@@ -1,9 +1,9 @@
 [package]
-name = "easy_tiger"
+name = "wt_sys"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 
-[workspace]
-members = ["wt_sys"]
+[build-dependencies]
+bindgen = "0.70.1"

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+wt_mdb = { path = "./wt_mdb" }
 
 [workspace]
-members = ["wt_sys"]
+members = ["wt_mdb", "wt_sys"]

@@ -1,0 +1,8 @@
+[package]
+name = "wt_mdb"
+version = "0.1.0"
+edition = "2021"
+description = "WiredTiger bindings intended to be used MongoDB way."
+
+[dependencies]
+wt_sys = { path = "../wt_sys" }

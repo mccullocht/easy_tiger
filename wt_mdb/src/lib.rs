@@ -1,176 +1,205 @@
-use wt_sys::{wiredtiger_open, wiredtiger_strerror};
-use wt_sys::{WT_CONNECTION, WT_CURSOR, WT_EVENT_HANDLER, WT_SESSION};
-use wt_sys::{WT_ERROR, WT_NOTFOUND};
+mod connection;
+mod record_cursor;
+mod session;
 
-use std::ffi::{CStr, CString};
-use std::io;
-use std::os::raw;
-use std::ptr;
+use wt_sys::wiredtiger_strerror;
+
+use std::ffi::CStr;
+use std::num::NonZero;
 use std::ptr::NonNull;
 
-// TODO: provide real WT errors this is annoying.
-fn get_error(result: i32) -> io::Error {
-    let err_msg = unsafe { CStr::from_ptr(wiredtiger_strerror(result)) };
-    io::Error::other(err_msg.to_str().unwrap().to_owned())
+/// WiredTiger specific error codes.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[repr(i32)]
+pub enum WiredTigerError {
+    Rollback = wt_sys::WT_ROLLBACK,
+    DuplicateKey = wt_sys::WT_DUPLICATE_KEY,
+    Generic = wt_sys::WT_ERROR,
+    NotFound = wt_sys::WT_NOTFOUND,
+    Panic = wt_sys::WT_PANIC,
+    RunRecovery = wt_sys::WT_RUN_RECOVERY,
+    CacheFull = wt_sys::WT_CACHE_FULL,
+    PrepareConflict = wt_sys::WT_PREPARE_CONFLICT,
+    TrySalvage = wt_sys::WT_TRY_SALVAGE,
 }
 
-fn make_result<T>(result: i32, value: T) -> Result<T, io::Error> {
-    if result == 0 {
-        Ok(value)
-    } else {
-        Err(get_error(result))
-    }
-}
-
-pub struct Connection {
-    conn: NonNull<WT_CONNECTION>,
-}
-
-pub struct Session {
-    session: NonNull<WT_SESSION>,
-}
-
-pub struct Cursor {
-    cursor: NonNull<WT_CURSOR>,
-}
-
-impl Connection {
-    pub fn open(filename: &str, options: &str) -> Result<Self, io::Error> {
-        let mut connp: *mut WT_CONNECTION = ptr::null_mut();
-        let options = CString::new(options).unwrap();
-        let dbpath = CString::new(filename).unwrap();
-        let event_handler: *const WT_EVENT_HANDLER = ptr::null();
-        let result: i32;
-        unsafe {
-            result = wiredtiger_open(
-                dbpath.as_ptr(),
-                event_handler as *mut WT_EVENT_HANDLER,
-                options.as_ptr(),
-                &mut connp,
-            );
-        };
-        if result == 0 {
-            let conn = NonNull::new(connp).ok_or_else(|| get_error(WT_ERROR))?;
-            Ok(Connection { conn })
-        } else {
-            Err(get_error(result))
-        }
+impl WiredTigerError {
+    pub fn to_c_str(self) -> &'static CStr {
+        unsafe { CStr::from_ptr(wiredtiger_strerror(self as i32)) }
     }
 
-    pub fn create_session(&self) -> Result<Session, io::Error> {
-        let mut sessionp: *mut WT_SESSION = ptr::null_mut();
-        let event_handler: *mut WT_EVENT_HANDLER = ptr::null_mut();
-        let result: i32;
-        unsafe {
-            result = (self.conn.as_ref().open_session.unwrap())(
-                self.conn.as_ptr(),
-                event_handler,
-                ptr::null(),
-                &mut sessionp,
-            );
-        }
-        if result == 0 {
-            let session = NonNull::new(sessionp).ok_or_else(|| get_error(WT_ERROR))?;
-            Ok(Session { session })
-        } else {
-            Err(get_error(result))
+    fn try_from_code(value: i32) -> Option<WiredTigerError> {
+        match value {
+            wt_sys::WT_ROLLBACK => Some(WiredTigerError::Rollback),
+            wt_sys::WT_DUPLICATE_KEY => Some(WiredTigerError::DuplicateKey),
+            wt_sys::WT_ERROR => Some(WiredTigerError::Generic),
+            wt_sys::WT_NOTFOUND => Some(WiredTigerError::NotFound),
+            wt_sys::WT_PANIC => Some(WiredTigerError::Panic),
+            wt_sys::WT_RUN_RECOVERY => Some(WiredTigerError::RunRecovery),
+            wt_sys::WT_CACHE_FULL => Some(WiredTigerError::CacheFull),
+            wt_sys::WT_PREPARE_CONFLICT => Some(WiredTigerError::PrepareConflict),
+            wt_sys::WT_TRY_SALVAGE => Some(WiredTigerError::TrySalvage),
+            _ => None,
         }
     }
 }
 
-// TODO: implement transactions
-impl Session {
-    pub fn create(&self, name: &str, config: &str) -> Result<(), io::Error> {
-        let name = CString::new(name).unwrap();
-        let config = CString::new(config).unwrap();
-        let result: i32;
-        unsafe {
-            result = (self.session.as_ref().create.unwrap())(
-                self.session.as_ptr(),
-                name.as_ptr(),
-                config.as_ptr(),
-            );
-        }
-        make_result(result, ())
+impl std::fmt::Display for WiredTigerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_c_str().to_string_lossy())
     }
+}
 
-    pub fn cursor(&self, uri: &str) -> Result<Cursor, io::Error> {
-        let uri = CString::new(uri).unwrap();
-        let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
-        let result: i32;
-        unsafe {
-            result = (self.session.as_ref().open_cursor.unwrap())(
-                self.session.as_ptr(),
-                uri.as_ptr(),
-                ptr::null_mut(),
-                ptr::null(),
-                &mut cursorp,
-            );
-        }
-        if result == 0 {
-            let cursor = NonNull::new(cursorp).ok_or_else(|| get_error(WT_ERROR))?;
-            Ok(Cursor { cursor })
-        } else {
-            Err(get_error(result))
+/// An Error, either WiredTiger-specific or POSIX.
+// TODO: Posix should be non-zero?
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum Error {
+    WiredTiger(WiredTigerError),
+    Posix(i32),
+}
+
+impl Error {
+    fn generic_error() -> Self {
+        Error::WiredTiger(WiredTigerError::Generic)
+    }
+}
+
+impl From<NonZero<i32>> for Error {
+    fn from(value: NonZero<i32>) -> Self {
+        WiredTigerError::try_from_code(value.get())
+            .map(Error::WiredTiger)
+            .unwrap_or(Error::Posix(value.get()))
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WiredTiger(w) => write!(f, "WT {}", w),
+            Self::Posix(p) => write!(f, "POSIX {}", p),
         }
     }
 }
 
-// TODO: flesh out cursor API.
-impl Cursor {
-    pub fn set(&self, key: &str, value: &str) -> Result<(), io::Error> {
-        let result: i32;
-        let ckey = CString::new(key).unwrap();
-        let cval = CString::new(value).unwrap();
-        unsafe {
-            self.cursor.as_ref().set_key.unwrap()(self.cursor.as_ptr(), ckey.as_ptr());
-            self.cursor.as_ref().set_value.unwrap()(self.cursor.as_ptr(), cval.as_ptr());
-            result = self.cursor.as_ref().insert.unwrap()(self.cursor.as_ptr());
-        }
-        make_result(result, ())
-    }
+pub use connection::Connection;
+pub use record_cursor::{Record, RecordCursor, RecordView};
+pub use session::Session;
+pub type Result<T> = std::result::Result<T, Error>;
 
-    pub fn search(&self, key: &str) -> Result<Option<String>, io::Error> {
-        let mut result: i32;
-        let ckey = CString::new(key).unwrap();
-        let mut val: *mut raw::c_char = ptr::null_mut();
-        unsafe {
-            self.cursor.as_ref().set_key.unwrap()(self.cursor.as_ptr(), ckey.as_ptr());
-            result = self.cursor.as_ref().search.unwrap()(self.cursor.as_ptr());
-            if result == WT_NOTFOUND {
-                return Ok(None);
-            }
-            if result != 0 {
-                return Err(get_error(result));
-            }
-            result = self.cursor.as_ref().get_value.unwrap()(self.cursor.as_ptr(), &mut val);
-            let owned_val = CStr::from_ptr(val).to_string_lossy().into_owned();
-            make_result(result, Some(owned_val))
-        }
-    }
+fn make_result<T>(code: i32, value: T) -> Result<T> {
+    NonZero::<i32>::new(code)
+        .map(|c| Err(Error::from(c)))
+        .unwrap_or(Ok(value))
 }
 
-// TODO: close APIs
-impl Drop for Connection {
-    fn drop(&mut self) {
-        unsafe {
-            self.conn.as_ref().close.unwrap()(self.conn.as_ptr(), std::ptr::null());
-        }
-    }
+fn wrap_ptr_create<T>(code: i32, ptr: *mut T) -> Result<NonNull<T>> {
+    let p = make_result(code, ptr)?;
+    NonNull::new(p).ok_or(Error::generic_error())
 }
 
-impl Drop for Session {
-    fn drop(&mut self) {
-        unsafe {
-            self.session.as_ref().close.unwrap()(self.session.as_ptr(), std::ptr::null());
-        }
-    }
-}
+#[cfg(test)]
+mod test {
+    use crate::{
+        connection::{Connection, ConnectionOptions, ConnectionOptionsBuilder},
+        record_cursor::{Record, RecordView},
+        Error, WiredTigerError,
+    };
 
-impl Drop for Cursor {
-    fn drop(&mut self) {
-        unsafe {
-            self.cursor.as_ref().close.unwrap()(self.cursor.as_ptr());
-        }
+    fn conn_options() -> ConnectionOptions {
+        ConnectionOptionsBuilder::default().create().into()
+    }
+
+    #[test]
+    fn insert_and_iterate() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_record_table("test", None).unwrap();
+        let mut cursor = session.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(RecordView::new(11, b"bar")), Ok(()));
+        assert_eq!(cursor.set(RecordView::new(7, b"foo")), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok(Record::new(7, b"foo"))));
+        assert_eq!(cursor.next(), Some(Ok(Record::new(11, b"bar"))));
+        assert_eq!(cursor.next(), None);
+    }
+
+    #[test]
+    fn insert_and_search() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_record_table("test", None).unwrap();
+        let mut cursor = session.open_record_cursor("test").unwrap();
+        let value: &[u8] = b"bar";
+        assert_eq!(cursor.set(RecordView::new(7, value)), Ok(()));
+        assert_eq!(cursor.set(&Record::new(11, value)), Ok(()));
+        assert_eq!(cursor.seek_exact(7), Some(Ok(Record::new(7, value))));
+        assert_eq!(cursor.seek_exact(11), Some(Ok(Record::new(11, value))));
+    }
+
+    #[test]
+    fn insert_and_remove() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_record_table("test", None).unwrap();
+        let mut cursor = session.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(RecordView::new(11, b"bar")), Ok(()));
+        assert_eq!(cursor.set(RecordView::new(7, b"foo")), Ok(()));
+        assert_eq!(cursor.remove(7), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok(Record::new(11, b"bar"))));
+        assert_eq!(cursor.next(), None);
+        assert_eq!(
+            cursor.remove(13),
+            Err(Error::WiredTiger(WiredTigerError::NotFound))
+        );
+    }
+
+    #[test]
+    fn largest_key() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_record_table("test", None).unwrap();
+        let mut cursor = session.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.largest_key(), None);
+        assert_eq!(cursor.set(RecordView::new(-1, b"bar")), Ok(()));
+        assert_eq!(cursor.largest_key(), Some(Ok(-1)));
+        assert_eq!(cursor.set(RecordView::new(7, b"foo")), Ok(()));
+        assert_eq!(cursor.largest_key(), Some(Ok(7)));
+    }
+
+    #[test]
+    fn transaction_commit() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_record_table("test", None).unwrap();
+        let read_session = conn.open_session().unwrap();
+        let mut read_cursor = read_session.open_record_cursor("test").unwrap();
+
+        let mut cursor = session.open_record_cursor("test").unwrap();
+        assert_eq!(session.begin_transaction(None), Ok(()));
+        assert_eq!(cursor.set(RecordView::new(1, b"foo")), Ok(()));
+        assert_eq!(cursor.set(RecordView::new(2, b"bar")), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok(Record::new(1, b"foo"))));
+        assert_eq!(read_cursor.next(), None);
+        assert_eq!(session.commit_transaction(None), Ok(()));
+        assert_eq!(read_cursor.next(), Some(Ok(Record::new(1, b"foo"))));
+    }
+
+    #[test]
+    fn transaction_rollback() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_record_table("test", None).unwrap();
+
+        let mut cursor = session.open_record_cursor("test").unwrap();
+        assert_eq!(session.begin_transaction(None), Ok(()));
+        assert_eq!(cursor.set(RecordView::new(1, b"foo")), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok(Record::new(1, b"foo"))));
+        assert_eq!(session.rollback_transaction(None), Ok(()));
+        assert_eq!(cursor.next(), None);
     }
 }

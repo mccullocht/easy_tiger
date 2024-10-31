@@ -1,6 +1,8 @@
 use std::{
     ffi::CString,
+    ops::Deref,
     ptr::{self, NonNull},
+    sync::Arc,
 };
 
 use wt_sys::{WT_CURSOR, WT_SESSION};
@@ -134,22 +136,21 @@ impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
 ///
 /// Sessions are used to create cursors to view and mutate data and manage
 /// transaction state.
-// TODO: not sure if the model of this is quite right w.r.t. thread safety.
-pub struct Session<'a> {
+pub struct Session {
     session: NonNull<WT_SESSION>,
-    connection: &'a Connection,
+    connection: Arc<Connection>,
 }
 
-impl<'a> Session<'a> {
-    pub(crate) fn new(session: NonNull<WT_SESSION>, connection: &'a Connection) -> Self {
-        Self {
+impl Session {
+    pub(crate) fn new(session: NonNull<WT_SESSION>, connection: Arc<Connection>) -> Arc<Self> {
+        Arc::new(Self {
             session,
             connection,
-        }
+        })
     }
 
     pub fn connection(&self) -> &Connection {
-        self.connection
+        self.connection.deref()
     }
 
     /// Create a new table, column group, index, or file.
@@ -172,8 +173,8 @@ impl<'a> Session<'a> {
         }
     }
 
-    // TODO: restrict api to table access only.
-    pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
+    /// Open a new cursor for the specified table.
+    pub fn open_record_cursor(self: &Arc<Self>, table_name: &str) -> Result<RecordCursor> {
         let name = CString::new(format!("table:{}", table_name)).expect("no nulls");
         let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
         let result: i32;
@@ -186,7 +187,7 @@ impl<'a> Session<'a> {
                 &mut cursorp,
             );
         }
-        wrap_ptr_create(result, cursorp).map(|cursor| RecordCursor::new(cursor, self))
+        wrap_ptr_create(result, cursorp).map(|cursor| RecordCursor::new(cursor, self.clone()))
     }
 
     /// Starts a transaction in this session.
@@ -258,7 +259,11 @@ impl<'a> Session<'a> {
     }
 }
 
-impl<'a> Drop for Session<'a> {
+/// Sessions may be sent to another thread, but are not Sync because no methods are safe for
+/// call from multiple threads concurrently.
+unsafe impl Send for Session {}
+
+impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.close_internal();
     }

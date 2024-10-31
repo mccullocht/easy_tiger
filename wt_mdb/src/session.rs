@@ -4,7 +4,7 @@
 // * integrate cursor pooling.
 
 use std::{
-    ffi::CString,
+    ffi::{CStr, CString},
     ptr::{self, NonNull},
     sync::Arc,
 };
@@ -12,7 +12,8 @@ use std::{
 use wt_sys::{WT_CURSOR, WT_SESSION};
 
 use crate::{
-    connection::Connection, make_result, record_cursor::RecordCursor, wrap_ptr_create, Result,
+    connection::Connection, make_result, make_table_uri, record_cursor::RecordCursor,
+    wrap_ptr_create, RecordView, Result,
 };
 
 /// An options builder for creating a table, column group, index, or file in WiredTiger.
@@ -21,21 +22,45 @@ pub struct CreateOptionsBuilder;
 
 /// Options when creating a table, column group, index, or file in WiredTiger.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
-pub struct CreateOptions {
-    rep: CString,
-}
+pub struct CreateOptions(CString);
 
 impl Default for CreateOptions {
     fn default() -> Self {
-        CreateOptions {
-            rep: CString::from(c"key_format=q,value_format=u"),
-        }
+        CreateOptions(CString::from(c"key_format=q,value_format=u"))
     }
 }
 
 impl From<CreateOptionsBuilder> for CreateOptions {
     fn from(_value: CreateOptionsBuilder) -> Self {
         Self::default()
+    }
+}
+
+/// An options builder for dropping a table, column group, index, or file in WiredTiger.
+#[derive(Default)]
+pub struct DropOptionsBuilder {
+    force: bool,
+}
+
+impl DropOptionsBuilder {
+    /// If set, return success even if the object does not exist.
+    pub fn set_force(mut self) -> Self {
+        self.force = true;
+        self
+    }
+}
+
+/// Options for dropping a table, column group, index, or file in WiredTiger.
+#[derive(Default, Debug)]
+pub struct DropOptions(Option<CString>);
+
+impl From<DropOptionsBuilder> for DropOptions {
+    fn from(value: DropOptionsBuilder) -> Self {
+        DropOptions(if value.force {
+            Some(CString::from(c"force=true"))
+        } else {
+            None
+        })
     }
 }
 
@@ -55,18 +80,15 @@ impl BeginTransactionOptionsBuilder {
 
 /// Options when beginning a new transaction.
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
-pub struct BeginTransactionOptions {
-    rep: CString,
-}
+pub struct BeginTransactionOptions(Option<CString>);
 
 impl From<BeginTransactionOptionsBuilder> for BeginTransactionOptions {
     fn from(value: BeginTransactionOptionsBuilder) -> Self {
-        let rep = if let Some(name) = value.name {
-            CString::new(format!("name={}", name)).expect("no nulls")
-        } else {
-            CString::default()
-        };
-        Self { rep }
+        Self(
+            value
+                .name
+                .map(|n| CString::new(format!("name={}", n)).expect("name has no nulls")),
+        )
     }
 }
 
@@ -88,18 +110,15 @@ impl CommitTransactionOptionsBuilder {
 
 /// Options for commit_transaction() operations.
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
-pub struct CommitTransactionOptions {
-    rep: CString,
-}
+pub struct CommitTransactionOptions(Option<CString>);
 
 impl From<CommitTransactionOptionsBuilder> for CommitTransactionOptions {
     fn from(value: CommitTransactionOptionsBuilder) -> Self {
-        let rep = if let Some(timeout) = value.operation_timeout_ms {
-            CString::new(format!("operation_timeout_ms={}", timeout)).expect("no nulls")
-        } else {
-            CString::default()
-        };
-        Self { rep }
+        Self(
+            value
+                .operation_timeout_ms
+                .map(|t| CString::new(format!("operation_timeout_ms={}", t)).expect("no nulls")),
+        )
     }
 }
 
@@ -121,18 +140,15 @@ impl RollbackTransactionOptionsBuilder {
 
 /// Options for rollback_transaction() operations.
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
-pub struct RollbackTransactionOptions {
-    rep: CString,
-}
+pub struct RollbackTransactionOptions(Option<CString>);
 
 impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
     fn from(value: RollbackTransactionOptionsBuilder) -> Self {
-        let rep = if let Some(timeout) = value.operation_timeout_ms {
-            CString::new(format!("operation_timeout_ms={}", timeout)).expect("no nulls")
-        } else {
-            CString::default()
-        };
-        Self { rep }
+        Self(
+            value
+                .operation_timeout_ms
+                .map(|t| CString::new(format!("operation_timeout_ms={}", t)).expect("no nulls")),
+        )
     }
 }
 
@@ -140,7 +156,6 @@ impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
 ///
 /// Sessions are used to create cursors to view and mutate data and manage
 /// transaction state.
-// TODO: not sure if the model of this is quite right w.r.t. thread safety.
 pub struct Session {
     session: NonNull<WT_SESSION>,
     connection: Arc<Connection>,
@@ -158,19 +173,42 @@ impl Session {
         self.connection.as_ref()
     }
 
-    /// Create a new table.
+    /// Create a new record table.
     pub fn create_record_table(
         &self,
         table_name: &str,
         config: Option<CreateOptions>,
     ) -> Result<()> {
-        let name = CString::new(format!("table:{}", table_name)).expect("no nulls");
+        let uri = make_table_uri(table_name);
         unsafe {
             make_result(
                 (self.session.as_ref().create.unwrap())(
                     self.session.as_ptr(),
-                    name.as_ptr(),
-                    config.unwrap_or_default().rep.as_ptr(),
+                    uri.as_ptr(),
+                    config.unwrap_or_default().0.as_ptr(),
+                ),
+                (),
+            )
+        }
+    }
+
+    /// Drop a record table.
+    ///
+    /// This requires exclusive access -- if any cursors are open on the specified table the call will fail
+    /// and return an EBUSY posix error.
+    pub fn drop_record_table(&self, table_name: &str, config: Option<DropOptions>) -> Result<()> {
+        let uri = make_table_uri(table_name);
+        unsafe {
+            make_result(
+                self.session.as_ref().drop.unwrap()(
+                    self.session.as_ptr(),
+                    uri.as_ptr(),
+                    config
+                        .unwrap_or_default()
+                        .0
+                        .as_ref()
+                        .map(|s| s.as_ptr())
+                        .unwrap_or(std::ptr::null()),
                 ),
                 (),
             )
@@ -179,15 +217,23 @@ impl Session {
 
     /// Open a record cursor over the named table.
     pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
-        let name = CString::new(format!("table:{}", table_name)).expect("no nulls");
+        self.open_record_cursor_with_options(table_name, None)
+    }
+
+    fn open_record_cursor_with_options(
+        &self,
+        table_name: &str,
+        options: Option<&CStr>,
+    ) -> Result<RecordCursor> {
+        let uri = make_table_uri(table_name);
         let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
         let result: i32;
         unsafe {
             result = (self.session.as_ref().open_cursor.unwrap())(
                 self.session.as_ptr(),
-                name.as_ptr(),
+                uri.as_ptr(),
                 ptr::null_mut(),
-                ptr::null(),
+                options.map(|s| s.as_ptr()).unwrap_or(std::ptr::null()),
                 &mut cursorp,
             );
         }
@@ -203,10 +249,15 @@ impl Session {
     /// This may not be called on a session with an active transaction or an error will be returned (EINVAL)
     /// but otherwise behavior is unspecified.
     pub fn begin_transaction(&self, options: Option<&BeginTransactionOptions>) -> Result<()> {
-        let optionsp = options.map(|o| o.rep.as_ptr()).unwrap_or(ptr::null());
         unsafe {
             make_result(
-                self.session.as_ref().begin_transaction.unwrap()(self.session.as_ptr(), optionsp),
+                self.session.as_ref().begin_transaction.unwrap()(
+                    self.session.as_ptr(),
+                    options
+                        .and_then(|o| o.0.as_ref())
+                        .map(|s| s.as_ptr())
+                        .unwrap_or(std::ptr::null()),
+                ),
                 (),
             )
         }
@@ -220,10 +271,15 @@ impl Session {
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
     pub fn commit_transaction(&self, options: Option<&CommitTransactionOptions>) -> Result<()> {
-        let optionsp = options.map(|o| o.rep.as_ptr()).unwrap_or(ptr::null());
         unsafe {
             make_result(
-                self.session.as_ref().commit_transaction.unwrap()(self.session.as_ptr(), optionsp),
+                self.session.as_ref().commit_transaction.unwrap()(
+                    self.session.as_ptr(),
+                    options
+                        .and_then(|o| o.0.as_ref())
+                        .map(|s| s.as_ptr())
+                        .unwrap_or(std::ptr::null()),
+                ),
                 (),
             )
         }
@@ -236,16 +292,42 @@ impl Session {
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
     pub fn rollback_transaction(&self, options: Option<&RollbackTransactionOptions>) -> Result<()> {
-        let optionsp = options.map(|o| o.rep.as_ptr()).unwrap_or(ptr::null());
         unsafe {
             make_result(
                 self.session.as_ref().rollback_transaction.unwrap()(
                     self.session.as_ptr(),
-                    optionsp,
+                    options
+                        .and_then(|o| o.0.as_ref())
+                        .map(|s| s.as_ptr())
+                        .unwrap_or(std::ptr::null()),
                 ),
                 (),
             )
         }
+    }
+
+    /// Create a new table called `table_name` and bulk load entries from `iter`.
+    ///
+    /// Bulk load requires that `iter` yields records in order by `key()`.
+    /// Bulk load requires that:
+    /// 1. `table_name`` is newly created.
+    /// 2. `iter` yields records in order by `key()`.
+    pub fn bulk_load<'a, I, R>(
+        &self,
+        table_name: &str,
+        options: Option<CreateOptions>,
+        iter: I,
+    ) -> Result<()>
+    where
+        I: Iterator<Item = R>,
+        R: Into<RecordView<'a>>,
+    {
+        self.create_record_table(table_name, options)?;
+        let mut cursor = self.open_record_cursor_with_options(table_name, Some(c"bulk=true"))?;
+        for record in iter {
+            cursor.set(record)?;
+        }
+        Ok(())
     }
 
     /// Close this session.

@@ -4,7 +4,7 @@ mod session;
 
 use wt_sys::wiredtiger_strerror;
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::num::NonZero;
 use std::ptr::NonNull;
 
@@ -97,6 +97,10 @@ fn wrap_ptr_create<T>(code: i32, ptr: *mut T) -> Result<NonNull<T>> {
     NonNull::new(p).ok_or(Error::generic_error())
 }
 
+fn make_table_uri(table_name: &str) -> CString {
+    CString::new(format!("table:{}", table_name)).expect("no nulls in table_name")
+}
+
 #[cfg(test)]
 mod test {
     use crate::{
@@ -105,14 +109,14 @@ mod test {
         Error, WiredTigerError,
     };
 
-    fn conn_options() -> ConnectionOptions {
-        ConnectionOptionsBuilder::default().create().into()
+    fn conn_options() -> Option<ConnectionOptions> {
+        Some(ConnectionOptionsBuilder::default().create().into())
     }
 
     #[test]
     fn insert_and_iterate() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
@@ -126,7 +130,7 @@ mod test {
     #[test]
     fn insert_and_search() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
@@ -140,7 +144,7 @@ mod test {
     #[test]
     fn insert_and_remove() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
@@ -158,7 +162,7 @@ mod test {
     #[test]
     fn largest_key() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
@@ -172,7 +176,7 @@ mod test {
     #[test]
     fn transaction_commit() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let read_session = conn.open_session().unwrap();
@@ -191,7 +195,7 @@ mod test {
     #[test]
     fn transaction_rollback() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let conn = Connection::open(tmpdir.path().to_str().unwrap(), &conn_options()).unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
 
@@ -201,5 +205,57 @@ mod test {
         assert_eq!(cursor.next(), Some(Ok(Record::new(1, b"foo"))));
         assert_eq!(session.rollback_transaction(None), Ok(()));
         assert_eq!(cursor.next(), None);
+    }
+
+    #[test]
+    fn bulk_load() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+
+        // Create Vec<Record>, bulk_load() into session, compare cursors.
+        let records = vec![
+            Record::new(7, b"foo"),
+            Record::new(11, b"bar"),
+            Record::new(19, b"quux"),
+        ];
+        assert_eq!(session.bulk_load("test", None, records.iter()), Ok(()));
+
+        let cursor = session.open_record_cursor("test").unwrap();
+        for (expected, actual) in records.iter().zip(cursor) {
+            assert_eq!(Ok(expected), actual.as_ref());
+        }
+    }
+
+    #[test]
+    fn bulk_load_existing_table() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+
+        // Bulk load will happily load into an empty table, so to get it to fail we insert a record.
+        assert_eq!(session.create_record_table("test", None), Ok(()));
+        let mut cursor = session.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(RecordView::new(1, b"bar")), Ok(()));
+        assert_eq!(
+            session.bulk_load("test", None, [Record::new(7, b"foo")].iter()),
+            Err(Error::Posix(16)) // EBUSY
+        );
+    }
+
+    #[test]
+    fn bulk_load_out_of_order() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+
+        assert_eq!(
+            session.bulk_load(
+                "test",
+                None,
+                [Record::new(11, b"bar"), Record::new(7, b"foo")].iter()
+            ),
+            Err(Error::Posix(22)) // EINVAL
+        );
     }
 }

@@ -1,6 +1,7 @@
 use crate::{make_result, session::Session, wrap_ptr_create, Result};
 use std::{
     ffi::CString,
+    num::NonZero,
     ptr::{self, NonNull},
     sync::Arc,
 };
@@ -11,29 +12,43 @@ use wt_sys::{wiredtiger_open, WT_CONNECTION, WT_SESSION};
 #[derive(Default)]
 pub struct ConnectionOptionsBuilder {
     create: bool,
+    cache_size_mb: Option<NonZero<usize>>,
 }
 
 impl ConnectionOptionsBuilder {
+    /// If set, create the database if it does not exist.
     pub fn create(mut self) -> Self {
         self.create = true;
+        self
+    }
+
+    /// Maximum heap memory to allocate for the cache, in MB.
+    pub fn cache_size_mb(mut self, size: NonZero<usize>) -> Self {
+        self.cache_size_mb = Some(size);
         self
     }
 }
 
 /// Options when connecting to a WiredTiger database.
-#[derive(Debug)]
-pub struct ConnectionOptions {
-    rep: CString,
-}
+#[derive(Debug, Default)]
+pub struct ConnectionOptions(Option<CString>);
 
 impl From<ConnectionOptionsBuilder> for ConnectionOptions {
     fn from(value: ConnectionOptionsBuilder) -> Self {
-        let rep = if value.create {
-            c"create".into()
+        let mut options = Vec::new();
+        if value.create {
+            options.push("create".to_string())
+        }
+        if let Some(cache_size) = value.cache_size_mb {
+            options.push(format!("cache_size={}", cache_size.get() << 20));
+        }
+        if options.is_empty() {
+            Self(None)
         } else {
-            CString::default()
-        };
-        ConnectionOptions { rep }
+            Self(Some(
+                CString::new(options.join(",")).expect("options does not contain null"),
+            ))
+        }
     }
 }
 
@@ -47,7 +62,7 @@ pub struct Connection {
 
 impl Connection {
     /// Open a new `Connection` to a WiredTiger database.
-    pub fn open(filename: &str, options: &ConnectionOptions) -> Result<Arc<Self>> {
+    pub fn open(filename: &str, options: Option<ConnectionOptions>) -> Result<Arc<Self>> {
         let mut connp: *mut WT_CONNECTION = ptr::null_mut();
         let dbpath = CString::new(filename).unwrap();
         let result: i32;
@@ -55,11 +70,12 @@ impl Connection {
             result = wiredtiger_open(
                 dbpath.as_ptr(),
                 ptr::null_mut(),
-                if options.rep.is_empty() {
-                    ptr::null()
-                } else {
-                    options.rep.as_ptr()
-                },
+                options
+                    .unwrap_or_default()
+                    .0
+                    .as_ref()
+                    .map(|s| s.as_ptr())
+                    .unwrap_or(std::ptr::null()),
                 &mut connp,
             );
         };

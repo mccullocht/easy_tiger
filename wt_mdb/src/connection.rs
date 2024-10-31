@@ -2,6 +2,7 @@ use crate::{make_result, session::Session, wrap_ptr_create, Result};
 use std::{
     ffi::CString,
     ptr::{self, NonNull},
+    sync::Arc,
 };
 
 use wt_sys::{wiredtiger_open, WT_CONNECTION, WT_SESSION};
@@ -46,7 +47,7 @@ pub struct Connection {
 
 impl Connection {
     /// Open a new `Connection` to a WiredTiger database.
-    pub fn open(filename: &str, options: &ConnectionOptions) -> Result<Self> {
+    pub fn open(filename: &str, options: &ConnectionOptions) -> Result<Arc<Self>> {
         let mut connp: *mut WT_CONNECTION = ptr::null_mut();
         let dbpath = CString::new(filename).unwrap();
         let result: i32;
@@ -62,12 +63,12 @@ impl Connection {
                 &mut connp,
             );
         };
-        wrap_ptr_create(result, connp).map(|conn| Connection { conn })
+        wrap_ptr_create(result, connp).map(|conn| Arc::new(Connection { conn }))
     }
 
     /// Create a new `Session`. These can be used to obtain cursors to read and write data
     /// as well as manage transaction.
-    pub fn open_session(&self) -> Result<Session> {
+    pub fn open_session(self: &Arc<Self>) -> Result<Session> {
         let mut sessionp: *mut WT_SESSION = ptr::null_mut();
         let result: i32;
         unsafe {

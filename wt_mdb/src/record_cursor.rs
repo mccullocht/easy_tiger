@@ -102,11 +102,11 @@ impl<'a> PartialEq<Record> for RecordView<'a> {
 /// the table is `i64` keyed and byte-string valued.
 pub struct RecordCursor<'a> {
     cursor: NonNull<WT_CURSOR>,
-    session: &'a Session<'a>,
+    session: &'a Session,
 }
 
 impl<'a> RecordCursor<'a> {
-    pub(crate) fn new(cursor: NonNull<WT_CURSOR>, session: &'a Session<'a>) -> Self {
+    pub(crate) fn new(cursor: NonNull<WT_CURSOR>, session: &'a Session) -> Self {
         Self { cursor, session }
     }
 
@@ -285,6 +285,10 @@ impl<'a> RecordCursor<'a> {
         }
     }
 }
+
+/// It is safe to send a `RecordCursor` to another thread to use.
+/// It is not safe to reference a `RecordCursor` from another thread without synchronization.
+unsafe impl<'a> Send for RecordCursor<'a> {}
 
 impl<'a> Drop for RecordCursor<'a> {
     fn drop(&mut self) {

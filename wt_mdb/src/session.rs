@@ -1,6 +1,12 @@
+// API TODOs:
+// * Transaction managed as an object, mutable function to create a transaction and
+//   consuming functions to commit and rollback. Factory for RecordCursors.
+// * integrate cursor pooling.
+
 use std::{
     ffi::CString,
     ptr::{self, NonNull},
+    sync::Arc,
 };
 
 use wt_sys::{WT_CURSOR, WT_SESSION};
@@ -135,25 +141,24 @@ impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
 /// Sessions are used to create cursors to view and mutate data and manage
 /// transaction state.
 // TODO: not sure if the model of this is quite right w.r.t. thread safety.
-pub struct Session<'a> {
+pub struct Session {
     session: NonNull<WT_SESSION>,
-    connection: &'a Connection,
+    connection: Arc<Connection>,
 }
 
-impl<'a> Session<'a> {
-    pub(crate) fn new(session: NonNull<WT_SESSION>, connection: &'a Connection) -> Self {
+impl Session {
+    pub(crate) fn new(session: NonNull<WT_SESSION>, connection: &Arc<Connection>) -> Self {
         Self {
             session,
-            connection,
+            connection: connection.clone(),
         }
     }
 
     pub fn connection(&self) -> &Connection {
-        self.connection
+        self.connection.as_ref()
     }
 
-    /// Create a new table, column group, index, or file.
-    // TODO: restrict api to table creation only.
+    /// Create a new table.
     pub fn create_record_table(
         &self,
         table_name: &str,
@@ -172,7 +177,7 @@ impl<'a> Session<'a> {
         }
     }
 
-    // TODO: restrict api to table access only.
+    /// Open a record cursor over the named table.
     pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
         let name = CString::new(format!("table:{}", table_name)).expect("no nulls");
         let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
@@ -258,7 +263,12 @@ impl<'a> Session<'a> {
     }
 }
 
-impl<'a> Drop for Session<'a> {
+/// It is safe to send a `Session` to another thread to use.
+/// It is not safe to reference a `Session` from another thread without synchronization.
+unsafe impl Send for Session {}
+
+/// Drop closes this session and silently consumes any error that may occur.
+impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.close_internal();
     }

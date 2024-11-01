@@ -5,6 +5,7 @@ mod session;
 use wt_sys::wiredtiger_strerror;
 
 use std::ffi::{CStr, CString};
+use std::io::ErrorKind;
 use std::num::NonZero;
 use std::ptr::NonNull;
 
@@ -50,6 +51,22 @@ impl std::fmt::Display for WiredTigerError {
     }
 }
 
+impl From<WiredTigerError> for ErrorKind {
+    fn from(value: WiredTigerError) -> Self {
+        match value {
+            WiredTigerError::Rollback
+            | WiredTigerError::Panic
+            | WiredTigerError::RunRecovery
+            | WiredTigerError::PrepareConflict
+            | WiredTigerError::TrySalvage
+            | WiredTigerError::Generic => ErrorKind::Other,
+            WiredTigerError::DuplicateKey => ErrorKind::AlreadyExists,
+            WiredTigerError::NotFound => ErrorKind::NotFound,
+            WiredTigerError::CacheFull => ErrorKind::OutOfMemory,
+        }
+    }
+}
+
 /// An Error, either WiredTiger-specific or POSIX.
 // TODO: Posix should be non-zero?
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -81,6 +98,18 @@ impl std::fmt::Display for Error {
     }
 }
 
+impl std::error::Error for Error {}
+
+impl From<Error> for std::io::Error {
+    fn from(value: Error) -> Self {
+        let kind = match &value {
+            Error::WiredTiger(wt) => (*wt).into(),
+            Error::Posix(_) => ErrorKind::Other,
+        };
+        std::io::Error::new(kind, value)
+    }
+}
+
 pub use connection::Connection;
 pub use record_cursor::{Record, RecordCursor, RecordView};
 pub use session::Session;
@@ -103,6 +132,8 @@ fn make_table_uri(table_name: &str) -> CString {
 
 #[cfg(test)]
 mod test {
+    use std::io::ErrorKind;
+
     use crate::{
         connection::{Connection, ConnectionOptions, ConnectionOptionsBuilder},
         record_cursor::{Record, RecordView},
@@ -259,6 +290,15 @@ mod test {
                 [Record::new(11, b"bar"), Record::new(7, b"foo")].into_iter()
             ),
             Err(Error::Posix(22)) // EINVAL
+        );
+    }
+
+    #[test]
+    fn io_error() {
+        let err = Error::WiredTiger(WiredTigerError::NotFound);
+        assert_eq!(
+            std::io::Error::from(err).to_string(),
+            std::io::Error::new(ErrorKind::NotFound, err).to_string()
         );
     }
 }

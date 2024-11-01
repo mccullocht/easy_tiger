@@ -11,7 +11,7 @@ use wt_sys::{WT_CURSOR, WT_ITEM, WT_NOTFOUND};
 
 use crate::{make_result, session::Session, Error, Result};
 
-/// A `RecordView`` in a WiredTiger table with an i64 key and a byte array value.
+/// A `RecordView` in a WiredTiger table with an i64 key and a byte array value.
 ///
 /// The underlying byte array may or may not be owned, the `Record` type alias may be more
 /// convenient when the data is owned.

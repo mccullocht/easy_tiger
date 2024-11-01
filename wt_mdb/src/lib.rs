@@ -1,3 +1,11 @@
+//! Bindings for the WiredTiger C library that align with MongoDB usage.
+//!
+//! To use, open a `Connection` to an on-disk database. `Session`s are used to group
+//! operations (including in transactions) and create `RecordCursor`s used to read
+//! and write table data.
+//!
+//! Unlike the general-purpose WiredTiger library, this library only allows tables
+//! that are keyed by `i64` with byte array payloads.
 mod connection;
 mod record_cursor;
 mod session;
@@ -110,9 +118,13 @@ impl From<Error> for std::io::Error {
     }
 }
 
-pub use connection::Connection;
+pub use connection::{Connection, ConnectionOptions, ConnectionOptionsBuilder};
 pub use record_cursor::{Record, RecordCursor, RecordView};
-pub use session::Session;
+pub use session::{
+    BeginTransactionOptions, BeginTransactionOptionsBuilder, CommitTransactionOptions,
+    CommitTransactionOptionsBuilder, CreateOptions, CreateOptionsBuilder, DropOptions,
+    DropOptionsBuilder, RollbackTransactionOptions, RollbackTransactionOptionsBuilder, Session,
+};
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {

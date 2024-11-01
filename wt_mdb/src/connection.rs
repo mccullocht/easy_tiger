@@ -99,6 +99,8 @@ impl Connection {
     }
 
     /// Close this database connection.
+    ///
+    /// The connection will automatically be closed when this struct is dropped, consuming any error.
     pub fn close(self) -> Result<()> {
         self.close_internal()
     }

@@ -120,8 +120,8 @@ mod test {
         let session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(RecordView::new(11, b"bar")), Ok(()));
-        assert_eq!(cursor.set(RecordView::new(7, b"foo")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
         assert_eq!(cursor.next(), Some(Ok(Record::new(7, b"foo"))));
         assert_eq!(cursor.next(), Some(Ok(Record::new(11, b"bar"))));
         assert_eq!(cursor.next(), None);
@@ -135,7 +135,7 @@ mod test {
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         let value: &[u8] = b"bar";
-        assert_eq!(cursor.set(RecordView::new(7, value)), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(7, value)), Ok(()));
         assert_eq!(cursor.set(&Record::new(11, value)), Ok(()));
         assert_eq!(cursor.seek_exact(7), Some(Ok(Record::new(7, value))));
         assert_eq!(cursor.seek_exact(11), Some(Ok(Record::new(11, value))));
@@ -148,8 +148,8 @@ mod test {
         let session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(RecordView::new(11, b"bar")), Ok(()));
-        assert_eq!(cursor.set(RecordView::new(7, b"foo")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
         assert_eq!(cursor.remove(7), Ok(()));
         assert_eq!(cursor.next(), Some(Ok(Record::new(11, b"bar"))));
         assert_eq!(cursor.next(), None);
@@ -167,9 +167,9 @@ mod test {
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.largest_key(), None);
-        assert_eq!(cursor.set(RecordView::new(-1, b"bar")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(-1, b"bar")), Ok(()));
         assert_eq!(cursor.largest_key(), Some(Ok(-1)));
-        assert_eq!(cursor.set(RecordView::new(7, b"foo")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
         assert_eq!(cursor.largest_key(), Some(Ok(7)));
     }
 
@@ -184,8 +184,8 @@ mod test {
 
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(session.begin_transaction(None), Ok(()));
-        assert_eq!(cursor.set(RecordView::new(1, b"foo")), Ok(()));
-        assert_eq!(cursor.set(RecordView::new(2, b"bar")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(1, b"foo")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(2, b"bar")), Ok(()));
         assert_eq!(cursor.next(), Some(Ok(Record::new(1, b"foo"))));
         assert_eq!(read_cursor.next(), None);
         assert_eq!(session.commit_transaction(None), Ok(()));
@@ -201,7 +201,7 @@ mod test {
 
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(session.begin_transaction(None), Ok(()));
-        assert_eq!(cursor.set(RecordView::new(1, b"foo")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(1, b"foo")), Ok(()));
         assert_eq!(cursor.next(), Some(Ok(Record::new(1, b"foo"))));
         assert_eq!(session.rollback_transaction(None), Ok(()));
         assert_eq!(cursor.next(), None);
@@ -219,7 +219,10 @@ mod test {
             Record::new(11, b"bar"),
             Record::new(19, b"quux"),
         ];
-        assert_eq!(session.bulk_load("test", None, records.iter()), Ok(()));
+        assert_eq!(
+            session.bulk_load("test", None, records.clone().into_iter()),
+            Ok(())
+        );
 
         let cursor = session.open_record_cursor("test").unwrap();
         for (expected, actual) in records.iter().zip(cursor) {
@@ -236,9 +239,9 @@ mod test {
         // Bulk load will happily load into an empty table, so to get it to fail we insert a record.
         assert_eq!(session.create_record_table("test", None), Ok(()));
         let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(RecordView::new(1, b"bar")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(1, b"bar")), Ok(()));
         assert_eq!(
-            session.bulk_load("test", None, [Record::new(7, b"foo")].iter()),
+            session.bulk_load("test", None, [Record::new(7, b"foo")].into_iter()),
             Err(Error::Posix(16)) // EBUSY
         );
     }
@@ -253,7 +256,7 @@ mod test {
             session.bulk_load(
                 "test",
                 None,
-                [Record::new(11, b"bar"), Record::new(7, b"foo")].iter()
+                [Record::new(11, b"bar"), Record::new(7, b"foo")].into_iter()
             ),
             Err(Error::Posix(22)) // EINVAL
         );

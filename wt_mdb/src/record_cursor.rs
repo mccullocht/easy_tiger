@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     ffi::c_void,
     iter::FusedIterator,
     num::NonZero,
@@ -10,19 +11,23 @@ use wt_sys::{WT_CURSOR, WT_ITEM, WT_NOTFOUND};
 
 use crate::{make_result, session::Session, Error, Result};
 
-/// A `Record`` in a WiredTiger table with an i64 key and a byte array value.
+/// A `RecordView`` in a WiredTiger table with an i64 key and a byte array value.
 ///
-/// `Record`` owns the underlying byte array; use `RecordView`` for unowned records.
+/// The underlying byte array may or may not be owned, the `Record` type alias may be more
+/// convenient when the data is owned.
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub struct Record {
+pub struct RecordView<'a> {
     key: i64,
-    value: Vec<u8>,
+    value: Cow<'a, [u8]>,
 }
 
-impl Record {
-    /// Create a new `Record` from a key and an owned byte array value.
-    pub fn new(key: i64, value: impl Into<Vec<u8>>) -> Self {
-        Record {
+impl<'a> RecordView<'a> {
+    /// Create a new `RecordView` from a key and an unowned byte array value.
+    pub fn new<V>(key: i64, value: V) -> Self
+    where
+        V: Into<Cow<'a, [u8]>>,
+    {
+        RecordView {
             key,
             value: value.into(),
         }
@@ -37,66 +42,20 @@ impl Record {
     pub fn value(&self) -> &[u8] {
         self.value.as_ref()
     }
-}
 
-impl<'a> From<&RecordView<'a>> for Record {
-    fn from(value: &RecordView<'a>) -> Self {
-        Record::new(value.key, value.value)
-    }
-}
-
-impl<'a> From<RecordView<'a>> for Record {
-    fn from(value: RecordView<'a>) -> Self {
-        Self::from(&value)
-    }
-}
-
-impl PartialEq<RecordView<'_>> for Record {
-    fn eq(&self, other: &RecordView<'_>) -> bool {
-        RecordView::from(self) == *other
-    }
-}
-
-/// A `RecordView`` in a WiredTiger table with an i64 key and a byte array value.
-///
-/// `RecordView` does not own the underlying byte array, use `Record` for owned records.
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
-pub struct RecordView<'a> {
-    key: i64,
-    value: &'a [u8],
-}
-
-impl<'a> RecordView<'a> {
-    /// Create a new `RecordView` from a key and an unowned byte array value.
-    pub fn new(key: i64, value: &'a [u8]) -> Self {
-        RecordView { key, value }
-    }
-
-    /// Return the key.
-    pub fn key(&self) -> i64 {
-        self.key
-    }
-
-    /// Return the value.
-    pub fn value(&self) -> &[u8] {
-        self.value
-    }
-}
-
-impl<'a> From<&'a Record> for RecordView<'a> {
-    fn from(value: &'a Record) -> Self {
-        RecordView {
-            key: value.key,
-            value: value.value.as_ref(),
+    /// Ensure that this RecordView owns the underlying value.
+    pub fn to_owned(self) -> Record {
+        let k = self.key();
+        match self.value {
+            Cow::Borrowed(v) => Record::new(k, v.to_owned()),
+            Cow::Owned(v) => Record::new(k, v),
         }
     }
 }
 
-impl<'a> PartialEq<Record> for RecordView<'a> {
-    fn eq(&self, other: &Record) -> bool {
-        *self == RecordView::from(other)
-    }
-}
+/// An alias for `RecordView` with `'static` lifetime, may be more convenient when the value is
+/// actually owned.
+pub type Record = RecordView<'static>;
 
 /// A `RecordCursor` facilities viewing and mutating data in a WiredTiger table where
 /// the table is `i64` keyed and byte-string valued.
@@ -115,18 +74,14 @@ impl<'a> RecordCursor<'a> {
     }
 
     /// Set the contents of `record` in the collection.
-    pub fn set<'b, R>(&mut self, record: R) -> Result<()>
-    where
-        R: Into<RecordView<'b>>,
-    {
+    pub fn set<'b>(&mut self, record: &RecordView<'b>) -> Result<()> {
         // safety: the memory passed to set_{key,value} need only be valid until a modifying
         // call like insert().
-        let view = record.into();
         unsafe {
-            self.cursor.as_ref().set_key.unwrap()(self.cursor.as_ptr(), view.key());
+            self.cursor.as_ref().set_key.unwrap()(self.cursor.as_ptr(), record.key());
             self.cursor.as_ref().set_value.unwrap()(
                 self.cursor.as_ptr(),
-                &Self::item_from_value(view.value()),
+                &Self::item_from_value(record.value()),
             );
             make_result(
                 self.cursor.as_ref().insert.unwrap()(self.cursor.as_ptr()),
@@ -194,7 +149,7 @@ impl<'a> RecordCursor<'a> {
     /// the cursor is unpositioned.
     /// TODO: double check that this is correct.
     pub fn seek_exact(&mut self, key: i64) -> Option<Result<Record>> {
-        unsafe { self.seek_exact_unsafe(key) }.map(|r| r.map(|v| v.into()))
+        unsafe { self.seek_exact_unsafe(key) }.map(|r| r.map(|v| v.to_owned()))
     }
 
     /// Return the largest key in the collection or `None` if the collection is empty.
@@ -303,7 +258,7 @@ impl<'a> Iterator for RecordCursor<'a> {
     ///
     /// If this cursor is unpositioned, returns to the start of the collection.
     fn next(&mut self) -> Option<Self::Item> {
-        unsafe { self.next_unsafe() }.map(|r| r.map(|v| v.into()))
+        unsafe { self.next_unsafe() }.map(|r| r.map(|v| v.to_owned()))
     }
 }
 

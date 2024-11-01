@@ -308,24 +308,21 @@ impl Session {
 
     /// Create a new table called `table_name` and bulk load entries from `iter`.
     ///
-    /// Bulk load requires that `iter` yields records in order by `key()`.
-    /// Bulk load requires that:
-    /// 1. `table_name`` is newly created.
-    /// 2. `iter` yields records in order by `key()`.
-    pub fn bulk_load<'a, I, R>(
+    /// Bulk load requires that `table_name` not exist or be empty and that `iter` yields records in
+    /// order by `key()`.
+    pub fn bulk_load<'a, I>(
         &self,
         table_name: &str,
         options: Option<CreateOptions>,
         iter: I,
     ) -> Result<()>
     where
-        I: Iterator<Item = R>,
-        R: Into<RecordView<'a>>,
+        I: Iterator<Item = RecordView<'a>>,
     {
         self.create_record_table(table_name, options)?;
         let mut cursor = self.open_record_cursor_with_options(table_name, Some(c"bulk=true"))?;
         for record in iter {
-            cursor.set(record)?;
+            cursor.set(&record)?;
         }
         Ok(())
     }

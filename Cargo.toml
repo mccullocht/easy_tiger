@@ -9,4 +9,4 @@ stable_deref_trait = "1.2.0"
 wt_mdb = { path = "./wt_mdb" }
 
 [workspace]
-members = ["wt_mdb", "wt_sys"]
+members = [ "bulk_load","wt_mdb", "wt_sys"]

@@ -17,11 +17,13 @@ pub trait GraphNode {
 
 /// A Vamana graph.
 pub trait Graph {
-    type Node: GraphNode;
+    type Node<'c>: GraphNode
+    where
+        Self: 'c;
 
     /// Get the contents of a single node.
     // XXX this design is weird to allow this to be cursor backed.
-    fn get(&mut self, node: i64) -> Option<Result<Self::Node>>;
+    fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>>;
 }
 
 /// Vector store for vectors used to navigate the graph.

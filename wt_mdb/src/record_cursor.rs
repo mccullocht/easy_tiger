@@ -51,6 +51,11 @@ impl<'a> RecordView<'a> {
             Cow::Owned(v) => Record::new(k, v),
         }
     }
+
+    /// Returns the inner value within the `RecordView`.
+    pub fn into_inner_value(self) -> Cow<'a, [u8]> {
+        self.value
+    }
 }
 
 /// An alias for `RecordView` with `'static` lifetime, may be more convenient when the value is
@@ -74,7 +79,7 @@ impl<'a> RecordCursor<'a> {
     }
 
     /// Set the contents of `record` in the collection.
-    pub fn set<'b>(&mut self, record: &RecordView<'b>) -> Result<()> {
+    pub fn set(&mut self, record: &RecordView<'_>) -> Result<()> {
         // safety: the memory passed to set_{key,value} need only be valid until a modifying
         // call like insert().
         unsafe {

@@ -28,5 +28,5 @@ pub trait Graph {
 pub trait NavVectorStore {
     /// Get the navigation vector for a single node.
     // XXX this design is weird to allow this to be cursor backed.
-    fn get(&mut self, node: i64) -> Option<Result<&'_ [u8]>>;
+    fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }

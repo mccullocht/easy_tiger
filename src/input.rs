@@ -48,6 +48,11 @@ impl<D> NumpyF32VectorStore<D> {
         self.vectors.len() / self.dimensions.get()
     }
 
+    /// Return true if there are no vectors in the store.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Return an iterator over all the vectors in the store.
     pub fn iter(&self) -> impl Iterator<Item = &[f32]> {
         self.vectors.chunks(self.dimensions.get())

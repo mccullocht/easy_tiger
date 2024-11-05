@@ -2,15 +2,15 @@ use std::num::NonZero;
 
 use crate::{quantization::binary_quantize, scoring::VectorScorer, Neighbor};
 
+#[derive(Debug)]
 struct TestVector {
     vector: Vec<f32>,
     nav_vector: Vec<u8>,
     edges: Vec<i64>,
 }
 
-pub struct TestGraph {
-    rep: Vec<TestVector>,
-}
+#[derive(Debug)]
+pub struct TestGraph(Vec<TestVector>);
 
 impl TestGraph {
     pub fn new<S, T, V>(max_edges: NonZero<usize>, scorer: S, iter: T) -> Self
@@ -19,11 +19,11 @@ impl TestGraph {
         T: IntoIterator<Item = V>,
         V: Into<Vec<f32>>,
     {
-        let rep = iter
+        let mut rep = iter
             .into_iter()
             .map(|x| {
                 let mut v = x.into();
-                S::normalize(&mut v);
+                scorer.normalize(&mut v);
                 let b = binary_quantize(&v);
                 TestVector {
                     vector: v,
@@ -31,22 +31,30 @@ impl TestGraph {
                     edges: Vec::new(),
                 }
             })
-            .collect();
-        TestGraph { rep }
+            .collect::<Vec<_>>();
+
+        for i in 0..rep.len() {
+            rep[i].edges = Self::compute_edges(&rep, i, max_edges, &scorer);
+        }
+        TestGraph(rep)
     }
 
-    fn compute_edges<S>(&self, index: usize, max_edges: NonZero<usize>, scorer: &S) -> Vec<i64>
+    fn compute_edges<S>(
+        graph: &[TestVector],
+        index: usize,
+        max_edges: NonZero<usize>,
+        scorer: &S,
+    ) -> Vec<i64>
     where
         S: VectorScorer<Elem = f32>,
     {
-        let q = &self.rep[index].vector;
-        let mut scored = self
-            .rep
+        let q = &graph[index].vector;
+        let mut scored = graph
             .iter()
             .enumerate()
             .filter_map(|(i, n)| {
                 if i != index {
-                    Some(Neighbor::new(i as i64, S::score(q, &n.vector)))
+                    Some(Neighbor::new(i as i64, scorer.score(q, &n.vector)))
                 } else {
                     None
                 }
@@ -57,16 +65,23 @@ impl TestGraph {
             return vec![];
         }
 
-        let mut edges = Vec::with_capacity(std::cmp::min(scored.len(), max_edges.get()));
-        edges.push(scored[0]);
-        // RNG prune: eliminate any neighbors that are closer to a selected edge than the vertex.
+        let mut selected = Vec::with_capacity(std::cmp::min(scored.len(), max_edges.get()));
+        selected.push(scored[0]);
+        // RNG prune: select edges that are closer to the vertex than they are to any of the other
+        // nodes we've already selected an edge to.
         for n in scored.iter().skip(1) {
-            if edges.len() == max_edges.get() {
+            if selected.len() == max_edges.get() {
                 break;
             }
 
-            for p in edges.iter() {}
+            let q = &graph[n.node() as usize].vector;
+            if !selected
+                .iter()
+                .any(|p| scorer.score(q, &graph[p.node() as usize].vector) > n.score())
+            {
+                selected.push(*n);
+            }
         }
-        todo!()
+        selected.into_iter().map(|n| n.node()).collect()
     }
 }

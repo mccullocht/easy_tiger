@@ -1,7 +1,8 @@
 use std::num::NonZero;
 
 use crate::{
-    graph::{Graph, NavVectorStore},
+    graph::{Graph, GraphNode, NavVectorStore},
+    quantization::binary_quantize,
     Neighbor,
 };
 
@@ -32,15 +33,72 @@ impl GraphSearcher {
         &self.params
     }
 
-    // XXX this search is explicitly single threaded, we'd need a _generator_ of graphs and vector stores
-    // to search multi-threaded. Some other internals would also need to change like the queue would need
-    // to be protected.
-    pub fn search<G, N>(&mut self, graph: &mut G, nav: &mut N) -> Vec<Neighbor>
+    // NB: graph and nav have to be mutable, which means that we can only use one thread internally for
+    // searching. A freelist or generator would be necessary to do a multi-threaded search that pops
+    // multiple candidates at once. This would also require significant changes to CandidateList.
+    // XXX need an error handling aware signature and
+    pub fn search<G, N>(&mut self, query: &[f32], graph: &mut G, nav: &mut N) -> Vec<Neighbor>
     where
         G: Graph,
         N: NavVectorStore,
     {
-        todo!()
+        let nav_query = if let Some(entry_point) = graph.entry_point() {
+            let nav_query = binary_quantize(query);
+            let entry_vector = nav.get(entry_point).unwrap().unwrap();
+            self.candidates.add_unvisited(Neighbor::new(
+                entry_point,
+                Self::nav_score(&nav_query, &entry_vector),
+            ));
+            nav_query
+        } else {
+            return vec![];
+        };
+
+        while let Some(mut best_candidate) = self.candidates.next_unvisited() {
+            let node = graph
+                .get(best_candidate.neighbor().node())
+                .unwrap()
+                .unwrap();
+            // If we aren't reranking we don't need to read the
+            best_candidate.visit(if self.params.num_rerank > 0 {
+                node.vector().into()
+            } else {
+                Vec::new()
+            });
+
+            for edge in node.edges() {
+                let vec = nav.get(edge).unwrap().unwrap();
+                self.candidates
+                    .add_unvisited(Neighbor::new(edge, Self::nav_score(&nav_query, &vec)));
+            }
+        }
+
+        let results = if self.params.num_rerank > 0 {
+            self.candidates
+                .iter()
+                .take(self.params.num_rerank)
+                .map(|c| {
+                    Neighbor::new(
+                        c.neighbor.node(),
+                        Self::score(query, c.vector.as_ref().expect("node visited")),
+                    )
+                })
+                .collect()
+        } else {
+            self.candidates.iter().map(|c| c.neighbor).collect()
+        };
+
+        self.candidates.clear();
+
+        results
+    }
+
+    fn score(q: &[f32], d: &[f32]) -> f64 {
+        simsimd::SpatialSimilarity::dot(q, d).unwrap()
+    }
+
+    fn nav_score(q: &[u8], d: &[u8]) -> f64 {
+        simsimd::BinarySimilarity::hamming(q, d).unwrap()
     }
 }
 
@@ -110,17 +168,13 @@ impl CandidateList {
         }
     }
 
+    fn iter(&self) -> impl Iterator<Item = &'_ Candidate> {
+        self.candidates.iter()
+    }
+
     fn clear(&mut self) {
         self.candidates.clear();
         self.next_unvisited = 0;
-    }
-}
-
-impl Extend<Neighbor> for CandidateList {
-    fn extend<T: IntoIterator<Item = Neighbor>>(&mut self, iter: T) {
-        for n in iter {
-            self.add_unvisited(n);
-        }
     }
 }
 

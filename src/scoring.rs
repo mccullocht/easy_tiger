@@ -13,14 +13,8 @@ pub trait VectorScorer {
     fn score(a: &[Self::Elem], b: &[Self::Elem]) -> f64;
 
     /// Normalize a vector for use with this scoring function.
-    /// By default, returns a reference to the input vector.
-    fn normalize<'a>(vector: &'a [Self::Elem]) -> Cow<'a, [Self::Elem]>
-    where
-        Self::Elem: Clone,
-        [Self::Elem]: ToOwned,
-    {
-        vector.into()
-    }
+    /// By default, does nothing.
+    fn normalize(_vector: &mut [Self::Elem]) {}
 }
 
 /// Computes a score based on l2 distance.
@@ -47,9 +41,11 @@ impl VectorScorer for DotProductScorer {
         (1f64 + SpatialSimilarity::dot(a, b).unwrap()) / 2f64
     }
 
-    fn normalize<'a>(vector: &'a [Self::Elem]) -> Cow<'a, [Self::Elem]> {
+    fn normalize(vector: &mut [Self::Elem]) {
         let norm = SpatialSimilarity::dot(vector, vector).unwrap().sqrt() as f32;
-        vector.iter().map(|d| *d / norm).collect::<Vec<_>>().into()
+        for d in vector.iter_mut() {
+            *d /= norm;
+        }
     }
 }
 

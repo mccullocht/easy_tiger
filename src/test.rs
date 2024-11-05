@@ -1,6 +1,6 @@
 use std::num::NonZero;
 
-use crate::{quantization::binary_quantize, Neighbor};
+use crate::{quantization::binary_quantize, scoring::VectorScorer, Neighbor};
 
 struct TestVector {
     vector: Vec<f32>,
@@ -13,15 +13,17 @@ pub struct TestGraph {
 }
 
 impl TestGraph {
-    pub fn new<T, V>(max_edges: NonZero<usize>, iter: T) -> Self
+    pub fn new<S, T, V>(max_edges: NonZero<usize>, scorer: S, iter: T) -> Self
     where
+        S: VectorScorer<Elem = f32>,
         T: IntoIterator<Item = V>,
         V: Into<Vec<f32>>,
     {
         let rep = iter
             .into_iter()
             .map(|x| {
-                let v = x.into();
+                let mut v = x.into();
+                S::normalize(&mut v);
                 let b = binary_quantize(&v);
                 TestVector {
                     vector: v,
@@ -33,7 +35,10 @@ impl TestGraph {
         TestGraph { rep }
     }
 
-    fn compute_edges(&self, index: usize, max_edges: NonZero<usize>) -> Vec<i64> {
+    fn compute_edges<S>(&self, index: usize, max_edges: NonZero<usize>, scorer: &S) -> Vec<i64>
+    where
+        S: VectorScorer<Elem = f32>,
+    {
         let q = &self.rep[index].vector;
         let mut scored = self
             .rep
@@ -41,24 +46,27 @@ impl TestGraph {
             .enumerate()
             .filter_map(|(i, n)| {
                 if i != index {
-                    Some(Neighbor::new(
-                        i as i64,
-                        simsimd::SpatialSimilarity::dot(q, &n.vector).unwrap(),
-                    ))
+                    Some(Neighbor::new(i as i64, S::score(q, &n.vector)))
                 } else {
                     None
                 }
             })
             .collect::<Vec<_>>();
         scored.sort();
-        if (scored.is_empty()) {
+        if scored.is_empty() {
             return vec![];
         }
 
         let mut edges = Vec::with_capacity(std::cmp::min(scored.len(), max_edges.get()));
         edges.push(scored[0]);
-        // score against all previous vectors in the list
-        for (i, n) in scored.iter().enumerate().skip(1) {}
+        // RNG prune: eliminate any neighbors that are closer to a selected edge than the vertex.
+        for n in scored.iter().skip(1) {
+            if edges.len() == max_edges.get() {
+                break;
+            }
+
+            for p in edges.iter() {}
+        }
         todo!()
     }
 }

@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 mod graph;
 pub mod input;
 pub mod quantization;
+pub mod search;
 
 /// `Neighbor` is a node and a distance relative to some other node.
 ///

@@ -21,6 +21,9 @@ pub trait Graph {
     where
         Self: 'c;
 
+    /// Return the graph entry point, or None if the graph is empty.
+    fn entry_point(&self) -> Option<i64>;
+
     /// Get the contents of a single node.
     // XXX this design is weird to allow this to be cursor backed.
     fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>>;

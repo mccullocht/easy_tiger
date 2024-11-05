@@ -4,6 +4,8 @@ mod graph;
 pub mod input;
 pub mod quantization;
 pub mod search;
+#[cfg(test)]
+mod test;
 
 /// `Neighbor` is a node and a distance relative to some other node.
 ///

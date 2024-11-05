@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use simsimd::{BinarySimilarity, SpatialSimilarity};
 
 /// Trait type for a vector scorer.

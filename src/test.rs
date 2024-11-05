@@ -13,7 +13,7 @@ pub struct TestGraph {
 }
 
 impl TestGraph {
-    fn new<T, V>(max_edges: NonZero<usize>, iter: T) -> Self
+    pub fn new<T, V>(max_edges: NonZero<usize>, iter: T) -> Self
     where
         T: IntoIterator<Item = V>,
         V: Into<Vec<f32>>,
@@ -33,9 +33,9 @@ impl TestGraph {
         TestGraph { rep }
     }
 
-    fn search(&self, index: usize) -> Vec<i64> {
+    fn compute_edges(&self, index: usize, max_edges: NonZero<usize>) -> Vec<i64> {
         let q = &self.rep[index].vector;
-        let neighbors = self
+        let mut scored = self
             .rep
             .iter()
             .enumerate()
@@ -50,6 +50,15 @@ impl TestGraph {
                 }
             })
             .collect::<Vec<_>>();
+        scored.sort();
+        if (scored.is_empty()) {
+            return vec![];
+        }
+
+        let mut edges = Vec::with_capacity(std::cmp::min(scored.len(), max_edges.get()));
+        edges.push(scored[0]);
+        // score against all previous vectors in the list
+        for (i, n) in scored.iter().enumerate().skip(1) {}
         todo!()
     }
 }

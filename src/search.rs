@@ -33,10 +33,16 @@ impl GraphSearcher {
         &self.params
     }
 
+    // XXX when searching as part of insertion, I probably want the raw vectors returned as well
+    // -- I can use them for RNG pruning.
+
+    // XXX I probably want to attach the scorer, quantization function, and quantization scorer to be
+    // a property of the graph object somehow.
+
     // NB: graph and nav have to be mutable, which means that we can only use one thread internally for
     // searching. A freelist or generator would be necessary to do a multi-threaded search that pops
     // multiple candidates at once. This would also require significant changes to CandidateList.
-    // XXX need an error handling aware signature and
+    // XXX need an Result return value err handling.
     pub fn search<G, N>(&mut self, query: &[f32], graph: &mut G, nav: &mut N) -> Vec<Neighbor>
     where
         G: Graph,
@@ -59,7 +65,7 @@ impl GraphSearcher {
                 .get(best_candidate.neighbor().node())
                 .unwrap()
                 .unwrap();
-            // If we aren't reranking we don't need to read the
+            // If we aren't reranking we don't need to copy the actual vector.
             best_candidate.visit(if self.params.num_rerank > 0 {
                 node.vector().into()
             } else {
@@ -93,6 +99,7 @@ impl GraphSearcher {
         results
     }
 
+    // XXX this doesn't work, we need to normalize the distance into a score (i think?)
     fn score(q: &[f32], d: &[f32]) -> f64 {
         simsimd::SpatialSimilarity::dot(q, d).unwrap()
     }

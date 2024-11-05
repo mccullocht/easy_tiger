@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 mod graph;
 pub mod input;
 pub mod quantization;
+mod scoring;
 pub mod search;
 #[cfg(test)]
 mod test;

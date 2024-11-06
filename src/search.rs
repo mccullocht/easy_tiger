@@ -215,3 +215,50 @@ impl<'a> VisitCandidateGuard<'a> {
             .unwrap_or(self.list.candidates.len());
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::num::NonZero;
+
+    use crate::{
+        scoring::{DotProductScorer, HammingScorer},
+        test::TestGraph,
+    };
+
+    use super::{GraphSearchParams, GraphSearcher};
+
+    fn build_test_graph(max_edges: usize) -> TestGraph {
+        let dim_values = [-0.25, -0.125, 0.125, 0.25];
+        TestGraph::new(
+            NonZero::new(max_edges).unwrap(),
+            DotProductScorer,
+            (0..256).map(|v| {
+                Vec::from([
+                    dim_values[v & 0x3],
+                    dim_values[(v >> 2) & 0x3],
+                    dim_values[(v >> 4) & 0x3],
+                    dim_values[(v >> 6) & 0x3],
+                ])
+            }),
+        )
+    }
+
+    #[test]
+    fn basic() {
+        let mut graph = build_test_graph(4);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(4).unwrap(),
+            num_rerank: 0,
+        });
+        assert_eq!(
+            searcher.search(
+                &[-0.1, -0.1, -0.1, -0.1],
+                &mut graph,
+                &DotProductScorer,
+                &mut graph,
+                &HammingScorer
+            ),
+            vec![]
+        );
+    }
+}

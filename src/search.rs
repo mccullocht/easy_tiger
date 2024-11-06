@@ -91,7 +91,7 @@ impl GraphSearcher {
             for edge in node.edges() {
                 let vec = nav
                     .get(edge)
-                    .unwrap_or_else(|| Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                    .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
                 self.candidates
                     .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
             }

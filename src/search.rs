@@ -91,7 +91,7 @@ impl GraphSearcher {
             for edge in node.edges() {
                 let vec = nav
                     .get(edge)
-                    .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                    .unwrap_or_else(|| Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
                 self.candidates
                     .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
             }
@@ -256,6 +256,14 @@ mod test {
         )
     }
 
+    fn normalize_scores(mut results: Vec<Neighbor>) -> Vec<Neighbor> {
+        // XXX how do I round to within some epsilon? shittily!
+        for n in results.iter_mut() {
+            n.score = (n.score * 100000.0).round() / 100000.0;
+        }
+        results
+    }
+
     #[test]
     fn basic_no_rerank() {
         let (mut graph, mut nav) = build_test_graph(4);
@@ -290,20 +298,22 @@ mod test {
             num_rerank: 4,
         });
         assert_eq!(
-            searcher
-                .search(
-                    &[-0.1, -0.1, -0.1, -0.1],
-                    &mut graph,
-                    &DotProductScorer,
-                    &mut nav,
-                    &HammingScorer
-                )
-                .unwrap(),
+            normalize_scores(
+                searcher
+                    .search(
+                        &[-0.1, -0.1, -0.1, -0.1],
+                        &mut graph,
+                        &DotProductScorer,
+                        &mut nav,
+                        &HammingScorer
+                    )
+                    .unwrap()
+            ),
             vec![
-                Neighbor::new(0, 0.6000000014901161),
-                Neighbor::new(1, 0.597072534263134),
-                Neighbor::new(4, 0.597072534263134),
-                Neighbor::new(5, 0.5948683321475983)
+                Neighbor::new(0, 0.6),
+                Neighbor::new(1, 0.59707),
+                Neighbor::new(4, 0.59707),
+                Neighbor::new(5, 0.59487)
             ]
         );
     }

@@ -222,14 +222,15 @@ mod test {
 
     use crate::{
         scoring::{DotProductScorer, HammingScorer},
-        test::TestGraph,
+        test::{TestGraph, TestNavVectorStore, TestVectorData},
+        Neighbor,
     };
 
     use super::{GraphSearchParams, GraphSearcher};
 
-    fn build_test_graph(max_edges: usize) -> TestGraph {
+    fn build_test_graph(max_edges: usize) -> (TestGraph, TestNavVectorStore) {
         let dim_values = [-0.25, -0.125, 0.125, 0.25];
-        TestGraph::new(
+        let test_data = TestVectorData::new(
             NonZero::new(max_edges).unwrap(),
             DotProductScorer,
             (0..256).map(|v| {
@@ -240,12 +241,16 @@ mod test {
                     dim_values[(v >> 6) & 0x3],
                 ])
             }),
+        );
+        (
+            TestGraph::from(test_data.clone()),
+            TestNavVectorStore::from(test_data.clone()),
         )
     }
 
     #[test]
-    fn basic() {
-        let mut graph = build_test_graph(4);
+    fn basic_no_rerank() {
+        let (mut graph, mut nav) = build_test_graph(4);
         let mut searcher = GraphSearcher::new(GraphSearchParams {
             beam_width: NonZero::new(4).unwrap(),
             num_rerank: 0,
@@ -255,10 +260,39 @@ mod test {
                 &[-0.1, -0.1, -0.1, -0.1],
                 &mut graph,
                 &DotProductScorer,
-                &mut graph,
+                &mut nav,
                 &HammingScorer
             ),
-            vec![]
+            vec![
+                Neighbor::new(0, 1.0),
+                Neighbor::new(1, 1.0),
+                Neighbor::new(4, 1.0),
+                Neighbor::new(5, 1.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn basic_rerank() {
+        let (mut graph, mut nav) = build_test_graph(4);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(4).unwrap(),
+            num_rerank: 4,
+        });
+        assert_eq!(
+            searcher.search(
+                &[-0.1, -0.1, -0.1, -0.1],
+                &mut graph,
+                &DotProductScorer,
+                &mut nav,
+                &HammingScorer
+            ),
+            vec![
+                Neighbor::new(0, 0.6000000014901161),
+                Neighbor::new(1, 0.597072534263134),
+                Neighbor::new(4, 0.597072534263134),
+                Neighbor::new(5, 0.5948683321475983)
+            ]
         );
     }
 }

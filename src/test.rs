@@ -1,4 +1,4 @@
-use std::{borrow::Cow, num::NonZero};
+use std::{borrow::Cow, num::NonZero, rc::Rc};
 
 use wt_mdb::Result;
 
@@ -16,10 +16,10 @@ struct TestVector {
     edges: Vec<i64>,
 }
 
-#[derive(Debug)]
-pub struct TestGraph(Vec<TestVector>);
+#[derive(Clone, Debug)]
+pub struct TestVectorData(Rc<Vec<TestVector>>);
 
-impl TestGraph {
+impl TestVectorData {
     pub fn new<S, T, V>(max_edges: NonZero<usize>, scorer: S, iter: T) -> Self
     where
         S: VectorScorer<Elem = f32>,
@@ -43,7 +43,7 @@ impl TestGraph {
         for i in 0..rep.len() {
             rep[i].edges = Self::compute_edges(&rep, i, max_edges, &scorer);
         }
-        TestGraph(rep)
+        TestVectorData(Rc::new(rep))
     }
 
     fn compute_edges<S>(
@@ -93,11 +93,20 @@ impl TestGraph {
     }
 }
 
+#[derive(Debug)]
+pub struct TestGraph(TestVectorData);
+
+impl From<TestVectorData> for TestGraph {
+    fn from(value: TestVectorData) -> Self {
+        TestGraph(value.clone())
+    }
+}
+
 impl Graph for TestGraph {
     type Node<'c> = TestGraphNode<'c>;
 
     fn entry_point(&self) -> Option<i64> {
-        if self.0.is_empty() {
+        if self.0 .0.is_empty() {
             None
         } else {
             Some(0)
@@ -105,10 +114,10 @@ impl Graph for TestGraph {
     }
 
     fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>> {
-        if node < 0 || node as usize >= self.0.len() {
+        if node < 0 || node as usize >= self.0 .0.len() {
             None
         } else {
-            Some(Ok(TestGraphNode(&self.0[node as usize])))
+            Some(Ok(TestGraphNode(&self.0 .0[node as usize])))
         }
     }
 }
@@ -127,12 +136,21 @@ impl<'a> GraphNode for TestGraphNode<'a> {
     }
 }
 
-impl NavVectorStore for TestGraph {
+#[derive(Debug)]
+pub struct TestNavVectorStore(TestVectorData);
+
+impl From<TestVectorData> for TestNavVectorStore {
+    fn from(value: TestVectorData) -> Self {
+        TestNavVectorStore(value)
+    }
+}
+
+impl NavVectorStore for TestNavVectorStore {
     fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        if node < 0 || node as usize >= self.0.len() {
+        if node < 0 || node as usize >= self.0 .0.len() {
             None
         } else {
-            Some(Ok(Cow::from(&self.0[node as usize].nav_vector)))
+            Some(Ok(Cow::from(&self.0 .0[node as usize].nav_vector)))
         }
     }
 }

@@ -1,6 +1,13 @@
-use std::num::NonZero;
+use std::{borrow::Cow, num::NonZero};
 
-use crate::{quantization::binary_quantize, scoring::VectorScorer, Neighbor};
+use wt_mdb::Result;
+
+use crate::{
+    graph::{Graph, GraphNode, NavVectorStore},
+    quantization::binary_quantize,
+    scoring::VectorScorer,
+    Neighbor,
+};
 
 #[derive(Debug)]
 struct TestVector {
@@ -83,5 +90,49 @@ impl TestGraph {
             }
         }
         selected.into_iter().map(|n| n.node()).collect()
+    }
+}
+
+impl Graph for TestGraph {
+    type Node<'c> = TestGraphNode<'c>;
+
+    fn entry_point(&self) -> Option<i64> {
+        if self.0.is_empty() {
+            None
+        } else {
+            Some(0)
+        }
+    }
+
+    fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>> {
+        if node < 0 || node as usize >= self.0.len() {
+            None
+        } else {
+            Some(Ok(TestGraphNode(&self.0[node as usize])))
+        }
+    }
+}
+
+pub struct TestGraphNode<'a>(&'a TestVector);
+
+impl<'a> GraphNode for TestGraphNode<'a> {
+    type EdgeIterator<'c> = std::iter::Copied<std::slice::Iter<'c, i64>> where Self: 'c;
+
+    fn vector(&self) -> Cow<'_, [f32]> {
+        Cow::from(&self.0.vector)
+    }
+
+    fn edges(&self) -> Self::EdgeIterator<'_> {
+        self.0.edges.iter().copied()
+    }
+}
+
+impl NavVectorStore for TestGraph {
+    fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>> {
+        if node < 0 || node as usize >= self.0.len() {
+            None
+        } else {
+            Some(Ok(Cow::from(&self.0[node as usize].nav_vector)))
+        }
     }
 }

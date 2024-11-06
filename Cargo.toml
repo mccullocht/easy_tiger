@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 memmap2 = { version = "0.9.5", features = ["stable_deref_trait"] }
+simsimd = "6.0.1"
 stable_deref_trait = "1.2.0"
 wt_mdb = { path = "./wt_mdb" }
 

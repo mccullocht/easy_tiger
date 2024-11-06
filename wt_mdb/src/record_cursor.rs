@@ -74,7 +74,7 @@ impl<'a> RecordCursor<'a> {
     }
 
     /// Set the contents of `record` in the collection.
-    pub fn set<'b>(&mut self, record: &RecordView<'b>) -> Result<()> {
+    pub fn set(&mut self, record: &RecordView<'_>) -> Result<()> {
         // safety: the memory passed to set_{key,value} need only be valid until a modifying
         // call like insert().
         unsafe {

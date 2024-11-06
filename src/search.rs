@@ -3,6 +3,7 @@ use std::num::NonZero;
 use crate::{
     graph::{Graph, GraphNode, NavVectorStore},
     quantization::binary_quantize,
+    scoring::VectorScorer,
     Neighbor,
 };
 
@@ -43,17 +44,26 @@ impl GraphSearcher {
     // searching. A freelist or generator would be necessary to do a multi-threaded search that pops
     // multiple candidates at once. This would also require significant changes to CandidateList.
     // XXX need an Result return value err handling.
-    pub fn search<G, N>(&mut self, query: &[f32], graph: &mut G, nav: &mut N) -> Vec<Neighbor>
+    pub fn search<G, N, S, A>(
+        &mut self,
+        query: &[f32],
+        graph: &mut G,
+        scorer: &S,
+        nav: &mut N,
+        nav_scorer: &A,
+    ) -> Vec<Neighbor>
     where
         G: Graph,
+        S: VectorScorer<Elem = f32>,
         N: NavVectorStore,
+        A: VectorScorer<Elem = u8>,
     {
         let nav_query = if let Some(entry_point) = graph.entry_point() {
             let nav_query = binary_quantize(query);
             let entry_vector = nav.get(entry_point).unwrap().unwrap();
             self.candidates.add_unvisited(Neighbor::new(
                 entry_point,
-                Self::nav_score(&nav_query, &entry_vector),
+                nav_scorer.score(&nav_query, &entry_vector),
             ));
             nav_query
         } else {
@@ -75,7 +85,7 @@ impl GraphSearcher {
             for edge in node.edges() {
                 let vec = nav.get(edge).unwrap().unwrap();
                 self.candidates
-                    .add_unvisited(Neighbor::new(edge, Self::nav_score(&nav_query, &vec)));
+                    .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
             }
         }
 
@@ -86,7 +96,7 @@ impl GraphSearcher {
                 .map(|c| {
                     Neighbor::new(
                         c.neighbor.node(),
-                        Self::score(query, c.vector.as_ref().expect("node visited")),
+                        scorer.score(query, c.vector.as_ref().expect("node visited")),
                     )
                 })
                 .collect()
@@ -97,15 +107,6 @@ impl GraphSearcher {
         self.candidates.clear();
 
         results
-    }
-
-    // XXX this doesn't work, we need to normalize the distance into a score (i think?)
-    fn score(q: &[f32], d: &[f32]) -> f64 {
-        simsimd::SpatialSimilarity::dot(q, d).unwrap()
-    }
-
-    fn nav_score(q: &[u8], d: &[u8]) -> f64 {
-        simsimd::BinarySimilarity::hamming(q, d).unwrap()
     }
 }
 
@@ -214,7 +215,3 @@ impl<'a> VisitCandidateGuard<'a> {
             .unwrap_or(self.list.candidates.len());
     }
 }
-
-// XXX when I get the next unvisited node I want to update it with a vector
-// I can't represent the iteration as an iterator because it would need a reference and i wouldn't
-// be able to insert new items while I have the iterator outstanding.

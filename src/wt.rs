@@ -114,6 +114,11 @@ impl<'a> WiredTigerGraph<'a> {
 impl<'a> Graph for WiredTigerGraph<'a> {
     type Node<'c> = WiredTigerGraphNode<'c> where Self: 'c;
 
+    fn entry_point(&self) -> Option<i64> {
+        // XXX this is totally busted. this needs to be stored in the graph.
+        Some(0)
+    }
+
     fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>> {
         let r = unsafe { self.cursor.seek_exact_unsafe(node)? }.map(RecordView::into_inner_value);
         Some(r.map(|r| WiredTigerGraphNode::new(self.metadata.dimensions, r)))

@@ -1,7 +1,6 @@
 use std::{
     num::NonZero,
     ops::Range,
-    path::Iter,
     sync::{RwLock, RwLockReadGuard},
 };
 
@@ -37,6 +36,15 @@ impl<D> BulkLoadBuilder<D> {
 
 impl<D> Graph for BulkLoadBuilder<D> {
     type Node<'c> = BulkLoadGraphNode<'c, D> where Self: 'c;
+
+    fn entry_point(&self) -> Option<i64> {
+        // TODO: store an entry point in the builder and maybe optimize for distance to a centroid?
+        if self.vectors.is_empty() {
+            None
+        } else {
+            Some(0)
+        }
+    }
 
     fn get(&mut self, node: i64) -> Option<wt_mdb::Result<Self::Node<'_>>> {
         Some(Ok(BulkLoadGraphNode {

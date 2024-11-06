@@ -48,9 +48,9 @@ impl<D> NumpyF32VectorStore<D> {
         self.vectors.len() / self.dimensions.get()
     }
 
-    /// Return true if there are no vectors in the store.
+    /// Return true if this store is empty.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.vectors.is_empty()
     }
 
     /// Return an iterator over all the vectors in the store.

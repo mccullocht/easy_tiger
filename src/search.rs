@@ -22,7 +22,11 @@ pub struct GraphSearcher {
     params: GraphSearchParams,
 }
 
+// TODO: search_for_indexing() that includes the vectors in the results. These could easily be
+// used for edge pruning.
+// TODO: consider attaching relevant scorers and quantization function to the Graph.
 impl GraphSearcher {
+    /// Create a new, reusable graph searcher.
     pub fn new(params: GraphSearchParams) -> Self {
         Self {
             candidates: CandidateList::new(params.beam_width.get()),
@@ -30,16 +34,16 @@ impl GraphSearcher {
         }
     }
 
+    /// Return the search params.
     pub fn params(&self) -> &GraphSearchParams {
         &self.params
     }
 
-    // XXX when searching as part of insertion, I probably want the raw vectors returned as well
-    // -- I can use them for RNG pruning.
-
-    // XXX I probably want to attach the scorer, quantization function, and quantization scorer to be
-    // a property of the graph object somehow.
-
+    /// Search for `query` in the given `graph`. `nav` and `nav_scorer` are used to score candidates
+    /// as we traverse the graph, `scorer` may be used to re-rank results if configured for this
+    /// searcher.
+    ///
+    /// Returns an approximate list of neighbors with the highest scores.
     // NB: graph and nav have to be mutable, which means that we can only use one thread internally for
     // searching. A freelist or generator would be necessary to do a multi-threaded search that pops
     // multiple candidates at once. This would also require significant changes to CandidateList.

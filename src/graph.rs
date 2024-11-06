@@ -25,13 +25,13 @@ pub trait Graph {
     fn entry_point(&self) -> Option<i64>;
 
     /// Get the contents of a single node.
-    // XXX this design is weird to allow this to be cursor backed.
+    // NB: self is mutable to allow reading from a WT cursor.
     fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>>;
 }
 
 /// Vector store for vectors used to navigate the graph.
 pub trait NavVectorStore {
     /// Get the navigation vector for a single node.
-    // XXX this design is weird to allow this to be cursor backed.
+    // NB: self is mutable to allow reading from a WT cursor.
     fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }

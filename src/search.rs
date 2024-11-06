@@ -7,6 +7,8 @@ use crate::{
     Neighbor,
 };
 
+use wt_mdb::{Error, Result, WiredTigerError};
+
 /// Parameters for a search over a Vamana graph.
 pub struct GraphSearchParams {
     /// Width of the graph search beam -- the number of candidates considered.
@@ -47,7 +49,6 @@ impl GraphSearcher {
     // NB: graph and nav have to be mutable, which means that we can only use one thread internally for
     // searching. A freelist or generator would be necessary to do a multi-threaded search that pops
     // multiple candidates at once. This would also require significant changes to CandidateList.
-    // XXX need an Result return value err handling.
     pub fn search<G, N, S, A>(
         &mut self,
         query: &[f32],
@@ -55,7 +56,7 @@ impl GraphSearcher {
         scorer: &S,
         nav: &mut N,
         nav_scorer: &A,
-    ) -> Vec<Neighbor>
+    ) -> Result<Vec<Neighbor>>
     where
         G: Graph,
         S: VectorScorer<Elem = f32>,
@@ -64,21 +65,22 @@ impl GraphSearcher {
     {
         let nav_query = if let Some(entry_point) = graph.entry_point() {
             let nav_query = binary_quantize(query);
-            let entry_vector = nav.get(entry_point).unwrap().unwrap();
+            let entry_vector = nav
+                .get(entry_point)
+                .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
             self.candidates.add_unvisited(Neighbor::new(
                 entry_point,
                 nav_scorer.score(&nav_query, &entry_vector),
             ));
             nav_query
         } else {
-            return vec![];
+            return Ok(vec![]);
         };
 
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
             let node = graph
                 .get(best_candidate.neighbor().node())
-                .unwrap()
-                .unwrap();
+                .unwrap_or_else(|| Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
             // If we aren't reranking we don't need to copy the actual vector.
             best_candidate.visit(if self.params.num_rerank > 0 {
                 node.vector().into()
@@ -87,7 +89,9 @@ impl GraphSearcher {
             });
 
             for edge in node.edges() {
-                let vec = nav.get(edge).unwrap().unwrap();
+                let vec = nav
+                    .get(edge)
+                    .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
                 self.candidates
                     .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
             }
@@ -110,7 +114,7 @@ impl GraphSearcher {
 
         self.candidates.clear();
 
-        results
+        Ok(results)
     }
 }
 
@@ -260,13 +264,15 @@ mod test {
             num_rerank: 0,
         });
         assert_eq!(
-            searcher.search(
-                &[-0.1, -0.1, -0.1, -0.1],
-                &mut graph,
-                &DotProductScorer,
-                &mut nav,
-                &HammingScorer
-            ),
+            searcher
+                .search(
+                    &[-0.1, -0.1, -0.1, -0.1],
+                    &mut graph,
+                    &DotProductScorer,
+                    &mut nav,
+                    &HammingScorer
+                )
+                .unwrap(),
             vec![
                 Neighbor::new(0, 1.0),
                 Neighbor::new(1, 1.0),
@@ -284,13 +290,15 @@ mod test {
             num_rerank: 4,
         });
         assert_eq!(
-            searcher.search(
-                &[-0.1, -0.1, -0.1, -0.1],
-                &mut graph,
-                &DotProductScorer,
-                &mut nav,
-                &HammingScorer
-            ),
+            searcher
+                .search(
+                    &[-0.1, -0.1, -0.1, -0.1],
+                    &mut graph,
+                    &DotProductScorer,
+                    &mut nav,
+                    &HammingScorer
+                )
+                .unwrap(),
             vec![
                 Neighbor::new(0, 0.6000000014901161),
                 Neighbor::new(1, 0.597072534263134),

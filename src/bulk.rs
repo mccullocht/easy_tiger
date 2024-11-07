@@ -12,6 +12,7 @@ use wt_mdb::{Record, Result};
 use crate::{
     graph::{Graph, GraphNode, NavVectorStore},
     input::NumpyF32VectorStore,
+    quantization::binary_quantize,
     scoring::{DotProductScorer, HammingScorer, VectorScorer},
     search::{GraphSearchParams, GraphSearcher},
     wt::{encode_graph_node, GraphMetadata, WiredTigerIndexParams, WiredTigerNavVectorStore},
@@ -59,9 +60,25 @@ where
         }
     }
 
+    /// Load binary quantized vector data into the nav vectors table.
+    pub fn load_nav_vectors<P>(&self, progress: P) -> Result<()>
+    where
+        P: Fn(),
+    {
+        let session = self.wt_params.connection.open_session()?;
+        session.bulk_load(
+            &self.wt_params.nav_table_name,
+            None,
+            self.vectors.iter().enumerate().map(|(i, v)| {
+                progress();
+                Record::new(i as i64, binary_quantize(v))
+            }),
+        )
+    }
+
     /// Insert all vectors from the passed vector store into the graph.
     ///
-    /// This operation uses rayon to parallelize
+    /// This operation uses rayon to parallelize large parts of the graph build.
     pub fn insert_all<P>(&self, progress: P) -> Result<()>
     where
         P: Fn(),
@@ -121,10 +138,11 @@ where
     }
 
     /// Bulk load the graph table with raw vectors and graph edges.
-    pub fn load<P>(&self, progress: P) -> Result<()>
+    pub fn load_graph<P>(&self, progress: P) -> Result<()>
     where
         P: Fn(),
     {
+        // TODO: write graph metadata, select a real entry point.
         let session = self.wt_params.connection.open_session()?;
         session.bulk_load(
             &self.wt_params.graph_table_name,

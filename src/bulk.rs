@@ -3,28 +3,38 @@ use std::{
     collections::BTreeSet,
     num::NonZero,
     ops::Range,
-    sync::{mpsc::sync_channel, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{mpsc::sync_channel, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-use wt_mdb::{Result, Session};
+use wt_mdb::{Record, Result};
 
 use crate::{
     graph::{Graph, GraphNode, NavVectorStore},
     input::NumpyF32VectorStore,
     scoring::{DotProductScorer, HammingScorer, VectorScorer},
     search::{GraphSearchParams, GraphSearcher},
-    wt::WiredTigerNavVectorStore,
+    wt::{encode_graph_node, GraphMetadata, WiredTigerIndexParams, WiredTigerNavVectorStore},
     Neighbor,
 };
 
+// XXX cleverly -- i want the loader to be public to allow injecting progress bars, but maybe
+// I can just pass one for each step. alternatively write an abstraction for progress update.
+// it could be structured as multiple structs that that consume/perform/generate:
+//
+// pub fn QuantizedVectorLoader::new(...) -> Self
+// pub fn QuantizedVectorLoader::load(self, progress_cb) -> Result<BulkGraphBuilder>
+// pub fn BulkGraphBuilder::build(self, progress_cb) -> Result<BulkGraphPruner>
+// pub fn BulkGraphPruner::load(self, progress_cb) -> Result<()>
+
+// TODO: tests for bulk load builder, mostly the built graph.
+
 /// Builds a Vamana graph for a bulk load.
 pub struct BulkLoadBuilder<D> {
+    metadata: GraphMetadata,
+    wt_params: WiredTigerIndexParams,
     vectors: NumpyF32VectorStore<D>,
     graph: Box<[RwLock<Vec<Neighbor>>]>,
-    session: Mutex<Session>,
-    nav_table_name: String,
-    max_edges: NonZero<usize>,
 }
 
 impl<D> BulkLoadBuilder<D>
@@ -32,46 +42,48 @@ where
     D: Send + Sync,
 {
     /// Create a new bulk graph builder with the passed vector set and max edge count limit.
-    // XXX need a session and a table name for the quantized vectors.
     pub fn new(
+        metadata: GraphMetadata,
+        wt_params: WiredTigerIndexParams,
         vectors: NumpyF32VectorStore<D>,
-        session: Session,
-        nav_table_name: &str,
-        max_edges: NonZero<usize>,
     ) -> Self {
         let mut graph_vec = Vec::with_capacity(vectors.len());
         graph_vec.resize_with(vectors.len(), || {
-            RwLock::new(Vec::with_capacity(max_edges.get() * 2))
+            RwLock::new(Vec::with_capacity(metadata.max_edges.get() * 2))
         });
         Self {
+            metadata,
+            wt_params,
             vectors,
             graph: graph_vec.into_boxed_slice(),
-            session: Mutex::new(session),
-            nav_table_name: nav_table_name.to_string(),
-            max_edges,
         }
     }
 
-    fn insert_all(&self) -> Result<()> {
+    /// Insert all vectors from the passed vector store into the graph.
+    ///
+    /// This operation uses rayon to parallelize
+    pub fn insert_all<P>(&self, progress: P) -> Result<()>
+    where
+        P: Fn(),
+    {
+        // TODO: track in-flight inserts and and be sure to include those in the results.
         let (sender, receiver) =
             sync_channel::<(usize, Vec<Neighbor>)>(rayon::current_num_threads() * 2);
-        // XXX this is annoying because we are expected to be able to Clone member of init which
-        // does not work for WiredTigerNavVectorStore
         (0..self.vectors.len())
             .into_par_iter()
             .chunks(1_000)
             .try_for_each(|nodes| {
-                // XXX the returned cursor borrows from the session so we can't drop the lock guard.
-                // the cursors aren't quite independent and I don't know how to fix this.
-                // making the Session Sync fixes it but creates other problems. We could also
-                // create a bunch of short-lived sessions which is probably fine for now.
+                // NB: we create a new session and cursor for each chunk. Relevant rayon APIs require these
+                // objects to be Send + Sync, but Session is only Send and wrapping it in a Mutex does not
+                // work because any RecordCursor objects returned have to be destroyed before the Mutex is
+                // released.
+                let session = self.wt_params.connection.open_session()?;
                 let mut nav = WiredTigerNavVectorStore::new(
-                    self.session
-                        .lock()
-                        .unwrap()
-                        .open_record_cursor(&self.nav_table_name)
+                    session
+                        .open_record_cursor(&self.wt_params.nav_table_name)
                         .unwrap(),
                 );
+                // XXX make this configurable! should be in GraphMetadata, right?
                 let mut searcher = GraphSearcher::new(GraphSearchParams {
                     beam_width: NonZero::new(128).unwrap(),
                     num_rerank: 128,
@@ -82,14 +94,53 @@ where
                     send.send((i, edges)).unwrap();
                 }
                 Ok::<(), wt_mdb::Error>(())
-            });
+            })?;
 
         drop(sender);
 
         while let Ok((index, edges)) = receiver.recv() {
             self.apply_insert(index, edges)?;
+            progress();
         }
         Ok(())
+    }
+
+    /// Cleanup the graph.
+    ///
+    /// This may prune edges and/or ensure graph connectivity.
+    pub fn cleanup<P>(&self, progress: P) -> Result<()>
+    where
+        P: Fn(),
+    {
+        // NB: this must not be run concurrently so that we can ensure
+        for (i, n) in self.graph.iter().enumerate() {
+            self.maybe_prune_node(i, n.write().unwrap(), self.metadata.max_edges)?;
+            progress();
+        }
+        Ok(())
+    }
+
+    /// Bulk load the graph table with raw vectors and graph edges.
+    pub fn load<P>(&self, progress: P) -> Result<()>
+    where
+        P: Fn(),
+    {
+        let session = self.wt_params.connection.open_session()?;
+        session.bulk_load(
+            &self.wt_params.graph_table_name,
+            None,
+            self.vectors
+                .iter()
+                .zip(self.graph.iter())
+                .enumerate()
+                .map(|(i, (v, n))| {
+                    progress();
+                    Record::new(
+                        i as i64,
+                        encode_graph_node(v, n.read().unwrap().iter().map(|n| n.node()).collect()),
+                    )
+                }),
+        )
     }
 
     fn search_for_insert<N>(
@@ -131,10 +182,10 @@ where
         Ok(())
     }
 
-    fn maybe_prune_node<'a>(
+    fn maybe_prune_node(
         &self,
         index: usize,
-        mut guard: RwLockWriteGuard<'a, Vec<Neighbor>>,
+        mut guard: RwLockWriteGuard<'_, Vec<Neighbor>>,
         max_edges: NonZero<usize>,
     ) -> Result<()> {
         if guard.len() <= max_edges.get() {
@@ -209,13 +260,13 @@ where
 
                 if select {
                     selected.insert(i);
-                    if selected.len() >= self.max_edges.get() {
+                    if selected.len() >= self.metadata.max_edges.get() {
                         break;
                     }
                 }
             }
 
-            if selected.len() >= self.max_edges.get() {
+            if selected.len() >= self.metadata.max_edges.get() {
                 break;
             }
         }
@@ -227,12 +278,6 @@ where
 
         Ok(edges.split_at_mut(selected.len()))
     }
-
-    // insertion flow:
-    // * search the graph with some parameters, re-score, prune(?)
-    // * insert the results into the graph for the given node (write locked)
-    // * iterate over the results and insert backlinks (write locked on each node)
-    // i think maybe we should insert without pruning and do the pruning as it comes up
 }
 
 struct BulkLoadBuilderGraph<'a, D>(&'a BulkLoadBuilder<D>);
@@ -294,64 +339,5 @@ impl<'a> Iterator for BulkNodeEdgesIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|i| self.guard[i].node())
-    }
-}
-
-struct BulkNodeEdges {
-    edges: Vec<Neighbor>,
-    first_unpruned: usize,
-}
-
-impl BulkNodeEdges {
-    fn new(max_edges: NonZero<usize>) -> Self {
-        Self {
-            edges: Vec::with_capacity(max_edges.get() * 2),
-            first_unpruned: 0,
-        }
-    }
-
-    fn insert(&mut self, n: Neighbor) -> Option<usize> {
-        match self.edges.binary_search(&n) {
-            Err(i) if i < self.capacity() => {
-                self.edges.insert(i, n);
-                self.first_unpruned = std::cmp::min(self.first_unpruned, i);
-                Some(i)
-            }
-            // Don't insert on exact match or if capacity has been reached.
-            _ => None,
-        }
-    }
-
-    fn prune<I>(&mut self, selected: I)
-    where
-        I: Iterator<Item = usize>,
-    {
-        let mut len = 0;
-        for (i, o) in selected.zip(0..self.len()) {
-            self.edges.swap(i, o);
-            len += 1;
-        }
-        self.edges.truncate(len);
-        self.first_unpruned = self.edges.len();
-    }
-
-    fn iter(&self) -> std::slice::Iter<'_, Neighbor> {
-        self.edges.iter()
-    }
-
-    fn len(&self) -> usize {
-        self.edges.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.edges.is_empty()
-    }
-
-    fn capacity(&self) -> usize {
-        self.edges.capacity()
-    }
-
-    fn first_unpruned(&self) -> usize {
-        self.first_unpruned
     }
 }

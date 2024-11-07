@@ -69,6 +69,7 @@ impl GraphSearcher {
         self.candidates.clear();
         self.seen.clear();
 
+        // XXX we ought to normalize the query vector too.
         let nav_query = if let Some(entry_point) = graph.entry_point() {
             let nav_query = binary_quantize(query);
             let entry_vector = nav

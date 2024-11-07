@@ -1,6 +1,6 @@
-use std::{borrow::Cow, num::NonZero};
+use std::{borrow::Cow, num::NonZero, sync::Arc};
 
-use wt_mdb::{RecordCursor, RecordView, Result};
+use wt_mdb::{Connection, RecordCursor, RecordView, Result};
 
 use crate::graph::{Graph, GraphNode, NavVectorStore};
 
@@ -8,6 +8,18 @@ use crate::graph::{Graph, GraphNode, NavVectorStore};
 #[derive(Copy, Clone, Debug)]
 pub struct GraphMetadata {
     pub dimensions: NonZero<usize>,
+    pub max_edges: NonZero<usize>,
+}
+
+/// Parameters to to open and access a WiredTiger graph index.
+#[derive(Clone)]
+pub struct WiredTigerIndexParams {
+    /// Connection to WiredTiger database.
+    pub connection: Arc<Connection>,
+    /// Name of the table containing raw vectors and graph.
+    pub graph_table_name: String,
+    /// Name of the table containing navigational quantized vectors.
+    pub nav_table_name: String,
 }
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor``.

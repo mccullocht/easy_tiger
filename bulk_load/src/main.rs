@@ -27,10 +27,10 @@ struct Args {
     wiredtiger_table_basename: String,
     /// If true, create the WiredTiger database if it does not exist.
     #[arg(short, long, default_value = "true")]
-    create: bool,
+    create: bool, // should be create_db
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(short, long, default_value = "false")]
-    drop: bool,
+    drop: bool, // XXX should be drop_tables.
 }
 
 fn progress_bar(len: usize, message: &'static str) -> ProgressBar {
@@ -105,6 +105,15 @@ fn main() -> io::Result<()> {
             .map_err(io::Error::from)?;
     }
     {
+        // NB: this step is _very_ slow. there are two things going on:
+        // 1) we serialize writes which causes us to leave several threads idle (AFAICT ~50% of threads).
+        // 2) searching for quantized vectors in the btree is not as cheap as I'd hoped.
+        //
+        // (1) is very hard to fix because pruning involves reading the current set of edges and
+        // scoring them against one another to do the actual pruning. none of this can be moved out of
+        // the lock. This may necessarily involve IO, but maybe it is possible to cache or somehow
+        // build the working set required outside of the lock? another possibility is to drop the RNG
+        // pruning and stop scoring shit.
         let progress = progress_bar(num_vectors, "build graph");
         builder
             .insert_all(|| progress.inc(1))

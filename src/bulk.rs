@@ -3,7 +3,7 @@ use std::{
     collections::BTreeSet,
     num::NonZero,
     ops::Range,
-    sync::{mpsc::sync_channel, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
@@ -81,11 +81,10 @@ where
     /// This operation uses rayon to parallelize large parts of the graph build.
     pub fn insert_all<P>(&self, progress: P) -> Result<()>
     where
-        P: Fn(),
+        P: Fn() + Send + Sync,
     {
         // TODO: track in-flight inserts and and be sure to include those in the results.
-        let (sender, receiver) =
-            sync_channel::<(usize, Vec<Neighbor>)>(rayon::current_num_threads() * 2);
+        let apply_mu = Mutex::new(());
         (0..self.vectors.len())
             .into_par_iter()
             .chunks(1_000)
@@ -105,21 +104,18 @@ where
                     beam_width: NonZero::new(128).unwrap(),
                     num_rerank: 128,
                 });
-                let send = sender.clone();
                 for i in nodes {
                     let edges = self.search_for_insert(i, &mut searcher, &mut nav)?;
-                    send.send((i, edges)).unwrap();
+                    {
+                        // XXX i could move this inside apply_insert() maybe?
+                        let _unused = apply_mu.lock().unwrap();
+                        self.apply_insert(i, edges)?;
+                    }
+                    progress();
                 }
+
                 Ok::<(), wt_mdb::Error>(())
-            })?;
-
-        drop(sender);
-
-        while let Ok((index, edges)) = receiver.recv() {
-            self.apply_insert(index, edges)?;
-            progress();
-        }
-        Ok(())
+            })
     }
 
     /// Cleanup the graph.

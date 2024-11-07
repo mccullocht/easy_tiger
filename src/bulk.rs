@@ -3,16 +3,18 @@ use std::{
     collections::BTreeSet,
     num::NonZero,
     ops::Range,
-    sync::{RwLock, RwLockReadGuard},
+    sync::{mpsc::sync_channel, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
-use wt_mdb::Result;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use wt_mdb::{Result, Session};
 
 use crate::{
     graph::{Graph, GraphNode, NavVectorStore},
     input::NumpyF32VectorStore,
     scoring::{DotProductScorer, HammingScorer, VectorScorer},
-    search::GraphSearcher,
+    search::{GraphSearchParams, GraphSearcher},
+    wt::WiredTigerNavVectorStore,
     Neighbor,
 };
 
@@ -20,13 +22,23 @@ use crate::{
 pub struct BulkLoadBuilder<D> {
     vectors: NumpyF32VectorStore<D>,
     graph: Box<[RwLock<Vec<Neighbor>>]>,
+    session: Mutex<Session>,
+    nav_table_name: String,
     max_edges: NonZero<usize>,
 }
 
-impl<D> BulkLoadBuilder<D> {
+impl<D> BulkLoadBuilder<D>
+where
+    D: Send + Sync,
+{
     /// Create a new bulk graph builder with the passed vector set and max edge count limit.
     // XXX need a session and a table name for the quantized vectors.
-    pub fn new(vectors: NumpyF32VectorStore<D>, max_edges: NonZero<usize>) -> Self {
+    pub fn new(
+        vectors: NumpyF32VectorStore<D>,
+        session: Session,
+        nav_table_name: &str,
+        max_edges: NonZero<usize>,
+    ) -> Self {
         let mut graph_vec = Vec::with_capacity(vectors.len());
         graph_vec.resize_with(vectors.len(), || {
             RwLock::new(Vec::with_capacity(max_edges.get() * 2))
@@ -34,54 +46,50 @@ impl<D> BulkLoadBuilder<D> {
         Self {
             vectors,
             graph: graph_vec.into_boxed_slice(),
+            session: Mutex::new(session),
+            nav_table_name: nav_table_name.to_string(),
             max_edges,
         }
     }
 
-    // TODO: consider forcing links to reciprocal. This means that if you prune a link you
-    // remove the backlink to yourself. i think this forces writing to be single threaded
-    // although you could position this as queues: threads concurrently search and then a
-    // single thread is responsible for actually updating. i think this ca
-    fn insert<N>(
-        &self,
-        index: usize,
-        searcher: &mut GraphSearcher,
-        nav_vectors: &mut N,
-    ) -> Result<()>
-    where
-        N: NavVectorStore,
-    {
-        // separate this into two halves: the first half does the search to generate a candidate list
-        // and the second manipulates the graph. The first part is run concurrently; the second part
-        // runs sequentially. the first part sends results to the second via mpsc. to avoid holes where
-        // concurrently processed nodes don't have links to each other we will maintain a skiplist of
-        // in-flight inserts. a node is in-flight when it is received by the thread that performs the
-        // search and finished when the graph update processor applies the update.
+    fn insert_all(&self) -> Result<()> {
+        let (sender, receiver) =
+            sync_channel::<(usize, Vec<Neighbor>)>(rayon::current_num_threads() * 2);
+        // XXX this is annoying because we are expected to be able to Clone member of init which
+        // does not work for WiredTigerNavVectorStore
+        (0..self.vectors.len())
+            .into_par_iter()
+            .chunks(1_000)
+            .try_for_each(|nodes| {
+                // XXX the returned cursor borrows from the session so we can't drop the lock guard.
+                // the cursors aren't quite independent and I don't know how to fix this.
+                // making the Session Sync fixes it but creates other problems. We could also
+                // create a bunch of short-lived sessions which is probably fine for now.
+                let mut nav = WiredTigerNavVectorStore::new(
+                    self.session
+                        .lock()
+                        .unwrap()
+                        .open_record_cursor(&self.nav_table_name)
+                        .unwrap(),
+                );
+                let mut searcher = GraphSearcher::new(GraphSearchParams {
+                    beam_width: NonZero::new(128).unwrap(),
+                    num_rerank: 128,
+                });
+                let send = sender.clone();
+                for i in nodes {
+                    let edges = self.search_for_insert(i, &mut searcher, &mut nav)?;
+                    send.send((i, edges)).unwrap();
+                }
+                Ok::<(), wt_mdb::Error>(())
+            });
 
-        let query = &self.vectors[index];
-        let mut graph = BulkLoadBuilderGraph(self);
-        let mut candidates = searcher.search(
-            query,
-            &mut graph,
-            &DotProductScorer,
-            nav_vectors,
-            &HammingScorer,
-        )?;
+        drop(sender);
 
-        // XXX if we allow concurrent search this is where we try to insert the concurrent nodes into the result set.
-
-        let (edges, _) = self.prune(&mut candidates, &mut graph, &DotProductScorer)?;
-        // if we are not allowing concurrent insert then this gets a lot easier: just replace the set of neighbors
-        // and do backlinks. If we _are_ allowing concurrent insertion then we might have to merge this with any
-        // backlinks that have already been built. if we hit vector capacity we may decide we need to prune.
-        let mut node = self.graph[index].write().unwrap();
-        node.extend_from_slice(edges);
-        drop(node);
-
-        // XXX at this point we are working off of a potentially outdated list -- another inserter may have pruned
-        // some of these outlinks. this means we cannot enforce reciprocal backlinks.
-
-        todo!()
+        while let Ok((index, edges)) = receiver.recv() {
+            self.apply_insert(index, edges)?;
+        }
+        Ok(())
     }
 
     fn search_for_insert<N>(
@@ -89,7 +97,7 @@ impl<D> BulkLoadBuilder<D> {
         index: usize,
         searcher: &mut GraphSearcher,
         nav_vectors: &mut N,
-    ) -> Result<(usize, Vec<Neighbor>)>
+    ) -> Result<Vec<Neighbor>>
     where
         N: NavVectorStore,
     {
@@ -108,7 +116,7 @@ impl<D> BulkLoadBuilder<D> {
             .0
             .len();
         candidates.truncate(pruned_len);
-        Ok((index, candidates))
+        Ok(candidates)
     }
 
     /// This function is the only mutator of self.graph and must not be run concurrently.
@@ -117,27 +125,40 @@ impl<D> BulkLoadBuilder<D> {
         for e in edges.iter() {
             let mut guard = self.graph[e.node() as usize].write().unwrap();
             guard.push(Neighbor::new(index as i64, e.score()));
-            if guard.len() >= guard.capacity() {
-                let (selected, dropped) = self.prune(
-                    &mut guard,
-                    &mut BulkLoadBuilderGraph(self),
-                    &DotProductScorer,
-                )?;
-                let pruned_len = selected.len();
-                let dropped = dropped.to_vec();
-                guard.truncate(pruned_len);
-                drop(guard);
+            let max_edges = NonZero::new(guard.capacity()).unwrap();
+            self.maybe_prune_node(index, guard, max_edges)?;
+        }
+        Ok(())
+    }
 
-                // Remove in-links from nodes that we dropped out-links to.
-                // If we maintain the invariant that all links are reciprocated then it will be easier
-                // to mutate the index without requiring a cleaning process.
-                for n in dropped {
-                    self.graph[n.node() as usize]
-                        .write()
-                        .unwrap()
-                        .retain(|e| e.node() != index as i64);
-                }
-            }
+    fn maybe_prune_node<'a>(
+        &self,
+        index: usize,
+        mut guard: RwLockWriteGuard<'a, Vec<Neighbor>>,
+        max_edges: NonZero<usize>,
+    ) -> Result<()> {
+        if guard.len() <= max_edges.get() {
+            return Ok(());
+        }
+
+        let (selected, dropped) = self.prune(
+            &mut guard,
+            &mut BulkLoadBuilderGraph(self),
+            &DotProductScorer,
+        )?;
+        let pruned_len = selected.len();
+        let dropped = dropped.to_vec();
+        guard.truncate(pruned_len);
+        drop(guard);
+
+        // Remove in-links from nodes that we dropped out-links to.
+        // If we maintain the invariant that all links are reciprocated then it will be easier
+        // to mutate the index without requiring a cleaning process.
+        for n in dropped {
+            self.graph[n.node() as usize]
+                .write()
+                .unwrap()
+                .retain(|e| e.node() != index as i64);
         }
         Ok(())
     }

@@ -65,6 +65,10 @@ impl GraphSearcher {
         N: NavVectorStore,
         A: VectorScorer<Elem = u8>,
     {
+        // We can't reliably ensure we will clear these on the way out.
+        self.candidates.clear();
+        self.seen.clear();
+
         let nav_query = if let Some(entry_point) = graph.entry_point() {
             let nav_query = binary_quantize(query);
             let entry_vector = nav
@@ -117,9 +121,6 @@ impl GraphSearcher {
         } else {
             self.candidates.iter().map(|c| c.neighbor).collect()
         };
-
-        self.candidates.clear();
-        self.seen.clear();
 
         Ok(results)
     }

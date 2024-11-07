@@ -1,4 +1,4 @@
-use std::num::NonZero;
+use std::{collections::HashSet, num::NonZero};
 
 use crate::{
     graph::{Graph, GraphNode, NavVectorStore},
@@ -21,6 +21,7 @@ pub struct GraphSearchParams {
 /// Helper to search a Vamana graph.
 pub struct GraphSearcher {
     candidates: CandidateList,
+    seen: HashSet<i64>, // TODO: use a more efficient hash function (ahash?)
     params: GraphSearchParams,
 }
 
@@ -32,6 +33,7 @@ impl GraphSearcher {
     pub fn new(params: GraphSearchParams) -> Self {
         Self {
             candidates: CandidateList::new(params.beam_width.get()),
+            seen: HashSet::new(),
             params,
         }
     }
@@ -72,6 +74,7 @@ impl GraphSearcher {
                 entry_point,
                 nav_scorer.score(&nav_query, &entry_vector),
             ));
+            self.seen.insert(entry_point);
             nav_query
         } else {
             return Ok(vec![]);
@@ -89,6 +92,9 @@ impl GraphSearcher {
             });
 
             for edge in node.edges() {
+                if !self.seen.insert(edge) {
+                    continue;
+                }
                 let vec = nav
                     .get(edge)
                     .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
@@ -113,6 +119,7 @@ impl GraphSearcher {
         };
 
         self.candidates.clear();
+        self.seen.clear();
 
         Ok(results)
     }

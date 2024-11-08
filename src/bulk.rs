@@ -88,9 +88,9 @@ where
     {
         // TODO: track in-flight inserts and and be sure to include those in the results.
         let apply_mu = Mutex::new(());
-        (0..100_000) // XXX should be 0..self.vectors.len()
+        (0..self.vectors.len())
             .into_par_iter()
-            .chunks(12_500)
+            .chunks(1_000)
             .try_for_each(|nodes| {
                 // NB: we create a new session and cursor for each chunk. Relevant rayon APIs require these
                 // objects to be Send + Sync, but Session is only Send and wrapping it in a Mutex does not

@@ -9,7 +9,3 @@ wt_mdb = { path = "../wt_mdb" }
 easy_tiger = { path = "../" }
 memmap2 = { version = "0.9.5", features = ["stable_deref_trait"] }
 indicatif = "0.17.8"
-
-[profile.profiling]
-inherits = "release"
-debug = true

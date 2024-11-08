@@ -6,7 +6,7 @@ use easy_tiger::{
     input::NumpyF32VectorStore,
     wt::{GraphMetadata, WiredTigerIndexParams},
 };
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use wt_mdb::{Connection, ConnectionOptionsBuilder, DropOptionsBuilder};
 
 #[derive(Parser, Debug)]
@@ -34,7 +34,6 @@ struct Args {
 }
 
 fn progress_bar(len: usize, message: &'static str) -> ProgressBar {
-    // XXX configure it to leave the progress bar
     ProgressBar::new(len as u64)
         .with_style(
             ProgressStyle::default_bar()
@@ -44,6 +43,7 @@ fn progress_bar(len: usize, message: &'static str) -> ProgressBar {
                 .unwrap(),
         )
         .with_message(message)
+        .with_finish(ProgressFinish::AndLeave)
 }
 
 fn main() -> io::Result<()> {
@@ -57,7 +57,7 @@ fn main() -> io::Result<()> {
     // TODO: wiredtiger_db_path should probably accept a Path
     // TODO: configurable cache size.
     let mut connection_options =
-        ConnectionOptionsBuilder::default().cache_size_mb(NonZero::new(4 << 10).unwrap());
+        ConnectionOptionsBuilder::default().cache_size_mb(NonZero::new(1 << 10).unwrap());
     if args.create {
         connection_options = connection_options.create();
     }
@@ -106,15 +106,8 @@ fn main() -> io::Result<()> {
             .map_err(io::Error::from)?;
     }
     {
-        // NB: this step is _very_ slow. there are two things going on:
-        // 1) we serialize writes which causes us to leave several threads idle (AFAICT ~50% of threads).
-        // 2) searching for quantized vectors in the btree is not as cheap as I'd hoped.
-        //
-        // (1) is very hard to fix because pruning involves reading the current set of edges and
-        // scoring them against one another to do the actual pruning. none of this can be moved out of
-        // the lock. This may necessarily involve IO, but maybe it is possible to cache or somehow
-        // build the working set required outside of the lock? another possibility is to drop the RNG
-        // pruning and stop scoring shit.
+        // XXX fix pruning to enforce RNG property again.
+        // this was so slow because we were using a debug build of wt.
         let progress = progress_bar(num_vectors, "build graph");
         builder
             .insert_all(|| progress.inc(1))
@@ -123,13 +116,13 @@ fn main() -> io::Result<()> {
     {
         let progress = progress_bar(num_vectors, "cleanup graph");
         builder
-            .insert_all(|| progress.inc(1))
+            .cleanup(|| progress.inc(1))
             .map_err(io::Error::from)?;
     }
     {
         let progress = progress_bar(num_vectors, "load graph");
         builder
-            .insert_all(|| progress.inc(1))
+            .load_graph(|| progress.inc(1))
             .map_err(io::Error::from)?;
     }
 

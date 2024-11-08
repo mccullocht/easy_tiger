@@ -206,11 +206,14 @@ where
             return Ok(());
         }
 
+        /*
         let (selected, dropped) = self.prune(
             &mut guard,
             &mut BulkLoadBuilderGraph(self),
             &DotProductScorer,
         )?;
+         */
+        let (selected, dropped) = self.prune_trivial(&mut guard);
         let pruned_len = selected.len();
         let dropped = dropped.to_vec();
         guard.truncate(pruned_len);
@@ -231,6 +234,7 @@ where
     /// Prune `edges`, enforcing RNG properties with alpha parameter.
     ///
     /// Returns two slices: one containing the selected nodes and one containing the unselected nodes.
+    #[allow(dead_code)]
     fn prune<'a, S>(
         &self,
         edges: &'a mut [Neighbor],
@@ -291,6 +295,14 @@ where
         }
 
         Ok(edges.split_at_mut(selected.len()))
+    }
+
+    fn prune_trivial<'a>(
+        &self,
+        edges: &'a mut [Neighbor],
+    ) -> (&'a mut [Neighbor], &'a mut [Neighbor]) {
+        edges.sort();
+        edges.split_at_mut(self.metadata.max_edges.get())
     }
 }
 

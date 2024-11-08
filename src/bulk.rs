@@ -27,6 +27,9 @@ use crate::{
 // pub fn QuantizedVectorLoader::load(self, progress_cb) -> Result<BulkGraphBuilder>
 // pub fn BulkGraphBuilder::build(self, progress_cb) -> Result<BulkGraphPruner>
 // pub fn BulkGraphPruner::load(self, progress_cb) -> Result<()>
+//
+// if you do this the graph build can be locked, but then transform into a representation that
+// is better for single-threaded access for cleanup.
 
 // TODO: tests for bulk load builder, mostly the built graph.
 
@@ -85,9 +88,9 @@ where
     {
         // TODO: track in-flight inserts and and be sure to include those in the results.
         let apply_mu = Mutex::new(());
-        (0..self.vectors.len())
+        (0..100_000) // XXX should be 0..self.vectors.len()
             .into_par_iter()
-            .chunks(1_000)
+            .chunks(12_500)
             .try_for_each(|nodes| {
                 // NB: we create a new session and cursor for each chunk. Relevant rayon APIs require these
                 // objects to be Send + Sync, but Session is only Send and wrapping it in a Mutex does not
@@ -111,6 +114,7 @@ where
                         let _unused = apply_mu.lock().unwrap();
                         self.apply_insert(i, edges)?;
                     }
+                    session.reset()?; // XXX not sure if this does anything.
                     progress();
                 }
 
@@ -125,7 +129,7 @@ where
     where
         P: Fn(),
     {
-        // NB: this must not be run concurrently so that we can ensure
+        // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
         for (i, n) in self.graph.iter().enumerate() {
             self.maybe_prune_node(i, n.write().unwrap(), self.metadata.max_edges)?;
             progress();
@@ -134,6 +138,7 @@ where
     }
 
     /// Bulk load the graph table with raw vectors and graph edges.
+    // XXX return the number of edges and maybe some other stats?
     pub fn load_graph<P>(&self, progress: P) -> Result<()>
     where
         P: Fn(),

@@ -327,6 +327,16 @@ impl Session {
         Ok(())
     }
 
+    /// Reset this session, which also resets any outstanding cursors.
+    pub fn reset(&self) -> Result<()> {
+        unsafe {
+            make_result(
+                self.session.as_ref().reset.unwrap()(self.session.as_ptr()),
+                (),
+            )
+        }
+    }
+
     /// Close this session.
     pub fn close(mut self) -> Result<()> {
         self.close_internal()

@@ -34,6 +34,7 @@ struct Args {
 }
 
 fn progress_bar(len: usize, message: &'static str) -> ProgressBar {
+    // XXX configure it to leave the progress bar
     ProgressBar::new(len as u64)
         .with_style(
             ProgressStyle::default_bar()
@@ -65,15 +66,15 @@ fn main() -> io::Result<()> {
         Some(connection_options.into()),
     )
     .map_err(io::Error::from)?;
-    let session = connection.open_session().map_err(io::Error::from)?;
 
     // TODO: max_edges should be configurable.
     let wt_params = WiredTigerIndexParams {
-        connection,
+        connection: connection.clone(),
         graph_table_name: format!("{}.graph", args.wiredtiger_table_basename),
         nav_table_name: format!("{}.nav_vectors", args.wiredtiger_table_basename),
     };
     if args.drop {
+        let session = connection.open_session().map_err(io::Error::from)?;
         session
             .drop_record_table(
                 &wt_params.graph_table_name,

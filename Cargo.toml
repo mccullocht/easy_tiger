@@ -13,3 +13,7 @@ wt_mdb = { path = "./wt_mdb" }
 
 [workspace]
 members = [ "bulk_load","wt_mdb", "wt_sys"]
+
+[profile.profiling]
+inherits = "release"
+debug = true

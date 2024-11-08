@@ -1,70 +1,58 @@
 use std::env;
 use std::fs::remove_file;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const GITHUB_WT_TAGS_URI: &str = "https://github.com/wiredtiger/wiredtiger/archive/refs/tags";
 const WT_VERSION: &str = "11.2.0";
 
-fn download_source() {
+fn download_source() -> PathBuf {
     let uri = format!("{GITHUB_WT_TAGS_URI}/{WT_VERSION}.tar.gz");
+    let out_dir = env::var("OUT_DIR").unwrap();
     Command::new("wget")
         .arg(uri)
         .arg("-P")
-        .arg(env::var("OUT_DIR").unwrap())
+        .arg(out_dir.clone())
         .output()
         .expect("Failed to download source");
+    PathBuf::from_iter([out_dir, format!("{WT_VERSION}.tar.gz")])
 }
 
-fn extract_source() {
-    let out_dir = env::var("OUT_DIR").unwrap();
+fn extract_source(tar_path: &Path) -> PathBuf {
+    let mut src_path = tar_path.to_path_buf();
+    src_path.pop();
     Command::new("tar")
         .arg("-xvf")
-        .arg(format!("{out_dir}/{WT_VERSION}.tar.gz"))
+        .arg(&tar_path)
         .arg("-C")
-        .arg(out_dir)
+        .arg(&src_path)
         .output()
         .expect("Failed to extract source");
+    src_path.push(format!("wiredtiger-{WT_VERSION}"));
+    src_path
 }
 
-fn build_wt() {
-    // TODO: switch to the CMake crate.
-    let src_dir = format!("{}/wiredtiger-{WT_VERSION}", env::var("OUT_DIR").unwrap());
-    let build_dir = format!("{src_dir}/build");
-    Command::new("cmake")
-        .arg("-DENABLE_STATIC=1")
-        .arg("-S")
-        .arg(src_dir)
-        .arg("-B")
-        .arg(build_dir.clone())
-        .output()
-        .expect("Failed to generate build files");
-    Command::new("cmake")
-        .arg("--build")
-        .arg(build_dir)
-        .arg("-j16")
-        .output()
-        .expect("Failed to build WiredTiger");
-}
-
-fn cleanup() {
-    let path = format!("{}/{WT_VERSION}.tar.gz", env::var("OUT_DIR").unwrap());
-    remove_file(path).expect("Failed to cleanup");
+fn build_wt(src_path: &Path) -> PathBuf {
+    let have_diagnostic = env::var("PROFILE").unwrap() == "debug";
+    let build_path = cmake::Config::new(src_path)
+        .define("ENABLE_STATIC", "1")
+        .define("HAVE_DIAGNOSTIC", if have_diagnostic { "1" } else { "0" })
+        // Overidde C_FLAGS and CXX_FLAGS to keep cmake from passing both --target and -mmacosx-version-min
+        .define("CMAKE_C_FLAGS", "")
+        .define("CMAKE_CXX_FLAGS", "")
+        .no_build_target(false)
+        .build();
+    PathBuf::from_iter([build_path, PathBuf::from("build")])
 }
 
 fn main() {
-    download_source();
-    extract_source();
-    build_wt();
-    cleanup();
-
-    let wt_build_dir = format!(
-        "{}/wiredtiger-{WT_VERSION}/build",
-        env::var("OUT_DIR").unwrap()
-    );
+    let tar_path = download_source();
+    let src_path = extract_source(&tar_path);
+    let build_path = build_wt(&src_path);
+    remove_file(tar_path).expect("failed to cleanup source tar");
 
     // Tell cargo to look for shared libraries in the specified directory
-    println!("cargo:rustc-link-search={wt_build_dir}");
+    println!("cargo:rustc-link-search={}", build_path.display());
 
     // Tell cargo to tell rustc to statically link with the wiredtiger library.
     // This requires that WT was configured with the -DENABLE_STATIC=1 option to cmake.
@@ -76,7 +64,7 @@ fn main() {
     let bindings = bindgen::Builder::default()
         // The input header we would like to generate
         // bindings for.
-        .header(format!("{wt_build_dir}/include/wiredtiger.h"))
+        .header(format!("{}/include/wiredtiger.h", build_path.display()))
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))

@@ -29,10 +29,13 @@ fn extract_source() {
 
 fn build_wt() {
     // TODO: switch to the CMake crate.
+    // TODO: use PROFILE={release,debug} to set HAVE_DIAGNOSTIC
+    // TODO: use NUM_JOBS to set parallelism.
     let src_dir = format!("{}/wiredtiger-{WT_VERSION}", env::var("OUT_DIR").unwrap());
     let build_dir = format!("{src_dir}/build");
     Command::new("cmake")
         .arg("-DENABLE_STATIC=1")
+        .arg("-DHAVE_DIAGNOSTIC=0")
         .arg("-S")
         .arg(src_dir)
         .arg("-B")

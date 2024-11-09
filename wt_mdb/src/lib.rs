@@ -76,7 +76,7 @@ impl From<WiredTigerError> for ErrorKind {
 }
 
 /// An Error, either WiredTiger-specific or POSIX.
-// TODO: Posix should be non-zero?
+// TODO: real posix mapping and an unknown type.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Error {
     WiredTiger(WiredTigerError),

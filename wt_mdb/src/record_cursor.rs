@@ -130,9 +130,6 @@ impl<'a> RecordCursor<'a> {
     }
 
     /// Seek to the for `key` and return any associated `RecordView` if present.
-    /// Leaves the cursor positioned at `key` if `Some(Ok(_))`` value is returned, otherwise
-    /// the cursor is unpositioned.
-    /// TODO: double check that this is correct.
     ///
     /// # Safety
     /// If the cursor's parent session returns this record during a transaction and that transaction
@@ -150,9 +147,6 @@ impl<'a> RecordCursor<'a> {
     }
 
     /// Seek to the for `key` and return any associated `Record` if present.
-    /// Leaves the cursor positioned at `key` if `Some(Ok(_))`` value is returned, otherwise
-    /// the cursor is unpositioned.
-    /// TODO: double check that this is correct.
     pub fn seek_exact(&mut self, key: i64) -> Option<Result<Record>> {
         unsafe { self.seek_exact_unsafe(key) }.map(|r| r.map(|v| v.to_owned()))
     }

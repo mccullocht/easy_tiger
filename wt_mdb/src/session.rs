@@ -1,4 +1,4 @@
-// API TODOs:
+// TODO:
 // * Transaction managed as an object, mutable function to create a transaction and
 //   consuming functions to commit and rollback. Factory for RecordCursors.
 // * integrate cursor pooling.

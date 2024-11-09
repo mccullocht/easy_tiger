@@ -127,7 +127,7 @@ impl<'a> Graph for WiredTigerGraph<'a> {
     type Node<'c> = WiredTigerGraphNode<'c> where Self: 'c;
 
     fn entry_point(&self) -> Option<i64> {
-        // XXX this is totally busted. this needs to be stored in the graph.
+        // TODO: store the entry point in the wiredtiger table.
         Some(0)
     }
 

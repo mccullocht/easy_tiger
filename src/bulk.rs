@@ -144,7 +144,7 @@ where
     }
 
     /// Bulk load the graph table with raw vectors and graph edges.
-    // XXX return the number of edges and maybe some other stats?
+    // TODO: consider returning stats. The number of encoded edges would be interesting.
     pub fn load_graph<P>(&self, progress: P) -> Result<()>
     where
         P: Fn(),

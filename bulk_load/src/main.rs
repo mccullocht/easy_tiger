@@ -18,19 +18,24 @@ struct Args {
     /// Number of dimensions in input vectors.
     #[arg(short, long)]
     dimensions: NonZero<usize>,
+    /// Limit the number of input vectors. Useful for testing.
+    #[arg(short, long)]
+    limit: Option<usize>,
 
     /// Path to the WiredTiger database to upload to.
-    #[arg(short, long)]
+    #[arg(long)]
     wiredtiger_db_path: PathBuf,
     /// Base name for vector tables.
-    #[arg(short, long)]
+    #[arg(long)]
     wiredtiger_table_basename: String,
+    #[arg(long, default_value = "1024")]
+    wiredtiger_cache_size_mb: NonZero<usize>,
     /// If true, create the WiredTiger database if it does not exist.
-    #[arg(short, long, default_value = "true")]
-    create: bool, // should be create_db
+    #[arg(long, default_value = "true")]
+    create_db: bool,
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
-    #[arg(short, long, default_value = "false")]
-    drop: bool, // XXX should be drop_tables.
+    #[arg(long, default_value = "false")]
+    drop_tables: bool,
 }
 
 fn progress_bar(len: usize, message: &'static str) -> ProgressBar {
@@ -54,11 +59,10 @@ fn main() -> io::Result<()> {
         args.dimensions,
     );
 
-    // TODO: wiredtiger_db_path should probably accept a Path
-    // TODO: configurable cache size.
+    // TODO: Connection.filename should accept &Path. This will likely be very annoying to plumb to CString.
     let mut connection_options =
-        ConnectionOptionsBuilder::default().cache_size_mb(NonZero::new(1 << 10).unwrap());
-    if args.create {
+        ConnectionOptionsBuilder::default().cache_size_mb(args.wiredtiger_cache_size_mb);
+    if args.create_db {
         connection_options = connection_options.create();
     }
     let connection = Connection::open(
@@ -73,7 +77,7 @@ fn main() -> io::Result<()> {
         graph_table_name: format!("{}.graph", args.wiredtiger_table_basename),
         nav_table_name: format!("{}.nav_vectors", args.wiredtiger_table_basename),
     };
-    if args.drop {
+    if args.drop_tables {
         let session = connection.open_session().map_err(io::Error::from)?;
         session
             .drop_record_table(
@@ -90,6 +94,7 @@ fn main() -> io::Result<()> {
     }
 
     let num_vectors = f32_vectors.len();
+    let limit = args.limit.unwrap_or(num_vectors);
     let builder = BulkLoadBuilder::new(
         GraphMetadata {
             dimensions: args.dimensions,
@@ -97,10 +102,11 @@ fn main() -> io::Result<()> {
         },
         wt_params,
         f32_vectors,
+        limit,
     );
 
     {
-        let progress = progress_bar(num_vectors, "load nav vectors");
+        let progress = progress_bar(limit, "load nav vectors");
         builder
             .load_nav_vectors(|| progress.inc(1))
             .map_err(io::Error::from)?;
@@ -108,19 +114,19 @@ fn main() -> io::Result<()> {
     {
         // XXX fix pruning to enforce RNG property again.
         // this was so slow because we were using a debug build of wt.
-        let progress = progress_bar(num_vectors, "build graph");
+        let progress = progress_bar(limit, "build graph");
         builder
             .insert_all(|| progress.inc(1))
             .map_err(io::Error::from)?;
     }
     {
-        let progress = progress_bar(num_vectors, "cleanup graph");
+        let progress = progress_bar(limit, "cleanup graph");
         builder
             .cleanup(|| progress.inc(1))
             .map_err(io::Error::from)?;
     }
     {
-        let progress = progress_bar(num_vectors, "load graph");
+        let progress = progress_bar(limit, "load graph");
         builder
             .load_graph(|| progress.inc(1))
             .map_err(io::Error::from)?;

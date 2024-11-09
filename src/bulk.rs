@@ -19,9 +19,8 @@ use crate::{
     Neighbor,
 };
 
-// XXX cleverly -- i want the loader to be public to allow injecting progress bars, but maybe
-// I can just pass one for each step. alternatively write an abstraction for progress update.
-// it could be structured as multiple structs that that consume/perform/generate:
+// TODO: rather than relying on users calling these methods in the right order, instead
+// consume/perform/generate, e.g.:
 //
 // pub fn QuantizedVectorLoader::new(...) -> Self
 // pub fn QuantizedVectorLoader::load(self, progress_cb) -> Result<BulkGraphBuilder>
@@ -39,17 +38,20 @@ pub struct BulkLoadBuilder<D> {
     wt_params: WiredTigerIndexParams,
     vectors: NumpyF32VectorStore<D>,
     graph: Box<[RwLock<Vec<Neighbor>>]>,
+    limit: usize,
 }
 
 impl<D> BulkLoadBuilder<D>
 where
     D: Send + Sync,
 {
-    /// Create a new bulk graph builder with the passed vector set and max edge count limit.
+    /// Create a new bulk graph builder with the passed vector set and configuration.
+    /// `limit` limits the number of vectors processed to less than the full set.
     pub fn new(
         metadata: GraphMetadata,
         wt_params: WiredTigerIndexParams,
         vectors: NumpyF32VectorStore<D>,
+        limit: usize,
     ) -> Self {
         let mut graph_vec = Vec::with_capacity(vectors.len());
         graph_vec.resize_with(vectors.len(), || {
@@ -60,6 +62,7 @@ where
             wt_params,
             vectors,
             graph: graph_vec.into_boxed_slice(),
+            limit,
         }
     }
 
@@ -72,10 +75,14 @@ where
         session.bulk_load(
             &self.wt_params.nav_table_name,
             None,
-            self.vectors.iter().enumerate().map(|(i, v)| {
-                progress();
-                Record::new(i as i64, binary_quantize(v))
-            }),
+            self.vectors
+                .iter()
+                .enumerate()
+                .take(self.limit)
+                .map(|(i, v)| {
+                    progress();
+                    Record::new(i as i64, binary_quantize(v))
+                }),
         )
     }
 
@@ -86,9 +93,9 @@ where
     where
         P: Fn() + Send + Sync,
     {
-        // TODO: track in-flight inserts and and be sure to include those in the results.
+        // XXX track in-flight inserts and and be sure to include those in the results.
         let apply_mu = Mutex::new(());
-        (0..self.vectors.len())
+        (0..self.limit)
             .into_par_iter()
             .chunks(1_000)
             .try_for_each(|nodes| {
@@ -110,7 +117,6 @@ where
                 for i in nodes {
                     let edges = self.search_for_insert(i, &mut searcher, &mut nav)?;
                     {
-                        // XXX i could move this inside apply_insert() maybe?
                         let _unused = apply_mu.lock().unwrap();
                         self.apply_insert(i, edges)?;
                     }
@@ -130,7 +136,7 @@ where
         P: Fn(),
     {
         // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
-        for (i, n) in self.graph.iter().enumerate() {
+        for (i, n) in self.graph.iter().enumerate().take(self.limit) {
             self.maybe_prune_node(i, n.write().unwrap(), self.metadata.max_edges)?;
             progress();
         }
@@ -152,6 +158,7 @@ where
                 .iter()
                 .zip(self.graph.iter())
                 .enumerate()
+                .take(self.limit)
                 .map(|(i, (v, n))| {
                     progress();
                     Record::new(
@@ -249,7 +256,6 @@ where
     where
         S: VectorScorer<Elem = f32>,
     {
-        // XXX it would be nice to stop passing graph and inject some sort of cache.
         edges.sort();
         // TODO: replace with a fixed length bitset
         let mut selected = BTreeSet::new();

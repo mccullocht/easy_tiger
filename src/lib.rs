@@ -8,7 +8,7 @@ mod scoring;
 pub mod search;
 #[cfg(test)]
 mod test;
-pub mod wt; // XXX maybe this shouldn't be public.
+pub mod wt;
 
 /// `Neighbor` is a node and a distance relative to some other node.
 ///

@@ -69,7 +69,6 @@ impl GraphSearcher {
         self.candidates.clear();
         self.seen.clear();
 
-        // XXX we ought to normalize the query vector too.
         let nav_query = if let Some(entry_point) = graph.entry_point() {
             let nav_query = binary_quantize(query);
             let entry_vector = nav
@@ -109,6 +108,8 @@ impl GraphSearcher {
         }
 
         let results = if self.params.num_rerank > 0 {
+            let mut normalized_query = query.to_vec();
+            scorer.normalize(&mut normalized_query);
             self.candidates
                 .iter()
                 .take(self.params.num_rerank)
@@ -266,7 +267,6 @@ mod test {
     }
 
     fn normalize_scores(mut results: Vec<Neighbor>) -> Vec<Neighbor> {
-        // XXX how do I round to within some epsilon? shittily!
         for n in results.iter_mut() {
             n.score = (n.score * 100000.0).round() / 100000.0;
         }

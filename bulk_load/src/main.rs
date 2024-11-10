@@ -112,8 +112,6 @@ fn main() -> io::Result<()> {
             .map_err(io::Error::from)?;
     }
     {
-        // XXX fix pruning to enforce RNG property again.
-        // this was so slow because we were using a debug build of wt.
         let progress = progress_bar(limit, "build graph");
         builder
             .insert_all(|| progress.inc(1))

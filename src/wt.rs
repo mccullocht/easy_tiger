@@ -26,6 +26,16 @@ pub struct WiredTigerIndexParams {
     pub nav_table_name: String,
 }
 
+impl WiredTigerIndexParams {
+    pub fn new(connection: Arc<Connection>, table_basename: &str) -> Self {
+        Self {
+            connection,
+            graph_table_name: format!("{}.graph", table_basename),
+            nav_table_name: format!("{}.nav_vectors", table_basename),
+        }
+    }
+}
+
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor``.
 pub struct WiredTigerNavVectorStore<'a> {
     cursor: RecordCursor<'a>,

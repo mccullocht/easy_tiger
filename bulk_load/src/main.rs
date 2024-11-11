@@ -4,6 +4,7 @@ use clap::Parser;
 use easy_tiger::{
     bulk::BulkLoadBuilder,
     input::NumpyF32VectorStore,
+    search::GraphSearchParams,
     wt::{GraphMetadata, WiredTigerIndexParams},
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
@@ -39,6 +40,19 @@ struct Args {
     /// Maximum number of edges for any vertex.
     #[arg(short, long, default_value = "32")]
     max_edges: NonZero<usize>,
+    /// Number of edges to search for when indexing a vertex.
+    ///
+    /// Larger values make indexing more expensive but may also produce a larger, more
+    /// saturated graph that has higher recall.
+    #[arg(short, long, default_value = "128")]
+    edge_candidates: NonZero<usize>,
+    /// Number of edge candidates to rerank. Defaults to edge_candidates.
+    ///
+    /// When > 0 re-rank candidate edges using the highest fidelity vectors available.
+    /// The candidate list is then truncated to this size, so this may effectively reduce
+    /// the value of edge_candidates.
+    #[arg(short, long)]
+    rerank_edges: Option<usize>,
 }
 
 fn progress_bar(len: usize, message: &'static str) -> ProgressBar {
@@ -74,7 +88,6 @@ fn main() -> io::Result<()> {
     )
     .map_err(io::Error::from)?;
 
-    // TODO: max_edges should be configurable.
     let wt_params = WiredTigerIndexParams {
         connection: connection.clone(),
         graph_table_name: format!("{}.graph", args.wiredtiger_table_basename),
@@ -102,6 +115,12 @@ fn main() -> io::Result<()> {
         GraphMetadata {
             dimensions: args.dimensions,
             max_edges: args.max_edges,
+            index_search_params: GraphSearchParams {
+                beam_width: args.edge_candidates,
+                num_rerank: args
+                    .rerank_edges
+                    .unwrap_or_else(|| args.edge_candidates.get()),
+            },
         },
         wt_params,
         f32_vectors,

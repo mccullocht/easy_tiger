@@ -2,13 +2,17 @@ use std::{borrow::Cow, num::NonZero, sync::Arc};
 
 use wt_mdb::{Connection, RecordCursor, RecordView, Result};
 
-use crate::graph::{Graph, GraphNode, NavVectorStore};
+use crate::{
+    graph::{Graph, GraphNode, NavVectorStore},
+    search::GraphSearchParams,
+};
 
 /// Metadata about graph shape and construction.
 #[derive(Copy, Clone, Debug)]
 pub struct GraphMetadata {
     pub dimensions: NonZero<usize>,
     pub max_edges: NonZero<usize>,
+    pub index_search_params: GraphSearchParams,
 }
 
 /// Parameters to to open and access a WiredTiger graph index.
@@ -41,13 +45,16 @@ impl<'a> NavVectorStore for WiredTigerNavVectorStore<'a> {
 
 /// Implementation of GraphNode that reads from an encoded value in a WiredTiger record table.
 pub struct WiredTigerGraphNode<'a> {
-    dimensions: NonZero<usize>, // XXX this should be a reference to GraphMetadata.
+    dimensions: NonZero<usize>,
     data: Cow<'a, [u8]>,
 }
 
 impl<'a> WiredTigerGraphNode<'a> {
-    pub fn new(dimensions: NonZero<usize>, data: Cow<'a, [u8]>) -> Self {
-        Self { dimensions, data }
+    pub fn new(metadata: &GraphMetadata, data: Cow<'a, [u8]>) -> Self {
+        Self {
+            dimensions: metadata.dimensions,
+            data,
+        }
     }
 
     // Vector f32 data is stored little endian so we can get away with aliasing. Slice requires
@@ -133,7 +140,7 @@ impl<'a> Graph for WiredTigerGraph<'a> {
 
     fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>> {
         let r = unsafe { self.cursor.seek_exact_unsafe(node)? }.map(RecordView::into_inner_value);
-        Some(r.map(|r| WiredTigerGraphNode::new(self.metadata.dimensions, r)))
+        Some(r.map(|r| WiredTigerGraphNode::new(&self.metadata, r)))
     }
 }
 

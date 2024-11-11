@@ -10,6 +10,7 @@ use crate::{
 use wt_mdb::{Error, Result, WiredTigerError};
 
 /// Parameters for a search over a Vamana graph.
+#[derive(Copy, Clone, Debug)]
 pub struct GraphSearchParams {
     /// Width of the graph search beam -- the number of candidates considered.
     /// We will return this many results.

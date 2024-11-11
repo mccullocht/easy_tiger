@@ -1,4 +1,4 @@
-use std::num::NonZero;
+use std::{collections::HashSet, num::NonZero};
 
 use crate::{
     graph::{Graph, GraphNode, NavVectorStore},
@@ -10,6 +10,7 @@ use crate::{
 use wt_mdb::{Error, Result, WiredTigerError};
 
 /// Parameters for a search over a Vamana graph.
+#[derive(Copy, Clone, Debug)]
 pub struct GraphSearchParams {
     /// Width of the graph search beam -- the number of candidates considered.
     /// We will return this many results.
@@ -21,6 +22,7 @@ pub struct GraphSearchParams {
 /// Helper to search a Vamana graph.
 pub struct GraphSearcher {
     candidates: CandidateList,
+    seen: HashSet<i64>, // TODO: use a more efficient hash function (ahash?)
     params: GraphSearchParams,
 }
 
@@ -32,6 +34,7 @@ impl GraphSearcher {
     pub fn new(params: GraphSearchParams) -> Self {
         Self {
             candidates: CandidateList::new(params.beam_width.get()),
+            seen: HashSet::new(),
             params,
         }
     }
@@ -63,6 +66,10 @@ impl GraphSearcher {
         N: NavVectorStore,
         A: VectorScorer<Elem = u8>,
     {
+        // We can't reliably ensure we will clear these on the way out.
+        self.candidates.clear();
+        self.seen.clear();
+
         let nav_query = if let Some(entry_point) = graph.entry_point() {
             let nav_query = binary_quantize(query);
             let entry_vector = nav
@@ -72,6 +79,7 @@ impl GraphSearcher {
                 entry_point,
                 nav_scorer.score(&nav_query, &entry_vector),
             ));
+            self.seen.insert(entry_point);
             nav_query
         } else {
             return Ok(vec![]);
@@ -89,15 +97,20 @@ impl GraphSearcher {
             });
 
             for edge in node.edges() {
+                if !self.seen.insert(edge) {
+                    continue;
+                }
                 let vec = nav
                     .get(edge)
-                    .unwrap_or_else(|| Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                    .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
                 self.candidates
                     .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
             }
         }
 
         let results = if self.params.num_rerank > 0 {
+            let mut normalized_query = query.to_vec();
+            scorer.normalize(&mut normalized_query);
             self.candidates
                 .iter()
                 .take(self.params.num_rerank)
@@ -111,8 +124,6 @@ impl GraphSearcher {
         } else {
             self.candidates.iter().map(|c| c.neighbor).collect()
         };
-
-        self.candidates.clear();
 
         Ok(results)
     }
@@ -257,7 +268,6 @@ mod test {
     }
 
     fn normalize_scores(mut results: Vec<Neighbor>) -> Vec<Neighbor> {
-        // XXX how do I round to within some epsilon? shittily!
         for n in results.iter_mut() {
             n.score = (n.score * 100000.0).round() / 100000.0;
         }

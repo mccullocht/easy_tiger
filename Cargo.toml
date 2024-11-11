@@ -4,10 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+crossbeam-skiplist = "0.1.3"
+leb128 = "0.2.5"
 memmap2 = { version = "0.9.5", features = ["stable_deref_trait"] }
+rayon = "1.10.0"
 simsimd = "6.0.1"
 stable_deref_trait = "1.2.0"
 wt_mdb = { path = "./wt_mdb" }
 
 [workspace]
 members = [ "bulk_load","wt_mdb", "wt_sys"]
+
+[profile.profiling]
+inherits = "release"
+debug = true

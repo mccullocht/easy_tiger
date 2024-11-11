@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+pub mod bulk;
 mod graph;
 pub mod input;
 pub mod quantization;
@@ -7,6 +8,7 @@ mod scoring;
 pub mod search;
 #[cfg(test)]
 mod test;
+pub mod wt;
 
 /// `Neighbor` is a node and a distance relative to some other node.
 ///
@@ -37,7 +39,7 @@ impl Neighbor {
 
 impl PartialEq for Neighbor {
     fn eq(&self, other: &Self) -> bool {
-        self.node == other.node && self.score.total_cmp(&other.score) == Ordering::Equal
+        self.node == other.node && self.score.total_cmp(&other.score).is_eq()
     }
 }
 

@@ -23,7 +23,7 @@ fn extract_source(tar_path: &Path) -> PathBuf {
     src_path.pop();
     Command::new("tar")
         .arg("-xvf")
-        .arg(&tar_path)
+        .arg(tar_path)
         .arg("-C")
         .arg(&src_path)
         .output()

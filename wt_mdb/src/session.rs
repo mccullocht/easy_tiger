@@ -1,4 +1,4 @@
-// API TODOs:
+// TODO:
 // * Transaction managed as an object, mutable function to create a transaction and
 //   consuming functions to commit and rollback. Factory for RecordCursors.
 // * integrate cursor pooling.
@@ -325,6 +325,16 @@ impl Session {
             cursor.set(&record)?;
         }
         Ok(())
+    }
+
+    /// Reset this session, which also resets any outstanding cursors.
+    pub fn reset(&self) -> Result<()> {
+        unsafe {
+            make_result(
+                self.session.as_ref().reset.unwrap()(self.session.as_ptr()),
+                (),
+            )
+        }
     }
 
     /// Close this session.

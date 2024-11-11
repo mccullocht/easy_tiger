@@ -36,6 +36,9 @@ struct Args {
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value = "false")]
     drop_tables: bool,
+    /// Maximum number of edges for any vertex.
+    #[arg(short, long, default_value = "32")]
+    max_edges: NonZero<usize>,
 }
 
 fn progress_bar(len: usize, message: &'static str) -> ProgressBar {
@@ -98,7 +101,7 @@ fn main() -> io::Result<()> {
     let builder = BulkLoadBuilder::new(
         GraphMetadata {
             dimensions: args.dimensions,
-            max_edges: NonZero::new(32).unwrap(),
+            max_edges: args.max_edges,
         },
         wt_params,
         f32_vectors,
@@ -123,12 +126,13 @@ fn main() -> io::Result<()> {
             .cleanup(|| progress.inc(1))
             .map_err(io::Error::from)?;
     }
-    {
+    let stats = {
         let progress = progress_bar(limit, "load graph");
         builder
             .load_graph(|| progress.inc(1))
-            .map_err(io::Error::from)?;
-    }
+            .map_err(io::Error::from)?
+    };
+    println!("Graph stats: {:?}", stats);
 
     Ok(())
 }

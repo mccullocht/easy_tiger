@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+crossbeam-skiplist = "0.1.3"
 leb128 = "0.2.5"
 memmap2 = { version = "0.9.5", features = ["stable_deref_trait"] }
 rayon = "1.10.0"

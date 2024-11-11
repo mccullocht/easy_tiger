@@ -1,4 +1,5 @@
 <<<<<<< HEAD
+<<<<<<< HEAD
 mod lookup;
 
 use std::{
@@ -10,9 +11,14 @@ use clap::{command, Parser, Subcommand};
 use easy_tiger::wt::WiredTigerIndexParams;
 use lookup::{lookup, LookupArgs};
 use wt_mdb::{Connection, ConnectionOptionsBuilder};
+=======
+mod search;
+
+>>>>>>> 959108b (search command)
 use std::io::ErrorKind;
 
 use clap::{command, Parser, Subcommand};
+use search::{search, SearchArgs};
 
 #[derive(Parser)]
 #[command(version, about = "EasyTiger vector indexing tool", long_about = None)]
@@ -36,7 +42,7 @@ enum Commands {
     /// Lookup the contents of a single vertex.
     Lookup(LookupArgs),
     /// Search for a list of vectors and time the operation.
-    Search,
+    Search(SearchArgs),
     /// Add a list of vectors to the index.
     Add,
     /// Delete vectors by key range.
@@ -59,7 +65,7 @@ fn main() -> std::io::Result<()> {
 
     match cli.command {
         Commands::Lookup(args) => lookup(connection, index_params, args),
-        Commands::Search => Err(std::io::Error::from(ErrorKind::Unsupported)),
+        Commands::Search(args) => search(args),
         Commands::Add => Err(std::io::Error::from(ErrorKind::Unsupported)),
         Commands::Delete => Err(std::io::Error::from(ErrorKind::Unsupported)),
     }

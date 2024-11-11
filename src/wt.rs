@@ -105,7 +105,7 @@ impl<'a> GraphNode for WiredTigerGraphNode<'a> {
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
         WiredTigerEdgeIterator {
-            data: &self.data.as_ref()[..(self.dimensions.get() * std::mem::size_of::<f32>())],
+            data: &self.data.as_ref()[(self.dimensions.get() * std::mem::size_of::<f32>())..],
             prev: 0,
         }
     }

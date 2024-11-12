@@ -219,15 +219,6 @@ where
             nav_vectors,
             &HammingScorer,
         )?;
-        // XXX figure out how this is happening
-        // XXX it always happens for vertex 0 with limit <1k, probably because I'm searching for the ep.
-        // XXX introduce a search for indexing that skip this the named point entirely
-        // XXX introduce entry point selection.
-        let original_len = candidates.len();
-        candidates.retain(|n| index != n.node() as usize);
-        if candidates.len() != original_len {
-            eprintln!("Found self link for vertex {}", index);
-        }
 
         let pruned_len = self
             .prune(&mut candidates, &mut graph, &DotProductScorer)?
@@ -289,13 +280,10 @@ where
         edges: &'a mut [Neighbor],
         graph: &mut BulkLoadBuilderGraph<'_, D>,
         scorer: &S,
-    ) -> Result<(&'a [Neighbor], &'a [Neighbor])>
+    ) -> Result<(&'a mut [Neighbor], &'a mut [Neighbor])>
     where
         S: VectorScorer<Elem = f32>,
     {
-        if edges.is_empty() {
-            return Ok((&[], &[]));
-        }
         edges.sort();
         // TODO: replace with a fixed length bitset
         let mut selected = BTreeSet::new();
@@ -343,7 +331,7 @@ where
             edges.swap(i, *j);
         }
 
-        Ok(edges.split_at(selected.len()))
+        Ok(edges.split_at_mut(selected.len()))
     }
 }
 

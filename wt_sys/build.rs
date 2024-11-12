@@ -51,6 +51,8 @@ fn main() {
     let build_path = build_wt(&src_path);
     remove_file(tar_path).expect("failed to cleanup source tar");
 
+    println!("cargo::rerun-if-changed=build.rs");
+
     // Tell cargo to look for shared libraries in the specified directory
     println!("cargo:rustc-link-search={}", build_path.display());
 

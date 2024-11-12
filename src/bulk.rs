@@ -20,7 +20,10 @@ use crate::{
     quantization::binary_quantize,
     scoring::{DotProductScorer, HammingScorer, VectorScorer},
     search::GraphSearcher,
-    wt::{encode_graph_node, GraphMetadata, WiredTigerIndexParams, WiredTigerNavVectorStore},
+    wt::{
+        encode_graph_node, GraphMetadata, WiredTigerIndexParams, WiredTigerNavVectorStore,
+        ENTRY_POINT_KEY,
+    },
     Neighbor,
 };
 
@@ -226,29 +229,38 @@ where
             edges: 0,
             unconnected: 0,
         };
-        // TODO: write graph metadata and entry point.
+        let metadata_rows = vec![Record::new(
+            ENTRY_POINT_KEY,
+            self.entry_vertex
+                .load(atomic::Ordering::Relaxed)
+                .to_le_bytes()
+                .to_vec(),
+        )];
+        // XXX: write graph metadata.
         let session = self.wt_params.connection.open_session()?;
         session.bulk_load(
             &self.wt_params.graph_table_name,
             None,
-            self.vectors
-                .iter()
-                .zip(self.graph.iter())
-                .enumerate()
-                .take(self.limit)
-                .map(|(i, (v, n))| {
-                    progress();
-                    let vertex = n.read().unwrap();
-                    stats.vertices += 1;
-                    stats.edges += vertex.len();
-                    if vertex.is_empty() {
-                        stats.unconnected += 1;
-                    }
-                    Record::new(
-                        i as i64,
-                        encode_graph_node(v, vertex.iter().map(|n| n.node()).collect()),
-                    )
-                }),
+            metadata_rows.into_iter().chain(
+                self.vectors
+                    .iter()
+                    .zip(self.graph.iter())
+                    .enumerate()
+                    .take(self.limit)
+                    .map(|(i, (v, n))| {
+                        progress();
+                        let vertex = n.read().unwrap();
+                        stats.vertices += 1;
+                        stats.edges += vertex.len();
+                        if vertex.is_empty() {
+                            stats.unconnected += 1;
+                        }
+                        Record::new(
+                            i as i64,
+                            encode_graph_node(v, vertex.iter().map(|n| n.node()).collect()),
+                        )
+                    }),
+            ),
         )?;
         Ok(stats)
     }
@@ -282,7 +294,7 @@ where
     /// This function is the only mutator of self.graph and must not be run concurrently.
     fn apply_insert(&self, index: usize, edges: Vec<Neighbor>) -> Result<()> {
         assert!(
-            edges.iter().find(|n| n.node() == index as i64).is_none(),
+            !edges.iter().any(|n| n.node() == index as i64),
             "Candidate edges for vertex {} contains self-edge.",
             index
         );

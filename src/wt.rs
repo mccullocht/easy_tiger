@@ -7,7 +7,13 @@ use crate::{
     search::GraphSearchParams,
 };
 
+/// Key in the graph table containing the entry point.
+pub const ENTRY_POINT_KEY: i64 = -1;
+/// Key in the graph table containing metadata.
+pub const METADATA_KEY: i64 = -2;
+
 /// Metadata about graph shape and construction.
+// XXX move to graph module
 #[derive(Copy, Clone, Debug)]
 pub struct GraphMetadata {
     pub dimensions: NonZero<usize>,

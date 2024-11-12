@@ -4,7 +4,10 @@ use std::{
     collections::BTreeSet,
     num::NonZero,
     ops::Range,
-    sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{
+        atomic::{self, AtomicI64, AtomicU64},
+        Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    },
 };
 
 use crossbeam_skiplist::SkipSet;
@@ -44,9 +47,14 @@ pub struct GraphStats {
 pub struct BulkLoadBuilder<D> {
     metadata: GraphMetadata,
     wt_params: WiredTigerIndexParams,
-    vectors: NumpyF32VectorStore<D>,
-    graph: Box<[RwLock<Vec<Neighbor>>]>,
     limit: usize,
+
+    vectors: NumpyF32VectorStore<D>,
+    centroid: Vec<f32>,
+
+    graph: Box<[RwLock<Vec<Neighbor>>]>,
+    entry_vertex: AtomicI64,
+    entry_score: AtomicU64,
 }
 
 impl<D> BulkLoadBuilder<D>
@@ -68,18 +76,22 @@ where
         Self {
             metadata,
             wt_params,
-            vectors,
-            graph: graph_vec.into_boxed_slice(),
             limit,
+            vectors,
+            centroid: Vec::new(),
+            graph: graph_vec.into_boxed_slice(),
+            entry_vertex: AtomicI64::new(-1),
+            entry_score: AtomicU64::new(f64::MIN.to_bits()),
         }
     }
 
     /// Load binary quantized vector data into the nav vectors table.
-    pub fn load_nav_vectors<P>(&self, progress: P) -> Result<()>
+    pub fn load_nav_vectors<P>(&mut self, progress: P) -> Result<()>
     where
         P: Fn(),
     {
         let session = self.wt_params.connection.open_session()?;
+        let mut sum = vec![0.0; self.metadata.dimensions.get()];
         session.bulk_load(
             &self.wt_params.nav_table_name,
             None,
@@ -89,9 +101,18 @@ where
                 .take(self.limit)
                 .map(|(i, v)| {
                     progress();
+                    for (i, o) in v.iter().zip(sum.iter_mut()) {
+                        *o += *i as f64;
+                    }
                     Record::new(i as i64, binary_quantize(v))
                 }),
-        )
+        )?;
+
+        self.centroid = sum
+            .into_iter()
+            .map(|s| (s / self.limit as f64) as f32)
+            .collect();
+        Ok(())
     }
 
     /// Insert all vectors from the passed vector store into the graph.
@@ -123,6 +144,10 @@ where
                 let mut searcher = GraphSearcher::new(self.metadata.index_search_params);
                 let scorer = DotProductScorer;
                 for i in nodes {
+                    if self.maybe_set_entry_point(i) {
+                        continue;
+                    }
+
                     in_flight.insert(i);
                     let mut edges = self.search_for_insert(i, &mut searcher, &mut nav)?;
                     let worst_score = edges.last().map(|n| n.score()).unwrap_or(f64::MIN);
@@ -145,6 +170,7 @@ where
                         self.apply_insert(i, edges)?;
                     }
                     in_flight.remove(&i);
+                    self.maybe_update_entry_point(i);
                     progress();
                 }
 
@@ -333,6 +359,62 @@ where
 
         Ok(edges.split_at_mut(selected.len()))
     }
+
+    fn maybe_set_entry_point(&self, vertex: usize) -> bool {
+        self.entry_vertex
+            .compare_exchange(
+                -1,
+                vertex as i64,
+                atomic::Ordering::SeqCst,
+                atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+            && self
+                .entry_score
+                .compare_exchange(
+                    f64::MIN.to_bits(),
+                    DotProductScorer
+                        .score(&self.vectors[vertex], &self.centroid)
+                        .to_bits(),
+                    atomic::Ordering::SeqCst,
+                    atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+    }
+
+    fn maybe_update_entry_point(&self, vertex: usize) -> bool {
+        let vertex_score = DotProductScorer.score(&self.vectors[vertex], &self.centroid);
+
+        loop {
+            let entry_score = f64::from_bits(self.entry_score.load(atomic::Ordering::Relaxed));
+            if vertex_score <= entry_score {
+                return false;
+            }
+            let entry_vertex = self.entry_vertex.load(atomic::Ordering::Relaxed);
+
+            if self
+                .entry_vertex
+                .compare_exchange(
+                    entry_vertex,
+                    vertex as i64,
+                    atomic::Ordering::SeqCst,
+                    atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+                && self
+                    .entry_score
+                    .compare_exchange(
+                        entry_score.to_bits(),
+                        vertex_score.to_bits(),
+                        atomic::Ordering::SeqCst,
+                        atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                return true;
+            }
+        }
+    }
 }
 
 struct BulkLoadBuilderGraph<'a, D>(&'a BulkLoadBuilder<D>);
@@ -341,11 +423,11 @@ impl<'a, D> Graph for BulkLoadBuilderGraph<'a, D> {
     type Node<'c> = BulkLoadGraphNode<'c, D> where Self: 'c;
 
     fn entry_point(&self) -> Option<i64> {
-        // TODO: store an entry point in the builder and optimize for distance to a centroid.
-        if self.0.vectors.is_empty() {
-            None
+        let vertex = self.0.entry_vertex.load(atomic::Ordering::Relaxed);
+        if vertex >= 0 {
+            Some(vertex)
         } else {
-            Some(0)
+            None
         }
     }
 

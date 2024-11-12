@@ -107,7 +107,7 @@ fn main() -> io::Result<()> {
 
     let num_vectors = f32_vectors.len();
     let limit = args.limit.unwrap_or(num_vectors);
-    let builder = BulkLoadBuilder::new(
+    let mut builder = BulkLoadBuilder::new(
         GraphMetadata {
             dimensions: args.dimensions,
             max_edges: args.max_edges,

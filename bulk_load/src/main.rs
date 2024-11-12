@@ -3,9 +3,9 @@ use std::{fs::File, io, num::NonZero, path::PathBuf};
 use clap::Parser;
 use easy_tiger::{
     bulk::BulkLoadBuilder,
+    graph::{GraphMetadata, GraphSearchParams},
     input::NumpyF32VectorStore,
-    search::GraphSearchParams,
-    wt::{GraphMetadata, WiredTigerIndexParams},
+    wt::WiredTigerIndexParams,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use wt_mdb::{Connection, ConnectionOptionsBuilder, DropOptionsBuilder};

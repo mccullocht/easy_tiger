@@ -15,15 +15,12 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use wt_mdb::{Record, Result};
 
 use crate::{
-    graph::{Graph, GraphNode, NavVectorStore},
+    graph::{Graph, GraphMetadata, GraphNode, NavVectorStore},
     input::NumpyF32VectorStore,
     quantization::binary_quantize,
     scoring::{DotProductScorer, HammingScorer, VectorScorer},
     search::GraphSearcher,
-    wt::{
-        encode_graph_node, GraphMetadata, WiredTigerIndexParams, WiredTigerNavVectorStore,
-        ENTRY_POINT_KEY,
-    },
+    wt::{encode_graph_node, WiredTigerIndexParams, WiredTigerNavVectorStore, ENTRY_POINT_KEY},
     Neighbor,
 };
 

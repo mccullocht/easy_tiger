@@ -1,23 +1,13 @@
-use std::{collections::HashSet, num::NonZero};
+use std::collections::HashSet;
 
 use crate::{
-    graph::{Graph, GraphNode, NavVectorStore},
+    graph::{Graph, GraphNode, GraphSearchParams, NavVectorStore},
     quantization::binary_quantize,
     scoring::VectorScorer,
     Neighbor,
 };
 
 use wt_mdb::{Error, Result, WiredTigerError};
-
-/// Parameters for a search over a Vamana graph.
-#[derive(Copy, Clone, Debug)]
-pub struct GraphSearchParams {
-    /// Width of the graph search beam -- the number of candidates considered.
-    /// We will return this many results.
-    pub beam_width: NonZero<usize>,
-    /// Number of results to re-rank using the vectors in the graph.
-    pub num_rerank: usize,
-}
 
 /// Helper to search a Vamana graph.
 pub struct GraphSearcher {
@@ -26,8 +16,6 @@ pub struct GraphSearcher {
     params: GraphSearchParams,
 }
 
-// TODO: search_for_indexing() that includes the vectors in the results. These could easily be
-// used for edge pruning.
 // TODO: consider attaching relevant scorers and quantization function to the Graph.
 impl GraphSearcher {
     /// Create a new, reusable graph searcher.

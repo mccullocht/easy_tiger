@@ -1,6 +1,24 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, num::NonZero};
 
 use wt_mdb::Result;
+
+/// Parameters for a search over a Vamana graph.
+#[derive(Copy, Clone, Debug)]
+pub struct GraphSearchParams {
+    /// Width of the graph search beam -- the number of candidates considered.
+    /// We will return this many results.
+    pub beam_width: NonZero<usize>,
+    /// Number of results to re-rank using the vectors in the graph.
+    pub num_rerank: usize,
+}
+
+/// Metadata about graph shape and construction.
+#[derive(Copy, Clone, Debug)]
+pub struct GraphMetadata {
+    pub dimensions: NonZero<usize>,
+    pub max_edges: NonZero<usize>,
+    pub index_search_params: GraphSearchParams,
+}
 
 /// A node in the Vamana graph.
 pub trait GraphNode {

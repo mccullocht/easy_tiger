@@ -2,24 +2,12 @@ use std::{borrow::Cow, num::NonZero, sync::Arc};
 
 use wt_mdb::{Connection, RecordCursor, RecordView, Result};
 
-use crate::{
-    graph::{Graph, GraphNode, NavVectorStore},
-    search::GraphSearchParams,
-};
+use crate::graph::{Graph, GraphMetadata, GraphNode, NavVectorStore};
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
 /// Key in the graph table containing metadata.
 pub const METADATA_KEY: i64 = -2;
-
-/// Metadata about graph shape and construction.
-// XXX move to graph module
-#[derive(Copy, Clone, Debug)]
-pub struct GraphMetadata {
-    pub dimensions: NonZero<usize>,
-    pub max_edges: NonZero<usize>,
-    pub index_search_params: GraphSearchParams,
-}
 
 /// Parameters to to open and access a WiredTiger graph index.
 #[derive(Clone)]

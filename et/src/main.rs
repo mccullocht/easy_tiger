@@ -1,15 +1,13 @@
 mod lookup;
-mod search;
 
 use std::{
-    io::{self, ErrorKind},
+    io::{self},
     num::NonZero,
 };
 
 use clap::{command, Parser, Subcommand};
 use easy_tiger::wt::WiredTigerIndexParams;
 use lookup::{lookup, LookupArgs};
-use search::{search, SearchArgs};
 use wt_mdb::{Connection, ConnectionOptionsBuilder};
 
 #[derive(Parser)]
@@ -33,12 +31,6 @@ struct Cli {
 enum Commands {
     /// Lookup the contents of a single vertex.
     Lookup(LookupArgs),
-    /// Search for a list of vectors and time the operation.
-    Search(SearchArgs),
-    /// Add a list of vectors to the index.
-    Add,
-    /// Delete vectors by key range.
-    Delete,
 }
 
 fn main() -> std::io::Result<()> {
@@ -57,8 +49,5 @@ fn main() -> std::io::Result<()> {
 
     match cli.command {
         Commands::Lookup(args) => lookup(connection, index_params, args),
-        Commands::Search(args) => search(connection, index_params, args),
-        Commands::Add => Err(std::io::Error::from(ErrorKind::Unsupported)),
-        Commands::Delete => Err(std::io::Error::from(ErrorKind::Unsupported)),
     }
 }

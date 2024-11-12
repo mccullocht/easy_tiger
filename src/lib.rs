@@ -1,10 +1,10 @@
 use std::cmp::Ordering;
 
 pub mod bulk;
-mod graph;
+pub mod graph;
 pub mod input;
 pub mod quantization;
-mod scoring;
+pub mod scoring;
 pub mod search;
 #[cfg(test)]
 mod test;

@@ -88,11 +88,7 @@ fn main() -> io::Result<()> {
     )
     .map_err(io::Error::from)?;
 
-    let wt_params = WiredTigerIndexParams {
-        connection: connection.clone(),
-        graph_table_name: format!("{}.graph", args.wiredtiger_table_basename),
-        nav_table_name: format!("{}.nav_vectors", args.wiredtiger_table_basename),
-    };
+    let wt_params = WiredTigerIndexParams::new(connection.clone(), &args.wiredtiger_table_basename);
     if args.drop_tables {
         let session = connection.open_session().map_err(io::Error::from)?;
         session

@@ -1,24 +1,16 @@
-<<<<<<< HEAD
-<<<<<<< HEAD
 mod lookup;
+mod search;
 
 use std::{
-    io::{self},
+    io::{self, ErrorKind},
     num::NonZero,
 };
 
 use clap::{command, Parser, Subcommand};
 use easy_tiger::wt::WiredTigerIndexParams;
 use lookup::{lookup, LookupArgs};
-use wt_mdb::{Connection, ConnectionOptionsBuilder};
-=======
-mod search;
-
->>>>>>> 959108b (search command)
-use std::io::ErrorKind;
-
-use clap::{command, Parser, Subcommand};
 use search::{search, SearchArgs};
+use wt_mdb::{Connection, ConnectionOptionsBuilder};
 
 #[derive(Parser)]
 #[command(version, about = "EasyTiger vector indexing tool", long_about = None)]
@@ -65,7 +57,7 @@ fn main() -> std::io::Result<()> {
 
     match cli.command {
         Commands::Lookup(args) => lookup(connection, index_params, args),
-        Commands::Search(args) => search(args),
+        Commands::Search(args) => search(connection, index_params, args),
         Commands::Add => Err(std::io::Error::from(ErrorKind::Unsupported)),
         Commands::Delete => Err(std::io::Error::from(ErrorKind::Unsupported)),
     }

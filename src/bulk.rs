@@ -160,6 +160,9 @@ where
                         continue;
                     }
 
+                    // Use a transaction for each search. Without this each lookup will be a separate transaction
+                    // which obtains a reader lock inside the session. Overhead for that is ~10x.
+                    session.begin_transaction(None)?;
                     in_flight.insert(i);
                     let mut edges = self.search_for_insert(i, &mut searcher, &mut nav)?;
                     let worst_score = edges.last().map(|n| n.score()).unwrap_or(f64::MIN);
@@ -181,6 +184,8 @@ where
                         let _unused = apply_mu.lock().unwrap();
                         self.apply_insert(i, edges)?;
                     }
+                    // Close out the transaction. There should be no conflicts as we did not write to the database.
+                    session.rollback_transaction(None)?;
                     in_flight.remove(&i);
                     self.maybe_update_entry_point(i);
                     progress();

@@ -147,7 +147,7 @@ fn main() -> io::Result<()> {
             .load_graph(|| progress.inc(1))
             .map_err(io::Error::from)?
     };
-    println!("Graph stats: {:?}", stats);
+    println!("{:?}", stats);
 
     Ok(())
 }

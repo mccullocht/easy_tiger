@@ -24,10 +24,17 @@ use crate::{
     Neighbor,
 };
 
+/// Stats for the built graph.
 #[derive(Debug)]
 pub struct GraphStats {
-    pub num_vertices: usize,
-    pub num_edges: usize,
+    /// Number of vertices in the graph.
+    pub vertices: usize,
+    /// Total number of out edges across all nodes.
+    /// The graph is undirected so the actual edge count would be half of this.
+    pub edges: usize,
+    /// Number of vertices that have no out edges.
+    /// The graph is undirected so these nodes also should not have in edges.
+    pub unconnected: usize,
 }
 
 // TODO: rather than relying on users calling these methods in the right order, instead
@@ -122,6 +129,11 @@ where
     where
         P: Fn() + Send + Sync,
     {
+        // XXX mutations of the graph a single threaded, so we could simplify entry point update:
+        // * apply_mu contains (ep_vertex, ep_score) which may be updated as each node completes.
+        // * maintain ep_vertex atomic member. read for entry_point(), maybe write on apply.
+        // * skip vertex_id 0 -- it is the implicit entry point to the graph at the start; needs no processing.
+
         let apply_mu = Mutex::new(());
         // Keep track of all in-flight concurrent insertions. These nodes will be processed at the
         // end of each insertion to ensure that we are linking these nodes when appropriate as those
@@ -194,16 +206,18 @@ where
     }
 
     /// Bulk load the graph table with raw vectors and graph edges.
-    // TODO: consider returning stats. The number of encoded edges would be interesting.
+    ///
+    /// Returns statistics about the generated graph.
     pub fn load_graph<P>(&self, progress: P) -> Result<GraphStats>
     where
         P: Fn(),
     {
         let mut stats = GraphStats {
-            num_vertices: 0,
-            num_edges: 0,
+            vertices: 0,
+            edges: 0,
+            unconnected: 0,
         };
-        // TODO: write graph metadata, select a real entry point.
+        // TODO: write graph metadata and entry point.
         let session = self.wt_params.connection.open_session()?;
         session.bulk_load(
             &self.wt_params.graph_table_name,
@@ -216,8 +230,11 @@ where
                 .map(|(i, (v, n))| {
                     progress();
                     let vertex = n.read().unwrap();
-                    stats.num_vertices += 1;
-                    stats.num_edges += vertex.len();
+                    stats.vertices += 1;
+                    stats.edges += vertex.len();
+                    if vertex.is_empty() {
+                        stats.unconnected += 1;
+                    }
                     Record::new(
                         i as i64,
                         encode_graph_node(v, vertex.iter().map(|n| n.node()).collect()),
@@ -229,17 +246,16 @@ where
 
     fn search_for_insert<N>(
         &self,
-        index: usize,
+        vertex_id: usize,
         searcher: &mut GraphSearcher,
         nav_vectors: &mut N,
     ) -> Result<Vec<Neighbor>>
     where
         N: NavVectorStore,
     {
-        let query = &self.vectors[index];
         let mut graph = BulkLoadBuilderGraph(self);
-        let mut candidates = searcher.search(
-            query,
+        let mut candidates = searcher.search_for_insert(
+            vertex_id as i64,
             &mut graph,
             &DotProductScorer,
             nav_vectors,
@@ -256,6 +272,11 @@ where
 
     /// This function is the only mutator of self.graph and must not be run concurrently.
     fn apply_insert(&self, index: usize, edges: Vec<Neighbor>) -> Result<()> {
+        assert!(
+            edges.iter().find(|n| n.node() == index as i64).is_none(),
+            "Candidate edges for vertex {} contains self-edge.",
+            index
+        );
         self.graph[index].write().unwrap().extend_from_slice(&edges);
         for e in edges.iter() {
             let mut guard = self.graph[e.node() as usize].write().unwrap();

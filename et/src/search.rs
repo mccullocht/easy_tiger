@@ -3,6 +3,7 @@ use std::{
     io::{self},
     num::NonZero,
     path::PathBuf,
+    sync::Arc,
 };
 
 use clap::Args;
@@ -12,19 +13,10 @@ use easy_tiger::{
     wt::{GraphMetadata, WiredTigerGraph, WiredTigerIndexParams, WiredTigerNavVectorStore},
 };
 use indicatif::{ProgressBar, ProgressStyle};
-use wt_mdb::{Connection, ConnectionOptionsBuilder};
+use wt_mdb::Connection;
 
 #[derive(Args)]
 pub struct SearchArgs {
-    /// Path to the WiredTiger database.
-    #[arg(long)]
-    wiredtiger_db_path: String,
-    /// Size of the WiredTiger disk cache, in MB.
-    #[arg(long, default_value = "1024")]
-    wiredtiger_cache_size_mb: NonZero<usize>,
-    /// WiredTiger table basename use to locate the graph.
-    #[arg(long)]
-    wiredtiger_table_basename: String,
     /// Number of vector dimensions for index and query vectors.
     // TODO: this should appear in the table, derive it from that!
     #[arg(short, long)]
@@ -34,9 +26,11 @@ pub struct SearchArgs {
     #[arg(short, long)]
     query_vectors: PathBuf,
     /// Number candidates in the search list.
+    #[arg(short, long)]
     candidates: NonZero<usize>,
     /// Number of results to re-rank at the end of each search.
     /// If unset, use the same figure as candidates.
+    #[arg(short, long)]
     rerank_budget: Option<usize>,
     /// Maximum number of queries to run. If unset, run all queries in the vector file.
     #[arg(short, long)]
@@ -44,7 +38,11 @@ pub struct SearchArgs {
     // TODO: recall statistics
 }
 
-pub fn search(args: SearchArgs) -> io::Result<()> {
+pub fn search(
+    connection: Arc<Connection>,
+    index_params: WiredTigerIndexParams,
+    args: SearchArgs,
+) -> io::Result<()> {
     let query_vectors = easy_tiger::input::NumpyF32VectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.query_vectors)?)? },
         args.dimensions,
@@ -54,18 +52,6 @@ pub fn search(args: SearchArgs) -> io::Result<()> {
         args.limit.unwrap_or(query_vectors.len()),
     );
 
-    // This leaves much to be desired.
-    let connection = Connection::open(
-        &args.wiredtiger_db_path,
-        Some(
-            ConnectionOptionsBuilder::default()
-                .cache_size_mb(args.wiredtiger_cache_size_mb)
-                .into(),
-        ),
-    )
-    .map_err(io::Error::from)?;
-    let index_params =
-        WiredTigerIndexParams::new(connection.clone(), &args.wiredtiger_table_basename);
     // TODO: this should be read from the graph table.
     let metadata = GraphMetadata {
         dimensions: args.dimensions,

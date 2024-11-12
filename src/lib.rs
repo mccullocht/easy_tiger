@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 pub mod bulk;
-mod graph;
+pub mod graph;
 pub mod input;
 pub mod quantization;
 pub mod scoring;

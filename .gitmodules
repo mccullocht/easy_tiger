@@ -1,0 +1,4 @@
+[submodule "wt_sys/wiredtiger"]
+	path = wt_sys/wiredtiger
+	url = https://github.com/wiredtiger/wiredtiger.git
+	branch = develop

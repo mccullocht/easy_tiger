@@ -14,7 +14,7 @@ fn build_wt() -> PathBuf {
         .define("HAVE_DIAGNOSTIC", if have_diagnostic { "1" } else { "0" })
         .define("ENABLE_PYTHON", "0")
         // CMake crate is not doing this correctly for whatever reason.
-        .build_arg(format!("-j{}", jobs))
+        //.build_arg(format!("-j{}", jobs))
         .build();
     PathBuf::from_iter([build_path, PathBuf::from("build")])
 }

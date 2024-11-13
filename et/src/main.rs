@@ -1,13 +1,15 @@
 mod lookup;
+mod search;
 
 use std::{
-    io::{self},
+    io::{self, ErrorKind},
     num::NonZero,
 };
 
 use clap::{command, Parser, Subcommand};
-use easy_tiger::wt::WiredTigerIndexParams;
+use easy_tiger::wt::{read_graph_metadata, WiredTigerIndexParams};
 use lookup::{lookup, LookupArgs};
+use search::{search, SearchArgs};
 use wt_mdb::{Connection, ConnectionOptionsBuilder};
 
 #[derive(Parser)]
@@ -31,6 +33,12 @@ struct Cli {
 enum Commands {
     /// Lookup the contents of a single vertex.
     Lookup(LookupArgs),
+    /// Search for a list of vectors and time the operation.
+    Search(SearchArgs),
+    /// Add a list of vectors to the index.
+    Add,
+    /// Delete vectors by key range.
+    Delete,
 }
 
 fn main() -> std::io::Result<()> {
@@ -46,8 +54,12 @@ fn main() -> std::io::Result<()> {
     .map_err(io::Error::from)?;
     let index_params =
         WiredTigerIndexParams::new(connection.clone(), &cli.wiredtiger_table_basename);
+    let metadata = read_graph_metadata(connection.clone(), &index_params.graph_table_name)?;
 
     match cli.command {
-        Commands::Lookup(args) => lookup(connection, index_params, args),
+        Commands::Lookup(args) => lookup(connection, index_params, metadata, args),
+        Commands::Search(args) => search(connection, index_params, metadata, args),
+        Commands::Add => Err(std::io::Error::from(ErrorKind::Unsupported)),
+        Commands::Delete => Err(std::io::Error::from(ErrorKind::Unsupported)),
     }
 }

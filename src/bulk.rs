@@ -284,7 +284,6 @@ where
             nav_vectors,
             &HammingScorer,
         )?;
-
         let pruned_len = self
             .prune(&mut candidates, &mut graph, &DotProductScorer)?
             .0
@@ -350,10 +349,13 @@ where
         edges: &'a mut [Neighbor],
         graph: &mut BulkLoadBuilderGraph<'_, D>,
         scorer: &S,
-    ) -> Result<(&'a mut [Neighbor], &'a mut [Neighbor])>
+    ) -> Result<(&'a [Neighbor], &'a [Neighbor])>
     where
         S: VectorScorer<Elem = f32>,
     {
+        if edges.is_empty() {
+            return Ok((&[], &[]));
+        }
         edges.sort();
         // TODO: replace with a fixed length bitset
         let mut selected = BTreeSet::new();
@@ -401,7 +403,7 @@ where
             edges.swap(i, *j);
         }
 
-        Ok(edges.split_at_mut(selected.len()))
+        Ok(edges.split_at(selected.len()))
     }
 }
 

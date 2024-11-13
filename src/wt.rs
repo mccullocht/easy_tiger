@@ -70,7 +70,7 @@ impl<'a> WiredTigerGraphNode<'a> {
             // Try to align it and if that fails, copy the data.
             let (prefix, vector, _) = unsafe { self.data.as_ref().align_to::<f32>() };
             if prefix.is_empty() {
-                return Some(vector);
+                return Some(&vector[..self.dimensions.get()]);
             }
         }
         None

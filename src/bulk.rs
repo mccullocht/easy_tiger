@@ -284,16 +284,6 @@ where
             nav_vectors,
             &HammingScorer,
         )?;
-        // XXX figure out how this is happening
-        // XXX it always happens for vertex 0 with limit <1k, probably because I'm searching for the ep.
-        // XXX introduce a search for indexing that skip this the named point entirely
-        // XXX introduce entry point selection.
-        let original_len = candidates.len();
-        candidates.retain(|n| index != n.node() as usize);
-        if candidates.len() != original_len {
-            eprintln!("Found self link for vertex {}", index);
-        }
-
         let pruned_len = self
             .prune(&mut candidates, &mut graph, &DotProductScorer)?
             .0

@@ -8,20 +8,16 @@ use std::{
 
 use clap::Args;
 use easy_tiger::{
+    graph::{GraphMetadata, GraphSearchParams},
     scoring::{DotProductScorer, HammingScorer},
-    search::{GraphSearchParams, GraphSearcher},
-    wt::{GraphMetadata, WiredTigerGraph, WiredTigerIndexParams, WiredTigerNavVectorStore},
+    search::GraphSearcher,
+    wt::{WiredTigerGraph, WiredTigerIndexParams, WiredTigerNavVectorStore},
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use wt_mdb::Connection;
 
 #[derive(Args)]
 pub struct SearchArgs {
-    /// Number of vector dimensions for index and query vectors.
-    // TODO: this should appear in the table, derive it from that!
-    #[arg(short, long)]
-    dimensions: NonZero<usize>,
-
     /// Path to numpy formatted little-endian float vectors.
     #[arg(short, long)]
     query_vectors: PathBuf,
@@ -41,28 +37,19 @@ pub struct SearchArgs {
 pub fn search(
     connection: Arc<Connection>,
     index_params: WiredTigerIndexParams,
+    metadata: GraphMetadata,
     args: SearchArgs,
 ) -> io::Result<()> {
     let query_vectors = easy_tiger::input::NumpyF32VectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.query_vectors)?)? },
-        args.dimensions,
+        metadata.dimensions,
     );
     let limit = std::cmp::min(
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
     );
 
-    // TODO: this should be read from the graph table.
-    let metadata = GraphMetadata {
-        dimensions: args.dimensions,
-        max_edges: NonZero::new(1).unwrap(), // unused here.
-        index_search_params: GraphSearchParams {
-            //unused here.
-            beam_width: NonZero::new(1).unwrap(),
-            num_rerank: 0,
-        },
-    };
-    let session = connection.open_session().map_err(io::Error::from)?;
+    let session = connection.open_session()?;
     let mut graph = WiredTigerGraph::new(
         metadata,
         session.open_record_cursor(&index_params.graph_table_name)?,
@@ -82,6 +69,7 @@ pub fn search(
         )
         .with_finish(indicatif::ProgressFinish::AndLeave);
     for q in query_vectors.iter().take(limit) {
+        session.begin_transaction(None)?;
         let results = searcher.search(
             q,
             &mut graph,
@@ -91,8 +79,9 @@ pub fn search(
         )?;
         assert_ne!(results.len(), 0);
         progress.inc(1);
+        progress.finish_using_style();
     }
-    progress.finish_using_style();
+    session.rollback_transaction(None)?;
 
     println!(
         "queries {} avg duration {:.3} ms",

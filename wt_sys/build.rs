@@ -1,55 +1,24 @@
 use std::env;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
-const GITHUB_WT_TAGS_URI: &str = "https://github.com/wiredtiger/wiredtiger/archive/refs/tags";
-const WT_VERSION: &str = "11.2.0";
-
-fn download_source() -> PathBuf {
-    let uri = format!("{GITHUB_WT_TAGS_URI}/{WT_VERSION}.tar.gz");
-    let out_dir = env::var("OUT_DIR").unwrap();
-    Command::new("wget")
-        .arg(uri)
-        .arg("-P")
-        .arg(out_dir.clone())
-        .output()
-        .expect("Failed to download source");
-    PathBuf::from_iter([out_dir, format!("{WT_VERSION}.tar.gz")])
-}
-
-fn extract_source(tar_path: &Path) -> PathBuf {
-    let mut src_path = tar_path.to_path_buf();
-    src_path.pop();
-    Command::new("tar")
-        .arg("-xvf")
-        .arg(tar_path)
-        .arg("-C")
-        .arg(&src_path)
-        .output()
-        .expect("Failed to extract source");
-    src_path.push(format!("wiredtiger-{WT_VERSION}"));
-    src_path
-}
-
-fn build_wt(src_path: &Path) -> PathBuf {
+fn build_wt() -> PathBuf {
     let have_diagnostic = env::var("PROFILE").unwrap() == "debug";
-    let build_path = cmake::Config::new(src_path)
+    let jobs = env::var("NUM_JOBS").unwrap_or("1".to_string());
+    let build_path = cmake::Config::new("wiredtiger")
         .define("ENABLE_STATIC", "1")
         .define("HAVE_DIAGNOSTIC", if have_diagnostic { "1" } else { "0" })
-        // Overidde C_FLAGS and CXX_FLAGS to keep cmake from passing both --target and -mmacosx-version-min
-        .define("CMAKE_C_FLAGS", "")
-        .define("CMAKE_CXX_FLAGS", "")
-        .no_build_target(false)
+        .define("ENABLE_PYTHON", "0")
+        // CMake crate is not doing this correctly for whatever reason.
+        .build_arg(format!("-j{}", jobs))
         .build();
     PathBuf::from_iter([build_path, PathBuf::from("build")])
 }
 
 fn main() {
-    let tar_path = download_source();
-    let src_path = extract_source(&tar_path);
-    let build_path = build_wt(&src_path);
+    let build_path = build_wt();
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=wiredtiger");
 
     // Tell cargo to look for shared libraries in the specified directory
     println!("cargo:rustc-link-search={}", build_path.display());

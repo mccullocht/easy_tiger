@@ -17,7 +17,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: WiredTiger submodule init
-      run: git submodule init -- wt_sys/wiredtiger
+      run: git submodule update --init --recursive
     - name: Build
       run: cargo build --workspace
     - name: Run tests

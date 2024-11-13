@@ -105,7 +105,7 @@ impl From<TestVectorData> for TestGraph {
 impl Graph for TestGraph {
     type Node<'c> = TestGraphNode<'c>;
 
-    fn entry_point(&self) -> Option<i64> {
+    fn entry_point(&mut self) -> Option<i64> {
         if self.0 .0.is_empty() {
             None
         } else {

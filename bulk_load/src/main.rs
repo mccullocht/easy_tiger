@@ -3,9 +3,9 @@ use std::{fs::File, io, num::NonZero, path::PathBuf};
 use clap::Parser;
 use easy_tiger::{
     bulk::BulkLoadBuilder,
+    graph::{GraphMetadata, GraphSearchParams},
     input::NumpyF32VectorStore,
-    search::GraphSearchParams,
-    wt::{GraphMetadata, WiredTigerIndexParams},
+    wt::WiredTigerIndexParams,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use wt_mdb::{Connection, ConnectionOptionsBuilder, DropOptionsBuilder};
@@ -107,7 +107,7 @@ fn main() -> io::Result<()> {
 
     let num_vectors = f32_vectors.len();
     let limit = args.limit.unwrap_or(num_vectors);
-    let builder = BulkLoadBuilder::new(
+    let mut builder = BulkLoadBuilder::new(
         GraphMetadata {
             dimensions: args.dimensions,
             max_edges: args.max_edges,
@@ -147,7 +147,7 @@ fn main() -> io::Result<()> {
             .load_graph(|| progress.inc(1))
             .map_err(io::Error::from)?
     };
-    println!("Graph stats: {:?}", stats);
+    println!("{:?}", stats);
 
     Ok(())
 }

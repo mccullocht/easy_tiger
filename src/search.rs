@@ -1,23 +1,13 @@
-use std::{collections::HashSet, num::NonZero};
+use std::collections::HashSet;
 
 use crate::{
-    graph::{Graph, GraphNode, NavVectorStore},
+    graph::{Graph, GraphNode, GraphSearchParams, NavVectorStore},
     quantization::binary_quantize,
     scoring::VectorScorer,
     Neighbor,
 };
 
 use wt_mdb::{Error, Result, WiredTigerError};
-
-/// Parameters for a search over a Vamana graph.
-#[derive(Copy, Clone, Debug)]
-pub struct GraphSearchParams {
-    /// Width of the graph search beam -- the number of candidates considered.
-    /// We will return this many results.
-    pub beam_width: NonZero<usize>,
-    /// Number of results to re-rank using the vectors in the graph.
-    pub num_rerank: usize,
-}
 
 /// Helper to search a Vamana graph.
 pub struct GraphSearcher {
@@ -26,8 +16,6 @@ pub struct GraphSearcher {
     params: GraphSearchParams,
 }
 
-// TODO: search_for_indexing() that includes the vectors in the results. These could easily be
-// used for edge pruning.
 // TODO: consider attaching relevant scorers and quantization function to the Graph.
 impl GraphSearcher {
     /// Create a new, reusable graph searcher.
@@ -66,9 +54,53 @@ impl GraphSearcher {
         N: NavVectorStore,
         A: VectorScorer<Elem = u8>,
     {
-        // We can't reliably ensure we will clear these on the way out.
-        self.candidates.clear();
         self.seen.clear();
+        self.search_internal(query, graph, scorer, nav, nav_scorer)
+    }
+
+    /// Search for the vector at `vertex_id` and return matching candidates.
+    pub fn search_for_insert<G, N, S, A>(
+        &mut self,
+        vertex_id: i64,
+        graph: &mut G,
+        scorer: &S,
+        nav: &mut N,
+        nav_scorer: &A,
+    ) -> Result<Vec<Neighbor>>
+    where
+        G: Graph,
+        S: VectorScorer<Elem = f32>,
+        N: NavVectorStore,
+        A: VectorScorer<Elem = u8>,
+    {
+        self.seen.clear();
+        // Insertions may be concurrent and there could already be backlinks to this vertex in the graph.
+        // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
+        self.seen.insert(vertex_id);
+
+        let query = graph
+            .get(vertex_id)
+            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?
+            .vector()
+            .to_vec();
+        self.search_internal(&query, graph, scorer, nav, nav_scorer)
+    }
+
+    fn search_internal<G, N, S, A>(
+        &mut self,
+        query: &[f32],
+        graph: &mut G,
+        scorer: &S,
+        nav: &mut N,
+        nav_scorer: &A,
+    ) -> Result<Vec<Neighbor>>
+    where
+        G: Graph,
+        S: VectorScorer<Elem = f32>,
+        N: NavVectorStore,
+        A: VectorScorer<Elem = u8>,
+    {
+        self.candidates.clear();
 
         let nav_query = if let Some(entry_point) = graph.entry_point() {
             let nav_query = binary_quantize(query);

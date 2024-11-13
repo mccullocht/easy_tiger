@@ -2,9 +2,8 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    graph::{Graph, GraphNode},
-    search::GraphSearchParams,
-    wt::{GraphMetadata, WiredTigerGraph, WiredTigerIndexParams},
+    graph::{Graph, GraphMetadata, GraphNode, GraphSearchParams},
+    wt::{WiredTigerGraph, WiredTigerIndexParams},
 };
 use wt_mdb::Connection;
 

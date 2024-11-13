@@ -410,7 +410,7 @@ struct BulkLoadBuilderGraph<'a, D>(&'a BulkLoadBuilder<D>);
 impl<'a, D> Graph for BulkLoadBuilderGraph<'a, D> {
     type Node<'c> = BulkLoadGraphNode<'c, D> where Self: 'c;
 
-    fn entry_point(&self) -> Option<i64> {
+    fn entry_point(&mut self) -> Option<i64> {
         let vertex = self.0.entry_vertex.load(atomic::Ordering::Relaxed);
         if vertex >= 0 {
             Some(vertex)

@@ -41,7 +41,7 @@ pub trait Graph {
         Self: 'c;
 
     /// Return the graph entry point, or None if the graph is empty.
-    fn entry_point(&self) -> Option<i64>;
+    fn entry_point(&mut self) -> Option<i64>;
 
     /// Get the contents of a single node.
     // NB: self is mutable to allow reading from a WT cursor.

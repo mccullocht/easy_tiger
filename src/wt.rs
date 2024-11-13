@@ -1,6 +1,6 @@
-use std::{borrow::Cow, num::NonZero, sync::Arc};
+use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
-use wt_mdb::{Connection, RecordCursor, RecordView, Result};
+use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, WiredTigerError};
 
 use crate::graph::{Graph, GraphMetadata, GraphNode, NavVectorStore};
 
@@ -137,15 +137,33 @@ impl<'a> WiredTigerGraph<'a> {
 impl<'a> Graph for WiredTigerGraph<'a> {
     type Node<'c> = WiredTigerGraphNode<'c> where Self: 'c;
 
-    fn entry_point(&self) -> Option<i64> {
-        // TODO: store the entry point in the wiredtiger table.
-        Some(0)
+    fn entry_point(&mut self) -> Option<i64> {
+        // TODO: handle errors better here. This probably requires changing the trait signature.
+        let result = unsafe { self.cursor.seek_exact_unsafe(ENTRY_POINT_KEY)? };
+        Some(
+            result
+                .map(|r| i64::from_le_bytes(r.value().try_into().unwrap()))
+                .unwrap_or(0),
+        )
     }
 
     fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>> {
         let r = unsafe { self.cursor.seek_exact_unsafe(node)? }.map(RecordView::into_inner_value);
         Some(r.map(|r| WiredTigerGraphNode::new(&self.metadata, r)))
     }
+}
+
+/// Read graph index metadata from the named graph table.
+// TODO: better story around caching this data and session/cursor management in general.
+pub fn read_graph_metadata(
+    connection: Arc<Connection>,
+    graph_table_name: &str,
+) -> io::Result<GraphMetadata> {
+    let session = connection.open_session()?;
+    let mut cursor = session.open_record_cursor(graph_table_name)?;
+    let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }
+        .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+    serde_json::from_slice(metadata_json.value()).map_err(|e| e.into())
 }
 
 /// Encode the contents of a graph node as a value that can be set in the WiredTiger table.

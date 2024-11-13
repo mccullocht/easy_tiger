@@ -20,7 +20,10 @@ use crate::{
     quantization::binary_quantize,
     scoring::{DotProductScorer, HammingScorer, VectorScorer},
     search::GraphSearcher,
-    wt::{encode_graph_node, WiredTigerIndexParams, WiredTigerNavVectorStore, ENTRY_POINT_KEY},
+    wt::{
+        encode_graph_node, WiredTigerIndexParams, WiredTigerNavVectorStore, ENTRY_POINT_KEY,
+        METADATA_KEY,
+    },
     Neighbor,
 };
 
@@ -226,14 +229,16 @@ where
             edges: 0,
             unconnected: 0,
         };
-        let metadata_rows = vec![Record::new(
-            ENTRY_POINT_KEY,
-            self.entry_vertex
-                .load(atomic::Ordering::Relaxed)
-                .to_le_bytes()
-                .to_vec(),
-        )];
-        // XXX: write graph metadata.
+        let metadata_rows = vec![
+            Record::new(METADATA_KEY, serde_json::to_vec(&self.metadata).unwrap()),
+            Record::new(
+                ENTRY_POINT_KEY,
+                self.entry_vertex
+                    .load(atomic::Ordering::Relaxed)
+                    .to_le_bytes()
+                    .to_vec(),
+            ),
+        ];
         let session = self.wt_params.connection.open_session()?;
         session.bulk_load(
             &self.wt_params.graph_table_name,

@@ -1,5 +1,4 @@
 use std::env;
-use std::fs::remove_file;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -49,9 +48,8 @@ fn main() {
     let tar_path = download_source();
     let src_path = extract_source(&tar_path);
     let build_path = build_wt(&src_path);
-    remove_file(tar_path).expect("failed to cleanup source tar");
 
-    println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build.rs");
 
     // Tell cargo to look for shared libraries in the specified directory
     println!("cargo:rustc-link-search={}", build_path.display());

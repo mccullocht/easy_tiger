@@ -1,9 +1,10 @@
 use std::{borrow::Cow, num::NonZero};
 
+use serde::{Deserialize, Serialize};
 use wt_mdb::Result;
 
 /// Parameters for a search over a Vamana graph.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct GraphSearchParams {
     /// Width of the graph search beam -- the number of candidates considered.
     /// We will return this many results.
@@ -13,7 +14,7 @@ pub struct GraphSearchParams {
 }
 
 /// Metadata about graph shape and construction.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct GraphMetadata {
     pub dimensions: NonZero<usize>,
     pub max_edges: NonZero<usize>,

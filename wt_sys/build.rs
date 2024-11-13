@@ -3,15 +3,18 @@ use std::path::PathBuf;
 
 fn build_wt() -> PathBuf {
     let have_diagnostic = env::var("PROFILE").unwrap() == "debug";
+    let jobs = std::cmp::max(
+        env::var("NUM_JOBS")
+            .map(|v| str::parse::<i32>(&v).unwrap())
+            .unwrap_or(4),
+        4,
+    );
     let build_path = cmake::Config::new("wiredtiger")
         .define("ENABLE_STATIC", "1")
         .define("HAVE_DIAGNOSTIC", if have_diagnostic { "1" } else { "0" })
         .define("ENABLE_PYTHON", "0")
         // CMake crate is not doing this correctly for whatever reason.
-        .build_arg(format!(
-            "-j{}",
-            env::var("NUM_JOBS").unwrap_or("1".to_string())
-        ))
+        .build_arg(format!("-j{}", jobs))
         .build();
     PathBuf::from_iter([build_path, PathBuf::from("build")])
 }

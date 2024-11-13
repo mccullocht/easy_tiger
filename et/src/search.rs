@@ -79,9 +79,9 @@ pub fn search(
         )?;
         assert_ne!(results.len(), 0);
         progress.inc(1);
-        progress.finish_using_style();
+        session.rollback_transaction(None)?;
     }
-    session.rollback_transaction(None)?;
+    progress.finish_using_style();
 
     println!(
         "queries {} avg duration {:.3} ms",

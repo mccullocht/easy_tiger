@@ -156,7 +156,6 @@ impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
 ///
 /// Mark this as Send+Sync so it can used from an Arc, but we mark the parent Session
 /// as !Sync so that it cannot be used directly from multiple threads.
-// XXX move Record to a separate module and move RecordCursor in here.
 pub(crate) struct InnerSession {
     ptr: NonNull<WT_SESSION>,
     conn: Arc<Connection>,
@@ -179,17 +178,10 @@ impl Drop for InnerSession {
 ///
 /// Sessions are used to create cursors to view and mutate data and manage
 /// transaction state.
-// XXX FIXME members should not be public
-// XXX PhantomData<Cell<()>> should force this to be !Sync. Not sure if this matters
-// since all non-trivial methods are mut.
-// XXX alternatives: make methods &self, use Arc<Mutex<InnerSession>>, eat locking for
-// every single method call. Then RecordCursor would be able to manufacture a Session
-// if desired and it would be safe to use.
-pub struct Session(pub(crate) Arc<InnerSession>);
+pub struct Session(Arc<InnerSession>);
 
 impl Session {
     pub(crate) fn new(session: NonNull<WT_SESSION>, connection: &Arc<Connection>) -> Self {
-        // XXX new problem dropped: Arc<InnerSession> is not Send either.
         Self(Arc::new(InnerSession {
             ptr: session,
             conn: connection.clone(),

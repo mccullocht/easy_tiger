@@ -169,25 +169,21 @@ pub fn read_graph_metadata(
     serde_json::from_slice(metadata_json.value()).map_err(|e| e.into())
 }
 
-// XXX this doesn't compile and it's not obvious why unconstrained lifetime wtf.
 pub struct WiredTigerGraphVectorIndex {
     index_params: WiredTigerIndexParams,
     metadata: GraphMetadata,
     session: Session,
 }
 
-impl<'a> GraphVectorIndex for WiredTigerGraphVectorIndex
-where
-    Self: 'a,
-{
-    type Graph = WiredTigerGraph<'a>;
-    type NavVectorStore = WiredTigerNavVectorStore<'a>;
+impl GraphVectorIndex for WiredTigerGraphVectorIndex {
+    type Graph = WiredTigerGraph;
+    type NavVectorStore = WiredTigerNavVectorStore;
 
     fn scorer(&self) -> Box<dyn F32VectorScorer> {
         Box::new(DotProductScorer)
     }
 
-    fn graph(&self) -> Result<Self::Graph> {
+    fn graph(&mut self) -> Result<Self::Graph> {
         Ok(WiredTigerGraph::new(
             self.metadata,
             self.session
@@ -195,7 +191,7 @@ where
         ))
     }
 
-    fn nav_vectors(&self) -> Result<Self::NavVectorStore> {
+    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
         Ok(WiredTigerNavVectorStore::new(
             self.session
                 .open_record_cursor(&self.index_params.nav_table_name)?,

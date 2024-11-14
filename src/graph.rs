@@ -97,8 +97,8 @@ pub trait GraphVectorIndex {
     fn scorer(&self) -> Box<dyn F32VectorScorer>;
 
     /// Return an object that can be used to navigate the graph.
-    fn graph(&self) -> Result<Self::Graph>;
+    fn graph(&mut self) -> Result<Self::Graph>;
 
     /// Return an object that can be used to score navigational vectors.
-    fn nav_vectors(&self) -> Result<Self::NavVectorStore>;
+    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore>;
 }

@@ -49,7 +49,7 @@ pub fn search(
         args.limit.unwrap_or(query_vectors.len()),
     );
 
-    let session = connection.open_session()?;
+    let mut session = connection.open_session()?;
     let mut graph = WiredTigerGraph::new(
         metadata,
         session.open_record_cursor(&index_params.graph_table_name)?,

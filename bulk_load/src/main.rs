@@ -90,7 +90,7 @@ fn main() -> io::Result<()> {
 
     let wt_params = WiredTigerIndexParams::new(connection.clone(), &args.wiredtiger_table_basename);
     if args.drop_tables {
-        let session = connection.open_session().map_err(io::Error::from)?;
+        let mut session = connection.open_session().map_err(io::Error::from)?;
         session
             .drop_record_table(
                 &wt_params.graph_table_name,

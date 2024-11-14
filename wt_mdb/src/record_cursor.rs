@@ -1,15 +1,15 @@
 use std::{
     borrow::Cow,
     ffi::c_void,
-    iter::FusedIterator,
     num::NonZero,
     ptr::{self, NonNull},
     slice,
+    sync::Arc,
 };
 
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_NOTFOUND};
 
-use crate::{make_result, session::Session, Error, Result};
+use crate::{make_result, session::InnerSession, Error, Result};
 
 /// A `RecordView` in a WiredTiger table with an i64 key and a byte array value.
 ///
@@ -64,18 +64,30 @@ pub type Record = RecordView<'static>;
 
 /// A `RecordCursor` facilities viewing and mutating data in a WiredTiger table where
 /// the table is `i64` keyed and byte-string valued.
-pub struct RecordCursor<'a> {
+pub struct RecordCursor {
     cursor: NonNull<WT_CURSOR>,
-    session: &'a Session,
+    // Ref the InnerSession, *DO NOT USE*.
+    //
+    // We maintain this reference to ensure that the underlying WT_SESSION outlives this cursor.
+    //
+    // We cannot use Arc<Session> because Arc<T> is only Send if T: Send + Sync. If Session
+    // methods use &mut self then they cannot be used through an Arc, and if we make Session
+    // Sync then it may be erroneously called from multiple threads.
+    //
+    // An alternative to this would be to use Arc<Mutex<InnerSession>> and allow concurrent
+    // calls to Session methods, which requires lock acquisition for every Session call.
+    //
+    // Note that we do not allow access to the Session from RecordCursor; doing so would be
+    // unsound as we could leak a reference to the underlying WT_SESSION to another thread.
+    _session: Arc<InnerSession>,
 }
 
-impl<'a> RecordCursor<'a> {
-    pub(crate) fn new(cursor: NonNull<WT_CURSOR>, session: &'a Session) -> Self {
-        Self { cursor, session }
-    }
-
-    pub fn session(&self) -> &Session {
-        self.session
+impl RecordCursor {
+    pub(crate) fn new(cursor: NonNull<WT_CURSOR>, session: Arc<InnerSession>) -> Self {
+        Self {
+            cursor,
+            _session: session,
+        }
     }
 
     /// Set the contents of `record` in the collection.
@@ -242,15 +254,15 @@ impl<'a> RecordCursor<'a> {
 
 /// It is safe to send a `RecordCursor` to another thread to use.
 /// It is not safe to reference a `RecordCursor` from another thread without synchronization.
-unsafe impl<'a> Send for RecordCursor<'a> {}
+unsafe impl Send for RecordCursor {}
 
-impl<'a> Drop for RecordCursor<'a> {
+impl Drop for RecordCursor {
     fn drop(&mut self) {
         let _ = self.close_internal();
     }
 }
 
-impl<'a> Iterator for RecordCursor<'a> {
+impl Iterator for RecordCursor {
     type Item = Result<Record>;
 
     /// Advance and return the next record.
@@ -260,5 +272,3 @@ impl<'a> Iterator for RecordCursor<'a> {
         unsafe { self.next_unsafe() }.map(|r| r.map(|v| v.to_owned()))
     }
 }
-
-impl<'a> FusedIterator for RecordCursor<'a> {}

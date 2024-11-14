@@ -27,7 +27,7 @@ pub fn lookup(
     metadata: GraphMetadata,
     args: LookupArgs,
 ) -> io::Result<()> {
-    let session = connection.open_session().map_err(io::Error::from)?;
+    let mut session = connection.open_session().map_err(io::Error::from)?;
     let mut graph = WiredTigerGraph::new(
         metadata,
         session.open_record_cursor(&index_params.graph_table_name)?,

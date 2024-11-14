@@ -2,7 +2,10 @@ use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
 use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, WiredTigerError};
 
-use crate::graph::{Graph, GraphMetadata, GraphNode, NavVectorStore};
+use crate::{
+    graph::{Graph, GraphMetadata, GraphNode, NavVectorStore},
+    scoring::QuantizedVectorScorer,
+};
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;

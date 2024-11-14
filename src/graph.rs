@@ -1,7 +1,9 @@
 use std::{borrow::Cow, num::NonZero};
 
 use serde::{Deserialize, Serialize};
-use wt_mdb::Result;
+use wt_mdb::{Result, Session};
+
+use crate::scoring::{F32VectorScorer, QuantizedVectorScorer};
 
 /// Parameters for a search over a Vamana graph.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
@@ -53,4 +55,51 @@ pub trait NavVectorStore {
     /// Get the navigation vector for a single node.
     // NB: self is mutable to allow reading from a WT cursor.
     fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>>;
+}
+
+pub struct NavVectorScorer<S> {
+    store: S,
+    query: Vec<u8>,
+    scorer: Box<dyn QuantizedVectorScorer>,
+}
+
+impl<S> NavVectorScorer<S>
+where
+    S: NavVectorStore,
+{
+    pub fn new<Q: Into<Vec<u8>>>(
+        store: S,
+        query: Q,
+        scorer: Box<dyn QuantizedVectorScorer>,
+    ) -> Self {
+        Self {
+            store,
+            query: query.into(),
+            scorer,
+        }
+    }
+
+    pub fn score(&mut self, vertex: i64) -> Option<Result<f64>> {
+        self.store
+            .get(vertex)
+            .map(|r| r.map(|v| self.scorer.score(&self.query, v.as_ref())))
+    }
+}
+
+/// `GraphVectorIndex` is used to generate objects for graph navigation.
+pub trait GraphVectorIndex {
+    type Graph: Graph;
+    type NavVectorStore: NavVectorStore;
+
+    /// Return the scorer used for vectors returned by the graph.
+    ///
+    /// This is only used at the reranking step at the end.
+    fn scorer(&self) -> &dyn F32VectorScorer;
+
+    /// Return an object that can be used to navigate the graph.
+    // XXX might run into lifetime trouble session -> recordcursor.
+    fn graph(&self, session: &Session) -> Result<Graph>;
+
+    /// Return an object that can be used to score navigational vectors.
+    fn nav_vector(&self, session: &Session) -> Result<NavVectorScorer<N>>;
 }

@@ -72,18 +72,24 @@ pub struct RecordCursor {
     // If we accept Arc<Session> then we have a few problems:
     // * Arc<Session> is not Send because Arc<T> is only Send if T is both Send and Sync.
     // * If we make Session Sync then it may be called from multiple threads which is incorrect.
-    // Maintaining an arc reference to an inner session seems like the least bad alternative:
-    // * Session does not need to be Arc<> wrapped so it can be Send but not Sync.
-    // * The underlying WT_SESSION remains alive so long as there is an open cursor, which
-    //   prevents leaks from failed drop() calls.
-    // One caveat of this approach: you cannot obtain a Session reference from a cursor. Doing
-    // so might allow you to create a reference to an underlying WT_SESSION from a second thread.
-    session: Arc<InnerSession>,
+    // There are two viable alternatives:
+    // 1) Maintain an InnerSession which is Send + Sync and ref it here to ensure the backing
+    //    WT_SESSION lives as long as any cursors on it. Make Session methods &mut to ensure
+    //    that they cannot be called concurrently without a lock.
+    // 2) Maintain an InnerSession that is also wrapped in a Mutex. Nearly all Session methods
+    //    can now be immutable references but they obtain a lock internally.
+    // With (1) you cannot obtain a Session reference from a cursor as that might leak a
+    // reference to a second thread, with (2) you could still provide a cursor reference since
+    // all access is thread-safe.
+    _session: Arc<InnerSession>,
 }
 
 impl RecordCursor {
     pub(crate) fn new(cursor: NonNull<WT_CURSOR>, session: Arc<InnerSession>) -> Self {
-        Self { cursor, session }
+        Self {
+            cursor,
+            _session: session,
+        }
     }
 
     /// Set the contents of `record` in the collection.

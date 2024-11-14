@@ -182,6 +182,9 @@ impl Drop for InnerSession {
 // XXX FIXME members should not be public
 // XXX PhantomData<Cell<()>> should force this to be !Sync. Not sure if this matters
 // since all non-trivial methods are mut.
+// XXX alternatives: make methods &self, use Arc<Mutex<InnerSession>>, eat locking for
+// every single method call. Then RecordCursor would be able to manufacture a Session
+// if desired and it would be safe to use.
 pub struct Session(pub(crate) Arc<InnerSession>);
 
 impl Session {

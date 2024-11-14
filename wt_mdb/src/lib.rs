@@ -160,7 +160,7 @@ mod test {
     fn insert_and_iterate() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
+        let mut session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
@@ -174,7 +174,7 @@ mod test {
     fn insert_and_search() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
+        let mut session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         let value: &[u8] = b"bar";
@@ -188,7 +188,7 @@ mod test {
     fn insert_and_remove() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
+        let mut session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
@@ -206,7 +206,7 @@ mod test {
     fn largest_key() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
+        let mut session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.largest_key(), None);
@@ -220,9 +220,9 @@ mod test {
     fn transaction_commit() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
+        let mut session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
-        let read_session = conn.open_session().unwrap();
+        let mut read_session = conn.open_session().unwrap();
         let mut read_cursor = read_session.open_record_cursor("test").unwrap();
 
         let mut cursor = session.open_record_cursor("test").unwrap();
@@ -239,7 +239,7 @@ mod test {
     fn transaction_rollback() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
+        let mut session = conn.open_session().unwrap();
         session.create_record_table("test", None).unwrap();
 
         let mut cursor = session.open_record_cursor("test").unwrap();
@@ -254,7 +254,7 @@ mod test {
     fn bulk_load() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
+        let mut session = conn.open_session().unwrap();
 
         // Create Vec<Record>, bulk_load() into session, compare cursors.
         let records = vec![
@@ -277,7 +277,7 @@ mod test {
     fn bulk_load_existing_table() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
+        let mut session = conn.open_session().unwrap();
 
         // Bulk load will happily load into an empty table, so to get it to fail we insert a record.
         assert_eq!(session.create_record_table("test", None), Ok(()));
@@ -293,7 +293,7 @@ mod test {
     fn bulk_load_out_of_order() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
+        let mut session = conn.open_session().unwrap();
 
         assert_eq!(
             session.bulk_load(

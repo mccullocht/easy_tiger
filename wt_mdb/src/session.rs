@@ -154,8 +154,11 @@ impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
 
 /// Inner state of a `Session`.
 ///
-/// Mark this as Send+Sync so it can used from an Arc, but we mark the parent Session
-/// as !Sync so that it cannot be used directly from multiple threads.
+/// Mark this as Send+Sync so it can use meaningfully from an Arc.
+/// *Safety*
+/// - Session has an Arc<InnerCursor> but only access it through mut methods, ensuring that
+///   we will not have concurrent access.
+/// - RecordCursor has an Arc<InnerCursor> reference but does not use it.
 pub(crate) struct InnerSession {
     ptr: NonNull<WT_SESSION>,
     conn: Arc<Connection>,

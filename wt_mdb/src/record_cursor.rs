@@ -66,21 +66,19 @@ pub type Record = RecordView<'static>;
 /// the table is `i64` keyed and byte-string valued.
 pub struct RecordCursor {
     cursor: NonNull<WT_CURSOR>,
-    // Ref the InnerSession rather than Session.
-    // If we maintain a reference to the Session then RecordCursor must have a lifetime which
-    // is unpleaseant to deal with.
-    // If we accept Arc<Session> then we have a few problems:
-    // * Arc<Session> is not Send because Arc<T> is only Send if T is both Send and Sync.
-    // * If we make Session Sync then it may be called from multiple threads which is incorrect.
-    // There are two viable alternatives:
-    // 1) Maintain an InnerSession which is Send + Sync and ref it here to ensure the backing
-    //    WT_SESSION lives as long as any cursors on it. Make Session methods &mut to ensure
-    //    that they cannot be called concurrently without a lock.
-    // 2) Maintain an InnerSession that is also wrapped in a Mutex. Nearly all Session methods
-    //    can now be immutable references but they obtain a lock internally.
-    // With (1) you cannot obtain a Session reference from a cursor as that might leak a
-    // reference to a second thread, with (2) you could still provide a cursor reference since
-    // all access is thread-safe.
+    // Ref the InnerSession, *DO NOT USE*.
+    //
+    // We maintain this reference to ensure that the underlying WT_SESSION outlives this cursor.
+    //
+    // We cannot use Arc<Session> because Arc<T> is only Send if T: Send + Sync. If Session
+    // methods use &mut self then they cannot be used through an Arc, and if we make Session
+    // Sync then it may be erroneously called from multiple threads.
+    //
+    // An alternative to this would be to use Arc<Mutex<InnerSession>> and allow concurrent
+    // calls to Session methods, which requires lock acquisition for every Session call.
+    //
+    // Note that we do not allow access to the Session from RecordCursor; doing so would be
+    // unsound as we could leak a reference to the underlying WT_SESSION to another thread.
     _session: Arc<InnerSession>,
 }
 

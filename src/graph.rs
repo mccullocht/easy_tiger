@@ -1,7 +1,7 @@
 use std::{borrow::Cow, num::NonZero};
 
 use serde::{Deserialize, Serialize};
-use wt_mdb::{Result, Session};
+use wt_mdb::Result;
 
 use crate::scoring::{F32VectorScorer, QuantizedVectorScorer};
 
@@ -94,12 +94,11 @@ pub trait GraphVectorIndex {
     /// Return the scorer used for vectors returned by the graph.
     ///
     /// This is only used at the reranking step at the end.
-    fn scorer(&self) -> &dyn F32VectorScorer;
+    fn scorer(&self) -> Box<dyn F32VectorScorer>;
 
     /// Return an object that can be used to navigate the graph.
-    // XXX might run into lifetime trouble session -> recordcursor.
-    fn graph(&self, session: &Session) -> Result<Graph>;
+    fn graph(&self) -> Result<Self::Graph>;
 
     /// Return an object that can be used to score navigational vectors.
-    fn nav_vector(&self, session: &Session) -> Result<NavVectorScorer<N>>;
+    fn nav_vectors(&self) -> Result<Self::NavVectorStore>;
 }

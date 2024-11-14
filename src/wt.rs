@@ -1,10 +1,10 @@
 use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
-use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, WiredTigerError};
+use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, Session, WiredTigerError};
 
 use crate::{
-    graph::{Graph, GraphMetadata, GraphNode, NavVectorStore},
-    scoring::QuantizedVectorScorer,
+    graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndex, NavVectorStore},
+    scoring::{DotProductScorer, F32VectorScorer},
 };
 
 /// Key in the graph table containing the entry point.
@@ -167,6 +167,40 @@ pub fn read_graph_metadata(
     let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }
         .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
     serde_json::from_slice(metadata_json.value()).map_err(|e| e.into())
+}
+
+// XXX this doesn't compile and it's not obvious why unconstrained lifetime wtf.
+pub struct WiredTigerGraphVectorIndex {
+    index_params: WiredTigerIndexParams,
+    metadata: GraphMetadata,
+    session: Session,
+}
+
+impl<'a> GraphVectorIndex for WiredTigerGraphVectorIndex
+where
+    Self: 'a,
+{
+    type Graph = WiredTigerGraph<'a>;
+    type NavVectorStore = WiredTigerNavVectorStore<'a>;
+
+    fn scorer(&self) -> Box<dyn F32VectorScorer> {
+        Box::new(DotProductScorer)
+    }
+
+    fn graph(&self) -> Result<Self::Graph> {
+        Ok(WiredTigerGraph::new(
+            self.metadata,
+            self.session
+                .open_record_cursor(&self.index_params.graph_table_name)?,
+        ))
+    }
+
+    fn nav_vectors(&self) -> Result<Self::NavVectorStore> {
+        Ok(WiredTigerNavVectorStore::new(
+            self.session
+                .open_record_cursor(&self.index_params.nav_table_name)?,
+        ))
+    }
 }
 
 /// Encode the contents of a graph node as a value that can be set in the WiredTiger table.

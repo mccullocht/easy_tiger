@@ -98,7 +98,7 @@ where
     where
         P: Fn(),
     {
-        let session = self.wt_params.connection.open_session()?;
+        let mut session = self.wt_params.connection.open_session()?;
         let mut sum = vec![0.0; self.metadata.dimensions.get()];
         session.bulk_load(
             &self.wt_params.nav_table_name,
@@ -153,7 +153,7 @@ where
                 // objects to be Send + Sync, but Session is only Send and wrapping it in a Mutex does not
                 // work because any RecordCursor objects returned have to be destroyed before the Mutex is
                 // released.
-                let session = self.wt_params.connection.open_session()?;
+                let mut session = self.wt_params.connection.open_session()?;
                 let mut nav = WiredTigerNavVectorStore::new(
                     session
                         .open_record_cursor(&self.wt_params.nav_table_name)
@@ -239,7 +239,7 @@ where
                     .to_vec(),
             ),
         ];
-        let session = self.wt_params.connection.open_session()?;
+        let mut session = self.wt_params.connection.open_session()?;
         session.bulk_load(
             &self.wt_params.graph_table_name,
             None,

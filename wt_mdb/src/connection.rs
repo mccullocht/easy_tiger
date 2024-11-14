@@ -1,4 +1,4 @@
-use crate::{make_result, session::Session, wrap_ptr_create, Result};
+use crate::{session::Session, wrap_ptr_create, Result};
 use std::{
     ffi::CString,
     num::NonZero,
@@ -56,9 +56,7 @@ impl From<ConnectionOptionsBuilder> for ConnectionOptions {
 ///
 /// There is typically only one connection per process. `Connection`s are thread-safe but
 /// `Session`s and `RecordCursor`s are not.
-pub struct Connection {
-    conn: NonNull<WT_CONNECTION>,
-}
+pub struct Connection(NonNull<WT_CONNECTION>);
 
 impl Connection {
     /// Open a new `Connection` to a WiredTiger database.
@@ -79,39 +77,23 @@ impl Connection {
                 &mut connp,
             );
         };
-        wrap_ptr_create(result, connp).map(|conn| Arc::new(Connection { conn }))
+        wrap_ptr_create(result, connp).map(|conn| Arc::new(Connection(conn)))
     }
 
     /// Create a new `Session`. These can be used to obtain cursors to read and write data
     /// as well as manage transaction.
-    pub fn open_session(self: &Arc<Self>) -> Result<Arc<Session>> {
+    pub fn open_session(self: &Arc<Self>) -> Result<Session> {
         let mut sessionp: *mut WT_SESSION = ptr::null_mut();
         let result: i32;
         unsafe {
-            result = (self.conn.as_ref().open_session.unwrap())(
-                self.conn.as_ptr(),
+            result = (self.0.as_ref().open_session.unwrap())(
+                self.0.as_ptr(),
                 ptr::null_mut(),
                 ptr::null(),
                 &mut sessionp,
             );
         }
-        wrap_ptr_create(result, sessionp).map(|session| Arc::new(Session::new(session, self)))
-    }
-
-    /// Close this database connection.
-    ///
-    /// The connection will automatically be closed when this struct is dropped, consuming any error.
-    pub fn close(self) -> Result<()> {
-        self.close_internal()
-    }
-
-    fn close_internal(&self) -> Result<()> {
-        unsafe {
-            make_result(
-                self.conn.as_ref().close.unwrap()(self.conn.as_ptr(), std::ptr::null()),
-                (),
-            )
-        }
+        wrap_ptr_create(result, sessionp).map(|session| Session::new(session, self))
     }
 }
 
@@ -120,6 +102,8 @@ unsafe impl Sync for Connection {}
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        let _ = self.close_internal();
+        // TODO: log something when an error occurs here.
+        // This would be unexpected as the connection can't be dropped until all cursors and sessions have also been dropped.
+        unsafe { self.0.as_ref().close.unwrap()(self.0.as_ptr(), std::ptr::null()) };
     }
 }

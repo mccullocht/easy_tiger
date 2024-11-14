@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     ffi::c_void,
-    iter::FusedIterator,
     num::NonZero,
     ptr::{self, NonNull},
     slice,
@@ -10,7 +9,7 @@ use std::{
 
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_NOTFOUND};
 
-use crate::{make_result, session::Session, Error, Result};
+use crate::{make_result, session::InnerSession, Error, Result};
 
 /// A `RecordView` in a WiredTiger table with an i64 key and a byte array value.
 ///
@@ -67,19 +66,24 @@ pub type Record = RecordView<'static>;
 /// the table is `i64` keyed and byte-string valued.
 pub struct RecordCursor {
     cursor: NonNull<WT_CURSOR>,
-    session: Arc<Session>,
+    // Ref the InnerSession rather than Session.
+    // If we maintain a reference to the Session then RecordCursor must have a lifetime which
+    // is unpleaseant to deal with.
+    // If we accept Arc<Session> then we have a few problems:
+    // * Arc<Session> is not Send because Arc<T> is only Send if T is both Send and Sync.
+    // * If we make Session Sync then it may be called from multiple threads which is incorrect.
+    // Maintaining an arc reference to an inner session seems like the least bad alternative:
+    // * Session does not need to be Arc<> wrapped so it can be Send but not Sync.
+    // * The underlying WT_SESSION remains alive so long as there is an open cursor, which
+    //   prevents leaks from failed drop() calls.
+    // One caveat of this approach: you cannot obtain a Session reference from a cursor. Doing
+    // so might allow you to create a reference to an underlying WT_SESSION from a second thread.
+    session: Arc<InnerSession>,
 }
 
 impl RecordCursor {
-    pub(crate) fn new(cursor: NonNull<WT_CURSOR>, session: &Arc<Session>) -> Self {
-        Self {
-            cursor,
-            session: session.clone(),
-        }
-    }
-
-    pub fn session(&self) -> &Session {
-        &self.session
+    pub(crate) fn new(cursor: NonNull<WT_CURSOR>, session: Arc<InnerSession>) -> Self {
+        Self { cursor, session }
     }
 
     /// Set the contents of `record` in the collection.
@@ -264,5 +268,3 @@ impl Iterator for RecordCursor {
         unsafe { self.next_unsafe() }.map(|r| r.map(|v| v.to_owned()))
     }
 }
-
-impl FusedIterator for RecordCursor {}

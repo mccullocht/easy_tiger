@@ -152,38 +152,63 @@ impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
     }
 }
 
+/// Inner state of a `Session`.
+///
+/// Mark this as Send+Sync so it can used from an Arc, but we mark the parent Session
+/// as !Sync so that it cannot be used directly from multiple threads.
+// XXX move Record to a separate module and move RecordCursor in here.
+pub(crate) struct InnerSession {
+    ptr: NonNull<WT_SESSION>,
+    conn: Arc<Connection>,
+}
+
+unsafe impl Send for InnerSession {}
+unsafe impl Sync for InnerSession {}
+
+/// Close the underlying WiredTiger session.
+impl Drop for InnerSession {
+    fn drop(&mut self) {
+        // TODO: print something if this returns an error.
+        // I would not expect this to happen as we have structure things to guarantee that
+        // `InnerSession` is only dropped when all cursors are closed.
+        unsafe { self.ptr.as_ref().close.unwrap()(self.ptr.as_ptr(), std::ptr::null()) };
+    }
+}
+
 /// A WiredTiger session.
 ///
 /// Sessions are used to create cursors to view and mutate data and manage
 /// transaction state.
-pub struct Session {
-    session: NonNull<WT_SESSION>,
-    connection: Arc<Connection>,
-}
+// XXX FIXME members should not be public
+// XXX PhantomData<Cell<()>> should force this to be !Sync. Not sure if this matters
+// since all non-trivial methods are mut.
+pub struct Session(pub(crate) Arc<InnerSession>);
 
 impl Session {
     pub(crate) fn new(session: NonNull<WT_SESSION>, connection: &Arc<Connection>) -> Self {
-        Self {
-            session,
-            connection: connection.clone(),
-        }
+        // XXX new problem dropped: Arc<InnerSession> is not Send either.
+        Self(Arc::new(InnerSession {
+            ptr: session,
+            conn: connection.clone(),
+        }))
     }
 
-    pub fn connection(&self) -> &Connection {
-        self.connection.as_ref()
+    /// Return the `Connection` this session belongs to.
+    pub fn connection(&self) -> &Arc<Connection> {
+        &self.0.conn
     }
 
     /// Create a new record table.
     pub fn create_record_table(
-        &self,
+        &mut self,
         table_name: &str,
         config: Option<CreateOptions>,
     ) -> Result<()> {
         let uri = make_table_uri(table_name);
         unsafe {
             make_result(
-                (self.session.as_ref().create.unwrap())(
-                    self.session.as_ptr(),
+                (self.0.ptr.as_ref().create.unwrap())(
+                    self.0.ptr.as_ptr(),
                     uri.as_ptr(),
                     config.unwrap_or_default().0.as_ptr(),
                 ),
@@ -196,12 +221,16 @@ impl Session {
     ///
     /// This requires exclusive access -- if any cursors are open on the specified table the call will fail
     /// and return an EBUSY posix error.
-    pub fn drop_record_table(&self, table_name: &str, config: Option<DropOptions>) -> Result<()> {
+    pub fn drop_record_table(
+        &mut self,
+        table_name: &str,
+        config: Option<DropOptions>,
+    ) -> Result<()> {
         let uri = make_table_uri(table_name);
         unsafe {
             make_result(
-                self.session.as_ref().drop.unwrap()(
-                    self.session.as_ptr(),
+                self.0.ptr.as_ref().drop.unwrap()(
+                    self.0.ptr.as_ptr(),
                     uri.as_ptr(),
                     config
                         .unwrap_or_default()
@@ -216,12 +245,12 @@ impl Session {
     }
 
     /// Open a record cursor over the named table.
-    pub fn open_record_cursor(self: &Arc<Self>, table_name: &str) -> Result<RecordCursor> {
+    pub fn open_record_cursor(&mut self, table_name: &str) -> Result<RecordCursor> {
         self.open_record_cursor_with_options(table_name, None)
     }
 
     fn open_record_cursor_with_options(
-        self: &Arc<Self>,
+        &mut self,
         table_name: &str,
         options: Option<&CStr>,
     ) -> Result<RecordCursor> {
@@ -229,15 +258,15 @@ impl Session {
         let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
         let result: i32;
         unsafe {
-            result = (self.session.as_ref().open_cursor.unwrap())(
-                self.session.as_ptr(),
+            result = (self.0.ptr.as_ref().open_cursor.unwrap())(
+                self.0.ptr.as_ptr(),
                 uri.as_ptr(),
                 ptr::null_mut(),
                 options.map(|s| s.as_ptr()).unwrap_or(std::ptr::null()),
                 &mut cursorp,
             );
         }
-        wrap_ptr_create(result, cursorp).map(|cursor| RecordCursor::new(cursor, self))
+        wrap_ptr_create(result, cursorp).map(|cursor| RecordCursor::new(cursor, self.0.clone()))
     }
 
     /// Starts a transaction in this session.
@@ -248,11 +277,11 @@ impl Session {
     ///
     /// This may not be called on a session with an active transaction or an error will be returned (EINVAL)
     /// but otherwise behavior is unspecified.
-    pub fn begin_transaction(&self, options: Option<&BeginTransactionOptions>) -> Result<()> {
+    pub fn begin_transaction(&mut self, options: Option<&BeginTransactionOptions>) -> Result<()> {
         unsafe {
             make_result(
-                self.session.as_ref().begin_transaction.unwrap()(
-                    self.session.as_ptr(),
+                self.0.ptr.as_ref().begin_transaction.unwrap()(
+                    self.0.ptr.as_ptr(),
                     options
                         .and_then(|o| o.0.as_ref())
                         .map(|s| s.as_ptr())
@@ -270,11 +299,11 @@ impl Session {
     ///
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
-    pub fn commit_transaction(&self, options: Option<&CommitTransactionOptions>) -> Result<()> {
+    pub fn commit_transaction(&mut self, options: Option<&CommitTransactionOptions>) -> Result<()> {
         unsafe {
             make_result(
-                self.session.as_ref().commit_transaction.unwrap()(
-                    self.session.as_ptr(),
+                self.0.ptr.as_ref().commit_transaction.unwrap()(
+                    self.0.ptr.as_ptr(),
                     options
                         .and_then(|o| o.0.as_ref())
                         .map(|s| s.as_ptr())
@@ -291,11 +320,14 @@ impl Session {
     ///
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
-    pub fn rollback_transaction(&self, options: Option<&RollbackTransactionOptions>) -> Result<()> {
+    pub fn rollback_transaction(
+        &mut self,
+        options: Option<&RollbackTransactionOptions>,
+    ) -> Result<()> {
         unsafe {
             make_result(
-                self.session.as_ref().rollback_transaction.unwrap()(
-                    self.session.as_ptr(),
+                self.0.ptr.as_ref().rollback_transaction.unwrap()(
+                    self.0.ptr.as_ptr(),
                     options
                         .and_then(|o| o.0.as_ref())
                         .map(|s| s.as_ptr())
@@ -311,7 +343,7 @@ impl Session {
     /// Bulk load requires that `table_name` not exist or be empty and that `iter` yields records in
     /// order by `key()`.
     pub fn bulk_load<'a, I>(
-        self: &Arc<Self>,
+        &mut self,
         table_name: &str,
         options: Option<CreateOptions>,
         iter: I,
@@ -328,37 +360,7 @@ impl Session {
     }
 
     /// Reset this session, which also resets any outstanding cursors.
-    pub fn reset(&self) -> Result<()> {
-        unsafe {
-            make_result(
-                self.session.as_ref().reset.unwrap()(self.session.as_ptr()),
-                (),
-            )
-        }
-    }
-
-    /// Close this session.
-    pub fn close(mut self) -> Result<()> {
-        self.close_internal()
-    }
-
-    fn close_internal(&mut self) -> Result<()> {
-        make_result(
-            unsafe {
-                self.session.as_ref().close.unwrap()(self.session.as_ptr(), std::ptr::null())
-            },
-            (),
-        )
-    }
-}
-
-/// It is safe to send a `Session` to another thread to use.
-/// It is not safe to reference a `Session` from another thread without synchronization.
-unsafe impl Send for Session {}
-
-/// Drop closes this session and silently consumes any error that may occur.
-impl Drop for Session {
-    fn drop(&mut self) {
-        let _ = self.close_internal();
+    pub fn reset(&mut self) -> Result<()> {
+        unsafe { make_result(self.0.ptr.as_ref().reset.unwrap()(self.0.ptr.as_ptr()), ()) }
     }
 }

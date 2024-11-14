@@ -159,7 +159,7 @@ pub fn read_graph_metadata(
     connection: Arc<Connection>,
     graph_table_name: &str,
 ) -> io::Result<GraphMetadata> {
-    let session = connection.open_session()?;
+    let mut session = connection.open_session()?;
     let mut cursor = session.open_record_cursor(graph_table_name)?;
     let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }
         .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;

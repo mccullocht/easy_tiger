@@ -30,18 +30,18 @@ impl WiredTigerIndexParams {
     }
 }
 
-/// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor``.
-pub struct WiredTigerNavVectorStore<'a> {
-    cursor: RecordCursor<'a>,
+/// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
+pub struct WiredTigerNavVectorStore {
+    cursor: RecordCursor,
 }
 
-impl<'a> WiredTigerNavVectorStore<'a> {
-    pub fn new(cursor: RecordCursor<'a>) -> Self {
+impl WiredTigerNavVectorStore {
+    pub fn new(cursor: RecordCursor) -> Self {
         Self { cursor }
     }
 }
 
-impl<'a> NavVectorStore for WiredTigerNavVectorStore<'a> {
+impl NavVectorStore for WiredTigerNavVectorStore {
     fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>> {
         Some(unsafe { self.cursor.seek_exact_unsafe(node)? }.map(RecordView::into_inner_value))
     }
@@ -123,18 +123,18 @@ impl<'a> Iterator for WiredTigerEdgeIterator<'a> {
 }
 
 /// Implementation of `Graph` that reads from a WiredTiger `RecordCursor`.
-pub struct WiredTigerGraph<'a> {
+pub struct WiredTigerGraph {
     metadata: GraphMetadata,
-    cursor: RecordCursor<'a>,
+    cursor: RecordCursor,
 }
 
-impl<'a> WiredTigerGraph<'a> {
-    pub fn new(metadata: GraphMetadata, cursor: RecordCursor<'a>) -> Self {
+impl WiredTigerGraph {
+    pub fn new(metadata: GraphMetadata, cursor: RecordCursor) -> Self {
         Self { metadata, cursor }
     }
 }
 
-impl<'a> Graph for WiredTigerGraph<'a> {
+impl Graph for WiredTigerGraph {
     type Node<'c> = WiredTigerGraphNode<'c> where Self: 'c;
 
     fn entry_point(&mut self) -> Option<i64> {

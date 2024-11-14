@@ -216,12 +216,12 @@ impl Session {
     }
 
     /// Open a record cursor over the named table.
-    pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
+    pub fn open_record_cursor(self: &Arc<Self>, table_name: &str) -> Result<RecordCursor> {
         self.open_record_cursor_with_options(table_name, None)
     }
 
     fn open_record_cursor_with_options(
-        &self,
+        self: &Arc<Self>,
         table_name: &str,
         options: Option<&CStr>,
     ) -> Result<RecordCursor> {
@@ -311,7 +311,7 @@ impl Session {
     /// Bulk load requires that `table_name` not exist or be empty and that `iter` yields records in
     /// order by `key()`.
     pub fn bulk_load<'a, I>(
-        &self,
+        self: &Arc<Self>,
         table_name: &str,
         options: Option<CreateOptions>,
         iter: I,

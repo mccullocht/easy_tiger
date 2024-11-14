@@ -5,6 +5,7 @@ use std::{
     num::NonZero,
     ptr::{self, NonNull},
     slice,
+    sync::Arc,
 };
 
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_NOTFOUND};
@@ -64,18 +65,21 @@ pub type Record = RecordView<'static>;
 
 /// A `RecordCursor` facilities viewing and mutating data in a WiredTiger table where
 /// the table is `i64` keyed and byte-string valued.
-pub struct RecordCursor<'a> {
+pub struct RecordCursor {
     cursor: NonNull<WT_CURSOR>,
-    session: &'a Session,
+    session: Arc<Session>,
 }
 
-impl<'a> RecordCursor<'a> {
-    pub(crate) fn new(cursor: NonNull<WT_CURSOR>, session: &'a Session) -> Self {
-        Self { cursor, session }
+impl RecordCursor {
+    pub(crate) fn new(cursor: NonNull<WT_CURSOR>, session: &Arc<Session>) -> Self {
+        Self {
+            cursor,
+            session: session.clone(),
+        }
     }
 
     pub fn session(&self) -> &Session {
-        self.session
+        &self.session
     }
 
     /// Set the contents of `record` in the collection.
@@ -242,15 +246,15 @@ impl<'a> RecordCursor<'a> {
 
 /// It is safe to send a `RecordCursor` to another thread to use.
 /// It is not safe to reference a `RecordCursor` from another thread without synchronization.
-unsafe impl<'a> Send for RecordCursor<'a> {}
+unsafe impl Send for RecordCursor {}
 
-impl<'a> Drop for RecordCursor<'a> {
+impl Drop for RecordCursor {
     fn drop(&mut self) {
         let _ = self.close_internal();
     }
 }
 
-impl<'a> Iterator for RecordCursor<'a> {
+impl Iterator for RecordCursor {
     type Item = Result<Record>;
 
     /// Advance and return the next record.
@@ -261,4 +265,4 @@ impl<'a> Iterator for RecordCursor<'a> {
     }
 }
 
-impl<'a> FusedIterator for RecordCursor<'a> {}
+impl FusedIterator for RecordCursor {}

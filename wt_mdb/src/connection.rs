@@ -84,7 +84,7 @@ impl Connection {
 
     /// Create a new `Session`. These can be used to obtain cursors to read and write data
     /// as well as manage transaction.
-    pub fn open_session(self: &Arc<Self>) -> Result<Session> {
+    pub fn open_session(self: &Arc<Self>) -> Result<Arc<Session>> {
         let mut sessionp: *mut WT_SESSION = ptr::null_mut();
         let result: i32;
         unsafe {
@@ -95,7 +95,7 @@ impl Connection {
                 &mut sessionp,
             );
         }
-        wrap_ptr_create(result, sessionp).map(|session| Session::new(session, self))
+        wrap_ptr_create(result, sessionp).map(|session| Arc::new(Session::new(session, self)))
     }
 
     /// Close this database connection.

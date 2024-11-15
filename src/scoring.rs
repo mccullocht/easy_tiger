@@ -1,21 +1,5 @@
 use simsimd::{BinarySimilarity, SpatialSimilarity};
 
-/// Trait type for a vector scorer.
-// XXX remove this entirely.
-pub trait VectorScorer {
-    type Elem;
-
-    /// Score vectors `a` and `b` against one another. Returns a score
-    /// where larger values are better matches.
-    ///
-    /// Input vectors must be the same length or this function may panic.
-    fn score(&self, a: &[Self::Elem], b: &[Self::Elem]) -> f64;
-
-    /// Normalize a vector for use with this scoring function.
-    /// By default, does nothing.
-    fn normalize(&self, _vector: &mut [Self::Elem]) {}
-}
-
 /// Scorer for `f32` vectors.
 ///
 /// This trait is object-safe; it may be instantiated at runtime based on
@@ -49,14 +33,6 @@ pub trait QuantizedVectorScorer {
 #[derive(Debug, Copy, Clone)]
 pub struct EuclideanScorer;
 
-impl VectorScorer for EuclideanScorer {
-    type Elem = f32;
-
-    fn score(&self, a: &[Self::Elem], b: &[Self::Elem]) -> f64 {
-        1f64 / (1f64 + SpatialSimilarity::l2sq(a, b).unwrap())
-    }
-}
-
 impl F32VectorScorer for EuclideanScorer {
     fn score(&self, a: &[f32], b: &[f32]) -> f64 {
         1f64 / (1f64 + SpatialSimilarity::l2sq(a, b).unwrap())
@@ -66,22 +42,6 @@ impl F32VectorScorer for EuclideanScorer {
 /// Computes a score based on the dot product.
 #[derive(Debug, Copy, Clone)]
 pub struct DotProductScorer;
-
-impl VectorScorer for DotProductScorer {
-    type Elem = f32;
-
-    fn score(&self, a: &[Self::Elem], b: &[Self::Elem]) -> f64 {
-        // Assuming values are normalized, this will produce a score in [0,1]
-        (1f64 + SpatialSimilarity::dot(a, b).unwrap()) / 2f64
-    }
-
-    fn normalize(&self, vector: &mut [Self::Elem]) {
-        let norm = SpatialSimilarity::dot(vector, vector).unwrap().sqrt() as f32;
-        for d in vector.iter_mut() {
-            *d /= norm;
-        }
-    }
-}
 
 impl F32VectorScorer for DotProductScorer {
     fn score(&self, a: &[f32], b: &[f32]) -> f64 {
@@ -100,15 +60,6 @@ impl F32VectorScorer for DotProductScorer {
 /// Computes a score from two bitmaps using hamming distance.
 #[derive(Debug, Copy, Clone)]
 pub struct HammingScorer;
-
-impl VectorScorer for HammingScorer {
-    type Elem = u8;
-
-    fn score(&self, a: &[Self::Elem], b: &[Self::Elem]) -> f64 {
-        let dim = (a.len() * 8) as f64;
-        (dim - BinarySimilarity::hamming(a, b).unwrap()) / dim
-    }
-}
 
 impl QuantizedVectorScorer for HammingScorer {
     fn score(&self, a: &[u8], b: &[u8]) -> f64 {

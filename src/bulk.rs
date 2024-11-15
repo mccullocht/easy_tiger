@@ -120,8 +120,7 @@ where
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect();
-        // XXX
-        F32VectorScorer::normalize(&DotProductScorer, &mut self.centroid);
+        self.metadata.new_scorer().normalize(&mut self.centroid);
         Ok(())
     }
 
@@ -135,11 +134,8 @@ where
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
-        let apply_mu = Mutex::new((
-            0i64,
-            // XXX
-            F32VectorScorer::score(&DotProductScorer, &self.vectors[0], &self.centroid),
-        ));
+        let scorer = self.metadata.new_scorer();
+        let apply_mu = Mutex::new((0i64, scorer.score(&self.vectors[0], &self.centroid)));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
         // Keep track of all in-flight concurrent insertions. These nodes will be processed at the
@@ -172,8 +168,7 @@ where
                         }
                         let p = Neighbor::new(
                             *v as i64,
-                            // XXX
-                            F32VectorScorer::score(&scorer, &self.vectors[i], &self.vectors[*v]),
+                            scorer.score(&self.vectors[i], &self.vectors[*v]),
                         );
                         if p.score < worst_score {
                             None
@@ -181,9 +176,7 @@ where
                             Some(p)
                         }
                     }));
-                    // XXX
-                    let centroid_score =
-                        F32VectorScorer::score(&DotProductScorer, &self.vectors[i], &self.centroid);
+                    let centroid_score = scorer.score(&self.vectors[i], &self.centroid);
                     {
                         let mut entry_point = apply_mu.lock().unwrap();
                         self.apply_insert(i, edges)?;

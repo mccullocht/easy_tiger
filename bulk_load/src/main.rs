@@ -8,7 +8,10 @@ use easy_tiger::{
     wt::WiredTigerIndexParams,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use wt_mdb::{Connection, ConnectionOptionsBuilder, DropOptionsBuilder};
+use wt_mdb::{
+    options::{ConnectionOptionsBuilder, DropOptionsBuilder},
+    Connection,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

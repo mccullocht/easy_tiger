@@ -9,3 +9,12 @@ pub(crate) trait ConfigurationString {
             .unwrap_or(std::ptr::null())
     }
 }
+
+impl<C> ConfigurationString for Option<&C>
+where
+    C: ConfigurationString,
+{
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.map(ConfigurationString::as_config_string).flatten()
+    }
+}

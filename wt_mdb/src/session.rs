@@ -12,8 +12,8 @@ use std::{
 use wt_sys::{WT_CURSOR, WT_SESSION};
 
 use crate::{
-    connection::Connection, make_result, make_table_uri, record_cursor::RecordCursor,
-    wrap_ptr_create, RecordView, Result,
+    connection::Connection, make_result, make_table_uri, options::ConfigurationString,
+    record_cursor::RecordCursor, wrap_ptr_create, RecordView, Result,
 };
 
 /// An options builder for creating a table, column group, index, or file in WiredTiger.
@@ -33,6 +33,12 @@ impl Default for CreateOptions {
 impl From<CreateOptionsBuilder> for CreateOptions {
     fn from(_value: CreateOptionsBuilder) -> Self {
         Self::default()
+    }
+}
+
+impl ConfigurationString for CreateOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        Some(self.0.as_c_str())
     }
 }
 
@@ -64,6 +70,12 @@ impl From<DropOptionsBuilder> for DropOptions {
     }
 }
 
+impl ConfigurationString for DropOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.0.as_deref()
+    }
+}
+
 /// Options builder when beginning a WiredTiger transaction.
 #[derive(Default)]
 pub struct BeginTransactionOptionsBuilder {
@@ -89,6 +101,12 @@ impl From<BeginTransactionOptionsBuilder> for BeginTransactionOptions {
                 .name
                 .map(|n| CString::new(format!("name={}", n)).expect("name has no nulls")),
         )
+    }
+}
+
+impl ConfigurationString for BeginTransactionOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.0.as_deref()
     }
 }
 
@@ -122,6 +140,12 @@ impl From<CommitTransactionOptionsBuilder> for CommitTransactionOptions {
     }
 }
 
+impl ConfigurationString for CommitTransactionOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.0.as_deref()
+    }
+}
+
 /// Options build for rollback_transaction() operations.
 #[derive(Default)]
 pub struct RollbackTransactionOptionsBuilder {
@@ -149,6 +173,12 @@ impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
                 .operation_timeout_ms
                 .map(|t| CString::new(format!("operation_timeout_ms={}", t)).expect("no nulls")),
         )
+    }
+}
+
+impl ConfigurationString for RollbackTransactionOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.0.as_deref()
     }
 }
 
@@ -208,7 +238,7 @@ impl Session {
                 (self.0.ptr.as_ref().create.unwrap())(
                     self.0.ptr.as_ptr(),
                     uri.as_ptr(),
-                    config.unwrap_or_default().0.as_ptr(),
+                    config.unwrap_or_default().as_config_ptr(),
                 ),
                 (),
             )
@@ -230,12 +260,7 @@ impl Session {
                 self.0.ptr.as_ref().drop.unwrap()(
                     self.0.ptr.as_ptr(),
                     uri.as_ptr(),
-                    config
-                        .unwrap_or_default()
-                        .0
-                        .as_ref()
-                        .map(|s| s.as_ptr())
-                        .unwrap_or(std::ptr::null()),
+                    config.unwrap_or_default().as_config_ptr(),
                 ),
                 (),
             )
@@ -280,10 +305,7 @@ impl Session {
             make_result(
                 self.0.ptr.as_ref().begin_transaction.unwrap()(
                     self.0.ptr.as_ptr(),
-                    options
-                        .and_then(|o| o.0.as_ref())
-                        .map(|s| s.as_ptr())
-                        .unwrap_or(std::ptr::null()),
+                    options.as_config_ptr(),
                 ),
                 (),
             )
@@ -302,10 +324,7 @@ impl Session {
             make_result(
                 self.0.ptr.as_ref().commit_transaction.unwrap()(
                     self.0.ptr.as_ptr(),
-                    options
-                        .and_then(|o| o.0.as_ref())
-                        .map(|s| s.as_ptr())
-                        .unwrap_or(std::ptr::null()),
+                    options.as_config_ptr(),
                 ),
                 (),
             )
@@ -326,10 +345,7 @@ impl Session {
             make_result(
                 self.0.ptr.as_ref().rollback_transaction.unwrap()(
                     self.0.ptr.as_ptr(),
-                    options
-                        .and_then(|o| o.0.as_ref())
-                        .map(|s| s.as_ptr())
-                        .unwrap_or(std::ptr::null()),
+                    options.as_config_ptr(),
                 ),
                 (),
             )

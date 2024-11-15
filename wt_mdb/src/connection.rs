@@ -1,62 +1,14 @@
-use crate::{options::ConfigurationString, session::Session, wrap_ptr_create, Result};
+use crate::{
+    options::ConfigurationString, options::ConnectionOptions, session::Session, wrap_ptr_create,
+    Result,
+};
 use std::{
-    ffi::{CStr, CString},
-    num::NonZero,
+    ffi::CString,
     ptr::{self, NonNull},
     sync::Arc,
 };
 
 use wt_sys::{wiredtiger_open, WT_CONNECTION, WT_SESSION};
-
-/// Builder for options when connecting to a WiredTiger database.
-#[derive(Default)]
-pub struct ConnectionOptionsBuilder {
-    create: bool,
-    cache_size_mb: Option<NonZero<usize>>,
-}
-
-impl ConnectionOptionsBuilder {
-    /// If set, create the database if it does not exist.
-    pub fn create(mut self) -> Self {
-        self.create = true;
-        self
-    }
-
-    /// Maximum heap memory to allocate for the cache, in MB.
-    pub fn cache_size_mb(mut self, size: NonZero<usize>) -> Self {
-        self.cache_size_mb = Some(size);
-        self
-    }
-}
-
-/// Options when connecting to a WiredTiger database.
-#[derive(Debug, Default)]
-pub struct ConnectionOptions(Option<CString>);
-
-impl From<ConnectionOptionsBuilder> for ConnectionOptions {
-    fn from(value: ConnectionOptionsBuilder) -> Self {
-        let mut options = Vec::new();
-        if value.create {
-            options.push("create".to_string())
-        }
-        if let Some(cache_size) = value.cache_size_mb {
-            options.push(format!("cache_size={}", cache_size.get() << 20));
-        }
-        if options.is_empty() {
-            Self(None)
-        } else {
-            Self(Some(
-                CString::new(options.join(",")).expect("options does not contain null"),
-            ))
-        }
-    }
-}
-
-impl ConfigurationString for ConnectionOptions {
-    fn as_config_string(&self) -> Option<&CStr> {
-        self.0.as_deref()
-    }
-}
 
 /// A connection to a WiredTiger database.
 ///

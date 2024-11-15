@@ -45,11 +45,7 @@ impl<'a> RecordView<'a> {
 
     /// Ensure that this RecordView owns the underlying value.
     pub fn to_owned(self) -> Record {
-        let k = self.key();
-        match self.value {
-            Cow::Borrowed(v) => Record::new(k, v.to_owned()),
-            Cow::Owned(v) => Record::new(k, v),
-        }
+        Record::new(self.key(), self.value.to_vec())
     }
 
     /// Returns the inner value within the `RecordView`.
@@ -269,6 +265,6 @@ impl Iterator for RecordCursor {
     ///
     /// If this cursor is unpositioned, returns to the start of the collection.
     fn next(&mut self) -> Option<Self::Item> {
-        unsafe { self.next_unsafe() }.map(|r| r.map(|v| v.to_owned()))
+        unsafe { self.next_unsafe() }.map(|r| r.map(RecordView::to_owned))
     }
 }

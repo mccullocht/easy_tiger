@@ -119,7 +119,7 @@ impl From<Error> for std::io::Error {
     }
 }
 
-pub use connection::{Connection, ConnectionOptions, ConnectionOptionsBuilder};
+pub use connection::Connection;
 pub use record_cursor::{Record, RecordCursor, RecordView};
 pub use session::{
     BeginTransactionOptions, BeginTransactionOptionsBuilder, CommitTransactionOptions,

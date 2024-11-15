@@ -121,11 +121,7 @@ impl From<Error> for std::io::Error {
 
 pub use connection::Connection;
 pub use record_cursor::{Record, RecordCursor, RecordView};
-pub use session::{
-    BeginTransactionOptions, BeginTransactionOptionsBuilder, CommitTransactionOptions,
-    CommitTransactionOptionsBuilder, CreateOptions, CreateOptionsBuilder, DropOptions,
-    DropOptionsBuilder, RollbackTransactionOptions, RollbackTransactionOptionsBuilder, Session,
-};
+pub use session::Session;
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {

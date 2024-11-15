@@ -144,7 +144,8 @@ mod test {
     use std::io::ErrorKind;
 
     use crate::{
-        connection::{Connection, ConnectionOptions, ConnectionOptionsBuilder},
+        connection::Connection,
+        options::{ConnectionOptions, ConnectionOptionsBuilder},
         record_cursor::{Record, RecordView},
         Error, WiredTigerError,
     };

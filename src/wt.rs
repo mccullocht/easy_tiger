@@ -183,7 +183,7 @@ pub struct WiredTigerGraphVectorIndex {
 impl WiredTigerGraphVectorIndex {
     /// Create a new `WiredTigerGraphVectorIndex` from `index_params`, caching immutable
     /// graph metadata.
-    pub fn new(index_params: WiredTigerIndexParams) -> io::Result<Self> {
+    pub fn from_db(index_params: WiredTigerIndexParams) -> io::Result<Self> {
         let mut session = index_params.connection.open_session()?;
         let mut cursor = session.open_record_cursor(&index_params.graph_table_name)?;
         let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }

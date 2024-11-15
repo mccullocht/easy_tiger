@@ -12,13 +12,15 @@ use std::{
 
 use crossbeam_skiplist::SkipSet;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-use wt_mdb::{Record, Result};
+use wt_mdb::{Record, Result, Session};
 
 use crate::{
-    graph::{Graph, GraphMetadata, GraphNode, NavVectorStore},
+    graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader, NavVectorStore},
     input::NumpyF32VectorStore,
     quantization::binary_quantize,
-    scoring::{DotProductScorer, HammingScorer, VectorScorer},
+    scoring::{
+        DotProductScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer, VectorScorer,
+    },
     search::GraphSearcher,
     wt::{
         encode_graph_node, WiredTigerIndexParams, WiredTigerNavVectorStore, ENTRY_POINT_KEY,
@@ -120,7 +122,8 @@ where
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect();
-        DotProductScorer.normalize(&mut self.centroid);
+        // XXX
+        F32VectorScorer::normalize(&DotProductScorer, &mut self.centroid);
         Ok(())
     }
 
@@ -136,7 +139,8 @@ where
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
         let apply_mu = Mutex::new((
             0i64,
-            DotProductScorer.score(&self.vectors[0], &self.centroid),
+            // XXX
+            F32VectorScorer::score(&DotProductScorer, &self.vectors[0], &self.centroid),
         ));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
@@ -174,7 +178,8 @@ where
                         }
                         let p = Neighbor::new(
                             *v as i64,
-                            scorer.score(&self.vectors[i], &self.vectors[*v]),
+                            // XXX
+                            F32VectorScorer::score(&scorer, &self.vectors[i], &self.vectors[*v]),
                         );
                         if p.score < worst_score {
                             None
@@ -182,7 +187,9 @@ where
                             Some(p)
                         }
                     }));
-                    let centroid_score = DotProductScorer.score(&self.vectors[i], &self.centroid);
+                    // XXX
+                    let centroid_score =
+                        F32VectorScorer::score(&DotProductScorer, &self.vectors[i], &self.centroid);
                     {
                         let mut entry_point = apply_mu.lock().unwrap();
                         self.apply_insert(i, edges)?;
@@ -404,6 +411,38 @@ where
         }
 
         Ok(edges.split_at(selected.len()))
+    }
+}
+
+struct BulkLoadGraphVectorIndexReader<'a, D>(&'a BulkLoadBuilder<D>, Session);
+
+impl<'a, D> BulkLoadGraphVectorIndexReader<'a, D> {
+    fn into_session(self) -> Session {
+        self.1
+    }
+}
+
+impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D> {
+    type Graph = BulkLoadBuilderGraph<'a, D>;
+    type NavVectorStore = WiredTigerNavVectorStore;
+
+    fn scorer(&self) -> Box<dyn F32VectorScorer> {
+        Box::new(DotProductScorer)
+    }
+
+    fn graph(&mut self) -> Result<Self::Graph> {
+        Ok(BulkLoadBuilderGraph(self.0))
+    }
+
+    fn nav_scorer(&self) -> Box<dyn QuantizedVectorScorer> {
+        Box::new(HammingScorer)
+    }
+
+    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
+        Ok(WiredTigerNavVectorStore::new(
+            self.1
+                .open_record_cursor(&self.0.wt_params.nav_table_name)?,
+        ))
     }
 }
 

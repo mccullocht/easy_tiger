@@ -58,6 +58,7 @@ pub trait NavVectorStore {
 }
 
 /// `GraphVectorIndexReader` is used to generate objects for graph navigation.
+// XXX consider providing metadata here and having metadata manufacture scorer.
 pub trait GraphVectorIndexReader {
     type Graph: Graph;
     type NavVectorStore: NavVectorStore;

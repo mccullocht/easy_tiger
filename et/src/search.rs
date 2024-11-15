@@ -8,9 +8,9 @@ use std::{
 
 use clap::Args;
 use easy_tiger::{
-    graph::{GraphMetadata, GraphSearchParams},
+    graph::GraphSearchParams,
     search::GraphSearcher,
-    wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader, WiredTigerIndexParams},
+    wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader},
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use wt_mdb::Connection;
@@ -33,16 +33,14 @@ pub struct SearchArgs {
     // TODO: recall statistics
 }
 
-// XXX this should take WiredTigerGraphVectorIndex instead of index_params and metadata.
 pub fn search(
     connection: Arc<Connection>,
-    index_params: WiredTigerIndexParams,
-    metadata: GraphMetadata,
+    index: WiredTigerGraphVectorIndex,
     args: SearchArgs,
 ) -> io::Result<()> {
     let query_vectors = easy_tiger::input::NumpyF32VectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.query_vectors)?)? },
-        metadata.dimensions,
+        index.metadata().dimensions,
     );
     let limit = std::cmp::min(
         query_vectors.len(),
@@ -53,10 +51,7 @@ pub fn search(
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
     });
 
-    let index = Arc::new(WiredTigerGraphVectorIndex::from_parts(
-        index_params,
-        metadata,
-    ));
+    let index = Arc::new(index);
     let mut session = connection.open_session()?;
     let progress = ProgressBar::new(limit as u64)
         .with_style(

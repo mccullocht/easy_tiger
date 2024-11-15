@@ -7,7 +7,7 @@ use crate::{
         Graph, GraphMetadata, GraphNode, GraphSearchParams, GraphVectorIndexReader, NavVectorStore,
     },
     quantization::binary_quantize,
-    scoring::VectorScorer,
+    scoring::F32VectorScorer,
     Neighbor,
 };
 
@@ -27,7 +27,7 @@ pub struct TestGraphVectorIndex {
 impl TestGraphVectorIndex {
     pub fn new<S, T, V>(max_edges: NonZero<usize>, scorer: S, iter: T) -> Self
     where
-        S: VectorScorer<Elem = f32>,
+        S: F32VectorScorer,
         T: IntoIterator<Item = V>,
         V: Into<Vec<f32>>,
     {
@@ -73,7 +73,7 @@ impl TestGraphVectorIndex {
         scorer: &S,
     ) -> Vec<i64>
     where
-        S: VectorScorer<Elem = f32>,
+        S: F32VectorScorer,
     {
         let q = &graph[index].vector;
         let mut scored = graph

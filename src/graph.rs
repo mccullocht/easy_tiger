@@ -23,7 +23,6 @@ pub struct GraphMetadata {
     pub index_search_params: GraphSearchParams,
 }
 
-// TODO: properly parameterize scorer selection.
 impl GraphMetadata {
     /// Return a scorer for high fidelity vectors in the index.
     pub fn new_scorer(&self) -> Box<dyn F32VectorScorer> {

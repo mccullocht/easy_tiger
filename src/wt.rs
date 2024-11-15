@@ -12,7 +12,7 @@ pub const ENTRY_POINT_KEY: i64 = -1;
 pub const METADATA_KEY: i64 = -2;
 
 /// Parameters to to open and access a WiredTiger graph index.
-// XXX not sure if I really need this anymore.
+// XXX not sure if I really need this anymore. fold it into WiredTigerGraphVectorIndex?
 #[derive(Clone)]
 pub struct WiredTigerIndexParams {
     /// Connection to WiredTiger database.
@@ -156,20 +156,6 @@ impl Graph for WiredTigerGraph {
     }
 }
 
-/// Read graph index metadata from the named graph table.
-// TODO: replace this call
-// TODO: better story around caching this data and session/cursor management in general.
-pub fn read_graph_metadata(
-    connection: Arc<Connection>,
-    graph_table_name: &str,
-) -> io::Result<GraphMetadata> {
-    let mut session = connection.open_session()?;
-    let mut cursor = session.open_record_cursor(graph_table_name)?;
-    let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }
-        .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-    serde_json::from_slice(metadata_json.value()).map_err(io::Error::from)
-}
-
 /// Immutable features of a WiredTiger graph vector index. These can be read from the db and
 /// stored in a catalog for convenient access at runtime.
 pub struct WiredTigerGraphVectorIndex {
@@ -180,6 +166,7 @@ pub struct WiredTigerGraphVectorIndex {
 impl WiredTigerGraphVectorIndex {
     /// Create a new `WiredTigerGraphVectorIndex` from `index_params`, caching immutable
     /// graph metadata.
+    // XXX take args to WiredTigerIndexParams::new()
     pub fn from_db(index_params: WiredTigerIndexParams) -> io::Result<Self> {
         let mut session = index_params.connection.open_session()?;
         let mut cursor = session.open_record_cursor(&index_params.graph_table_name)?;
@@ -192,16 +179,19 @@ impl WiredTigerGraphVectorIndex {
         })
     }
 
-    pub fn from_parts(index_params: WiredTigerIndexParams, metadata: GraphMetadata) -> Self {
-        Self {
-            index_params,
-            metadata,
-        }
-    }
-
     /// Return `GraphMetadata` for this index.
     pub fn metadata(&self) -> &GraphMetadata {
         &self.metadata
+    }
+
+    /// Return the name of the table containing the graph.
+    pub fn graph_table_name(&self) -> &str {
+        &self.index_params.graph_table_name
+    }
+
+    /// Return the name of the table containing the navigational vectors.
+    pub fn nav_table_name(&self) -> &str {
+        &self.index_params.nav_table_name
     }
 }
 

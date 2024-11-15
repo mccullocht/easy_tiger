@@ -2,8 +2,8 @@ use std::{io, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    graph::{Graph, GraphMetadata, GraphNode},
-    wt::{WiredTigerGraph, WiredTigerIndexParams},
+    graph::{Graph, GraphNode},
+    wt::{WiredTigerGraph, WiredTigerGraphVectorIndex},
 };
 use wt_mdb::Connection;
 
@@ -23,14 +23,13 @@ pub struct LookupArgs {
 
 pub fn lookup(
     connection: Arc<Connection>,
-    index_params: WiredTigerIndexParams,
-    metadata: GraphMetadata,
+    index: WiredTigerGraphVectorIndex,
     args: LookupArgs,
 ) -> io::Result<()> {
-    let mut session = connection.open_session().map_err(io::Error::from)?;
+    let mut session = connection.open_session()?;
     let mut graph = WiredTigerGraph::new(
-        metadata,
-        session.open_record_cursor(&index_params.graph_table_name)?,
+        *index.metadata(),
+        session.open_record_cursor(index.graph_table_name())?,
     );
     match graph.get(args.id) {
         None => {

@@ -244,11 +244,7 @@ impl<'a> VisitCandidateGuard<'a> {
 mod test {
     use std::num::NonZero;
 
-    use crate::{
-        scoring::DotProductScorer,
-        test::{TestGraphVectorIndex, TestGraphVectorIndexReader},
-        Neighbor,
-    };
+    use crate::{scoring::DotProductScorer, test::TestGraphVectorIndex, Neighbor};
 
     use super::{GraphSearchParams, GraphSearcher};
 

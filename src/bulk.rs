@@ -18,7 +18,7 @@ use crate::{
     graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader},
     input::NumpyF32VectorStore,
     quantization::binary_quantize,
-    scoring::{DotProductScorer, F32VectorScorer, VectorScorer},
+    scoring::{DotProductScorer, F32VectorScorer},
     search::GraphSearcher,
     wt::{
         encode_graph_node, WiredTigerIndexParams, WiredTigerNavVectorStore, ENTRY_POINT_KEY,
@@ -330,15 +330,12 @@ where
     /// Prune `edges`, enforcing RNG properties with alpha parameter.
     ///
     /// Returns two slices: one containing the selected nodes and one containing the unselected nodes.
-    fn prune<'a, S>(
+    fn prune<'a>(
         &self,
         edges: &'a mut [Neighbor],
         graph: &mut BulkLoadBuilderGraph<'_, D>,
-        scorer: &S,
-    ) -> Result<(&'a [Neighbor], &'a [Neighbor])>
-    where
-        S: VectorScorer<Elem = f32>,
-    {
+        scorer: &dyn F32VectorScorer,
+    ) -> Result<(&'a [Neighbor], &'a [Neighbor])> {
         if edges.is_empty() {
             return Ok((&[], &[]));
         }

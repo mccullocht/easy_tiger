@@ -7,7 +7,7 @@ use std::{
 };
 
 use clap::{command, Parser, Subcommand};
-use easy_tiger::wt::{read_graph_metadata, WiredTigerIndexParams};
+use easy_tiger::wt::{WiredTigerGraphVectorIndex, WiredTigerIndexParams};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
 use wt_mdb::{options::ConnectionOptionsBuilder, Connection};
@@ -54,11 +54,11 @@ fn main() -> std::io::Result<()> {
     .map_err(io::Error::from)?;
     let index_params =
         WiredTigerIndexParams::new(connection.clone(), &cli.wiredtiger_table_basename);
-    let metadata = read_graph_metadata(connection.clone(), &index_params.graph_table_name)?;
+    let index = WiredTigerGraphVectorIndex::from_db(index_params)?;
 
     match cli.command {
-        Commands::Lookup(args) => lookup(connection, index_params, metadata, args),
-        Commands::Search(args) => search(connection, index_params, metadata, args),
+        Commands::Lookup(args) => lookup(connection, index, args),
+        Commands::Search(args) => search(connection, index, args),
         Commands::Add => Err(std::io::Error::from(ErrorKind::Unsupported)),
         Commands::Delete => Err(std::io::Error::from(ErrorKind::Unsupported)),
     }

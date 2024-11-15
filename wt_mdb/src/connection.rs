@@ -1,61 +1,19 @@
-use crate::{session::Session, wrap_ptr_create, Result};
+use crate::{
+    options::ConfigurationString, options::ConnectionOptions, session::Session, wrap_ptr_create,
+    Result,
+};
 use std::{
     ffi::CString,
-    num::NonZero,
     ptr::{self, NonNull},
     sync::Arc,
 };
 
 use wt_sys::{wiredtiger_open, WT_CONNECTION, WT_SESSION};
 
-/// Builder for options when connecting to a WiredTiger database.
-#[derive(Default)]
-pub struct ConnectionOptionsBuilder {
-    create: bool,
-    cache_size_mb: Option<NonZero<usize>>,
-}
-
-impl ConnectionOptionsBuilder {
-    /// If set, create the database if it does not exist.
-    pub fn create(mut self) -> Self {
-        self.create = true;
-        self
-    }
-
-    /// Maximum heap memory to allocate for the cache, in MB.
-    pub fn cache_size_mb(mut self, size: NonZero<usize>) -> Self {
-        self.cache_size_mb = Some(size);
-        self
-    }
-}
-
-/// Options when connecting to a WiredTiger database.
-#[derive(Debug, Default)]
-pub struct ConnectionOptions(Option<CString>);
-
-impl From<ConnectionOptionsBuilder> for ConnectionOptions {
-    fn from(value: ConnectionOptionsBuilder) -> Self {
-        let mut options = Vec::new();
-        if value.create {
-            options.push("create".to_string())
-        }
-        if let Some(cache_size) = value.cache_size_mb {
-            options.push(format!("cache_size={}", cache_size.get() << 20));
-        }
-        if options.is_empty() {
-            Self(None)
-        } else {
-            Self(Some(
-                CString::new(options.join(",")).expect("options does not contain null"),
-            ))
-        }
-    }
-}
-
 /// A connection to a WiredTiger database.
 ///
-/// There is typically only one connection per process. `Connection`s are thread-safe but
-/// `Session`s and `RecordCursor`s are not.
+/// There is typically only one connection per database per process.
+/// `Connection`s may be freely shared between threads and are safe for concurrent access.
 pub struct Connection(NonNull<WT_CONNECTION>);
 
 impl Connection {
@@ -68,12 +26,7 @@ impl Connection {
             result = wiredtiger_open(
                 dbpath.as_ptr(),
                 ptr::null_mut(),
-                options
-                    .unwrap_or_default()
-                    .0
-                    .as_ref()
-                    .map(|s| s.as_ptr())
-                    .unwrap_or(std::ptr::null()),
+                options.unwrap_or_default().as_config_ptr(),
                 &mut connp,
             );
         };

@@ -7,6 +7,7 @@
 //! Unlike the general-purpose WiredTiger library, this library only allows tables
 //! that are keyed by `i64` with byte array payloads.
 mod connection;
+pub mod options;
 mod record_cursor;
 mod session;
 
@@ -118,13 +119,9 @@ impl From<Error> for std::io::Error {
     }
 }
 
-pub use connection::{Connection, ConnectionOptions, ConnectionOptionsBuilder};
+pub use connection::Connection;
 pub use record_cursor::{Record, RecordCursor, RecordView};
-pub use session::{
-    BeginTransactionOptions, BeginTransactionOptionsBuilder, CommitTransactionOptions,
-    CommitTransactionOptionsBuilder, CreateOptions, CreateOptionsBuilder, DropOptions,
-    DropOptionsBuilder, RollbackTransactionOptions, RollbackTransactionOptionsBuilder, Session,
-};
+pub use session::Session;
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {
@@ -147,7 +144,8 @@ mod test {
     use std::io::ErrorKind;
 
     use crate::{
-        connection::{Connection, ConnectionOptions, ConnectionOptionsBuilder},
+        connection::Connection,
+        options::{ConnectionOptions, ConnectionOptionsBuilder},
         record_cursor::{Record, RecordView},
         Error, WiredTigerError,
     };

@@ -10,7 +10,7 @@ use clap::{command, Parser, Subcommand};
 use easy_tiger::wt::{read_graph_metadata, WiredTigerIndexParams};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
-use wt_mdb::{Connection, ConnectionOptionsBuilder};
+use wt_mdb::{options::ConnectionOptionsBuilder, Connection};
 
 #[derive(Parser)]
 #[command(version, about = "EasyTiger vector indexing tool", long_about = None)]

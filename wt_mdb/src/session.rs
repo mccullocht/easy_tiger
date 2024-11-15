@@ -4,7 +4,7 @@
 // * integrate cursor pooling.
 
 use std::{
-    ffi::{CStr, CString},
+    ffi::CStr,
     ptr::{self, NonNull},
     sync::Arc,
 };
@@ -12,145 +12,15 @@ use std::{
 use wt_sys::{WT_CURSOR, WT_SESSION};
 
 use crate::{
-    connection::Connection, make_result, make_table_uri, record_cursor::RecordCursor,
+    connection::Connection,
+    make_result, make_table_uri,
+    options::{
+        BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
+        DropOptions, RollbackTransactionOptions,
+    },
+    record_cursor::RecordCursor,
     wrap_ptr_create, RecordView, Result,
 };
-
-/// An options builder for creating a table, column group, index, or file in WiredTiger.
-#[derive(Default)]
-pub struct CreateOptionsBuilder;
-
-/// Options when creating a table, column group, index, or file in WiredTiger.
-#[derive(Debug, Hash, Eq, PartialEq, Clone)]
-pub struct CreateOptions(CString);
-
-impl Default for CreateOptions {
-    fn default() -> Self {
-        CreateOptions(CString::from(c"key_format=q,value_format=u"))
-    }
-}
-
-impl From<CreateOptionsBuilder> for CreateOptions {
-    fn from(_value: CreateOptionsBuilder) -> Self {
-        Self::default()
-    }
-}
-
-/// An options builder for dropping a table, column group, index, or file in WiredTiger.
-#[derive(Default)]
-pub struct DropOptionsBuilder {
-    force: bool,
-}
-
-impl DropOptionsBuilder {
-    /// If set, return success even if the object does not exist.
-    pub fn set_force(mut self) -> Self {
-        self.force = true;
-        self
-    }
-}
-
-/// Options for dropping a table, column group, index, or file in WiredTiger.
-#[derive(Default, Debug)]
-pub struct DropOptions(Option<CString>);
-
-impl From<DropOptionsBuilder> for DropOptions {
-    fn from(value: DropOptionsBuilder) -> Self {
-        DropOptions(if value.force {
-            Some(CString::from(c"force=true"))
-        } else {
-            None
-        })
-    }
-}
-
-/// Options builder when beginning a WiredTiger transaction.
-#[derive(Default)]
-pub struct BeginTransactionOptionsBuilder {
-    name: Option<String>,
-}
-
-impl BeginTransactionOptionsBuilder {
-    /// Set the name of the transaction, for debugging purposes.
-    pub fn set_name(mut self, name: &str) -> Self {
-        self.name = Some(name.to_owned());
-        self
-    }
-}
-
-/// Options when beginning a new transaction.
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
-pub struct BeginTransactionOptions(Option<CString>);
-
-impl From<BeginTransactionOptionsBuilder> for BeginTransactionOptions {
-    fn from(value: BeginTransactionOptionsBuilder) -> Self {
-        Self(
-            value
-                .name
-                .map(|n| CString::new(format!("name={}", n)).expect("name has no nulls")),
-        )
-    }
-}
-
-/// Options build for commit_transaction() operations.
-#[derive(Default)]
-pub struct CommitTransactionOptionsBuilder {
-    operation_timeout_ms: Option<u32>,
-}
-
-impl CommitTransactionOptionsBuilder {
-    /// When set to a non-zero value acts a requested time limit for the operations in ms.
-    /// This is not a guarantee -- the operation may still take longer than the timeout.
-    /// If the limit is reached the operation may be rolled back.
-    pub fn operation_timeout_ms(mut self, timeout: Option<u32>) -> Self {
-        self.operation_timeout_ms = timeout;
-        self
-    }
-}
-
-/// Options for commit_transaction() operations.
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
-pub struct CommitTransactionOptions(Option<CString>);
-
-impl From<CommitTransactionOptionsBuilder> for CommitTransactionOptions {
-    fn from(value: CommitTransactionOptionsBuilder) -> Self {
-        Self(
-            value
-                .operation_timeout_ms
-                .map(|t| CString::new(format!("operation_timeout_ms={}", t)).expect("no nulls")),
-        )
-    }
-}
-
-/// Options build for rollback_transaction() operations.
-#[derive(Default)]
-pub struct RollbackTransactionOptionsBuilder {
-    operation_timeout_ms: Option<u32>,
-}
-
-impl RollbackTransactionOptionsBuilder {
-    /// When set to a non-zero value acts a requested time limit for the operations in ms.
-    /// This is not a guarantee -- the operation may still take longer than the timeout.
-    /// If the limit is reached the operation may be rolled back.
-    pub fn operation_timeout_ms(mut self, timeout: Option<u32>) -> Self {
-        self.operation_timeout_ms = timeout;
-        self
-    }
-}
-
-/// Options for rollback_transaction() operations.
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
-pub struct RollbackTransactionOptions(Option<CString>);
-
-impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
-    fn from(value: RollbackTransactionOptionsBuilder) -> Self {
-        Self(
-            value
-                .operation_timeout_ms
-                .map(|t| CString::new(format!("operation_timeout_ms={}", t)).expect("no nulls")),
-        )
-    }
-}
 
 /// Inner state of a `Session`.
 ///
@@ -208,7 +78,7 @@ impl Session {
                 (self.0.ptr.as_ref().create.unwrap())(
                     self.0.ptr.as_ptr(),
                     uri.as_ptr(),
-                    config.unwrap_or_default().0.as_ptr(),
+                    config.unwrap_or_default().as_config_ptr(),
                 ),
                 (),
             )
@@ -230,12 +100,7 @@ impl Session {
                 self.0.ptr.as_ref().drop.unwrap()(
                     self.0.ptr.as_ptr(),
                     uri.as_ptr(),
-                    config
-                        .unwrap_or_default()
-                        .0
-                        .as_ref()
-                        .map(|s| s.as_ptr())
-                        .unwrap_or(std::ptr::null()),
+                    config.unwrap_or_default().as_config_ptr(),
                 ),
                 (),
             )
@@ -280,10 +145,7 @@ impl Session {
             make_result(
                 self.0.ptr.as_ref().begin_transaction.unwrap()(
                     self.0.ptr.as_ptr(),
-                    options
-                        .and_then(|o| o.0.as_ref())
-                        .map(|s| s.as_ptr())
-                        .unwrap_or(std::ptr::null()),
+                    options.as_config_ptr(),
                 ),
                 (),
             )
@@ -302,10 +164,7 @@ impl Session {
             make_result(
                 self.0.ptr.as_ref().commit_transaction.unwrap()(
                     self.0.ptr.as_ptr(),
-                    options
-                        .and_then(|o| o.0.as_ref())
-                        .map(|s| s.as_ptr())
-                        .unwrap_or(std::ptr::null()),
+                    options.as_config_ptr(),
                 ),
                 (),
             )
@@ -326,10 +185,7 @@ impl Session {
             make_result(
                 self.0.ptr.as_ref().rollback_transaction.unwrap()(
                     self.0.ptr.as_ptr(),
-                    options
-                        .and_then(|o| o.0.as_ref())
-                        .map(|s| s.as_ptr())
-                        .unwrap_or(std::ptr::null()),
+                    options.as_config_ptr(),
                 ),
                 (),
             )

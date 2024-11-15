@@ -18,9 +18,7 @@ use crate::{
     graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader, NavVectorStore},
     input::NumpyF32VectorStore,
     quantization::binary_quantize,
-    scoring::{
-        DotProductScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer, VectorScorer,
-    },
+    scoring::{DotProductScorer, F32VectorScorer, HammingScorer, VectorScorer},
     search::GraphSearcher,
     wt::{
         encode_graph_node, WiredTigerIndexParams, WiredTigerNavVectorStore, ENTRY_POINT_KEY,
@@ -426,16 +424,12 @@ impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D> {
     type Graph = BulkLoadBuilderGraph<'a, D>;
     type NavVectorStore = WiredTigerNavVectorStore;
 
-    fn scorer(&self) -> Box<dyn F32VectorScorer> {
-        Box::new(DotProductScorer)
+    fn metadata(&self) -> &GraphMetadata {
+        &self.0.metadata
     }
 
     fn graph(&mut self) -> Result<Self::Graph> {
         Ok(BulkLoadBuilderGraph(self.0))
-    }
-
-    fn nav_scorer(&self) -> Box<dyn QuantizedVectorScorer> {
-        Box::new(HammingScorer)
     }
 
     fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {

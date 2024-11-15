@@ -2,10 +2,7 @@ use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
 use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, Session, WiredTigerError};
 
-use crate::{
-    graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader, NavVectorStore},
-    scoring::{DotProductScorer, F32VectorScorer, HammingScorer},
-};
+use crate::graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader, NavVectorStore};
 
 // TODO: drop WiredTiger from most of these names, it feels redundant and verbose.
 
@@ -223,8 +220,8 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
     type Graph = WiredTigerGraph;
     type NavVectorStore = WiredTigerNavVectorStore;
 
-    fn scorer(&self) -> Box<dyn F32VectorScorer> {
-        Box::new(DotProductScorer)
+    fn metadata(&self) -> &GraphMetadata {
+        &self.index.metadata
     }
 
     fn graph(&mut self) -> Result<Self::Graph> {
@@ -233,10 +230,6 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
             self.session
                 .open_record_cursor(&self.index.index_params.graph_table_name)?,
         ))
-    }
-
-    fn nav_scorer(&self) -> Box<dyn crate::scoring::QuantizedVectorScorer> {
-        Box::new(HammingScorer)
     }
 
     fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {

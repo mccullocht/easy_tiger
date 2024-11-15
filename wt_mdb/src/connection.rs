@@ -1,6 +1,6 @@
-use crate::{session::Session, wrap_ptr_create, Result};
+use crate::{options::ConfigurationString, session::Session, wrap_ptr_create, Result};
 use std::{
-    ffi::CString,
+    ffi::{CStr, CString},
     num::NonZero,
     ptr::{self, NonNull},
     sync::Arc,
@@ -52,10 +52,16 @@ impl From<ConnectionOptionsBuilder> for ConnectionOptions {
     }
 }
 
+impl ConfigurationString for ConnectionOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.0.as_deref()
+    }
+}
+
 /// A connection to a WiredTiger database.
 ///
-/// There is typically only one connection per process. `Connection`s are thread-safe but
-/// `Session`s and `RecordCursor`s are not.
+/// There is typically only one connection per database per process.
+/// `Connection`s may be freely shared between threads and are safe for concurrent access.
 pub struct Connection(NonNull<WT_CONNECTION>);
 
 impl Connection {
@@ -68,12 +74,7 @@ impl Connection {
             result = wiredtiger_open(
                 dbpath.as_ptr(),
                 ptr::null_mut(),
-                options
-                    .unwrap_or_default()
-                    .0
-                    .as_ref()
-                    .map(|s| s.as_ptr())
-                    .unwrap_or(std::ptr::null()),
+                options.unwrap_or_default().as_config_ptr(),
                 &mut connp,
             );
         };

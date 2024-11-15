@@ -57,37 +57,8 @@ pub trait NavVectorStore {
     fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }
 
-pub struct NavVectorScorer<S> {
-    store: S,
-    query: Vec<u8>,
-    scorer: Box<dyn QuantizedVectorScorer>,
-}
-
-impl<S> NavVectorScorer<S>
-where
-    S: NavVectorStore,
-{
-    pub fn new<Q: Into<Vec<u8>>>(
-        store: S,
-        query: Q,
-        scorer: Box<dyn QuantizedVectorScorer>,
-    ) -> Self {
-        Self {
-            store,
-            query: query.into(),
-            scorer,
-        }
-    }
-
-    pub fn score(&mut self, vertex: i64) -> Option<Result<f64>> {
-        self.store
-            .get(vertex)
-            .map(|r| r.map(|v| self.scorer.score(&self.query, v.as_ref())))
-    }
-}
-
-/// `GraphVectorIndex` is used to generate objects for graph navigation.
-pub trait GraphVectorIndex {
+/// `GraphVectorIndexReader` is used to generate objects for graph navigation.
+pub trait GraphVectorIndexReader {
     type Graph: Graph;
     type NavVectorStore: NavVectorStore;
 
@@ -99,6 +70,9 @@ pub trait GraphVectorIndex {
     /// Return an object that can be used to navigate the graph.
     fn graph(&mut self) -> Result<Self::Graph>;
 
-    /// Return an object that can be used to score navigational vectors.
+    /// Return the scorer used for navigation vectors.
+    fn nav_scorer(&self) -> Box<dyn QuantizedVectorScorer>;
+
+    /// Return an object that can be used to read navigational vectors.
     fn nav_vectors(&mut self) -> Result<Self::NavVectorStore>;
 }

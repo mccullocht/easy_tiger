@@ -3,9 +3,11 @@ use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, Session, WiredTigerError};
 
 use crate::{
-    graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndex, NavVectorStore},
-    scoring::{DotProductScorer, F32VectorScorer},
+    graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader, NavVectorStore},
+    scoring::{DotProductScorer, F32VectorScorer, HammingScorer},
 };
+
+// TODO: drop WiredTiger from most of these names, it feels redundant and verbose.
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
@@ -13,6 +15,7 @@ pub const ENTRY_POINT_KEY: i64 = -1;
 pub const METADATA_KEY: i64 = -2;
 
 /// Parameters to to open and access a WiredTiger graph index.
+// XXX not sure if I really need this anymore.
 #[derive(Clone)]
 pub struct WiredTigerIndexParams {
     /// Connection to WiredTiger database.
@@ -157,6 +160,7 @@ impl Graph for WiredTigerGraph {
 }
 
 /// Read graph index metadata from the named graph table.
+// TODO: replace this call
 // TODO: better story around caching this data and session/cursor management in general.
 pub fn read_graph_metadata(
     connection: Arc<Connection>,
@@ -166,16 +170,56 @@ pub fn read_graph_metadata(
     let mut cursor = session.open_record_cursor(graph_table_name)?;
     let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }
         .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-    serde_json::from_slice(metadata_json.value()).map_err(|e| e.into())
+    serde_json::from_slice(metadata_json.value()).map_err(io::Error::from)
 }
 
+/// Immutable features of a WiredTiger graph vector index. These can be read from the db and
+/// stored in a catalog for convenient access at runtime.
 pub struct WiredTigerGraphVectorIndex {
     index_params: WiredTigerIndexParams,
     metadata: GraphMetadata,
+}
+
+impl WiredTigerGraphVectorIndex {
+    /// Create a new `WiredTigerGraphVectorIndex` from `index_params`, caching immutable
+    /// graph metadata.
+    pub fn new(index_params: WiredTigerIndexParams) -> io::Result<Self> {
+        let mut session = index_params.connection.open_session()?;
+        let mut cursor = session.open_record_cursor(&index_params.graph_table_name)?;
+        let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }
+            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+        let metadata = serde_json::from_slice(metadata_json.value())?;
+        Ok(Self {
+            index_params,
+            metadata,
+        })
+    }
+
+    /// Return `GraphMetadata` for this index.
+    pub fn metadata(&self) -> &GraphMetadata {
+        &self.metadata
+    }
+}
+
+/// A `GraphVectorIndexReader` implementation that operates entirely on a WiredTiger graph.
+pub struct WiredTigerGraphVectorIndexReader {
+    index: Arc<WiredTigerGraphVectorIndex>,
     session: Session,
 }
 
-impl GraphVectorIndex for WiredTigerGraphVectorIndex {
+impl WiredTigerGraphVectorIndexReader {
+    /// Create a new `WiredTigerGraphVectorIndex` given a named index and a session to access that data.
+    pub fn new(index: Arc<WiredTigerGraphVectorIndex>, session: Session) -> Self {
+        Self { index, session }
+    }
+
+    /// Unwrap into the inner Session.
+    pub fn into_session(self) -> Session {
+        self.session
+    }
+}
+
+impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
     type Graph = WiredTigerGraph;
     type NavVectorStore = WiredTigerNavVectorStore;
 
@@ -185,16 +229,20 @@ impl GraphVectorIndex for WiredTigerGraphVectorIndex {
 
     fn graph(&mut self) -> Result<Self::Graph> {
         Ok(WiredTigerGraph::new(
-            self.metadata,
+            self.index.metadata,
             self.session
-                .open_record_cursor(&self.index_params.graph_table_name)?,
+                .open_record_cursor(&self.index.index_params.graph_table_name)?,
         ))
+    }
+
+    fn nav_scorer(&self) -> Box<dyn crate::scoring::QuantizedVectorScorer> {
+        Box::new(HammingScorer)
     }
 
     fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
         Ok(WiredTigerNavVectorStore::new(
             self.session
-                .open_record_cursor(&self.index_params.nav_table_name)?,
+                .open_record_cursor(&self.index.index_params.nav_table_name)?,
         ))
     }
 }

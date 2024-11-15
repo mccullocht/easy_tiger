@@ -15,10 +15,10 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use wt_mdb::{Record, Result, Session};
 
 use crate::{
-    graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader, NavVectorStore},
+    graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader},
     input::NumpyF32VectorStore,
     quantization::binary_quantize,
-    scoring::{DotProductScorer, F32VectorScorer, HammingScorer, VectorScorer},
+    scoring::{DotProductScorer, F32VectorScorer, VectorScorer},
     search::GraphSearcher,
     wt::{
         encode_graph_node, WiredTigerIndexParams, WiredTigerNavVectorStore, ENTRY_POINT_KEY,
@@ -156,19 +156,15 @@ where
                 // work because any RecordCursor objects returned have to be destroyed before the Mutex is
                 // released.
                 let mut session = self.wt_params.connection.open_session()?;
-                let mut nav = WiredTigerNavVectorStore::new(
-                    session
-                        .open_record_cursor(&self.wt_params.nav_table_name)
-                        .unwrap(),
-                );
                 let mut searcher = GraphSearcher::new(self.metadata.index_search_params);
                 let scorer = DotProductScorer;
                 for i in nodes {
                     // Use a transaction for each search. Without this each lookup will be a separate transaction
                     // which obtains a reader lock inside the session. Overhead for that is ~10x.
                     session.begin_transaction(None)?;
+                    let mut reader = BulkLoadGraphVectorIndexReader(self, session);
                     in_flight.insert(i);
-                    let mut edges = self.search_for_insert(i, &mut searcher, &mut nav)?;
+                    let mut edges = self.search_for_insert(i, &mut searcher, &mut reader)?;
                     let worst_score = edges.last().map(|n| n.score()).unwrap_or(f64::MIN);
                     edges.extend(in_flight.iter().filter_map(|v| {
                         if *v == i {
@@ -198,6 +194,7 @@ where
                         }
                     }
                     // Close out the transaction. There should be no conflicts as we did not write to the database.
+                    session = reader.into_session();
                     session.rollback_transaction(None)?;
                     in_flight.remove(&i);
                     progress();
@@ -272,23 +269,14 @@ where
         Ok(stats)
     }
 
-    fn search_for_insert<N>(
+    fn search_for_insert(
         &self,
         vertex_id: usize,
         searcher: &mut GraphSearcher,
-        nav_vectors: &mut N,
-    ) -> Result<Vec<Neighbor>>
-    where
-        N: NavVectorStore,
-    {
+        reader: &mut BulkLoadGraphVectorIndexReader<'_, D>,
+    ) -> Result<Vec<Neighbor>> {
         let mut graph = BulkLoadBuilderGraph(self);
-        let mut candidates = searcher.search_for_insert(
-            vertex_id as i64,
-            &mut graph,
-            &DotProductScorer,
-            nav_vectors,
-            &HammingScorer,
-        )?;
+        let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
         let pruned_len = self
             .prune(&mut candidates, &mut graph, &DotProductScorer)?
             .0

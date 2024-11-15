@@ -1,9 +1,8 @@
 use std::collections::HashSet;
 
 use crate::{
-    graph::{Graph, GraphNode, GraphSearchParams, NavVectorStore},
+    graph::{Graph, GraphNode, GraphSearchParams, GraphVectorIndexReader, NavVectorStore},
     quantization::binary_quantize,
-    scoring::VectorScorer,
     Neighbor,
 };
 
@@ -16,7 +15,6 @@ pub struct GraphSearcher {
     params: GraphSearchParams,
 }
 
-// TODO: consider attaching relevant scorers and quantization function to the Graph.
 impl GraphSearcher {
     /// Create a new, reusable graph searcher.
     pub fn new(params: GraphSearchParams) -> Self {
@@ -32,76 +30,50 @@ impl GraphSearcher {
         &self.params
     }
 
-    /// Search for `query` in the given `graph`. `nav` and `nav_scorer` are used to score candidates
-    /// as we traverse the graph, `scorer` may be used to re-rank results if configured for this
-    /// searcher.
+    /// Search for `query` in the given graph `reader`. The reader will search in quantized space
+    /// before optionally re-ranking based on higher fidelity vectors stored in the graph.
     ///
     /// Returns an approximate list of neighbors with the highest scores.
-    // NB: graph and nav have to be mutable, which means that we can only use one thread internally for
-    // searching. A freelist or generator would be necessary to do a multi-threaded search that pops
-    // multiple candidates at once. This would also require significant changes to CandidateList.
-    pub fn search<G, N, S, A>(
+    pub fn search<R: GraphVectorIndexReader>(
         &mut self,
         query: &[f32],
-        graph: &mut G,
-        scorer: &S,
-        nav: &mut N,
-        nav_scorer: &A,
-    ) -> Result<Vec<Neighbor>>
-    where
-        G: Graph,
-        S: VectorScorer<Elem = f32>,
-        N: NavVectorStore,
-        A: VectorScorer<Elem = u8>,
-    {
+        reader: &mut R,
+    ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, graph, scorer, nav, nav_scorer)
+        self.search_internal(query, reader)
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
-    pub fn search_for_insert<G, N, S, A>(
+    pub fn search_for_insert<R: GraphVectorIndexReader>(
         &mut self,
         vertex_id: i64,
-        graph: &mut G,
-        scorer: &S,
-        nav: &mut N,
-        nav_scorer: &A,
-    ) -> Result<Vec<Neighbor>>
-    where
-        G: Graph,
-        S: VectorScorer<Elem = f32>,
-        N: NavVectorStore,
-        A: VectorScorer<Elem = u8>,
-    {
+        reader: &mut R,
+    ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         // Insertions may be concurrent and there could already be backlinks to this vertex in the graph.
         // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
         self.seen.insert(vertex_id);
 
-        let query = graph
+        // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
+        let query = reader
+            .graph()?
             .get(vertex_id)
             .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?
             .vector()
             .to_vec();
-        self.search_internal(&query, graph, scorer, nav, nav_scorer)
+        self.search_internal(&query, reader)
     }
 
-    fn search_internal<G, N, S, A>(
+    fn search_internal<R: GraphVectorIndexReader>(
         &mut self,
         query: &[f32],
-        graph: &mut G,
-        scorer: &S,
-        nav: &mut N,
-        nav_scorer: &A,
-    ) -> Result<Vec<Neighbor>>
-    where
-        G: Graph,
-        S: VectorScorer<Elem = f32>,
-        N: NavVectorStore,
-        A: VectorScorer<Elem = u8>,
-    {
+        reader: &mut R,
+    ) -> Result<Vec<Neighbor>> {
         self.candidates.clear();
 
+        let mut graph = reader.graph()?;
+        let mut nav = reader.nav_vectors()?;
+        let nav_scorer = reader.metadata().new_nav_scorer();
         let nav_query = if let Some(entry_point) = graph.entry_point() {
             let nav_query = binary_quantize(query);
             let entry_vector = nav
@@ -142,6 +114,7 @@ impl GraphSearcher {
 
         let results = if self.params.num_rerank > 0 {
             let mut normalized_query = query.to_vec();
+            let scorer = reader.metadata().new_scorer();
             scorer.normalize(&mut normalized_query);
             self.candidates
                 .iter()
@@ -272,16 +245,16 @@ mod test {
     use std::num::NonZero;
 
     use crate::{
-        scoring::{DotProductScorer, HammingScorer},
-        test::{TestGraph, TestNavVectorStore, TestVectorData},
+        scoring::DotProductScorer,
+        test::{TestGraphVectorIndex, TestGraphVectorIndexReader},
         Neighbor,
     };
 
     use super::{GraphSearchParams, GraphSearcher};
 
-    fn build_test_graph(max_edges: usize) -> (TestGraph, TestNavVectorStore) {
+    fn build_test_graph(max_edges: usize) -> TestGraphVectorIndex {
         let dim_values = [-0.25, -0.125, 0.125, 0.25];
-        let test_data = TestVectorData::new(
+        TestGraphVectorIndex::new(
             NonZero::new(max_edges).unwrap(),
             DotProductScorer,
             (0..256).map(|v| {
@@ -292,10 +265,6 @@ mod test {
                     dim_values[(v >> 6) & 0x3],
                 ])
             }),
-        );
-        (
-            TestGraph::from(test_data.clone()),
-            TestNavVectorStore::from(test_data.clone()),
         )
     }
 
@@ -308,20 +277,14 @@ mod test {
 
     #[test]
     fn basic_no_rerank() {
-        let (mut graph, mut nav) = build_test_graph(4);
+        let index = build_test_graph(4);
         let mut searcher = GraphSearcher::new(GraphSearchParams {
             beam_width: NonZero::new(4).unwrap(),
             num_rerank: 0,
         });
         assert_eq!(
             searcher
-                .search(
-                    &[-0.1, -0.1, -0.1, -0.1],
-                    &mut graph,
-                    &DotProductScorer,
-                    &mut nav,
-                    &HammingScorer
-                )
+                .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
                 .unwrap(),
             vec![
                 Neighbor::new(0, 1.0),
@@ -334,7 +297,7 @@ mod test {
 
     #[test]
     fn basic_rerank() {
-        let (mut graph, mut nav) = build_test_graph(4);
+        let index = build_test_graph(4);
         let mut searcher = GraphSearcher::new(GraphSearchParams {
             beam_width: NonZero::new(4).unwrap(),
             num_rerank: 4,
@@ -342,13 +305,7 @@ mod test {
         assert_eq!(
             normalize_scores(
                 searcher
-                    .search(
-                        &[-0.1, -0.1, -0.1, -0.1],
-                        &mut graph,
-                        &DotProductScorer,
-                        &mut nav,
-                        &HammingScorer
-                    )
+                    .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
                     .unwrap()
             ),
             vec![

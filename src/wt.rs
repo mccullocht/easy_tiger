@@ -192,6 +192,13 @@ impl WiredTigerGraphVectorIndex {
         })
     }
 
+    pub fn from_parts(index_params: WiredTigerIndexParams, metadata: GraphMetadata) -> Self {
+        Self {
+            index_params,
+            metadata,
+        }
+    }
+
     /// Return `GraphMetadata` for this index.
     pub fn metadata(&self) -> &GraphMetadata {
         &self.metadata

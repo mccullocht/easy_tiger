@@ -9,9 +9,8 @@ use std::{
 use clap::Args;
 use easy_tiger::{
     graph::{GraphMetadata, GraphSearchParams},
-    scoring::{DotProductScorer, HammingScorer},
     search::GraphSearcher,
-    wt::{WiredTigerGraph, WiredTigerIndexParams, WiredTigerNavVectorStore},
+    wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader, WiredTigerIndexParams},
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use wt_mdb::Connection;
@@ -34,6 +33,7 @@ pub struct SearchArgs {
     // TODO: recall statistics
 }
 
+// XXX this should take WiredTigerGraphVectorIndex instead of index_params and metadata.
 pub fn search(
     connection: Arc<Connection>,
     index_params: WiredTigerIndexParams,
@@ -48,19 +48,16 @@ pub fn search(
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
     );
-
-    let mut session = connection.open_session()?;
-    let mut graph = WiredTigerGraph::new(
-        metadata,
-        session.open_record_cursor(&index_params.graph_table_name)?,
-    );
-    let mut nav_vectors =
-        WiredTigerNavVectorStore::new(session.open_record_cursor(&index_params.nav_table_name)?);
     let mut searcher = GraphSearcher::new(GraphSearchParams {
         beam_width: args.candidates,
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
     });
 
+    let index = Arc::new(WiredTigerGraphVectorIndex::from_parts(
+        index_params,
+        metadata,
+    ));
+    let mut session = connection.open_session()?;
     let progress = ProgressBar::new(limit as u64)
         .with_style(
             ProgressStyle::default_bar()
@@ -70,15 +67,11 @@ pub fn search(
         .with_finish(indicatif::ProgressFinish::AndLeave);
     for q in query_vectors.iter().take(limit) {
         session.begin_transaction(None)?;
-        let results = searcher.search(
-            q,
-            &mut graph,
-            &DotProductScorer,
-            &mut nav_vectors,
-            &HammingScorer,
-        )?;
+        let mut reader = WiredTigerGraphVectorIndexReader::new(index.clone(), session);
+        let results = searcher.search(q, &mut reader)?;
         assert_ne!(results.len(), 0);
         progress.inc(1);
+        session = reader.into_session();
         session.rollback_transaction(None)?;
     }
     progress.finish_using_style();

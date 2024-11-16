@@ -6,13 +6,13 @@ use std::{
     ops::Range,
     sync::{
         atomic::{self, AtomicI64},
-        Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
     },
 };
 
 use crossbeam_skiplist::SkipSet;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-use wt_mdb::{Record, Result, Session};
+use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
     graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader},
@@ -21,7 +21,7 @@ use crate::{
     scoring::{DotProductScorer, F32VectorScorer},
     search::GraphSearcher,
     wt::{
-        encode_graph_node, WiredTigerIndexParams, WiredTigerNavVectorStore, ENTRY_POINT_KEY,
+        encode_graph_node, WiredTigerGraphVectorIndex, WiredTigerNavVectorStore, ENTRY_POINT_KEY,
         METADATA_KEY,
     },
     Neighbor,
@@ -55,8 +55,8 @@ pub struct GraphStats {
 
 /// Builds a Vamana graph for a bulk load.
 pub struct BulkLoadBuilder<D> {
-    metadata: GraphMetadata,
-    wt_params: WiredTigerIndexParams,
+    connection: Arc<Connection>,
+    index: WiredTigerGraphVectorIndex,
     limit: usize,
 
     vectors: NumpyF32VectorStore<D>,
@@ -73,18 +73,18 @@ where
     /// Create a new bulk graph builder with the passed vector set and configuration.
     /// `limit` limits the number of vectors processed to less than the full set.
     pub fn new(
-        metadata: GraphMetadata,
-        wt_params: WiredTigerIndexParams,
+        connection: Arc<Connection>,
+        index: WiredTigerGraphVectorIndex,
         vectors: NumpyF32VectorStore<D>,
         limit: usize,
     ) -> Self {
         let mut graph_vec = Vec::with_capacity(vectors.len());
         graph_vec.resize_with(vectors.len(), || {
-            RwLock::new(Vec::with_capacity(metadata.max_edges.get() * 2))
+            RwLock::new(Vec::with_capacity(index.metadata().max_edges.get() * 2))
         });
         Self {
-            metadata,
-            wt_params,
+            connection,
+            index,
             limit,
             vectors,
             centroid: Vec::new(),
@@ -98,10 +98,10 @@ where
     where
         P: Fn(),
     {
-        let mut session = self.wt_params.connection.open_session()?;
-        let mut sum = vec![0.0; self.metadata.dimensions.get()];
+        let mut session = self.connection.open_session()?;
+        let mut sum = vec![0.0; self.index.metadata().dimensions.get()];
         session.bulk_load(
-            &self.wt_params.nav_table_name,
+            self.index.nav_table_name(),
             None,
             self.vectors
                 .iter()
@@ -120,7 +120,10 @@ where
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect();
-        self.metadata.new_scorer().normalize(&mut self.centroid);
+        self.index
+            .metadata()
+            .new_scorer()
+            .normalize(&mut self.centroid);
         Ok(())
     }
 
@@ -134,7 +137,7 @@ where
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
-        let scorer = self.metadata.new_scorer();
+        let scorer = self.index.metadata().new_scorer();
         let apply_mu = Mutex::new((0i64, scorer.score(&self.vectors[0], &self.centroid)));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
@@ -151,8 +154,8 @@ where
                 // objects to be Send + Sync, but Session is only Send and wrapping it in a Mutex does not
                 // work because any RecordCursor objects returned have to be destroyed before the Mutex is
                 // released.
-                let mut session = self.wt_params.connection.open_session()?;
-                let mut searcher = GraphSearcher::new(self.metadata.index_search_params);
+                let mut session = self.connection.open_session()?;
+                let mut searcher = GraphSearcher::new(self.index.metadata().index_search_params);
                 let scorer = DotProductScorer;
                 for i in nodes {
                     // Use a transaction for each search. Without this each lookup will be a separate transaction
@@ -206,7 +209,7 @@ where
     {
         // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
         for (i, n) in self.graph.iter().enumerate().take(self.limit) {
-            self.maybe_prune_node(i, n.write().unwrap(), self.metadata.max_edges)?;
+            self.maybe_prune_node(i, n.write().unwrap(), self.index.metadata().max_edges)?;
             progress();
         }
         Ok(())
@@ -225,7 +228,10 @@ where
             unconnected: 0,
         };
         let metadata_rows = vec![
-            Record::new(METADATA_KEY, serde_json::to_vec(&self.metadata).unwrap()),
+            Record::new(
+                METADATA_KEY,
+                serde_json::to_vec(&self.index.metadata()).unwrap(),
+            ),
             Record::new(
                 ENTRY_POINT_KEY,
                 self.entry_vertex
@@ -234,9 +240,9 @@ where
                     .to_vec(),
             ),
         ];
-        let mut session = self.wt_params.connection.open_session()?;
+        let mut session = self.connection.open_session()?;
         session.bulk_load(
-            &self.wt_params.graph_table_name,
+            self.index.graph_table_name(),
             None,
             metadata_rows.into_iter().chain(
                 self.vectors
@@ -370,13 +376,13 @@ where
 
                 if select {
                     selected.insert(i);
-                    if selected.len() >= self.metadata.max_edges.get() {
+                    if selected.len() >= self.index.metadata().max_edges.get() {
                         break;
                     }
                 }
             }
 
-            if selected.len() >= self.metadata.max_edges.get() {
+            if selected.len() >= self.index.metadata().max_edges.get() {
                 break;
             }
         }
@@ -403,7 +409,7 @@ impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D> {
     type NavVectorStore = WiredTigerNavVectorStore;
 
     fn metadata(&self) -> &GraphMetadata {
-        &self.0.metadata
+        self.0.index.metadata()
     }
 
     fn graph(&mut self) -> Result<Self::Graph> {
@@ -412,8 +418,7 @@ impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D> {
 
     fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
         Ok(WiredTigerNavVectorStore::new(
-            self.1
-                .open_record_cursor(&self.0.wt_params.nav_table_name)?,
+            self.1.open_record_cursor(self.0.index.nav_table_name())?,
         ))
     }
 }

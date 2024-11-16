@@ -16,6 +16,7 @@ pub struct GraphSearchParams {
 }
 
 /// Metadata about graph shape and construction.
+// TODO: rename to GraphConfig.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct GraphMetadata {
     pub dimensions: NonZero<usize>,

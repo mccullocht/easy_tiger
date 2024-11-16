@@ -1,13 +1,10 @@
 mod lookup;
 mod search;
 
-use std::{
-    io::{self, ErrorKind},
-    num::NonZero,
-};
+use std::{io::ErrorKind, num::NonZero};
 
 use clap::{command, Parser, Subcommand};
-use easy_tiger::wt::{WiredTigerGraphVectorIndex, WiredTigerIndexParams};
+use easy_tiger::wt::WiredTigerGraphVectorIndex;
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
 use wt_mdb::{options::ConnectionOptionsBuilder, Connection};
@@ -50,11 +47,8 @@ fn main() -> std::io::Result<()> {
                 .cache_size_mb(cli.wiredtiger_cache_size_mb)
                 .into(),
         ),
-    )
-    .map_err(io::Error::from)?;
-    let index_params =
-        WiredTigerIndexParams::new(connection.clone(), &cli.wiredtiger_table_basename);
-    let index = WiredTigerGraphVectorIndex::from_db(index_params)?;
+    )?;
+    let index = WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?;
 
     match cli.command {
         Commands::Lookup(args) => lookup(connection, index, args),

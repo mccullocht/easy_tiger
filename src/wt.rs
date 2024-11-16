@@ -11,28 +11,6 @@ pub const ENTRY_POINT_KEY: i64 = -1;
 /// Key in the graph table containing metadata.
 pub const METADATA_KEY: i64 = -2;
 
-/// Parameters to to open and access a WiredTiger graph index.
-// XXX not sure if I really need this anymore. fold it into WiredTigerGraphVectorIndex?
-#[derive(Clone)]
-pub struct WiredTigerIndexParams {
-    /// Connection to WiredTiger database.
-    pub connection: Arc<Connection>,
-    /// Name of the table containing raw vectors and graph.
-    pub graph_table_name: String,
-    /// Name of the table containing navigational quantized vectors.
-    pub nav_table_name: String,
-}
-
-impl WiredTigerIndexParams {
-    pub fn new(connection: Arc<Connection>, table_basename: &str) -> Self {
-        Self {
-            connection,
-            graph_table_name: format!("{}.graph", table_basename),
-            nav_table_name: format!("{}.nav_vectors", table_basename),
-        }
-    }
-}
-
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
 pub struct WiredTigerNavVectorStore {
     cursor: RecordCursor,
@@ -159,22 +137,35 @@ impl Graph for WiredTigerGraph {
 /// Immutable features of a WiredTiger graph vector index. These can be read from the db and
 /// stored in a catalog for convenient access at runtime.
 pub struct WiredTigerGraphVectorIndex {
-    index_params: WiredTigerIndexParams,
+    graph_table_name: String,
+    nav_table_name: String,
     metadata: GraphMetadata,
 }
 
 impl WiredTigerGraphVectorIndex {
-    /// Create a new `WiredTigerGraphVectorIndex` from `index_params`, caching immutable
-    /// graph metadata.
-    // XXX take args to WiredTigerIndexParams::new()
-    pub fn from_db(index_params: WiredTigerIndexParams) -> io::Result<Self> {
-        let mut session = index_params.connection.open_session()?;
-        let mut cursor = session.open_record_cursor(&index_params.graph_table_name)?;
+    /// Create a new `WiredTigerGraphVectorIndex` from the relevant db tables, extracting
+    /// immutable graph metadata that can be used across operations.
+    pub fn from_db(connection: &Arc<Connection>, table_basename: &str) -> io::Result<Self> {
+        let mut session = connection.open_session()?;
+        let (graph_table_name, nav_table_name) = Self::generate_table_names(table_basename);
+        let mut cursor = session.open_record_cursor(&graph_table_name)?;
         let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }
             .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
         let metadata = serde_json::from_slice(metadata_json.value())?;
         Ok(Self {
-            index_params,
+            graph_table_name,
+            nav_table_name,
+            metadata,
+        })
+    }
+
+    /// Create a new `WiredTigerGraphVectorIndex` for table initialization, providing
+    /// graph metadata up front.
+    pub fn from_init(metadata: GraphMetadata, table_basename: &str) -> io::Result<Self> {
+        let (graph_table_name, nav_table_name) = Self::generate_table_names(table_basename);
+        Ok(Self {
+            graph_table_name,
+            nav_table_name,
             metadata,
         })
     }
@@ -186,12 +177,19 @@ impl WiredTigerGraphVectorIndex {
 
     /// Return the name of the table containing the graph.
     pub fn graph_table_name(&self) -> &str {
-        &self.index_params.graph_table_name
+        &self.graph_table_name
     }
 
     /// Return the name of the table containing the navigational vectors.
     pub fn nav_table_name(&self) -> &str {
-        &self.index_params.nav_table_name
+        &self.nav_table_name
+    }
+
+    fn generate_table_names(table_basename: &str) -> (String, String) {
+        (
+            format!("{}.graph", table_basename),
+            format!("{}.nav_vectors", table_basename),
+        )
     }
 }
 
@@ -225,14 +223,14 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
         Ok(WiredTigerGraph::new(
             self.index.metadata,
             self.session
-                .open_record_cursor(&self.index.index_params.graph_table_name)?,
+                .open_record_cursor(&self.index.graph_table_name)?,
         ))
     }
 
     fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
         Ok(WiredTigerNavVectorStore::new(
             self.session
-                .open_record_cursor(&self.index.index_params.nav_table_name)?,
+                .open_record_cursor(&self.index.nav_table_name)?,
         ))
     }
 }

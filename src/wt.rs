@@ -231,6 +231,17 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
     }
 }
 
+impl Clone for WiredTigerGraphVectorIndexReader {
+    fn clone(&self) -> Self {
+        let session = self.session.connection().open_session().unwrap();
+        session.begin_transaction(None).unwrap();
+        Self {
+            index: self.index.clone(),
+            session,
+        }
+    }
+}
+
 /// Encode the contents of a graph node as a value that can be set in the WiredTiger table.
 pub fn encode_graph_node(vector: &[f32], mut edges: Vec<i64>) -> Vec<u8> {
     // A 64-bit value may occupy up to 10 bytes when leb128 encoded so reserve enough space for that.

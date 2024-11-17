@@ -14,7 +14,10 @@ pub struct NumpyF32VectorStore<D> {
     vectors: &'static [f32],
 }
 
-impl<D> NumpyF32VectorStore<D> {
+impl<D> NumpyF32VectorStore<D>
+where
+    D: Send + Sync,
+{
     /// Create a new store for numpy vector data with the given input and dimension count.
     ///
     /// This will typically be used with a memory-mapped file.

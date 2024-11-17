@@ -1,13 +1,10 @@
 mod lookup;
 mod search;
 
-use std::{
-    io::{self, ErrorKind},
-    num::NonZero,
-};
+use std::{io::ErrorKind, num::NonZero};
 
 use clap::{command, Parser, Subcommand};
-use easy_tiger::wt::{read_graph_metadata, WiredTigerIndexParams};
+use easy_tiger::wt::WiredTigerGraphVectorIndex;
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
 use wt_mdb::{options::ConnectionOptionsBuilder, Connection};
@@ -50,15 +47,12 @@ fn main() -> std::io::Result<()> {
                 .cache_size_mb(cli.wiredtiger_cache_size_mb)
                 .into(),
         ),
-    )
-    .map_err(io::Error::from)?;
-    let index_params =
-        WiredTigerIndexParams::new(connection.clone(), &cli.wiredtiger_table_basename);
-    let metadata = read_graph_metadata(connection.clone(), &index_params.graph_table_name)?;
+    )?;
+    let index = WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?;
 
     match cli.command {
-        Commands::Lookup(args) => lookup(connection, index_params, metadata, args),
-        Commands::Search(args) => search(connection, index_params, metadata, args),
+        Commands::Lookup(args) => lookup(connection, index, args),
+        Commands::Search(args) => search(connection, index, args),
         Commands::Add => Err(std::io::Error::from(ErrorKind::Unsupported)),
         Commands::Delete => Err(std::io::Error::from(ErrorKind::Unsupported)),
     }

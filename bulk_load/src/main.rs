@@ -5,7 +5,7 @@ use easy_tiger::{
     bulk::BulkLoadBuilder,
     graph::{GraphMetadata, GraphSearchParams},
     input::NumpyF32VectorStore,
-    wt::WiredTigerIndexParams,
+    wt::WiredTigerGraphVectorIndex,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use wt_mdb::{
@@ -91,18 +91,28 @@ fn main() -> io::Result<()> {
     )
     .map_err(io::Error::from)?;
 
-    let wt_params = WiredTigerIndexParams::new(connection.clone(), &args.wiredtiger_table_basename);
+    let metadata = GraphMetadata {
+        dimensions: args.dimensions,
+        max_edges: args.max_edges,
+        index_search_params: GraphSearchParams {
+            beam_width: args.edge_candidates,
+            num_rerank: args
+                .rerank_edges
+                .unwrap_or_else(|| args.edge_candidates.get()),
+        },
+    };
+    let index = WiredTigerGraphVectorIndex::from_init(metadata, &args.wiredtiger_table_basename)?;
     if args.drop_tables {
         let mut session = connection.open_session().map_err(io::Error::from)?;
         session
             .drop_record_table(
-                &wt_params.graph_table_name,
+                index.graph_table_name(),
                 Some(DropOptionsBuilder::default().set_force().into()),
             )
             .map_err(io::Error::from)?;
         session
             .drop_record_table(
-                &wt_params.nav_table_name,
+                index.nav_table_name(),
                 Some(DropOptionsBuilder::default().set_force().into()),
             )
             .map_err(io::Error::from)?;
@@ -110,21 +120,7 @@ fn main() -> io::Result<()> {
 
     let num_vectors = f32_vectors.len();
     let limit = args.limit.unwrap_or(num_vectors);
-    let mut builder = BulkLoadBuilder::new(
-        GraphMetadata {
-            dimensions: args.dimensions,
-            max_edges: args.max_edges,
-            index_search_params: GraphSearchParams {
-                beam_width: args.edge_candidates,
-                num_rerank: args
-                    .rerank_edges
-                    .unwrap_or_else(|| args.edge_candidates.get()),
-            },
-        },
-        wt_params,
-        f32_vectors,
-        limit,
-    );
+    let mut builder = BulkLoadBuilder::new(connection, index, f32_vectors, limit);
 
     {
         let progress = progress_bar(limit, "load nav vectors");

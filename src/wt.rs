@@ -1,34 +1,15 @@
 use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
-use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, WiredTigerError};
+use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, Session, WiredTigerError};
 
-use crate::graph::{Graph, GraphMetadata, GraphNode, NavVectorStore};
+use crate::graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader, NavVectorStore};
+
+// TODO: drop WiredTiger from most of these names, it feels redundant and verbose.
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
 /// Key in the graph table containing metadata.
 pub const METADATA_KEY: i64 = -2;
-
-/// Parameters to to open and access a WiredTiger graph index.
-#[derive(Clone)]
-pub struct WiredTigerIndexParams {
-    /// Connection to WiredTiger database.
-    pub connection: Arc<Connection>,
-    /// Name of the table containing raw vectors and graph.
-    pub graph_table_name: String,
-    /// Name of the table containing navigational quantized vectors.
-    pub nav_table_name: String,
-}
-
-impl WiredTigerIndexParams {
-    pub fn new(connection: Arc<Connection>, table_basename: &str) -> Self {
-        Self {
-            connection,
-            graph_table_name: format!("{}.graph", table_basename),
-            nav_table_name: format!("{}.nav_vectors", table_basename),
-        }
-    }
-}
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
 pub struct WiredTigerNavVectorStore {
@@ -153,17 +134,105 @@ impl Graph for WiredTigerGraph {
     }
 }
 
-/// Read graph index metadata from the named graph table.
-// TODO: better story around caching this data and session/cursor management in general.
-pub fn read_graph_metadata(
-    connection: Arc<Connection>,
-    graph_table_name: &str,
-) -> io::Result<GraphMetadata> {
-    let mut session = connection.open_session()?;
-    let mut cursor = session.open_record_cursor(graph_table_name)?;
-    let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }
-        .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-    serde_json::from_slice(metadata_json.value()).map_err(|e| e.into())
+/// Immutable features of a WiredTiger graph vector index. These can be read from the db and
+/// stored in a catalog for convenient access at runtime.
+pub struct WiredTigerGraphVectorIndex {
+    graph_table_name: String,
+    nav_table_name: String,
+    metadata: GraphMetadata,
+}
+
+impl WiredTigerGraphVectorIndex {
+    /// Create a new `WiredTigerGraphVectorIndex` from the relevant db tables, extracting
+    /// immutable graph metadata that can be used across operations.
+    pub fn from_db(connection: &Arc<Connection>, table_basename: &str) -> io::Result<Self> {
+        let mut session = connection.open_session()?;
+        let (graph_table_name, nav_table_name) = Self::generate_table_names(table_basename);
+        let mut cursor = session.open_record_cursor(&graph_table_name)?;
+        let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }
+            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+        let metadata = serde_json::from_slice(metadata_json.value())?;
+        Ok(Self {
+            graph_table_name,
+            nav_table_name,
+            metadata,
+        })
+    }
+
+    /// Create a new `WiredTigerGraphVectorIndex` for table initialization, providing
+    /// graph metadata up front.
+    pub fn from_init(metadata: GraphMetadata, table_basename: &str) -> io::Result<Self> {
+        let (graph_table_name, nav_table_name) = Self::generate_table_names(table_basename);
+        Ok(Self {
+            graph_table_name,
+            nav_table_name,
+            metadata,
+        })
+    }
+
+    /// Return `GraphMetadata` for this index.
+    pub fn metadata(&self) -> &GraphMetadata {
+        &self.metadata
+    }
+
+    /// Return the name of the table containing the graph.
+    pub fn graph_table_name(&self) -> &str {
+        &self.graph_table_name
+    }
+
+    /// Return the name of the table containing the navigational vectors.
+    pub fn nav_table_name(&self) -> &str {
+        &self.nav_table_name
+    }
+
+    fn generate_table_names(table_basename: &str) -> (String, String) {
+        (
+            format!("{}.graph", table_basename),
+            format!("{}.nav_vectors", table_basename),
+        )
+    }
+}
+
+/// A `GraphVectorIndexReader` implementation that operates entirely on a WiredTiger graph.
+pub struct WiredTigerGraphVectorIndexReader {
+    index: Arc<WiredTigerGraphVectorIndex>,
+    session: Session,
+}
+
+impl WiredTigerGraphVectorIndexReader {
+    /// Create a new `WiredTigerGraphVectorIndex` given a named index and a session to access that data.
+    pub fn new(index: Arc<WiredTigerGraphVectorIndex>, session: Session) -> Self {
+        Self { index, session }
+    }
+
+    /// Unwrap into the inner Session.
+    pub fn into_session(self) -> Session {
+        self.session
+    }
+}
+
+impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
+    type Graph = WiredTigerGraph;
+    type NavVectorStore = WiredTigerNavVectorStore;
+
+    fn metadata(&self) -> &GraphMetadata {
+        &self.index.metadata
+    }
+
+    fn graph(&mut self) -> Result<Self::Graph> {
+        Ok(WiredTigerGraph::new(
+            self.index.metadata,
+            self.session
+                .open_record_cursor(&self.index.graph_table_name)?,
+        ))
+    }
+
+    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
+        Ok(WiredTigerNavVectorStore::new(
+            self.session
+                .open_record_cursor(&self.index.nav_table_name)?,
+        ))
+    }
 }
 
 /// Encode the contents of a graph node as a value that can be set in the WiredTiger table.

@@ -8,10 +8,9 @@ use std::{
 
 use clap::Args;
 use easy_tiger::{
-    graph::{GraphMetadata, GraphSearchParams},
-    scoring::{DotProductScorer, HammingScorer},
+    graph::GraphSearchParams,
     search::GraphSearcher,
-    wt::{WiredTigerGraph, WiredTigerIndexParams, WiredTigerNavVectorStore},
+    wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader},
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use wt_mdb::Connection;
@@ -36,31 +35,24 @@ pub struct SearchArgs {
 
 pub fn search(
     connection: Arc<Connection>,
-    index_params: WiredTigerIndexParams,
-    metadata: GraphMetadata,
+    index: WiredTigerGraphVectorIndex,
     args: SearchArgs,
 ) -> io::Result<()> {
     let query_vectors = easy_tiger::input::NumpyF32VectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.query_vectors)?)? },
-        metadata.dimensions,
+        index.metadata().dimensions,
     );
     let limit = std::cmp::min(
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
     );
-
-    let mut session = connection.open_session()?;
-    let mut graph = WiredTigerGraph::new(
-        metadata,
-        session.open_record_cursor(&index_params.graph_table_name)?,
-    );
-    let mut nav_vectors =
-        WiredTigerNavVectorStore::new(session.open_record_cursor(&index_params.nav_table_name)?);
     let mut searcher = GraphSearcher::new(GraphSearchParams {
         beam_width: args.candidates,
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
     });
 
+    let index = Arc::new(index);
+    let mut session = connection.open_session()?;
     let progress = ProgressBar::new(limit as u64)
         .with_style(
             ProgressStyle::default_bar()
@@ -70,15 +62,11 @@ pub fn search(
         .with_finish(indicatif::ProgressFinish::AndLeave);
     for q in query_vectors.iter().take(limit) {
         session.begin_transaction(None)?;
-        let results = searcher.search(
-            q,
-            &mut graph,
-            &DotProductScorer,
-            &mut nav_vectors,
-            &HammingScorer,
-        )?;
+        let mut reader = WiredTigerGraphVectorIndexReader::new(index.clone(), session);
+        let results = searcher.search(q, &mut reader)?;
         assert_ne!(results.len(), 0);
         progress.inc(1);
+        session = reader.into_session();
         session.rollback_transaction(None)?;
     }
     progress.finish_using_style();

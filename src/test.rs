@@ -1,11 +1,13 @@
-use std::{borrow::Cow, num::NonZero, rc::Rc};
+use std::{borrow::Cow, num::NonZero, usize};
 
 use wt_mdb::Result;
 
 use crate::{
-    graph::{Graph, GraphNode, NavVectorStore},
+    graph::{
+        Graph, GraphMetadata, GraphNode, GraphSearchParams, GraphVectorIndexReader, NavVectorStore,
+    },
     quantization::binary_quantize,
-    scoring::VectorScorer,
+    scoring::F32VectorScorer,
     Neighbor,
 };
 
@@ -16,13 +18,16 @@ struct TestVector {
     edges: Vec<i64>,
 }
 
-#[derive(Clone, Debug)]
-pub struct TestVectorData(Rc<Vec<TestVector>>);
+#[derive(Debug)]
+pub struct TestGraphVectorIndex {
+    data: Vec<TestVector>,
+    metadata: GraphMetadata,
+}
 
-impl TestVectorData {
+impl TestGraphVectorIndex {
     pub fn new<S, T, V>(max_edges: NonZero<usize>, scorer: S, iter: T) -> Self
     where
-        S: VectorScorer<Elem = f32>,
+        S: F32VectorScorer,
         T: IntoIterator<Item = V>,
         V: Into<Vec<f32>>,
     {
@@ -43,7 +48,22 @@ impl TestVectorData {
         for i in 0..rep.len() {
             rep[i].edges = Self::compute_edges(&rep, i, max_edges, &scorer);
         }
-        TestVectorData(Rc::new(rep))
+        let metadata = GraphMetadata {
+            dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
+            max_edges: max_edges,
+            index_search_params: GraphSearchParams {
+                beam_width: NonZero::new(usize::MAX).unwrap(),
+                num_rerank: usize::MAX,
+            },
+        };
+        Self {
+            data: rep,
+            metadata,
+        }
+    }
+
+    pub fn reader(&self) -> TestGraphVectorIndexReader {
+        TestGraphVectorIndexReader(self)
     }
 
     fn compute_edges<S>(
@@ -53,7 +73,7 @@ impl TestVectorData {
         scorer: &S,
     ) -> Vec<i64>
     where
-        S: VectorScorer<Elem = f32>,
+        S: F32VectorScorer,
     {
         let q = &graph[index].vector;
         let mut scored = graph
@@ -94,19 +114,33 @@ impl TestVectorData {
 }
 
 #[derive(Debug)]
-pub struct TestGraph(TestVectorData);
+pub struct TestGraphVectorIndexReader<'a>(&'a TestGraphVectorIndex);
 
-impl From<TestVectorData> for TestGraph {
-    fn from(value: TestVectorData) -> Self {
-        TestGraph(value.clone())
+impl<'a> GraphVectorIndexReader for TestGraphVectorIndexReader<'a> {
+    type Graph = TestGraph<'a>;
+    type NavVectorStore = TestNavVectorStore<'a>;
+
+    fn metadata(&self) -> &GraphMetadata {
+        &self.0.metadata
+    }
+
+    fn graph(&mut self) -> Result<Self::Graph> {
+        Ok(TestGraph(self.0))
+    }
+
+    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
+        Ok(TestNavVectorStore(self.0))
     }
 }
 
-impl Graph for TestGraph {
-    type Node<'c> = TestGraphNode<'c>;
+#[derive(Debug)]
+pub struct TestGraph<'a>(&'a TestGraphVectorIndex);
+
+impl<'a> Graph for TestGraph<'a> {
+    type Node<'c> = TestGraphNode<'c> where Self: 'c;
 
     fn entry_point(&mut self) -> Option<i64> {
-        if self.0 .0.is_empty() {
+        if self.0.data.is_empty() {
             None
         } else {
             Some(0)
@@ -114,10 +148,10 @@ impl Graph for TestGraph {
     }
 
     fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>> {
-        if node < 0 || node as usize >= self.0 .0.len() {
+        if node < 0 || node as usize >= self.0.data.len() {
             None
         } else {
-            Some(Ok(TestGraphNode(&self.0 .0[node as usize])))
+            Some(Ok(TestGraphNode(&self.0.data[node as usize])))
         }
     }
 }
@@ -137,20 +171,14 @@ impl<'a> GraphNode for TestGraphNode<'a> {
 }
 
 #[derive(Debug)]
-pub struct TestNavVectorStore(TestVectorData);
+pub struct TestNavVectorStore<'a>(&'a TestGraphVectorIndex);
 
-impl From<TestVectorData> for TestNavVectorStore {
-    fn from(value: TestVectorData) -> Self {
-        TestNavVectorStore(value)
-    }
-}
-
-impl NavVectorStore for TestNavVectorStore {
+impl<'a> NavVectorStore for TestNavVectorStore<'a> {
     fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        if node < 0 || node as usize >= self.0 .0.len() {
+        if node < 0 || node as usize >= self.0.data.len() {
             None
         } else {
-            Some(Ok(Cow::from(&self.0 .0[node as usize].nav_vector)))
+            Some(Ok(Cow::from(&self.0.data[node as usize].nav_vector)))
         }
     }
 }

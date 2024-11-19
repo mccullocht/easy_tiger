@@ -13,7 +13,7 @@ mod session;
 use wt_sys::wiredtiger_strerror;
 
 use std::borrow::Cow;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::io::ErrorKind;
 use std::num::NonZero;
 use std::ptr::NonNull;
@@ -179,10 +179,6 @@ fn make_result<T>(code: i32, value: T) -> Result<T> {
 fn wrap_ptr_create<T>(code: i32, ptr: *mut T) -> Result<NonNull<T>> {
     let p = make_result(code, ptr)?;
     NonNull::new(p).ok_or(Error::generic_error())
-}
-
-fn make_table_uri(table_name: &str) -> CString {
-    CString::new(format!("table:{}", table_name)).expect("no nulls in table_name")
 }
 
 #[cfg(test)]

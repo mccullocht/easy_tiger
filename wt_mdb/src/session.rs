@@ -2,8 +2,9 @@
 // * integrate cursor pooling.
 
 use std::{
-    ffi::{c_void, CStr},
+    ffi::{c_void, CStr, CString},
     num::NonZero,
+    ops::Deref,
     ptr::{self, NonNull},
     slice,
     sync::Arc,
@@ -13,7 +14,7 @@ use wt_sys::{WT_CURSOR, WT_ITEM, WT_NOTFOUND, WT_SESSION};
 
 use crate::{
     connection::Connection,
-    make_result, make_table_uri,
+    make_result,
     options::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
         DropOptions, RollbackTransactionOptions,
@@ -46,6 +47,29 @@ impl Drop for InnerSession {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TableUri(CString);
+
+impl TableUri {
+    fn table_name(&self) -> &CStr {
+        // magic number 6 comes from length of string "table:"
+        &(self.0.as_c_str()[6usize..])
+    }
+}
+
+impl Deref for TableUri {
+    type Target = CStr;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_c_str()
+    }
+}
+
+impl From<&str> for TableUri {
+    fn from(value: &str) -> Self {
+        Self(CString::new(format!("table:{}", value)).expect("no nulls in table name"))
+    }
+}
+
 /// A WiredTiger session.
 ///
 /// Sessions are used to create cursors to view and mutate data and manage
@@ -71,7 +95,7 @@ impl Session {
         table_name: &str,
         config: Option<CreateOptions>,
     ) -> Result<()> {
-        let uri = make_table_uri(table_name);
+        let uri = TableUri::from(table_name);
         unsafe {
             make_result(
                 (self.0.ptr.as_ref().create.unwrap())(
@@ -93,7 +117,7 @@ impl Session {
         table_name: &str,
         config: Option<DropOptions>,
     ) -> Result<()> {
-        let uri = make_table_uri(table_name);
+        let uri = TableUri::from(table_name);
         unsafe {
             make_result(
                 self.0.ptr.as_ref().drop.unwrap()(
@@ -116,19 +140,20 @@ impl Session {
         table_name: &str,
         options: Option<&CStr>,
     ) -> Result<RecordCursor> {
-        let uri = make_table_uri(table_name);
+        let table_uri = TableUri::from(table_name);
         let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
         let result: i32;
         unsafe {
             result = (self.0.ptr.as_ref().open_cursor.unwrap())(
                 self.0.ptr.as_ptr(),
-                uri.as_ptr(),
+                table_uri.0.as_ptr(),
                 ptr::null_mut(),
                 options.map(|s| s.as_ptr()).unwrap_or(std::ptr::null()),
                 &mut cursorp,
             );
         }
-        wrap_ptr_create(result, cursorp).map(|cursor| RecordCursor::new(cursor, self.0.clone()))
+        wrap_ptr_create(result, cursorp)
+            .map(|cursor| RecordCursor::new(cursor, table_uri, self.0.clone()))
     }
 
     /// Starts a transaction in this session.
@@ -222,6 +247,7 @@ impl Session {
 /// the table is `i64` keyed and byte-string valued.
 pub struct RecordCursor {
     cursor: NonNull<WT_CURSOR>,
+    table_uri: TableUri,
     // Ref the InnerSession, *DO NOT USE*.
     //
     // We maintain this reference to ensure that the underlying WT_SESSION outlives this cursor.
@@ -239,11 +265,17 @@ pub struct RecordCursor {
 }
 
 impl RecordCursor {
-    fn new(cursor: NonNull<WT_CURSOR>, session: Arc<InnerSession>) -> Self {
+    fn new(cursor: NonNull<WT_CURSOR>, table_uri: TableUri, session: Arc<InnerSession>) -> Self {
         Self {
             cursor,
+            table_uri,
             _session: session,
         }
+    }
+
+    /// Returns the name of the table.
+    pub fn table_name(&self) -> &CStr {
+        self.table_uri.table_name()
     }
 
     /// Set the contents of `record` in the collection.

@@ -1,11 +1,10 @@
-// TODO:
-// * integrate cursor pooling.
-
 use std::{
+    cell::Cell,
     ffi::{c_void, CStr, CString},
     num::NonZero,
     ops::Deref,
     ptr::{self, NonNull},
+    rc::Rc,
     slice,
     sync::Arc,
 };
@@ -34,9 +33,6 @@ struct InnerSession {
     conn: Arc<Connection>,
 }
 
-unsafe impl Send for InnerSession {}
-unsafe impl Sync for InnerSession {}
-
 /// Close the underlying WiredTiger session.
 impl Drop for InnerSession {
     fn drop(&mut self) {
@@ -47,7 +43,8 @@ impl Drop for InnerSession {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// URI of a WT table encoded as a CString.
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct TableUri(CString);
 
 impl TableUri {
@@ -70,23 +67,43 @@ impl From<&str> for TableUri {
     }
 }
 
+/// Inner representation of a cursor.
+///
+/// This inner representation is used by RecordCursor but also may be cached by Session.
+struct InnerCursor {
+    ptr: NonNull<WT_CURSOR>,
+    uri: TableUri,
+}
+
+impl Drop for InnerCursor {
+    fn drop(&mut self) {
+        // TODO: log this.
+        let _ = unsafe { self.ptr.as_ref().close.unwrap()(self.ptr.as_ptr()) };
+    }
+}
+
 /// A WiredTiger session.
 ///
-/// Sessions are used to create cursors to view and mutate data and manage
-/// transaction state.
-pub struct Session(Arc<InnerSession>);
+/// Sessions are used to create cursors to view and mutate data and manage transaction state.
+pub struct Session {
+    inner: Rc<InnerSession>,
+    cached_cursors: Cell<Vec<InnerCursor>>,
+}
 
 impl Session {
     pub(crate) fn new(session: NonNull<WT_SESSION>, connection: &Arc<Connection>) -> Self {
-        Self(Arc::new(InnerSession {
-            ptr: session,
-            conn: connection.clone(),
-        }))
+        Self {
+            inner: Rc::new(InnerSession {
+                ptr: session,
+                conn: connection.clone(),
+            }),
+            cached_cursors: Cell::new(vec![]),
+        }
     }
 
     /// Return the `Connection` this session belongs to.
     pub fn connection(&self) -> &Arc<Connection> {
-        &self.0.conn
+        &self.inner.conn
     }
 
     /// Create a new record table.
@@ -98,8 +115,8 @@ impl Session {
         let uri = TableUri::from(table_name);
         unsafe {
             make_result(
-                (self.0.ptr.as_ref().create.unwrap())(
-                    self.0.ptr.as_ptr(),
+                (self.inner.ptr.as_ref().create.unwrap())(
+                    self.inner.ptr.as_ptr(),
                     uri.as_ptr(),
                     config.unwrap_or_default().as_config_ptr(),
                 ),
@@ -120,8 +137,8 @@ impl Session {
         let uri = TableUri::from(table_name);
         unsafe {
             make_result(
-                self.0.ptr.as_ref().drop.unwrap()(
-                    self.0.ptr.as_ptr(),
+                self.inner.ptr.as_ref().drop.unwrap()(
+                    self.inner.ptr.as_ptr(),
                     uri.as_ptr(),
                     config.unwrap_or_default().as_config_ptr(),
                 ),
@@ -140,20 +157,45 @@ impl Session {
         table_name: &str,
         options: Option<&CStr>,
     ) -> Result<RecordCursor> {
-        let table_uri = TableUri::from(table_name);
+        let uri = TableUri::from(table_name);
         let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
         let result: i32;
         unsafe {
-            result = (self.0.ptr.as_ref().open_cursor.unwrap())(
-                self.0.ptr.as_ptr(),
-                table_uri.0.as_ptr(),
+            result = (self.inner.ptr.as_ref().open_cursor.unwrap())(
+                self.inner.ptr.as_ptr(),
+                uri.0.as_ptr(),
                 ptr::null_mut(),
                 options.map(|s| s.as_ptr()).unwrap_or(std::ptr::null()),
                 &mut cursorp,
             );
         }
         wrap_ptr_create(result, cursorp)
-            .map(|cursor| RecordCursor::new(cursor, table_uri, self.0.clone()))
+            .map(|ptr| RecordCursor::new(InnerCursor { ptr, uri }, self.inner.clone()))
+    }
+
+    /// Get a cached cursor or create a new cursor over `table_name`.
+    // TODO: return a Guard the automatically returns the cursor. We cannot do this yet as the guard would need
+    // a reference, which would prevent us from calling any mutable Session methods (nearly all of them).
+    pub fn get_record_cursor(&mut self, table_name: &str) -> Result<RecordCursor> {
+        let cursor_cache = self.cached_cursors.get_mut();
+        cursor_cache
+            .iter()
+            .position(|c| c.uri.table_name().to_bytes() == table_name.as_bytes())
+            .map(|i| {
+                let inner = cursor_cache.remove(i);
+                Ok(RecordCursor::new(inner, self.inner.clone()))
+            })
+            .unwrap_or_else(|| self.open_record_cursor(table_name))
+    }
+
+    /// Return a `RecordCursor` to the cache for future re-use.
+    pub fn return_record_cursor(&mut self, cursor: RecordCursor) {
+        self.cached_cursors.get_mut().push(cursor.into_inner());
+    }
+
+    /// Remove all cached cursors.
+    pub fn clear_cursor_cache(&mut self) {
+        self.cached_cursors.get_mut().clear();
     }
 
     /// Starts a transaction in this session.
@@ -167,8 +209,8 @@ impl Session {
     pub fn begin_transaction(&mut self, options: Option<&BeginTransactionOptions>) -> Result<()> {
         unsafe {
             make_result(
-                self.0.ptr.as_ref().begin_transaction.unwrap()(
-                    self.0.ptr.as_ptr(),
+                self.inner.ptr.as_ref().begin_transaction.unwrap()(
+                    self.inner.ptr.as_ptr(),
                     options.as_config_ptr(),
                 ),
                 (),
@@ -186,8 +228,8 @@ impl Session {
     pub fn commit_transaction(&mut self, options: Option<&CommitTransactionOptions>) -> Result<()> {
         unsafe {
             make_result(
-                self.0.ptr.as_ref().commit_transaction.unwrap()(
-                    self.0.ptr.as_ptr(),
+                self.inner.ptr.as_ref().commit_transaction.unwrap()(
+                    self.inner.ptr.as_ptr(),
                     options.as_config_ptr(),
                 ),
                 (),
@@ -207,8 +249,8 @@ impl Session {
     ) -> Result<()> {
         unsafe {
             make_result(
-                self.0.ptr.as_ref().rollback_transaction.unwrap()(
-                    self.0.ptr.as_ptr(),
+                self.inner.ptr.as_ref().rollback_transaction.unwrap()(
+                    self.inner.ptr.as_ptr(),
                     options.as_config_ptr(),
                 ),
                 (),
@@ -239,43 +281,44 @@ impl Session {
 
     /// Reset this session, which also resets any outstanding cursors.
     pub fn reset(&mut self) -> Result<()> {
-        unsafe { make_result(self.0.ptr.as_ref().reset.unwrap()(self.0.ptr.as_ptr()), ()) }
+        unsafe {
+            make_result(
+                self.inner.ptr.as_ref().reset.unwrap()(self.inner.ptr.as_ptr()),
+                (),
+            )
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.clear_cursor_cache();
     }
 }
 
 /// A `RecordCursor` facilities viewing and mutating data in a WiredTiger table where
 /// the table is `i64` keyed and byte-string valued.
 pub struct RecordCursor {
-    cursor: NonNull<WT_CURSOR>,
-    table_uri: TableUri,
+    inner: InnerCursor,
     // Ref the InnerSession, *DO NOT USE*.
     //
     // We maintain this reference to ensure that the underlying WT_SESSION outlives this cursor.
     //
-    // We cannot use Arc<Session> because Arc<T> is only Send if T: Send + Sync. If Session
-    // methods use &mut self then they cannot be used through an Arc, and if we make Session
-    // Sync then it may be erroneously called from multiple threads.
-    //
-    // An alternative to this would be to use Arc<Mutex<InnerSession>> and allow concurrent
-    // calls to Session methods, which requires lock acquisition for every Session call.
-    //
-    // Note that we do not allow access to the Session from RecordCursor; doing so would be
-    // unsound as we could leak a reference to the underlying WT_SESSION to another thread.
-    _session: Arc<InnerSession>,
+    // TODO: switch to maintaining a lifetime.
+    _session: Rc<InnerSession>,
 }
 
 impl RecordCursor {
-    fn new(cursor: NonNull<WT_CURSOR>, table_uri: TableUri, session: Arc<InnerSession>) -> Self {
+    fn new(inner: InnerCursor, session: Rc<InnerSession>) -> Self {
         Self {
-            cursor,
-            table_uri,
+            inner,
             _session: session,
         }
     }
 
     /// Returns the name of the table.
     pub fn table_name(&self) -> &CStr {
-        self.table_uri.table_name()
+        self.inner.uri.table_name()
     }
 
     /// Set the contents of `record` in the collection.
@@ -283,13 +326,13 @@ impl RecordCursor {
         // safety: the memory passed to set_{key,value} need only be valid until a modifying
         // call like insert().
         unsafe {
-            self.cursor.as_ref().set_key.unwrap()(self.cursor.as_ptr(), record.key());
-            self.cursor.as_ref().set_value.unwrap()(
-                self.cursor.as_ptr(),
+            self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), record.key());
+            self.inner.ptr.as_ref().set_value.unwrap()(
+                self.inner.ptr.as_ptr(),
                 &Self::item_from_value(record.value()),
             );
             make_result(
-                self.cursor.as_ref().insert.unwrap()(self.cursor.as_ptr()),
+                self.inner.ptr.as_ref().insert.unwrap()(self.inner.ptr.as_ptr()),
                 (),
             )
         }
@@ -300,9 +343,9 @@ impl RecordCursor {
     /// This may return a `WiredTigerError::NotFound` if the key does not exist in the collection.
     pub fn remove(&mut self, key: i64) -> Result<()> {
         unsafe {
-            self.cursor.as_ref().set_key.unwrap()(self.cursor.as_ptr(), key);
+            self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), key);
             make_result(
-                self.cursor.as_ref().remove.unwrap()(self.cursor.as_ptr()),
+                self.inner.ptr.as_ref().remove.unwrap()(self.inner.ptr.as_ptr()),
                 (),
             )
         }
@@ -321,7 +364,9 @@ impl RecordCursor {
     /// `Iterator.next()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn next_unsafe(&mut self) -> Option<Result<RecordView<'_>>> {
         unsafe {
-            match NonZero::new(self.cursor.as_ref().next.unwrap()(self.cursor.as_ptr())) {
+            match NonZero::new(self.inner.ptr.as_ref().next.unwrap()(
+                self.inner.ptr.as_ptr(),
+            )) {
                 None => Some(self.record_view(None)),
                 Some(code) if code.get() == WT_NOTFOUND => None,
                 Some(code) => Some(Err(Error::from(code))),
@@ -337,8 +382,10 @@ impl RecordCursor {
     /// `seek_exact()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn seek_exact_unsafe(&mut self, key: i64) -> Option<Result<RecordView<'_>>> {
         unsafe {
-            self.cursor.as_ref().set_key.unwrap()(self.cursor.as_ptr(), key);
-            match NonZero::new(self.cursor.as_ref().search.unwrap()(self.cursor.as_ptr())) {
+            self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), key);
+            match NonZero::new(self.inner.ptr.as_ref().search.unwrap()(
+                self.inner.ptr.as_ptr(),
+            )) {
                 None => Some(self.record_view(Some(key))),
                 Some(code) if code.get() == WT_NOTFOUND => None,
                 Some(code) => Some(Err(Error::from(code))),
@@ -354,8 +401,8 @@ impl RecordCursor {
     /// Return the largest key in the collection or `None` if the collection is empty.
     pub fn largest_key(&mut self) -> Option<Result<i64>> {
         unsafe {
-            match NonZero::new(self.cursor.as_ref().largest_key.unwrap()(
-                self.cursor.as_ptr(),
+            match NonZero::new(self.inner.ptr.as_ref().largest_key.unwrap()(
+                self.inner.ptr.as_ptr(),
             )) {
                 None => Some(self.record_key()),
                 Some(code) if code.get() == WT_NOTFOUND => None,
@@ -368,15 +415,14 @@ impl RecordCursor {
     pub fn reset(&mut self) -> Result<()> {
         unsafe {
             make_result(
-                self.cursor.as_ref().reset.unwrap()(self.cursor.as_ptr()),
+                self.inner.ptr.as_ref().reset.unwrap()(self.inner.ptr.as_ptr()),
                 (),
             )
         }
     }
 
-    /// Close this cursor.
-    pub fn close(mut self) -> Result<()> {
-        self.close_internal()
+    fn into_inner(self) -> InnerCursor {
+        self.inner
     }
 
     /// Return the current record key. This assumes that we have just positioned the cursor
@@ -385,7 +431,7 @@ impl RecordCursor {
         unsafe {
             let mut k = 0i64;
             make_result(
-                self.cursor.as_ref().get_key.unwrap()(self.cursor.as_ptr(), &mut k),
+                self.inner.ptr.as_ref().get_key.unwrap()(self.inner.ptr.as_ptr(), &mut k),
                 (),
             )
             .map(|_| k)
@@ -403,7 +449,7 @@ impl RecordCursor {
         let value = unsafe {
             let mut item = Self::default_item();
             make_result(
-                self.cursor.as_ref().get_value.unwrap()(self.cursor.as_ptr(), &mut item),
+                self.inner.ptr.as_ref().get_value.unwrap()(self.inner.ptr.as_ptr(), &mut item),
                 (),
             )
             .map(|_| slice::from_raw_parts(item.data as *const u8, item.size))?
@@ -426,27 +472,6 @@ impl RecordCursor {
             memsize: 0,
             flags: 0,
         }
-    }
-
-    /// Close a mutable instance. This is invoked by both `close()` and `drop()`, although
-    /// drop ignores the returned value.
-    fn close_internal(&mut self) -> Result<()> {
-        unsafe {
-            make_result(
-                self.cursor.as_ref().close.unwrap()(self.cursor.as_ptr()),
-                (),
-            )
-        }
-    }
-}
-
-/// It is safe to send a `RecordCursor` to another thread to use.
-/// It is not safe to reference a `RecordCursor` from another thread without synchronization.
-unsafe impl Send for RecordCursor {}
-
-impl Drop for RecordCursor {
-    fn drop(&mut self) {
-        let _ = self.close_internal();
     }
 }
 

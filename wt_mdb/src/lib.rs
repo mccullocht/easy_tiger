@@ -290,6 +290,22 @@ mod test {
     }
 
     #[test]
+    fn cursor_cache() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let mut session = conn.open_session().unwrap();
+        session.create_record_table("test", None).unwrap();
+
+        let mut cursor = session.get_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(&RecordView::new(1, b"foo")), Ok(()));
+        session.return_record_cursor(cursor);
+
+        cursor = session.get_record_cursor("test").unwrap();
+        assert_eq!(cursor.next(), Some(Ok(Record::new(1, b"foo"))));
+        assert_eq!(cursor.next(), None);
+    }
+
+    #[test]
     fn bulk_load() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();

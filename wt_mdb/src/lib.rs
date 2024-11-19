@@ -8,7 +8,6 @@
 //! that are keyed by `i64` with byte array payloads.
 mod connection;
 pub mod options;
-mod record_cursor;
 mod session;
 
 use wt_sys::wiredtiger_strerror;
@@ -168,8 +167,7 @@ impl<'a> RecordView<'a> {
 pub type Record = RecordView<'static>;
 
 pub use connection::Connection;
-pub use record_cursor::RecordCursor;
-pub use session::Session;
+pub use session::{RecordCursor, Session};
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {

@@ -1,8 +1,9 @@
 use std::{
-    cell::Cell,
+    cell::RefCell,
     ffi::{c_void, CStr, CString},
+    mem::ManuallyDrop,
     num::NonZero,
-    ops::Deref,
+    ops::{Deref, DerefMut},
     ptr::{self, NonNull},
     rc::Rc,
     slice,
@@ -82,12 +83,58 @@ impl Drop for InnerCursor {
     }
 }
 
+impl Default for InnerCursor {
+    fn default() -> Self {
+        Self {
+            ptr: NonNull::dangling(),
+            uri: TableUri::default(),
+        }
+    }
+}
+
+pub struct RecordCursorGuard<'a> {
+    session: &'a Session,
+    // Prevent the value from being dropped, I always take the value on the way out.
+    cursor: ManuallyDrop<RecordCursor>,
+}
+
+impl<'a> RecordCursorGuard<'a> {
+    fn new(session: &'a Session, cursor: RecordCursor) -> Self {
+        Self {
+            session,
+            cursor: ManuallyDrop::new(cursor),
+        }
+    }
+}
+
+impl<'a> Deref for RecordCursorGuard<'a> {
+    type Target = RecordCursor;
+
+    fn deref(&self) -> &Self::Target {
+        &self.cursor
+    }
+}
+
+impl<'a> DerefMut for RecordCursorGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.cursor
+    }
+}
+
+impl<'a> Drop for RecordCursorGuard<'a> {
+    fn drop(&mut self) {
+        // Safety: we never intend to allow RecordCursorGuard to drop the value.
+        self.session
+            .return_record_cursor(unsafe { ManuallyDrop::take(&mut self.cursor) });
+    }
+}
+
 /// A WiredTiger session.
 ///
 /// Sessions are used to create cursors to view and mutate data and manage transaction state.
 pub struct Session {
     inner: Rc<InnerSession>,
-    cached_cursors: Cell<Vec<InnerCursor>>,
+    cached_cursors: RefCell<Vec<InnerCursor>>,
 }
 
 impl Session {
@@ -97,7 +144,7 @@ impl Session {
                 ptr: session,
                 conn: connection.clone(),
             }),
-            cached_cursors: Cell::new(vec![]),
+            cached_cursors: RefCell::new(vec![]),
         }
     }
 
@@ -108,7 +155,7 @@ impl Session {
 
     /// Create a new record table.
     pub fn create_record_table(
-        &mut self,
+        &self,
         table_name: &str,
         config: Option<CreateOptions>,
     ) -> Result<()> {
@@ -129,11 +176,7 @@ impl Session {
     ///
     /// This requires exclusive access -- if any cursors are open on the specified table the call will fail
     /// and return an EBUSY posix error.
-    pub fn drop_record_table(
-        &mut self,
-        table_name: &str,
-        config: Option<DropOptions>,
-    ) -> Result<()> {
+    pub fn drop_record_table(&self, table_name: &str, config: Option<DropOptions>) -> Result<()> {
         let uri = TableUri::from(table_name);
         unsafe {
             make_result(
@@ -148,12 +191,12 @@ impl Session {
     }
 
     /// Open a record cursor over the named table.
-    pub fn open_record_cursor(&mut self, table_name: &str) -> Result<RecordCursor> {
+    pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
         self.open_record_cursor_with_options(table_name, None)
     }
 
     fn open_record_cursor_with_options(
-        &mut self,
+        &self,
         table_name: &str,
         options: Option<&CStr>,
     ) -> Result<RecordCursor> {
@@ -176,8 +219,8 @@ impl Session {
     /// Get a cached cursor or create a new cursor over `table_name`.
     // TODO: return a Guard the automatically returns the cursor. We cannot do this yet as the guard would need
     // a reference, which would prevent us from calling any mutable Session methods (nearly all of them).
-    pub fn get_record_cursor(&mut self, table_name: &str) -> Result<RecordCursor> {
-        let cursor_cache = self.cached_cursors.get_mut();
+    pub fn get_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
+        let mut cursor_cache = self.cached_cursors.borrow_mut();
         cursor_cache
             .iter()
             .position(|c| c.uri.table_name().to_bytes() == table_name.as_bytes())
@@ -189,13 +232,18 @@ impl Session {
     }
 
     /// Return a `RecordCursor` to the cache for future re-use.
-    pub fn return_record_cursor(&mut self, cursor: RecordCursor) {
-        self.cached_cursors.get_mut().push(cursor.into_inner());
+    // XXX remove me
+    pub fn return_record_cursor(&self, cursor: RecordCursor) {
+        self.return_record_cursor_internal(cursor.into_inner());
+    }
+
+    fn return_record_cursor_internal(&self, cursor: InnerCursor) {
+        self.cached_cursors.borrow_mut().push(cursor)
     }
 
     /// Remove all cached cursors.
-    pub fn clear_cursor_cache(&mut self) {
-        self.cached_cursors.get_mut().clear();
+    pub fn clear_cursor_cache(&self) {
+        self.cached_cursors.borrow_mut().clear();
     }
 
     /// Starts a transaction in this session.
@@ -206,7 +254,7 @@ impl Session {
     ///
     /// This may not be called on a session with an active transaction or an error will be returned (EINVAL)
     /// but otherwise behavior is unspecified.
-    pub fn begin_transaction(&mut self, options: Option<&BeginTransactionOptions>) -> Result<()> {
+    pub fn begin_transaction(&self, options: Option<&BeginTransactionOptions>) -> Result<()> {
         unsafe {
             make_result(
                 self.inner.ptr.as_ref().begin_transaction.unwrap()(
@@ -225,7 +273,7 @@ impl Session {
     ///
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
-    pub fn commit_transaction(&mut self, options: Option<&CommitTransactionOptions>) -> Result<()> {
+    pub fn commit_transaction(&self, options: Option<&CommitTransactionOptions>) -> Result<()> {
         unsafe {
             make_result(
                 self.inner.ptr.as_ref().commit_transaction.unwrap()(
@@ -243,10 +291,7 @@ impl Session {
     ///
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
-    pub fn rollback_transaction(
-        &mut self,
-        options: Option<&RollbackTransactionOptions>,
-    ) -> Result<()> {
+    pub fn rollback_transaction(&self, options: Option<&RollbackTransactionOptions>) -> Result<()> {
         unsafe {
             make_result(
                 self.inner.ptr.as_ref().rollback_transaction.unwrap()(
@@ -263,7 +308,7 @@ impl Session {
     /// Bulk load requires that `table_name` not exist or be empty and that `iter` yields records in
     /// order by `key()`.
     pub fn bulk_load<'a, I>(
-        &mut self,
+        &self,
         table_name: &str,
         options: Option<CreateOptions>,
         iter: I,
@@ -280,7 +325,7 @@ impl Session {
     }
 
     /// Reset this session, which also resets any outstanding cursors.
-    pub fn reset(&mut self) -> Result<()> {
+    pub fn reset(&self) -> Result<()> {
         unsafe {
             make_result(
                 self.inner.ptr.as_ref().reset.unwrap()(self.inner.ptr.as_ptr()),

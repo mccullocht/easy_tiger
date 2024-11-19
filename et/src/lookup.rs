@@ -26,7 +26,7 @@ pub fn lookup(
     index: WiredTigerGraphVectorIndex,
     args: LookupArgs,
 ) -> io::Result<()> {
-    let mut session = connection.open_session()?;
+    let session = connection.open_session()?;
     let mut graph = WiredTigerGraph::new(
         *index.metadata(),
         session.open_record_cursor(index.graph_table_name())?,

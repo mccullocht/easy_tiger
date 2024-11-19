@@ -146,7 +146,7 @@ impl WiredTigerGraphVectorIndex {
     /// Create a new `WiredTigerGraphVectorIndex` from the relevant db tables, extracting
     /// immutable graph metadata that can be used across operations.
     pub fn from_db(connection: &Arc<Connection>, table_basename: &str) -> io::Result<Self> {
-        let mut session = connection.open_session()?;
+        let session = connection.open_session()?;
         let (graph_table_name, nav_table_name) = Self::generate_table_names(table_basename);
         let mut cursor = session.open_record_cursor(&graph_table_name)?;
         let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }

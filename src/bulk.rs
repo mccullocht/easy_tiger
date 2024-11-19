@@ -98,7 +98,7 @@ where
     where
         P: Fn(),
     {
-        let mut session = self.connection.open_session()?;
+        let session = self.connection.open_session()?;
         let mut sum = vec![0.0; self.index.metadata().dimensions.get()];
         session.bulk_load(
             self.index.nav_table_name(),
@@ -240,7 +240,7 @@ where
                     .to_vec(),
             ),
         ];
-        let mut session = self.connection.open_session()?;
+        let session = self.connection.open_session()?;
         session.bulk_load(
             self.index.graph_table_name(),
             None,

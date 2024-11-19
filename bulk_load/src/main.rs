@@ -103,7 +103,7 @@ fn main() -> io::Result<()> {
     };
     let index = WiredTigerGraphVectorIndex::from_init(metadata, &args.wiredtiger_table_basename)?;
     if args.drop_tables {
-        let mut session = connection.open_session().map_err(io::Error::from)?;
+        let session = connection.open_session().map_err(io::Error::from)?;
         session
             .drop_record_table(
                 index.graph_table_name(),

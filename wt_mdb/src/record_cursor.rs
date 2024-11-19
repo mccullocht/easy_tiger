@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     ffi::c_void,
     num::NonZero,
     ptr::{self, NonNull},
@@ -9,54 +8,7 @@ use std::{
 
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_NOTFOUND};
 
-use crate::{make_result, session::InnerSession, Error, Result};
-
-/// A `RecordView` in a WiredTiger table with an i64 key and a byte array value.
-///
-/// The underlying byte array may or may not be owned, the `Record` type alias may be more
-/// convenient when the data is owned.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub struct RecordView<'a> {
-    key: i64,
-    value: Cow<'a, [u8]>,
-}
-
-impl<'a> RecordView<'a> {
-    /// Create a new `RecordView` from a key and an unowned byte array value.
-    pub fn new<V>(key: i64, value: V) -> Self
-    where
-        V: Into<Cow<'a, [u8]>>,
-    {
-        RecordView {
-            key,
-            value: value.into(),
-        }
-    }
-
-    /// Return the key.
-    pub fn key(&self) -> i64 {
-        self.key
-    }
-
-    /// Return the value.
-    pub fn value(&self) -> &[u8] {
-        self.value.as_ref()
-    }
-
-    /// Ensure that this RecordView owns the underlying value.
-    pub fn to_owned(self) -> Record {
-        Record::new(self.key(), self.value.to_vec())
-    }
-
-    /// Returns the inner value within the `RecordView`.
-    pub fn into_inner_value(self) -> Cow<'a, [u8]> {
-        self.value
-    }
-}
-
-/// An alias for `RecordView` with `'static` lifetime, may be more convenient when the value is
-/// actually owned.
-pub type Record = RecordView<'static>;
+use crate::{make_result, session::InnerSession, Error, Record, RecordView, Result};
 
 /// A `RecordCursor` facilities viewing and mutating data in a WiredTiger table where
 /// the table is `i64` keyed and byte-string valued.

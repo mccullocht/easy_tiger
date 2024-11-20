@@ -2,7 +2,7 @@ use std::{io, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    graph::{Graph, GraphNode},
+    graph::{Graph, GraphVertex},
     wt::{WiredTigerGraph, WiredTigerGraphVectorIndex},
 };
 use wt_mdb::Connection;

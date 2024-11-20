@@ -4,7 +4,8 @@ use wt_mdb::Result;
 
 use crate::{
     graph::{
-        Graph, GraphMetadata, GraphNode, GraphSearchParams, GraphVectorIndexReader, NavVectorStore,
+        Graph, GraphMetadata, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
+        NavVectorStore,
     },
     quantization::binary_quantize,
     scoring::F32VectorScorer,
@@ -137,28 +138,28 @@ impl<'a> GraphVectorIndexReader for TestGraphVectorIndexReader<'a> {
 pub struct TestGraph<'a>(&'a TestGraphVectorIndex);
 
 impl<'a> Graph for TestGraph<'a> {
-    type Node<'c> = TestGraphNode<'c> where Self: 'c;
+    type Vertex<'c> = TestGraphVertex<'c> where Self: 'c;
 
-    fn entry_point(&mut self) -> Option<i64> {
+    fn entry_point(&mut self) -> Option<Result<i64>> {
         if self.0.data.is_empty() {
             None
         } else {
-            Some(0)
+            Some(Ok(0))
         }
     }
 
-    fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>> {
-        if node < 0 || node as usize >= self.0.data.len() {
+    fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+        if vertex_id < 0 || vertex_id as usize >= self.0.data.len() {
             None
         } else {
-            Some(Ok(TestGraphNode(&self.0.data[node as usize])))
+            Some(Ok(TestGraphVertex(&self.0.data[vertex_id as usize])))
         }
     }
 }
 
-pub struct TestGraphNode<'a>(&'a TestVector);
+pub struct TestGraphVertex<'a>(&'a TestVector);
 
-impl<'a> GraphNode for TestGraphNode<'a> {
+impl<'a> GraphVertex for TestGraphVertex<'a> {
     type EdgeIterator<'c> = std::iter::Copied<std::slice::Iter<'c, i64>> where Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
@@ -174,11 +175,11 @@ impl<'a> GraphNode for TestGraphNode<'a> {
 pub struct TestNavVectorStore<'a>(&'a TestGraphVectorIndex);
 
 impl<'a> NavVectorStore for TestNavVectorStore<'a> {
-    fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        if node < 0 || node as usize >= self.0.data.len() {
+    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+        if vertex_id < 0 || vertex_id as usize >= self.0.data.len() {
             None
         } else {
-            Some(Ok(Cow::from(&self.0.data[node as usize].nav_vector)))
+            Some(Ok(Cow::from(&self.0.data[vertex_id as usize].nav_vector)))
         }
     }
 }

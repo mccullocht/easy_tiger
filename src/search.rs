@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::{
-    graph::{Graph, GraphNode, GraphSearchParams, GraphVectorIndexReader, NavVectorStore},
+    graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore},
     quantization::binary_quantize,
     Neighbor,
 };
@@ -74,7 +74,8 @@ impl GraphSearcher {
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
         let nav_scorer = reader.metadata().new_nav_scorer();
-        let nav_query = if let Some(entry_point) = graph.entry_point() {
+        let nav_query = if let Some(epr) = graph.entry_point() {
+            let entry_point = epr?;
             let nav_query = binary_quantize(query);
             let entry_vector = nav
                 .get(entry_point)

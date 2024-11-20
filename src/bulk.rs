@@ -15,7 +15,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader},
+    graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex},
     input::NumpyF32VectorStore,
     quantization::binary_quantize,
     scoring::{DotProductScorer, F32VectorScorer},
@@ -426,39 +426,39 @@ impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D> {
 struct BulkLoadBuilderGraph<'a, D>(&'a BulkLoadBuilder<D>);
 
 impl<'a, D> Graph for BulkLoadBuilderGraph<'a, D> {
-    type Node<'c> = BulkLoadGraphNode<'c, D> where Self: 'c;
+    type Vertex<'c> = BulkLoadGraphVertex<'c, D> where Self: 'c;
 
-    fn entry_point(&mut self) -> Option<i64> {
+    fn entry_point(&mut self) -> Option<Result<i64>> {
         let vertex = self.0.entry_vertex.load(atomic::Ordering::Relaxed);
         if vertex >= 0 {
-            Some(vertex)
+            Some(Ok(vertex))
         } else {
             None
         }
     }
 
-    fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>> {
-        Some(Ok(BulkLoadGraphNode {
+    fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+        Some(Ok(BulkLoadGraphVertex {
             builder: self.0,
-            node,
+            vertex_id,
         }))
     }
 }
 
-struct BulkLoadGraphNode<'a, D> {
+struct BulkLoadGraphVertex<'a, D> {
     builder: &'a BulkLoadBuilder<D>,
-    node: i64,
+    vertex_id: i64,
 }
 
-impl<'a, D> GraphNode for BulkLoadGraphNode<'a, D> {
+impl<'a, D> GraphVertex for BulkLoadGraphVertex<'a, D> {
     type EdgeIterator<'c> = BulkNodeEdgesIterator<'c> where Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
-        self.builder.vectors[self.node as usize].into()
+        self.builder.vectors[self.vertex_id as usize].into()
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
-        BulkNodeEdgesIterator::new(self.builder.graph[self.node as usize].read().unwrap())
+        BulkNodeEdgesIterator::new(self.builder.graph[self.vertex_id as usize].read().unwrap())
     }
 }
 

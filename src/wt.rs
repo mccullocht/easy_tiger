@@ -2,7 +2,7 @@ use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
 use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, Session, WiredTigerError};
 
-use crate::graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader, NavVectorStore};
+use crate::graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore};
 
 // TODO: drop WiredTiger from most of these names, it feels redundant and verbose.
 
@@ -23,18 +23,18 @@ impl<'a> WiredTigerNavVectorStore<'a> {
 }
 
 impl<'a> NavVectorStore for WiredTigerNavVectorStore<'a> {
-    fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        Some(unsafe { self.cursor.seek_exact_unsafe(node)? }.map(RecordView::into_inner_value))
+    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+        Some(unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value))
     }
 }
 
-/// Implementation of GraphNode that reads from an encoded value in a WiredTiger record table.
-pub struct WiredTigerGraphNode<'a> {
+/// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
+pub struct WiredTigerGraphVertex<'a> {
     dimensions: NonZero<usize>,
     data: Cow<'a, [u8]>,
 }
 
-impl<'a> WiredTigerGraphNode<'a> {
+impl<'a> WiredTigerGraphVertex<'a> {
     pub fn new(metadata: &GraphMetadata, data: Cow<'a, [u8]>) -> Self {
         Self {
             dimensions: metadata.dimensions,
@@ -58,7 +58,7 @@ impl<'a> WiredTigerGraphNode<'a> {
     }
 }
 
-impl<'a> GraphNode for WiredTigerGraphNode<'a> {
+impl<'a> GraphVertex for WiredTigerGraphVertex<'a> {
     type EdgeIterator<'c> = WiredTigerEdgeIterator<'c> where Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
@@ -116,21 +116,17 @@ impl<'a> WiredTigerGraph<'a> {
 }
 
 impl<'a> Graph for WiredTigerGraph<'a> {
-    type Node<'c> = WiredTigerGraphNode<'c> where Self: 'c;
+    type Vertex<'c> = WiredTigerGraphVertex<'c> where Self: 'c;
 
-    fn entry_point(&mut self) -> Option<i64> {
-        // TODO: handle errors better here. This probably requires changing the trait signature.
+    fn entry_point(&mut self) -> Option<Result<i64>> {
         let result = unsafe { self.cursor.seek_exact_unsafe(ENTRY_POINT_KEY)? };
-        Some(
-            result
-                .map(|r| i64::from_le_bytes(r.value().try_into().unwrap()))
-                .unwrap_or(0),
-        )
+        Some(result.map(|r| i64::from_le_bytes(r.value().try_into().unwrap())))
     }
 
-    fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>> {
-        let r = unsafe { self.cursor.seek_exact_unsafe(node)? }.map(RecordView::into_inner_value);
-        Some(r.map(|r| WiredTigerGraphNode::new(&self.metadata, r)))
+    fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+        let r =
+            unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
+        Some(r.map(|r| WiredTigerGraphVertex::new(&self.metadata, r)))
     }
 }
 

@@ -72,15 +72,19 @@ pub trait NavVectorStore {
 
 /// `GraphVectorIndexReader` is used to generate objects for graph navigation.
 pub trait GraphVectorIndexReader {
-    type Graph: Graph;
-    type NavVectorStore: NavVectorStore;
+    type Graph<'a>: Graph + 'a
+    where
+        Self: 'a;
+    type NavVectorStore<'a>: NavVectorStore + 'a
+    where
+        Self: 'a;
 
     /// Return metadata for this graph.
     fn metadata(&self) -> &GraphMetadata;
 
     /// Return an object that can be used to navigate the graph.
-    fn graph(&mut self) -> Result<Self::Graph>;
+    fn graph(&self) -> Result<Self::Graph<'_>>;
 
     /// Return an object that can be used to read navigational vectors.
-    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore>;
+    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>>;
 }

@@ -405,18 +405,18 @@ impl<'a, D> BulkLoadGraphVectorIndexReader<'a, D> {
 }
 
 impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D> {
-    type Graph = BulkLoadBuilderGraph<'a, D>;
-    type NavVectorStore = WiredTigerNavVectorStore;
+    type Graph<'b> = BulkLoadBuilderGraph<'b, D> where Self: 'b;
+    type NavVectorStore<'b> = WiredTigerNavVectorStore<'b> where Self: 'b;
 
     fn metadata(&self) -> &GraphMetadata {
         self.0.index.metadata()
     }
 
-    fn graph(&mut self) -> Result<Self::Graph> {
+    fn graph(&self) -> Result<Self::Graph<'_>> {
         Ok(BulkLoadBuilderGraph(self.0))
     }
 
-    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
+    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         Ok(WiredTigerNavVectorStore::new(
             self.1.open_record_cursor(self.0.index.nav_table_name())?,
         ))

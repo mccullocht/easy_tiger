@@ -47,7 +47,12 @@ impl From<&str> for TableUri {
 
 /// A WiredTiger session.
 ///
-/// Sessions are used to create cursors to view and mutate data and manage transaction state.
+/// `Session`s are used to create cursors to view and mutate data and manage transaction state.
+///
+/// `Session` is `Send` and may be freely passed to other threads but it is not `Sync` as it is
+/// unsafe to access without synchronization. `RecordCursor`s reference their parent `Session` so
+/// it is not possible to `Send` a `Session` with open cursors. Some `Session` APIs support cursor
+/// caching to try to mitigate the costs of opening/closing cursors to perform a `Send`.
 pub struct Session {
     ptr: NonNull<WT_SESSION>,
     connection: Arc<Connection>,
@@ -247,6 +252,8 @@ impl Drop for Session {
         unsafe { self.ptr.as_ref().close.unwrap()(self.ptr.as_ptr(), std::ptr::null()) };
     }
 }
+
+unsafe impl Send for Session {}
 
 /// Inner representation of a cursor.
 ///

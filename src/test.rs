@@ -117,18 +117,18 @@ impl TestGraphVectorIndex {
 pub struct TestGraphVectorIndexReader<'a>(&'a TestGraphVectorIndex);
 
 impl<'a> GraphVectorIndexReader for TestGraphVectorIndexReader<'a> {
-    type Graph = TestGraph<'a>;
-    type NavVectorStore = TestNavVectorStore<'a>;
+    type Graph<'b> = TestGraph<'b> where Self: 'b;
+    type NavVectorStore<'b> = TestNavVectorStore<'b> where Self: 'b;
 
     fn metadata(&self) -> &GraphMetadata {
         &self.0.metadata
     }
 
-    fn graph(&mut self) -> Result<Self::Graph> {
+    fn graph(&self) -> Result<Self::Graph<'_>> {
         Ok(TestGraph(self.0))
     }
 
-    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
+    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         Ok(TestNavVectorStore(self.0))
     }
 }

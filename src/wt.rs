@@ -12,17 +12,17 @@ pub const ENTRY_POINT_KEY: i64 = -1;
 pub const METADATA_KEY: i64 = -2;
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
-pub struct WiredTigerNavVectorStore {
-    cursor: RecordCursor,
+pub struct WiredTigerNavVectorStore<'a> {
+    cursor: RecordCursor<'a>,
 }
 
-impl WiredTigerNavVectorStore {
-    pub fn new(cursor: RecordCursor) -> Self {
+impl<'a> WiredTigerNavVectorStore<'a> {
+    pub fn new(cursor: RecordCursor<'a>) -> Self {
         Self { cursor }
     }
 }
 
-impl NavVectorStore for WiredTigerNavVectorStore {
+impl<'a> NavVectorStore for WiredTigerNavVectorStore<'a> {
     fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>> {
         Some(unsafe { self.cursor.seek_exact_unsafe(node)? }.map(RecordView::into_inner_value))
     }
@@ -104,18 +104,18 @@ impl<'a> Iterator for WiredTigerEdgeIterator<'a> {
 }
 
 /// Implementation of `Graph` that reads from a WiredTiger `RecordCursor`.
-pub struct WiredTigerGraph {
+pub struct WiredTigerGraph<'a> {
     metadata: GraphMetadata,
-    cursor: RecordCursor,
+    cursor: RecordCursor<'a>,
 }
 
-impl WiredTigerGraph {
-    pub fn new(metadata: GraphMetadata, cursor: RecordCursor) -> Self {
+impl<'a> WiredTigerGraph<'a> {
+    pub fn new(metadata: GraphMetadata, cursor: RecordCursor<'a>) -> Self {
         Self { metadata, cursor }
     }
 }
 
-impl Graph for WiredTigerGraph {
+impl<'a> Graph for WiredTigerGraph<'a> {
     type Node<'c> = WiredTigerGraphNode<'c> where Self: 'c;
 
     fn entry_point(&mut self) -> Option<i64> {
@@ -212,14 +212,14 @@ impl WiredTigerGraphVectorIndexReader {
 }
 
 impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
-    type Graph = WiredTigerGraph;
-    type NavVectorStore = WiredTigerNavVectorStore;
+    type Graph<'a> = WiredTigerGraph<'a> where Self: 'a;
+    type NavVectorStore<'a> = WiredTigerNavVectorStore<'a> where Self: 'a;
 
     fn metadata(&self) -> &GraphMetadata {
         &self.index.metadata
     }
 
-    fn graph(&mut self) -> Result<Self::Graph> {
+    fn graph(&self) -> Result<Self::Graph<'_>> {
         Ok(WiredTigerGraph::new(
             self.index.metadata,
             self.session
@@ -227,7 +227,7 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
         ))
     }
 
-    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
+    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         Ok(WiredTigerNavVectorStore::new(
             self.session
                 .open_record_cursor(&self.index.nav_table_name)?,

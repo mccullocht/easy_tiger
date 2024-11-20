@@ -94,7 +94,7 @@ impl Default for InnerCursor {
 
 pub struct RecordCursorGuard<'a> {
     session: &'a Session,
-    // Prevent the value from being dropped, I always take the value on the way out.
+    // On drop we will take the value and return it to session.
     cursor: ManuallyDrop<RecordCursor>,
 }
 
@@ -219,7 +219,7 @@ impl Session {
     /// Get a cached cursor or create a new cursor over `table_name`.
     // TODO: return a Guard the automatically returns the cursor. We cannot do this yet as the guard would need
     // a reference, which would prevent us from calling any mutable Session methods (nearly all of them).
-    pub fn get_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
+    pub fn get_record_cursor(&self, table_name: &str) -> Result<RecordCursorGuard<'_>> {
         let mut cursor_cache = self.cached_cursors.borrow_mut();
         cursor_cache
             .iter()
@@ -229,6 +229,7 @@ impl Session {
                 Ok(RecordCursor::new(inner, self.inner.clone()))
             })
             .unwrap_or_else(|| self.open_record_cursor(table_name))
+            .map(|c| RecordCursorGuard::new(self, c))
     }
 
     /// Return a `RecordCursor` to the cache for future re-use.

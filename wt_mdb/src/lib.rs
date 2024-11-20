@@ -298,7 +298,7 @@ mod test {
 
         let mut cursor = session.get_record_cursor("test").unwrap();
         assert_eq!(cursor.set(&RecordView::new(1, b"foo")), Ok(()));
-        session.return_record_cursor(cursor);
+        drop(cursor);
 
         cursor = session.get_record_cursor("test").unwrap();
         assert_eq!(cursor.next(), Some(Ok(Record::new(1, b"foo"))));

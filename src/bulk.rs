@@ -15,7 +15,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{Graph, GraphMetadata, GraphNode, GraphVectorIndexReader},
+    graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex},
     input::NumpyF32VectorStore,
     quantization::binary_quantize,
     scoring::{DotProductScorer, F32VectorScorer},
@@ -260,7 +260,7 @@ where
                         }
                         Record::new(
                             i as i64,
-                            encode_graph_node(v, vertex.iter().map(|n| n.node()).collect()),
+                            encode_graph_node(v, vertex.iter().map(|n| n.vertex()).collect()),
                         )
                     }),
             ),
@@ -287,13 +287,13 @@ where
     /// This function is the only mutator of self.graph and must not be run concurrently.
     fn apply_insert(&self, index: usize, edges: Vec<Neighbor>) -> Result<()> {
         assert!(
-            !edges.iter().any(|n| n.node() == index as i64),
+            !edges.iter().any(|n| n.vertex() == index as i64),
             "Candidate edges for vertex {} contains self-edge.",
             index
         );
         self.graph[index].write().unwrap().extend_from_slice(&edges);
         for e in edges.iter() {
-            let mut guard = self.graph[e.node() as usize].write().unwrap();
+            let mut guard = self.graph[e.vertex() as usize].write().unwrap();
             guard.push(Neighbor::new(index as i64, e.score()));
             let max_edges = NonZero::new(guard.capacity()).unwrap();
             self.maybe_prune_node(index, guard, max_edges)?;
@@ -325,10 +325,10 @@ where
         // If we maintain the invariant that all links are reciprocated then it will be easier
         // to mutate the index without requiring a cleaning process.
         for n in dropped {
-            self.graph[n.node() as usize]
+            self.graph[n.vertex() as usize]
                 .write()
                 .unwrap()
-                .retain(|e| e.node() != index as i64);
+                .retain(|e| e.vertex() != index as i64);
         }
         Ok(())
     }
@@ -357,7 +357,7 @@ where
 
                 // TODO: fix error handling so we can reuse this elsewhere.
                 let e_vec = graph
-                    .get(e.node())
+                    .get(e.vertex())
                     .expect("bulk load")
                     .expect("numpy vector store")
                     .vector()
@@ -365,7 +365,7 @@ where
                 let mut select = false;
                 for p in selected.iter().take_while(|j| **j < i).map(|j| edges[*j]) {
                     let p_node = graph
-                        .get(p.node())
+                        .get(p.vertex())
                         .expect("bulk load")
                         .expect("numpy vector store");
                     if scorer.score(&e_vec, &p_node.vector()) > e.score * alpha {
@@ -405,18 +405,18 @@ impl<'a, D> BulkLoadGraphVectorIndexReader<'a, D> {
 }
 
 impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D> {
-    type Graph = BulkLoadBuilderGraph<'a, D>;
-    type NavVectorStore = WiredTigerNavVectorStore;
+    type Graph<'b> = BulkLoadBuilderGraph<'b, D> where Self: 'b;
+    type NavVectorStore<'b> = WiredTigerNavVectorStore<'b> where Self: 'b;
 
     fn metadata(&self) -> &GraphMetadata {
         self.0.index.metadata()
     }
 
-    fn graph(&mut self) -> Result<Self::Graph> {
+    fn graph(&self) -> Result<Self::Graph<'_>> {
         Ok(BulkLoadBuilderGraph(self.0))
     }
 
-    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore> {
+    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         Ok(WiredTigerNavVectorStore::new(
             self.1.open_record_cursor(self.0.index.nav_table_name())?,
         ))
@@ -426,39 +426,39 @@ impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D> {
 struct BulkLoadBuilderGraph<'a, D>(&'a BulkLoadBuilder<D>);
 
 impl<'a, D> Graph for BulkLoadBuilderGraph<'a, D> {
-    type Node<'c> = BulkLoadGraphNode<'c, D> where Self: 'c;
+    type Vertex<'c> = BulkLoadGraphVertex<'c, D> where Self: 'c;
 
-    fn entry_point(&mut self) -> Option<i64> {
+    fn entry_point(&mut self) -> Option<Result<i64>> {
         let vertex = self.0.entry_vertex.load(atomic::Ordering::Relaxed);
         if vertex >= 0 {
-            Some(vertex)
+            Some(Ok(vertex))
         } else {
             None
         }
     }
 
-    fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>> {
-        Some(Ok(BulkLoadGraphNode {
+    fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+        Some(Ok(BulkLoadGraphVertex {
             builder: self.0,
-            node,
+            vertex_id,
         }))
     }
 }
 
-struct BulkLoadGraphNode<'a, D> {
+struct BulkLoadGraphVertex<'a, D> {
     builder: &'a BulkLoadBuilder<D>,
-    node: i64,
+    vertex_id: i64,
 }
 
-impl<'a, D> GraphNode for BulkLoadGraphNode<'a, D> {
+impl<'a, D> GraphVertex for BulkLoadGraphVertex<'a, D> {
     type EdgeIterator<'c> = BulkNodeEdgesIterator<'c> where Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
-        self.builder.vectors[self.node as usize].into()
+        self.builder.vectors[self.vertex_id as usize].into()
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
-        BulkNodeEdgesIterator::new(self.builder.graph[self.node as usize].read().unwrap())
+        BulkNodeEdgesIterator::new(self.builder.graph[self.vertex_id as usize].read().unwrap())
     }
 }
 
@@ -481,6 +481,6 @@ impl<'a> Iterator for BulkNodeEdgesIterator<'a> {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.range.next().map(|i| self.guard[i].node())
+        self.range.next().map(|i| self.guard[i].vertex())
     }
 }

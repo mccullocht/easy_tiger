@@ -36,8 +36,41 @@ impl GraphMetadata {
     }
 }
 
+/// `GraphVectorIndexReader` is used to generate objects for graph navigation.
+pub trait GraphVectorIndexReader {
+    type Graph<'a>: Graph + 'a
+    where
+        Self: 'a;
+    type NavVectorStore<'a>: NavVectorStore + 'a
+    where
+        Self: 'a;
+
+    /// Return metadata for this graph.
+    fn metadata(&self) -> &GraphMetadata;
+
+    /// Return an object that can be used to navigate the graph.
+    fn graph(&self) -> Result<Self::Graph<'_>>;
+
+    /// Return an object that can be used to read navigational vectors.
+    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>>;
+}
+
+/// A Vamana graph.
+pub trait Graph {
+    type Vertex<'c>: GraphVertex
+    where
+        Self: 'c;
+
+    /// Return the graph entry point, or None if the graph is empty.
+    fn entry_point(&mut self) -> Option<Result<i64>>;
+
+    /// Get the contents of a single vertex.
+    // NB: self is mutable to allow reading from a WT cursor.
+    fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>>;
+}
+
 /// A node in the Vamana graph.
-pub trait GraphNode {
+pub trait GraphVertex {
     type EdgeIterator<'a>: Iterator<Item = i64>
     where
         Self: 'a;
@@ -49,38 +82,8 @@ pub trait GraphNode {
     fn edges(&self) -> Self::EdgeIterator<'_>;
 }
 
-/// A Vamana graph.
-pub trait Graph {
-    type Node<'c>: GraphNode
-    where
-        Self: 'c;
-
-    /// Return the graph entry point, or None if the graph is empty.
-    fn entry_point(&mut self) -> Option<i64>;
-
-    /// Get the contents of a single node.
-    // NB: self is mutable to allow reading from a WT cursor.
-    fn get(&mut self, node: i64) -> Option<Result<Self::Node<'_>>>;
-}
-
 /// Vector store for vectors used to navigate the graph.
 pub trait NavVectorStore {
-    /// Get the navigation vector for a single node.
-    // NB: self is mutable to allow reading from a WT cursor.
-    fn get(&mut self, node: i64) -> Option<Result<Cow<'_, [u8]>>>;
-}
-
-/// `GraphVectorIndexReader` is used to generate objects for graph navigation.
-pub trait GraphVectorIndexReader {
-    type Graph: Graph;
-    type NavVectorStore: NavVectorStore;
-
-    /// Return metadata for this graph.
-    fn metadata(&self) -> &GraphMetadata;
-
-    /// Return an object that can be used to navigate the graph.
-    fn graph(&mut self) -> Result<Self::Graph>;
-
-    /// Return an object that can be used to read navigational vectors.
-    fn nav_vectors(&mut self) -> Result<Self::NavVectorStore>;
+    /// Get the navigation vector for a single vertex.
+    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }

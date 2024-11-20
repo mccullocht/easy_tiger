@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::{
-    graph::{Graph, GraphNode, GraphSearchParams, GraphVectorIndexReader, NavVectorStore},
+    graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore},
     quantization::binary_quantize,
     Neighbor,
 };
@@ -74,7 +74,8 @@ impl GraphSearcher {
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
         let nav_scorer = reader.metadata().new_nav_scorer();
-        let nav_query = if let Some(entry_point) = graph.entry_point() {
+        let nav_query = if let Some(epr) = graph.entry_point() {
+            let entry_point = epr?;
             let nav_query = binary_quantize(query);
             let entry_vector = nav
                 .get(entry_point)
@@ -91,7 +92,7 @@ impl GraphSearcher {
 
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
             let node = graph
-                .get(best_candidate.neighbor().node())
+                .get(best_candidate.neighbor().vertex())
                 .unwrap_or_else(|| Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
             // If we aren't reranking we don't need to copy the actual vector.
             best_candidate.visit(if self.params.num_rerank > 0 {
@@ -121,7 +122,7 @@ impl GraphSearcher {
                 .take(self.params.num_rerank)
                 .map(|c| {
                     Neighbor::new(
-                        c.neighbor.node(),
+                        c.neighbor.vertex(),
                         scorer.score(query, c.vector.as_ref().expect("node visited")),
                     )
                 })

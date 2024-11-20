@@ -102,15 +102,15 @@ impl TestGraphVectorIndex {
                 break;
             }
 
-            let q = &graph[n.node() as usize].vector;
+            let q = &graph[n.vertex() as usize].vector;
             if !selected
                 .iter()
-                .any(|p| scorer.score(q, &graph[p.node() as usize].vector) > n.score())
+                .any(|p| scorer.score(q, &graph[p.vertex() as usize].vector) > n.score())
             {
                 selected.push(*n);
             }
         }
-        selected.into_iter().map(|n| n.node()).collect()
+        selected.into_iter().map(|n| n.vertex()).collect()
     }
 }
 

@@ -92,7 +92,7 @@ impl GraphSearcher {
 
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
             let node = graph
-                .get(best_candidate.neighbor().node())
+                .get(best_candidate.neighbor().vertex())
                 .unwrap_or_else(|| Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
             // If we aren't reranking we don't need to copy the actual vector.
             best_candidate.visit(if self.params.num_rerank > 0 {
@@ -122,7 +122,7 @@ impl GraphSearcher {
                 .take(self.params.num_rerank)
                 .map(|c| {
                     Neighbor::new(
-                        c.neighbor.node(),
+                        c.neighbor.vertex(),
                         scorer.score(query, c.vector.as_ref().expect("node visited")),
                     )
                 })

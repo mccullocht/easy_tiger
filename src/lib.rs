@@ -16,20 +16,20 @@ pub mod wt;
 /// In a graph index, score might be relative to another node in the index.
 ///
 /// When compared `Neighbor`s are ordered first in descending order by score,
-/// then in ascending order by node.
+/// then in ascending order by vertex id.
 #[derive(Debug, Copy, Clone)]
 pub struct Neighbor {
-    node: i64,
+    vertex: i64,
     score: f64,
 }
 
 impl Neighbor {
-    pub fn new(node: i64, score: f64) -> Self {
-        Self { node, score }
+    pub fn new(vertex: i64, score: f64) -> Self {
+        Self { vertex, score }
     }
 
-    pub fn node(&self) -> i64 {
-        self.node
+    pub fn vertex(&self) -> i64 {
+        self.vertex
     }
 
     pub fn score(&self) -> f64 {
@@ -39,7 +39,7 @@ impl Neighbor {
 
 impl PartialEq for Neighbor {
     fn eq(&self, other: &Self) -> bool {
-        self.node == other.node && self.score.total_cmp(&other.score).is_eq()
+        self.vertex == other.vertex && self.score.total_cmp(&other.score).is_eq()
     }
 }
 
@@ -55,7 +55,7 @@ impl Ord for Neighbor {
     fn cmp(&self, other: &Self) -> Ordering {
         let c = self.score.total_cmp(&other.score).reverse();
         match c {
-            Ordering::Equal => self.node.cmp(&other.node),
+            Ordering::Equal => self.vertex.cmp(&other.vertex),
             _ => c,
         }
     }

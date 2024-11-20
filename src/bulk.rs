@@ -260,7 +260,7 @@ where
                         }
                         Record::new(
                             i as i64,
-                            encode_graph_node(v, vertex.iter().map(|n| n.node()).collect()),
+                            encode_graph_node(v, vertex.iter().map(|n| n.vertex()).collect()),
                         )
                     }),
             ),
@@ -287,13 +287,13 @@ where
     /// This function is the only mutator of self.graph and must not be run concurrently.
     fn apply_insert(&self, index: usize, edges: Vec<Neighbor>) -> Result<()> {
         assert!(
-            !edges.iter().any(|n| n.node() == index as i64),
+            !edges.iter().any(|n| n.vertex() == index as i64),
             "Candidate edges for vertex {} contains self-edge.",
             index
         );
         self.graph[index].write().unwrap().extend_from_slice(&edges);
         for e in edges.iter() {
-            let mut guard = self.graph[e.node() as usize].write().unwrap();
+            let mut guard = self.graph[e.vertex() as usize].write().unwrap();
             guard.push(Neighbor::new(index as i64, e.score()));
             let max_edges = NonZero::new(guard.capacity()).unwrap();
             self.maybe_prune_node(index, guard, max_edges)?;
@@ -325,10 +325,10 @@ where
         // If we maintain the invariant that all links are reciprocated then it will be easier
         // to mutate the index without requiring a cleaning process.
         for n in dropped {
-            self.graph[n.node() as usize]
+            self.graph[n.vertex() as usize]
                 .write()
                 .unwrap()
-                .retain(|e| e.node() != index as i64);
+                .retain(|e| e.vertex() != index as i64);
         }
         Ok(())
     }
@@ -357,7 +357,7 @@ where
 
                 // TODO: fix error handling so we can reuse this elsewhere.
                 let e_vec = graph
-                    .get(e.node())
+                    .get(e.vertex())
                     .expect("bulk load")
                     .expect("numpy vector store")
                     .vector()
@@ -365,7 +365,7 @@ where
                 let mut select = false;
                 for p in selected.iter().take_while(|j| **j < i).map(|j| edges[*j]) {
                     let p_node = graph
-                        .get(p.node())
+                        .get(p.vertex())
                         .expect("bulk load")
                         .expect("numpy vector store");
                     if scorer.score(&e_vec, &p_node.vector()) > e.score * alpha {
@@ -481,6 +481,6 @@ impl<'a> Iterator for BulkNodeEdgesIterator<'a> {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.range.next().map(|i| self.guard[i].node())
+        self.range.next().map(|i| self.guard[i].vertex())
     }
 }

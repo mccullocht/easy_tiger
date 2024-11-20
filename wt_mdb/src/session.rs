@@ -270,15 +270,6 @@ impl Drop for InnerCursor {
     }
 }
 
-impl Default for InnerCursor {
-    fn default() -> Self {
-        Self {
-            ptr: NonNull::dangling(),
-            uri: TableUri::default(),
-        }
-    }
-}
-
 /// A `RecordCursor` facilities viewing and mutating data in a WiredTiger table where
 /// the table is `i64` keyed and byte-string valued.
 pub struct RecordCursor<'a> {

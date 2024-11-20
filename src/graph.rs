@@ -55,6 +55,17 @@ pub trait GraphVectorIndexReader {
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>>;
 }
 
+// XXX docos
+pub trait ParallelGraphVectorIndexReader: GraphVectorIndexReader {
+    fn lookup<D>(&self, vertex_id: i64, done: D)
+    where
+        D: FnOnce(
+                Option<Result<<<Self as GraphVectorIndexReader>::Graph<'_> as Graph>::Vertex<'_>>>,
+            ) + Send
+            + Sync
+            + 'static;
+}
+
 /// A Vamana graph.
 pub trait Graph {
     type Vertex<'c>: GraphVertex

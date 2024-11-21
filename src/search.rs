@@ -1,12 +1,13 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, num::NonZero, sync::mpsc::channel};
 
 use crate::{
     graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore},
     quantization::binary_quantize,
+    scoring::QuantizedVectorScorer,
     Neighbor,
 };
 
-use wt_mdb::{Error, Result, WiredTigerError};
+use wt_mdb::{Error, Result};
 
 /// Helper to search a Vamana graph.
 pub struct GraphSearcher {
@@ -39,8 +40,28 @@ impl GraphSearcher {
         query: &[f32],
         reader: &mut R,
     ) -> Result<Vec<Neighbor>> {
+        self.search_with_concurrency(query, reader, NonZero::new(1).unwrap())
+    }
+
+    /// Search `reader` for `query` using up `max_concurrent` threads at any one time.
+    /// The query will be executed serially if `max_concurrent == 1` or if
+    /// `!reader.parallel_lookup()`.
+    ///
+    /// Return the top matching candidates.
+    pub fn search_with_concurrency<R: GraphVectorIndexReader>(
+        &mut self,
+        query: &[f32],
+        reader: &mut R,
+        max_concurrent: NonZero<usize>,
+    ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, reader)
+        self.candidates.clear();
+
+        if max_concurrent.get() > 1 && reader.parallel_lookup() {
+            self.search_concurrently(query, reader, max_concurrent)
+        } else {
+            self.search_serially(query, reader)
+        }
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -53,47 +74,32 @@ impl GraphSearcher {
         // Insertions may be concurrent and there could already be backlinks to this vertex in the graph.
         // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
         self.seen.insert(vertex_id);
+        self.candidates.clear();
 
         // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
         let query = reader
             .graph()?
             .get(vertex_id)
-            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?
+            .unwrap_or(Err(Error::not_found_error()))?
             .vector()
             .to_vec();
-        self.search_internal(&query, reader)
+        self.search_serially(&query, reader)
     }
 
-    fn search_internal<R: GraphVectorIndexReader>(
+    fn search_serially<R: GraphVectorIndexReader>(
         &mut self,
         query: &[f32],
         reader: &mut R,
     ) -> Result<Vec<Neighbor>> {
-        self.candidates.clear();
-
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
         let nav_scorer = reader.metadata().new_nav_scorer();
-        let nav_query = if let Some(epr) = graph.entry_point() {
-            let entry_point = epr?;
-            let nav_query = binary_quantize(query);
-            let entry_vector = nav
-                .get(entry_point)
-                .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-            self.candidates.add_unvisited(Neighbor::new(
-                entry_point,
-                nav_scorer.score(&nav_query, &entry_vector),
-            ));
-            self.seen.insert(entry_point);
-            nav_query
-        } else {
-            return Ok(vec![]);
-        };
+        let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
 
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
             let node = graph
                 .get(best_candidate.neighbor().vertex())
-                .unwrap_or_else(|| Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                .unwrap_or_else(|| Err(Error::not_found_error()))?;
             // If we aren't reranking we don't need to copy the actual vector.
             best_candidate.visit(if self.params.num_rerank > 0 {
                 node.vector().into()
@@ -105,15 +111,112 @@ impl GraphSearcher {
                 if !self.seen.insert(edge) {
                     continue;
                 }
-                let vec = nav
-                    .get(edge)
-                    .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
                     .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
             }
         }
 
-        let results = if self.params.num_rerank > 0 {
+        Ok(self.extract_results(query, reader))
+    }
+
+    fn search_concurrently<R>(
+        &mut self,
+        query: &[f32],
+        reader: &mut R,
+        max_concurrent: NonZero<usize>,
+    ) -> Result<Vec<Neighbor>>
+    where
+        R: GraphVectorIndexReader,
+    {
+        self.candidates.clear();
+
+        let mut graph = reader.graph()?;
+        let mut nav = reader.nav_vectors()?;
+        let nav_scorer = reader.metadata().new_nav_scorer();
+        let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
+
+        let mut num_concurrent = 0;
+        let (send, recv) = channel();
+        loop {
+            for neighbor in self
+                .candidates
+                .unvisited_iter()
+                .take(max_concurrent.get() - num_concurrent)
+                .copied()
+            {
+                let graph_send = send.clone();
+                reader.lookup(neighbor.vertex(), move |vertex| {
+                    graph_send
+                        .send(vertex.map(|result| {
+                            result.map(|v| {
+                                (neighbor, v.vector().to_vec(), v.edges().collect::<Vec<_>>())
+                            })
+                        }))
+                        .unwrap();
+                });
+                num_concurrent += 1;
+            }
+
+            // If we have no outstanding reads at this point then all of the members of the
+            // candidate list have been visited and we've converged on the result set.
+            if num_concurrent == 0 {
+                break;
+            }
+
+            for lookup_result in std::iter::once(recv.recv().unwrap()).chain(recv.try_iter()) {
+                num_concurrent -= 1;
+                let (neighbor, vector, edges) =
+                    lookup_result.unwrap_or(Err(Error::not_found_error()))?;
+                self.candidates.visit_candidate(neighbor, vector);
+                for edge in edges {
+                    if self.seen.insert(edge) {
+                        let doc = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
+                        self.candidates
+                            .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &doc)));
+                    }
+                }
+            }
+        }
+
+        Ok(self.extract_results(query, reader))
+    }
+
+    // Initialize the candidate queue and return the binary quantized query.
+    fn init_candidates<G, N>(
+        &mut self,
+        query: &[f32],
+        graph: &mut G,
+        nav: &mut N,
+        nav_scorer: &dyn QuantizedVectorScorer,
+    ) -> Result<Vec<u8>>
+    where
+        G: Graph,
+        N: NavVectorStore,
+    {
+        let nav_query = binary_quantize(query);
+        if let Some(epr) = graph.entry_point() {
+            let entry_point = epr?;
+            let entry_vector = nav
+                .get(entry_point)
+                .unwrap_or(Err(Error::not_found_error()))?;
+            self.candidates.add_unvisited(Neighbor::new(
+                entry_point,
+                nav_scorer.score(&nav_query, &entry_vector),
+            ));
+            self.seen.insert(entry_point);
+        }
+        // We don't treat failing to obtain an entry point as an error because
+        // the graph may be empty.
+        Ok(nav_query)
+    }
+
+    fn extract_results<R: GraphVectorIndexReader>(
+        &mut self,
+        query: &[f32],
+        reader: &R,
+    ) -> Vec<Neighbor> {
+        if self.params.num_rerank > 0 {
             let mut normalized_query = query.to_vec();
             let scorer = reader.metadata().new_scorer();
             scorer.normalize(&mut normalized_query);
@@ -123,15 +226,29 @@ impl GraphSearcher {
                 .map(|c| {
                     Neighbor::new(
                         c.neighbor.vertex(),
-                        scorer.score(query, c.vector.as_ref().expect("node visited")),
+                        scorer.score(query, c.state.vector().expect("node visited")),
                     )
                 })
                 .collect()
         } else {
             self.candidates.iter().map(|c| c.neighbor).collect()
-        };
+        }
+    }
+}
 
-        Ok(results)
+#[derive(Debug, PartialEq)]
+enum CandidateState {
+    Unvisited,
+    Pending,
+    Visited(Vec<f32>),
+}
+
+impl CandidateState {
+    fn vector(&self) -> Option<&[f32]> {
+        match self {
+            CandidateState::Visited(v) => Some(v),
+            _ => None,
+        }
     }
 }
 
@@ -139,15 +256,14 @@ impl GraphSearcher {
 #[derive(Debug)]
 struct Candidate {
     neighbor: Neighbor,
-    // If set, we've visited this neighbor.
-    vector: Option<Vec<f32>>,
+    state: CandidateState,
 }
 
 impl From<Neighbor> for Candidate {
     fn from(neighbor: Neighbor) -> Self {
         Candidate {
             neighbor,
-            vector: None,
+            state: CandidateState::Unvisited,
         }
     }
 }
@@ -171,6 +287,10 @@ impl CandidateList {
         }
     }
 
+    /// Add a new candidate as an unvisited entry in the list.
+    ///
+    /// This maintains the list at a length <= capacity so the neighbor may not be inserted _or_ it
+    /// may cause another neighbor to be dropped.
     fn add_unvisited(&mut self, neighbor: Neighbor) {
         // If the queue is full and the candidate is not competitive then drop it.
         if self.candidates.len() >= self.candidates.capacity()
@@ -201,10 +321,42 @@ impl CandidateList {
         }
     }
 
+    /// Return an iterator over all unvisited candidates, marking any return as Pending.
+    fn unvisited_iter(&mut self) -> impl Iterator<Item = &'_ Neighbor> {
+        self.candidates
+            .iter_mut()
+            .skip(self.next_unvisited)
+            .filter_map(|c| match c.state {
+                CandidateState::Unvisited => {
+                    c.state = CandidateState::Pending;
+                    Some(&c.neighbor)
+                }
+                _ => None,
+            })
+    }
+
+    /// Mark `neighbor` as visited and insert associated `vector`.
+    ///
+    /// Returns true if `neighbor` was successfully updated.
+    fn visit_candidate(&mut self, neighbor: Neighbor, vector: Vec<f32>) -> bool {
+        match self
+            .candidates
+            .binary_search_by_key(&neighbor, |c| c.neighbor)
+        {
+            Ok(index) => {
+                self.candidates[index].state = CandidateState::Visited(vector);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Iterate over all candidates.
     fn iter(&self) -> impl Iterator<Item = &'_ Candidate> {
         self.candidates.iter()
     }
 
+    /// Reset the candidate list to an empty state.
     fn clear(&mut self) {
         self.candidates.clear();
         self.next_unvisited = 0;
@@ -229,14 +381,20 @@ impl<'a> VisitCandidateGuard<'a> {
 
     /// Mark this candidate as visited and update the full fidelity vector in the candidate list.
     fn visit(&mut self, vector: impl Into<Vec<f32>>) {
-        self.list.candidates[self.index].vector = Some(vector.into());
+        self.list.candidates[self.index].state = CandidateState::Visited(vector.into());
         self.list.next_unvisited = self
             .list
             .candidates
             .iter()
             .enumerate()
             .skip(self.index + 1)
-            .find_map(|(i, c)| if c.vector.is_some() { None } else { Some(i) })
+            .find_map(|(i, c)| {
+                if c.state == CandidateState::Unvisited {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(self.list.candidates.len());
     }
 }

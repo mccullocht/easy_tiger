@@ -270,6 +270,8 @@ impl Drop for InnerCursor {
     }
 }
 
+unsafe impl Send for InnerCursor {}
+
 /// A `RecordCursor` facilities viewing and mutating data in a WiredTiger table where
 /// the table is `i64` keyed and byte-string valued.
 pub struct RecordCursor<'a> {

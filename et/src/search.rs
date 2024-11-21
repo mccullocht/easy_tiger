@@ -10,9 +10,11 @@ use clap::Args;
 use easy_tiger::{
     graph::GraphSearchParams,
     search::GraphSearcher,
+    worker_pool::WorkerPool,
     wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader},
 };
 use indicatif::{ProgressBar, ProgressStyle};
+use threadpool::ThreadPool;
 use wt_mdb::Connection;
 
 #[derive(Args)]
@@ -30,6 +32,9 @@ pub struct SearchArgs {
     /// Maximum number of queries to run. If unset, run all queries in the vector file.
     #[arg(short, long)]
     limit: Option<usize>,
+    /// If greater than 1, do up to this many concurrent reads during graph traversal.
+    #[arg(long, default_value = "1")]
+    concurrency: NonZero<usize>,
     // TODO: recall statistics
 }
 
@@ -50,6 +55,14 @@ pub fn search(
         beam_width: args.candidates,
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
     });
+    let pool = if args.concurrency.get() > 1 {
+        Some(WorkerPool::new(
+            ThreadPool::new(args.concurrency.into()),
+            connection.clone(),
+        ))
+    } else {
+        None
+    };
 
     let index = Arc::new(index);
     let mut session = connection.open_session()?;
@@ -62,8 +75,12 @@ pub fn search(
         .with_finish(indicatif::ProgressFinish::AndLeave);
     for q in query_vectors.iter().take(limit) {
         session.begin_transaction(None)?;
-        let mut reader = WiredTigerGraphVectorIndexReader::new(index.clone(), session);
-        let results = searcher.search(q, &mut reader)?;
+        let mut reader = WiredTigerGraphVectorIndexReader::new(
+            index.clone(),
+            session,
+            pool.as_ref().map(WorkerPool::clone),
+        );
+        let results = searcher.search_with_concurrency(q, &mut reader, args.concurrency)?;
         assert_ne!(results.len(), 0);
         progress.inc(1);
         session = reader.into_session();

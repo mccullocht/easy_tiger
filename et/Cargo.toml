@@ -8,4 +8,5 @@ clap = { version = "4.5.20", features = ["derive"] }
 easy_tiger = { path = "../" }
 indicatif = "0.17.8"
 memmap2 = { version = "0.9.5", features = ["stable_deref_trait"] }
+threadpool = "1.8.1"
 wt_mdb = { path = "../wt_mdb" }

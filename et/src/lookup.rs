@@ -29,7 +29,7 @@ pub fn lookup(
     let session = connection.open_session()?;
     let mut graph = WiredTigerGraph::new(
         *index.metadata(),
-        session.open_record_cursor(index.graph_table_name())?,
+        session.get_record_cursor(index.graph_table_name())?,
     );
     match graph.get(args.id) {
         None => {

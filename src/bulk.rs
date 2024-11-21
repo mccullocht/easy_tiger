@@ -396,15 +396,21 @@ where
     }
 }
 
-struct BulkLoadGraphVectorIndexReader<'a, D>(&'a BulkLoadBuilder<D>, Session);
+struct BulkLoadGraphVectorIndexReader<'a, D: Send>(&'a BulkLoadBuilder<D>, Session);
 
-impl<'a, D> BulkLoadGraphVectorIndexReader<'a, D> {
+impl<'a, D> BulkLoadGraphVectorIndexReader<'a, D>
+where
+    D: Send,
+{
     fn into_session(self) -> Session {
         self.1
     }
 }
 
-impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D> {
+impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D>
+where
+    D: Send,
+{
     type Graph<'b> = BulkLoadBuilderGraph<'b, D> where Self: 'b;
     type NavVectorStore<'b> = WiredTigerNavVectorStore<'b> where Self: 'b;
 
@@ -418,14 +424,17 @@ impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D> {
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         Ok(WiredTigerNavVectorStore::new(
-            self.1.open_record_cursor(self.0.index.nav_table_name())?,
+            self.1.get_record_cursor(self.0.index.nav_table_name())?,
         ))
     }
 }
 
-struct BulkLoadBuilderGraph<'a, D>(&'a BulkLoadBuilder<D>);
+struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>);
 
-impl<'a, D> Graph for BulkLoadBuilderGraph<'a, D> {
+impl<'a, D> Graph for BulkLoadBuilderGraph<'a, D>
+where
+    D: Send,
+{
     type Vertex<'c> = BulkLoadGraphVertex<'c, D> where Self: 'c;
 
     fn entry_point(&mut self) -> Option<Result<i64>> {

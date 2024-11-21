@@ -1,8 +1,11 @@
 use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
-use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, Session, WiredTigerError};
+use wt_mdb::{Connection, Error, RecordCursorGuard, RecordView, Result, Session, WiredTigerError};
 
-use crate::graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore};
+use crate::{
+    graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    worker_pool::WorkerPool,
+};
 
 // TODO: drop WiredTiger from most of these names, it feels redundant and verbose.
 
@@ -13,11 +16,11 @@ pub const METADATA_KEY: i64 = -2;
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
 pub struct WiredTigerNavVectorStore<'a> {
-    cursor: RecordCursor<'a>,
+    cursor: RecordCursorGuard<'a>,
 }
 
 impl<'a> WiredTigerNavVectorStore<'a> {
-    pub fn new(cursor: RecordCursor<'a>) -> Self {
+    pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
         Self { cursor }
     }
 }
@@ -35,7 +38,7 @@ pub struct WiredTigerGraphVertex<'a> {
 }
 
 impl<'a> WiredTigerGraphVertex<'a> {
-    pub fn new(metadata: &GraphMetadata, data: Cow<'a, [u8]>) -> Self {
+    fn new(metadata: &GraphMetadata, data: Cow<'a, [u8]>) -> Self {
         Self {
             dimensions: metadata.dimensions,
             data,
@@ -106,11 +109,11 @@ impl<'a> Iterator for WiredTigerEdgeIterator<'a> {
 /// Implementation of `Graph` that reads from a WiredTiger `RecordCursor`.
 pub struct WiredTigerGraph<'a> {
     metadata: GraphMetadata,
-    cursor: RecordCursor<'a>,
+    cursor: RecordCursorGuard<'a>,
 }
 
 impl<'a> WiredTigerGraph<'a> {
-    pub fn new(metadata: GraphMetadata, cursor: RecordCursor<'a>) -> Self {
+    pub fn new(metadata: GraphMetadata, cursor: RecordCursorGuard<'a>) -> Self {
         Self { metadata, cursor }
     }
 }
@@ -193,12 +196,22 @@ impl WiredTigerGraphVectorIndex {
 pub struct WiredTigerGraphVectorIndexReader {
     index: Arc<WiredTigerGraphVectorIndex>,
     session: Session,
+    worker_pool: Option<WorkerPool>,
 }
 
 impl WiredTigerGraphVectorIndexReader {
     /// Create a new `WiredTigerGraphVectorIndex` given a named index and a session to access that data.
-    pub fn new(index: Arc<WiredTigerGraphVectorIndex>, session: Session) -> Self {
-        Self { index, session }
+    /// Optionally provide a `WorkerPool` for use with parallel `lookup()`.
+    pub fn new(
+        index: Arc<WiredTigerGraphVectorIndex>,
+        session: Session,
+        worker_pool: Option<WorkerPool>,
+    ) -> Self {
+        Self {
+            index,
+            session,
+            worker_pool,
+        }
     }
 
     /// Unwrap into the inner Session.
@@ -219,15 +232,48 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
         Ok(WiredTigerGraph::new(
             self.index.metadata,
             self.session
-                .open_record_cursor(&self.index.graph_table_name)?,
+                .get_record_cursor(&self.index.graph_table_name)?,
         ))
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         Ok(WiredTigerNavVectorStore::new(
-            self.session
-                .open_record_cursor(&self.index.nav_table_name)?,
+            self.session.get_record_cursor(&self.index.nav_table_name)?,
         ))
+    }
+
+    fn parallel_lookup(&self) -> bool {
+        self.worker_pool.is_some()
+    }
+
+    fn lookup<D>(&self, vertex_id: i64, done: D)
+    where
+        D: FnOnce(Option<Result<WiredTigerGraphVertex<'_>>>) + Send + Sync + 'static,
+    {
+        if let Some(workers) = self.worker_pool.as_ref() {
+            let index = self.index.clone();
+            workers.execute(move |session| {
+                let mut cursor = match session.get_record_cursor(index.graph_table_name()) {
+                    Ok(cursor) => cursor,
+                    Err(e) => {
+                        done(Some(Err(e)));
+                        return;
+                    }
+                };
+                done(
+                    unsafe { cursor.seek_exact_unsafe(vertex_id) }.map(|result| {
+                        result.map(|r| {
+                            WiredTigerGraphVertex::new(index.metadata(), r.into_inner_value())
+                        })
+                    }),
+                );
+            });
+        } else {
+            match self.graph() {
+                Ok(mut graph) => done(graph.get(vertex_id)),
+                Err(e) => done(Some(Err(e))),
+            }
+        }
     }
 }
 

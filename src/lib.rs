@@ -8,6 +8,7 @@ pub mod scoring;
 pub mod search;
 #[cfg(test)]
 mod test;
+pub mod worker_pool;
 pub mod wt;
 
 /// `Neighbor` is a node and a distance relative to some other node.

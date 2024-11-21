@@ -53,6 +53,31 @@ pub trait GraphVectorIndexReader {
 
     /// Return an object that can be used to read navigational vectors.
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>>;
+
+    /// If true, `lookup()` calls may be performed in parallel.
+    fn parallel_lookup(&self) -> bool {
+        false
+    }
+
+    /// Lookup `vertex_id` and when the read is complete invoke `done` with the vertex contents.
+    ///
+    /// `done` may be invoked from the calling thread or another thread; callers are responsible for
+    /// marshalling the data to wherever it needs to be.
+    // TODO: callers should be able to pass a timestamp token so that lookups are performed at the
+    // same timestamp as any other reads performed for the query.
+    fn lookup<D>(&self, vertex_id: i64, done: D)
+    where
+        D: FnOnce(
+                Option<Result<<<Self as GraphVectorIndexReader>::Graph<'_> as Graph>::Vertex<'_>>>,
+            ) + Send
+            + Sync
+            + 'static,
+    {
+        match self.graph() {
+            Ok(mut graph) => done(graph.get(vertex_id)),
+            Err(e) => done(Some(Err(e))),
+        }
+    }
 }
 
 /// A Vamana graph.

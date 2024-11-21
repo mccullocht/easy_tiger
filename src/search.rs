@@ -6,10 +6,11 @@ use crate::{
         ParallelGraphVectorIndexReader,
     },
     quantization::binary_quantize,
+    scoring::QuantizedVectorScorer,
     Neighbor,
 };
 
-use wt_mdb::{Error, Result, WiredTigerError};
+use wt_mdb::{Error, Result};
 
 /// Helper to search a Vamana graph.
 pub struct GraphSearcher {
@@ -77,21 +78,7 @@ impl GraphSearcher {
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
         let nav_scorer = reader.metadata().new_nav_scorer();
-        let nav_query = if let Some(epr) = graph.entry_point() {
-            let entry_point = epr?;
-            let nav_query = binary_quantize(query);
-            let entry_vector = nav
-                .get(entry_point)
-                .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates.add_unvisited(Neighbor::new(
-                entry_point,
-                nav_scorer.score(&nav_query, &entry_vector),
-            ));
-            self.seen.insert(entry_point);
-            nav_query
-        } else {
-            return Ok(vec![]);
-        };
+        let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
 
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
             let node = graph
@@ -133,25 +120,10 @@ impl GraphSearcher {
         self.seen.clear();
         self.candidates.clear();
 
-        // XXX we could probably factor this part out into a shared helper.
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
         let nav_scorer = reader.metadata().new_nav_scorer();
-        let nav_query = if let Some(epr) = graph.entry_point() {
-            let entry_point = epr?;
-            let nav_query = binary_quantize(query);
-            let entry_vector = nav
-                .get(entry_point)
-                .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates.add_unvisited(Neighbor::new(
-                entry_point,
-                nav_scorer.score(&nav_query, &entry_vector),
-            ));
-            self.seen.insert(entry_point);
-            nav_query
-        } else {
-            return Ok(vec![]);
-        };
+        let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
 
         let mut num_concurrent = 0;
         let (send, recv) = channel();
@@ -197,6 +169,35 @@ impl GraphSearcher {
         }
 
         Ok(self.extract_results(query, reader))
+    }
+
+    // Initialize the candidate queue and return the binary quantized query.
+    fn init_candidates<G, N>(
+        &mut self,
+        query: &[f32],
+        graph: &mut G,
+        nav: &mut N,
+        nav_scorer: &dyn QuantizedVectorScorer,
+    ) -> Result<Vec<u8>>
+    where
+        G: Graph,
+        N: NavVectorStore,
+    {
+        let nav_query = binary_quantize(query);
+        if let Some(epr) = graph.entry_point() {
+            let entry_point = epr?;
+            let entry_vector = nav
+                .get(entry_point)
+                .unwrap_or(Err(Error::not_found_error()))?;
+            self.candidates.add_unvisited(Neighbor::new(
+                entry_point,
+                nav_scorer.score(&nav_query, &entry_vector),
+            ));
+            self.seen.insert(entry_point);
+        }
+        // We don't treat failing to obtain an entry point as an error because
+        // the graph may be empty.
+        Ok(nav_query)
     }
 
     fn extract_results<R: GraphVectorIndexReader>(

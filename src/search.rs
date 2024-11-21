@@ -61,7 +61,7 @@ impl GraphSearcher {
         let query = reader
             .graph()?
             .get(vertex_id)
-            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?
+            .unwrap_or(Err(Error::not_found_error()))?
             .vector()
             .to_vec();
         self.search_internal(&query, reader)
@@ -82,7 +82,7 @@ impl GraphSearcher {
             let nav_query = binary_quantize(query);
             let entry_vector = nav
                 .get(entry_point)
-                .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                .unwrap_or(Err(Error::not_found_error()))?;
             self.candidates.add_unvisited(Neighbor::new(
                 entry_point,
                 nav_scorer.score(&nav_query, &entry_vector),
@@ -96,7 +96,7 @@ impl GraphSearcher {
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
             let node = graph
                 .get(best_candidate.neighbor().vertex())
-                .unwrap_or_else(|| Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                .unwrap_or_else(|| Err(Error::not_found_error()))?;
             // If we aren't reranking we don't need to copy the actual vector.
             best_candidate.visit(if self.params.num_rerank > 0 {
                 node.vector().into()
@@ -108,9 +108,7 @@ impl GraphSearcher {
                 if !self.seen.insert(edge) {
                     continue;
                 }
-                let vec = nav
-                    .get(edge)
-                    .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
                     .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
             }
@@ -144,7 +142,7 @@ impl GraphSearcher {
             let nav_query = binary_quantize(query);
             let entry_vector = nav
                 .get(entry_point)
-                .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                .unwrap_or(Err(Error::not_found_error()))?;
             self.candidates.add_unvisited(Neighbor::new(
                 entry_point,
                 nav_scorer.score(&nav_query, &entry_vector),
@@ -185,16 +183,12 @@ impl GraphSearcher {
 
             for lookup_result in std::iter::once(recv.recv().unwrap()).chain(recv.try_iter()) {
                 num_concurrent -= 1;
-                // XXX do something to make this not found business suck less. either getting to
-                // notfound quicker or maybe implementing unwrap_or_not_found()?
                 let (neighbor, vector, edges) =
-                    lookup_result.unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                    lookup_result.unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates.visit_candidate(neighbor, vector);
                 for edge in edges {
                     if self.seen.insert(edge) {
-                        let doc = nav
-                            .get(edge)
-                            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                        let doc = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
                         self.candidates
                             .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &doc)));
                     }

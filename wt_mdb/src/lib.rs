@@ -88,6 +88,11 @@ impl Error {
     fn generic_error() -> Self {
         Error::WiredTiger(WiredTigerError::Generic)
     }
+
+    /// Return a WiredTiger `NotFound` error.
+    pub fn not_found_error() -> Self {
+        Error::WiredTiger(WiredTigerError::NotFound)
+    }
 }
 
 impl From<NonZero<i32>> for Error {

@@ -41,8 +41,7 @@ pub struct WiredTigerGraphVertex<'a> {
 }
 
 impl<'a> WiredTigerGraphVertex<'a> {
-    // XXX this doesn't need to be public.
-    pub fn new(metadata: &GraphMetadata, data: Cow<'a, [u8]>) -> Self {
+    fn new(metadata: &GraphMetadata, data: Cow<'a, [u8]>) -> Self {
         Self {
             dimensions: metadata.dimensions,
             data,
@@ -213,7 +212,8 @@ impl WiredTigerGraphVectorIndexReader {
         }
     }
 
-    // XXX docos
+    /// Create a new `WiredTigerGraphVectorIndex` that also has a worker pool for executing
+    /// parallel `lookup()`.
     pub fn with_worker_pool(
         index: Arc<WiredTigerGraphVectorIndex>,
         session: Session,
@@ -284,19 +284,6 @@ impl ParallelGraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
         } else {
             // XXX might be able to write a totally synchronous version of this.
             unimplemented!()
-        }
-    }
-}
-
-// XXX remove this entirely.
-impl Clone for WiredTigerGraphVectorIndexReader {
-    fn clone(&self) -> Self {
-        let session = self.session.connection().open_session().unwrap();
-        session.begin_transaction(None).unwrap();
-        Self {
-            index: self.index.clone(),
-            session,
-            worker_pool: self.worker_pool.clone(),
         }
     }
 }

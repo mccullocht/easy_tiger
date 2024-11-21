@@ -119,7 +119,10 @@ impl GraphSearcher {
         Ok(self.extract_results(query, reader))
     }
 
-    // XXX docos
+    /// Search `reader` for `query` with up to `max_concurrent` vector node lookups in flight at
+    /// any time.
+    ///
+    /// Return the top matching candidates.
     pub fn search_concurrently<R>(
         &mut self,
         query: &[f32],
@@ -152,19 +155,6 @@ impl GraphSearcher {
             return Ok(vec![]);
         };
 
-        // XXX i had to hack this to allow cloning readers so that I could test concurrent reads in
-        // search. it is quite good (50%+ reduction in time), but the implementation sucks.
-        //
-        // generalize read-only wt worker pool
-        // * Custom threadpool that accepts (count,connection) and on creation; each thread has a Session.
-        // * crossbeam mpcp to handle input queue dispatching
-        // * queued items are Fns that accept a read timestamp and a mutable Session
-        // * begin a transaction before before calling the fn, rollback transaction afterward.
-        // * users are responsible for getting the results out however they want?
-        //   - or maybe we can take whatever they return and put it in another queue/iteration?
-        //
-        // it's going to be tricky to layer this abstraction, might need a subtype of GVIR for this
-        // just to make it work right.
         let mut num_concurrent = 0;
         let (send, recv) = channel();
         loop {

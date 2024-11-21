@@ -55,8 +55,14 @@ pub trait GraphVectorIndexReader {
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>>;
 }
 
-// XXX docos
+/// A trait that allows lookups of graph vertexes in parallel.
 pub trait ParallelGraphVectorIndexReader: GraphVectorIndexReader {
+    /// Lookup `vertex_id` and when the read is complete invoke `done` with the vertex contents.
+    ///
+    /// `done` may be invoked from the calling thread or another thread; callers are responsible for
+    /// marshalling the data to wherever it needs to be.
+    // TODO: callers should be able to pass a timestamp token so that lookups are performed at the
+    // same timestamp as any other reads performed for the query.
     fn lookup<D>(&self, vertex_id: i64, done: D)
     where
         D: FnOnce(

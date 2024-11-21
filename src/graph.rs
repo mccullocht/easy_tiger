@@ -63,6 +63,7 @@ pub trait ParallelGraphVectorIndexReader: GraphVectorIndexReader {
     /// marshalling the data to wherever it needs to be.
     // TODO: callers should be able to pass a timestamp token so that lookups are performed at the
     // same timestamp as any other reads performed for the query.
+    // XXX is there a default implementation I can provide?
     fn lookup<D>(&self, vertex_id: i64, done: D)
     where
         D: FnOnce(

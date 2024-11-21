@@ -1,6 +1,6 @@
 use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
-use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, Session, WiredTigerError};
+use wt_mdb::{Connection, Error, RecordCursorGuard, RecordView, Result, Session, WiredTigerError};
 
 use crate::{
     graph::{
@@ -19,11 +19,11 @@ pub const METADATA_KEY: i64 = -2;
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
 pub struct WiredTigerNavVectorStore<'a> {
-    cursor: RecordCursor<'a>,
+    cursor: RecordCursorGuard<'a>,
 }
 
 impl<'a> WiredTigerNavVectorStore<'a> {
-    pub fn new(cursor: RecordCursor<'a>) -> Self {
+    pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
         Self { cursor }
     }
 }
@@ -112,11 +112,11 @@ impl<'a> Iterator for WiredTigerEdgeIterator<'a> {
 /// Implementation of `Graph` that reads from a WiredTiger `RecordCursor`.
 pub struct WiredTigerGraph<'a> {
     metadata: GraphMetadata,
-    cursor: RecordCursor<'a>,
+    cursor: RecordCursorGuard<'a>,
 }
 
 impl<'a> WiredTigerGraph<'a> {
-    pub fn new(metadata: GraphMetadata, cursor: RecordCursor<'a>) -> Self {
+    pub fn new(metadata: GraphMetadata, cursor: RecordCursorGuard<'a>) -> Self {
         Self { metadata, cursor }
     }
 }
@@ -241,19 +241,16 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
-        // XXX switch to cursor caching APIs?
         Ok(WiredTigerGraph::new(
             self.index.metadata,
             self.session
-                .open_record_cursor(&self.index.graph_table_name)?,
+                .get_record_cursor(&self.index.graph_table_name)?,
         ))
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-        // XXX switch to cursor caching APIs?
         Ok(WiredTigerNavVectorStore::new(
-            self.session
-                .open_record_cursor(&self.index.nav_table_name)?,
+            self.session.get_record_cursor(&self.index.nav_table_name)?,
         ))
     }
 }

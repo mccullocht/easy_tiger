@@ -167,7 +167,7 @@ impl<'a> RecordView<'a> {
 pub type Record = RecordView<'static>;
 
 pub use connection::Connection;
-pub use session::{RecordCursor, Session};
+pub use session::{RecordCursor, RecordCursorGuard, Session};
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {

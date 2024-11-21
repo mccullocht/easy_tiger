@@ -75,17 +75,12 @@ pub fn search(
         .with_finish(indicatif::ProgressFinish::AndLeave);
     for q in query_vectors.iter().take(limit) {
         session.begin_transaction(None)?;
-        // XXX this is awkward as hell so internalize it as much as possible.
-        let mut reader = if let Some(pool) = pool.as_ref() {
-            WiredTigerGraphVectorIndexReader::with_worker_pool(index.clone(), session, pool.clone())
-        } else {
-            WiredTigerGraphVectorIndexReader::new(index.clone(), session)
-        };
-        let results = if pool.is_some() {
-            searcher.search_concurrently(q, &mut reader, args.concurrency)
-        } else {
-            searcher.search(q, &mut reader)
-        }?;
+        let mut reader = WiredTigerGraphVectorIndexReader::new(
+            index.clone(),
+            session,
+            pool.as_ref().map(WorkerPool::clone),
+        );
+        let results = searcher.search_with_concurrency(q, &mut reader, args.concurrency)?;
         assert_ne!(results.len(), 0);
         progress.inc(1);
         session = reader.into_session();

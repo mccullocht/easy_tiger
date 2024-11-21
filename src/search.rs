@@ -1,10 +1,7 @@
 use std::{collections::HashSet, num::NonZero, sync::mpsc::channel};
 
 use crate::{
-    graph::{
-        Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
-        ParallelGraphVectorIndexReader,
-    },
+    graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore},
     quantization::binary_quantize,
     scoring::QuantizedVectorScorer,
     Neighbor,
@@ -43,8 +40,28 @@ impl GraphSearcher {
         query: &[f32],
         reader: &mut R,
     ) -> Result<Vec<Neighbor>> {
+        self.search_with_concurrency(query, reader, NonZero::new(1).unwrap())
+    }
+
+    /// Search `reader` for `query` using up `max_concurrent` threads at any one time.
+    /// The query will be executed serially if `max_concurrent == 1` or if
+    /// `!reader.parallel_lookup()`.
+    ///
+    /// Return the top matching candidates.
+    pub fn search_with_concurrency<R: GraphVectorIndexReader>(
+        &mut self,
+        query: &[f32],
+        reader: &mut R,
+        max_concurrent: NonZero<usize>,
+    ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, reader)
+        self.candidates.clear();
+
+        if max_concurrent.get() > 1 && reader.parallel_lookup() {
+            self.search_concurrently(query, reader, max_concurrent)
+        } else {
+            self.search_serially(query, reader)
+        }
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -57,6 +74,7 @@ impl GraphSearcher {
         // Insertions may be concurrent and there could already be backlinks to this vertex in the graph.
         // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
         self.seen.insert(vertex_id);
+        self.candidates.clear();
 
         // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
         let query = reader
@@ -65,16 +83,14 @@ impl GraphSearcher {
             .unwrap_or(Err(Error::not_found_error()))?
             .vector()
             .to_vec();
-        self.search_internal(&query, reader)
+        self.search_serially(&query, reader)
     }
 
-    fn search_internal<R: GraphVectorIndexReader>(
+    fn search_serially<R: GraphVectorIndexReader>(
         &mut self,
         query: &[f32],
         reader: &mut R,
     ) -> Result<Vec<Neighbor>> {
-        self.candidates.clear();
-
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
         let nav_scorer = reader.metadata().new_nav_scorer();
@@ -104,20 +120,15 @@ impl GraphSearcher {
         Ok(self.extract_results(query, reader))
     }
 
-    /// Search `reader` for `query` with up to `max_concurrent` vector node lookups in flight at
-    /// any time.
-    ///
-    /// Return the top matching candidates.
-    pub fn search_concurrently<R>(
+    fn search_concurrently<R>(
         &mut self,
         query: &[f32],
         reader: &mut R,
         max_concurrent: NonZero<usize>,
     ) -> Result<Vec<Neighbor>>
     where
-        R: ParallelGraphVectorIndexReader,
+        R: GraphVectorIndexReader,
     {
-        self.seen.clear();
         self.candidates.clear();
 
         let mut graph = reader.graph()?;

@@ -3,10 +3,7 @@ use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 use wt_mdb::{Connection, Error, RecordCursorGuard, RecordView, Result, Session, WiredTigerError};
 
 use crate::{
-    graph::{
-        Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore,
-        ParallelGraphVectorIndexReader,
-    },
+    graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore},
     worker_pool::WorkerPool,
 };
 
@@ -204,25 +201,16 @@ pub struct WiredTigerGraphVectorIndexReader {
 
 impl WiredTigerGraphVectorIndexReader {
     /// Create a new `WiredTigerGraphVectorIndex` given a named index and a session to access that data.
-    pub fn new(index: Arc<WiredTigerGraphVectorIndex>, session: Session) -> Self {
-        Self {
-            index,
-            session,
-            worker_pool: None,
-        }
-    }
-
-    /// Create a new `WiredTigerGraphVectorIndex` that also has a worker pool for executing
-    /// parallel `lookup()`.
-    pub fn with_worker_pool(
+    /// Optionally provide a `WorkerPool` for use with parallel `lookup()`.
+    pub fn new(
         index: Arc<WiredTigerGraphVectorIndex>,
         session: Session,
-        worker_pool: WorkerPool,
+        worker_pool: Option<WorkerPool>,
     ) -> Self {
         Self {
             index,
             session,
-            worker_pool: Some(worker_pool),
+            worker_pool,
         }
     }
 
@@ -253,9 +241,11 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
             self.session.get_record_cursor(&self.index.nav_table_name)?,
         ))
     }
-}
 
-impl ParallelGraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
+    fn parallel_lookup(&self) -> bool {
+        self.worker_pool.is_some()
+    }
+
     fn lookup<D>(&self, vertex_id: i64, done: D)
     where
         D: FnOnce(Option<Result<WiredTigerGraphVertex<'_>>>) + Send + Sync + 'static,
@@ -279,8 +269,10 @@ impl ParallelGraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
                 );
             });
         } else {
-            // XXX might be able to write a totally synchronous version of this.
-            unimplemented!()
+            match self.graph() {
+                Ok(mut graph) => done(graph.get(vertex_id)),
+                Err(e) => done(Some(Err(e))),
+            }
         }
     }
 }

@@ -1,12 +1,14 @@
 use std::{collections::HashSet, num::NonZero, sync::mpsc::channel};
 
 use crate::{
-    graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{
+        Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
+        ParallelGraphVectorIndexReader,
+    },
     quantization::binary_quantize,
     Neighbor,
 };
 
-use threadpool::ThreadPool;
 use wt_mdb::{Error, Result, WiredTigerError};
 
 /// Helper to search a Vamana graph.
@@ -123,10 +125,9 @@ impl GraphSearcher {
         query: &[f32],
         reader: &mut R,
         max_concurrent: NonZero<usize>,
-        pool: &ThreadPool,
     ) -> Result<Vec<Neighbor>>
     where
-        R: GraphVectorIndexReader + Clone + Send + 'static,
+        R: ParallelGraphVectorIndexReader,
     {
         self.seen.clear();
         self.candidates.clear();
@@ -173,14 +174,15 @@ impl GraphSearcher {
                 .take(max_concurrent.get() - num_concurrent)
                 .copied()
             {
-                let r = reader.clone();
                 let graph_send = send.clone();
-                pool.execute(move || {
-                    let mut graph = r.graph().unwrap();
-                    let read = graph.get(neighbor.vertex()).map(|r| {
-                        r.map(|rv| (rv.vector().to_vec(), rv.edges().collect::<Vec<_>>()))
-                    });
-                    graph_send.send((neighbor, read)).unwrap();
+                reader.lookup(neighbor.vertex(), move |vertex| {
+                    graph_send
+                        .send(vertex.map(|result| {
+                            result.map(|v| {
+                                (neighbor, v.vector().to_vec(), v.edges().collect::<Vec<_>>())
+                            })
+                        }))
+                        .unwrap();
                 });
                 num_concurrent += 1;
             }
@@ -191,12 +193,12 @@ impl GraphSearcher {
                 break;
             }
 
-            for (neighbor, read) in std::iter::once(recv.recv().unwrap()).chain(recv.try_iter()) {
+            for lookup_result in std::iter::once(recv.recv().unwrap()).chain(recv.try_iter()) {
                 num_concurrent -= 1;
                 // XXX do something to make this not found business suck less. either getting to
                 // notfound quicker or maybe implementing unwrap_or_not_found()?
-                let (vector, edges) =
-                    read.unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+                let (neighbor, vector, edges) =
+                    lookup_result.unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
                 self.candidates.visit_candidate(neighbor, vector);
                 for edge in edges {
                     if self.seen.insert(edge) {

@@ -10,6 +10,7 @@ use clap::Args;
 use easy_tiger::{
     graph::GraphSearchParams,
     search::GraphSearcher,
+    worker_pool::WorkerPool,
     wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader},
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -55,7 +56,10 @@ pub fn search(
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
     });
     let pool = if args.concurrency.get() > 1 {
-        Some(ThreadPool::new(args.concurrency.into()))
+        Some(WorkerPool::new(
+            ThreadPool::new(args.concurrency.into()),
+            connection.clone(),
+        ))
     } else {
         None
     };
@@ -71,14 +75,14 @@ pub fn search(
         .with_finish(indicatif::ProgressFinish::AndLeave);
     for q in query_vectors.iter().take(limit) {
         session.begin_transaction(None)?;
-        let mut reader = WiredTigerGraphVectorIndexReader::new(index.clone(), session);
-        let results = if let Some(pool) = &pool {
-            searcher.search_concurrently(
-                q,
-                &mut reader,
-                NonZero::new(pool.max_count()).unwrap(),
-                pool,
-            )
+        // XXX this is awkward as hell so internalize it as much as possible.
+        let mut reader = if let Some(pool) = pool.as_ref() {
+            WiredTigerGraphVectorIndexReader::with_worker_pool(index.clone(), session, pool.clone())
+        } else {
+            WiredTigerGraphVectorIndexReader::new(index.clone(), session)
+        };
+        let results = if pool.is_some() {
+            searcher.search_concurrently(q, &mut reader, args.concurrency)
         } else {
             searcher.search(q, &mut reader)
         }?;

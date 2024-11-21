@@ -2,7 +2,13 @@ use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
 use wt_mdb::{Connection, Error, RecordCursor, RecordView, Result, Session, WiredTigerError};
 
-use crate::graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore};
+use crate::{
+    graph::{
+        Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore,
+        ParallelGraphVectorIndexReader,
+    },
+    worker_pool::WorkerPool,
+};
 
 // TODO: drop WiredTiger from most of these names, it feels redundant and verbose.
 
@@ -35,6 +41,7 @@ pub struct WiredTigerGraphVertex<'a> {
 }
 
 impl<'a> WiredTigerGraphVertex<'a> {
+    // XXX this doesn't need to be public.
     pub fn new(metadata: &GraphMetadata, data: Cow<'a, [u8]>) -> Self {
         Self {
             dimensions: metadata.dimensions,
@@ -193,12 +200,30 @@ impl WiredTigerGraphVectorIndex {
 pub struct WiredTigerGraphVectorIndexReader {
     index: Arc<WiredTigerGraphVectorIndex>,
     session: Session,
+    worker_pool: Option<WorkerPool>,
 }
 
 impl WiredTigerGraphVectorIndexReader {
     /// Create a new `WiredTigerGraphVectorIndex` given a named index and a session to access that data.
     pub fn new(index: Arc<WiredTigerGraphVectorIndex>, session: Session) -> Self {
-        Self { index, session }
+        Self {
+            index,
+            session,
+            worker_pool: None,
+        }
+    }
+
+    // XXX docos
+    pub fn with_worker_pool(
+        index: Arc<WiredTigerGraphVectorIndex>,
+        session: Session,
+        worker_pool: WorkerPool,
+    ) -> Self {
+        Self {
+            index,
+            session,
+            worker_pool: Some(worker_pool),
+        }
     }
 
     /// Unwrap into the inner Session.
@@ -216,6 +241,7 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
+        // XXX switch to cursor caching APIs?
         Ok(WiredTigerGraph::new(
             self.index.metadata,
             self.session
@@ -224,6 +250,7 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
+        // XXX switch to cursor caching APIs?
         Ok(WiredTigerNavVectorStore::new(
             self.session
                 .open_record_cursor(&self.index.nav_table_name)?,
@@ -231,6 +258,37 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
     }
 }
 
+impl ParallelGraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
+    fn lookup<D>(&self, vertex_id: i64, done: D)
+    where
+        D: FnOnce(Option<Result<WiredTigerGraphVertex<'_>>>) + Send + Sync + 'static,
+    {
+        if let Some(workers) = self.worker_pool.as_ref() {
+            let index = self.index.clone();
+            workers.execute(move |session| {
+                let mut cursor = match session.get_record_cursor(index.graph_table_name()) {
+                    Ok(cursor) => cursor,
+                    Err(e) => {
+                        done(Some(Err(e)));
+                        return;
+                    }
+                };
+                done(
+                    unsafe { cursor.seek_exact_unsafe(vertex_id) }.map(|result| {
+                        result.map(|r| {
+                            WiredTigerGraphVertex::new(index.metadata(), r.into_inner_value())
+                        })
+                    }),
+                );
+            });
+        } else {
+            // XXX might be able to write a totally synchronous version of this.
+            unimplemented!()
+        }
+    }
+}
+
+// XXX remove this entirely.
 impl Clone for WiredTigerGraphVectorIndexReader {
     fn clone(&self) -> Self {
         let session = self.session.connection().open_session().unwrap();
@@ -238,6 +296,7 @@ impl Clone for WiredTigerGraphVectorIndexReader {
         Self {
             index: self.index.clone(),
             session,
+            worker_pool: self.worker_pool.clone(),
         }
     }
 }

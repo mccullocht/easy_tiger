@@ -17,7 +17,7 @@ threadpool = "1.8.1"
 wt_mdb = { path = "./wt_mdb" }
 
 [workspace]
-members = [ "bulk_load", "et","wt_mdb", "wt_sys"]
+members = ["et", "wt_mdb", "wt_sys"]
 
 [profile.profiling]
 inherits = "release"

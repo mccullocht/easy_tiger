@@ -1,8 +1,13 @@
+mod bulk_load;
 mod lookup;
 mod search;
 
-use std::{io::ErrorKind, num::NonZero};
+use std::{
+    io::{self, ErrorKind},
+    num::NonZero,
+};
 
+use bulk_load::{bulk_load, BulkLoadArgs};
 use clap::{command, Parser, Subcommand};
 use easy_tiger::wt::WiredTigerGraphVectorIndex;
 use lookup::{lookup, LookupArgs};
@@ -24,10 +29,16 @@ struct Cli {
     /// WiredTiger table basename use to locate the graph.
     #[arg(long)]
     wiredtiger_table_basename: String,
+    /// If true, create the WiredTiger database if it does not exist.
+    #[arg(long, default_value = "false")]
+    wiredtiger_create_db: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Bulk load a set of vectors into an index.
+    /// Requires that the index be uninitialized.
+    BulkLoad(BulkLoadArgs),
     /// Lookup the contents of a single vertex.
     Lookup(LookupArgs),
     /// Search for a list of vectors and time the operation.
@@ -38,22 +49,29 @@ enum Commands {
     Delete,
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> io::Result<()> {
     let cli = Cli::parse();
-    let connection = Connection::open(
-        &cli.wiredtiger_db_path,
-        Some(
-            ConnectionOptionsBuilder::default()
-                .cache_size_mb(cli.wiredtiger_cache_size_mb)
-                .into(),
-        ),
-    )?;
-    let index = WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?;
+    // TODO: Connection.filename should accept &Path. This will likely be very annoying to plumb to CString.
+    let mut connection_options =
+        ConnectionOptionsBuilder::default().cache_size_mb(cli.wiredtiger_cache_size_mb);
+    if cli.wiredtiger_create_db {
+        connection_options = connection_options.create();
+    }
+    let connection = Connection::open(&cli.wiredtiger_db_path, Some(connection_options.into()))?;
 
     match cli.command {
-        Commands::Lookup(args) => lookup(connection, index, args),
-        Commands::Search(args) => search(connection, index, args),
-        Commands::Add => Err(std::io::Error::from(ErrorKind::Unsupported)),
-        Commands::Delete => Err(std::io::Error::from(ErrorKind::Unsupported)),
+        Commands::BulkLoad(args) => bulk_load(connection, args, &cli.wiredtiger_table_basename),
+        Commands::Lookup(args) => lookup(
+            connection.clone(),
+            WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?,
+            args,
+        ),
+        Commands::Search(args) => search(
+            connection.clone(),
+            WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?,
+            args,
+        ),
+        Commands::Add => Err(io::Error::from(ErrorKind::Unsupported)),
+        Commands::Delete => Err(io::Error::from(ErrorKind::Unsupported)),
     }
 }

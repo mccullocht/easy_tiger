@@ -1,6 +1,6 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf};
+use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
-use clap::Parser;
+use clap::Args;
 use easy_tiger::{
     bulk::BulkLoadBuilder,
     graph::{GraphMetadata, GraphSearchParams},
@@ -9,14 +9,10 @@ use easy_tiger::{
     wt::WiredTigerGraphVectorIndex,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use wt_mdb::{
-    options::{ConnectionOptionsBuilder, DropOptionsBuilder},
-    Connection,
-};
+use wt_mdb::{options::DropOptionsBuilder, Connection};
 
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Args {
+#[derive(Args)]
+pub struct BulkLoadArgs {
     /// Path to the input vectors to bulk ingest.
     #[arg(short, long)]
     f32_vectors: PathBuf,
@@ -26,24 +22,7 @@ struct Args {
     /// Similarity function to use for vector scoring.
     #[arg(short, long, value_enum)]
     similarity: VectorSimilarity,
-    /// Limit the number of input vectors. Useful for testing.
-    #[arg(short, long)]
-    limit: Option<usize>,
 
-    /// Path to the WiredTiger database to upload to.
-    #[arg(long)]
-    wiredtiger_db_path: PathBuf,
-    /// Base name for vector tables.
-    #[arg(long)]
-    wiredtiger_table_basename: String,
-    #[arg(long, default_value = "1024")]
-    wiredtiger_cache_size_mb: NonZero<usize>,
-    /// If true, create the WiredTiger database if it does not exist.
-    #[arg(long, default_value = "true")]
-    create_db: bool,
-    /// If true, drop any WiredTiger tables with the same name before bulk upload.
-    #[arg(long, default_value = "false")]
-    drop_tables: bool,
     /// Maximum number of edges for any vertex.
     #[arg(short, long, default_value = "32")]
     max_edges: NonZero<usize>,
@@ -60,40 +39,25 @@ struct Args {
     /// the value of edge_candidates.
     #[arg(short, long)]
     rerank_edges: Option<usize>,
+
+    /// If true, drop any WiredTiger tables with the same name before bulk upload.
+    #[arg(long, default_value = "false")]
+    drop_tables: bool,
+
+    /// Limit the number of input vectors. Useful for testing.
+    #[arg(short, long)]
+    limit: Option<usize>,
 }
 
-fn progress_bar(len: usize, message: &'static str) -> ProgressBar {
-    ProgressBar::new(len as u64)
-        .with_style(
-            ProgressStyle::default_bar()
-                .template(
-                    "{msg} {wide_bar} {pos}/{len} ETA: {eta_precise} Elapsed: {elapsed_precise}",
-                )
-                .unwrap(),
-        )
-        .with_message(message)
-        .with_finish(ProgressFinish::AndLeave)
-}
-
-fn main() -> io::Result<()> {
-    let args = Args::parse();
-
+pub fn bulk_load(
+    connection: Arc<Connection>,
+    args: BulkLoadArgs,
+    table_basename: &str,
+) -> io::Result<()> {
     let f32_vectors = NumpyF32VectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
         args.dimensions,
     )?;
-
-    // TODO: Connection.filename should accept &Path. This will likely be very annoying to plumb to CString.
-    let mut connection_options =
-        ConnectionOptionsBuilder::default().cache_size_mb(args.wiredtiger_cache_size_mb);
-    if args.create_db {
-        connection_options = connection_options.create();
-    }
-    let connection = Connection::open(
-        &args.wiredtiger_db_path.to_string_lossy(),
-        Some(connection_options.into()),
-    )
-    .map_err(io::Error::from)?;
 
     let metadata = GraphMetadata {
         dimensions: args.dimensions,
@@ -106,9 +70,9 @@ fn main() -> io::Result<()> {
                 .unwrap_or_else(|| args.edge_candidates.get()),
         },
     };
-    let index = WiredTigerGraphVectorIndex::from_init(metadata, &args.wiredtiger_table_basename)?;
+    let index = WiredTigerGraphVectorIndex::from_init(metadata, table_basename)?;
     if args.drop_tables {
-        let session = connection.open_session().map_err(io::Error::from)?;
+        let session = connection.open_session()?;
         session
             .drop_record_table(
                 index.graph_table_name(),
@@ -154,4 +118,17 @@ fn main() -> io::Result<()> {
     println!("{:?}", stats);
 
     Ok(())
+}
+
+fn progress_bar(len: usize, message: &'static str) -> ProgressBar {
+    ProgressBar::new(len as u64)
+        .with_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{msg} {wide_bar} {pos}/{len} ETA: {eta_precise} Elapsed: {elapsed_precise}",
+                )
+                .unwrap(),
+        )
+        .with_message(message)
+        .with_finish(ProgressFinish::AndLeave)
 }

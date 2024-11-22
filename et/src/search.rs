@@ -11,7 +11,7 @@ use std::{
 use clap::Args;
 use easy_tiger::{
     graph::GraphSearchParams,
-    search::GraphSearcher,
+    search::{GraphSearchStats, GraphSearcher},
     worker_pool::WorkerPool,
     wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader},
     Neighbor,
@@ -101,6 +101,7 @@ pub fn search(
 
     let index = Arc::new(index);
     let mut session = connection.open_session()?;
+    let mut search_stats = GraphSearchStats::default();
     let progress = ProgressBar::new(limit as u64)
         .with_style(
             ProgressStyle::default_bar()
@@ -117,7 +118,9 @@ pub fn search(
         );
         let results = searcher.search_with_concurrency(query, &mut reader, args.concurrency)?;
         assert_ne!(results.len(), 0);
+        search_stats += searcher.stats();
         recall_computer.as_mut().map(|r| r.add_results(i, &results));
+
         progress.inc(1);
         session = reader.into_session();
         session.rollback_transaction(None)?;
@@ -125,9 +128,11 @@ pub fn search(
     progress.finish_using_style();
 
     println!(
-        "queries {} avg duration {:.3} ms",
+        "queries {} avg duration {:.3}ms avg candidates {:.2} avg visited {:.2}",
         limit,
-        progress.elapsed().div_f32(limit as f32).as_micros() as f64 / 1_000f64
+        progress.elapsed().div_f32(limit as f32).as_micros() as f64 / 1_000f64,
+        search_stats.candidates as f64 / limit as f64,
+        search_stats.visited as f64 / limit as f64,
     );
 
     if let Some(computer) = recall_computer {
@@ -136,8 +141,6 @@ pub fn search(
 
     Ok(())
 }
-
-// XXX maybe also do vertex_visited/vertex_nav_scored counters?
 
 pub struct RecallComputer {
     k: usize,

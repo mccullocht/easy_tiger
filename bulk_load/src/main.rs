@@ -81,7 +81,7 @@ fn main() -> io::Result<()> {
     let f32_vectors = NumpyF32VectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
         args.dimensions,
-    );
+    )?;
 
     // TODO: Connection.filename should accept &Path. This will likely be very annoying to plumb to CString.
     let mut connection_options =

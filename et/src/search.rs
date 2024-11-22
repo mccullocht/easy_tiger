@@ -46,7 +46,7 @@ pub fn search(
     let query_vectors = easy_tiger::input::NumpyF32VectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.query_vectors)?)? },
         index.metadata().dimensions,
-    );
+    )?;
     let limit = std::cmp::min(
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),

@@ -92,7 +92,7 @@ where
             centroid: Vec::new(),
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
-            scorer: scorer,
+            scorer,
         }
     }
 

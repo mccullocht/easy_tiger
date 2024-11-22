@@ -18,7 +18,7 @@ use crate::{
     graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex},
     input::NumpyF32VectorStore,
     quantization::binary_quantize,
-    scoring::{DotProductScorer, F32VectorScorer},
+    scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
         encode_graph_node, WiredTigerGraphVectorIndex, WiredTigerNavVectorStore, ENTRY_POINT_KEY,
@@ -64,6 +64,7 @@ pub struct BulkLoadBuilder<D> {
 
     graph: Box<[RwLock<Vec<Neighbor>>]>,
     entry_vertex: AtomicI64,
+    scorer: Box<dyn F32VectorScorer>,
 }
 
 impl<D> BulkLoadBuilder<D>
@@ -82,6 +83,7 @@ where
         graph_vec.resize_with(vectors.len(), || {
             RwLock::new(Vec::with_capacity(index.metadata().max_edges.get() * 2))
         });
+        let scorer = index.metadata().new_scorer();
         Self {
             connection,
             index,
@@ -90,6 +92,7 @@ where
             centroid: Vec::new(),
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
+            scorer,
         }
     }
 
@@ -120,10 +123,7 @@ where
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect();
-        self.index
-            .metadata()
-            .new_scorer()
-            .normalize(&mut self.centroid);
+        self.scorer.normalize(&mut self.centroid);
         Ok(())
     }
 
@@ -137,8 +137,7 @@ where
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
-        let scorer = self.index.metadata().new_scorer();
-        let apply_mu = Mutex::new((0i64, scorer.score(&self.vectors[0], &self.centroid)));
+        let apply_mu = Mutex::new((0i64, self.scorer.score(&self.vectors[0], &self.centroid)));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
         // Keep track of all in-flight concurrent insertions. These nodes will be processed at the
@@ -156,7 +155,6 @@ where
                 // released.
                 let mut session = self.connection.open_session()?;
                 let mut searcher = GraphSearcher::new(self.index.metadata().index_search_params);
-                let scorer = DotProductScorer;
                 for i in nodes {
                     // Use a transaction for each search. Without this each lookup will be a separate transaction
                     // which obtains a reader lock inside the session. Overhead for that is ~10x.
@@ -171,7 +169,7 @@ where
                         }
                         let p = Neighbor::new(
                             *v as i64,
-                            scorer.score(&self.vectors[i], &self.vectors[*v]),
+                            self.scorer.score(&self.vectors[i], &self.vectors[*v]),
                         );
                         if p.score < worst_score {
                             None
@@ -179,7 +177,7 @@ where
                             Some(p)
                         }
                     }));
-                    let centroid_score = scorer.score(&self.vectors[i], &self.centroid);
+                    let centroid_score = self.scorer.score(&self.vectors[i], &self.centroid);
                     {
                         let mut entry_point = apply_mu.lock().unwrap();
                         self.apply_insert(i, edges)?;
@@ -277,7 +275,7 @@ where
         let mut graph = BulkLoadBuilderGraph(self);
         let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
         let pruned_len = self
-            .prune(&mut candidates, &mut graph, &DotProductScorer)?
+            .prune(&mut candidates, &mut graph, self.scorer.as_ref())?
             .0
             .len();
         candidates.truncate(pruned_len);
@@ -314,7 +312,7 @@ where
         let (selected, dropped) = self.prune(
             &mut guard,
             &mut BulkLoadBuilderGraph(self),
-            &DotProductScorer,
+            self.scorer.as_ref(),
         )?;
         let pruned_len = selected.len();
         let dropped = dropped.to_vec();

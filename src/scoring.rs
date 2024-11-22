@@ -1,10 +1,13 @@
+use std::{io, str::FromStr};
+
+use serde::{Deserialize, Serialize};
 use simsimd::{BinarySimilarity, SpatialSimilarity};
 
 /// Scorer for `f32` vectors.
 ///
 /// This trait is object-safe; it may be instantiated at runtime based on
 /// data that appears in a file or other backing store.
-pub trait F32VectorScorer {
+pub trait F32VectorScorer: Send + Sync {
     /// Score vectors `a` and `b` against one another. Returns a score
     /// where larger values are better matches.
     ///
@@ -27,6 +30,46 @@ pub trait QuantizedVectorScorer {
     /// This function is not required to be commutative and may panic if
     /// one of the inputs is misshapen.
     fn score(&self, query: &[u8], doc: &[u8]) -> f64;
+}
+
+/// Functions used for computing a similarity score for high fidelity vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VectorSimilarity {
+    /// Euclidean (l2) distance.
+    Euclidean,
+    /// Dot product scoring, an approximation of cosine scoring.
+    /// Vectors used for this scorer must be normalized.
+    Dot,
+}
+
+impl VectorSimilarity {
+    pub fn new_scorer(self) -> Box<dyn F32VectorScorer> {
+        match self {
+            Self::Euclidean => Box::new(EuclideanScorer),
+            Self::Dot => Box::new(DotProductScorer),
+        }
+    }
+}
+
+impl Default for VectorSimilarity {
+    fn default() -> Self {
+        Self::Dot
+    }
+}
+
+impl FromStr for VectorSimilarity {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "euclidean" => Ok(VectorSimilarity::Euclidean),
+            "dot" => Ok(VectorSimilarity::Dot),
+            x => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown similarity fuction {}", x),
+            )),
+        }
+    }
 }
 
 /// Computes a score based on l2 distance.

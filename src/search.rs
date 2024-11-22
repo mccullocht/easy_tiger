@@ -1,4 +1,9 @@
-use std::{collections::HashSet, num::NonZero, sync::mpsc::channel};
+use std::{
+    collections::HashSet,
+    num::NonZero,
+    ops::{Add, AddAssign},
+    sync::mpsc::channel,
+};
 
 use crate::{
     graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore},
@@ -9,26 +14,62 @@ use crate::{
 
 use wt_mdb::{Error, Result};
 
+#[derive(Debug, Copy, Clone, Default)]
+pub struct GraphSearchStats {
+    /// Total number of candidates vertices seen and nav scored.
+    pub candidates: usize,
+    /// Total number of graph vertices visited and traversed.
+    pub visited: usize,
+}
+
+impl Add for GraphSearchStats {
+    type Output = GraphSearchStats;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        GraphSearchStats {
+            candidates: self.candidates + rhs.candidates,
+            visited: self.visited + rhs.visited,
+        }
+    }
+}
+
+impl AddAssign for GraphSearchStats {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs
+    }
+}
+
 /// Helper to search a Vamana graph.
 pub struct GraphSearcher {
+    params: GraphSearchParams,
+
     candidates: CandidateList,
     seen: HashSet<i64>, // TODO: use a more efficient hash function (ahash?)
-    params: GraphSearchParams,
+    visited: usize,
 }
 
 impl GraphSearcher {
     /// Create a new, reusable graph searcher.
     pub fn new(params: GraphSearchParams) -> Self {
         Self {
+            params,
             candidates: CandidateList::new(params.beam_width.get()),
             seen: HashSet::new(),
-            params,
+            visited: 0,
         }
     }
 
     /// Return the search params.
     pub fn params(&self) -> &GraphSearchParams {
         &self.params
+    }
+
+    /// Return stats for the last search that completed.
+    pub fn stats(&self) -> GraphSearchStats {
+        GraphSearchStats {
+            candidates: self.seen.len(),
+            visited: self.visited,
+        }
     }
 
     /// Search for `query` in the given graph `reader`. The reader will search in quantized space
@@ -56,6 +97,7 @@ impl GraphSearcher {
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         self.candidates.clear();
+        self.visited = 0;
 
         if max_concurrent.get() > 1 && reader.parallel_lookup() {
             self.search_concurrently(query, reader, max_concurrent)
@@ -97,6 +139,7 @@ impl GraphSearcher {
         let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
 
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
+            self.visited += 1;
             let node = graph
                 .get(best_candidate.neighbor().vertex())
                 .unwrap_or_else(|| Err(Error::not_found_error()))?;
@@ -165,6 +208,7 @@ impl GraphSearcher {
             }
 
             for lookup_result in std::iter::once(recv.recv().unwrap()).chain(recv.try_iter()) {
+                self.visited += 1;
                 num_concurrent -= 1;
                 let (neighbor, vector, edges) =
                     lookup_result.unwrap_or(Err(Error::not_found_error()))?;

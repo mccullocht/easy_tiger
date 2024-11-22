@@ -1,4 +1,4 @@
-use std::{num::NonZero, ops::Index};
+use std::{io, num::NonZero, ops::Index};
 
 use stable_deref_trait::StableDeref;
 
@@ -21,24 +21,35 @@ where
     /// Create a new store for numpy vector data with the given input and dimension count.
     ///
     /// This will typically be used with a memory-mapped file.
-    pub fn new(data: D, dimensions: NonZero<usize>) -> Self
+    pub fn new(data: D, dimensions: NonZero<usize>) -> io::Result<Self>
     where
         D: StableDeref<Target = [u8]>,
     {
         let vectorp = data.as_ptr() as *const f32;
-        assert!(vectorp.is_aligned());
-        assert_eq!(
-            data.len() % (std::mem::size_of::<f32>() * dimensions.get()),
-            0
-        );
+        if !vectorp.is_aligned() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "input vector data not aligned to f32".to_string(),
+            ));
+        }
+        if data.len() % (std::mem::size_of::<f32>() * dimensions.get()) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "input vector data does not divide evenly into stride length of {}",
+                    std::mem::size_of::<f32>() * dimensions.get()
+                ),
+            ));
+        }
+
         // Safety: StableDeref guarantees the pointer is stable even after a move.
         let vectors: &'static [f32] =
             unsafe { std::slice::from_raw_parts(vectorp, data.len() / std::mem::size_of::<f32>()) };
-        Self {
+        Ok(Self {
             data,
             dimensions,
             vectors,
-        }
+        })
     }
 
     /// Return number of dimensions in each vector.

@@ -8,7 +8,7 @@ use crate::{
         NavVectorStore,
     },
     quantization::binary_quantize,
-    scoring::F32VectorScorer,
+    scoring::{F32VectorScorer, VectorSimilarity},
     Neighbor,
 };
 
@@ -51,6 +51,7 @@ impl TestGraphVectorIndex {
         }
         let metadata = GraphMetadata {
             dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
+            similarity: VectorSimilarity::Dot,
             max_edges: max_edges,
             index_search_params: GraphSearchParams {
                 beam_width: NonZero::new(usize::MAX).unwrap(),

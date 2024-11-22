@@ -5,6 +5,7 @@ use easy_tiger::{
     bulk::BulkLoadBuilder,
     graph::{GraphMetadata, GraphSearchParams},
     input::NumpyF32VectorStore,
+    scoring::VectorSimilarity,
     wt::WiredTigerGraphVectorIndex,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
@@ -22,6 +23,9 @@ struct Args {
     /// Number of dimensions in input vectors.
     #[arg(short, long)]
     dimensions: NonZero<usize>,
+    /// Similarity function to use for vector scoring.
+    #[arg(short, long, value_enum)]
+    similarity: VectorSimilarity,
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
     limit: Option<usize>,
@@ -93,6 +97,7 @@ fn main() -> io::Result<()> {
 
     let metadata = GraphMetadata {
         dimensions: args.dimensions,
+        similarity: args.similarity,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,

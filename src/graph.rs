@@ -3,7 +3,9 @@ use std::{borrow::Cow, num::NonZero};
 use serde::{Deserialize, Serialize};
 use wt_mdb::Result;
 
-use crate::scoring::{DotProductScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer};
+use crate::scoring::{
+    DotProductScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer, VectorSimilarity,
+};
 
 /// Parameters for a search over a Vamana graph.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
@@ -20,6 +22,8 @@ pub struct GraphSearchParams {
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct GraphMetadata {
     pub dimensions: NonZero<usize>,
+    #[serde(default)]
+    pub similarity: VectorSimilarity,
     pub max_edges: NonZero<usize>,
     pub index_search_params: GraphSearchParams,
 }

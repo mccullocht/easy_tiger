@@ -4,7 +4,7 @@ use simsimd::{BinarySimilarity, SpatialSimilarity};
 ///
 /// This trait is object-safe; it may be instantiated at runtime based on
 /// data that appears in a file or other backing store.
-pub trait F32VectorScorer {
+pub trait F32VectorScorer: Send + Sync {
     /// Score vectors `a` and `b` against one another. Returns a score
     /// where larger values are better matches.
     ///

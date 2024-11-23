@@ -39,10 +39,14 @@ enum Commands {
     /// Bulk load a set of vectors into an index.
     /// Requires that the index be uninitialized.
     BulkLoad(BulkLoadArgs),
+    /// Drop an index.
+    DropIndex,
     /// Lookup the contents of a single vertex.
     Lookup(LookupArgs),
     /// Search for a list of vectors and time the operation.
     Search(SearchArgs),
+    /// Exhaustively search an index and create new Neighbors files.
+    ExhaustiveSearch,
     /// Add a list of vectors to the index.
     Add,
     /// Delete vectors by key range.
@@ -71,7 +75,6 @@ fn main() -> io::Result<()> {
             WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?,
             args,
         ),
-        Commands::Add => Err(io::Error::from(ErrorKind::Unsupported)),
-        Commands::Delete => Err(io::Error::from(ErrorKind::Unsupported)),
+        _ => Err(io::Error::from(ErrorKind::Unsupported)),
     }
 }

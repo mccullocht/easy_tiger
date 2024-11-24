@@ -1,5 +1,4 @@
 use std::{
-    cmp::Reverse,
     collections::BinaryHeap,
     fs::File,
     io::{self, BufWriter, Write},
@@ -74,11 +73,11 @@ pub fn exhaustive_search(
         for (i, s) in similarities.into_iter().enumerate() {
             let n = Neighbor::new(record.key(), s);
             if results[i].len() < results[i].capacity() {
-                results[i].push(Reverse(n));
+                results[i].push(n);
             } else {
                 let mut peek = results[i].peek_mut().unwrap();
-                if n <= peek.0 {
-                    peek.0 = n;
+                if n <= *peek {
+                    *peek = n;
                 }
             }
         }
@@ -86,8 +85,8 @@ pub fn exhaustive_search(
     }
 
     let mut writer = BufWriter::new(File::create(args.neighbors)?);
-    for neighbor_heap in results {
-        let mut neighbors = neighbor_heap.into_iter().map(|rn| rn.0).collect::<Vec<_>>();
+    for neighbor_heap in results.into_iter() {
+        let mut neighbors = neighbor_heap.into_iter().collect::<Vec<_>>();
         neighbors.sort();
         for n in neighbors {
             writer.write_all(&(n.vertex() as u32).to_le_bytes())?;

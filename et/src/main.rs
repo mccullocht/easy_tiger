@@ -1,4 +1,5 @@
 mod bulk_load;
+mod exhaustive_search;
 mod lookup;
 mod search;
 
@@ -10,6 +11,7 @@ use std::{
 use bulk_load::{bulk_load, BulkLoadArgs};
 use clap::{command, Parser, Subcommand};
 use easy_tiger::wt::WiredTigerGraphVectorIndex;
+use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
 use wt_mdb::{options::ConnectionOptionsBuilder, Connection};
@@ -46,7 +48,7 @@ enum Commands {
     /// Search for a list of vectors and time the operation.
     Search(SearchArgs),
     /// Exhaustively search an index and create new Neighbors files.
-    ExhaustiveSearch,
+    ExhaustiveSearch(ExhaustiveSearchArgs),
     /// Add a list of vectors to the index.
     Add,
     /// Delete vectors by key range.
@@ -71,6 +73,11 @@ fn main() -> io::Result<()> {
             args,
         ),
         Commands::Search(args) => search(
+            connection.clone(),
+            WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?,
+            args,
+        ),
+        Commands::ExhaustiveSearch(args) => exhaustive_search(
             connection.clone(),
             WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?,
             args,

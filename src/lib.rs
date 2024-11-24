@@ -61,3 +61,41 @@ impl Ord for Neighbor {
         }
     }
 }
+
+// XXX fix name of tests.rs
+#[cfg(test)]
+mod test_lib {
+    use std::cmp::Ordering;
+
+    use crate::Neighbor;
+
+    #[test]
+    fn neighbor_eq() {
+        assert_eq!(Neighbor::new(1, 1.0), Neighbor::new(1, 1.0));
+        assert_ne!(Neighbor::new(1, 1.0), Neighbor::new(1, 1.01));
+    }
+
+    #[test]
+    fn neighbor_ord() {
+        assert_eq!(
+            Neighbor::new(1, 1.0).cmp(&Neighbor::new(1, 1.0)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Neighbor::new(1, 1.1).cmp(&Neighbor::new(1, 1.0)),
+            Ordering::Less
+        );
+        assert_eq!(
+            Neighbor::new(1, 1.0).cmp(&Neighbor::new(1, 1.1)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            Neighbor::new(1, 1.0).cmp(&Neighbor::new(2, 1.0)),
+            Ordering::Less
+        );
+        assert_eq!(
+            Neighbor::new(2, 1.0).cmp(&Neighbor::new(1, 1.0)),
+            Ordering::Greater
+        );
+    }
+}

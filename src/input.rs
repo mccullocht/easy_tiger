@@ -1,13 +1,9 @@
-use std::{
-    io,
-    num::NonZero,
-    ops::{Deref, Index},
-};
+use std::{io, num::NonZero, ops::Index};
 
 use stable_deref_trait::StableDeref;
 
 /// A store of vector data indexed by a densely assigned range of values.
-pub trait VectorStore: Index<usize> {
+pub trait VectorStore: Index<usize, Output = [Self::Elem]> {
     type Elem;
 
     /// Return the number of vectors in the store.
@@ -15,6 +11,9 @@ pub trait VectorStore: Index<usize> {
 
     /// Return true if this store is empty.
     fn is_empty(&self) -> bool;
+
+    /// Return the slice length of each row in terms of `Elem`.
+    fn elem_stride(&self) -> usize;
 
     /// Return an iterator over all the vectors in the store.
     fn iter(&self) -> impl Iterator<Item = &[Self::Elem]>;
@@ -32,8 +31,10 @@ pub struct DerefVectorStore<E: 'static, D> {
 
 impl<E, D> DerefVectorStore<E, D>
 where
-    D: Deref<Target = [u8]>,
+    D: StableDeref<Target = [u8]>,
 {
+    /// Create a new store from byte de-refable `data` where each entry contains
+    /// `stride` elements of of type `E`.
     pub fn new(data: D, stride: NonZero<usize>) -> io::Result<Self> {
         let elem_width = std::mem::size_of::<E>();
         let vectorp = data.as_ptr() as *const E;
@@ -80,6 +81,10 @@ impl<E, D> VectorStore for DerefVectorStore<E, D> {
         self.len == 0
     }
 
+    fn elem_stride(&self) -> usize {
+        self.stride
+    }
+
     fn iter(&self) -> impl Iterator<Item = &[Self::Elem]> {
         self.raw_vectors.chunks(self.stride)
     }
@@ -88,7 +93,7 @@ impl<E, D> VectorStore for DerefVectorStore<E, D> {
 impl<E, D> Index<usize> for DerefVectorStore<E, D> {
     type Output = [E];
 
-    fn index(&self, index: usize) -> &Self::Output {
+    fn index(&self, index: usize) -> &[E] {
         let start = index * self.stride;
         let end = start + self.stride;
         &self.raw_vectors[start..end]

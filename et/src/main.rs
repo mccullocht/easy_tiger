@@ -1,4 +1,5 @@
 mod bulk_load;
+mod drop_index;
 mod exhaustive_search;
 mod lookup;
 mod search;
@@ -10,6 +11,7 @@ use std::{
 
 use bulk_load::{bulk_load, BulkLoadArgs};
 use clap::{command, Parser, Subcommand};
+use drop_index::drop_index;
 use easy_tiger::wt::WiredTigerGraphVectorIndex;
 use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
 use lookup::{lookup, LookupArgs};
@@ -28,12 +30,13 @@ struct Cli {
     /// Size of the WiredTiger disk cache, in MB.
     #[arg(long, default_value = "1024")]
     wiredtiger_cache_size_mb: NonZero<usize>,
-    /// WiredTiger table basename use to locate the graph.
-    #[arg(long)]
-    wiredtiger_table_basename: String,
     /// If true, create the WiredTiger database if it does not exist.
     #[arg(long, default_value = "false")]
     wiredtiger_create_db: bool,
+
+    /// Name of the index, used to derive table names in WiredTiger.
+    #[arg(short, long)]
+    index_name: String,
 }
 
 #[derive(Subcommand)]
@@ -66,20 +69,21 @@ fn main() -> io::Result<()> {
     let connection = Connection::open(&cli.wiredtiger_db_path, Some(connection_options.into()))?;
 
     match cli.command {
-        Commands::BulkLoad(args) => bulk_load(connection, args, &cli.wiredtiger_table_basename),
+        Commands::BulkLoad(args) => bulk_load(connection, args, &cli.index_name),
+        Commands::DropIndex => drop_index(connection, &cli.index_name),
         Commands::Lookup(args) => lookup(
             connection.clone(),
-            WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?,
+            WiredTigerGraphVectorIndex::from_db(&connection, &cli.index_name)?,
             args,
         ),
         Commands::Search(args) => search(
             connection.clone(),
-            WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?,
+            WiredTigerGraphVectorIndex::from_db(&connection, &cli.index_name)?,
             args,
         ),
         Commands::ExhaustiveSearch(args) => exhaustive_search(
             connection.clone(),
-            WiredTigerGraphVectorIndex::from_db(&connection, &cli.wiredtiger_table_basename)?,
+            WiredTigerGraphVectorIndex::from_db(&connection, &cli.index_name)?,
             args,
         ),
         _ => Err(io::Error::from(ErrorKind::Unsupported)),

@@ -24,13 +24,13 @@ pub struct BulkLoadArgs {
     similarity: VectorSimilarity,
 
     /// Maximum number of edges for any vertex.
-    #[arg(short, long, default_value = "32")]
+    #[arg(short, long, default_value = "64")]
     max_edges: NonZero<usize>,
     /// Number of edges to search for when indexing a vertex.
     ///
     /// Larger values make indexing more expensive but may also produce a larger, more
     /// saturated graph that has higher recall.
-    #[arg(short, long, default_value = "128")]
+    #[arg(short, long, default_value = "256")]
     edge_candidates: NonZero<usize>,
     /// Number of edge candidates to rerank. Defaults to edge_candidates.
     ///

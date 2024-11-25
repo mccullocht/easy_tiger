@@ -62,7 +62,6 @@ impl Ord for Neighbor {
     }
 }
 
-// XXX fix name of tests.rs
 #[cfg(test)]
 mod test_lib {
     use std::cmp::Ordering;

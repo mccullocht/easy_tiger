@@ -3,7 +3,6 @@ use std::{
     fs::File,
     io::{self},
     num::NonZero,
-    ops::Index,
     path::PathBuf,
     sync::Arc,
 };
@@ -11,6 +10,7 @@ use std::{
 use clap::Args;
 use easy_tiger::{
     graph::GraphSearchParams,
+    input::{DerefVectorStore, VectorStore},
     search::{GraphSearchStats, GraphSearcher},
     worker_pool::WorkerPool,
     wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader},
@@ -18,7 +18,6 @@ use easy_tiger::{
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use memmap2::Mmap;
-use stable_deref_trait::StableDeref;
 use threadpool::ThreadPool;
 use wt_mdb::Connection;
 
@@ -58,7 +57,7 @@ pub fn search(
     index: WiredTigerGraphVectorIndex,
     args: SearchArgs,
 ) -> io::Result<()> {
-    let query_vectors = easy_tiger::input::NumpyF32VectorStore::new(
+    let query_vectors = easy_tiger::input::DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         index.metadata().dimensions,
     )?;
@@ -80,7 +79,7 @@ pub fn search(
     };
     let mut recall_computer = if let Some((neighbors, recall_k)) = args.neighbors.zip(args.recall_k)
     {
-        let neighbors = NumpyU32Neighbors::new(
+        let neighbors = DerefVectorStore::<u32, _>::new(
             unsafe { Mmap::map(&File::open(neighbors)?)? },
             args.neighbors_len,
         )?;
@@ -142,9 +141,9 @@ pub fn search(
     Ok(())
 }
 
-pub struct RecallComputer {
+pub struct RecallComputer<N> {
     k: usize,
-    neighbors: NumpyU32Neighbors<Mmap>,
+    neighbors: N,
 
     queries: usize,
     total: usize,
@@ -152,9 +151,12 @@ pub struct RecallComputer {
     expected_buf: Vec<u32>,
 }
 
-impl RecallComputer {
-    fn new(k: NonZero<usize>, neighbors: NumpyU32Neighbors<Mmap>) -> io::Result<Self> {
-        if k <= neighbors.neighbors_len() {
+impl<N> RecallComputer<N>
+where
+    N: VectorStore<Elem = u32>,
+{
+    fn new(k: NonZero<usize>, neighbors: N) -> io::Result<Self> {
+        if k.get() <= neighbors.elem_stride() {
             Ok(Self {
                 k: k.get(),
                 neighbors,
@@ -191,7 +193,7 @@ impl RecallComputer {
     }
 }
 
-impl Display for RecallComputer {
+impl<N> Display for RecallComputer<N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -201,85 +203,5 @@ impl Display for RecallComputer {
             self.matched,
             self.total
         )
-    }
-}
-
-/// Immutable store for numpy formatted u32 neighbor data.
-///
-/// In this format all i32 values are little endian coded and written end-to-end. The number of
-/// neighbors contained in each row must be provided externally.
-/// count must be provided externally.
-// TODO: existing data files are u32 formatted, but maybe I should generate i64 value files?
-// TODO: merge this with NumpyF32VectorStore -- could probably template on the elem type?
-pub struct NumpyU32Neighbors<D> {
-    // NB: the contents of data is referenced by vectors.
-    #[allow(dead_code)]
-    data: D,
-    neighbors_len: NonZero<usize>,
-    neighbors: &'static [u32],
-}
-
-impl<D> NumpyU32Neighbors<D>
-where
-    D: Send + Sync,
-{
-    /// Create a new store for numpy neighbor store with the given input and neighbors count.
-    ///
-    /// This will typically be used with a memory-mapped file.
-    pub fn new(data: D, neighbors_len: NonZero<usize>) -> io::Result<Self>
-    where
-        D: StableDeref<Target = [u8]>,
-    {
-        let vectorp = data.as_ptr() as *const u32;
-        if !vectorp.is_aligned() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "input neighbor data not aligned to u32".to_string(),
-            ));
-        }
-        if data.len() % (std::mem::size_of::<u32>() * neighbors_len.get()) != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "input neighbor data does not divide evenly into stride length of {}",
-                    std::mem::size_of::<f32>() * neighbors_len.get()
-                ),
-            ));
-        }
-
-        // Safety: StableDeref guarantees the pointer is stable even after a move.
-        let neighbors: &'static [u32] =
-            unsafe { std::slice::from_raw_parts(vectorp, data.len() / std::mem::size_of::<u32>()) };
-        Ok(Self {
-            data,
-            neighbors_len,
-            neighbors,
-        })
-    }
-
-    /// Return number of neighbors in each row.
-    pub fn neighbors_len(&self) -> NonZero<usize> {
-        self.neighbors_len
-    }
-
-    /// Return the number of neighbors in the store.
-    pub fn len(&self) -> usize {
-        self.neighbors.len() / self.neighbors_len.get()
-    }
-
-    /// Return true if this store is empty.
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.neighbors.is_empty()
-    }
-}
-
-impl<D> Index<usize> for NumpyU32Neighbors<D> {
-    type Output = [u32];
-
-    fn index(&self, index: usize) -> &Self::Output {
-        let start = index * self.neighbors_len.get();
-        let end = start + self.neighbors_len.get();
-        &self.neighbors[start..end]
     }
 }

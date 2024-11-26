@@ -8,7 +8,9 @@ use std::{
 };
 
 use clap::Args;
-use easy_tiger::{input::NumpyF32VectorStore, wt::WiredTigerGraphVectorIndex, Neighbor};
+use easy_tiger::{
+    input::DerefVectorStore, input::VectorStore, wt::WiredTigerGraphVectorIndex, Neighbor,
+};
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use memmap2::Mmap;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -33,7 +35,7 @@ pub fn exhaustive_search(
     index: WiredTigerGraphVectorIndex,
     args: ExhaustiveSearchArgs,
 ) -> io::Result<()> {
-    let query_vectors = NumpyF32VectorStore::new(
+    let query_vectors = DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         index.metadata().dimensions,
     )?;

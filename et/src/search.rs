@@ -57,7 +57,7 @@ pub fn search(
     index: WiredTigerGraphVectorIndex,
     args: SearchArgs,
 ) -> io::Result<()> {
-    let query_vectors = easy_tiger::input::NumpyF32VectorStore::new(
+    let query_vectors = easy_tiger::input::DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         index.metadata().dimensions,
     )?;

@@ -16,7 +16,7 @@ use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
     graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex},
-    input::NumpyF32VectorStore,
+    input::{DerefVectorStore, VectorStore},
     quantization::binary_quantize,
     scoring::F32VectorScorer,
     search::GraphSearcher,
@@ -59,7 +59,7 @@ pub struct BulkLoadBuilder<D> {
     index: WiredTigerGraphVectorIndex,
     limit: usize,
 
-    vectors: NumpyF32VectorStore<D>,
+    vectors: DerefVectorStore<f32, D>,
     centroid: Vec<f32>,
 
     graph: Box<[RwLock<Vec<Neighbor>>]>,
@@ -76,7 +76,7 @@ where
     pub fn new(
         connection: Arc<Connection>,
         index: WiredTigerGraphVectorIndex,
-        vectors: NumpyF32VectorStore<D>,
+        vectors: DerefVectorStore<f32, D>,
         limit: usize,
     ) -> Self {
         let mut graph_vec = Vec::with_capacity(vectors.len());

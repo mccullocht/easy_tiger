@@ -104,6 +104,7 @@ impl<E, D> Index<usize> for DerefVectorStore<E, D> {
 ///
 /// In this format all f32 values are little endian coded and written end-to-end. The dimension
 /// count must be provided externally.
+// XXX remove me
 pub struct NumpyF32VectorStore<D> {
     // NB: the contents of data is referenced by vectors.
     #[allow(dead_code)]

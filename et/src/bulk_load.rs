@@ -4,12 +4,12 @@ use clap::Args;
 use easy_tiger::{
     bulk::BulkLoadBuilder,
     graph::{GraphMetadata, GraphSearchParams},
-    input::NumpyF32VectorStore,
+    input::{DerefVectorStore, VectorStore},
     scoring::VectorSimilarity,
     wt::WiredTigerGraphVectorIndex,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use wt_mdb::{options::DropOptionsBuilder, Connection};
+use wt_mdb::Connection;
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -52,9 +52,9 @@ pub struct BulkLoadArgs {
 pub fn bulk_load(
     connection: Arc<Connection>,
     args: BulkLoadArgs,
-    table_basename: &str,
+    index_name: &str,
 ) -> io::Result<()> {
-    let f32_vectors = NumpyF32VectorStore::new(
+    let f32_vectors = DerefVectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
         args.dimensions,
     )?;
@@ -70,21 +70,9 @@ pub fn bulk_load(
                 .unwrap_or_else(|| args.edge_candidates.get()),
         },
     };
-    let index = WiredTigerGraphVectorIndex::from_init(metadata, table_basename)?;
+    let index = WiredTigerGraphVectorIndex::from_init(metadata, index_name)?;
     if args.drop_tables {
-        let session = connection.open_session()?;
-        session
-            .drop_record_table(
-                index.graph_table_name(),
-                Some(DropOptionsBuilder::default().set_force().into()),
-            )
-            .map_err(io::Error::from)?;
-        session
-            .drop_record_table(
-                index.nav_table_name(),
-                Some(DropOptionsBuilder::default().set_force().into()),
-            )
-            .map_err(io::Error::from)?;
+        crate::drop_index::drop_index(connection.clone(), index_name)?;
     }
 
     let num_vectors = f32_vectors.len();

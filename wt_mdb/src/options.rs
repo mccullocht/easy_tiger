@@ -1,6 +1,7 @@
 use std::{
     ffi::{c_char, CStr, CString},
     num::NonZero,
+    str::FromStr,
 };
 
 pub(crate) trait ConfigurationString {
@@ -27,6 +28,7 @@ where
 pub struct ConnectionOptionsBuilder {
     create: bool,
     cache_size_mb: Option<NonZero<usize>>,
+    statistics: Statistics,
 }
 
 impl ConnectionOptionsBuilder {
@@ -40,6 +42,68 @@ impl ConnectionOptionsBuilder {
     pub fn cache_size_mb(mut self, size: NonZero<usize>) -> Self {
         self.cache_size_mb = Some(size);
         self
+    }
+
+    pub fn statistics(mut self, statistics: Statistics) -> Self {
+        self.statistics = statistics;
+        self
+    }
+}
+
+/// Level of statistics gathering.
+///
+/// This is set on both the connection and when accessing stats cursors.
+/// Note that the level for a stats cursor must be less than the connection level
+/// or an error may occur.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Statistics {
+    /// Collect no stats.
+    None,
+    /// Collect stats that are fast/cheap to collect.
+    Fast,
+    /// Collect all known stats, even if they are expensive.
+    All,
+}
+
+impl Statistics {
+    pub(crate) fn to_config_string_clause(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            opt => Some(format!("statistics=({})", opt)),
+        }
+    }
+}
+
+impl Default for Statistics {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl std::fmt::Display for Statistics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::None => "none",
+                Self::Fast => "fast",
+                Self::All => "all",
+            }
+        )
+    }
+}
+
+impl FromStr for Statistics {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "fast" => Ok(Self::Fast),
+            "all" => Ok(Self::All),
+            _ => Err(format!("Unknown statistics type {}", s)),
+        }
     }
 }
 
@@ -55,6 +119,9 @@ impl From<ConnectionOptionsBuilder> for ConnectionOptions {
         }
         if let Some(cache_size) = value.cache_size_mb {
             options.push(format!("cache_size={}", cache_size.get() << 20));
+        }
+        if let Some(clause) = value.statistics.to_config_string_clause() {
+            options.push(clause);
         }
         if options.is_empty() {
             Self(None)

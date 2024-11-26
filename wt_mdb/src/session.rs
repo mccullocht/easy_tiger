@@ -1,7 +1,8 @@
 // TODO: this should be a module directory so i can place cursors in separate files.
+// this would allow me to use pub (super)
 use std::{
     cell::RefCell,
-    ffi::{c_void, CStr, CString},
+    ffi::{c_char, c_void, CStr, CString},
     mem::ManuallyDrop,
     num::NonZero,
     ops::{Deref, DerefMut},
@@ -17,7 +18,7 @@ use crate::{
     make_result,
     options::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
-        DropOptions, RollbackTransactionOptions,
+        DropOptions, RollbackTransactionOptions, Statistics,
     },
     wrap_ptr_create, Error, Record, RecordView, Result,
 };
@@ -152,13 +153,45 @@ impl Session {
     }
 
     /// Return a `RecordCursor` to the cache for future re-use.
-    pub fn return_record_cursor(&self, cursor: RecordCursor) {
+    fn return_record_cursor(&self, cursor: RecordCursor) {
         self.cached_cursors.borrow_mut().push(cursor.into_inner())
     }
 
     /// Remove all cached cursors.
     pub fn clear_cursor_cache(&self) {
         self.cached_cursors.borrow_mut().clear();
+    }
+
+    /// Return a new cursor that prints statistics.
+    pub fn new_stats_cursor(
+        &self,
+        level: Statistics,
+        table: Option<&str>,
+    ) -> Result<StatisticsCursor<'_>> {
+        let table_stats_uri = table.map(|t| {
+            CString::new(format!("statistics:table:{}", t)).expect("no nulls in table name")
+        });
+        let uri = table_stats_uri.as_deref().unwrap_or(c"statistics:");
+        let options = level
+            .to_config_string_clause()
+            .map(|s| CString::new(s).expect("no nulls in stats options"));
+        let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
+        unsafe {
+            wrap_ptr_create(
+                (self.ptr.as_ref().open_cursor.unwrap())(
+                    self.ptr.as_ptr(),
+                    uri.as_ptr(),
+                    ptr::null_mut(),
+                    options.map(|o| o.as_ptr()).unwrap_or(std::ptr::null()),
+                    &mut cursorp,
+                ),
+                cursorp,
+            )
+            .map(|ptr| StatisticsCursor {
+                ptr,
+                _session: self,
+            })
+        }
     }
 
     /// Starts a transaction in this session.
@@ -493,5 +526,56 @@ impl<'a> Drop for RecordCursorGuard<'a> {
         // Safety: we never intend to allow RecordCursorGuard to drop the value.
         self.session
             .return_record_cursor(unsafe { ManuallyDrop::take(&mut self.cursor) });
+    }
+}
+
+pub struct StatisticsCursor<'a> {
+    ptr: NonNull<WT_CURSOR>,
+    _session: &'a Session,
+}
+
+impl<'a> StatisticsCursor<'a> {
+    fn read_stat(&self) -> Result<(&'a str, &'a str)> {
+        let (key, value) = unsafe {
+            let mut key_ptr: *mut c_char = std::ptr::null_mut();
+            let mut value_ptr: *mut c_char = std::ptr::null_mut();
+            (
+                make_result(
+                    self.ptr.as_ref().get_key.unwrap()(self.ptr.as_ptr(), &mut key_ptr),
+                    CStr::from_ptr::<'a>(key_ptr),
+                )?,
+                make_result(
+                    self.ptr.as_ref().get_value.unwrap()(self.ptr.as_ptr(), &mut value_ptr),
+                    CStr::from_ptr::<'a>(key_ptr),
+                )?,
+            )
+        };
+        Ok((
+            key.to_str().map_err(|_| Error::generic_error())?,
+            value.to_str().map_err(|_| Error::generic_error())?,
+        ))
+    }
+}
+
+// XXX figure out if this will do something dumb if I save a reference.
+// ideally i want next() to invalidate the reference.
+impl<'a> Iterator for StatisticsCursor<'a> {
+    type Item = Result<(&'a str, &'a str)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            match NonZero::new(self.ptr.as_ref().next.unwrap()(self.ptr.as_ptr())) {
+                None => Some(self.read_stat()),
+                Some(code) if code.get() == WT_NOTFOUND => None,
+                Some(code) => Some(Err(Error::from(code))),
+            }
+        }
+    }
+}
+
+impl<'a> Drop for StatisticsCursor<'a> {
+    fn drop(&mut self) {
+        // TODO: print something if this returns an error.
+        unsafe { self.ptr.as_ref().close.unwrap()(self.ptr.as_ptr()) };
     }
 }

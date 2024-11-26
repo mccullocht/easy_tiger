@@ -293,7 +293,7 @@ where
         for e in edges.iter() {
             let mut guard = self.graph[e.vertex() as usize].write().unwrap();
             guard.push(Neighbor::new(index as i64, e.score()));
-            let max_edges = NonZero::new(guard.capacity()).unwrap();
+            let max_edges = NonZero::new(guard.capacity() - 1).unwrap();
             self.maybe_prune_node(index, guard, max_edges)?;
         }
         Ok(())

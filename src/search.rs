@@ -264,7 +264,8 @@ impl GraphSearcher {
             let mut normalized_query = query.to_vec();
             let scorer = reader.metadata().new_scorer();
             scorer.normalize(&mut normalized_query);
-            self.candidates
+            let mut rescored = self
+                .candidates
                 .iter()
                 .take(self.params.num_rerank)
                 .map(|c| {
@@ -273,7 +274,9 @@ impl GraphSearcher {
                         scorer.score(query, c.state.vector().expect("node visited")),
                     )
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            rescored.sort();
+            rescored
         } else {
             self.candidates.iter().map(|c| c.neighbor).collect()
         }

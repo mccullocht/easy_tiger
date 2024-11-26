@@ -56,7 +56,7 @@ where
                 ),
             ));
         }
-        let len = data.len() / stride.get();
+        let len = data.len() / (stride.get() * elem_width);
 
         // Safety: StableDeref guarantees the pointer is stable even after a move.
         let raw_vectors: &'static [E] =

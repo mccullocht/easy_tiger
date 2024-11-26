@@ -9,7 +9,7 @@ use easy_tiger::{
     wt::WiredTigerGraphVectorIndex,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use wt_mdb::Connection;
+use wt_mdb::{options::DropOptionsBuilder, Connection};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -72,7 +72,15 @@ pub fn bulk_load(
     };
     let index = WiredTigerGraphVectorIndex::from_init(metadata, index_name)?;
     if args.drop_tables {
-        crate::drop_index::drop_index(connection.clone(), index_name)?;
+        let session = connection.open_session()?;
+        session.drop_record_table(
+            index.graph_table_name(),
+            Some(DropOptionsBuilder::default().set_force().into()),
+        )?;
+        session.drop_record_table(
+            index.nav_table_name(),
+            Some(DropOptionsBuilder::default().set_force().into()),
+        )?;
     }
 
     let num_vectors = f32_vectors.len();
@@ -80,28 +88,24 @@ pub fn bulk_load(
     let mut builder = BulkLoadBuilder::new(connection, index, f32_vectors, limit);
 
     {
+        let progress = progress_bar(limit, "quantize nav vectors");
+        builder.quantize_nav_vectors(|| progress.inc(1))?;
+    }
+    {
         let progress = progress_bar(limit, "load nav vectors");
-        builder
-            .load_nav_vectors(|| progress.inc(1))
-            .map_err(io::Error::from)?;
+        builder.load_nav_vectors(|| progress.inc(1))?;
     }
     {
         let progress = progress_bar(limit, "build graph");
-        builder
-            .insert_all(|| progress.inc(1))
-            .map_err(io::Error::from)?;
+        builder.insert_all(|| progress.inc(1))?;
     }
     {
         let progress = progress_bar(limit, "cleanup graph");
-        builder
-            .cleanup(|| progress.inc(1))
-            .map_err(io::Error::from)?;
+        builder.cleanup(|| progress.inc(1))?;
     }
     let stats = {
         let progress = progress_bar(limit, "load graph");
-        builder
-            .load_graph(|| progress.inc(1))
-            .map_err(io::Error::from)?
+        builder.load_graph(|| progress.inc(1))?;
     };
     println!("{:?}", stats);
 

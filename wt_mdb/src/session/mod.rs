@@ -177,14 +177,14 @@ impl Session {
         let options = level
             .to_config_string_clause()
             .map(|s| CString::new(s).expect("no nulls in stats options"));
-        let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
+        let mut cursorp: *mut WT_CURSOR = std::ptr::null_mut();
         unsafe {
             wrap_ptr_create(
                 (self.ptr.as_ref().open_cursor.unwrap())(
                     self.ptr.as_ptr(),
                     uri.as_ptr(),
                     ptr::null_mut(),
-                    options.map(|o| o.as_ptr()).unwrap_or(std::ptr::null()),
+                    options.as_ref().map(|o| o.as_ptr()).unwrap_or(std::ptr::null()),
                     &mut cursorp,
                 ),
                 cursorp,

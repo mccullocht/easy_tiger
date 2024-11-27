@@ -1,4 +1,4 @@
-// TODO: this should be a module directory so i can place cursors in separate files.
+// XXX this should be a module directory so i can place cursors in separate files.
 // this would allow me to use pub (super)
 use std::{
     cell::RefCell,
@@ -162,7 +162,7 @@ impl Session {
         self.cached_cursors.borrow_mut().clear();
     }
 
-    /// Return a new cursor that prints statistics.
+    /// Return a new cursor that provides statistics by name.
     pub fn new_stats_cursor(
         &self,
         level: Statistics,
@@ -529,38 +529,52 @@ impl<'a> Drop for RecordCursorGuard<'a> {
     }
 }
 
+/// Cursor over statistics, either for the entire connection or a specific URI.
 pub struct StatisticsCursor<'a> {
     ptr: NonNull<WT_CURSOR>,
     _session: &'a Session,
 }
 
 impl<'a> StatisticsCursor<'a> {
-    fn read_stat(&self) -> Result<(&'a str, &'a str)> {
-        let (key, value) = unsafe {
-            let mut key_ptr: *mut c_char = std::ptr::null_mut();
-            let mut value_ptr: *mut c_char = std::ptr::null_mut();
-            (
-                make_result(
-                    self.ptr.as_ref().get_key.unwrap()(self.ptr.as_ptr(), &mut key_ptr),
-                    CStr::from_ptr::<'a>(key_ptr),
-                )?,
-                make_result(
-                    self.ptr.as_ref().get_value.unwrap()(self.ptr.as_ptr(), &mut value_ptr),
-                    CStr::from_ptr::<'a>(key_ptr),
-                )?,
-            )
+    /// Seek to specific WT_STAT_.* and return the associated value if any.
+    pub fn seek_exact(&mut self, wt_stat: u32) -> Option<Result<i64>> {
+        unsafe {
+            self.ptr.as_ref().set_key.unwrap()(self.ptr.as_ptr(), wt_stat);
+            match NonZero::new(self.ptr.as_ref().search.unwrap()(self.ptr.as_ptr())) {
+                None => Some(self.read_stat().map(|(_, v)| v)),
+                Some(code) if code.get() == WT_NOTFOUND => None,
+                Some(code) => Some(Err(Error::from(code))),
+            }
+        }
+    }
+
+    fn read_stat(&self) -> Result<(String, i64)> {
+        let (desc, value) = unsafe {
+            let mut desc_ptr: *mut c_char = std::ptr::null_mut();
+            let mut pvalue_ptr: *mut c_char = std::ptr::null_mut();
+            let mut value = 0i64;
+            make_result(
+                self.ptr.as_ref().get_value.unwrap()(
+                    self.ptr.as_ptr(),
+                    &mut desc_ptr,
+                    &mut pvalue_ptr,
+                    &mut value,
+                ),
+                (),
+            )?;
+            (CStr::from_ptr::<'a>(desc_ptr), value)
         };
         Ok((
-            key.to_str().map_err(|_| Error::generic_error())?,
-            value.to_str().map_err(|_| Error::generic_error())?,
+            desc.to_str()
+                .map(str::to_string)
+                .map_err(|_| Error::generic_error())?,
+            value,
         ))
     }
 }
 
-// XXX figure out if this will do something dumb if I save a reference.
-// ideally i want next() to invalidate the reference.
 impl<'a> Iterator for StatisticsCursor<'a> {
-    type Item = Result<(&'a str, &'a str)>;
+    type Item = Result<(String, i64)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {

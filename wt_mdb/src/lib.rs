@@ -172,7 +172,7 @@ impl<'a> RecordView<'a> {
 pub type Record = RecordView<'static>;
 
 pub use connection::Connection;
-pub use session::{RecordCursor, RecordCursorGuard, Session};
+pub use session::{RecordCursor, RecordCursorGuard, Session, StatisticsCursor};
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {
@@ -192,7 +192,7 @@ mod test {
 
     use crate::{
         connection::Connection,
-        options::{ConnectionOptions, ConnectionOptionsBuilder},
+        options::{ConnectionOptions, ConnectionOptionsBuilder, Statistics},
         Error, Record, RecordView, WiredTigerError,
     };
 
@@ -362,6 +362,49 @@ mod test {
                 [Record::new(11, b"bar"), Record::new(7, b"foo")].into_iter()
             ),
             Err(Error::Posix(22)) // EINVAL
+        );
+    }
+
+    #[test]
+    fn statistics() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(
+            tmpdir.path().to_str().unwrap(),
+            Some(
+                ConnectionOptionsBuilder::default()
+                    .create()
+                    .statistics(Statistics::Fast)
+                    .into(),
+            ),
+        )
+        .unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_record_table("test", None).unwrap();
+        let mut cursor = session.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
+        assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
+
+        for stat in session.new_stats_cursor(Statistics::Fast, None).unwrap() {
+            let (desc, value) = stat.unwrap();
+            assert!(value >= 0, "{}", desc);
+        }
+
+        for stat in session
+            .new_stats_cursor(Statistics::Fast, Some("test"))
+            .unwrap()
+        {
+            let (desc, value) = stat.unwrap();
+            assert!(value >= 0, "{}", desc);
+        }
+
+        assert!(
+            session
+                .new_stats_cursor(Statistics::Fast, None)
+                .unwrap()
+                .seek_exact(wt_sys::WT_STAT_CONN_READ_IO)
+                .unwrap()
+                .unwrap()
+                > 0
         );
     }
 

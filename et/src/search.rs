@@ -19,7 +19,8 @@ use easy_tiger::{
 use indicatif::{ProgressBar, ProgressStyle};
 use memmap2::Mmap;
 use threadpool::ThreadPool;
-use wt_mdb::Connection;
+use wt_mdb::{Connection, Result, Session};
+use wt_sys::{WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
 
 #[derive(Args)]
 pub struct SearchArgs {
@@ -134,6 +135,14 @@ pub fn search(
         search_stats.visited as f64 / limit as f64,
     );
 
+    let (search_calls, read_io) = cache_hit_stats(&session)?;
+    println!(
+        "cache hit rate {:.2}% ({} reads, {} lookups)",
+        (search_calls - read_io) as f64 * 100.0 / search_calls as f64,
+        read_io,
+        search_calls,
+    );
+
     if let Some(computer) = recall_computer {
         println!("{}", computer);
     }
@@ -204,4 +213,16 @@ impl<N> Display for RecallComputer<N> {
             self.total
         )
     }
+}
+
+/// Count lookup calls and read IOs. This can be used to estimate cache hit rate.
+fn cache_hit_stats(session: &Session) -> Result<(i64, i64)> {
+    let mut stat_cursor = session.new_stats_cursor(wt_mdb::options::Statistics::Fast, None)?;
+    let search_calls = stat_cursor
+        .seek_exact(WT_STAT_CONN_CURSOR_SEARCH)
+        .expect("WT_STAT_CONN_CURSOR_SEARCH")?;
+    let read_ios = stat_cursor
+        .seek_exact(WT_STAT_CONN_READ_IO)
+        .expect("WT_STAT_CONN_READ_IO")?;
+    Ok((search_calls, read_ios))
 }

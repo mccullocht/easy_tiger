@@ -12,3 +12,4 @@ rayon = "1.10.0"
 stable_deref_trait = "1.2.0"
 threadpool = "1.8.1"
 wt_mdb = { path = "../wt_mdb" }
+wt_sys = { path = "../wt_sys" }

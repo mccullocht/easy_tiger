@@ -16,7 +16,10 @@ use easy_tiger::wt::WiredTigerGraphVectorIndex;
 use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
-use wt_mdb::{options::ConnectionOptionsBuilder, Connection};
+use wt_mdb::{
+    options::{ConnectionOptionsBuilder, Statistics},
+    Connection,
+};
 
 #[derive(Parser)]
 #[command(version, about = "EasyTiger vector indexing tool", long_about = None)]
@@ -61,8 +64,9 @@ enum Commands {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
     // TODO: Connection.filename should accept &Path. This will likely be very annoying to plumb to CString.
-    let mut connection_options =
-        ConnectionOptionsBuilder::default().cache_size_mb(cli.wiredtiger_cache_size_mb);
+    let mut connection_options = ConnectionOptionsBuilder::default()
+        .cache_size_mb(cli.wiredtiger_cache_size_mb)
+        .statistics(Statistics::Fast);
     if cli.wiredtiger_create_db {
         connection_options = connection_options.create();
     }

@@ -1,3 +1,4 @@
+use core::f64;
 use std::collections::HashMap;
 
 use crate::{
@@ -9,7 +10,7 @@ use wt_mdb::{Error, Result};
 
 pub struct CrudGraph<R> {
     reader: R,
-    vertex_cache: HashMap<i64, CrudGraphVertex>,
+    vertex_cache: HashMap<i64, Option<CrudGraphVertex>>,
 }
 
 // XXX I haven't thought much about how I'm going to interact with this.
@@ -23,10 +24,8 @@ pub struct CrudGraph<R> {
 //   - when I insert unscored edges
 //   - scored edges are needed pruning.
 //
-// for rep:
-// * edges are always Neighbor
-// * unscored edges are NaN
-// * I record if any unscored edges have been inserted
+// XXX is this the right way of doing this, vs simply mutating in-place on the graph?
+// feels like I'm building a shitty ORM
 struct CrudGraphVertex {
     vector: Vec<f32>,
     edges: Vec<Neighbor>,
@@ -34,7 +33,6 @@ struct CrudGraphVertex {
     any_unscored: bool,
     // if set, this vertex is dirty and should be written back.
     dirty: bool,
-    // XXX should I have deleted here?
 }
 
 impl CrudGraphVertex {
@@ -54,11 +52,37 @@ impl CrudGraphVertex {
         self.edges.iter().map(|n| n.vertex())
     }
 
-    fn sorted_neighbors<G: Graph>(
+    /// Insert an edge to `vertex_id`. Return the number of edges on the vertex.
+    fn insert_edge(&mut self, vertex_id: i64) -> usize {
+        if self
+            .edges
+            .iter()
+            .find(|n| n.vertex() == vertex_id)
+            .is_none()
+        {
+            self.edges.push(Neighbor::new(vertex_id, f64::NAN));
+            self.any_unscored = true;
+            self.dirty = true;
+        }
+        self.edges.len()
+    }
+
+    /// Remove an edge to `vertex_id`. Return the number of edges on the vertex.
+    fn remove_edge(&mut self, vertex_id: i64) -> usize {
+        let len = self.edges.len();
+        self.edges.retain(|n| n.vertex() != vertex_id);
+        if len != self.edges.len() {
+            self.dirty = true;
+        }
+        self.edges.len()
+    }
+
+    fn prune_edges<S: Iterator<Item = usize>>(
         &mut self,
-        graph: &mut G,
+        graph: &mut impl Graph,
         scorer: &dyn F32VectorScorer,
-    ) -> Result<&[Neighbor]> {
+        prune: impl FnOnce(&[Neighbor]) -> S,
+    ) -> Result<Vec<i64>> {
         if self.any_unscored {
             for n in self.edges.iter_mut().filter(|n| n.score().is_nan()) {
                 let vertex = graph
@@ -69,12 +93,22 @@ impl CrudGraphVertex {
             self.any_unscored = false;
         }
         self.edges.sort();
-        Ok(&self.edges)
-    }
 
-    // insert_edge(&mut self, vertex_id: i64) -> usize;
-    // remove_edge(&mut self, vertex_id: i64) -> usize;
-    // prune_edges(&mut self, keep: impl Iterator<Item=i64>) -> Vec<i64>;
+        // Prune and move kept edges to the beginning of the edge array.
+        let mut kept = 0usize;
+        for (i, j) in prune(&self.edges).enumerate() {
+            self.edges.swap(i, j);
+            kept += 1;
+        }
+
+        // Extract the list of vertices that were pruned off and truncate the edge list.
+        let (_, pruned) = self.edges.split_at(kept);
+        let pruned_vertices = pruned.iter().map(Neighbor::vertex).collect();
+        self.edges.truncate(kept);
+        self.dirty = true;
+
+        Ok(pruned_vertices)
+    }
 }
 
 /// Convert a `GraphVertex` into an unscored vertex.

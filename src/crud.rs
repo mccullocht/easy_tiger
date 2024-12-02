@@ -18,20 +18,29 @@ pub struct CrudGraph {
     searcher: GraphSearcher,
 }
 
-// XXX I think I need a queue for pruning backlinks: (src, dst) and use a priority
-// queue to order it so that I avoid re-reading the same vertex.
+// XXX we need to reject improperly sized vectors.
 impl CrudGraph {
     /// Insert a vertex for `vector`. Returns the assigned id.
     pub fn insert(&mut self, vector: &[f32]) -> Result<i64> {
-        let vertex_id = self.assign_vertex_id()?;
+        let vertex_id = self
+            .reader
+            .session()
+            .get_record_cursor(self.reader.index().graph_table_name())?
+            .largest_key()
+            .unwrap_or(Err(Error::not_found_error()))
+            .map(|i| i + 1)?;
+        self.insert_internal(vertex_id, vector).map(|_| vertex_id)
+    }
 
+    fn insert_internal(&mut self, vertex_id: i64, vector: &[f32]) -> Result<()> {
         let scorer = self.reader.metadata().new_scorer();
         // XXX does this normalize the vector? I can't remember.
         let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
+        // If there are no edges then we don't have an entry point, so fix that.
+        // We could execute the rest of this function safely but there's no point.
         if candidate_edges.is_empty() {
-            // XXX update the entry point. it's fine to fall through and do the rest of this.
-            todo!()
+            return graph.set_entry_point(vertex_id);
         }
         let selected_len = Self::prune(
             &mut candidate_edges,
@@ -63,22 +72,17 @@ impl CrudGraph {
             )?;
         }
 
-        // XXX should group if there are common src vertices.
+        // TODO: group and bulk delete if there are common src_vertex_id.
         for (src_vertex_id, dst_vertex_id) in pruned_edges {
-            self.delete_edge(&mut graph, src_vertex_id, dst_vertex_id)?;
+            let vertex = graph
+                .get(src_vertex_id)
+                .unwrap_or(Err(Error::not_found_error()))?;
+            let edges = vertex.edges().filter(|v| *v != dst_vertex_id).collect();
+            let encoded = encode_graph_node_internal(vertex.vector_bytes(), edges);
+            graph.set(src_vertex_id, &encoded)?;
         }
 
-        Ok(vertex_id)
-    }
-
-    // XXX integrate this into the wt graph impl?
-    fn assign_vertex_id(&mut self) -> Result<i64> {
-        self.reader
-            .session()
-            .get_record_cursor(self.reader.index().graph_table_name())?
-            .largest_key()
-            .unwrap_or(Err(Error::not_found_error()))
-            .map(|i| i + 1)
+        Ok(())
     }
 
     fn insert_edge(
@@ -126,20 +130,7 @@ impl CrudGraph {
         graph.set(src_vertex_id, &encoded)
     }
 
-    fn delete_edge(
-        &self,
-        graph: &mut WiredTigerGraph<'_>,
-        src_vertex_id: i64,
-        dst_vertex_id: i64,
-    ) -> Result<()> {
-        let vertex = graph
-            .get(src_vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))?;
-        let edges = vertex.edges().filter(|v| *v != dst_vertex_id).collect();
-        let encoded = encode_graph_node_internal(vertex.vector_bytes(), edges);
-        graph.set(src_vertex_id, &encoded)
-    }
-
+    /// Delete `vertex_id`, removing both the vertex and any incoming edges.
     pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
         let scorer = self.reader.metadata().new_scorer();
         let mut graph = self.reader.graph()?;
@@ -218,8 +209,12 @@ impl CrudGraph {
         Ok(())
     }
 
-    pub fn update(&mut self, _vertex_id: i64, _vector: &[f32]) -> Result<()> {
-        todo!()
+    /// Update the contents of `vertex_id` with `vector`.
+    pub fn update(&mut self, vertex_id: i64, vector: &[f32]) -> Result<()> {
+        // TODO: a non-trivial implementation might perform the search like during insert
+        // and skip edge updates if the edge set is identical or nearly identical.
+        self.delete(vertex_id)?;
+        self.insert_internal(vertex_id, vector)
     }
 
     // XXX share this with the bulk loader implementation.

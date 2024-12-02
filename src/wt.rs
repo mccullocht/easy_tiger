@@ -129,6 +129,13 @@ impl<'a> WiredTigerGraph<'a> {
         Self { metadata, cursor }
     }
 
+    pub(crate) fn set_entry_point(&mut self, entry_point: i64) -> Result<()> {
+        self.cursor.set(&RecordView::new(
+            ENTRY_POINT_KEY,
+            &entry_point.to_le_bytes(),
+        ))
+    }
+
     pub(crate) fn set(&mut self, vertex_id: i64, encoded_graph_node: &[u8]) -> Result<()> {
         self.cursor
             .set(&RecordView::new(vertex_id, encoded_graph_node))

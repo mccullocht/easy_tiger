@@ -27,6 +27,10 @@ impl<'a> WiredTigerNavVectorStore<'a> {
     pub(crate) fn set(&mut self, vertex_id: i64, vector: Cow<'_, [u8]>) -> Result<()> {
         self.cursor.set(&RecordView::new(vertex_id, vector))
     }
+
+    pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
+        self.cursor.remove(vertex_id)
+    }
 }
 
 impl<'a> NavVectorStore for WiredTigerNavVectorStore<'a> {
@@ -128,6 +132,10 @@ impl<'a> WiredTigerGraph<'a> {
     pub(crate) fn set(&mut self, vertex_id: i64, encoded_graph_node: &[u8]) -> Result<()> {
         self.cursor
             .set(&RecordView::new(vertex_id, encoded_graph_node))
+    }
+
+    pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
+        self.cursor.remove(vertex_id)
     }
 }
 

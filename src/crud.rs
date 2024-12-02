@@ -63,6 +63,7 @@ impl CrudGraph {
             )?;
         }
 
+        // XXX should group if there are common src vertices.
         for (src_vertex_id, dst_vertex_id) in pruned_edges {
             self.delete_edge(&mut graph, src_vertex_id, dst_vertex_id)?;
         }
@@ -139,13 +140,82 @@ impl CrudGraph {
         graph.set(src_vertex_id, &encoded)
     }
 
-    pub fn delete(&mut self, _vertex_id: i64) -> Result<()> {
-        // read the existing vertex
-        // remove the vertex
-        // remove all backlinks
-        // generate new connections from the old edges. this could use caching?
-        // - if the new edges violate max_edges, prune and remove pruned backlinks.
-        todo!()
+    pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
+        let scorer = self.reader.metadata().new_scorer();
+        let mut graph = self.reader.graph()?;
+
+        let edges = graph
+            .get(vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?
+            .edges()
+            .collect::<Vec<_>>();
+
+        graph.remove(vertex_id)?;
+        self.reader.nav_vectors()?.remove(vertex_id)?;
+
+        // Cache information about each vertex linked to vertex_id.
+        // Remove any links back to vertex_id.
+        let mut vertices = edges
+            .into_iter()
+            .map(|e| {
+                graph
+                    .get(e)
+                    .unwrap_or(Err(Error::not_found_error()))
+                    .map(|v| {
+                        (
+                            e,
+                            v.vector().to_vec(),
+                            v.edges().filter(|d| *d != vertex_id).collect::<Vec<_>>(),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Score all pairs of vectors among the edges of vertex_id that are not already connected.
+        let mut candidate_links = vertices
+            .iter()
+            .enumerate()
+            .flat_map(|(src, (_, src_vector, src_edges))| {
+                vertices
+                    .iter()
+                    .enumerate()
+                    .skip(src + 1)
+                    .filter_map(|(dst, (dst_vertex, dst_vector, _))| {
+                        if !src_edges.contains(dst_vertex) {
+                            Some((src, dst, scorer.score(src_vector, dst_vector)))
+                        } else {
+                            None
+                        }
+                    })
+                    // TODO: this feels unnecessary but it doesn't compile without it.
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        // Sort candidate links in descending order by score, then apply all that fit --
+        // that is inserting the edge into both vertices does not exceed max_edges.
+        candidate_links.sort_by(|a, b| {
+            a.2.total_cmp(&b.2)
+                .reverse()
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        let max_edges = self.reader.metadata().max_edges.get();
+        for (src, dst, _) in candidate_links {
+            if vertices[src].2.len() < max_edges && vertices[dst].2.len() < max_edges {
+                let src_id = vertices[src].0;
+                let dst_id = vertices[dst].0;
+                vertices[src].2.push(dst_id);
+                vertices[dst].2.push(src_id);
+            }
+        }
+
+        // Write all the mutated nodes back to WT.
+        for (vertex_id, vector, edges) in vertices {
+            graph.set(vertex_id, &encode_graph_node(&vector, edges))?;
+        }
+
+        Ok(())
     }
 
     pub fn update(&mut self, _vertex_id: i64, _vector: &[f32]) -> Result<()> {

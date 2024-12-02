@@ -1,124 +1,208 @@
-use core::f64;
-use std::collections::HashMap;
+use std::{collections::BTreeSet, num::NonZero};
 
 use crate::{
-    graph::{Graph, GraphVertex},
+    graph::{Graph, GraphVectorIndexReader, GraphVertex},
+    quantization::binary_quantize,
     scoring::F32VectorScorer,
+    search::GraphSearcher,
+    wt::{
+        encode_graph_node, encode_graph_node_internal, WiredTigerGraph,
+        WiredTigerGraphVectorIndexReader,
+    },
     Neighbor,
 };
 use wt_mdb::{Error, Result};
 
-pub struct CrudGraph<R> {
-    reader: R,
-    vertex_cache: HashMap<i64, Option<CrudGraphVertex>>,
+pub struct CrudGraph {
+    reader: WiredTigerGraphVectorIndexReader,
+    searcher: GraphSearcher,
 }
 
-// XXX I haven't thought much about how I'm going to interact with this.
-// * One appears in CrudGraph for each node participating in a transaction
-// * Might want a notion of is-mutated for write back. Would always mutate on insert,
-//   but update and delete might not.
-// * Need abstractions to iterate and mutate edges
-//   - insert will add scored edges
-//   - Unscored edges can be used when adding backlinks on insert
-//   - Unscored edges can be used in re-linking on delete.
-//   - when I insert unscored edges
-//   - scored edges are needed pruning.
-//
-// XXX is this the right way of doing this, vs simply mutating in-place on the graph?
-// feels like I'm building a shitty ORM
-struct CrudGraphVertex {
-    vector: Vec<f32>,
-    edges: Vec<Neighbor>,
-    // if set, one or more edges has a score of NaN.
-    any_unscored: bool,
-    // if set, this vertex is dirty and should be written back.
-    dirty: bool,
-}
+// XXX I think I need a queue for pruning backlinks: (src, dst) and use a priority
+// queue to order it so that I avoid re-reading the same vertex.
+impl CrudGraph {
+    /// Insert a vertex for `vector`. Returns the assigned id.
+    pub fn insert(&mut self, vector: &[f32]) -> Result<i64> {
+        let vertex_id = self.assign_vertex_id()?;
 
-impl CrudGraphVertex {
-    /// Create a new vertex with a vector and a set of scored edges.
-    fn new(vector: Vec<f32>, edges: Vec<Neighbor>) -> Self {
-        let any_unscored = edges.iter().any(|n| n.score().is_nan());
-        Self {
-            vector,
-            edges,
-            any_unscored,
-            dirty: false,
+        let scorer = self.reader.metadata().new_scorer();
+        // XXX does this normalize the vector? I can't remember.
+        let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;
+        let mut graph = self.reader.graph()?;
+        if candidate_edges.is_empty() {
+            // XXX update the entry point. it's fine to fall through and do the rest of this.
+            todo!()
         }
-    }
+        let selected_len = Self::prune(
+            &mut candidate_edges,
+            self.reader.metadata().max_edges,
+            &mut graph,
+            scorer.as_ref(),
+        )?;
+        candidate_edges.truncate(selected_len);
 
-    /// Return edges in an arbitrary order.
-    fn edges(&self) -> impl Iterator<Item = i64> + ExactSizeIterator + '_ {
-        self.edges.iter().map(|n| n.vertex())
-    }
+        graph.set(
+            vertex_id,
+            &encode_graph_node_internal(
+                vector,
+                candidate_edges.iter().map(|n| n.vertex()).collect(),
+            ),
+        )?;
+        self.reader
+            .nav_vectors()?
+            .set(vertex_id, binary_quantize(vector).into())?;
 
-    /// Insert an edge to `vertex_id`. Return the number of edges on the vertex.
-    fn insert_edge(&mut self, vertex_id: i64) -> usize {
-        if self
-            .edges
-            .iter()
-            .find(|n| n.vertex() == vertex_id)
-            .is_none()
-        {
-            self.edges.push(Neighbor::new(vertex_id, f64::NAN));
-            self.any_unscored = true;
-            self.dirty = true;
+        let mut pruned_edges = vec![];
+        for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
+            self.insert_edge(
+                &mut graph,
+                scorer.as_ref(),
+                src_vertex_id,
+                vertex_id,
+                &mut pruned_edges,
+            )?;
         }
-        self.edges.len()
-    }
 
-    /// Remove an edge to `vertex_id`. Return the number of edges on the vertex.
-    fn remove_edge(&mut self, vertex_id: i64) -> usize {
-        let len = self.edges.len();
-        self.edges.retain(|n| n.vertex() != vertex_id);
-        if len != self.edges.len() {
-            self.dirty = true;
+        for (src_vertex_id, dst_vertex_id) in pruned_edges {
+            self.delete_edge(&mut graph, src_vertex_id, dst_vertex_id)?;
         }
-        self.edges.len()
+
+        Ok(vertex_id)
     }
 
-    fn prune_edges<S: Iterator<Item = usize>>(
-        &mut self,
+    // XXX integrate this into the wt graph impl?
+    fn assign_vertex_id(&mut self) -> Result<i64> {
+        self.reader
+            .session()
+            .get_record_cursor(self.reader.index().graph_table_name())?
+            .largest_key()
+            .unwrap_or(Err(Error::not_found_error()))
+            .map(|i| i + 1)
+    }
+
+    fn insert_edge(
+        &self,
+        graph: &mut WiredTigerGraph<'_>,
+        scorer: &dyn F32VectorScorer,
+        src_vertex_id: i64,
+        dst_vertex_id: i64,
+        pruned_edges: &mut Vec<(i64, i64)>,
+    ) -> Result<()> {
+        let vertex = graph
+            .get(src_vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?;
+        let mut edges = std::iter::once(dst_vertex_id)
+            .chain(vertex.edges().filter(|v| *v != dst_vertex_id))
+            .collect::<Vec<_>>();
+        let encoded = if edges.len() >= self.reader.metadata().max_edges.get() {
+            let src_vector = vertex.vector().to_vec();
+            let mut neighbors = edges
+                .iter()
+                .map(|e| {
+                    graph
+                        .get(*e)
+                        .unwrap_or(Err(Error::not_found_error()))
+                        .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst.vector())))
+                })
+                .collect::<Result<Vec<Neighbor>>>()?;
+            let selected_len = Self::prune(
+                &mut neighbors,
+                self.reader.metadata().max_edges,
+                graph,
+                scorer,
+            )?;
+            // Ensure the graph is undirected by removing links from pruned edges back to this node.
+            for v in neighbors.iter().skip(selected_len).map(Neighbor::vertex) {
+                pruned_edges.push((v, src_vertex_id))
+            }
+            edges.clear();
+            edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
+
+            encode_graph_node(&src_vector, edges)
+        } else {
+            encode_graph_node_internal(vertex.vector_bytes(), edges)
+        };
+        graph.set(src_vertex_id, &encoded)
+    }
+
+    fn delete_edge(
+        &self,
+        graph: &mut WiredTigerGraph<'_>,
+        src_vertex_id: i64,
+        dst_vertex_id: i64,
+    ) -> Result<()> {
+        let vertex = graph
+            .get(src_vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?;
+        let edges = vertex.edges().filter(|v| *v != dst_vertex_id).collect();
+        let encoded = encode_graph_node_internal(vertex.vector_bytes(), edges);
+        graph.set(src_vertex_id, &encoded)
+    }
+
+    pub fn delete(&mut self, _vertex_id: i64) -> Result<()> {
+        // read the existing vertex
+        // remove the vertex
+        // remove all backlinks
+        // generate new connections from the old edges. this could use caching?
+        // - if the new edges violate max_edges, prune and remove pruned backlinks.
+        todo!()
+    }
+
+    pub fn update(&mut self, _vertex_id: i64, _vector: &[f32]) -> Result<()> {
+        todo!()
+    }
+
+    // XXX share this with the bulk loader implementation.
+    fn prune(
+        edges: &mut [Neighbor],
+        max_edges: NonZero<usize>,
         graph: &mut impl Graph,
         scorer: &dyn F32VectorScorer,
-        prune: impl FnOnce(&[Neighbor]) -> S,
-    ) -> Result<Vec<i64>> {
-        if self.any_unscored {
-            for n in self.edges.iter_mut().filter(|n| n.score().is_nan()) {
-                let vertex = graph
-                    .get(n.vertex())
-                    .unwrap_or(Err(Error::not_found_error()))?;
-                n.score = scorer.score(&self.vector, &vertex.vector());
+    ) -> Result<usize> {
+        if edges.is_empty() {
+            return Ok(0);
+        }
+
+        // TODO: replace with a fixed length bitset
+        let mut selected = BTreeSet::new();
+        selected.insert(0); // we always keep the first node.
+        for alpha in [1.0, 1.2] {
+            for (i, e) in edges.iter().enumerate().skip(1) {
+                if selected.contains(&i) {
+                    continue;
+                }
+
+                // TODO: fix error handling so we can reuse this elsewhere.
+                let e_vec = graph
+                    .get(e.vertex())
+                    .unwrap_or(Err(Error::not_found_error()))?
+                    .vector()
+                    .into_owned();
+                for p in selected.iter().take_while(|j| **j < i).map(|j| edges[*j]) {
+                    let p_node = graph
+                        .get(p.vertex())
+                        .unwrap_or(Err(Error::not_found_error()))?;
+                    if scorer.score(&e_vec, &p_node.vector()) > e.score * alpha {
+                        selected.insert(i);
+                        break;
+                    }
+                }
+
+                if selected.len() >= max_edges.get() {
+                    break;
+                }
             }
-            self.any_unscored = false;
-        }
-        self.edges.sort();
 
-        // Prune and move kept edges to the beginning of the edge array.
-        let mut kept = 0usize;
-        for (i, j) in prune(&self.edges).enumerate() {
-            self.edges.swap(i, j);
-            kept += 1;
+            if selected.len() >= max_edges.get() {
+                break;
+            }
         }
 
-        // Extract the list of vertices that were pruned off and truncate the edge list.
-        let (_, pruned) = self.edges.split_at(kept);
-        let pruned_vertices = pruned.iter().map(Neighbor::vertex).collect();
-        self.edges.truncate(kept);
-        self.dirty = true;
-
-        Ok(pruned_vertices)
-    }
-}
-
-/// Convert a `GraphVertex` into an unscored vertex.
-impl<V: GraphVertex> From<V> for CrudGraphVertex {
-    fn from(value: V) -> Self {
-        Self {
-            vector: value.vector().to_vec(),
-            edges: value.edges().map(|e| Neighbor::new(e, f64::NAN)).collect(),
-            any_unscored: true,
-            dirty: false,
+        // Partition edges into selected and unselected.
+        for (i, j) in selected.iter().enumerate() {
+            edges.swap(i, *j);
         }
+
+        Ok(selected.len())
     }
 }

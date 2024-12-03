@@ -16,7 +16,6 @@ pub struct CrudGraph {
     searcher: GraphSearcher,
 }
 
-// XXX we need to reject improperly sized vectors.
 impl CrudGraph {
     /// Insert a vertex for `vector`. Returns the assigned id.
     pub fn insert(&mut self, vector: &[f32]) -> Result<i64> {
@@ -31,6 +30,9 @@ impl CrudGraph {
     }
 
     fn insert_internal(&mut self, vertex_id: i64, vector: &[f32]) -> Result<()> {
+        // TODO: make this an error instead of panicking.
+        assert_eq!(self.reader.metadata().dimensions.get(), vector.len());
+
         let scorer = self.reader.metadata().new_scorer();
         // TODO: normalize input vector.
         let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;

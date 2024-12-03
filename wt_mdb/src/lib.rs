@@ -186,6 +186,29 @@ fn wrap_ptr_create<T>(code: i32, ptr: *mut T) -> Result<NonNull<T>> {
     NonNull::new(p).ok_or(Error::generic_error())
 }
 
+const EOPNOTSUPP: i32 = 95;
+
+/// Call a `$func` on the `NonNull` WiredTiger object `$ptr` optionally with some `$args`.
+/// Usually `$func` is expected to return an integer code which will be coerced into `wt_mdb::Result<()>`;
+/// start the macro with `nocode` if `$func` returns void.
+/// This call will return an EOPNOTSUPP error if `$func` is `null/None`
+macro_rules! wt_call {
+    ($ptr:expr, $func:ident) => {
+        $ptr.as_ref().$func.map(|fp| crate::make_result(fp($ptr.as_ptr()), ())).unwrap_or(Err(crate::Error::Posix(crate::EOPNOTSUPP)))
+    };
+    ($ptr:expr, $func:ident, $( $args:expr ),* ) => {
+        $ptr.as_ref().$func.map(|fp| crate::make_result(fp($ptr.as_ptr(), $($args), *), ())).unwrap_or(Err(crate::Error::Posix(crate::EOPNOTSUPP)))
+    };
+    (nocode $ptr:expr, $func:ident) => {
+        $ptr.as_ref().$func.map(|fp| { fp($ptr.as_ptr()); Ok(()) }).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
+    };
+    (nocode $ptr:expr, $func:ident, $( $args:expr ),* ) => {
+        $ptr.as_ref().$func.map(|fp| { fp($ptr.as_ptr(), $($args), *); Ok(()) }).unwrap_or(Err(crate::Error::Posix(crate::EOPNOTSUPP)))
+    };
+}
+
+pub(crate) use wt_call;
+
 #[cfg(test)]
 mod test {
     use std::io::ErrorKind;

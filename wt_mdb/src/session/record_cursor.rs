@@ -6,7 +6,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{Error, Record, RecordView, Result};
+use crate::{wt_call, Error, Record, RecordView, Result};
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_NOTFOUND};
 
 use super::{Session, TableUri};
@@ -27,28 +27,6 @@ impl Drop for InnerCursor {
 }
 
 unsafe impl Send for InnerCursor {}
-
-const EOPNOTSUPP: i32 = 95;
-
-// XXX move this to the crate root.
-/// Call a `$func` on the `NonNull` WiredTiger object `$ptr` optionally with some `$args`.
-/// Usually `$func` is expected to return an integer code which will be coerced into `wt_mdb::Result<()>`;
-/// start the macro with `nocode` if `$func` returns void.
-/// This call will return an EOPNOTSUPP error if `$func` is `null/None`
-macro_rules! wt_call {
-    ($ptr:expr, $func:ident) => {
-        $ptr.as_ref().$func.map(|fp| crate::make_result(fp($ptr.as_ptr()), ())).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
-    };
-    ($ptr:expr, $func:ident, $( $args:expr ),* ) => {
-        $ptr.as_ref().$func.map(|fp| crate::make_result(fp($ptr.as_ptr(), $($args), *), ())).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
-    };
-    (nocode $ptr:expr, $func:ident) => {
-        $ptr.as_ref().$func.map(|fp| { fp($ptr.as_ptr()); Ok(()) }).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
-    };
-    (nocode $ptr:expr, $func:ident, $( $args:expr ),* ) => {
-        $ptr.as_ref().$func.map(|fp| { fp($ptr.as_ptr(), $($args), *); Ok(()) }).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
-    };
-}
 
 /// A `RecordCursor` facilities viewing and mutating data in a WiredTiger table where
 /// the table is `i64` keyed and byte-string valued.

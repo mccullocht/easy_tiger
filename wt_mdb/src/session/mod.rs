@@ -14,12 +14,11 @@ use wt_sys::{WT_CURSOR, WT_SESSION};
 
 use crate::{
     connection::Connection,
-    make_result,
     options::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
         DropOptions, RollbackTransactionOptions, Statistics,
     },
-    wrap_ptr_create, RecordView, Result,
+    wt_call, Error, RecordView, Result,
 };
 
 pub use record_cursor::{RecordCursor, RecordCursorGuard};
@@ -85,13 +84,11 @@ impl Session {
     ) -> Result<()> {
         let uri = TableUri::from(table_name);
         unsafe {
-            make_result(
-                (self.ptr.as_ref().create.unwrap())(
-                    self.ptr.as_ptr(),
-                    uri.as_ptr(),
-                    config.unwrap_or_default().as_config_ptr(),
-                ),
-                (),
+            wt_call!(
+                self.ptr,
+                create,
+                uri.as_ptr(),
+                config.unwrap_or_default().as_config_ptr()
             )
         }
     }
@@ -103,13 +100,11 @@ impl Session {
     pub fn drop_record_table(&self, table_name: &str, config: Option<DropOptions>) -> Result<()> {
         let uri = TableUri::from(table_name);
         unsafe {
-            make_result(
-                self.ptr.as_ref().drop.unwrap()(
-                    self.ptr.as_ptr(),
-                    uri.as_ptr(),
-                    config.unwrap_or_default().as_config_ptr(),
-                ),
-                (),
+            wt_call!(
+                self.ptr,
+                drop,
+                uri.as_ptr(),
+                config.unwrap_or_default().as_config_ptr()
             )
         }
     }
@@ -126,17 +121,18 @@ impl Session {
     ) -> Result<RecordCursor> {
         let uri = TableUri::from(table_name);
         let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
-        let result: i32;
         unsafe {
-            result = (self.ptr.as_ref().open_cursor.unwrap())(
-                self.ptr.as_ptr(),
+            wt_call!(
+                self.ptr,
+                open_cursor,
                 uri.0.as_ptr(),
-                ptr::null_mut(),
+                std::ptr::null_mut(),
                 options.map(|s| s.as_ptr()).unwrap_or(std::ptr::null()),
-                &mut cursorp,
-            );
-        }
-        wrap_ptr_create(result, cursorp)
+                &mut cursorp
+            )
+        }?;
+        NonNull::new(cursorp)
+            .ok_or(Error::generic_error())
             .map(|ptr| RecordCursor::new(InnerCursor { ptr, uri }, self))
     }
 
@@ -180,24 +176,24 @@ impl Session {
             .map(|s| CString::new(s).expect("no nulls in stats options"));
         let mut cursorp: *mut WT_CURSOR = std::ptr::null_mut();
         unsafe {
-            wrap_ptr_create(
-                (self.ptr.as_ref().open_cursor.unwrap())(
-                    self.ptr.as_ptr(),
-                    uri.as_ptr(),
-                    ptr::null_mut(),
-                    options
-                        .as_ref()
-                        .map(|o| o.as_ptr())
-                        .unwrap_or(std::ptr::null()),
-                    &mut cursorp,
-                ),
-                cursorp,
+            wt_call!(
+                self.ptr,
+                open_cursor,
+                uri.as_ptr(),
+                std::ptr::null_mut(),
+                options
+                    .as_ref()
+                    .map(|o| o.as_ptr())
+                    .unwrap_or(std::ptr::null()),
+                &mut cursorp
             )
+        }?;
+        NonNull::new(cursorp)
+            .ok_or(Error::generic_error())
             .map(|ptr| StatCursor {
                 ptr,
                 _session: self,
             })
-        }
     }
 
     /// Starts a transaction in this session.
@@ -209,15 +205,7 @@ impl Session {
     /// This may not be called on a session with an active transaction or an error will be returned (EINVAL)
     /// but otherwise behavior is unspecified.
     pub fn begin_transaction(&self, options: Option<&BeginTransactionOptions>) -> Result<()> {
-        unsafe {
-            make_result(
-                self.ptr.as_ref().begin_transaction.unwrap()(
-                    self.ptr.as_ptr(),
-                    options.as_config_ptr(),
-                ),
-                (),
-            )
-        }
+        unsafe { wt_call!(self.ptr, begin_transaction, options.as_config_ptr()) }
     }
 
     /// Commit the current transaction.
@@ -228,15 +216,7 @@ impl Session {
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
     pub fn commit_transaction(&self, options: Option<&CommitTransactionOptions>) -> Result<()> {
-        unsafe {
-            make_result(
-                self.ptr.as_ref().commit_transaction.unwrap()(
-                    self.ptr.as_ptr(),
-                    options.as_config_ptr(),
-                ),
-                (),
-            )
-        }
+        unsafe { wt_call!(self.ptr, commit_transaction, options.as_config_ptr()) }
     }
 
     /// Rollback the current transaction.
@@ -246,15 +226,7 @@ impl Session {
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
     pub fn rollback_transaction(&self, options: Option<&RollbackTransactionOptions>) -> Result<()> {
-        unsafe {
-            make_result(
-                self.ptr.as_ref().rollback_transaction.unwrap()(
-                    self.ptr.as_ptr(),
-                    options.as_config_ptr(),
-                ),
-                (),
-            )
-        }
+        unsafe { wt_call!(self.ptr, rollback_transaction, options.as_config_ptr()) }
     }
 
     /// Create a new table called `table_name` and bulk load entries from `iter`.
@@ -280,7 +252,7 @@ impl Session {
 
     /// Reset this session, which also resets any outstanding cursors.
     pub fn reset(&self) -> Result<()> {
-        unsafe { make_result(self.ptr.as_ref().reset.unwrap()(self.ptr.as_ptr()), ()) }
+        unsafe { wt_call!(self.ptr, reset) }
     }
 }
 
@@ -289,7 +261,7 @@ impl Drop for Session {
         // Empty the cursor cache otherwise closing the session may fail.
         self.clear_cursor_cache();
         // TODO: print something if this returns an error.
-        unsafe { self.ptr.as_ref().close.unwrap()(self.ptr.as_ptr(), std::ptr::null()) };
+        let _ = unsafe { wt_call!(self.ptr, close, std::ptr::null()) };
     }
 }
 

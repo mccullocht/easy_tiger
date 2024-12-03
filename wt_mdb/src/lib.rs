@@ -207,7 +207,7 @@ macro_rules! wt_call {
     };
 }
 
-pub(crate) use wt_call;
+use wt_call;
 
 #[cfg(test)]
 mod test {

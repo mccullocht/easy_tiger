@@ -3,7 +3,7 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     bulk::BulkLoadBuilder,
-    graph::{GraphMetadata, GraphSearchParams},
+    graph::{GraphConfig, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
     scoring::VectorSimilarity,
     wt::WiredTigerGraphVectorIndex,
@@ -59,7 +59,7 @@ pub fn bulk_load(
         args.dimensions,
     )?;
 
-    let metadata = GraphMetadata {
+    let config = GraphConfig {
         dimensions: args.dimensions,
         similarity: args.similarity,
         max_edges: args.max_edges,
@@ -70,7 +70,7 @@ pub fn bulk_load(
                 .unwrap_or_else(|| args.edge_candidates.get()),
         },
     };
-    let index = WiredTigerGraphVectorIndex::from_init(metadata, index_name)?;
+    let index = WiredTigerGraphVectorIndex::from_init(config, index_name)?;
     if args.drop_tables {
         let session = connection.open_session()?;
         session.drop_record_table(

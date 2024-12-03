@@ -28,7 +28,7 @@ pub fn lookup(
 ) -> io::Result<()> {
     let session = connection.open_session()?;
     let mut graph = WiredTigerGraph::new(
-        *index.metadata(),
+        *index.config(),
         session.get_record_cursor(index.graph_table_name())?,
     );
     match graph.get(args.id) {

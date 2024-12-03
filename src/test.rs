@@ -4,8 +4,7 @@ use wt_mdb::Result;
 
 use crate::{
     graph::{
-        Graph, GraphMetadata, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
-        NavVectorStore,
+        Graph, GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
     },
     quantization::binary_quantize,
     scoring::{F32VectorScorer, VectorSimilarity},
@@ -22,7 +21,7 @@ struct TestVector {
 #[derive(Debug)]
 pub struct TestGraphVectorIndex {
     data: Vec<TestVector>,
-    metadata: GraphMetadata,
+    config: GraphConfig,
 }
 
 impl TestGraphVectorIndex {
@@ -49,7 +48,7 @@ impl TestGraphVectorIndex {
         for i in 0..rep.len() {
             rep[i].edges = Self::compute_edges(&rep, i, max_edges, &scorer);
         }
-        let metadata = GraphMetadata {
+        let config = GraphConfig {
             dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
             similarity: VectorSimilarity::Dot,
             max_edges: max_edges,
@@ -58,10 +57,7 @@ impl TestGraphVectorIndex {
                 num_rerank: usize::MAX,
             },
         };
-        Self {
-            data: rep,
-            metadata,
-        }
+        Self { data: rep, config }
     }
 
     pub fn reader(&self) -> TestGraphVectorIndexReader {
@@ -122,8 +118,8 @@ impl<'a> GraphVectorIndexReader for TestGraphVectorIndexReader<'a> {
     type Graph<'b> = TestGraph<'b> where Self: 'b;
     type NavVectorStore<'b> = TestNavVectorStore<'b> where Self: 'b;
 
-    fn metadata(&self) -> &GraphMetadata {
-        &self.0.metadata
+    fn config(&self) -> &GraphConfig {
+        &self.0.config
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {

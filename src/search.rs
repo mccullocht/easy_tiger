@@ -135,7 +135,7 @@ impl GraphSearcher {
     ) -> Result<Vec<Neighbor>> {
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
-        let nav_scorer = reader.metadata().new_nav_scorer();
+        let nav_scorer = reader.config().new_nav_scorer();
         let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
 
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
@@ -176,7 +176,7 @@ impl GraphSearcher {
 
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
-        let nav_scorer = reader.metadata().new_nav_scorer();
+        let nav_scorer = reader.config().new_nav_scorer();
         let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
 
         let mut num_concurrent = 0;
@@ -262,7 +262,7 @@ impl GraphSearcher {
     ) -> Vec<Neighbor> {
         if self.params.num_rerank > 0 {
             let mut normalized_query = query.to_vec();
-            let scorer = reader.metadata().new_scorer();
+            let scorer = reader.config().new_scorer();
             scorer.normalize(&mut normalized_query);
             let mut rescored = self
                 .candidates

@@ -3,7 +3,7 @@ use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 use wt_mdb::{Connection, Error, RecordCursorGuard, RecordView, Result, Session, WiredTigerError};
 
 use crate::{
-    graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
     worker_pool::WorkerPool,
 };
 
@@ -11,8 +11,8 @@ use crate::{
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
-/// Key in the graph table containing metadata.
-pub const METADATA_KEY: i64 = -2;
+/// Key in the graph table containing configuration.
+pub const CONFIG_KEY: i64 = -2;
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
 pub struct WiredTigerNavVectorStore<'a> {
@@ -38,9 +38,9 @@ pub struct WiredTigerGraphVertex<'a> {
 }
 
 impl<'a> WiredTigerGraphVertex<'a> {
-    fn new(metadata: &GraphMetadata, data: Cow<'a, [u8]>) -> Self {
+    fn new(config: &GraphConfig, data: Cow<'a, [u8]>) -> Self {
         Self {
-            dimensions: metadata.dimensions,
+            dimensions: config.dimensions,
             data,
         }
     }
@@ -108,13 +108,13 @@ impl<'a> Iterator for WiredTigerEdgeIterator<'a> {
 
 /// Implementation of `Graph` that reads from a WiredTiger `RecordCursor`.
 pub struct WiredTigerGraph<'a> {
-    metadata: GraphMetadata,
+    config: GraphConfig,
     cursor: RecordCursorGuard<'a>,
 }
 
 impl<'a> WiredTigerGraph<'a> {
-    pub fn new(metadata: GraphMetadata, cursor: RecordCursorGuard<'a>) -> Self {
-        Self { metadata, cursor }
+    pub fn new(config: GraphConfig, cursor: RecordCursorGuard<'a>) -> Self {
+        Self { config, cursor }
     }
 }
 
@@ -129,7 +129,7 @@ impl<'a> Graph for WiredTigerGraph<'a> {
     fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
         let r =
             unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
-        Some(r.map(|r| WiredTigerGraphVertex::new(&self.metadata, r)))
+        Some(r.map(|r| WiredTigerGraphVertex::new(&self.config, r)))
     }
 }
 
@@ -138,7 +138,7 @@ impl<'a> Graph for WiredTigerGraph<'a> {
 pub struct WiredTigerGraphVectorIndex {
     graph_table_name: String,
     nav_table_name: String,
-    metadata: GraphMetadata,
+    config: GraphConfig,
 }
 
 impl WiredTigerGraphVectorIndex {
@@ -148,30 +148,30 @@ impl WiredTigerGraphVectorIndex {
         let session = connection.open_session()?;
         let (graph_table_name, nav_table_name) = Self::generate_table_names(table_basename);
         let mut cursor = session.open_record_cursor(&graph_table_name)?;
-        let metadata_json = unsafe { cursor.seek_exact_unsafe(METADATA_KEY) }
+        let config_json = unsafe { cursor.seek_exact_unsafe(CONFIG_KEY) }
             .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-        let metadata = serde_json::from_slice(metadata_json.value())?;
+        let config = serde_json::from_slice(config_json.value())?;
         Ok(Self {
             graph_table_name,
             nav_table_name,
-            metadata,
+            config,
         })
     }
 
     /// Create a new `WiredTigerGraphVectorIndex` for table initialization, providing
     /// graph metadata up front.
-    pub fn from_init(metadata: GraphMetadata, table_basename: &str) -> io::Result<Self> {
+    pub fn from_init(config: GraphConfig, table_basename: &str) -> io::Result<Self> {
         let (graph_table_name, nav_table_name) = Self::generate_table_names(table_basename);
         Ok(Self {
             graph_table_name,
             nav_table_name,
-            metadata,
+            config,
         })
     }
 
     /// Return `GraphMetadata` for this index.
-    pub fn metadata(&self) -> &GraphMetadata {
-        &self.metadata
+    pub fn config(&self) -> &GraphConfig {
+        &self.config
     }
 
     /// Return the name of the table containing the graph.
@@ -224,13 +224,13 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
     type Graph<'a> = WiredTigerGraph<'a> where Self: 'a;
     type NavVectorStore<'a> = WiredTigerNavVectorStore<'a> where Self: 'a;
 
-    fn metadata(&self) -> &GraphMetadata {
-        &self.index.metadata
+    fn config(&self) -> &GraphConfig {
+        &self.index.config
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
         Ok(WiredTigerGraph::new(
-            self.index.metadata,
+            self.index.config,
             self.session
                 .get_record_cursor(&self.index.graph_table_name)?,
         ))
@@ -263,7 +263,7 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
                 done(
                     unsafe { cursor.seek_exact_unsafe(vertex_id) }.map(|result| {
                         result.map(|r| {
-                            WiredTigerGraphVertex::new(index.metadata(), r.into_inner_value())
+                            WiredTigerGraphVertex::new(index.config(), r.into_inner_value())
                         })
                     }),
                 );

@@ -18,12 +18,12 @@ use tempfile::tempfile;
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
     input::{DerefVectorStore, VectorStore},
     quantization::{binary_quantize_to, binary_quantized_bytes},
     scoring::F32VectorScorer,
     search::GraphSearcher,
-    wt::{encode_graph_node, WiredTigerGraphVectorIndex, ENTRY_POINT_KEY, METADATA_KEY},
+    wt::{encode_graph_node, WiredTigerGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY},
     Neighbor,
 };
 
@@ -82,11 +82,11 @@ where
     ) -> Self {
         let mut graph_vec = Vec::with_capacity(vectors.len());
         graph_vec.resize_with(vectors.len(), || {
-            RwLock::new(Vec::with_capacity(index.metadata().max_edges.get() * 2))
+            RwLock::new(Vec::with_capacity(index.config().max_edges.get() * 2))
         });
         let quantized_stride =
-            NonZero::new(binary_quantized_bytes(index.metadata().dimensions.get())).unwrap();
-        let scorer = index.metadata().new_scorer();
+            NonZero::new(binary_quantized_bytes(index.config().dimensions.get())).unwrap();
+        let scorer = index.config().new_scorer();
         Self {
             connection,
             index,
@@ -107,7 +107,7 @@ where
     /// Quantize nav vectors and write to a temp file for quick access.
     pub fn quantize_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
         let mut writer = BufWriter::new(tempfile().unwrap());
-        let mut sum = vec![0.0; self.index.metadata().dimensions.get()];
+        let mut sum = vec![0.0; self.index.config().dimensions.get()];
         let mut buf = vec![0u8; self.quantized_vectors.elem_stride()];
         for v in self.vectors.iter().take(self.limit) {
             for (i, o) in v.iter().zip(sum.iter_mut()) {
@@ -180,7 +180,7 @@ where
                 // work because any RecordCursor objects returned have to be destroyed before the Mutex is
                 // released.
                 let mut session = self.connection.open_session()?;
-                let mut searcher = GraphSearcher::new(self.index.metadata().index_search_params);
+                let mut searcher = GraphSearcher::new(self.index.config().index_search_params);
                 for i in nodes {
                     // Use a transaction for each search. Without this each lookup will be a separate transaction
                     // which obtains a reader lock inside the session. Overhead for that is ~10x.
@@ -233,7 +233,7 @@ where
     {
         // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
         for (i, n) in self.graph.iter().enumerate().take(self.limit) {
-            self.maybe_prune_node(i, n.write().unwrap(), self.index.metadata().max_edges)?;
+            self.maybe_prune_node(i, n.write().unwrap(), self.index.config().max_edges)?;
             progress();
         }
         Ok(())
@@ -251,10 +251,10 @@ where
             edges: 0,
             unconnected: 0,
         };
-        let metadata_rows = vec![
+        let config_rows = vec![
             Record::new(
-                METADATA_KEY,
-                serde_json::to_vec(&self.index.metadata()).unwrap(),
+                CONFIG_KEY,
+                serde_json::to_vec(&self.index.config()).unwrap(),
             ),
             Record::new(
                 ENTRY_POINT_KEY,
@@ -268,7 +268,7 @@ where
         session.bulk_load(
             self.index.graph_table_name(),
             None,
-            metadata_rows.into_iter().chain(
+            config_rows.into_iter().chain(
                 self.vectors
                     .iter()
                     .zip(self.graph.iter())
@@ -400,13 +400,13 @@ where
 
                 if select {
                     selected.insert(i);
-                    if selected.len() >= self.index.metadata().max_edges.get() {
+                    if selected.len() >= self.index.config().max_edges.get() {
                         break;
                     }
                 }
             }
 
-            if selected.len() >= self.index.metadata().max_edges.get() {
+            if selected.len() >= self.index.config().max_edges.get() {
                 break;
             }
         }
@@ -438,8 +438,8 @@ where
     type Graph<'b> = BulkLoadBuilderGraph<'b, D> where Self: 'b;
     type NavVectorStore<'b> = BulkLoadBuilderNavVectorStore<'b, D> where Self: 'b;
 
-    fn metadata(&self) -> &GraphMetadata {
-        self.0.index.metadata()
+    fn config(&self) -> &GraphConfig {
+        self.0.index.config()
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {

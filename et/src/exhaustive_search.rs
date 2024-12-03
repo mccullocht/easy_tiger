@@ -37,20 +37,20 @@ pub fn exhaustive_search(
 ) -> io::Result<()> {
     let query_vectors = DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
-        index.metadata().dimensions,
+        index.config().dimensions,
     )?;
 
     let mut results = Vec::with_capacity(query_vectors.len());
     results.resize_with(query_vectors.len(), || {
         BinaryHeap::with_capacity(args.neighbors_len.get())
     });
-    let scorer = index.metadata().new_scorer();
+    let scorer = index.config().new_scorer();
 
     let session = connection.open_session()?;
     let mut cursor = session.open_record_cursor(index.graph_table_name())?;
     let limit = cursor.largest_key().unwrap().unwrap() + 1;
     cursor.seek_exact(-1).unwrap()?;
-    let mut index_vector = vec![0.0f32; index.metadata().dimensions.get()];
+    let mut index_vector = vec![0.0f32; index.config().dimensions.get()];
     let progress = ProgressBar::new(limit as u64)
         .with_style(
             ProgressStyle::default_bar()

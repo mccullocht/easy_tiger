@@ -2,7 +2,7 @@ use std::{
     ffi::{c_void, CStr},
     mem::ManuallyDrop,
     num::NonZero,
-    ops::{Deref, DerefMut},
+    ops::{Bound, Deref, DerefMut, RangeBounds},
     ptr::NonNull,
 };
 
@@ -137,6 +137,34 @@ impl<'a> RecordCursor<'a> {
                 Some(code) => Some(Err(Error::from(code))),
             }
         }
+    }
+
+    /// Set the bounds this cursor. This affects almost all positioning operations, so for instance
+    /// a `seek_exact()` with a key out of bounds might yield `None`.
+    ///
+    /// Cursor bounds are removed by `reset()`.
+    pub fn set_bounds(&mut self, bounds: impl RangeBounds<i64>) -> Result<()> {
+        let start_config_str = match bounds.start_bound() {
+            Bound::Included(key) => {
+                unsafe { self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), *key) };
+                c"bound=lower,action=set"
+            }
+            Bound::Excluded(key) => {
+                unsafe { self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), *key) };
+                c"bound=lower,action=set,inclusive=false"
+            }
+            Bound::Unbounded => c"bound=lower,action=clear",
+        };
+        make_result(
+            unsafe {
+                self.inner.ptr.as_ref().bound.unwrap()(
+                    self.inner.ptr.as_ptr(),
+                    start_config_str.as_ptr(),
+                )
+            },
+            (),
+        )?;
+        todo!()
     }
 
     /// Reset the cursor to an unpositioned state.

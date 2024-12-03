@@ -155,7 +155,8 @@ impl Session {
     }
 
     /// Return a `RecordCursor` to the cache for future re-use.
-    fn return_record_cursor(&self, cursor: RecordCursor) {
+    fn return_record_cursor(&self, mut cursor: RecordCursor) {
+        let _ = cursor.reset();
         self.cached_cursors.borrow_mut().push(cursor.into_inner())
     }
 
@@ -184,7 +185,10 @@ impl Session {
                     self.ptr.as_ptr(),
                     uri.as_ptr(),
                     ptr::null_mut(),
-                    options.as_ref().map(|o| o.as_ptr()).unwrap_or(std::ptr::null()),
+                    options
+                        .as_ref()
+                        .map(|o| o.as_ptr())
+                        .unwrap_or(std::ptr::null()),
                     &mut cursorp,
                 ),
                 cursorp,

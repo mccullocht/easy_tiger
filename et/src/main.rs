@@ -12,7 +12,6 @@ use std::{
 use bulk_load::{bulk_load, BulkLoadArgs};
 use clap::{command, Parser, Subcommand};
 use drop_index::drop_index;
-use easy_tiger::wt::WiredTigerGraphVectorIndex;
 use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
@@ -75,21 +74,11 @@ fn main() -> io::Result<()> {
     match cli.command {
         Commands::BulkLoad(args) => bulk_load(connection, args, &cli.index_name),
         Commands::DropIndex => drop_index(connection, &cli.index_name),
-        Commands::Lookup(args) => lookup(
-            connection.clone(),
-            WiredTigerGraphVectorIndex::from_db(&connection, &cli.index_name)?,
-            args,
-        ),
-        Commands::Search(args) => search(
-            connection.clone(),
-            WiredTigerGraphVectorIndex::from_db(&connection, &cli.index_name)?,
-            args,
-        ),
-        Commands::ExhaustiveSearch(args) => exhaustive_search(
-            connection.clone(),
-            WiredTigerGraphVectorIndex::from_db(&connection, &cli.index_name)?,
-            args,
-        ),
+        Commands::Lookup(args) => lookup(connection.clone(), &cli.index_name, args),
+        Commands::Search(args) => search(connection.clone(), &cli.index_name, args),
+        Commands::ExhaustiveSearch(args) => {
+            exhaustive_search(connection.clone(), &cli.index_name, args)
+        }
         _ => Err(io::Error::from(ErrorKind::Unsupported)),
     }
 }

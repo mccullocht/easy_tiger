@@ -23,7 +23,7 @@ use crate::{
     quantization::{binary_quantize_to, binary_quantized_bytes},
     scoring::F32VectorScorer,
     search::GraphSearcher,
-    wt::{encode_graph_node, WiredTigerGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY},
+    wt::{encode_graph_node, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY},
     Neighbor,
 };
 
@@ -56,7 +56,7 @@ pub struct GraphStats {
 /// Builds a Vamana graph for a bulk load.
 pub struct BulkLoadBuilder<D> {
     connection: Arc<Connection>,
-    index: WiredTigerGraphVectorIndex,
+    index: TableGraphVectorIndex,
     limit: usize,
 
     vectors: DerefVectorStore<f32, D>,
@@ -76,7 +76,7 @@ where
     /// `limit` limits the number of vectors processed to less than the full set.
     pub fn new(
         connection: Arc<Connection>,
-        index: WiredTigerGraphVectorIndex,
+        index: TableGraphVectorIndex,
         vectors: DerefVectorStore<f32, D>,
         limit: usize,
     ) -> Self {

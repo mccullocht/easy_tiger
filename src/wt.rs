@@ -7,37 +7,35 @@ use crate::{
     worker_pool::WorkerPool,
 };
 
-// TODO: drop WiredTiger from most of these names, it feels redundant and verbose.
-
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
 /// Key in the graph table containing configuration.
 pub const CONFIG_KEY: i64 = -2;
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
-pub struct WiredTigerNavVectorStore<'a> {
+pub struct CursorNavVectorStore<'a> {
     cursor: RecordCursorGuard<'a>,
 }
 
-impl<'a> WiredTigerNavVectorStore<'a> {
+impl<'a> CursorNavVectorStore<'a> {
     pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
         Self { cursor }
     }
 }
 
-impl<'a> NavVectorStore for WiredTigerNavVectorStore<'a> {
+impl<'a> NavVectorStore for CursorNavVectorStore<'a> {
     fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
         Some(unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value))
     }
 }
 
 /// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
-pub struct WiredTigerGraphVertex<'a> {
+pub struct CursorGraphVertex<'a> {
     dimensions: NonZero<usize>,
     data: Cow<'a, [u8]>,
 }
 
-impl<'a> WiredTigerGraphVertex<'a> {
+impl<'a> CursorGraphVertex<'a> {
     fn new(config: &GraphConfig, data: Cow<'a, [u8]>) -> Self {
         Self {
             dimensions: config.dimensions,
@@ -61,8 +59,8 @@ impl<'a> WiredTigerGraphVertex<'a> {
     }
 }
 
-impl<'a> GraphVertex for WiredTigerGraphVertex<'a> {
-    type EdgeIterator<'c> = WiredTigerEdgeIterator<'c> where Self: 'c;
+impl<'a> GraphVertex for CursorGraphVertex<'a> {
+    type EdgeIterator<'c> = Leb128EdgeIterator<'c> where Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
         self.maybe_alias_vector_data()
@@ -82,7 +80,7 @@ impl<'a> GraphVertex for WiredTigerGraphVertex<'a> {
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
-        WiredTigerEdgeIterator {
+        Leb128EdgeIterator {
             data: &self.data.as_ref()[(self.dimensions.get() * std::mem::size_of::<f32>())..],
             prev: 0,
         }
@@ -90,13 +88,13 @@ impl<'a> GraphVertex for WiredTigerGraphVertex<'a> {
 }
 
 /// Iterator over edge data in a graph backed by WiredTiger.
-/// Create by calling `WiredTigerGraphNode.edges()`.
-pub struct WiredTigerEdgeIterator<'a> {
+/// Create by calling `CursorGraphNode.edges()`.
+pub struct Leb128EdgeIterator<'a> {
     data: &'a [u8],
     prev: i64,
 }
 
-impl<'a> Iterator for WiredTigerEdgeIterator<'a> {
+impl<'a> Iterator for Leb128EdgeIterator<'a> {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -107,19 +105,19 @@ impl<'a> Iterator for WiredTigerEdgeIterator<'a> {
 }
 
 /// Implementation of `Graph` that reads from a WiredTiger `RecordCursor`.
-pub struct WiredTigerGraph<'a> {
+pub struct CursorGraph<'a> {
     config: GraphConfig,
     cursor: RecordCursorGuard<'a>,
 }
 
-impl<'a> WiredTigerGraph<'a> {
+impl<'a> CursorGraph<'a> {
     pub fn new(config: GraphConfig, cursor: RecordCursorGuard<'a>) -> Self {
         Self { config, cursor }
     }
 }
 
-impl<'a> Graph for WiredTigerGraph<'a> {
-    type Vertex<'c> = WiredTigerGraphVertex<'c> where Self: 'c;
+impl<'a> Graph for CursorGraph<'a> {
+    type Vertex<'c> = CursorGraphVertex<'c> where Self: 'c;
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let result = unsafe { self.cursor.seek_exact_unsafe(ENTRY_POINT_KEY)? };
@@ -129,20 +127,20 @@ impl<'a> Graph for WiredTigerGraph<'a> {
     fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
         let r =
             unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
-        Some(r.map(|r| WiredTigerGraphVertex::new(&self.config, r)))
+        Some(r.map(|r| CursorGraphVertex::new(&self.config, r)))
     }
 }
 
 /// Immutable features of a WiredTiger graph vector index. These can be read from the db and
 /// stored in a catalog for convenient access at runtime.
-pub struct WiredTigerGraphVectorIndex {
+pub struct TableGraphVectorIndex {
     graph_table_name: String,
     nav_table_name: String,
     config: GraphConfig,
 }
 
-impl WiredTigerGraphVectorIndex {
-    /// Create a new `WiredTigerGraphVectorIndex` from the relevant db tables, extracting
+impl TableGraphVectorIndex {
+    /// Create a new `TableGraphVectorIndex` from the relevant db tables, extracting
     /// immutable graph metadata that can be used across operations.
     pub fn from_db(connection: &Arc<Connection>, table_basename: &str) -> io::Result<Self> {
         let session = connection.open_session()?;
@@ -158,7 +156,7 @@ impl WiredTigerGraphVectorIndex {
         })
     }
 
-    /// Create a new `WiredTigerGraphVectorIndex` for table initialization, providing
+    /// Create a new `TableGraphVectorIndex` for table initialization, providing
     /// graph metadata up front.
     pub fn from_init(config: GraphConfig, table_basename: &str) -> io::Result<Self> {
         let (graph_table_name, nav_table_name) = Self::generate_table_names(table_basename);
@@ -193,17 +191,17 @@ impl WiredTigerGraphVectorIndex {
 }
 
 /// A `GraphVectorIndexReader` implementation that operates entirely on a WiredTiger graph.
-pub struct WiredTigerGraphVectorIndexReader {
-    index: Arc<WiredTigerGraphVectorIndex>,
+pub struct SessionGraphVectorIndexReader {
+    index: Arc<TableGraphVectorIndex>,
     session: Session,
     worker_pool: Option<WorkerPool>,
 }
 
-impl WiredTigerGraphVectorIndexReader {
-    /// Create a new `WiredTigerGraphVectorIndex` given a named index and a session to access that data.
+impl SessionGraphVectorIndexReader {
+    /// Create a new `TableGraphVectorIndex` given a named index and a session to access that data.
     /// Optionally provide a `WorkerPool` for use with parallel `lookup()`.
     pub fn new(
-        index: Arc<WiredTigerGraphVectorIndex>,
+        index: Arc<TableGraphVectorIndex>,
         session: Session,
         worker_pool: Option<WorkerPool>,
     ) -> Self {
@@ -220,16 +218,16 @@ impl WiredTigerGraphVectorIndexReader {
     }
 }
 
-impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
-    type Graph<'a> = WiredTigerGraph<'a> where Self: 'a;
-    type NavVectorStore<'a> = WiredTigerNavVectorStore<'a> where Self: 'a;
+impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
+    type Graph<'a> = CursorGraph<'a> where Self: 'a;
+    type NavVectorStore<'a> = CursorNavVectorStore<'a> where Self: 'a;
 
     fn config(&self) -> &GraphConfig {
         &self.index.config
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
-        Ok(WiredTigerGraph::new(
+        Ok(CursorGraph::new(
             self.index.config,
             self.session
                 .get_record_cursor(&self.index.graph_table_name)?,
@@ -237,7 +235,7 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-        Ok(WiredTigerNavVectorStore::new(
+        Ok(CursorNavVectorStore::new(
             self.session.get_record_cursor(&self.index.nav_table_name)?,
         ))
     }
@@ -248,7 +246,7 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
 
     fn lookup<D>(&self, vertex_id: i64, done: D)
     where
-        D: FnOnce(Option<Result<WiredTigerGraphVertex<'_>>>) + Send + Sync + 'static,
+        D: FnOnce(Option<Result<CursorGraphVertex<'_>>>) + Send + Sync + 'static,
     {
         if let Some(workers) = self.worker_pool.as_ref() {
             let index = self.index.clone();
@@ -262,9 +260,7 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
                 };
                 done(
                     unsafe { cursor.seek_exact_unsafe(vertex_id) }.map(|result| {
-                        result.map(|r| {
-                            WiredTigerGraphVertex::new(index.config(), r.into_inner_value())
-                        })
+                        result.map(|r| CursorGraphVertex::new(index.config(), r.into_inner_value()))
                     }),
                 );
             });

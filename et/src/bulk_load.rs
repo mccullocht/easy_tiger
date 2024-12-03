@@ -6,7 +6,7 @@ use easy_tiger::{
     graph::{GraphConfig, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
     scoring::VectorSimilarity,
-    wt::WiredTigerGraphVectorIndex,
+    wt::TableGraphVectorIndex,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use wt_mdb::{options::DropOptionsBuilder, Connection};
@@ -70,7 +70,7 @@ pub fn bulk_load(
                 .unwrap_or_else(|| args.edge_candidates.get()),
         },
     };
-    let index = WiredTigerGraphVectorIndex::from_init(config, index_name)?;
+    let index = TableGraphVectorIndex::from_init(config, index_name)?;
     if args.drop_tables {
         let session = connection.open_session()?;
         session.drop_record_table(

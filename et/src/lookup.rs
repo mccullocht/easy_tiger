@@ -3,7 +3,7 @@ use std::{io, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     graph::{Graph, GraphVertex},
-    wt::{WiredTigerGraph, WiredTigerGraphVectorIndex},
+    wt::{CursorGraph, TableGraphVectorIndex},
 };
 use wt_mdb::Connection;
 
@@ -21,13 +21,10 @@ pub struct LookupArgs {
     edges: bool,
 }
 
-pub fn lookup(
-    connection: Arc<Connection>,
-    index: WiredTigerGraphVectorIndex,
-    args: LookupArgs,
-) -> io::Result<()> {
+pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -> io::Result<()> {
+    let index = TableGraphVectorIndex::from_db(&connection, index_name)?;
     let session = connection.open_session()?;
-    let mut graph = WiredTigerGraph::new(
+    let mut graph = CursorGraph::new(
         *index.config(),
         session.get_record_cursor(index.graph_table_name())?,
     );

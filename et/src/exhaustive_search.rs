@@ -9,7 +9,9 @@ use std::{
 
 use clap::Args;
 use easy_tiger::{
-    input::DerefVectorStore, input::VectorStore, wt::WiredTigerGraphVectorIndex, Neighbor,
+    input::{DerefVectorStore, VectorStore},
+    wt::TableGraphVectorIndex,
+    Neighbor,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use memmap2::Mmap;
@@ -32,9 +34,10 @@ pub struct ExhaustiveSearchArgs {
 
 pub fn exhaustive_search(
     connection: Arc<Connection>,
-    index: WiredTigerGraphVectorIndex,
+    index_name: &str,
     args: ExhaustiveSearchArgs,
 ) -> io::Result<()> {
+    let index = TableGraphVectorIndex::from_db(&connection, index_name)?;
     let query_vectors = DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         index.config().dimensions,

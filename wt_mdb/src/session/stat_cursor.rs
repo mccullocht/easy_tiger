@@ -19,8 +19,7 @@ impl<'a> StatCursor<'a> {
     pub fn seek_exact(&mut self, wt_stat: u32) -> Option<Result<i64>> {
         map_not_found(
             unsafe {
-                wt_call!(nocode self.ptr, set_key, wt_stat)
-                    .and_then(|()| wt_call!(self.ptr, search))
+                wt_call!(void self.ptr, set_key, wt_stat).and_then(|()| wt_call!(self.ptr, search))
             }
             .and_then(|()| self.read_stat().map(|(_, v)| v)),
         )

@@ -188,24 +188,22 @@ fn map_not_found<T>(r: Result<T>) -> Option<Result<T>> {
     }
 }
 
-const EOPNOTSUPP: i32 = 95;
-
 /// Call a `$func` on the `NonNull` WiredTiger object `$ptr` optionally with some `$args`.
 /// Usually `$func` is expected to return an integer code which will be coerced into `wt_mdb::Result<()>`;
-/// start the macro with `nocode` if `$func` returns void.
-/// This call will return an EOPNOTSUPP error if `$func` is `null/None`
+/// start the macro with `void` if `$func` returns void.
+/// This may panic if any of the function pointers is `None`; this invariant is guaranteed by WT.
 macro_rules! wt_call {
     ($ptr:expr, $func:ident) => {
-        $ptr.as_ref().$func.map(|fp| crate::make_result(fp($ptr.as_ptr()), ())).unwrap_or(Err(crate::Error::Posix(crate::EOPNOTSUPP)))
+        crate::make_result($ptr.as_ref().$func.expect("function pointer must be non-null")($ptr.as_ptr()), ())
     };
     ($ptr:expr, $func:ident, $( $args:expr ),* ) => {
-        $ptr.as_ref().$func.map(|fp| crate::make_result(fp($ptr.as_ptr(), $($args), *), ())).unwrap_or(Err(crate::Error::Posix(crate::EOPNOTSUPP)))
+        crate::make_result($ptr.as_ref().$func.expect("function pointer must be non-null")($ptr.as_ptr(), $($args), *), ())
     };
-    (nocode $ptr:expr, $func:ident) => {
-        $ptr.as_ref().$func.map(|fp| { fp($ptr.as_ptr()); Ok(()) }).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
+    (void $ptr:expr, $func:ident) => {
+        {$ptr.as_ref().$func.expect("function pointer must be non-null")($ptr.as_ptr()); Ok(())}
     };
-    (nocode $ptr:expr, $func:ident, $( $args:expr ),* ) => {
-        $ptr.as_ref().$func.map(|fp| { fp($ptr.as_ptr(), $($args), *); Ok(()) }).unwrap_or(Err(crate::Error::Posix(crate::EOPNOTSUPP)))
+    (void $ptr:expr, $func:ident, $( $args:expr ),* ) => {
+        {$ptr.as_ref().$func.expect("function pointer must be non-null")($ptr.as_ptr(), $($args), *); Ok::<(), crate::Error>(())}
     };
 }
 

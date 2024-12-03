@@ -53,8 +53,8 @@ impl<'a> RecordCursor<'a> {
         // safety: the memory passed to set_{key,value} need only be valid until a modifying
         // call like insert().
         unsafe {
-            wt_call!(nocode self.inner.ptr, set_key, record.key())?;
-            wt_call!(nocode
+            wt_call!(void self.inner.ptr, set_key, record.key())?;
+            wt_call!(void
                 self.inner.ptr,
                 set_value,
                 &Self::item_from_value(record.value())
@@ -68,7 +68,7 @@ impl<'a> RecordCursor<'a> {
     /// This may return a `WiredTigerError::NotFound` if the key does not exist in the collection.
     pub fn remove(&mut self, key: i64) -> Result<()> {
         unsafe {
-            wt_call!(nocode self.inner.ptr, set_key, key)?;
+            wt_call!(void self.inner.ptr, set_key, key)?;
             wt_call!(self.inner.ptr, remove)
         }
     }
@@ -99,7 +99,7 @@ impl<'a> RecordCursor<'a> {
     pub unsafe fn seek_exact_unsafe(&mut self, key: i64) -> Option<Result<RecordView<'_>>> {
         map_not_found(
             unsafe {
-                wt_call!(nocode self.inner.ptr, set_key, key)
+                wt_call!(void self.inner.ptr, set_key, key)
                     .and_then(|()| wt_call!(self.inner.ptr, search))
             }
             .and_then(|()| self.record_view(Some(key))),
@@ -123,29 +123,23 @@ impl<'a> RecordCursor<'a> {
     ///
     /// Cursor bounds are removed by `reset()`.
     pub fn set_bounds(&mut self, bounds: impl RangeBounds<i64>) -> Result<()> {
-        let start_config_str = match bounds.start_bound() {
-            Bound::Included(key) => {
-                unsafe { self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), *key) };
-                c"bound=lower,action=set"
-            }
-            Bound::Excluded(key) => {
-                unsafe { self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), *key) };
-                c"bound=lower,action=set,inclusive=false"
-            }
-            Bound::Unbounded => c"bound=lower,action=clear",
+        let (start_key, start_config_str) = match bounds.start_bound() {
+            Bound::Included(key) => (Some(*key), c"bound=lower,action=set"),
+            Bound::Excluded(key) => (Some(*key), c"bound=lower,action=set,inclusive=false"),
+            Bound::Unbounded => (None, c"bound=lower,action=clear"),
         };
+        if let Some(k) = start_key {
+            unsafe { wt_call!(void self.inner.ptr, set_key, k) }?;
+        }
         unsafe { wt_call!(self.inner.ptr, bound, start_config_str.as_ptr())? };
-        let end_config_str = match bounds.end_bound() {
-            Bound::Included(key) => {
-                unsafe { self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), *key) };
-                c"bound=upper,action=set"
-            }
-            Bound::Excluded(key) => {
-                unsafe { self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), *key) };
-                c"bound=upper,action=set,inclusive=false"
-            }
-            Bound::Unbounded => c"bound=upper,action=clear",
+        let (end_key, end_config_str) = match bounds.end_bound() {
+            Bound::Included(key) => (Some(*key), c"bound=upper,action=set"),
+            Bound::Excluded(key) => (Some(*key), c"bound=upper,action=set,inclusive=false"),
+            Bound::Unbounded => (None, c"bound=upper,action=clear"),
         };
+        if let Some(k) = end_key {
+            unsafe { wt_call!(void self.inner.ptr, set_key, k) }?;
+        }
         unsafe { wt_call!(self.inner.ptr, bound, end_config_str.as_ptr()) }
     }
 

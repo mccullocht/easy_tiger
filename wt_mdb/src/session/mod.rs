@@ -119,21 +119,8 @@ impl Session {
         table_name: &str,
         options: Option<&CStr>,
     ) -> Result<RecordCursor> {
-        // XXX heavy overlap with stats cursor
         let uri = TableUri::from(table_name);
-        let mut cursorp: *mut WT_CURSOR = std::ptr::null_mut();
-        unsafe {
-            wt_call!(
-                self.ptr,
-                open_cursor,
-                uri.0.as_ptr(),
-                std::ptr::null_mut(),
-                options.map(|s| s.as_ptr()).unwrap_or(std::ptr::null()),
-                &mut cursorp
-            )
-        }?;
-        NonNull::new(cursorp)
-            .ok_or(Error::generic_error())
+        self.new_cursor_pointer(&uri.0, options)
             .map(|ptr| RecordCursor::new(InnerCursor { ptr, uri }, self))
     }
 
@@ -175,6 +162,14 @@ impl Session {
         let options = level
             .to_config_string_clause()
             .map(|s| CString::new(s).expect("no nulls in stats options"));
+        self.new_cursor_pointer(uri, options.as_deref())
+            .map(|ptr| StatCursor {
+                ptr,
+                _session: self,
+            })
+    }
+
+    fn new_cursor_pointer(&self, uri: &CStr, options: Option<&CStr>) -> Result<NonNull<WT_CURSOR>> {
         let mut cursorp: *mut WT_CURSOR = std::ptr::null_mut();
         unsafe {
             wt_call!(
@@ -182,19 +177,11 @@ impl Session {
                 open_cursor,
                 uri.as_ptr(),
                 std::ptr::null_mut(),
-                options
-                    .as_ref()
-                    .map(|o| o.as_ptr())
-                    .unwrap_or(std::ptr::null()),
+                options.map(CStr::as_ptr).unwrap_or(std::ptr::null()),
                 &mut cursorp
             )
         }?;
-        NonNull::new(cursorp)
-            .ok_or(Error::generic_error())
-            .map(|ptr| StatCursor {
-                ptr,
-                _session: self,
-            })
+        NonNull::new(cursorp).ok_or(Error::generic_error())
     }
 
     /// Starts a transaction in this session.

@@ -5,7 +5,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{map_not_found, wt_call, Error, Record, RecordView, Result};
+use crate::{map_not_found, wt_call, Record, RecordView, Result};
 use wt_sys::{WT_CURSOR, WT_ITEM};
 
 use super::{Session, TableUri};

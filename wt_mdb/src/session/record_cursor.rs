@@ -21,7 +21,7 @@ pub(super) struct InnerCursor {
 impl Drop for InnerCursor {
     fn drop(&mut self) {
         // TODO: log this.
-        let _ = unsafe { self.ptr.as_ref().close.unwrap()(self.ptr.as_ptr()) };
+        let _ = unsafe { wt_call!(self.ptr, close) };
     }
 }
 
@@ -85,8 +85,7 @@ impl<'a> RecordCursor<'a> {
     /// is rolled back, we cannot guarantee that view value data is safe to access. Use
     /// `Iterator.next()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn next_unsafe(&mut self) -> Option<Result<RecordView<'_>>> {
-        let result = unsafe { wt_call!(self.inner.ptr, next) };
-        match result {
+        match unsafe { wt_call!(self.inner.ptr, next) } {
             Ok(()) => Some(self.record_view(None)),
             Err(e) if e == Error::not_found_error() => None,
             Err(e) => Some(Err(e)),
@@ -100,11 +99,10 @@ impl<'a> RecordCursor<'a> {
     /// is rolled back, we cannot guarantee that view value data is safe to access. Use
     /// `seek_exact()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn seek_exact_unsafe(&mut self, key: i64) -> Option<Result<RecordView<'_>>> {
-        let result = unsafe {
+        match unsafe {
             wt_call!(nocode self.inner.ptr, set_key, key)
                 .and_then(|()| wt_call!(self.inner.ptr, search))
-        };
-        match result {
+        } {
             Ok(()) => Some(self.record_view(Some(key))),
             Err(e) if e == Error::not_found_error() => None,
             Err(e) => Some(Err(e)),
@@ -118,8 +116,7 @@ impl<'a> RecordCursor<'a> {
 
     /// Return the largest key in the collection or `None` if the collection is empty.
     pub fn largest_key(&mut self) -> Option<Result<i64>> {
-        let result = unsafe { wt_call!(self.inner.ptr, largest_key) };
-        match result {
+        match unsafe { wt_call!(self.inner.ptr, largest_key) } {
             Ok(()) => Some(self.record_key()),
             Err(e) if e == Error::not_found_error() => None,
             Err(e) => Some(Err(e)),

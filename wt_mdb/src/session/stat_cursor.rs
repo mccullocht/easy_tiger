@@ -17,10 +17,9 @@ pub struct StatCursor<'a> {
 impl<'a> StatCursor<'a> {
     /// Seek to specific WT_STAT_.* and return the associated value if any.
     pub fn seek_exact(&mut self, wt_stat: u32) -> Option<Result<i64>> {
-        let result = unsafe {
+        match unsafe {
             wt_call!(nocode self.ptr, set_key, wt_stat).and_then(|()| wt_call!(self.ptr, search))
-        };
-        match result {
+        } {
             Ok(()) => Some(self.read_stat().map(|(_, v)| v)),
             Err(e) if e == Error::not_found_error() => None,
             Err(e) => Some(Err(e)),
@@ -57,8 +56,7 @@ impl<'a> Iterator for StatCursor<'a> {
     type Item = Result<(String, i64)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let result = unsafe { wt_call!(self.ptr, next) };
-        match result {
+        match unsafe { wt_call!(self.ptr, next) } {
             Ok(()) => Some(self.read_stat()),
             Err(e) if e == Error::not_found_error() => None,
             Err(e) => Some(Err(e)),

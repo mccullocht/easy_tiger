@@ -5,7 +5,7 @@ use std::{
     cell::RefCell,
     ffi::{CStr, CString},
     ops::Deref,
-    ptr::{self, NonNull},
+    ptr::NonNull,
     sync::Arc,
 };
 
@@ -119,8 +119,9 @@ impl Session {
         table_name: &str,
         options: Option<&CStr>,
     ) -> Result<RecordCursor> {
+        // XXX heavy overlap with stats cursor
         let uri = TableUri::from(table_name);
-        let mut cursorp: *mut WT_CURSOR = ptr::null_mut();
+        let mut cursorp: *mut WT_CURSOR = std::ptr::null_mut();
         unsafe {
             wt_call!(
                 self.ptr,

@@ -1,7 +1,5 @@
-use std::{collections::BTreeSet, num::NonZero};
-
 use crate::{
-    graph::{Graph, GraphVectorIndexReader, GraphVertex},
+    graph::{prune_edges, Graph, GraphVectorIndexReader, GraphVertex},
     quantization::binary_quantize,
     scoring::F32VectorScorer,
     search::GraphSearcher,
@@ -34,7 +32,7 @@ impl CrudGraph {
 
     fn insert_internal(&mut self, vertex_id: i64, vector: &[f32]) -> Result<()> {
         let scorer = self.reader.metadata().new_scorer();
-        // XXX does this normalize the vector? I can't remember.
+        // TODO: normalize input vector.
         let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
         // If there are no edges then we don't have an entry point, so fix that.
@@ -42,7 +40,7 @@ impl CrudGraph {
         if candidate_edges.is_empty() {
             return graph.set_entry_point(vertex_id);
         }
-        let selected_len = Self::prune(
+        let selected_len = prune_edges(
             &mut candidate_edges,
             self.reader.metadata().max_edges,
             &mut graph,
@@ -110,7 +108,7 @@ impl CrudGraph {
                         .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst.vector())))
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
-            let selected_len = Self::prune(
+            let selected_len = prune_edges(
                 &mut neighbors,
                 self.reader.metadata().max_edges,
                 graph,
@@ -215,59 +213,5 @@ impl CrudGraph {
         // and skip edge updates if the edge set is identical or nearly identical.
         self.delete(vertex_id)?;
         self.insert_internal(vertex_id, vector)
-    }
-
-    // XXX share this with the bulk loader implementation.
-    fn prune(
-        edges: &mut [Neighbor],
-        max_edges: NonZero<usize>,
-        graph: &mut impl Graph,
-        scorer: &dyn F32VectorScorer,
-    ) -> Result<usize> {
-        if edges.is_empty() {
-            return Ok(0);
-        }
-
-        // TODO: replace with a fixed length bitset
-        let mut selected = BTreeSet::new();
-        selected.insert(0); // we always keep the first node.
-        for alpha in [1.0, 1.2] {
-            for (i, e) in edges.iter().enumerate().skip(1) {
-                if selected.contains(&i) {
-                    continue;
-                }
-
-                // TODO: fix error handling so we can reuse this elsewhere.
-                let e_vec = graph
-                    .get(e.vertex())
-                    .unwrap_or(Err(Error::not_found_error()))?
-                    .vector()
-                    .into_owned();
-                for p in selected.iter().take_while(|j| **j < i).map(|j| edges[*j]) {
-                    let p_node = graph
-                        .get(p.vertex())
-                        .unwrap_or(Err(Error::not_found_error()))?;
-                    if scorer.score(&e_vec, &p_node.vector()) > e.score * alpha {
-                        selected.insert(i);
-                        break;
-                    }
-                }
-
-                if selected.len() >= max_edges.get() {
-                    break;
-                }
-            }
-
-            if selected.len() >= max_edges.get() {
-                break;
-            }
-        }
-
-        // Partition edges into selected and unselected.
-        for (i, j) in selected.iter().enumerate() {
-            edges.swap(i, *j);
-        }
-
-        Ok(selected.len())
     }
 }

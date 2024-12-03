@@ -1,10 +1,13 @@
-use std::{borrow::Cow, num::NonZero};
+use std::{borrow::Cow, collections::BTreeSet, num::NonZero};
 
 use serde::{Deserialize, Serialize};
-use wt_mdb::Result;
+use wt_mdb::{Error, Result};
 
-use crate::scoring::{
-    DotProductScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer, VectorSimilarity,
+use crate::{
+    scoring::{
+        DotProductScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer, VectorSimilarity,
+    },
+    Neighbor,
 };
 
 /// Parameters for a search over a Vamana graph.
@@ -115,4 +118,61 @@ pub trait GraphVertex {
 pub trait NavVectorStore {
     /// Get the navigation vector for a single vertex.
     fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
+}
+
+/// Prune `edges` down to at most `max_edges`. Use `graph` and `scorer` to inform this decision.
+/// Returns a split point: all edges before that point are selected, all after are to be dropped.
+/// REQUIRES: `edges.is_sorted()`.
+pub(crate) fn prune_edges(
+    edges: &mut [Neighbor],
+    max_edges: NonZero<usize>,
+    graph: &mut impl Graph,
+    scorer: &dyn F32VectorScorer,
+) -> Result<usize> {
+    if edges.is_empty() {
+        return Ok(0);
+    }
+
+    debug_assert!(edges.is_sorted());
+
+    // TODO: replace with a fixed length bitset
+    let mut selected = BTreeSet::new();
+    selected.insert(0); // we always keep the first node.
+    for alpha in [1.0, 1.2] {
+        for (i, e) in edges.iter().enumerate().skip(1) {
+            if selected.contains(&i) {
+                continue;
+            }
+
+            let e_vec = graph
+                .get(e.vertex())
+                .unwrap_or(Err(Error::not_found_error()))?
+                .vector()
+                .into_owned();
+            for p in selected.iter().take_while(|j| **j < i).map(|j| edges[*j]) {
+                let p_node = graph
+                    .get(p.vertex())
+                    .unwrap_or(Err(Error::not_found_error()))?;
+                if scorer.score(&e_vec, &p_node.vector()) > e.score * alpha {
+                    selected.insert(i);
+                    break;
+                }
+            }
+
+            if selected.len() >= max_edges.get() {
+                break;
+            }
+        }
+
+        if selected.len() >= max_edges.get() {
+            break;
+        }
+    }
+
+    // Partition edges into selected and unselected.
+    for (i, j) in selected.iter().enumerate() {
+        edges.swap(i, *j);
+    }
+
+    Ok(selected.len())
 }

@@ -6,7 +6,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{make_result, Error, Record, RecordView, Result};
+use crate::{Error, Record, RecordView, Result};
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_NOTFOUND};
 
 use super::{Session, TableUri};
@@ -32,25 +32,20 @@ const EOPNOTSUPP: i32 = 95;
 
 // XXX move this to the crate root.
 /// Call a `$func` on the `NonNull` WiredTiger object `$ptr` optionally with some `$args`.
-/// `$func` is expected to return an integer error code, which will be coerced into `wt_mdb::Result<()>`.
-/// This returns an `wt_mdb::Result<()>`
-macro_rules! wt_call_code {
+/// Usually `$func` is expected to return an integer code which will be coerced into `wt_mdb::Result<()>`;
+/// start the macro with `nocode` if `$func` returns void.
+/// This call will return an EOPNOTSUPP error if `$func` is `null/None`
+macro_rules! wt_call {
     ($ptr:expr, $func:ident) => {
         $ptr.as_ref().$func.map(|fp| crate::make_result(fp($ptr.as_ptr()), ())).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
     };
     ($ptr:expr, $func:ident, $( $args:expr ),* ) => {
         $ptr.as_ref().$func.map(|fp| crate::make_result(fp($ptr.as_ptr(), $($args), *), ())).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
     };
-}
-
-/// Call a `$func` on the `NonNull` WiredTiger object `$ptr` optionally with some `$args`.
-/// `$func` is expected to return an integer error code, which will be coerced into `wt_mdb::Result<()>` with an error only if
-/// `$func` is `null/None`.
-macro_rules! wt_call_no_code {
-    ($ptr:expr, $func:ident) => {
+    (nocode $ptr:expr, $func:ident) => {
         $ptr.as_ref().$func.map(|fp| { fp($ptr.as_ptr()); Ok(()) }).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
     };
-    ($ptr:expr, $func:ident, $( $args:expr ),* ) => {
+    (nocode $ptr:expr, $func:ident, $( $args:expr ),* ) => {
         $ptr.as_ref().$func.map(|fp| { fp($ptr.as_ptr(), $($args), *); Ok(()) }).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
     };
 }
@@ -81,13 +76,13 @@ impl<'a> RecordCursor<'a> {
         // safety: the memory passed to set_{key,value} need only be valid until a modifying
         // call like insert().
         unsafe {
-            wt_call_no_code!(self.inner.ptr, set_key, record.key())?;
-            wt_call_no_code!(
+            wt_call!(nocode self.inner.ptr, set_key, record.key())?;
+            wt_call!(nocode
                 self.inner.ptr,
                 set_value,
                 &Self::item_from_value(record.value())
             )?;
-            wt_call_code!(self.inner.ptr, insert)
+            wt_call!(self.inner.ptr, insert)
         }
     }
 
@@ -96,8 +91,8 @@ impl<'a> RecordCursor<'a> {
     /// This may return a `WiredTigerError::NotFound` if the key does not exist in the collection.
     pub fn remove(&mut self, key: i64) -> Result<()> {
         unsafe {
-            wt_call_no_code!(self.inner.ptr, set_key, key)?;
-            wt_call_code!(self.inner.ptr, remove)
+            wt_call!(nocode self.inner.ptr, set_key, key)?;
+            wt_call!(self.inner.ptr, remove)
         }
     }
 
@@ -113,14 +108,11 @@ impl<'a> RecordCursor<'a> {
     /// is rolled back, we cannot guarantee that view value data is safe to access. Use
     /// `Iterator.next()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn next_unsafe(&mut self) -> Option<Result<RecordView<'_>>> {
-        unsafe {
-            match NonZero::new(self.inner.ptr.as_ref().next.unwrap()(
-                self.inner.ptr.as_ptr(),
-            )) {
-                None => Some(self.record_view(None)),
-                Some(code) if code.get() == WT_NOTFOUND => None,
-                Some(code) => Some(Err(Error::from(code))),
-            }
+        let result = unsafe { wt_call!(self.inner.ptr, next) };
+        match result {
+            Ok(()) => Some(self.record_view(None)),
+            Err(e) if e == Error::not_found_error() => None,
+            Err(e) => Some(Err(e)),
         }
     }
 
@@ -131,15 +123,14 @@ impl<'a> RecordCursor<'a> {
     /// is rolled back, we cannot guarantee that view value data is safe to access. Use
     /// `seek_exact()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn seek_exact_unsafe(&mut self, key: i64) -> Option<Result<RecordView<'_>>> {
-        unsafe {
-            self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), key);
-            match NonZero::new(self.inner.ptr.as_ref().search.unwrap()(
-                self.inner.ptr.as_ptr(),
-            )) {
-                None => Some(self.record_view(Some(key))),
-                Some(code) if code.get() == WT_NOTFOUND => None,
-                Some(code) => Some(Err(Error::from(code))),
-            }
+        let result = unsafe {
+            wt_call!(nocode self.inner.ptr, set_key, key)
+                .and_then(|()| wt_call!(self.inner.ptr, search))
+        };
+        match result {
+            Ok(()) => Some(self.record_view(Some(key))),
+            Err(e) if e == Error::not_found_error() => None,
+            Err(e) => Some(Err(e)),
         }
     }
 
@@ -177,7 +168,7 @@ impl<'a> RecordCursor<'a> {
             }
             Bound::Unbounded => c"bound=lower,action=clear",
         };
-        unsafe { wt_call_code!(self.inner.ptr, bound, start_config_str.as_ptr())? };
+        unsafe { wt_call!(self.inner.ptr, bound, start_config_str.as_ptr())? };
         let end_config_str = match bounds.end_bound() {
             Bound::Included(key) => {
                 unsafe { self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), *key) };
@@ -189,12 +180,12 @@ impl<'a> RecordCursor<'a> {
             }
             Bound::Unbounded => c"bound=upper,action=clear",
         };
-        unsafe { wt_call_code!(self.inner.ptr, bound, end_config_str.as_ptr()) }
+        unsafe { wt_call!(self.inner.ptr, bound, end_config_str.as_ptr()) }
     }
 
     /// Reset the cursor to an unpositioned state.
     pub fn reset(&mut self) -> Result<()> {
-        unsafe { wt_call_code!(self.inner.ptr, reset) }
+        unsafe { wt_call!(self.inner.ptr, reset) }
     }
 
     pub(super) fn into_inner(self) -> InnerCursor {
@@ -205,7 +196,7 @@ impl<'a> RecordCursor<'a> {
     /// and WT_NOTFOUND will not be returned.
     fn record_key(&self) -> Result<i64> {
         let mut k = 0i64;
-        unsafe { wt_call_code!(self.inner.ptr, get_key, &mut k).map(|()| k) }
+        unsafe { wt_call!(self.inner.ptr, get_key, &mut k).map(|()| k) }
     }
 
     /// Return the current record view. This assumes that we have just positioned the cursor
@@ -218,11 +209,8 @@ impl<'a> RecordCursor<'a> {
 
         let value = unsafe {
             let mut item = Self::default_item();
-            make_result(
-                self.inner.ptr.as_ref().get_value.unwrap()(self.inner.ptr.as_ptr(), &mut item),
-                (),
-            )
-            .map(|_| std::slice::from_raw_parts(item.data as *const u8, item.size))?
+            wt_call!(self.inner.ptr, get_value, &mut item)
+                .map(|()| std::slice::from_raw_parts(item.data as *const u8, item.size))?
         };
 
         Ok(RecordView::new(key, value))

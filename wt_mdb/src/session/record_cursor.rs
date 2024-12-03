@@ -1,13 +1,12 @@
 use std::{
     ffi::{c_void, CStr},
     mem::ManuallyDrop,
-    num::NonZero,
     ops::{Bound, Deref, DerefMut, RangeBounds},
     ptr::NonNull,
 };
 
 use crate::{wt_call, Error, Record, RecordView, Result};
-use wt_sys::{WT_CURSOR, WT_ITEM, WT_NOTFOUND};
+use wt_sys::{WT_CURSOR, WT_ITEM};
 
 use super::{Session, TableUri};
 
@@ -119,14 +118,11 @@ impl<'a> RecordCursor<'a> {
 
     /// Return the largest key in the collection or `None` if the collection is empty.
     pub fn largest_key(&mut self) -> Option<Result<i64>> {
-        unsafe {
-            match NonZero::new(self.inner.ptr.as_ref().largest_key.unwrap()(
-                self.inner.ptr.as_ptr(),
-            )) {
-                None => Some(self.record_key()),
-                Some(code) if code.get() == WT_NOTFOUND => None,
-                Some(code) => Some(Err(Error::from(code))),
-            }
+        let result = unsafe { wt_call!(self.inner.ptr, largest_key) };
+        match result {
+            Ok(()) => Some(self.record_key()),
+            Err(e) if e == Error::not_found_error() => None,
+            Err(e) => Some(Err(e)),
         }
     }
 

@@ -180,6 +180,14 @@ fn make_result<T>(code: i32, value: T) -> Result<T> {
         .unwrap_or(Ok(value))
 }
 
+fn map_not_found<T>(r: Result<T>) -> Option<Result<T>> {
+    if r.as_ref().is_err_and(|e| *e == Error::not_found_error()) {
+        None
+    } else {
+        Some(r)
+    }
+}
+
 const EOPNOTSUPP: i32 = 95;
 
 /// Call a `$func` on the `NonNull` WiredTiger object `$ptr` optionally with some `$args`.

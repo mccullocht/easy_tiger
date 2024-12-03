@@ -3,7 +3,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{wt_call, Error, Result};
+use crate::{map_not_found, wt_call, Error, Result};
 use wt_sys::WT_CURSOR;
 
 use super::Session;
@@ -17,13 +17,13 @@ pub struct StatCursor<'a> {
 impl<'a> StatCursor<'a> {
     /// Seek to specific WT_STAT_.* and return the associated value if any.
     pub fn seek_exact(&mut self, wt_stat: u32) -> Option<Result<i64>> {
-        match unsafe {
-            wt_call!(nocode self.ptr, set_key, wt_stat).and_then(|()| wt_call!(self.ptr, search))
-        } {
-            Ok(()) => Some(self.read_stat().map(|(_, v)| v)),
-            Err(e) if e == Error::not_found_error() => None,
-            Err(e) => Some(Err(e)),
-        }
+        map_not_found(
+            unsafe {
+                wt_call!(nocode self.ptr, set_key, wt_stat)
+                    .and_then(|()| wt_call!(self.ptr, search))
+            }
+            .and_then(|()| self.read_stat().map(|(_, v)| v)),
+        )
     }
 
     // Read the description into a string instead of aliasing the value.
@@ -56,11 +56,7 @@ impl<'a> Iterator for StatCursor<'a> {
     type Item = Result<(String, i64)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match unsafe { wt_call!(self.ptr, next) } {
-            Ok(()) => Some(self.read_stat()),
-            Err(e) if e == Error::not_found_error() => None,
-            Err(e) => Some(Err(e)),
-        }
+        map_not_found(unsafe { wt_call!(self.ptr, next) }.and_then(|()| self.read_stat()))
     }
 }
 

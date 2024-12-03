@@ -5,7 +5,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{wt_call, Error, Record, RecordView, Result};
+use crate::{map_not_found, wt_call, Error, Record, RecordView, Result};
 use wt_sys::{WT_CURSOR, WT_ITEM};
 
 use super::{Session, TableUri};
@@ -85,11 +85,9 @@ impl<'a> RecordCursor<'a> {
     /// is rolled back, we cannot guarantee that view value data is safe to access. Use
     /// `Iterator.next()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn next_unsafe(&mut self) -> Option<Result<RecordView<'_>>> {
-        match unsafe { wt_call!(self.inner.ptr, next) } {
-            Ok(()) => Some(self.record_view(None)),
-            Err(e) if e == Error::not_found_error() => None,
-            Err(e) => Some(Err(e)),
-        }
+        map_not_found(
+            unsafe { wt_call!(self.inner.ptr, next) }.and_then(|()| self.record_view(None)),
+        )
     }
 
     /// Seek to the for `key` and return any associated `RecordView` if present.
@@ -99,14 +97,13 @@ impl<'a> RecordCursor<'a> {
     /// is rolled back, we cannot guarantee that view value data is safe to access. Use
     /// `seek_exact()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn seek_exact_unsafe(&mut self, key: i64) -> Option<Result<RecordView<'_>>> {
-        match unsafe {
-            wt_call!(nocode self.inner.ptr, set_key, key)
-                .and_then(|()| wt_call!(self.inner.ptr, search))
-        } {
-            Ok(()) => Some(self.record_view(Some(key))),
-            Err(e) if e == Error::not_found_error() => None,
-            Err(e) => Some(Err(e)),
-        }
+        map_not_found(
+            unsafe {
+                wt_call!(nocode self.inner.ptr, set_key, key)
+                    .and_then(|()| wt_call!(self.inner.ptr, search))
+            }
+            .and_then(|()| self.record_view(Some(key))),
+        )
     }
 
     /// Seek to the for `key` and return any associated `Record` if present.
@@ -116,11 +113,9 @@ impl<'a> RecordCursor<'a> {
 
     /// Return the largest key in the collection or `None` if the collection is empty.
     pub fn largest_key(&mut self) -> Option<Result<i64>> {
-        match unsafe { wt_call!(self.inner.ptr, largest_key) } {
-            Ok(()) => Some(self.record_key()),
-            Err(e) if e == Error::not_found_error() => None,
-            Err(e) => Some(Err(e)),
-        }
+        map_not_found(
+            unsafe { wt_call!(self.inner.ptr, largest_key) }.and_then(|()| self.record_key()),
+        )
     }
 
     /// Set the bounds this cursor. This affects almost all positioning operations, so for instance

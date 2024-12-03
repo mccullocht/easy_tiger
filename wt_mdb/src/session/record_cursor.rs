@@ -28,6 +28,33 @@ impl Drop for InnerCursor {
 
 unsafe impl Send for InnerCursor {}
 
+const EOPNOTSUPP: i32 = 95;
+
+// XXX move this to the crate root.
+/// Call a `$func` on the `NonNull` WiredTiger object `$ptr` optionally with some `$args`.
+/// `$func` is expected to return an integer error code, which will be coerced into `wt_mdb::Result<()>`.
+/// This returns an `wt_mdb::Result<()>`
+macro_rules! wt_call_code {
+    ($ptr:expr, $func:ident) => {
+        $ptr.as_ref().$func.map(|fp| crate::make_result(fp($ptr.as_ptr()), ())).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
+    };
+    ($ptr:expr, $func:ident, $( $args:expr ),* ) => {
+        $ptr.as_ref().$func.map(|fp| crate::make_result(fp($ptr.as_ptr(), $($args), *), ())).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
+    };
+}
+
+/// Call a `$func` on the `NonNull` WiredTiger object `$ptr` optionally with some `$args`.
+/// `$func` is expected to return an integer error code, which will be coerced into `wt_mdb::Result<()>` with an error only if
+/// `$func` is `null/None`.
+macro_rules! wt_call_no_code {
+    ($ptr:expr, $func:ident) => {
+        $ptr.as_ref().$func.map(|fp| { fp($ptr.as_ptr()); Ok(()) }).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
+    };
+    ($ptr:expr, $func:ident, $( $args:expr ),* ) => {
+        $ptr.as_ref().$func.map(|fp| { fp($ptr.as_ptr(), $($args), *); Ok(()) }).unwrap_or(Err(crate::Error::Posix(EOPNOTSUPP)))
+    };
+}
+
 /// A `RecordCursor` facilities viewing and mutating data in a WiredTiger table where
 /// the table is `i64` keyed and byte-string valued.
 pub struct RecordCursor<'a> {
@@ -54,15 +81,13 @@ impl<'a> RecordCursor<'a> {
         // safety: the memory passed to set_{key,value} need only be valid until a modifying
         // call like insert().
         unsafe {
-            self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), record.key());
-            self.inner.ptr.as_ref().set_value.unwrap()(
-                self.inner.ptr.as_ptr(),
-                &Self::item_from_value(record.value()),
-            );
-            make_result(
-                self.inner.ptr.as_ref().insert.unwrap()(self.inner.ptr.as_ptr()),
-                (),
-            )
+            wt_call_no_code!(self.inner.ptr, set_key, record.key())?;
+            wt_call_no_code!(
+                self.inner.ptr,
+                set_value,
+                &Self::item_from_value(record.value())
+            )?;
+            wt_call_code!(self.inner.ptr, insert)
         }
     }
 
@@ -71,11 +96,8 @@ impl<'a> RecordCursor<'a> {
     /// This may return a `WiredTigerError::NotFound` if the key does not exist in the collection.
     pub fn remove(&mut self, key: i64) -> Result<()> {
         unsafe {
-            self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), key);
-            make_result(
-                self.inner.ptr.as_ref().remove.unwrap()(self.inner.ptr.as_ptr()),
-                (),
-            )
+            wt_call_no_code!(self.inner.ptr, set_key, key)?;
+            wt_call_code!(self.inner.ptr, remove)
         }
     }
 
@@ -155,15 +177,7 @@ impl<'a> RecordCursor<'a> {
             }
             Bound::Unbounded => c"bound=lower,action=clear",
         };
-        make_result(
-            unsafe {
-                self.inner.ptr.as_ref().bound.unwrap()(
-                    self.inner.ptr.as_ptr(),
-                    start_config_str.as_ptr(),
-                )
-            },
-            (),
-        )?;
+        unsafe { wt_call_code!(self.inner.ptr, bound, start_config_str.as_ptr())? };
         let end_config_str = match bounds.end_bound() {
             Bound::Included(key) => {
                 unsafe { self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), *key) };
@@ -175,25 +189,12 @@ impl<'a> RecordCursor<'a> {
             }
             Bound::Unbounded => c"bound=upper,action=clear",
         };
-        make_result(
-            unsafe {
-                self.inner.ptr.as_ref().bound.unwrap()(
-                    self.inner.ptr.as_ptr(),
-                    end_config_str.as_ptr(),
-                )
-            },
-            (),
-        )
+        unsafe { wt_call_code!(self.inner.ptr, bound, end_config_str.as_ptr()) }
     }
 
     /// Reset the cursor to an unpositioned state.
     pub fn reset(&mut self) -> Result<()> {
-        unsafe {
-            make_result(
-                self.inner.ptr.as_ref().reset.unwrap()(self.inner.ptr.as_ptr()),
-                (),
-            )
-        }
+        unsafe { wt_call_code!(self.inner.ptr, reset) }
     }
 
     pub(super) fn into_inner(self) -> InnerCursor {
@@ -203,14 +204,8 @@ impl<'a> RecordCursor<'a> {
     /// Return the current record key. This assumes that we have just positioned the cursor
     /// and WT_NOTFOUND will not be returned.
     fn record_key(&self) -> Result<i64> {
-        unsafe {
-            let mut k = 0i64;
-            make_result(
-                self.inner.ptr.as_ref().get_key.unwrap()(self.inner.ptr.as_ptr(), &mut k),
-                (),
-            )
-            .map(|_| k)
-        }
+        let mut k = 0i64;
+        unsafe { wt_call_code!(self.inner.ptr, get_key, &mut k).map(|()| k) }
     }
 
     /// Return the current record view. This assumes that we have just positioned the cursor

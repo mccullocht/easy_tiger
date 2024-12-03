@@ -16,7 +16,6 @@ use std::borrow::Cow;
 use std::ffi::CStr;
 use std::io::ErrorKind;
 use std::num::NonZero;
-use std::ptr::NonNull;
 
 /// WiredTiger specific error codes.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -179,11 +178,6 @@ fn make_result<T>(code: i32, value: T) -> Result<T> {
     NonZero::<i32>::new(code)
         .map(|c| Err(Error::from(c)))
         .unwrap_or(Ok(value))
-}
-
-fn wrap_ptr_create<T>(code: i32, ptr: *mut T) -> Result<NonNull<T>> {
-    let p = make_result(code, ptr)?;
-    NonNull::new(p).ok_or(Error::generic_error())
 }
 
 const EOPNOTSUPP: i32 = 95;

@@ -1,6 +1,8 @@
 use crate::{
-    options::ConfigurationString, options::ConnectionOptions, session::Session, wrap_ptr_create,
-    Result,
+    make_result,
+    options::{ConfigurationString, ConnectionOptions},
+    session::Session,
+    wt_call, Error, Result,
 };
 use std::{
     ffi::CString,
@@ -21,32 +23,38 @@ impl Connection {
     pub fn open(filename: &str, options: Option<ConnectionOptions>) -> Result<Arc<Self>> {
         let mut connp: *mut WT_CONNECTION = ptr::null_mut();
         let dbpath = CString::new(filename).unwrap();
-        let result: i32;
-        unsafe {
-            result = wiredtiger_open(
-                dbpath.as_ptr(),
-                ptr::null_mut(),
-                options.unwrap_or_default().as_config_ptr(),
-                &mut connp,
-            );
-        };
-        wrap_ptr_create(result, connp).map(|conn| Arc::new(Connection(conn)))
+        make_result(
+            unsafe {
+                wiredtiger_open(
+                    dbpath.as_ptr(),
+                    ptr::null_mut(),
+                    options.unwrap_or_default().as_config_ptr(),
+                    &mut connp,
+                )
+            },
+            (),
+        )?;
+        NonNull::new(connp)
+            .ok_or(Error::generic_error())
+            .map(|conn| Arc::new(Connection(conn)))
     }
 
     /// Create a new `Session`. These can be used to obtain cursors to read and write data
     /// as well as manage transaction.
     pub fn open_session(self: &Arc<Self>) -> Result<Session> {
         let mut sessionp: *mut WT_SESSION = ptr::null_mut();
-        let result: i32;
         unsafe {
-            result = (self.0.as_ref().open_session.unwrap())(
-                self.0.as_ptr(),
-                ptr::null_mut(),
-                ptr::null(),
-                &mut sessionp,
-            );
-        }
-        wrap_ptr_create(result, sessionp).map(|session| Session::new(session, self))
+            wt_call!(
+                self.0,
+                open_session,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &mut sessionp
+            )
+        }?;
+        NonNull::new(sessionp)
+            .ok_or(Error::generic_error())
+            .map(|session| Session::new(session, self))
     }
 }
 
@@ -57,6 +65,6 @@ impl Drop for Connection {
     fn drop(&mut self) {
         // TODO: log something when an error occurs here.
         // This would be unexpected as the connection can't be dropped until all cursors and sessions have also been dropped.
-        unsafe { self.0.as_ref().close.unwrap()(self.0.as_ptr(), std::ptr::null()) };
+        let _ = unsafe { wt_call!(self.0, close, std::ptr::null()) };
     }
 }

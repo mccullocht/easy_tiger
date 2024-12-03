@@ -164,7 +164,26 @@ impl<'a> RecordCursor<'a> {
             },
             (),
         )?;
-        todo!()
+        let end_config_str = match bounds.end_bound() {
+            Bound::Included(key) => {
+                unsafe { self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), *key) };
+                c"bound=upper,action=set"
+            }
+            Bound::Excluded(key) => {
+                unsafe { self.inner.ptr.as_ref().set_key.unwrap()(self.inner.ptr.as_ptr(), *key) };
+                c"bound=upper,action=set,inclusive=false"
+            }
+            Bound::Unbounded => c"bound=upper,action=clear",
+        };
+        make_result(
+            unsafe {
+                self.inner.ptr.as_ref().bound.unwrap()(
+                    self.inner.ptr.as_ptr(),
+                    end_config_str.as_ptr(),
+                )
+            },
+            (),
+        )
     }
 
     /// Reset the cursor to an unpositioned state.

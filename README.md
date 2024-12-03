@@ -55,6 +55,10 @@ path because we don't have to traverse the BTree to locate vector data.
 
 # Caveats
 
+* This implementation assumes that each key in the collection contains at most 1 vector. Many
+  applications are likely to model as 1-to-many. I think this could be addressed with a compound
+  key -- 64 bits of row key + 64 bits of vector hash so that it is still possible to perform
+  predicate joins easily, although it will be difficult to estimate cardinality.
 * Quantization is inflexible -- only binary quantization is supported. Stateful quantization
   algorithms are more difficult to maintain on mutable indices.
 * This implementation does not allow pre-quantized inputs for the "full fidelity" vectors or the

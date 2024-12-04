@@ -6,7 +6,7 @@ use crate::{
     search::GraphSearcher,
     wt::{
         encode_graph_node, encode_graph_node_internal, WiredTigerGraph,
-        WiredTigerGraphVectorIndexReader,
+        WiredTigerGraphVectorIndexReader, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -146,11 +146,10 @@ impl CrudGraph {
         let scorer = self.reader.metadata().new_scorer();
         let mut graph = self.reader.graph()?;
 
-        let edges = graph
+        let (vector, edges) = graph
             .get(vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))?
-            .edges()
-            .collect::<Vec<_>>();
+            .unwrap_or(Err(Error::not_found_error()))
+            .map(|v| (v.vector().to_vec(), v.edges().collect::<Vec<_>>()))?;
 
         graph.remove(vertex_id)?;
         self.reader.nav_vectors()?.remove(vertex_id)?;
@@ -209,6 +208,22 @@ impl CrudGraph {
                 let dst_id = vertices[dst].0;
                 vertices[src].2.push(dst_id);
                 vertices[dst].2.push(src_id);
+            }
+        }
+
+        // Oh no, we've deleted the entry point! Find the closes point amongst the
+        // edges of this node to use as a new one. So long as at least one vector is in
+        // the index it will be safe to unwrap() entry_point() here.
+        if graph.entry_point().unwrap()? == vertex_id {
+            let mut neighbors = vertices
+                .iter()
+                .map(|(id, vec, _)| Neighbor::new(*id, scorer.score(&vector, &vec)))
+                .collect::<Vec<_>>();
+            neighbors.sort();
+            if let Some(ep_neighbor) = neighbors.first() {
+                graph.set(ENTRY_POINT_KEY, &ep_neighbor.vertex().to_le_bytes())?
+            } else {
+                graph.remove(ENTRY_POINT_KEY)?
             }
         }
 

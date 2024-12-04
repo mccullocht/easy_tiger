@@ -6,7 +6,10 @@
 
 use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
-use wt_mdb::{Connection, Error, RecordCursorGuard, RecordView, Result, Session, WiredTigerError};
+use wt_mdb::{
+    options::CreateOptions, Connection, Error, Record, RecordCursorGuard, RecordView, Result,
+    Session, WiredTigerError,
+};
 
 use crate::{
     graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore},
@@ -201,6 +204,22 @@ impl WiredTigerGraphVectorIndex {
             nav_table_name,
             metadata,
         })
+    }
+
+    /// Create necessary tables for the index and write index metadata.
+    pub fn init_index(
+        &self,
+        connection: &Arc<Connection>,
+        table_options: Option<CreateOptions>,
+    ) -> io::Result<()> {
+        let session = connection.open_session()?;
+        session.create_record_table(&self.graph_table_name, table_options.clone())?;
+        session.create_record_table(&self.nav_table_name, table_options)?;
+        let mut cursor = session.open_record_cursor(&self.graph_table_name)?;
+        Ok(cursor.set(&Record::new(
+            METADATA_KEY,
+            serde_json::to_vec(&self.metadata)?,
+        ))?)
     }
 
     /// Return `GraphMetadata` for this index.

@@ -29,7 +29,7 @@ impl IndexMutator {
     ///
     /// Callers should typically begin a transaction on the session _before_ creating this object,
     /// then [Self::into_session](into_session()) this struct and commit the transaction when done.
-    pub fn new(session: Session, index: Arc<WiredTigerGraphVectorIndex>) -> Self {
+    pub fn new(index: Arc<WiredTigerGraphVectorIndex>, session: Session) -> Self {
         let searcher = GraphSearcher::new(index.metadata().index_search_params);
         Self {
             reader: WiredTigerGraphVectorIndexReader::new(index, session, None),
@@ -44,13 +44,14 @@ impl IndexMutator {
 
     /// Insert a vertex for `vector`. Returns the assigned id.
     pub fn insert(&mut self, vector: &[f32]) -> Result<i64> {
+        // A freshly initialized table might will have the metadata key but no entry point.
         let vertex_id = self
             .reader
             .session()
             .get_record_cursor(self.reader.index().graph_table_name())?
             .largest_key()
-            .unwrap_or(Err(Error::not_found_error()))
-            .map(|i| i + 1)?;
+            .unwrap_or(Ok(-1))
+            .map(|i| std::cmp::max(i, -1) + 1)?;
         self.insert_internal(vertex_id, vector).map(|_| vertex_id)
     }
 
@@ -62,10 +63,10 @@ impl IndexMutator {
         // TODO: normalize input vector.
         let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
-        // If there are no edges then we don't have an entry point, so fix that.
-        // We could execute the rest of this function safely but there's no point.
         if candidate_edges.is_empty() {
-            return graph.set_entry_point(vertex_id);
+            // Proceed through the rest of the function so that the inserts happen.
+            // This is mostly as a noop because there are no edges.
+            graph.set_entry_point(vertex_id)?;
         }
         let selected_len = prune_edges(
             &mut candidate_edges,
@@ -259,3 +260,101 @@ impl IndexMutator {
 }
 
 // XXX write a lot of tests.
+#[cfg(test)]
+mod tests {
+    use std::{num::NonZero, sync::Arc};
+
+    use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
+
+    use crate::{
+        graph::{Graph, GraphMetadata, GraphSearchParams, GraphVectorIndexReader},
+        scoring::VectorSimilarity,
+        wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader},
+    };
+
+    use super::IndexMutator;
+
+    struct Fixture {
+        index: Arc<WiredTigerGraphVectorIndex>,
+        conn: Arc<Connection>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Fixture {
+        fn search_params() -> GraphSearchParams {
+            GraphSearchParams {
+                beam_width: NonZero::new(16).unwrap(),
+                num_rerank: 16,
+            }
+        }
+
+        fn new_reader(&self) -> WiredTigerGraphVectorIndexReader {
+            WiredTigerGraphVectorIndexReader::new(
+                self.index.clone(),
+                self.conn.open_session().unwrap(),
+                None,
+            )
+        }
+
+        fn new_mutator(&self) -> IndexMutator {
+            IndexMutator::new(self.index.clone(), self.conn.open_session().unwrap())
+        }
+    }
+
+    impl Default for Fixture {
+        fn default() -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let conn = Connection::open(
+                dir.path().to_str().unwrap(),
+                Some(ConnectionOptionsBuilder::default().create().into()),
+            )
+            .unwrap();
+            let index = Arc::new(
+                WiredTigerGraphVectorIndex::from_init(
+                    GraphMetadata {
+                        dimensions: NonZero::new(2).unwrap(),
+                        similarity: VectorSimilarity::Euclidean,
+                        max_edges: NonZero::new(4).unwrap(),
+                        index_search_params: Self::search_params(),
+                    },
+                    "test",
+                )
+                .unwrap(),
+            );
+            index.init_index(&conn, None).unwrap();
+            Self {
+                _dir: dir,
+                conn,
+                index,
+            }
+        }
+    }
+
+    #[test]
+    fn insert_empty_graph() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let mut mutator = fixture.new_mutator();
+        let id = mutator.insert(&[0.0, 0.0])?;
+        assert_eq!(id, 0);
+        assert_eq!(fixture.new_reader().graph()?.entry_point(), Some(Ok(id)));
+        Ok(())
+    }
+
+    #[test]
+    fn delete_entry_point() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let mut mutator = fixture.new_mutator();
+        let entry_id = mutator.insert(&[0.0, 0.0])?;
+        let next_entry_id = mutator.insert(&[0.5, 0.5])?;
+        mutator.insert(&[1.0, 1.0])?;
+
+        mutator.delete(entry_id)?;
+        assert_eq!(
+            fixture.new_reader().graph()?.entry_point(),
+            Some(Ok(next_entry_id))
+        );
+        Ok(())
+    }
+}

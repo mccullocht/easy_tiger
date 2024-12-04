@@ -1,3 +1,9 @@
+//! WiredTiger implementations of graph access abstractions.
+//!
+//! None of these abstractions will begin or commit transactions, for performance reasons it
+//! is recommeded that callers begin a transaction before performing their search or mutation
+//! and commit or rollback the transaction when they are done.
+
 use std::{borrow::Cow, io, num::NonZero, sync::Arc};
 
 use wt_mdb::{Connection, Error, RecordCursorGuard, RecordView, Result, Session, WiredTigerError};

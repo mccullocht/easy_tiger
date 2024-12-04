@@ -44,6 +44,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a new (empty) index.
+    Init,
     /// Bulk load a set of vectors into an index.
     /// Requires that the index be uninitialized.
     BulkLoad(BulkLoadArgs),
@@ -55,7 +57,7 @@ enum Commands {
     Search(SearchArgs),
     /// Exhaustively search an index and create new Neighbors files.
     ExhaustiveSearch(ExhaustiveSearchArgs),
-    /// Add a list of vectors to the index.
+    /// Insert a vector or vectors from a file into the index.
     Add,
     /// Delete vectors by key range.
     Delete,

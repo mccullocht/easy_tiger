@@ -1,3 +1,6 @@
+//! Testing utilities to generate fake data.
+
+// TODO: delete this module and move it into mod search.
 use std::{borrow::Cow, num::NonZero, usize};
 
 use wt_mdb::Result;

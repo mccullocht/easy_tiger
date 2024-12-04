@@ -1,3 +1,8 @@
+//! Interfaces for graph configuration and access abstractions.
+//!
+//! Graph access traits provided here are used during graph search, and allow us to
+//! build indices with both WiredTiger backing and in-memory backing for bulk loads.
+
 use std::{borrow::Cow, collections::BTreeSet, num::NonZero};
 
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,8 @@
+//! EasyTiger is a scheme for indexing dense vectors backed by WiredTiger storage.
+//!
+//! This is built on top of WiredTiger APIs and designed to be used in parallel to
+//! another table as a projection of vector data from that source. Underneath a
+//! graph-based DiskANN index is used to serve vector similarity queries.
 use std::cmp::Ordering;
 
 pub mod bulk;

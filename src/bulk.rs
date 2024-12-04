@@ -1,3 +1,13 @@
+//! Tools to bulk load an index.
+//!
+//! For a brand new index we can take a set of vectors and build the graph in memory,
+//! then bulk load it into WiredTiger. This is much faster than incrementally building
+//! the graph through a series of transactions as there are fewer, simpler abstractions
+//! around vector access and graph edge state.
+//!
+//! Caveats:
+//! * Only `numpy` little-endian formatted `f32` vectors are accepted.
+//! * Row keys are assigned densely beginning at zero.
 use core::f64;
 use std::{
     borrow::Cow,

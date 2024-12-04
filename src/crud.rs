@@ -1,3 +1,4 @@
+//! Tools for mutating WiredTiger backed vector indices.
 use crate::{
     graph::{prune_edges, Graph, GraphVectorIndexReader, GraphVertex},
     quantization::binary_quantize,
@@ -11,12 +12,20 @@ use crate::{
 };
 use wt_mdb::{Error, Result};
 
+/// Perform mutations on the vector index.
+///
+/// This accepts a [wt_mdb::Session] that is used to mutate the index. Callers should
+/// begin a transaction before creating [CrudGraph] and commit the transaction when
+/// they are done mutating.
 pub struct CrudGraph {
     reader: WiredTigerGraphVectorIndexReader,
     searcher: GraphSearcher,
 }
 
 impl CrudGraph {
+    // XXX need a constructor
+    // XXX need into_session()
+
     /// Insert a vertex for `vector`. Returns the assigned id.
     pub fn insert(&mut self, vector: &[f32]) -> Result<i64> {
         let vertex_id = self
@@ -131,6 +140,8 @@ impl CrudGraph {
     }
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
+    ///
+    /// XXX need to check if the deleted vector is the entry point.
     pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
         let scorer = self.reader.metadata().new_scorer();
         let mut graph = self.reader.graph()?;

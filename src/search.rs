@@ -1,3 +1,5 @@
+//! Index search implementation, including graph search and re-ranking.
+
 use std::{
     collections::HashSet,
     num::NonZero,

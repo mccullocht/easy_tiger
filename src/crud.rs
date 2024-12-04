@@ -1,30 +1,46 @@
 //! Tools for mutating WiredTiger backed vector indices.
+use std::sync::Arc;
+
 use crate::{
     graph::{prune_edges, Graph, GraphVectorIndexReader, GraphVertex},
     quantization::binary_quantize,
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_node, encode_graph_node_internal, WiredTigerGraph,
+        encode_graph_node, encode_graph_node_internal, WiredTigerGraph, WiredTigerGraphVectorIndex,
         WiredTigerGraphVectorIndexReader, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
-use wt_mdb::{Error, Result};
+use wt_mdb::{Error, Result, Session};
 
 /// Perform mutations on the vector index.
 ///
-/// This accepts a [wt_mdb::Session] that is used to mutate the index. Callers should
-/// begin a transaction before creating [CrudGraph] and commit the transaction when
-/// they are done mutating.
-pub struct CrudGraph {
+/// This accepts a [wt_mdb::Session](Session) that is used to mutate the index. Callers
+/// should begin a transaction before creating [IndexMutator] and commit the transaction
+/// when they are done mutating.
+pub struct IndexMutator {
     reader: WiredTigerGraphVectorIndexReader,
     searcher: GraphSearcher,
 }
 
-impl CrudGraph {
-    // XXX need a constructor
-    // XXX need into_session()
+impl IndexMutator {
+    /// Create a new mutator operating on `index` and wrapping `session`.
+    ///
+    /// Callers should typically begin a transaction on the session _before_ creating this object,
+    /// then [Self::into_session](into_session()) this struct and commit the transaction when done.
+    pub fn new(session: Session, index: Arc<WiredTigerGraphVectorIndex>) -> Self {
+        let searcher = GraphSearcher::new(index.metadata().index_search_params);
+        Self {
+            reader: WiredTigerGraphVectorIndexReader::new(index, session, None),
+            searcher,
+        }
+    }
+
+    /// Obtain the inner [wt_mdb::Session](Session).
+    pub fn into_session(self) -> Session {
+        self.reader.into_session()
+    }
 
     /// Insert a vertex for `vector`. Returns the assigned id.
     pub fn insert(&mut self, vector: &[f32]) -> Result<i64> {
@@ -140,8 +156,6 @@ impl CrudGraph {
     }
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
-    ///
-    /// XXX need to check if the deleted vector is the entry point.
     pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
         let scorer = self.reader.metadata().new_scorer();
         let mut graph = self.reader.graph()?;
@@ -217,7 +231,7 @@ impl CrudGraph {
         if graph.entry_point().unwrap()? == vertex_id {
             let mut neighbors = vertices
                 .iter()
-                .map(|(id, vec, _)| Neighbor::new(*id, scorer.score(&vector, &vec)))
+                .map(|(id, vec, _)| Neighbor::new(*id, scorer.score(&vector, vec)))
                 .collect::<Vec<_>>();
             neighbors.sort();
             if let Some(ep_neighbor) = neighbors.first() {
@@ -243,3 +257,5 @@ impl CrudGraph {
         self.insert_internal(vertex_id, vector)
     }
 }
+
+// XXX write a lot of tests.

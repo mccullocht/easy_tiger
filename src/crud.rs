@@ -136,6 +136,7 @@ impl IndexMutator {
                         .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst.vector())))
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
+            neighbors.sort();
             let selected_len = prune_edges(
                 &mut neighbors,
                 self.reader.metadata().max_edges,
@@ -169,6 +170,7 @@ impl IndexMutator {
         graph.remove(vertex_id)?;
         self.reader.nav_vectors()?.remove(vertex_id)?;
 
+        // XXX move edge cache and relinking logic to another function.
         // Cache information about each vertex linked to vertex_id.
         // Remove any links back to vertex_id.
         let mut vertices = edges
@@ -259,7 +261,6 @@ impl IndexMutator {
     }
 }
 
-// XXX write a lot of tests.
 #[cfg(test)]
 mod tests {
     use std::{num::NonZero, sync::Arc};
@@ -378,22 +379,7 @@ mod tests {
     fn insert_to_prune() -> Result<()> {
         let fixture = Fixture::default();
 
-        println!("insert");
         let mut mutator = fixture.new_mutator();
-        println!("0");
-        mutator.insert(&[0.0, 0.0])?;
-        println!("1");
-        mutator.insert(&[0.1, 0.1])?;
-        println!("2");
-        mutator.insert(&[-0.1, 0.1])?;
-        println!("3");
-        mutator.insert(&[0.1, -0.1])?;
-        println!("4");
-        mutator.insert(&[-0.2, -0.2])?;
-        println!("5");
-        mutator.insert(&[-0.1, -0.1])?;
-        println!("6");
-        /*
         let vertex_ids = [
             mutator.insert(&[0.0, 0.0])?,
             mutator.insert(&[0.1, 0.1])?,
@@ -403,12 +389,11 @@ mod tests {
             mutator.insert(&[-0.1, -0.1])?,
         ];
 
-        println!("read");
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
         let vertex = graph.get(vertex_ids[0]).unwrap()?;
-        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 2, 3, 5]);
-        */
+        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 5]);
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
         Ok(())
     }
@@ -438,7 +423,8 @@ mod tests {
             fixture.new_reader().graph()?.entry_point(),
             Some(Ok(next_entry_id))
         );
-        // XXX do a search
+
+        assert_eq!(fixture.search(&[0.0, 0.0])?, vec![1, 2]);
         Ok(())
     }
 

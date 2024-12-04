@@ -4,7 +4,7 @@
 //! is recommeded that callers begin a transaction before performing their search or mutation
 //! and commit or rollback the transaction when they are done.
 
-use std::{borrow::Cow, io, num::NonZero, sync::Arc};
+use std::{borrow::Cow, io, sync::Arc};
 
 use wt_mdb::{
     options::CreateOptions, Connection, Error, Record, RecordCursorGuard, RecordView, Result,
@@ -50,20 +50,21 @@ impl<'a> NavVectorStore for WiredTigerNavVectorStore<'a> {
 
 /// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
 pub struct WiredTigerGraphVertex<'a> {
-    dimensions: NonZero<usize>,
+    // split point between vector data and edge data.
+    split: usize,
     data: Cow<'a, [u8]>,
 }
 
 impl<'a> WiredTigerGraphVertex<'a> {
     fn new(metadata: &GraphMetadata, data: Cow<'a, [u8]>) -> Self {
         Self {
-            dimensions: metadata.dimensions,
+            split: metadata.dimensions.get() * std::mem::size_of::<f32>(),
             data,
         }
     }
 
     pub(crate) fn vector_bytes(&self) -> &[u8] {
-        &self.data
+        &self.data[..self.split]
     }
 
     // Vector f32 data is stored little endian so we can get away with aliasing. Slice requires
@@ -73,9 +74,10 @@ impl<'a> WiredTigerGraphVertex<'a> {
         {
             // WiredTiger does not guarantee that the returned memory will be aligned, a
             // Try to align it and if that fails, copy the data.
-            let (prefix, vector, _) = unsafe { self.data.as_ref().align_to::<f32>() };
+            let (prefix, vector, _) =
+                unsafe { self.data.as_ref()[0..self.split].align_to::<f32>() };
             if prefix.is_empty() {
-                return Some(&vector[..self.dimensions.get()]);
+                return Some(vector);
             }
         }
         None
@@ -89,22 +91,17 @@ impl<'a> GraphVertex for WiredTigerGraphVertex<'a> {
         self.maybe_alias_vector_data()
             .map(|v| v.into())
             .unwrap_or_else(|| {
-                let mut out = vec![0.0f32; self.dimensions.get()];
-                for (i, o) in self
-                    .data
-                    .as_ref()
+                self.data.as_ref()[0..self.split]
                     .chunks(std::mem::size_of::<f32>())
-                    .zip(out.iter_mut())
-                {
-                    *o = f32::from_le_bytes(i.try_into().expect("array of 4 conversion."));
-                }
-                out.into()
+                    .map(|b| f32::from_le_bytes(b.try_into().expect("array of 4 conversion")))
+                    .collect::<Vec<_>>()
+                    .into()
             })
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
         WiredTigerEdgeIterator {
-            data: &self.data.as_ref()[(self.dimensions.get() * std::mem::size_of::<f32>())..],
+            data: &self.data.as_ref()[self.split..],
             prev: 0,
         }
     }

@@ -273,7 +273,7 @@ impl GraphSearcher {
                 .map(|c| {
                     Neighbor::new(
                         c.neighbor.vertex(),
-                        scorer.score(query, c.state.vector().expect("node visited")),
+                        scorer.score(&normalized_query, c.state.vector().expect("node visited")),
                     )
                 })
                 .collect::<Vec<_>>();

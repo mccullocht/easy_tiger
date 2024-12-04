@@ -267,8 +267,9 @@ mod tests {
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
     use crate::{
-        graph::{Graph, GraphMetadata, GraphSearchParams, GraphVectorIndexReader},
+        graph::{Graph, GraphMetadata, GraphSearchParams, GraphVectorIndexReader, GraphVertex},
         scoring::VectorSimilarity,
+        search::GraphSearcher,
         wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader},
     };
 
@@ -298,6 +299,14 @@ mod tests {
 
         fn new_mutator(&self) -> IndexMutator {
             IndexMutator::new(self.index.clone(), self.conn.open_session().unwrap())
+        }
+
+        fn search(&self, query: &[f32]) -> Result<Vec<i64>> {
+            let mut searcher = GraphSearcher::new(Self::search_params());
+            let mut reader = self.new_reader();
+            searcher
+                .search(query, &mut reader)
+                .map(|neighbors| neighbors.into_iter().map(|n| n.vertex()).collect())
         }
     }
 
@@ -331,14 +340,88 @@ mod tests {
     }
 
     #[test]
-    fn insert_empty_graph() -> Result<()> {
+    fn empty_graph() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let mut reader = fixture.new_reader();
+        assert_eq!(reader.graph()?.entry_point(), None);
+        let mut searcher = GraphSearcher::new(Fixture::search_params());
+        assert_eq!(searcher.search(&[0.5, -0.5], &mut reader), Ok(vec![]));
+        Ok(())
+    }
+
+    #[test]
+    fn insert_one() -> Result<()> {
         let fixture = Fixture::default();
 
         let mut mutator = fixture.new_mutator();
         let id = mutator.insert(&[0.0, 0.0])?;
         assert_eq!(id, 0);
         assert_eq!(fixture.new_reader().graph()?.entry_point(), Some(Ok(id)));
+        assert_eq!(fixture.search(&[1.0, 1.0]), Ok(vec![id]));
         Ok(())
+    }
+
+    #[test]
+    fn insert_two() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let mut mutator = fixture.new_mutator();
+        mutator.insert(&[0.0, 0.0])?;
+        mutator.insert(&[0.5, 0.5])?;
+        assert_eq!(fixture.search(&[1.0, 1.0]), Ok(vec![1, 0]));
+        Ok(())
+    }
+
+    // Insert enough vectors that we have to prune the edge list for the entry point.
+    #[test]
+    fn insert_to_prune() -> Result<()> {
+        let fixture = Fixture::default();
+
+        println!("insert");
+        let mut mutator = fixture.new_mutator();
+        println!("0");
+        mutator.insert(&[0.0, 0.0])?;
+        println!("1");
+        mutator.insert(&[0.1, 0.1])?;
+        println!("2");
+        mutator.insert(&[-0.1, 0.1])?;
+        println!("3");
+        mutator.insert(&[0.1, -0.1])?;
+        println!("4");
+        mutator.insert(&[-0.2, -0.2])?;
+        println!("5");
+        mutator.insert(&[-0.1, -0.1])?;
+        println!("6");
+        /*
+        let vertex_ids = [
+            mutator.insert(&[0.0, 0.0])?,
+            mutator.insert(&[0.1, 0.1])?,
+            mutator.insert(&[-0.1, 0.1])?,
+            mutator.insert(&[0.1, -0.1])?,
+            mutator.insert(&[-0.2, -0.2])?,
+            mutator.insert(&[-0.1, -0.1])?,
+        ];
+
+        println!("read");
+        let reader = fixture.new_reader();
+        let mut graph = reader.graph()?;
+        let vertex = graph.get(vertex_ids[0]).unwrap()?;
+        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 2, 3, 5]);
+        */
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_one() {
+        unimplemented!()
+    }
+
+    // Delete an edge
+    #[test]
+    fn delete_relink() {
+        unimplemented!()
     }
 
     #[test]
@@ -355,6 +438,12 @@ mod tests {
             fixture.new_reader().graph()?.entry_point(),
             Some(Ok(next_entry_id))
         );
+        // XXX do a search
         Ok(())
+    }
+
+    #[test]
+    fn update() {
+        unimplemented!()
     }
 }

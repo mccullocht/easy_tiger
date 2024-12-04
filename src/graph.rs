@@ -10,7 +10,8 @@ use wt_mdb::{Error, Result};
 
 use crate::{
     scoring::{
-        DotProductScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer, VectorSimilarity,
+        DotProductScorer, EuclideanScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer,
+        VectorSimilarity,
     },
     Neighbor,
 };
@@ -39,7 +40,10 @@ pub struct GraphMetadata {
 impl GraphMetadata {
     /// Return a scorer for high fidelity vectors in the index.
     pub fn new_scorer(&self) -> Box<dyn F32VectorScorer> {
-        Box::new(DotProductScorer)
+        match self.similarity {
+            VectorSimilarity::Euclidean => Box::new(EuclideanScorer),
+            VectorSimilarity::Dot => Box::new(DotProductScorer),
+        }
     }
 
     /// Return a scorer for quantized navigational vectors in the index.

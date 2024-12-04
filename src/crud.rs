@@ -302,6 +302,14 @@ mod tests {
             IndexMutator::new(self.index.clone(), self.conn.open_session().unwrap())
         }
 
+        fn insert_many(&self, vectors: &[[f32; 2]]) -> Result<Vec<i64>> {
+            let mut mutator = self.new_mutator();
+            vectors
+                .iter()
+                .map(|v| mutator.insert(v.as_ref()))
+                .collect::<Result<Vec<_>>>()
+        }
+
         fn search(&self, query: &[f32]) -> Result<Vec<i64>> {
             let mut searcher = GraphSearcher::new(Self::search_params());
             let mut reader = self.new_reader();
@@ -367,9 +375,7 @@ mod tests {
     fn insert_two() -> Result<()> {
         let fixture = Fixture::default();
 
-        let mut mutator = fixture.new_mutator();
-        mutator.insert(&[0.0, 0.0])?;
-        mutator.insert(&[0.5, 0.5])?;
+        fixture.insert_many(&[[0.0, 0.0], [0.5, 0.5]])?;
         assert_eq!(fixture.search(&[1.0, 1.0]), Ok(vec![1, 0]));
         Ok(())
     }
@@ -379,15 +385,14 @@ mod tests {
     fn insert_to_prune() -> Result<()> {
         let fixture = Fixture::default();
 
-        let mut mutator = fixture.new_mutator();
-        let vertex_ids = [
-            mutator.insert(&[0.0, 0.0])?,
-            mutator.insert(&[0.1, 0.1])?,
-            mutator.insert(&[-0.1, 0.1])?,
-            mutator.insert(&[0.1, -0.1])?,
-            mutator.insert(&[-0.2, -0.2])?,
-            mutator.insert(&[-0.1, -0.1])?,
-        ];
+        let vertex_ids = fixture.insert_many(&[
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.1],
+            [0.1, -0.1],
+            [-0.2, -0.2],
+            [-0.1, -0.1],
+        ])?;
 
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
@@ -399,8 +404,21 @@ mod tests {
     }
 
     #[test]
-    fn delete_one() {
-        unimplemented!()
+    fn delete_one() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let vertex_ids = fixture.insert_many(&[[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])?;
+        fixture.new_mutator().delete(vertex_ids[1])?;
+        assert_eq!(
+            fixture.search(&[0.0, 0.0])?,
+            vertex_ids
+                .iter()
+                .copied()
+                .filter(|i| *i != vertex_ids[1])
+                .collect::<Vec<_>>()
+        );
+
+        Ok(())
     }
 
     // Delete an edge
@@ -423,8 +441,8 @@ mod tests {
             fixture.new_reader().graph()?.entry_point(),
             Some(Ok(next_entry_id))
         );
-
         assert_eq!(fixture.search(&[0.0, 0.0])?, vec![1, 2]);
+
         Ok(())
     }
 

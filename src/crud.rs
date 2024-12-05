@@ -16,9 +16,9 @@ use wt_mdb::{Error, Result, Session};
 
 /// Perform mutations on the vector index.
 ///
-/// This accepts a [wt_mdb::Session](Session) that is used to mutate the index. Callers
-/// should begin a transaction before creating [IndexMutator] and commit the transaction
-/// when they are done mutating.
+/// This accepts a [wt_mdb::Session] that is used to mutate the index. Callers should begin a
+/// transaction before creating [IndexMutator] and commit the transaction when they are done
+/// mutating.
 pub struct IndexMutator {
     reader: WiredTigerGraphVectorIndexReader,
     searcher: GraphSearcher,
@@ -28,7 +28,7 @@ impl IndexMutator {
     /// Create a new mutator operating on `index` and wrapping `session`.
     ///
     /// Callers should typically begin a transaction on the session _before_ creating this object,
-    /// then [Self::into_session](into_session()) this struct and commit the transaction when done.
+    /// then [Self::into_session()] this struct and commit the transaction when done.
     pub fn new(index: Arc<WiredTigerGraphVectorIndex>, session: Session) -> Self {
         let searcher = GraphSearcher::new(index.metadata().index_search_params);
         Self {
@@ -37,7 +37,7 @@ impl IndexMutator {
         }
     }
 
-    /// Obtain the inner [wt_mdb::Session](Session).
+    /// Obtain the inner [wt_mdb::Session].
     pub fn into_session(self) -> Session {
         self.reader.into_session()
     }
@@ -423,8 +423,32 @@ mod tests {
 
     // Delete an edge
     #[test]
-    fn delete_relink() {
-        unimplemented!()
+    fn delete_relink() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let vertex_ids = fixture.insert_many(&[
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.1],
+            [0.1, -0.1],
+            [-0.2, -0.2],
+            [-0.1, -0.1],
+        ])?;
+
+        let reader = fixture.new_reader();
+        let mut graph = reader.graph()?;
+        let vertex = graph.get(vertex_ids[0]).unwrap()?;
+        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 5]);
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
+
+        fixture.new_mutator().delete(1)?;
+        let reader = fixture.new_reader();
+        let mut graph = reader.graph()?;
+        let vertex = graph.get(vertex_ids[0]).unwrap()?;
+        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[2, 3, 5]);
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 2, 3, 5, 4]));
+
+        Ok(())
     }
 
     #[test]
@@ -447,7 +471,34 @@ mod tests {
     }
 
     #[test]
-    fn update() {
-        unimplemented!()
+    fn delete_only_point() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let mut mutator = fixture.new_mutator();
+        let id = mutator.insert(&[0.0, 0.0])?;
+        assert_eq!(fixture.search(&[0.0, 0.0])?, vec![id]);
+        mutator.delete(id)?;
+        assert_eq!(fixture.search(&[0.0, 0.0])?, Vec::<i64>::new());
+
+        Ok(())
+    }
+
+    #[test]
+    fn update() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let vertex_ids = fixture.insert_many(&[
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.1],
+            [0.1, -0.1],
+            [-0.2, -0.2],
+            [-0.1, -0.1],
+        ])?;
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
+        fixture.new_mutator().update(vertex_ids[0], &[1.0, 1.0])?;
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![1, 2, 3, 5, 4, 0]));
+
+        Ok(())
     }
 }

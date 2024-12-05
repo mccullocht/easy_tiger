@@ -1,3 +1,5 @@
+//! Utilities to access input formats for index building.
+
 use std::{io, num::NonZero, ops::Index};
 
 use stable_deref_trait::StableDeref;

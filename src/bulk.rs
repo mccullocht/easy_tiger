@@ -1,7 +1,16 @@
+//! Tools to bulk load an index.
+//!
+//! For a brand new index we can take a set of vectors and build the graph in memory,
+//! then bulk load it into WiredTiger. This is much faster than incrementally building
+//! the graph through a series of transactions as there are fewer, simpler abstractions
+//! around vector access and graph edge state.
+//!
+//! Caveats:
+//! * Only `numpy` little-endian formatted `f32` vectors are accepted.
+//! * Row keys are assigned densely beginning at zero.
 use core::f64;
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
     io::{BufWriter, Write},
     num::NonZero,
     ops::Range,
@@ -18,7 +27,7 @@ use tempfile::tempfile;
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
     input::{DerefVectorStore, VectorStore},
     quantization::{binary_quantize_to, binary_quantized_bytes},
     scoring::F32VectorScorer,
@@ -300,11 +309,13 @@ where
     ) -> Result<Vec<Neighbor>> {
         let mut graph = BulkLoadBuilderGraph(self);
         let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
-        let pruned_len = self
-            .prune(&mut candidates, &mut graph, self.scorer.as_ref())?
-            .0
-            .len();
-        candidates.truncate(pruned_len);
+        let split = prune_edges(
+            &mut candidates,
+            self.index.config().max_edges,
+            &mut graph,
+            self.scorer.as_ref(),
+        )?;
+        candidates.truncate(split);
         Ok(candidates)
     }
 
@@ -335,14 +346,14 @@ where
             return Ok(());
         }
 
-        let (selected, dropped) = self.prune(
+        guard.sort();
+        let split = prune_edges(
             &mut guard,
+            self.index.config().max_edges,
             &mut BulkLoadBuilderGraph(self),
             self.scorer.as_ref(),
         )?;
-        let pruned_len = selected.len();
-        let dropped = dropped.to_vec();
-        guard.truncate(pruned_len);
+        let dropped = guard.split_off(split);
         drop(guard);
 
         // Remove in-links from nodes that we dropped out-links to.
@@ -356,73 +367,11 @@ where
         }
         Ok(())
     }
-
-    /// Prune `edges`, enforcing RNG properties with alpha parameter.
-    ///
-    /// Returns two slices: one containing the selected nodes and one containing the unselected nodes.
-    fn prune<'a>(
-        &self,
-        edges: &'a mut [Neighbor],
-        graph: &mut BulkLoadBuilderGraph<'_, D>,
-        scorer: &dyn F32VectorScorer,
-    ) -> Result<(&'a [Neighbor], &'a [Neighbor])> {
-        if edges.is_empty() {
-            return Ok((&[], &[]));
-        }
-        edges.sort();
-        // TODO: replace with a fixed length bitset
-        let mut selected = BTreeSet::new();
-        selected.insert(0); // we always keep the first node.
-        for alpha in [1.0, 1.2] {
-            for (i, e) in edges.iter().enumerate().skip(1) {
-                if selected.contains(&i) {
-                    continue;
-                }
-
-                // TODO: fix error handling so we can reuse this elsewhere.
-                let e_vec = graph
-                    .get(e.vertex())
-                    .expect("bulk load")
-                    .expect("numpy vector store")
-                    .vector()
-                    .into_owned();
-                let mut select = false;
-                for p in selected.iter().take_while(|j| **j < i).map(|j| edges[*j]) {
-                    let p_node = graph
-                        .get(p.vertex())
-                        .expect("bulk load")
-                        .expect("numpy vector store");
-                    if scorer.score(&e_vec, &p_node.vector()) > e.score * alpha {
-                        select = true;
-                        break;
-                    }
-                }
-
-                if select {
-                    selected.insert(i);
-                    if selected.len() >= self.index.config().max_edges.get() {
-                        break;
-                    }
-                }
-            }
-
-            if selected.len() >= self.index.config().max_edges.get() {
-                break;
-            }
-        }
-
-        // Partition edges into selected and unselected.
-        for (i, j) in selected.iter().enumerate() {
-            edges.swap(i, *j);
-        }
-
-        Ok(edges.split_at(selected.len()))
-    }
 }
 
 struct BulkLoadGraphVectorIndexReader<'a, D: Send>(&'a BulkLoadBuilder<D>, Session);
 
-impl<'a, D> BulkLoadGraphVectorIndexReader<'a, D>
+impl<D> BulkLoadGraphVectorIndexReader<'_, D>
 where
     D: Send,
 {
@@ -431,12 +380,18 @@ where
     }
 }
 
-impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D>
+impl<D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, D>
 where
     D: Send,
 {
-    type Graph<'b> = BulkLoadBuilderGraph<'b, D> where Self: 'b;
-    type NavVectorStore<'b> = BulkLoadBuilderNavVectorStore<'b, D> where Self: 'b;
+    type Graph<'b>
+        = BulkLoadBuilderGraph<'b, D>
+    where
+        Self: 'b;
+    type NavVectorStore<'b>
+        = BulkLoadBuilderNavVectorStore<'b, D>
+    where
+        Self: 'b;
 
     fn config(&self) -> &GraphConfig {
         self.0.index.config()
@@ -453,11 +408,14 @@ where
 
 struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>);
 
-impl<'a, D> Graph for BulkLoadBuilderGraph<'a, D>
+impl<D> Graph for BulkLoadBuilderGraph<'_, D>
 where
     D: Send,
 {
-    type Vertex<'c> = BulkLoadGraphVertex<'c, D> where Self: 'c;
+    type Vertex<'c>
+        = BulkLoadGraphVertex<'c, D>
+    where
+        Self: 'c;
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let vertex = self.0.entry_vertex.load(atomic::Ordering::Relaxed);
@@ -481,8 +439,11 @@ struct BulkLoadGraphVertex<'a, D> {
     vertex_id: i64,
 }
 
-impl<'a, D> GraphVertex for BulkLoadGraphVertex<'a, D> {
-    type EdgeIterator<'c> = BulkNodeEdgesIterator<'c> where Self: 'c;
+impl<D> GraphVertex for BulkLoadGraphVertex<'_, D> {
+    type EdgeIterator<'c>
+        = BulkNodeEdgesIterator<'c>
+    where
+        Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
         self.builder.vectors[self.vertex_id as usize].into()
@@ -508,7 +469,7 @@ impl<'a> BulkNodeEdgesIterator<'a> {
     }
 }
 
-impl<'a> Iterator for BulkNodeEdgesIterator<'a> {
+impl Iterator for BulkNodeEdgesIterator<'_> {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -518,7 +479,7 @@ impl<'a> Iterator for BulkNodeEdgesIterator<'a> {
 
 struct BulkLoadBuilderNavVectorStore<'a, D: Send>(&'a BulkLoadBuilder<D>);
 
-impl<'a, D> NavVectorStore for BulkLoadBuilderNavVectorStore<'a, D>
+impl<D> NavVectorStore for BulkLoadBuilderNavVectorStore<'_, D>
 where
     D: Send,
 {

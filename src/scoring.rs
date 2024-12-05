@@ -1,3 +1,5 @@
+//! Dense vector scoring traits and implementations.
+
 use std::{io, str::FromStr};
 
 use serde::{Deserialize, Serialize};

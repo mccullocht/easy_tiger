@@ -16,7 +16,6 @@ use std::borrow::Cow;
 use std::ffi::CStr;
 use std::io::ErrorKind;
 use std::num::NonZero;
-use std::ptr::NonNull;
 
 /// WiredTiger specific error codes.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -77,7 +76,7 @@ impl From<WiredTigerError> for ErrorKind {
 }
 
 /// An Error, either WiredTiger-specific or POSIX.
-// TODO: real posix mapping and an unknown type.
+// TODO: use rustix::io::Errno instead of Posix
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Error {
     WiredTiger(WiredTigerError),
@@ -181,10 +180,34 @@ fn make_result<T>(code: i32, value: T) -> Result<T> {
         .unwrap_or(Ok(value))
 }
 
-fn wrap_ptr_create<T>(code: i32, ptr: *mut T) -> Result<NonNull<T>> {
-    let p = make_result(code, ptr)?;
-    NonNull::new(p).ok_or(Error::generic_error())
+fn map_not_found<T>(r: Result<T>) -> Option<Result<T>> {
+    if r.as_ref().is_err_and(|e| *e == Error::not_found_error()) {
+        None
+    } else {
+        Some(r)
+    }
 }
+
+/// Call a `$func` on the `NonNull` WiredTiger object `$ptr` optionally with some `$args`.
+/// Usually `$func` is expected to return an integer code which will be coerced into `wt_mdb::Result<()>`;
+/// start the macro with `void` if `$func` returns void.
+/// This may panic if any of the function pointers is `None`; this invariant is guaranteed by WT.
+macro_rules! wt_call {
+    ($ptr:expr, $func:ident) => {
+        crate::make_result($ptr.as_ref().$func.expect("function pointer must be non-null")($ptr.as_ptr()), ())
+    };
+    ($ptr:expr, $func:ident, $( $args:expr ),* ) => {
+        crate::make_result($ptr.as_ref().$func.expect("function pointer must be non-null")($ptr.as_ptr(), $($args), *), ())
+    };
+    (void $ptr:expr, $func:ident) => {
+        {$ptr.as_ref().$func.expect("function pointer must be non-null")($ptr.as_ptr()); Ok(())}
+    };
+    (void $ptr:expr, $func:ident, $( $args:expr ),* ) => {
+        {$ptr.as_ref().$func.expect("function pointer must be non-null")($ptr.as_ptr(), $($args), *); Ok::<(), crate::Error>(())}
+    };
+}
+
+use wt_call;
 
 #[cfg(test)]
 mod test {

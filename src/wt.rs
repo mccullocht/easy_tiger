@@ -42,7 +42,7 @@ impl<'a> WiredTigerNavVectorStore<'a> {
     }
 }
 
-impl<'a> NavVectorStore for WiredTigerNavVectorStore<'a> {
+impl NavVectorStore for WiredTigerNavVectorStore<'_> {
     fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
         Some(unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value))
     }
@@ -84,8 +84,11 @@ impl<'a> WiredTigerGraphVertex<'a> {
     }
 }
 
-impl<'a> GraphVertex for WiredTigerGraphVertex<'a> {
-    type EdgeIterator<'c> = WiredTigerEdgeIterator<'c> where Self: 'c;
+impl GraphVertex for WiredTigerGraphVertex<'_> {
+    type EdgeIterator<'c>
+        = WiredTigerEdgeIterator<'c>
+    where
+        Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
         self.maybe_alias_vector_data()
@@ -114,7 +117,7 @@ pub struct WiredTigerEdgeIterator<'a> {
     prev: i64,
 }
 
-impl<'a> Iterator for WiredTigerEdgeIterator<'a> {
+impl Iterator for WiredTigerEdgeIterator<'_> {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -152,8 +155,11 @@ impl<'a> WiredTigerGraph<'a> {
     }
 }
 
-impl<'a> Graph for WiredTigerGraph<'a> {
-    type Vertex<'c> = WiredTigerGraphVertex<'c> where Self: 'c;
+impl Graph for WiredTigerGraph<'_> {
+    type Vertex<'c>
+        = WiredTigerGraphVertex<'c>
+    where
+        Self: 'c;
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let result = unsafe { self.cursor.seek_exact_unsafe(ENTRY_POINT_KEY)? };
@@ -281,8 +287,14 @@ impl WiredTigerGraphVectorIndexReader {
 }
 
 impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
-    type Graph<'a> = WiredTigerGraph<'a> where Self: 'a;
-    type NavVectorStore<'a> = WiredTigerNavVectorStore<'a> where Self: 'a;
+    type Graph<'a>
+        = WiredTigerGraph<'a>
+    where
+        Self: 'a;
+    type NavVectorStore<'a>
+        = WiredTigerNavVectorStore<'a>
+    where
+        Self: 'a;
 
     fn metadata(&self) -> &GraphMetadata {
         &self.index.metadata
@@ -365,7 +377,7 @@ pub(crate) enum VectorRep<'a> {
     Bytes(&'a [u8]),
 }
 
-impl<'a> VectorRep<'a> {
+impl VectorRep<'_> {
     fn byte_len(&self) -> usize {
         match *self {
             Self::Float(f) => std::mem::size_of_val(f),

@@ -373,7 +373,7 @@ where
 
 struct BulkLoadGraphVectorIndexReader<'a, D: Send>(&'a BulkLoadBuilder<D>, Session);
 
-impl<'a, D> BulkLoadGraphVectorIndexReader<'a, D>
+impl<D> BulkLoadGraphVectorIndexReader<'_, D>
 where
     D: Send,
 {
@@ -382,12 +382,18 @@ where
     }
 }
 
-impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D>
+impl<D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, D>
 where
     D: Send,
 {
-    type Graph<'b> = BulkLoadBuilderGraph<'b, D> where Self: 'b;
-    type NavVectorStore<'b> = BulkLoadBuilderNavVectorStore<'b, D> where Self: 'b;
+    type Graph<'b>
+        = BulkLoadBuilderGraph<'b, D>
+    where
+        Self: 'b;
+    type NavVectorStore<'b>
+        = BulkLoadBuilderNavVectorStore<'b, D>
+    where
+        Self: 'b;
 
     fn metadata(&self) -> &GraphMetadata {
         self.0.index.metadata()
@@ -404,11 +410,14 @@ where
 
 struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>);
 
-impl<'a, D> Graph for BulkLoadBuilderGraph<'a, D>
+impl<D> Graph for BulkLoadBuilderGraph<'_, D>
 where
     D: Send,
 {
-    type Vertex<'c> = BulkLoadGraphVertex<'c, D> where Self: 'c;
+    type Vertex<'c>
+        = BulkLoadGraphVertex<'c, D>
+    where
+        Self: 'c;
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let vertex = self.0.entry_vertex.load(atomic::Ordering::Relaxed);
@@ -432,8 +441,11 @@ struct BulkLoadGraphVertex<'a, D> {
     vertex_id: i64,
 }
 
-impl<'a, D> GraphVertex for BulkLoadGraphVertex<'a, D> {
-    type EdgeIterator<'c> = BulkNodeEdgesIterator<'c> where Self: 'c;
+impl<D> GraphVertex for BulkLoadGraphVertex<'_, D> {
+    type EdgeIterator<'c>
+        = BulkNodeEdgesIterator<'c>
+    where
+        Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
         self.builder.vectors[self.vertex_id as usize].into()
@@ -459,7 +471,7 @@ impl<'a> BulkNodeEdgesIterator<'a> {
     }
 }
 
-impl<'a> Iterator for BulkNodeEdgesIterator<'a> {
+impl Iterator for BulkNodeEdgesIterator<'_> {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -469,7 +481,7 @@ impl<'a> Iterator for BulkNodeEdgesIterator<'a> {
 
 struct BulkLoadBuilderNavVectorStore<'a, D: Send>(&'a BulkLoadBuilder<D>);
 
-impl<'a, D> NavVectorStore for BulkLoadBuilderNavVectorStore<'a, D>
+impl<D> NavVectorStore for BulkLoadBuilderNavVectorStore<'_, D>
 where
     D: Send,
 {

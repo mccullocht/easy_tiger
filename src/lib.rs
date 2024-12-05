@@ -12,8 +12,6 @@ pub mod input;
 pub mod quantization;
 pub mod scoring;
 pub mod search;
-#[cfg(test)]
-mod test;
 pub mod worker_pool;
 pub mod wt;
 

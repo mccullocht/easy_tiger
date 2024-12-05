@@ -170,10 +170,9 @@ impl IndexMutator {
         graph.remove(vertex_id)?;
         self.reader.nav_vectors()?.remove(vertex_id)?;
 
-        // XXX move edge cache and relinking logic to another function.
         // Cache information about each vertex linked to vertex_id.
         // Remove any links back to vertex_id.
-        let mut vertices = edges
+        let mut vertex_data = edges
             .into_iter()
             .map(|e| {
                 graph
@@ -189,12 +188,44 @@ impl IndexMutator {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        // Score all pairs of vectors among the edges of vertex_id that are not already connected.
-        let mut candidate_links = vertices
+        // Create links between edges of the deleted node if needed.
+        self.cross_link_peer_vertices(&mut vertex_data, scorer.as_ref())?;
+
+        // Oh no, we've deleted the entry point! Find the closes point amongst the
+        // edges of this node to use as a new one. So long as at least one vector is in
+        // the index it will be safe to unwrap() entry_point() here.
+        if graph.entry_point().unwrap()? == vertex_id {
+            let mut neighbors = vertex_data
+                .iter()
+                .map(|(id, vec, _)| Neighbor::new(*id, scorer.score(&vector, vec)))
+                .collect::<Vec<_>>();
+            neighbors.sort();
+            if let Some(ep_neighbor) = neighbors.first() {
+                graph.set(ENTRY_POINT_KEY, &ep_neighbor.vertex().to_le_bytes())?
+            } else {
+                graph.remove(ENTRY_POINT_KEY)?
+            }
+        }
+
+        // Write all the mutated nodes back to WT.
+        for (vertex_id, vector, edges) in vertex_data {
+            graph.set(vertex_id, &encode_graph_node(&vector, edges))?;
+        }
+
+        Ok(())
+    }
+
+    fn cross_link_peer_vertices(
+        &self,
+        vertex_data: &mut [(i64, Vec<f32>, Vec<i64>)],
+        scorer: &dyn F32VectorScorer,
+    ) -> Result<()> {
+        // Score all pairs of vectors among the passed vertices.
+        let mut candidate_links = vertex_data
             .iter()
             .enumerate()
             .flat_map(|(src, (_, src_vector, src_edges))| {
-                vertices
+                vertex_data
                     .iter()
                     .enumerate()
                     .skip(src + 1)
@@ -220,33 +251,12 @@ impl IndexMutator {
         });
         let max_edges = self.reader.metadata().max_edges.get();
         for (src, dst, _) in candidate_links {
-            if vertices[src].2.len() < max_edges && vertices[dst].2.len() < max_edges {
-                let src_id = vertices[src].0;
-                let dst_id = vertices[dst].0;
-                vertices[src].2.push(dst_id);
-                vertices[dst].2.push(src_id);
+            if vertex_data[src].2.len() < max_edges && vertex_data[dst].2.len() < max_edges {
+                let src_id = vertex_data[src].0;
+                let dst_id = vertex_data[dst].0;
+                vertex_data[src].2.push(dst_id);
+                vertex_data[dst].2.push(src_id);
             }
-        }
-
-        // Oh no, we've deleted the entry point! Find the closes point amongst the
-        // edges of this node to use as a new one. So long as at least one vector is in
-        // the index it will be safe to unwrap() entry_point() here.
-        if graph.entry_point().unwrap()? == vertex_id {
-            let mut neighbors = vertices
-                .iter()
-                .map(|(id, vec, _)| Neighbor::new(*id, scorer.score(&vector, vec)))
-                .collect::<Vec<_>>();
-            neighbors.sort();
-            if let Some(ep_neighbor) = neighbors.first() {
-                graph.set(ENTRY_POINT_KEY, &ep_neighbor.vertex().to_le_bytes())?
-            } else {
-                graph.remove(ENTRY_POINT_KEY)?
-            }
-        }
-
-        // Write all the mutated nodes back to WT.
-        for (vertex_id, vector, edges) in vertices {
-            graph.set(vertex_id, &encode_graph_node(&vector, edges))?;
         }
 
         Ok(())

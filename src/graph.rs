@@ -1,10 +1,19 @@
-use std::{borrow::Cow, num::NonZero};
+//! Interfaces for graph configuration and access abstractions.
+//!
+//! Graph access traits provided here are used during graph search, and allow us to
+//! build indices with both WiredTiger backing and in-memory backing for bulk loads.
+
+use std::{borrow::Cow, collections::BTreeSet, num::NonZero};
 
 use serde::{Deserialize, Serialize};
-use wt_mdb::Result;
+use wt_mdb::{Error, Result};
 
-use crate::scoring::{
-    DotProductScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer, VectorSimilarity,
+use crate::{
+    scoring::{
+        DotProductScorer, EuclideanScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer,
+        VectorSimilarity,
+    },
+    Neighbor,
 };
 
 /// Parameters for a search over a Vamana graph.
@@ -31,7 +40,10 @@ pub struct GraphMetadata {
 impl GraphMetadata {
     /// Return a scorer for high fidelity vectors in the index.
     pub fn new_scorer(&self) -> Box<dyn F32VectorScorer> {
-        Box::new(DotProductScorer)
+        match self.similarity {
+            VectorSimilarity::Euclidean => Box::new(EuclideanScorer),
+            VectorSimilarity::Dot => Box::new(DotProductScorer),
+        }
     }
 
     /// Return a scorer for quantized navigational vectors in the index.
@@ -115,4 +127,66 @@ pub trait GraphVertex {
 pub trait NavVectorStore {
     /// Get the navigation vector for a single vertex.
     fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
+}
+
+/// Prune `edges` down to at most `max_edges`. Use `graph` and `scorer` to inform this decision.
+/// Returns a split point: all edges before that point are selected, all after are to be dropped.
+/// REQUIRES: `edges.is_sorted()`.
+// TODO: alpha value(s) should be tuneable.
+pub(crate) fn prune_edges(
+    edges: &mut [Neighbor],
+    max_edges: NonZero<usize>,
+    graph: &mut impl Graph,
+    scorer: &dyn F32VectorScorer,
+) -> Result<usize> {
+    if edges.is_empty() {
+        return Ok(0);
+    }
+
+    debug_assert!(edges.is_sorted());
+
+    // Obtain all the vectors to make relative neighbor graph scoring easier.
+    let vectors = edges
+        .iter()
+        .map(|n| {
+            graph
+                .get(n.vertex())
+                .unwrap_or(Err(Error::not_found_error()))
+                .map(|v| v.vector().to_vec())
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // TODO: replace with a fixed length bitset
+    let mut selected = BTreeSet::new();
+    selected.insert(0); // we always keep the first node.
+    for alpha in [1.0, 1.2] {
+        for (i, e) in edges.iter().enumerate().skip(1) {
+            if selected.contains(&i) {
+                continue;
+            }
+
+            let e_vec = &vectors[i];
+            if !selected
+                .iter()
+                .take_while(|s| **s < i)
+                .any(|s| scorer.score(e_vec, &vectors[*s]) > e.score * alpha)
+            {
+                selected.insert(i);
+                if selected.len() >= max_edges.get() {
+                    break;
+                }
+            }
+        }
+
+        if selected.len() >= max_edges.get() {
+            break;
+        }
+    }
+
+    // Partition edges into selected and unselected.
+    for (i, j) in selected.iter().enumerate() {
+        edges.swap(i, *j);
+    }
+
+    Ok(selected.len())
 }

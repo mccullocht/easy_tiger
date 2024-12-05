@@ -193,7 +193,7 @@ impl<'a> RecordCursor<'a> {
     }
 }
 
-impl<'a> Iterator for RecordCursor<'a> {
+impl Iterator for RecordCursor<'_> {
     type Item = Result<Record>;
 
     /// Advance and return the next record.
@@ -227,13 +227,13 @@ impl<'a> Deref for RecordCursorGuard<'a> {
     }
 }
 
-impl<'a> DerefMut for RecordCursorGuard<'a> {
+impl DerefMut for RecordCursorGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.cursor
     }
 }
 
-impl<'a> Drop for RecordCursorGuard<'a> {
+impl Drop for RecordCursorGuard<'_> {
     fn drop(&mut self) {
         // Safety: we never intend to allow RecordCursorGuard to drop the value.
         self.session

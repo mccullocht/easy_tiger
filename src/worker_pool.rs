@@ -1,3 +1,13 @@
+//! Worker pool for WiredTiger access.
+//!
+//! This wraps a [threadpool::ThreadPool] to provide a [wt_mdb::Session] to each
+//! closure that is executed. This allows us to distribute WiredTiger read work
+//! across multiple threads. Each `Session` is cached in the worker pool thread
+//! to avoid overhead.
+//!
+//! Note that it is the responsibility of the caller to ensure that each thread
+//! has a consistent view of the database by managing timestamps.
+
 use std::sync::Arc;
 
 use thread_local::ThreadLocal;

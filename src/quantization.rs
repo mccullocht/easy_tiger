@@ -1,3 +1,7 @@
+//! Utilities for vector quantization.
+//!
+//! Graph navigation during search uses these quantized vectors.
+
 /// Return the number of output bytes required to binary quantize a vector of `dimensions` length.
 pub fn binary_quantized_bytes(dimensions: usize) -> usize {
     (dimensions + 7) / 8

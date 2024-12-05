@@ -1,6 +1,15 @@
-use std::{borrow::Cow, io, num::NonZero, sync::Arc};
+//! WiredTiger implementations of graph access abstractions.
+//!
+//! None of these abstractions will begin or commit transactions, for performance reasons it
+//! is recommeded that callers begin a transaction before performing their search or mutation
+//! and commit or rollback the transaction when they are done.
 
-use wt_mdb::{Connection, Error, RecordCursorGuard, RecordView, Result, Session, WiredTigerError};
+use std::{borrow::Cow, io, sync::Arc};
+
+use wt_mdb::{
+    options::CreateOptions, Connection, Error, Record, RecordCursorGuard, RecordView, Result,
+    Session, WiredTigerError,
+};
 
 use crate::{
     graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore},
@@ -23,9 +32,17 @@ impl<'a> WiredTigerNavVectorStore<'a> {
     pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
         Self { cursor }
     }
+
+    pub(crate) fn set(&mut self, vertex_id: i64, vector: Cow<'_, [u8]>) -> Result<()> {
+        self.cursor.set(&RecordView::new(vertex_id, vector))
+    }
+
+    pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
+        self.cursor.remove(vertex_id)
+    }
 }
 
-impl<'a> NavVectorStore for WiredTigerNavVectorStore<'a> {
+impl NavVectorStore for WiredTigerNavVectorStore<'_> {
     fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
         Some(unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value))
     }
@@ -33,16 +50,21 @@ impl<'a> NavVectorStore for WiredTigerNavVectorStore<'a> {
 
 /// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
 pub struct WiredTigerGraphVertex<'a> {
-    dimensions: NonZero<usize>,
+    // split point between vector data and edge data.
+    split: usize,
     data: Cow<'a, [u8]>,
 }
 
 impl<'a> WiredTigerGraphVertex<'a> {
     fn new(metadata: &GraphMetadata, data: Cow<'a, [u8]>) -> Self {
         Self {
-            dimensions: metadata.dimensions,
+            split: metadata.dimensions.get() * std::mem::size_of::<f32>(),
             data,
         }
+    }
+
+    pub(crate) fn vector_bytes(&self) -> &[u8] {
+        &self.data[..self.split]
     }
 
     // Vector f32 data is stored little endian so we can get away with aliasing. Slice requires
@@ -52,38 +74,37 @@ impl<'a> WiredTigerGraphVertex<'a> {
         {
             // WiredTiger does not guarantee that the returned memory will be aligned, a
             // Try to align it and if that fails, copy the data.
-            let (prefix, vector, _) = unsafe { self.data.as_ref().align_to::<f32>() };
+            let (prefix, vector, _) =
+                unsafe { self.data.as_ref()[0..self.split].align_to::<f32>() };
             if prefix.is_empty() {
-                return Some(&vector[..self.dimensions.get()]);
+                return Some(vector);
             }
         }
         None
     }
 }
 
-impl<'a> GraphVertex for WiredTigerGraphVertex<'a> {
-    type EdgeIterator<'c> = WiredTigerEdgeIterator<'c> where Self: 'c;
+impl GraphVertex for WiredTigerGraphVertex<'_> {
+    type EdgeIterator<'c>
+        = WiredTigerEdgeIterator<'c>
+    where
+        Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
         self.maybe_alias_vector_data()
             .map(|v| v.into())
             .unwrap_or_else(|| {
-                let mut out = vec![0.0f32; self.dimensions.get()];
-                for (i, o) in self
-                    .data
-                    .as_ref()
+                self.data.as_ref()[0..self.split]
                     .chunks(std::mem::size_of::<f32>())
-                    .zip(out.iter_mut())
-                {
-                    *o = f32::from_le_bytes(i.try_into().expect("array of 4 conversion."));
-                }
-                out.into()
+                    .map(|b| f32::from_le_bytes(b.try_into().expect("array of 4 conversion")))
+                    .collect::<Vec<_>>()
+                    .into()
             })
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
         WiredTigerEdgeIterator {
-            data: &self.data.as_ref()[(self.dimensions.get() * std::mem::size_of::<f32>())..],
+            data: &self.data.as_ref()[self.split..],
             prev: 0,
         }
     }
@@ -96,7 +117,7 @@ pub struct WiredTigerEdgeIterator<'a> {
     prev: i64,
 }
 
-impl<'a> Iterator for WiredTigerEdgeIterator<'a> {
+impl Iterator for WiredTigerEdgeIterator<'_> {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -116,10 +137,29 @@ impl<'a> WiredTigerGraph<'a> {
     pub fn new(metadata: GraphMetadata, cursor: RecordCursorGuard<'a>) -> Self {
         Self { metadata, cursor }
     }
+
+    pub(crate) fn set_entry_point(&mut self, entry_point: i64) -> Result<()> {
+        self.cursor.set(&RecordView::new(
+            ENTRY_POINT_KEY,
+            &entry_point.to_le_bytes(),
+        ))
+    }
+
+    pub(crate) fn set(&mut self, vertex_id: i64, encoded_graph_node: &[u8]) -> Result<()> {
+        self.cursor
+            .set(&RecordView::new(vertex_id, encoded_graph_node))
+    }
+
+    pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
+        self.cursor.remove(vertex_id)
+    }
 }
 
-impl<'a> Graph for WiredTigerGraph<'a> {
-    type Vertex<'c> = WiredTigerGraphVertex<'c> where Self: 'c;
+impl Graph for WiredTigerGraph<'_> {
+    type Vertex<'c>
+        = WiredTigerGraphVertex<'c>
+    where
+        Self: 'c;
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let result = unsafe { self.cursor.seek_exact_unsafe(ENTRY_POINT_KEY)? };
@@ -169,6 +209,22 @@ impl WiredTigerGraphVectorIndex {
         })
     }
 
+    /// Create necessary tables for the index and write index metadata.
+    pub fn init_index(
+        &self,
+        connection: &Arc<Connection>,
+        table_options: Option<CreateOptions>,
+    ) -> io::Result<()> {
+        let session = connection.open_session()?;
+        session.create_record_table(&self.graph_table_name, table_options.clone())?;
+        session.create_record_table(&self.nav_table_name, table_options)?;
+        let mut cursor = session.open_record_cursor(&self.graph_table_name)?;
+        Ok(cursor.set(&Record::new(
+            METADATA_KEY,
+            serde_json::to_vec(&self.metadata)?,
+        ))?)
+    }
+
     /// Return `GraphMetadata` for this index.
     pub fn metadata(&self) -> &GraphMetadata {
         &self.metadata
@@ -214,15 +270,31 @@ impl WiredTigerGraphVectorIndexReader {
         }
     }
 
-    /// Unwrap into the inner Session.
+    /// Return a reference to the underlying `Session`.
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    /// Return a reference to the index in use.
+    pub fn index(&self) -> &WiredTigerGraphVectorIndex {
+        &self.index
+    }
+
+    /// Unwrap into the inner `Session`.
     pub fn into_session(self) -> Session {
         self.session
     }
 }
 
 impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
-    type Graph<'a> = WiredTigerGraph<'a> where Self: 'a;
-    type NavVectorStore<'a> = WiredTigerNavVectorStore<'a> where Self: 'a;
+    type Graph<'a>
+        = WiredTigerGraph<'a>
+    where
+        Self: 'a;
+    type NavVectorStore<'a>
+        = WiredTigerNavVectorStore<'a>
+    where
+        Self: 'a;
 
     fn metadata(&self) -> &GraphMetadata {
         &self.index.metadata
@@ -278,18 +350,61 @@ impl GraphVectorIndexReader for WiredTigerGraphVectorIndexReader {
 }
 
 /// Encode the contents of a graph node as a value that can be set in the WiredTiger table.
-pub fn encode_graph_node(vector: &[f32], mut edges: Vec<i64>) -> Vec<u8> {
+pub fn encode_graph_node(vector: &[f32], edges: Vec<i64>) -> Vec<u8> {
+    encode_graph_node_internal(vector, edges)
+}
+
+pub(crate) fn encode_graph_node_internal<'a>(
+    into_vector: impl Into<VectorRep<'a>>,
+    mut edges: Vec<i64>,
+) -> Vec<u8> {
+    let vector = into_vector.into();
     // A 64-bit value may occupy up to 10 bytes when leb128 encoded so reserve enough space for that.
     // There is unfortunately no constant for this in the leb128 crate.
-    let mut out = Vec::with_capacity(vector.len() * std::mem::size_of::<f64>() + edges.len() * 10);
-    for d in vector.iter() {
-        out.extend_from_slice(&d.to_le_bytes());
-    }
+    let mut out: Vec<u8> = Vec::with_capacity(vector.byte_len() + edges.len() * 10);
+    vector.append_bytes(&mut out);
+
     edges.sort();
-    let mut last = 0;
-    for e in edges {
-        leb128::write::signed(&mut out, e - last).unwrap();
-        last = e;
+    for (prev, next) in std::iter::once(&0).chain(edges.iter()).zip(edges.iter()) {
+        leb128::write::signed(&mut out, *next - *prev).unwrap();
     }
+
     out
+}
+
+pub(crate) enum VectorRep<'a> {
+    Float(&'a [f32]),
+    Bytes(&'a [u8]),
+}
+
+impl VectorRep<'_> {
+    fn byte_len(&self) -> usize {
+        match *self {
+            Self::Float(f) => std::mem::size_of_val(f),
+            Self::Bytes(b) => b.len(),
+        }
+    }
+
+    fn append_bytes(&self, vec: &mut Vec<u8>) {
+        match *self {
+            Self::Float(f) => {
+                for d in f {
+                    vec.extend_from_slice(&d.to_le_bytes());
+                }
+            }
+            Self::Bytes(b) => vec.extend_from_slice(b),
+        }
+    }
+}
+
+impl<'a> From<&'a [f32]> for VectorRep<'a> {
+    fn from(value: &'a [f32]) -> Self {
+        VectorRep::Float(value)
+    }
+}
+
+impl<'a> From<&'a [u8]> for VectorRep<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        VectorRep::Bytes(value)
+    }
 }

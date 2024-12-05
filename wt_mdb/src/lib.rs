@@ -10,12 +10,13 @@ mod connection;
 pub mod options;
 mod session;
 
+use rustix::io::Errno;
 use wt_sys::wiredtiger_strerror;
 
-use std::borrow::Cow;
 use std::ffi::CStr;
 use std::io::ErrorKind;
 use std::num::NonZero;
+use std::{borrow::Cow, io};
 
 /// WiredTiger specific error codes.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -80,7 +81,7 @@ impl From<WiredTigerError> for ErrorKind {
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Error {
     WiredTiger(WiredTigerError),
-    Posix(i32),
+    Errno(Errno),
 }
 
 impl Error {
@@ -98,7 +99,7 @@ impl From<NonZero<i32>> for Error {
     fn from(value: NonZero<i32>) -> Self {
         WiredTigerError::try_from_code(value.get())
             .map(Error::WiredTiger)
-            .unwrap_or(Error::Posix(value.get()))
+            .unwrap_or(Error::Errno(Errno::from_raw_os_error(value.get())))
     }
 }
 
@@ -106,7 +107,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WiredTiger(w) => write!(f, "WT {}", w),
-            Self::Posix(p) => write!(f, "POSIX {}", p),
+            Self::Errno(p) => write!(f, "errno {}", p),
         }
     }
 }
@@ -115,11 +116,10 @@ impl std::error::Error for Error {}
 
 impl From<Error> for std::io::Error {
     fn from(value: Error) -> Self {
-        let kind = match &value {
-            Error::WiredTiger(wt) => (*wt).into(),
-            Error::Posix(_) => ErrorKind::Other,
-        };
-        std::io::Error::new(kind, value)
+        match &value {
+            Error::WiredTiger(wt) => io::Error::new((*wt).into(), value),
+            Error::Errno(errno) => io::Error::from(*errno),
+        }
     }
 }
 
@@ -212,6 +212,8 @@ use wt_call;
 #[cfg(test)]
 mod test {
     use std::io::ErrorKind;
+
+    use rustix::io::Errno;
 
     use crate::{
         connection::Connection,
@@ -368,7 +370,7 @@ mod test {
         assert_eq!(cursor.set(&RecordView::new(1, b"bar")), Ok(()));
         assert_eq!(
             session.bulk_load("test", None, [Record::new(7, b"foo")].into_iter()),
-            Err(Error::Posix(16)) // EBUSY
+            Err(Error::Errno(Errno::BUSY))
         );
     }
 
@@ -384,7 +386,7 @@ mod test {
                 None,
                 [Record::new(11, b"bar"), Record::new(7, b"foo")].into_iter()
             ),
-            Err(Error::Posix(22)) // EINVAL
+            Err(Error::Errno(Errno::INVAL))
         );
     }
 

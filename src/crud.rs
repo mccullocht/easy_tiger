@@ -7,8 +7,8 @@ use crate::{
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_node, encode_graph_node_internal, WiredTigerGraph, WiredTigerGraphVectorIndex,
-        WiredTigerGraphVectorIndexReader, ENTRY_POINT_KEY,
+        encode_graph_node, encode_graph_node_internal, CursorGraph, SessionGraphVectorIndexReader,
+        TableGraphVectorIndex, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -20,7 +20,7 @@ use wt_mdb::{Error, Result, Session};
 /// transaction before creating [IndexMutator] and commit the transaction when they are done
 /// mutating.
 pub struct IndexMutator {
-    reader: WiredTigerGraphVectorIndexReader,
+    reader: SessionGraphVectorIndexReader,
     searcher: GraphSearcher,
 }
 
@@ -29,10 +29,10 @@ impl IndexMutator {
     ///
     /// Callers should typically begin a transaction on the session _before_ creating this object,
     /// then [Self::into_session()] this struct and commit the transaction when done.
-    pub fn new(index: Arc<WiredTigerGraphVectorIndex>, session: Session) -> Self {
-        let searcher = GraphSearcher::new(index.metadata().index_search_params);
+    pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
+        let searcher = GraphSearcher::new(index.config().index_search_params);
         Self {
-            reader: WiredTigerGraphVectorIndexReader::new(index, session, None),
+            reader: SessionGraphVectorIndexReader::new(index, session, None),
             searcher,
         }
     }
@@ -57,9 +57,9 @@ impl IndexMutator {
 
     fn insert_internal(&mut self, vertex_id: i64, vector: &[f32]) -> Result<()> {
         // TODO: make this an error instead of panicking.
-        assert_eq!(self.reader.metadata().dimensions.get(), vector.len());
+        assert_eq!(self.reader.config().dimensions.get(), vector.len());
 
-        let scorer = self.reader.metadata().new_scorer();
+        let scorer = self.reader.config().new_scorer();
         // TODO: normalize input vector.
         let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
@@ -70,7 +70,7 @@ impl IndexMutator {
         }
         let selected_len = prune_edges(
             &mut candidate_edges,
-            self.reader.metadata().max_edges,
+            self.reader.config().max_edges,
             &mut graph,
             scorer.as_ref(),
         )?;
@@ -113,7 +113,7 @@ impl IndexMutator {
 
     fn insert_edge(
         &self,
-        graph: &mut WiredTigerGraph<'_>,
+        graph: &mut CursorGraph<'_>,
         scorer: &dyn F32VectorScorer,
         src_vertex_id: i64,
         dst_vertex_id: i64,
@@ -125,7 +125,7 @@ impl IndexMutator {
         let mut edges = std::iter::once(dst_vertex_id)
             .chain(vertex.edges().filter(|v| *v != dst_vertex_id))
             .collect::<Vec<_>>();
-        let encoded = if edges.len() >= self.reader.metadata().max_edges.get() {
+        let encoded = if edges.len() >= self.reader.config().max_edges.get() {
             let src_vector = vertex.vector().to_vec();
             let mut neighbors = edges
                 .iter()
@@ -139,7 +139,7 @@ impl IndexMutator {
             neighbors.sort();
             let selected_len = prune_edges(
                 &mut neighbors,
-                self.reader.metadata().max_edges,
+                self.reader.config().max_edges,
                 graph,
                 scorer,
             )?;
@@ -159,7 +159,7 @@ impl IndexMutator {
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
     pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
-        let scorer = self.reader.metadata().new_scorer();
+        let scorer = self.reader.config().new_scorer();
         let mut graph = self.reader.graph()?;
 
         let (vector, edges) = graph
@@ -249,7 +249,7 @@ impl IndexMutator {
                 .then_with(|| a.0.cmp(&b.0))
                 .then_with(|| a.1.cmp(&b.1))
         });
-        let max_edges = self.reader.metadata().max_edges.get();
+        let max_edges = self.reader.config().max_edges.get();
         for (src, dst, _) in candidate_links {
             if vertex_data[src].2.len() < max_edges && vertex_data[dst].2.len() < max_edges {
                 let src_id = vertex_data[src].0;
@@ -278,16 +278,16 @@ mod tests {
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
     use crate::{
-        graph::{Graph, GraphMetadata, GraphSearchParams, GraphVectorIndexReader, GraphVertex},
+        graph::{Graph, GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVertex},
         scoring::VectorSimilarity,
         search::GraphSearcher,
-        wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader},
+        wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     };
 
     use super::IndexMutator;
 
     struct Fixture {
-        index: Arc<WiredTigerGraphVectorIndex>,
+        index: Arc<TableGraphVectorIndex>,
         conn: Arc<Connection>,
         _dir: tempfile::TempDir,
     }
@@ -300,8 +300,8 @@ mod tests {
             }
         }
 
-        fn new_reader(&self) -> WiredTigerGraphVectorIndexReader {
-            WiredTigerGraphVectorIndexReader::new(
+        fn new_reader(&self) -> SessionGraphVectorIndexReader {
+            SessionGraphVectorIndexReader::new(
                 self.index.clone(),
                 self.conn.open_session().unwrap(),
                 None,
@@ -338,8 +338,8 @@ mod tests {
             )
             .unwrap();
             let index = Arc::new(
-                WiredTigerGraphVectorIndex::from_init(
-                    GraphMetadata {
+                TableGraphVectorIndex::from_init(
+                    GraphConfig {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
                         max_edges: NonZero::new(4).unwrap(),

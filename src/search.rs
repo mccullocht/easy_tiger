@@ -137,7 +137,7 @@ impl GraphSearcher {
     ) -> Result<Vec<Neighbor>> {
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
-        let nav_scorer = reader.metadata().new_nav_scorer();
+        let nav_scorer = reader.config().new_nav_scorer();
         let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
 
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
@@ -178,7 +178,7 @@ impl GraphSearcher {
 
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
-        let nav_scorer = reader.metadata().new_nav_scorer();
+        let nav_scorer = reader.config().new_nav_scorer();
         let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
 
         let mut num_concurrent = 0;
@@ -264,7 +264,7 @@ impl GraphSearcher {
     ) -> Vec<Neighbor> {
         if self.params.num_rerank > 0 {
             let mut normalized_query = query.to_vec();
-            let scorer = reader.metadata().new_scorer();
+            let scorer = reader.config().new_scorer();
             scorer.normalize(&mut normalized_query);
             let mut rescored = self
                 .candidates
@@ -455,7 +455,7 @@ mod test {
     use wt_mdb::Result;
 
     use crate::{
-        graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+        graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
         quantization::binary_quantize,
         scoring::{DotProductScorer, F32VectorScorer, VectorSimilarity},
         Neighbor,
@@ -473,7 +473,7 @@ mod test {
     #[derive(Debug)]
     pub struct TestGraphVectorIndex {
         data: Vec<TestVector>,
-        metadata: GraphMetadata,
+        config: GraphConfig,
     }
 
     impl TestGraphVectorIndex {
@@ -500,7 +500,7 @@ mod test {
             for i in 0..rep.len() {
                 rep[i].edges = Self::compute_edges(&rep, i, max_edges, &scorer);
             }
-            let metadata = GraphMetadata {
+            let config = GraphConfig {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Dot,
                 max_edges: max_edges,
@@ -509,10 +509,7 @@ mod test {
                     num_rerank: usize::MAX,
                 },
             };
-            Self {
-                data: rep,
-                metadata,
-            }
+            Self { data: rep, config }
         }
 
         pub fn reader(&self) -> TestGraphVectorIndexReader {
@@ -570,11 +567,17 @@ mod test {
     pub struct TestGraphVectorIndexReader<'a>(&'a TestGraphVectorIndex);
 
     impl<'a> GraphVectorIndexReader for TestGraphVectorIndexReader<'a> {
-        type Graph<'b> = TestGraph<'b> where Self: 'b;
-        type NavVectorStore<'b> = TestNavVectorStore<'b> where Self: 'b;
+        type Graph<'b>
+            = TestGraph<'b>
+        where
+            Self: 'b;
+        type NavVectorStore<'b>
+            = TestNavVectorStore<'b>
+        where
+            Self: 'b;
 
-        fn metadata(&self) -> &GraphMetadata {
-            &self.0.metadata
+        fn config(&self) -> &GraphConfig {
+            &self.0.config
         }
 
         fn graph(&self) -> Result<Self::Graph<'_>> {
@@ -590,7 +593,10 @@ mod test {
     pub struct TestGraph<'a>(&'a TestGraphVectorIndex);
 
     impl<'a> Graph for TestGraph<'a> {
-        type Vertex<'c> = TestGraphVertex<'c> where Self: 'c;
+        type Vertex<'c>
+            = TestGraphVertex<'c>
+        where
+            Self: 'c;
 
         fn entry_point(&mut self) -> Option<Result<i64>> {
             if self.0.data.is_empty() {
@@ -612,7 +618,10 @@ mod test {
     pub struct TestGraphVertex<'a>(&'a TestVector);
 
     impl<'a> GraphVertex for TestGraphVertex<'a> {
-        type EdgeIterator<'c> = std::iter::Copied<std::slice::Iter<'c, i64>> where Self: 'c;
+        type EdgeIterator<'c>
+            = std::iter::Copied<std::slice::Iter<'c, i64>>
+        where
+            Self: 'c;
 
         fn vector(&self) -> Cow<'_, [f32]> {
             Cow::from(&self.0.vector)

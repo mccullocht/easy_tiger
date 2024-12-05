@@ -26,10 +26,9 @@ pub struct GraphSearchParams {
     pub num_rerank: usize,
 }
 
-/// Metadata about graph shape and construction.
-// TODO: rename to GraphConfig.
+/// Configuration describing graph shape and construction. Used to read and mutate the graph.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
-pub struct GraphMetadata {
+pub struct GraphConfig {
     pub dimensions: NonZero<usize>,
     #[serde(default)]
     pub similarity: VectorSimilarity,
@@ -37,7 +36,7 @@ pub struct GraphMetadata {
     pub index_search_params: GraphSearchParams,
 }
 
-impl GraphMetadata {
+impl GraphConfig {
     /// Return a scorer for high fidelity vectors in the index.
     pub fn new_scorer(&self) -> Box<dyn F32VectorScorer> {
         match self.similarity {
@@ -61,8 +60,8 @@ pub trait GraphVectorIndexReader {
     where
         Self: 'a;
 
-    /// Return metadata for this graph.
-    fn metadata(&self) -> &GraphMetadata;
+    /// Return config for this graph.
+    fn config(&self) -> &GraphConfig;
 
     /// Return an object that can be used to navigate the graph.
     fn graph(&self) -> Result<Self::Graph<'_>>;

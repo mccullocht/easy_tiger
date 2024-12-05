@@ -162,6 +162,9 @@ pub(crate) fn prune_edges(
                 let p_node = graph
                     .get(p.vertex())
                     .unwrap_or(Err(Error::not_found_error()))?;
+                // XXX might be inverted. if this vector is farther from each selected neighbor
+                // than it is from the vertex being pruned (that is, the score for every selected
+                // neighbor is lower than e.score), then we keep the select the edge.
                 if scorer.score(&e_vec, &p_node.vector()) > e.score * alpha {
                     selected.insert(i);
                     break;

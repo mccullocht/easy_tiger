@@ -410,6 +410,7 @@ mod tests {
         assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 5]);
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
+        panic!();
         Ok(())
     }
 

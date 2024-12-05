@@ -184,7 +184,7 @@ impl TableGraphVectorIndex {
     /// immutable graph metadata that can be used across operations.
     pub fn from_db(connection: &Arc<Connection>, table_basename: &str) -> io::Result<Self> {
         let session = connection.open_session()?;
-        let (graph_table_name, nav_table_name) = Self::generate_table_names(table_basename);
+        let [graph_table_name, nav_table_name] = Self::generate_table_names(table_basename);
         let mut cursor = session.open_record_cursor(&graph_table_name)?;
         let config_json = unsafe { cursor.seek_exact_unsafe(CONFIG_KEY) }
             .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
@@ -198,8 +198,9 @@ impl TableGraphVectorIndex {
 
     /// Create a new `TableGraphVectorIndex` for table initialization, providing
     /// graph metadata up front.
+    // XXX merge this with init_index???
     pub fn from_init(config: GraphConfig, table_basename: &str) -> io::Result<Self> {
-        let (graph_table_name, nav_table_name) = Self::generate_table_names(table_basename);
+        let [graph_table_name, nav_table_name] = Self::generate_table_names(table_basename);
         Ok(Self {
             graph_table_name,
             nav_table_name,
@@ -220,6 +221,14 @@ impl TableGraphVectorIndex {
         Ok(cursor.set(&Record::new(CONFIG_KEY, serde_json::to_vec(&self.config)?))?)
     }
 
+    /// Generate the names of the tables used for `index_name`.
+    pub fn generate_table_names(index_name: &str) -> [String; 2] {
+        [
+            format!("{}.graph", index_name),
+            format!("{}.nav_vectors", index_name),
+        ]
+    }
+
     /// Return `GraphMetadata` for this index.
     pub fn config(&self) -> &GraphConfig {
         &self.config
@@ -233,13 +242,6 @@ impl TableGraphVectorIndex {
     /// Return the name of the table containing the navigational vectors.
     pub fn nav_table_name(&self) -> &str {
         &self.nav_table_name
-    }
-
-    fn generate_table_names(table_basename: &str) -> (String, String) {
-        (
-            format!("{}.graph", table_basename),
-            format!("{}.nav_vectors", table_basename),
-        )
     }
 }
 

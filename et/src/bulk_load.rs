@@ -11,6 +11,8 @@ use easy_tiger::{
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use wt_mdb::{options::DropOptionsBuilder, Connection};
 
+use crate::drop_index;
+
 #[derive(Args)]
 pub struct BulkLoadArgs {
     /// Path to the input vectors to bulk ingest.
@@ -74,18 +76,10 @@ pub fn bulk_load(
                 .unwrap_or_else(|| args.edge_candidates.get()),
         },
     };
-    let index = TableGraphVectorIndex::from_init(config, index_name)?;
     if args.drop_tables {
-        let session = connection.open_session()?;
-        session.drop_record_table(
-            index.graph_table_name(),
-            Some(DropOptionsBuilder::default().set_force().into()),
-        )?;
-        session.drop_record_table(
-            index.nav_table_name(),
-            Some(DropOptionsBuilder::default().set_force().into()),
-        )?;
+        drop_index(connection.clone(), index_name)?;
     }
+    let index = TableGraphVectorIndex::from_init(config, index_name)?;
 
     let num_vectors = f32_vectors.len();
     let limit = args.limit.unwrap_or(num_vectors);

@@ -44,7 +44,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new (empty) index.
-    Init,
+    InitIndex,
     /// Bulk load a set of vectors into an index.
     /// Requires that the index be uninitialized.
     BulkLoad(BulkLoadArgs),
@@ -76,8 +76,8 @@ fn main() -> io::Result<()> {
     match cli.command {
         Commands::BulkLoad(args) => bulk_load(connection, args, &cli.index_name),
         Commands::DropIndex => drop_index(connection, &cli.index_name),
-        Commands::Lookup(args) => lookup(connection.clone(), &cli.index_name, args),
-        Commands::Search(args) => search(connection.clone(), &cli.index_name, args),
+        Commands::Lookup(args) => lookup(connection, &cli.index_name, args),
+        Commands::Search(args) => search(connection, &cli.index_name, args),
         Commands::ExhaustiveSearch(args) => {
             exhaustive_search(connection.clone(), &cli.index_name, args)
         }

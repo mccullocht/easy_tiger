@@ -132,6 +132,7 @@ pub trait NavVectorStore {
 /// Prune `edges` down to at most `max_edges`. Use `graph` and `scorer` to inform this decision.
 /// Returns a split point: all edges before that point are selected, all after are to be dropped.
 /// REQUIRES: `edges.is_sorted()`.
+// TODO: alpha value(s) should be tuneable.
 pub(crate) fn prune_edges(
     edges: &mut [Neighbor],
     max_edges: NonZero<usize>,
@@ -144,6 +145,17 @@ pub(crate) fn prune_edges(
 
     debug_assert!(edges.is_sorted());
 
+    // Obtain all the vectors to make relative neighbor graph scoring easier.
+    let vectors = edges
+        .iter()
+        .map(|n| {
+            graph
+                .get(n.vertex())
+                .unwrap_or(Err(Error::not_found_error()))
+                .map(|v| v.vector().to_vec())
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     // TODO: replace with a fixed length bitset
     let mut selected = BTreeSet::new();
     selected.insert(0); // we always keep the first node.
@@ -153,26 +165,16 @@ pub(crate) fn prune_edges(
                 continue;
             }
 
-            let e_vec = graph
-                .get(e.vertex())
-                .unwrap_or(Err(Error::not_found_error()))?
-                .vector()
-                .into_owned();
-            for p in selected.iter().take_while(|j| **j < i).map(|j| edges[*j]) {
-                let p_node = graph
-                    .get(p.vertex())
-                    .unwrap_or(Err(Error::not_found_error()))?;
-                // XXX might be inverted. if this vector is farther from each selected neighbor
-                // than it is from the vertex being pruned (that is, the score for every selected
-                // neighbor is lower than e.score), then we keep the select the edge.
-                if scorer.score(&e_vec, &p_node.vector()) > e.score * alpha {
-                    selected.insert(i);
+            let e_vec = &vectors[i];
+            if !selected
+                .iter()
+                .take_while(|s| **s < i)
+                .any(|s| scorer.score(e_vec, &vectors[*s]) > e.score * alpha)
+            {
+                selected.insert(i);
+                if selected.len() >= max_edges.get() {
                     break;
                 }
-            }
-
-            if selected.len() >= max_edges.get() {
-                break;
             }
         }
 

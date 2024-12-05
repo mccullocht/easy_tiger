@@ -407,10 +407,9 @@ mod tests {
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
         let vertex = graph.get(vertex_ids[0]).unwrap()?;
-        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 5]);
+        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 2, 3, 5]);
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
-        panic!();
         Ok(())
     }
 
@@ -449,7 +448,7 @@ mod tests {
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
         let vertex = graph.get(vertex_ids[0]).unwrap()?;
-        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 5]);
+        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 2, 3, 5]);
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
         fixture.new_mutator().delete(1)?;

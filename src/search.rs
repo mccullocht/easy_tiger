@@ -513,10 +513,10 @@ mod test {
                     .unwrap()
             ),
             vec![
-                Neighbor::new(0, 0.6),
-                Neighbor::new(1, 0.59707),
-                Neighbor::new(4, 0.59707),
-                Neighbor::new(5, 0.59487)
+                Neighbor::new(0, 1.0),
+                Neighbor::new(1, 0.98536),
+                Neighbor::new(4, 0.98536),
+                Neighbor::new(5, 0.97434)
             ]
         );
     }

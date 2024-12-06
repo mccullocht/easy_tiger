@@ -1,4 +1,5 @@
 mod bulk_load;
+mod delete;
 mod drop_index;
 mod exhaustive_search;
 mod init_index;
@@ -7,12 +8,13 @@ mod lookup;
 mod search;
 
 use std::{
-    io::{self, ErrorKind},
+    io::{self},
     num::NonZero,
 };
 
 use bulk_load::{bulk_load, BulkLoadArgs};
 use clap::{command, Parser, Subcommand};
+use delete::{delete, DeleteArgs};
 use drop_index::drop_index;
 use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
 use init_index::{init_index, InitIndexArgs};
@@ -63,7 +65,7 @@ enum Commands {
     /// Insert a vectors from a file into the index.
     Insert(InsertArgs),
     /// Delete vectors by key range.
-    Delete,
+    Delete(DeleteArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -79,6 +81,7 @@ fn main() -> io::Result<()> {
 
     match cli.command {
         Commands::BulkLoad(args) => bulk_load(connection, args, &cli.index_name),
+        Commands::Delete(args) => delete(connection, &cli.index_name, args),
         Commands::DropIndex => drop_index(connection, &cli.index_name),
         Commands::InitIndex(args) => init_index(connection, &cli.index_name, args),
         Commands::Insert(args) => insert(connection, &cli.index_name, args),
@@ -87,6 +90,5 @@ fn main() -> io::Result<()> {
         Commands::ExhaustiveSearch(args) => {
             exhaustive_search(connection.clone(), &cli.index_name, args)
         }
-        _ => Err(io::Error::from(ErrorKind::Unsupported)),
     }
 }

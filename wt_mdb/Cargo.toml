@@ -5,6 +5,7 @@ edition = "2021"
 description = "WiredTiger bindings intended to be used MongoDB way."
 
 [dependencies]
+rustix = "0.38.41"
 wt_sys = { path = "../wt_sys" }
 
 [dev-dependencies]

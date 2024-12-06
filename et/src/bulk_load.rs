@@ -22,6 +22,10 @@ pub struct BulkLoadArgs {
     /// Similarity function to use for vector scoring.
     #[arg(short, long, value_enum)]
     similarity: VectorSimilarity,
+    /// If true, load all quantized vectors into a trivial memory store for bulk loading.
+    /// This can be significantly faster than reading these values from WiredTiger.
+    #[arg(long)]
+    memory_quantized_vectors: bool,
 
     /// Maximum number of edges for any vertex.
     #[arg(short, long, default_value = "64")]
@@ -85,7 +89,13 @@ pub fn bulk_load(
 
     let num_vectors = f32_vectors.len();
     let limit = args.limit.unwrap_or(num_vectors);
-    let mut builder = BulkLoadBuilder::new(connection, index, f32_vectors, limit);
+    let mut builder = BulkLoadBuilder::new(
+        connection,
+        index,
+        f32_vectors,
+        args.memory_quantized_vectors,
+        limit,
+    );
 
     {
         let progress = progress_bar(limit, "load nav vectors");

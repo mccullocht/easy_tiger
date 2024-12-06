@@ -11,7 +11,6 @@
 use core::f64;
 use std::{
     borrow::Cow,
-    io::{BufWriter, Write},
     num::NonZero,
     ops::Range,
     sync::{
@@ -21,18 +20,18 @@ use std::{
 };
 
 use crossbeam_skiplist::SkipSet;
-use memmap2::{Mmap, MmapMut};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-use tempfile::tempfile;
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex},
     input::{DerefVectorStore, VectorStore},
-    quantization::{binary_quantize_to, binary_quantized_bytes},
+    quantization::binary_quantize,
     scoring::F32VectorScorer,
     search::GraphSearcher,
-    wt::{encode_graph_node, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY},
+    wt::{
+        encode_graph_node, CursorNavVectorStore, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
+    },
     Neighbor,
 };
 
@@ -69,7 +68,6 @@ pub struct BulkLoadBuilder<D> {
     limit: usize,
 
     vectors: DerefVectorStore<f32, D>,
-    quantized_vectors: DerefVectorStore<u8, Mmap>,
     centroid: Vec<f32>,
 
     graph: Box<[RwLock<Vec<Neighbor>>]>,
@@ -93,19 +91,12 @@ where
         graph_vec.resize_with(vectors.len(), || {
             RwLock::new(Vec::with_capacity(index.config().max_edges.get() * 2))
         });
-        let quantized_stride =
-            NonZero::new(binary_quantized_bytes(index.config().dimensions.get())).unwrap();
         let scorer = index.config().new_scorer();
         Self {
             connection,
             index,
             limit,
             vectors,
-            quantized_vectors: DerefVectorStore::new(
-                MmapMut::map_anon(0).unwrap().make_read_only().unwrap(),
-                quantized_stride,
-            )
-            .unwrap(),
             centroid: Vec::new(),
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
@@ -113,52 +104,31 @@ where
         }
     }
 
-    /// Quantize nav vectors and write to a temp file for quick access.
-    pub fn quantize_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
-        let mut writer = BufWriter::new(tempfile().unwrap());
-        let mut sum = vec![0.0; self.index.config().dimensions.get()];
-        let mut buf = vec![0u8; self.quantized_vectors.elem_stride()];
-        for v in self.vectors.iter().take(self.limit) {
-            for (i, o) in v.iter().zip(sum.iter_mut()) {
-                *o += *i as f64;
-            }
-            binary_quantize_to(v, &mut buf);
-            writer.write_all(&buf).unwrap();
-            progress();
-        }
-
-        let f = writer.into_inner().unwrap();
-        self.quantized_vectors = DerefVectorStore::new(
-            unsafe { Mmap::map(&f).unwrap() },
-            NonZero::new(buf.len()).unwrap(),
-        )
-        .unwrap();
-
-        self.centroid = sum
-            .into_iter()
-            .map(|s| (s / self.limit as f64) as f32)
-            .collect();
-        self.scorer.normalize(&mut self.centroid);
-
-        Ok(())
-    }
-
     /// Load binary quantized vector data into the nav vectors table.
     pub fn load_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
+        let dim = self.index.config().dimensions.get();
+        let mut sum = vec![0.0; dim];
         session.bulk_load(
             self.index.nav_table_name(),
             None,
-            self.quantized_vectors
+            self.vectors
                 .iter()
                 .enumerate()
                 .take(self.limit)
                 .map(|(i, v)| {
                     progress();
-                    // TODO: figure out why this has to be owned.
-                    Record::new(i as i64, v.to_owned())
+                    for (i, o) in v.iter().zip(sum.iter_mut()) {
+                        *o += *i as f64;
+                    }
+                    Record::new(i as i64, binary_quantize(v))
                 }),
         )?;
+        self.centroid = sum
+            .into_iter()
+            .map(|s| (s / self.limit as f64) as f32)
+            .collect();
+        self.scorer.normalize(&mut self.centroid);
         Ok(())
     }
 
@@ -389,7 +359,7 @@ where
     where
         Self: 'b;
     type NavVectorStore<'b>
-        = BulkLoadBuilderNavVectorStore<'b, D>
+        = CursorNavVectorStore<'b>
     where
         Self: 'b;
 
@@ -402,7 +372,9 @@ where
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-        Ok(BulkLoadBuilderNavVectorStore(self.0))
+        Ok(CursorNavVectorStore::new(
+            self.1.get_record_cursor(&self.0.index.nav_table_name())?,
+        ))
     }
 }
 
@@ -474,16 +446,5 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|i| self.guard[i].vertex())
-    }
-}
-
-struct BulkLoadBuilderNavVectorStore<'a, D: Send>(&'a BulkLoadBuilder<D>);
-
-impl<D> NavVectorStore for BulkLoadBuilderNavVectorStore<'_, D>
-where
-    D: Send,
-{
-    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        Some(Ok(self.0.quantized_vectors[vertex_id as usize].into()))
     }
 }

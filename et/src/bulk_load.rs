@@ -88,10 +88,6 @@ pub fn bulk_load(
     let mut builder = BulkLoadBuilder::new(connection, index, f32_vectors, limit);
 
     {
-        let progress = progress_bar(limit, "quantize nav vectors");
-        builder.quantize_nav_vectors(|| progress.inc(1))?;
-    }
-    {
         let progress = progress_bar(limit, "load nav vectors");
         builder.load_nav_vectors(|| progress.inc(1))?;
     }
@@ -105,7 +101,7 @@ pub fn bulk_load(
     }
     let stats = {
         let progress = progress_bar(limit, "load graph");
-        builder.load_graph(|| progress.inc(1))?;
+        builder.load_graph(|| progress.inc(1))?
     };
     println!("{:?}", stats);
 

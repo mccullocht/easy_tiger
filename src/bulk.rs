@@ -373,7 +373,7 @@ where
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         Ok(CursorNavVectorStore::new(
-            self.1.get_record_cursor(&self.0.index.nav_table_name())?,
+            self.1.get_record_cursor(self.0.index.nav_table_name())?,
         ))
     }
 }

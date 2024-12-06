@@ -20,13 +20,14 @@ use std::{
 };
 
 use crossbeam_skiplist::SkipSet;
+use memmap2::{Mmap, MmapMut};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex},
+    graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
     input::{DerefVectorStore, VectorStore},
-    quantization::binary_quantize,
+    quantization::{binary_quantize, binary_quantized_bytes},
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
@@ -70,6 +71,9 @@ pub struct BulkLoadBuilder<D> {
     vectors: DerefVectorStore<f32, D>,
     centroid: Vec<f32>,
 
+    memory_quantized_vectors: bool,
+    quantized_vectors: Option<DerefVectorStore<u8, Mmap>>,
+
     graph: Box<[RwLock<Vec<Neighbor>>]>,
     entry_vertex: AtomicI64,
     scorer: Box<dyn F32VectorScorer>,
@@ -85,6 +89,7 @@ where
         connection: Arc<Connection>,
         index: TableGraphVectorIndex,
         vectors: DerefVectorStore<f32, D>,
+        memory_quantized_vectors: bool,
         limit: usize,
     ) -> Self {
         let mut graph_vec = Vec::with_capacity(vectors.len());
@@ -98,6 +103,8 @@ where
             limit,
             vectors,
             centroid: Vec::new(),
+            memory_quantized_vectors,
+            quantized_vectors: None,
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
             scorer,
@@ -109,6 +116,11 @@ where
         let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
         let mut sum = vec![0.0; dim];
+        let mut quantized_vectors = if self.memory_quantized_vectors {
+            Some(MmapMut::map_anon(binary_quantized_bytes(dim) * self.vectors.len()).unwrap())
+        } else {
+            None
+        };
         session.bulk_load(
             self.index.nav_table_name(),
             None,
@@ -121,9 +133,22 @@ where
                     for (i, o) in v.iter().zip(sum.iter_mut()) {
                         *o += *i as f64;
                     }
-                    Record::new(i as i64, binary_quantize(v))
+                    let quantized = binary_quantize(v);
+                    if let Some(q) = quantized_vectors.as_mut() {
+                        let start = i * quantized.len();
+                        q[start..(start + quantized.len())].copy_from_slice(&quantized);
+                    }
+                    Record::new(i as i64, quantized)
                 }),
         )?;
+
+        self.quantized_vectors = quantized_vectors.map(|m| {
+            DerefVectorStore::new(
+                m.make_read_only().unwrap(),
+                NonZero::new(binary_quantized_bytes(dim)).unwrap(),
+            )
+            .unwrap()
+        });
         self.centroid = sum
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
@@ -359,7 +384,7 @@ where
     where
         Self: 'b;
     type NavVectorStore<'b>
-        = CursorNavVectorStore<'b>
+        = BulkLoadNavVectorStore<'b>
     where
         Self: 'b;
 
@@ -372,9 +397,13 @@ where
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-        Ok(CursorNavVectorStore::new(
-            self.1.get_record_cursor(self.0.index.nav_table_name())?,
-        ))
+        if let Some(s) = self.0.quantized_vectors.as_ref() {
+            Ok(BulkLoadNavVectorStore::Memory(s))
+        } else {
+            Ok(BulkLoadNavVectorStore::Cursor(CursorNavVectorStore::new(
+                self.1.get_record_cursor(self.0.index.nav_table_name())?,
+            )))
+        }
     }
 }
 
@@ -446,5 +475,25 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|i| self.guard[i].vertex())
+    }
+}
+
+enum BulkLoadNavVectorStore<'a> {
+    Cursor(CursorNavVectorStore<'a>),
+    Memory(&'a DerefVectorStore<u8, memmap2::Mmap>),
+}
+
+impl<'a> NavVectorStore for BulkLoadNavVectorStore<'a> {
+    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+        match self {
+            Self::Cursor(c) => c.get(vertex_id),
+            Self::Memory(m) => {
+                if vertex_id >= 0 && (vertex_id as usize) < m.len() {
+                    Some(Ok(m[vertex_id as usize].into()))
+                } else {
+                    None
+                }
+            }
+        }
     }
 }

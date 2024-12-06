@@ -45,8 +45,8 @@ pub struct InitIndexArgs {
 
 pub fn init_index(
     connection: Arc<Connection>,
-    args: InitIndexArgs,
     index_name: &str,
+    args: InitIndexArgs,
 ) -> io::Result<()> {
     if args.drop_if_exists {
         drop_index(connection.clone(), index_name)?;

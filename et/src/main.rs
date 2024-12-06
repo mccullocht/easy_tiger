@@ -1,6 +1,7 @@
 mod bulk_load;
 mod drop_index;
 mod exhaustive_search;
+mod init_index;
 mod lookup;
 mod search;
 
@@ -13,6 +14,7 @@ use bulk_load::{bulk_load, BulkLoadArgs};
 use clap::{command, Parser, Subcommand};
 use drop_index::drop_index;
 use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
+use init_index::{init_index, InitIndexArgs};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
 use wt_mdb::{
@@ -44,7 +46,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new (empty) index.
-    InitIndex,
+    InitIndex(InitIndexArgs),
     /// Bulk load a set of vectors into an index.
     /// Requires that the index be uninitialized.
     BulkLoad(BulkLoadArgs),
@@ -57,7 +59,7 @@ enum Commands {
     /// Exhaustively search an index and create new Neighbors files.
     ExhaustiveSearch(ExhaustiveSearchArgs),
     /// Insert a vector or vectors from a file into the index.
-    Add,
+    Insert,
     /// Delete vectors by key range.
     Delete,
 }
@@ -76,6 +78,7 @@ fn main() -> io::Result<()> {
     match cli.command {
         Commands::BulkLoad(args) => bulk_load(connection, args, &cli.index_name),
         Commands::DropIndex => drop_index(connection, &cli.index_name),
+        Commands::InitIndex(args) => init_index(connection, args, &cli.index_name),
         Commands::Lookup(args) => lookup(connection, &cli.index_name, args),
         Commands::Search(args) => search(connection, &cli.index_name, args),
         Commands::ExhaustiveSearch(args) => {

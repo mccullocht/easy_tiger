@@ -198,9 +198,8 @@ impl TableGraphVectorIndex {
 
     /// Create a new `TableGraphVectorIndex` for table initialization, providing
     /// graph metadata up front.
-    // XXX merge this with init_index???
-    pub fn from_init(config: GraphConfig, table_basename: &str) -> io::Result<Self> {
-        let [graph_table_name, nav_table_name] = Self::generate_table_names(table_basename);
+    pub fn from_init(config: GraphConfig, index_name: &str) -> io::Result<Self> {
+        let [graph_table_name, nav_table_name] = Self::generate_table_names(index_name);
         Ok(Self {
             graph_table_name,
             nav_table_name,
@@ -210,15 +209,18 @@ impl TableGraphVectorIndex {
 
     /// Create necessary tables for the index and write index metadata.
     pub fn init_index(
-        &self,
         connection: &Arc<Connection>,
         table_options: Option<CreateOptions>,
-    ) -> io::Result<()> {
+        config: GraphConfig,
+        index_name: &str,
+    ) -> io::Result<Self> {
+        let index = Self::from_init(config, index_name)?;
         let session = connection.open_session()?;
-        session.create_record_table(&self.graph_table_name, table_options.clone())?;
-        session.create_record_table(&self.nav_table_name, table_options)?;
-        let mut cursor = session.open_record_cursor(&self.graph_table_name)?;
-        Ok(cursor.set(&Record::new(CONFIG_KEY, serde_json::to_vec(&self.config)?))?)
+        session.create_record_table(&index.graph_table_name, table_options.clone())?;
+        session.create_record_table(&index.nav_table_name, table_options)?;
+        let mut cursor = session.open_record_cursor(&index.graph_table_name)?;
+        cursor.set(&Record::new(CONFIG_KEY, serde_json::to_vec(&index.config)?))?;
+        Ok(index)
     }
 
     /// Generate the names of the tables used for `index_name`.

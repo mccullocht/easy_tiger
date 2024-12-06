@@ -9,7 +9,7 @@ use easy_tiger::{
     wt::TableGraphVectorIndex,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
-use wt_mdb::{options::DropOptionsBuilder, Connection};
+use wt_mdb::Connection;
 
 use crate::drop_index;
 

@@ -51,7 +51,7 @@ impl<'a> StatCursor<'a> {
     }
 }
 
-impl<'a> Iterator for StatCursor<'a> {
+impl Iterator for StatCursor<'_> {
     type Item = Result<(String, i64)>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -59,7 +59,7 @@ impl<'a> Iterator for StatCursor<'a> {
     }
 }
 
-impl<'a> Drop for StatCursor<'a> {
+impl Drop for StatCursor<'_> {
     fn drop(&mut self) {
         // TODO: print something if this returns an error.
         let _ = unsafe { wt_call!(self.ptr, close) };

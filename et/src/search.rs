@@ -13,7 +13,7 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     search::{GraphSearchStats, GraphSearcher},
     worker_pool::WorkerPool,
-    wt::{WiredTigerGraphVectorIndex, WiredTigerGraphVectorIndexReader},
+    wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -53,14 +53,11 @@ pub struct SearchArgs {
     recall_k: Option<NonZero<usize>>,
 }
 
-pub fn search(
-    connection: Arc<Connection>,
-    index: WiredTigerGraphVectorIndex,
-    args: SearchArgs,
-) -> io::Result<()> {
+pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
+    let index = TableGraphVectorIndex::from_db(&connection, index_name)?;
     let query_vectors = easy_tiger::input::DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
-        index.metadata().dimensions,
+        index.config().dimensions,
     )?;
     let limit = std::cmp::min(
         query_vectors.len(),
@@ -111,7 +108,7 @@ pub fn search(
         .with_finish(indicatif::ProgressFinish::AndLeave);
     for (i, query) in query_vectors.iter().enumerate().take(limit) {
         session.begin_transaction(None)?;
-        let mut reader = WiredTigerGraphVectorIndexReader::new(
+        let mut reader = SessionGraphVectorIndexReader::new(
             index.clone(),
             session,
             pool.as_ref().map(WorkerPool::clone),

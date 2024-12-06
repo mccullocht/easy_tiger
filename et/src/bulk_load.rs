@@ -3,10 +3,10 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     bulk::BulkLoadBuilder,
-    graph::{GraphMetadata, GraphSearchParams},
+    graph::{GraphConfig, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
     scoring::VectorSimilarity,
-    wt::WiredTigerGraphVectorIndex,
+    wt::TableGraphVectorIndex,
 };
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use wt_mdb::{options::DropOptionsBuilder, Connection};
@@ -59,7 +59,7 @@ pub fn bulk_load(
         args.dimensions,
     )?;
 
-    let metadata = GraphMetadata {
+    let config = GraphConfig {
         dimensions: args.dimensions,
         similarity: args.similarity,
         max_edges: args.max_edges,
@@ -70,7 +70,7 @@ pub fn bulk_load(
                 .unwrap_or_else(|| args.edge_candidates.get()),
         },
     };
-    let index = WiredTigerGraphVectorIndex::from_init(metadata, index_name)?;
+    let index = TableGraphVectorIndex::from_init(config, index_name)?;
     if args.drop_tables {
         let session = connection.open_session()?;
         session.drop_record_table(
@@ -88,10 +88,6 @@ pub fn bulk_load(
     let mut builder = BulkLoadBuilder::new(connection, index, f32_vectors, limit);
 
     {
-        let progress = progress_bar(limit, "quantize nav vectors");
-        builder.quantize_nav_vectors(|| progress.inc(1))?;
-    }
-    {
         let progress = progress_bar(limit, "load nav vectors");
         builder.load_nav_vectors(|| progress.inc(1))?;
     }
@@ -105,7 +101,7 @@ pub fn bulk_load(
     }
     let stats = {
         let progress = progress_bar(limit, "load graph");
-        builder.load_graph(|| progress.inc(1))?;
+        builder.load_graph(|| progress.inc(1))?
     };
     println!("{:?}", stats);
 

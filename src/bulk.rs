@@ -1,8 +1,16 @@
+//! Tools to bulk load an index.
+//!
+//! For a brand new index we can take a set of vectors and build the graph in memory,
+//! then bulk load it into WiredTiger. This is much faster than incrementally building
+//! the graph through a series of transactions as there are fewer, simpler abstractions
+//! around vector access and graph edge state.
+//!
+//! Caveats:
+//! * Only `numpy` little-endian formatted `f32` vectors are accepted.
+//! * Row keys are assigned densely beginning at zero.
 use core::f64;
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
-    io::{BufWriter, Write},
     num::NonZero,
     ops::Range,
     sync::{
@@ -12,18 +20,18 @@ use std::{
 };
 
 use crossbeam_skiplist::SkipSet;
-use memmap2::{Mmap, MmapMut};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-use tempfile::tempfile;
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{Graph, GraphMetadata, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex},
     input::{DerefVectorStore, VectorStore},
-    quantization::{binary_quantize_to, binary_quantized_bytes},
+    quantization::binary_quantize,
     scoring::F32VectorScorer,
     search::GraphSearcher,
-    wt::{encode_graph_node, WiredTigerGraphVectorIndex, ENTRY_POINT_KEY, METADATA_KEY},
+    wt::{
+        encode_graph_node, CursorNavVectorStore, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
+    },
     Neighbor,
 };
 
@@ -56,11 +64,10 @@ pub struct GraphStats {
 /// Builds a Vamana graph for a bulk load.
 pub struct BulkLoadBuilder<D> {
     connection: Arc<Connection>,
-    index: WiredTigerGraphVectorIndex,
+    index: TableGraphVectorIndex,
     limit: usize,
 
     vectors: DerefVectorStore<f32, D>,
-    quantized_vectors: DerefVectorStore<u8, Mmap>,
     centroid: Vec<f32>,
 
     graph: Box<[RwLock<Vec<Neighbor>>]>,
@@ -76,27 +83,20 @@ where
     /// `limit` limits the number of vectors processed to less than the full set.
     pub fn new(
         connection: Arc<Connection>,
-        index: WiredTigerGraphVectorIndex,
+        index: TableGraphVectorIndex,
         vectors: DerefVectorStore<f32, D>,
         limit: usize,
     ) -> Self {
         let mut graph_vec = Vec::with_capacity(vectors.len());
         graph_vec.resize_with(vectors.len(), || {
-            RwLock::new(Vec::with_capacity(index.metadata().max_edges.get() * 2))
+            RwLock::new(Vec::with_capacity(index.config().max_edges.get() * 2))
         });
-        let quantized_stride =
-            NonZero::new(binary_quantized_bytes(index.metadata().dimensions.get())).unwrap();
-        let scorer = index.metadata().new_scorer();
+        let scorer = index.config().new_scorer();
         Self {
             connection,
             index,
             limit,
             vectors,
-            quantized_vectors: DerefVectorStore::new(
-                MmapMut::map_anon(0).unwrap().make_read_only().unwrap(),
-                quantized_stride,
-            )
-            .unwrap(),
             centroid: Vec::new(),
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
@@ -104,52 +104,31 @@ where
         }
     }
 
-    /// Quantize nav vectors and write to a temp file for quick access.
-    pub fn quantize_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
-        let mut writer = BufWriter::new(tempfile().unwrap());
-        let mut sum = vec![0.0; self.index.metadata().dimensions.get()];
-        let mut buf = vec![0u8; self.quantized_vectors.elem_stride()];
-        for v in self.vectors.iter().take(self.limit) {
-            for (i, o) in v.iter().zip(sum.iter_mut()) {
-                *o += *i as f64;
-            }
-            binary_quantize_to(v, &mut buf);
-            writer.write_all(&buf).unwrap();
-            progress();
-        }
-
-        let f = writer.into_inner().unwrap();
-        self.quantized_vectors = DerefVectorStore::new(
-            unsafe { Mmap::map(&f).unwrap() },
-            NonZero::new(buf.len()).unwrap(),
-        )
-        .unwrap();
-
-        self.centroid = sum
-            .into_iter()
-            .map(|s| (s / self.limit as f64) as f32)
-            .collect();
-        self.scorer.normalize(&mut self.centroid);
-
-        Ok(())
-    }
-
     /// Load binary quantized vector data into the nav vectors table.
     pub fn load_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
+        let dim = self.index.config().dimensions.get();
+        let mut sum = vec![0.0; dim];
         session.bulk_load(
             self.index.nav_table_name(),
             None,
-            self.quantized_vectors
+            self.vectors
                 .iter()
                 .enumerate()
                 .take(self.limit)
                 .map(|(i, v)| {
                     progress();
-                    // TODO: figure out why this has to be owned.
-                    Record::new(i as i64, v.to_owned())
+                    for (i, o) in v.iter().zip(sum.iter_mut()) {
+                        *o += *i as f64;
+                    }
+                    Record::new(i as i64, binary_quantize(v))
                 }),
         )?;
+        self.centroid = sum
+            .into_iter()
+            .map(|s| (s / self.limit as f64) as f32)
+            .collect();
+        self.scorer.normalize(&mut self.centroid);
         Ok(())
     }
 
@@ -180,7 +159,7 @@ where
                 // work because any RecordCursor objects returned have to be destroyed before the Mutex is
                 // released.
                 let mut session = self.connection.open_session()?;
-                let mut searcher = GraphSearcher::new(self.index.metadata().index_search_params);
+                let mut searcher = GraphSearcher::new(self.index.config().index_search_params);
                 for i in nodes {
                     // Use a transaction for each search. Without this each lookup will be a separate transaction
                     // which obtains a reader lock inside the session. Overhead for that is ~10x.
@@ -233,7 +212,7 @@ where
     {
         // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
         for (i, n) in self.graph.iter().enumerate().take(self.limit) {
-            self.maybe_prune_node(i, n.write().unwrap(), self.index.metadata().max_edges)?;
+            self.maybe_prune_node(i, n.write().unwrap(), self.index.config().max_edges)?;
             progress();
         }
         Ok(())
@@ -251,10 +230,10 @@ where
             edges: 0,
             unconnected: 0,
         };
-        let metadata_rows = vec![
+        let config_rows = vec![
             Record::new(
-                METADATA_KEY,
-                serde_json::to_vec(&self.index.metadata()).unwrap(),
+                CONFIG_KEY,
+                serde_json::to_vec(&self.index.config()).unwrap(),
             ),
             Record::new(
                 ENTRY_POINT_KEY,
@@ -268,7 +247,7 @@ where
         session.bulk_load(
             self.index.graph_table_name(),
             None,
-            metadata_rows.into_iter().chain(
+            config_rows.into_iter().chain(
                 self.vectors
                     .iter()
                     .zip(self.graph.iter())
@@ -300,11 +279,13 @@ where
     ) -> Result<Vec<Neighbor>> {
         let mut graph = BulkLoadBuilderGraph(self);
         let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
-        let pruned_len = self
-            .prune(&mut candidates, &mut graph, self.scorer.as_ref())?
-            .0
-            .len();
-        candidates.truncate(pruned_len);
+        let split = prune_edges(
+            &mut candidates,
+            self.index.config().max_edges,
+            &mut graph,
+            self.scorer.as_ref(),
+        )?;
+        candidates.truncate(split);
         Ok(candidates)
     }
 
@@ -335,14 +316,14 @@ where
             return Ok(());
         }
 
-        let (selected, dropped) = self.prune(
+        guard.sort();
+        let split = prune_edges(
             &mut guard,
+            self.index.config().max_edges,
             &mut BulkLoadBuilderGraph(self),
             self.scorer.as_ref(),
         )?;
-        let pruned_len = selected.len();
-        let dropped = dropped.to_vec();
-        guard.truncate(pruned_len);
+        let dropped = guard.split_off(split);
         drop(guard);
 
         // Remove in-links from nodes that we dropped out-links to.
@@ -356,73 +337,11 @@ where
         }
         Ok(())
     }
-
-    /// Prune `edges`, enforcing RNG properties with alpha parameter.
-    ///
-    /// Returns two slices: one containing the selected nodes and one containing the unselected nodes.
-    fn prune<'a>(
-        &self,
-        edges: &'a mut [Neighbor],
-        graph: &mut BulkLoadBuilderGraph<'_, D>,
-        scorer: &dyn F32VectorScorer,
-    ) -> Result<(&'a [Neighbor], &'a [Neighbor])> {
-        if edges.is_empty() {
-            return Ok((&[], &[]));
-        }
-        edges.sort();
-        // TODO: replace with a fixed length bitset
-        let mut selected = BTreeSet::new();
-        selected.insert(0); // we always keep the first node.
-        for alpha in [1.0, 1.2] {
-            for (i, e) in edges.iter().enumerate().skip(1) {
-                if selected.contains(&i) {
-                    continue;
-                }
-
-                // TODO: fix error handling so we can reuse this elsewhere.
-                let e_vec = graph
-                    .get(e.vertex())
-                    .expect("bulk load")
-                    .expect("numpy vector store")
-                    .vector()
-                    .into_owned();
-                let mut select = false;
-                for p in selected.iter().take_while(|j| **j < i).map(|j| edges[*j]) {
-                    let p_node = graph
-                        .get(p.vertex())
-                        .expect("bulk load")
-                        .expect("numpy vector store");
-                    if scorer.score(&e_vec, &p_node.vector()) > e.score * alpha {
-                        select = true;
-                        break;
-                    }
-                }
-
-                if select {
-                    selected.insert(i);
-                    if selected.len() >= self.index.metadata().max_edges.get() {
-                        break;
-                    }
-                }
-            }
-
-            if selected.len() >= self.index.metadata().max_edges.get() {
-                break;
-            }
-        }
-
-        // Partition edges into selected and unselected.
-        for (i, j) in selected.iter().enumerate() {
-            edges.swap(i, *j);
-        }
-
-        Ok(edges.split_at(selected.len()))
-    }
 }
 
 struct BulkLoadGraphVectorIndexReader<'a, D: Send>(&'a BulkLoadBuilder<D>, Session);
 
-impl<'a, D> BulkLoadGraphVectorIndexReader<'a, D>
+impl<D> BulkLoadGraphVectorIndexReader<'_, D>
 where
     D: Send,
 {
@@ -431,15 +350,21 @@ where
     }
 }
 
-impl<'a, D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'a, D>
+impl<D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, D>
 where
     D: Send,
 {
-    type Graph<'b> = BulkLoadBuilderGraph<'b, D> where Self: 'b;
-    type NavVectorStore<'b> = BulkLoadBuilderNavVectorStore<'b, D> where Self: 'b;
+    type Graph<'b>
+        = BulkLoadBuilderGraph<'b, D>
+    where
+        Self: 'b;
+    type NavVectorStore<'b>
+        = CursorNavVectorStore<'b>
+    where
+        Self: 'b;
 
-    fn metadata(&self) -> &GraphMetadata {
-        self.0.index.metadata()
+    fn config(&self) -> &GraphConfig {
+        self.0.index.config()
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
@@ -447,17 +372,22 @@ where
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-        Ok(BulkLoadBuilderNavVectorStore(self.0))
+        Ok(CursorNavVectorStore::new(
+            self.1.get_record_cursor(self.0.index.nav_table_name())?,
+        ))
     }
 }
 
 struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>);
 
-impl<'a, D> Graph for BulkLoadBuilderGraph<'a, D>
+impl<D> Graph for BulkLoadBuilderGraph<'_, D>
 where
     D: Send,
 {
-    type Vertex<'c> = BulkLoadGraphVertex<'c, D> where Self: 'c;
+    type Vertex<'c>
+        = BulkLoadGraphVertex<'c, D>
+    where
+        Self: 'c;
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let vertex = self.0.entry_vertex.load(atomic::Ordering::Relaxed);
@@ -481,8 +411,11 @@ struct BulkLoadGraphVertex<'a, D> {
     vertex_id: i64,
 }
 
-impl<'a, D> GraphVertex for BulkLoadGraphVertex<'a, D> {
-    type EdgeIterator<'c> = BulkNodeEdgesIterator<'c> where Self: 'c;
+impl<D> GraphVertex for BulkLoadGraphVertex<'_, D> {
+    type EdgeIterator<'c>
+        = BulkNodeEdgesIterator<'c>
+    where
+        Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
         self.builder.vectors[self.vertex_id as usize].into()
@@ -508,21 +441,10 @@ impl<'a> BulkNodeEdgesIterator<'a> {
     }
 }
 
-impl<'a> Iterator for BulkNodeEdgesIterator<'a> {
+impl Iterator for BulkNodeEdgesIterator<'_> {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|i| self.guard[i].vertex())
-    }
-}
-
-struct BulkLoadBuilderNavVectorStore<'a, D: Send>(&'a BulkLoadBuilder<D>);
-
-impl<'a, D> NavVectorStore for BulkLoadBuilderNavVectorStore<'a, D>
-where
-    D: Send,
-{
-    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        Some(Ok(self.0.quantized_vectors[vertex_id as usize].into()))
     }
 }

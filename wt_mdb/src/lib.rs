@@ -99,7 +99,7 @@ impl From<NonZero<i32>> for Error {
     fn from(value: NonZero<i32>) -> Self {
         WiredTigerError::try_from_code(value.get())
             .map(Error::WiredTiger)
-            .unwrap_or(Error::Errno(Errno::from_raw_os_error(value.get())))
+            .unwrap_or_else(|| Error::Errno(Errno::from_raw_os_error(value.get())))
     }
 }
 

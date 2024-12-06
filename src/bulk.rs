@@ -483,7 +483,7 @@ enum BulkLoadNavVectorStore<'a> {
     Memory(&'a DerefVectorStore<u8, memmap2::Mmap>),
 }
 
-impl<'a> NavVectorStore for BulkLoadNavVectorStore<'a> {
+impl NavVectorStore for BulkLoadNavVectorStore<'_> {
     fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
         match self {
             Self::Cursor(c) => c.get(vertex_id),

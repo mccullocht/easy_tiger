@@ -210,6 +210,7 @@ where
                     let centroid_score = self.scorer.score(&self.vectors[i], &self.centroid);
                     {
                         let mut entry_point = apply_mu.lock().unwrap();
+                        // XXX move apply_insert() above the lock point.
                         self.apply_insert(i, edges)?;
                         if centroid_score > entry_point.1 {
                             entry_point.0 = i as i64;
@@ -235,11 +236,18 @@ where
     where
         P: Fn(),
     {
+        // XXX run pruning concurrently on all nodes but do not remove pruned backlinks
+
         // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
         for (i, n) in self.graph.iter().enumerate().take(self.limit) {
             self.maybe_prune_node(i, n.write().unwrap(), self.index.config().max_edges)?;
             progress();
         }
+
+        // XXX iterate over the vertices and prune any link that is not reciprocated.
+        // this is easier if I unwrap all the neighbor lists first, which requires transformation
+        // of this structure.
+
         Ok(())
     }
 
@@ -351,6 +359,7 @@ where
         let dropped = guard.split_off(split);
         drop(guard);
 
+        // XXX remove this.
         // Remove in-links from nodes that we dropped out-links to.
         // If we maintain the invariant that all links are reciprocated then it will be easier
         // to mutate the index without requiring a cleaning process.

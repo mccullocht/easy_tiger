@@ -15,7 +15,7 @@ use std::{
     ops::Range,
     sync::{
         atomic::{self, AtomicI64},
-        Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, Mutex, RwLock, RwLockReadGuard,
     },
 };
 
@@ -200,6 +200,7 @@ where
                     let mut reader = BulkLoadGraphVectorIndexReader(self, session);
                     in_flight.insert(i);
                     let mut edges = self.search_for_insert(i, &mut searcher, &mut reader)?;
+                    // XXX I hate this, i'm pretty sure it's resulting in some disasterous shit
                     let worst_score = edges.last().map(|n| n.score()).unwrap_or(f64::MIN);
                     edges.extend(in_flight.iter().filter_map(|v| {
                         if *v == i {
@@ -250,14 +251,38 @@ where
             "raw edges avg {:.2} max {}",
             self.graph
                 .iter()
+                .take(self.limit)
                 .map(|v| v.read().unwrap().len())
                 .sum::<usize>() as f64
                 / self.limit as f64,
             self.graph
                 .iter()
+                .take(self.limit)
                 .map(|v| v.read().unwrap().len())
                 .max()
                 .unwrap()
+        );
+
+        eprintln!(
+            "directed {}",
+            self.graph
+                .iter()
+                .enumerate()
+                .take(self.limit)
+                .map(|(i, v)| {
+                    v.read()
+                        .unwrap()
+                        .iter()
+                        .filter(|n| {
+                            !self.graph[n.vertex() as usize]
+                                .read()
+                                .unwrap()
+                                .iter()
+                                .any(|f| f.vertex() == i as i64)
+                        })
+                        .count()
+                })
+                .sum::<usize>()
         );
 
         let max_edges = self.index.config().max_edges;
@@ -265,6 +290,7 @@ where
             .graph
             .par_iter()
             .enumerate()
+            .take(self.limit)
             .flat_map(|(i, v)| {
                 let mut edges = v.write().unwrap();
                 let pruned = if edges.len() >= max_edges.get() {
@@ -305,8 +331,37 @@ where
             let mut src = self.graph[i as usize].write().unwrap();
             let mut dst = self.graph[n.vertex() as usize].write().unwrap();
             if src.len() >= max_edges.get() || dst.len() >= max_edges.get() {
+                // XXX this is removing 2 so we're seeing two different scores.
+                let ps = src
+                    .iter()
+                    .filter(|e| e.vertex() == n.vertex())
+                    .copied()
+                    .collect::<Vec<_>>();
+                let pd = dst
+                    .iter()
+                    .filter(|e| e.vertex() == i)
+                    .copied()
+                    .collect::<Vec<_>>();
+
+                let os = src.len();
                 src.retain(|e| e.vertex() != n.vertex());
+                let od = dst.len();
                 dst.retain(|e| e.vertex() != i);
+                assert!(
+                    (src.len() == os - 1 && dst.len() == od - 1)
+                        || (src.len() == os && dst.len() == od),
+                    "{} {} ({} {} {:?}) ({} {} {:?})",
+                    i,
+                    n.vertex(),
+                    os,
+                    src.len(),
+                    ps,
+                    od,
+                    dst.len(),
+                    pd,
+                );
+                //assert_eq!(src.len(), os - 1, "{} {}", i, n.vertex());
+                //assert_eq!(dst.len(), od - 1, "{} {}", i, n.vertex());
             }
         }
 
@@ -401,38 +456,6 @@ where
         for e in edges.iter() {
             let mut guard = self.graph[e.vertex() as usize].write().unwrap();
             guard.push(Neighbor::new(index as i64, e.score()));
-        }
-        Ok(())
-    }
-
-    fn maybe_prune_node(
-        &self,
-        index: usize,
-        mut guard: RwLockWriteGuard<'_, Vec<Neighbor>>,
-        max_edges: NonZero<usize>,
-    ) -> Result<()> {
-        if guard.len() <= max_edges.get() {
-            return Ok(());
-        }
-
-        guard.sort();
-        let split = prune_edges(
-            &mut guard,
-            self.index.config().max_edges,
-            &mut BulkLoadBuilderGraph(self),
-            self.scorer.as_ref(),
-        )?;
-        let dropped = guard.split_off(split);
-        drop(guard);
-
-        // Remove in-links from nodes that we dropped out-links to.
-        // If we maintain the invariant that all links are reciprocated then it will be easier
-        // to mutate the index without requiring a cleaning process.
-        for n in dropped {
-            self.graph[n.vertex() as usize]
-                .write()
-                .unwrap()
-                .retain(|e| e.vertex() != index as i64);
         }
         Ok(())
     }

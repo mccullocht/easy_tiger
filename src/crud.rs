@@ -60,8 +60,9 @@ impl IndexMutator {
         assert_eq!(self.reader.config().dimensions.get(), vector.len());
 
         let scorer = self.reader.config().new_scorer();
+        let vector = scorer.normalize_vector(vector.into());
         // TODO: normalize input vector.
-        let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;
+        let mut candidate_edges = self.searcher.search(&vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
         if candidate_edges.is_empty() {
             // Proceed through the rest of the function so that the inserts happen.
@@ -79,13 +80,13 @@ impl IndexMutator {
         graph.set(
             vertex_id,
             &encode_graph_node_internal(
-                vector,
+                vector.as_ref(),
                 candidate_edges.iter().map(|n| n.vertex()).collect(),
             ),
         )?;
         self.reader
             .nav_vectors()?
-            .set(vertex_id, binary_quantize(vector).into())?;
+            .set(vertex_id, binary_quantize(vector.as_ref()).into())?;
 
         let mut pruned_edges = vec![];
         for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {

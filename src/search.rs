@@ -271,10 +271,9 @@ impl GraphSearcher {
                 .iter()
                 .take(self.params.num_rerank)
                 .map(|c| {
-                    Neighbor::new(
-                        c.neighbor.vertex(),
-                        scorer.score(&normalized_query, c.state.vector().expect("node visited")),
-                    )
+                    let mut vec = c.state.vector().expect("node visited").to_vec();
+                    scorer.normalize(&mut vec);
+                    Neighbor::new(c.neighbor.vertex(), scorer.score(&normalized_query, &vec))
                 })
                 .collect::<Vec<_>>();
             rescored.sort();

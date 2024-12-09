@@ -11,6 +11,7 @@
 use core::f64;
 use std::{
     borrow::Cow,
+    collections::HashSet,
     num::NonZero,
     ops::Range,
     sync::{
@@ -175,6 +176,7 @@ where
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
+        // XXX unnormalized score
         let apply_mu = Mutex::new((0i64, self.scorer.score(&self.vectors[0], &self.centroid)));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
@@ -200,9 +202,20 @@ where
                     let mut reader = BulkLoadGraphVectorIndexReader(self, session);
                     in_flight.insert(i);
                     let mut edges = self.search_for_insert(i, &mut searcher, &mut reader)?;
+                    assert_eq!(
+                        edges.len(),
+                        edges
+                            .iter()
+                            .map(|n| n.vertex())
+                            .collect::<HashSet<_>>()
+                            .len(),
+                        "{}",
+                        i
+                    );
                     // Insert any other in-flight edges into the candidate queue. These are vertices we may have missed because
                     // they are being inserted concurrently in another thread.
                     self.insert_in_flight_edges(i, in_flight.iter().map(|e| *e), &mut edges);
+                    // XXX unnormalized score
                     let centroid_score = self.scorer.score(&self.vectors[i], &self.centroid);
                     {
                         let mut entry_point = apply_mu.lock().unwrap();
@@ -439,17 +452,26 @@ where
         edges: &mut Vec<Neighbor>,
     ) {
         let limit = self.index.config().index_search_params.beam_width.get();
+        let mut normalized_query = self.vectors[vertex_id].to_vec();
+        self.scorer.normalize(&mut normalized_query);
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
+            let mut vec = self.vectors[in_flight_vertex].to_vec();
+            self.scorer.normalize((&mut vec));
             let n = Neighbor::new(
                 in_flight_vertex as i64,
                 self.scorer
-                    .score(&self.vectors[vertex_id], &self.vectors[in_flight_vertex]),
+                    .score(&normalized_query, &self.vectors[in_flight_vertex]),
             );
             // If the queue is full and n is worse than all other edges, skip.
             if edges.len() >= limit && n >= *edges.last().unwrap() {
                 continue;
             }
 
+            let dupe = edges
+                .iter()
+                .find(|e| e.vertex() == in_flight_vertex as i64 && **e != n)
+                .copied();
+            assert!(dupe.is_none(), "{:?} vs {:?}", n, dupe.unwrap());
             if let Err(index) = edges.binary_search(&n) {
                 if edges.len() >= limit {
                     edges.pop();
@@ -469,6 +491,9 @@ where
         self.graph[index].write().unwrap().extend_from_slice(&edges);
         for e in edges.iter() {
             let mut guard = self.graph[e.vertex() as usize].write().unwrap();
+            // XXX this might still insert duplicates. the duplicates have the same score if using euclidean scoring.
+            let dupe = guard.iter().find(|n| n.vertex() == index as i64).copied();
+            assert!(dupe.is_none(), "{} {:?} {:?}", index, e, dupe.unwrap());
             guard.push(Neighbor::new(index as i64, e.score()));
         }
         Ok(())

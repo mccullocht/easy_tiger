@@ -264,7 +264,7 @@ impl GraphSearcher {
     ) -> Vec<Neighbor> {
         if self.params.num_rerank > 0 {
             let scorer = reader.config().new_scorer();
-            let normalized_query = scorer.normalize_vector(query.into());
+            let query = scorer.normalize_vector(query.into());
             let mut rescored = self
                 .candidates
                 .iter()
@@ -272,7 +272,7 @@ impl GraphSearcher {
                 .map(|c| {
                     Neighbor::new(
                         c.neighbor.vertex(),
-                        scorer.score(&normalized_query, c.state.vector().expect("node visited")),
+                        scorer.score(&query, c.state.vector().expect("node visited")),
                     )
                 })
                 .collect::<Vec<_>>();

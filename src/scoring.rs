@@ -1,6 +1,6 @@
 //! Dense vector scoring traits and implementations.
 
-use std::{io, str::FromStr};
+use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use simsimd::{BinarySimilarity, SpatialSimilarity};
@@ -19,6 +19,12 @@ pub trait F32VectorScorer: Send + Sync {
     /// Normalize a vector for use with this scoring function.
     /// By default, does nothing.
     fn normalize(&self, _vector: &mut [f32]) {}
+
+    /// Normalize a vector for use with this scoring function.
+    /// By default, does nothing.
+    fn normalize_vector<'a>(&self, vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
+        vector
+    }
 }
 
 /// Scorer for quantized vectors.
@@ -94,11 +100,12 @@ impl F32VectorScorer for DotProductScorer {
         (1f64 + SpatialSimilarity::dot(a, b).unwrap()) / 2f64
     }
 
-    fn normalize(&self, vector: &mut [f32]) {
-        let norm = SpatialSimilarity::dot(vector, vector).unwrap().sqrt() as f32;
-        for d in vector.iter_mut() {
+    fn normalize_vector<'a>(&self, mut vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
+        let norm = SpatialSimilarity::dot(&vector, &vector).unwrap().sqrt() as f32;
+        for d in vector.to_mut().iter_mut() {
             *d /= norm;
         }
+        vector
     }
 }
 

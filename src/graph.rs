@@ -189,3 +189,56 @@ pub(crate) fn prune_edges(
 
     Ok(selected.len())
 }
+
+pub(crate) fn select_edges(
+    edges: &[Neighbor],
+    max_edges: NonZero<usize>,
+    graph: &mut impl Graph,
+    scorer: &dyn F32VectorScorer,
+) -> Result<BTreeSet<usize>> {
+    if edges.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    debug_assert!(edges.is_sorted());
+
+    // Obtain all the vectors to make relative neighbor graph scoring easier.
+    let vectors = edges
+        .iter()
+        .map(|n| {
+            graph
+                .get(n.vertex())
+                .unwrap_or(Err(Error::not_found_error()))
+                .map(|v| v.vector().to_vec())
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // TODO: replace with a fixed length bitset
+    let mut selected = BTreeSet::new();
+    selected.insert(0); // we always keep the first node.
+    for alpha in [1.0, 1.2] {
+        for (i, e) in edges.iter().enumerate().skip(1) {
+            if selected.contains(&i) {
+                continue;
+            }
+
+            let e_vec = &vectors[i];
+            if !selected
+                .iter()
+                .take_while(|s| **s < i)
+                .any(|s| scorer.score(e_vec, &vectors[*s]) > e.score * alpha)
+            {
+                selected.insert(i);
+                if selected.len() >= max_edges.get() {
+                    break;
+                }
+            }
+        }
+
+        if selected.len() >= max_edges.get() {
+            break;
+        }
+    }
+
+    Ok(selected)
+}

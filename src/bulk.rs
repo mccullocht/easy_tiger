@@ -21,11 +21,19 @@ use std::{
 
 use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use rayon::{
+    iter::{
+        IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+    },
+    slice::ParallelSliceMut,
+};
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{
+        prune_edges, select_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex,
+        NavVectorStore,
+    },
     input::{DerefVectorStore, VectorStore},
     quantization::{binary_quantize, binary_quantized_bytes},
     scoring::F32VectorScorer,
@@ -210,6 +218,7 @@ where
                     let centroid_score = self.scorer.score(&self.vectors[i], &self.centroid);
                     {
                         let mut entry_point = apply_mu.lock().unwrap();
+                        // XXX this is fast enough so long as I don't do any real pruning in here.
                         self.apply_insert(i, edges)?;
                         if centroid_score > entry_point.1 {
                             entry_point.0 = i as i64;
@@ -233,13 +242,80 @@ where
     /// This may prune edges and/or ensure graph connectivity.
     pub fn cleanup<P>(&self, progress: P) -> Result<()>
     where
-        P: Fn(),
+        P: Fn() + Send + Sync,
     {
+        // XXX only 128 avg! max is damn near 1k lol
+        // i could blindly keep the top N edges by distance and that would probably be good enough.
+        eprintln!(
+            "raw edges avg {:.2} max {}",
+            self.graph
+                .iter()
+                .map(|v| v.read().unwrap().len())
+                .sum::<usize>() as f64
+                / self.limit as f64,
+            self.graph
+                .iter()
+                .map(|v| v.read().unwrap().len())
+                .max()
+                .unwrap()
+        );
+
+        let max_edges = self.index.config().max_edges;
+        let mut pruned_edges = self
+            .graph
+            .par_iter()
+            .enumerate()
+            .flat_map(|(i, v)| {
+                let mut edges = v.write().unwrap();
+                let pruned = if edges.len() >= max_edges.get() {
+                    edges.sort();
+                    // XXX bad error handling.
+                    let selected = select_edges(
+                        &edges,
+                        max_edges,
+                        &mut BulkLoadBuilderGraph(self),
+                        self.scorer.as_ref(),
+                    )
+                    .unwrap();
+                    edges
+                        .iter()
+                        .enumerate()
+                        .filter(|e| !selected.contains(&e.0))
+                        .map(|(_, n)| {
+                            (
+                                Neighbor::new(std::cmp::min(n.vertex(), i as i64), n.score()),
+                                std::cmp::max(n.vertex(), i as i64),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![]
+                };
+                progress();
+                pruned
+            })
+            .collect::<Vec<_>>();
+        eprintln!("pruned_edges {}", pruned_edges.len());
+        pruned_edges.par_sort_unstable();
+        pruned_edges.dedup();
+        eprintln!("pruned_edges {}", pruned_edges.len());
+
+        eprintln!("removing pruned edges");
+        for (n, i) in pruned_edges.into_iter().rev() {
+            let mut src = self.graph[i as usize].write().unwrap();
+            let mut dst = self.graph[n.vertex() as usize].write().unwrap();
+            if src.len() >= max_edges.get() || dst.len() >= max_edges.get() {
+                src.retain(|e| e.vertex() != n.vertex());
+                dst.retain(|e| e.vertex() != i);
+            }
+        }
+
+        /*
         // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
         for (i, n) in self.graph.iter().enumerate().take(self.limit) {
             self.maybe_prune_node(i, n.write().unwrap(), self.index.config().max_edges)?;
-            progress();
         }
+        */
         Ok(())
     }
 
@@ -325,8 +401,6 @@ where
         for e in edges.iter() {
             let mut guard = self.graph[e.vertex() as usize].write().unwrap();
             guard.push(Neighbor::new(index as i64, e.score()));
-            let max_edges = NonZero::new(guard.capacity() - 1).unwrap();
-            self.maybe_prune_node(index, guard, max_edges)?;
         }
         Ok(())
     }

@@ -263,9 +263,8 @@ impl GraphSearcher {
         reader: &R,
     ) -> Vec<Neighbor> {
         if self.params.num_rerank > 0 {
-            let mut normalized_query = query.to_vec();
             let scorer = reader.config().new_scorer();
-            scorer.normalize(&mut normalized_query);
+            let query = scorer.normalize_vector(query.into());
             let mut rescored = self
                 .candidates
                 .iter()
@@ -273,7 +272,7 @@ impl GraphSearcher {
                 .map(|c| {
                     Neighbor::new(
                         c.neighbor.vertex(),
-                        scorer.score(&normalized_query, c.state.vector().expect("node visited")),
+                        scorer.score(&query, c.state.vector().expect("node visited")),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -486,8 +485,7 @@ mod test {
             let mut rep = iter
                 .into_iter()
                 .map(|x| {
-                    let mut v = x.into();
-                    scorer.normalize(&mut v);
+                    let v = x.into();
                     let b = binary_quantize(&v);
                     TestVector {
                         vector: v,
@@ -502,7 +500,7 @@ mod test {
             }
             let config = GraphConfig {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
-                similarity: VectorSimilarity::Dot,
+                similarity: VectorSimilarity::Euclidean,
                 max_edges: max_edges,
                 index_search_params: GraphSearchParams {
                     beam_width: NonZero::new(usize::MAX).unwrap(),
@@ -683,7 +681,7 @@ mod test {
                 Neighbor::new(0, 1.0),
                 Neighbor::new(1, 1.0),
                 Neighbor::new(4, 1.0),
-                Neighbor::new(5, 1.0)
+                Neighbor::new(16, 1.0)
             ]
         );
     }
@@ -702,10 +700,10 @@ mod test {
                     .unwrap()
             ),
             vec![
-                Neighbor::new(0, 1.0),
-                Neighbor::new(1, 0.98536),
-                Neighbor::new(4, 0.98536),
-                Neighbor::new(5, 0.97434)
+                Neighbor::new(1, 0.93622),
+                Neighbor::new(4, 0.93622),
+                Neighbor::new(16, 0.93622),
+                Neighbor::new(0, 0.91743),
             ]
         );
     }

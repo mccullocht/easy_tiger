@@ -8,6 +8,11 @@
 //! Caveats:
 //! * Only `numpy` little-endian formatted `f32` vectors are accepted.
 //! * Row keys are assigned densely beginning at zero.
+
+// XXX options to make this faster
+// * Two step edge commit, acquiring locks in a fixed order. Pruning also needs to do this.
+// * Similarity cache based on edges when pruning. Retain global lock to sequence updates.
+// * Directed build, add back edges, prune.
 use core::f64;
 use std::{
     borrow::Cow,

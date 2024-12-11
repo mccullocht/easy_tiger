@@ -339,7 +339,9 @@ mod tests {
             )
             .unwrap();
             let index = Arc::new(
-                TableGraphVectorIndex::from_init(
+                TableGraphVectorIndex::init_index(
+                    &conn,
+                    None,
                     GraphConfig {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
@@ -350,7 +352,6 @@ mod tests {
                 )
                 .unwrap(),
             );
-            index.init_index(&conn, None).unwrap();
             Self {
                 _dir: dir,
                 conn,

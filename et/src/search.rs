@@ -1,10 +1,13 @@
+use rayon::prelude::*;
+
 use std::{
-    fmt::Display,
     fs::File,
     io::{self},
     num::NonZero,
+    ops::Add,
     path::PathBuf,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use clap::Args;
@@ -63,10 +66,10 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
     );
-    let mut searcher = GraphSearcher::new(GraphSearchParams {
+    let search_params = GraphSearchParams {
         beam_width: args.candidates,
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
-    });
+    };
     let pool = if args.concurrency.get() > 1 {
         Some(WorkerPool::new(
             ThreadPool::new(args.concurrency.into()),
@@ -75,8 +78,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     } else {
         None
     };
-    let mut recall_computer = if let Some((neighbors, recall_k)) = args.neighbors.zip(args.recall_k)
-    {
+    let recall_computer = if let Some((neighbors, recall_k)) = args.neighbors.zip(args.recall_k) {
         let neighbors = DerefVectorStore::<u32, _>::new(
             unsafe { Mmap::map(&File::open(neighbors)?)? },
             args.neighbors_len,
@@ -97,8 +99,6 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     };
 
     let index = Arc::new(index);
-    let mut session = connection.open_session()?;
-    let mut search_stats = GraphSearchStats::default();
     let progress = ProgressBar::new(limit as u64)
         .with_style(
             ProgressStyle::default_bar()
@@ -106,33 +106,33 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
                 .unwrap(),
         )
         .with_finish(indicatif::ProgressFinish::AndLeave);
-    for (i, query) in query_vectors.iter().enumerate().take(limit) {
-        session.begin_transaction(None)?;
-        let mut reader = SessionGraphVectorIndexReader::new(
-            index.clone(),
-            session,
-            pool.as_ref().map(WorkerPool::clone),
-        );
-        let results = searcher.search_with_concurrency(query, &mut reader, args.concurrency)?;
-        assert_ne!(results.len(), 0);
-        search_stats += searcher.stats();
-        recall_computer.as_mut().map(|r| r.add_results(i, &results));
-
-        progress.inc(1);
-        session = reader.into_session();
-        session.rollback_transaction(None)?;
-    }
+    let stats = (0..query_vectors.len())
+        .into_par_iter()
+        .take(limit)
+        .map_init(
+            || {
+                SearcherState::new(&index, &connection, &pool, search_params, args.concurrency)
+                    .unwrap()
+            },
+            |searcher, index| {
+                let stats = searcher.query(index, &query_vectors[index], recall_computer.as_ref());
+                progress.inc(1);
+                stats
+            },
+        )
+        .try_reduce(|| AggregateSearchStats::default(), |a, b| Ok(a + b))?;
     progress.finish_using_style();
 
     println!(
-        "queries {} avg duration {:.3}ms avg candidates {:.2} avg visited {:.2}",
-        limit,
-        progress.elapsed().div_f32(limit as f32).as_micros() as f64 / 1_000f64,
-        search_stats.candidates as f64 / limit as f64,
-        search_stats.visited as f64 / limit as f64,
+        "queries {} avg duration {:0.6}s max duration {:0.6}s  avg candidates {:.2} avg visited {:.2}",
+        stats.count,
+        stats.total_duration.as_secs_f64() / stats.count as f64,
+        stats.max_duration.as_secs_f64(),
+        stats.total_graph_stats.candidates as f64 / stats.count as f64,
+        stats.total_graph_stats.visited as f64 / stats.count as f64,
     );
 
-    let (search_calls, read_io) = cache_hit_stats(&session)?;
+    let (search_calls, read_io) = cache_hit_stats(&connection.open_session()?)?;
     println!(
         "cache hit rate {:.2}% ({} reads, {} lookups)",
         (search_calls - read_io) as f64 * 100.0 / search_calls as f64,
@@ -140,21 +140,66 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         search_calls,
     );
 
-    if let Some(computer) = recall_computer {
-        println!("{}", computer);
+    if let Some((computer, recalled_count)) = recall_computer.zip(stats.total_recall_results) {
+        println!(
+            "recall@{} {:0.6}",
+            computer.k,
+            recalled_count as f64 / (stats.count * computer.k) as f64
+        );
     }
 
     Ok(())
 }
 
+struct SearcherState {
+    reader: SessionGraphVectorIndexReader,
+    searcher: GraphSearcher,
+    concurrency: NonZero<usize>,
+}
+
+impl SearcherState {
+    fn new(
+        index: &Arc<TableGraphVectorIndex>,
+        connection: &Arc<Connection>,
+        worker_pool: &Option<WorkerPool>,
+        search_params: GraphSearchParams,
+        concurrency: NonZero<usize>,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            reader: SessionGraphVectorIndexReader::new(
+                index.clone(),
+                connection.open_session()?,
+                worker_pool.clone(),
+            ),
+            searcher: GraphSearcher::new(search_params),
+            concurrency,
+        })
+    }
+
+    fn query<N: VectorStore<Elem = u32>>(
+        &mut self,
+        index: usize,
+        query: &[f32],
+        recall_computer: Option<&RecallComputer<N>>,
+    ) -> io::Result<AggregateSearchStats> {
+        self.reader.session().begin_transaction(None)?;
+        let start = Instant::now();
+        let results =
+            self.searcher
+                .search_with_concurrency(query, &mut self.reader, self.concurrency)?;
+        let duration = Instant::now() - start;
+        self.reader.session().rollback_transaction(None)?;
+        Ok(AggregateSearchStats::new(
+            duration,
+            self.searcher.stats(),
+            recall_computer.map(|r| r.compute_recall(index, &results)),
+        ))
+    }
+}
+
 pub struct RecallComputer<N> {
     k: usize,
     neighbors: N,
-
-    queries: usize,
-    total: usize,
-    matched: usize,
-    expected_buf: Vec<u32>,
 }
 
 impl<N> RecallComputer<N>
@@ -166,10 +211,6 @@ where
             Ok(Self {
                 k: k.get(),
                 neighbors,
-                queries: 0,
-                total: 0,
-                matched: 0,
-                expected_buf: Vec::with_capacity(k.get()),
             })
         } else {
             Err(io::Error::new(
@@ -179,36 +220,54 @@ where
         }
     }
 
-    fn add_results(&mut self, query_index: usize, query_results: &[Neighbor]) {
-        self.expected_buf.clear();
-        self.expected_buf
-            .extend_from_slice(&self.neighbors[query_index][..self.k]);
-        self.expected_buf.sort();
+    fn compute_recall(&self, query_index: usize, query_results: &[Neighbor]) -> usize {
+        let mut expected = self.neighbors[query_index][..self.k].to_vec();
+        expected.sort();
+        query_results
+            .iter()
+            .take(self.k)
+            .filter(|n| expected.binary_search(&(n.vertex() as u32)).is_ok())
+            .count()
+    }
+}
 
-        self.queries += 1;
-        for n in query_results.iter().take(self.k) {
-            self.total += 1;
-            if self
-                .expected_buf
-                .binary_search(&(n.vertex() as u32))
-                .is_ok()
-            {
-                self.matched += 1;
-            }
+#[derive(Default)]
+struct AggregateSearchStats {
+    count: usize,
+    total_duration: Duration,
+    max_duration: Duration,
+    total_graph_stats: GraphSearchStats,
+    total_recall_results: Option<usize>,
+}
+
+impl AggregateSearchStats {
+    fn new(duration: Duration, graph_stats: GraphSearchStats, recall: Option<usize>) -> Self {
+        Self {
+            count: 1,
+            total_duration: duration,
+            max_duration: duration,
+            total_graph_stats: graph_stats,
+            total_recall_results: recall,
         }
     }
 }
 
-impl<N> Display for RecallComputer<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "recall@k {:.5}  ({} queries; {} matched; {} total)",
-            self.matched as f64 / self.total as f64,
-            self.queries,
-            self.matched,
-            self.total
-        )
+impl Add<AggregateSearchStats> for AggregateSearchStats {
+    type Output = AggregateSearchStats;
+
+    fn add(self, rhs: AggregateSearchStats) -> Self::Output {
+        Self {
+            count: self.count + rhs.count,
+            total_duration: self.total_duration + rhs.total_duration,
+            max_duration: std::cmp::max(self.total_duration, rhs.max_duration),
+            total_graph_stats: self.total_graph_stats + rhs.total_graph_stats,
+            total_recall_results: self
+                .total_recall_results
+                .zip(rhs.total_recall_results)
+                .map(|(a, b)| a + b)
+                .or(self.total_recall_results)
+                .or(rhs.total_recall_results),
+        }
     }
 }
 

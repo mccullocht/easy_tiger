@@ -54,10 +54,15 @@ pub struct SearchArgs {
     /// Compute recall@k. Must be <= neighbors_len.
     #[arg(long)]
     recall_k: Option<NonZero<usize>>,
+
+    #[arg(long, default_value = "1")]
+    warmup_iters: usize,
+    #[arg(long, default_value = "2")]
+    test_iters: usize,
 }
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
-    let index = TableGraphVectorIndex::from_db(&connection, index_name)?;
+    let index = Arc::new(TableGraphVectorIndex::from_db(&connection, index_name)?);
     let query_vectors = easy_tiger::input::DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         index.config().dimensions,
@@ -98,57 +103,114 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         None
     };
 
-    let index = Arc::new(index);
-    let progress = ProgressBar::new(limit as u64)
+    if args.warmup_iters > 0 {
+        search_phase(
+            "warmup",
+            args.warmup_iters,
+            limit,
+            &query_vectors,
+            &index,
+            &pool,
+            &connection,
+            search_params,
+            args.concurrency,
+            recall_computer.as_ref(),
+        )?;
+    }
+
+    if args.test_iters > 0 {
+        let stats = search_phase(
+            "test",
+            args.test_iters,
+            limit,
+            &query_vectors,
+            &index,
+            &pool,
+            &connection,
+            search_params,
+            args.concurrency,
+            recall_computer.as_ref(),
+        )?;
+
+        println!(
+            "queries {} avg duration {:0.6}s max duration {:0.6}s  avg candidates {:.2} avg visited {:.2}",
+            stats.count,
+            stats.total_duration.as_secs_f64() / stats.count as f64,
+            stats.max_duration.as_secs_f64(),
+            stats.total_graph_stats.candidates as f64 / stats.count as f64,
+            stats.total_graph_stats.visited as f64 / stats.count as f64,
+        );
+
+        // TODO: reset connection stats so this is more accurate.
+        let (search_calls, read_io) = cache_hit_stats(&connection.open_session()?)?;
+        println!(
+            "cache hit rate {:.2}% ({} reads, {} lookups)",
+            (search_calls - read_io) as f64 * 100.0 / search_calls as f64,
+            read_io,
+            search_calls,
+        );
+
+        if let Some((computer, recalled_count)) = recall_computer.zip(stats.total_recall_results) {
+            println!(
+                "recall@{} {:0.6}",
+                computer.k,
+                recalled_count as f64 / (stats.count * computer.k) as f64
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn search_phase<Q: Send + Sync, N: Send + Sync>(
+    name: &'static str,
+    iters: usize,
+    limit: usize,
+    query_vectors: &DerefVectorStore<f32, Q>,
+    index: &Arc<TableGraphVectorIndex>,
+    worker_pool: &Option<WorkerPool>,
+    connection: &Arc<Connection>,
+    search_params: GraphSearchParams,
+    concurrency: NonZero<usize>,
+    recall_computer: Option<&RecallComputer<DerefVectorStore<u32, N>>>,
+) -> io::Result<AggregateSearchStats> {
+    let query_indices = (0..limit)
+        .into_iter()
+        .cycle()
+        .take(iters * limit)
+        .collect::<Vec<_>>();
+    let progress = ProgressBar::new(query_indices.len() as u64)
         .with_style(
             ProgressStyle::default_bar()
-                .template("{wide_bar} {pos}/{len} ETA: {eta_precise} Elapsed: {elapsed_precise}")
+                .template(
+                    "{msg} {wide_bar} {pos}/{len} ETA: {eta_precise} Elapsed: {elapsed_precise}",
+                )
                 .unwrap(),
         )
+        .with_message(name)
         .with_finish(indicatif::ProgressFinish::AndLeave);
-    let stats = (0..query_vectors.len())
+    let stats = query_indices
         .into_par_iter()
-        .take(limit)
         .map_init(
             || {
-                SearcherState::new(&index, &connection, &pool, search_params, args.concurrency)
-                    .unwrap()
+                SearcherState::new(
+                    &index,
+                    &connection,
+                    &worker_pool,
+                    search_params,
+                    concurrency,
+                )
+                .unwrap()
             },
             |searcher, index| {
-                let stats = searcher.query(index, &query_vectors[index], recall_computer.as_ref());
+                let stats = searcher.query(index, &query_vectors[index], recall_computer);
                 progress.inc(1);
                 stats
             },
         )
         .try_reduce(|| AggregateSearchStats::default(), |a, b| Ok(a + b))?;
     progress.finish_using_style();
-
-    println!(
-        "queries {} avg duration {:0.6}s max duration {:0.6}s  avg candidates {:.2} avg visited {:.2}",
-        stats.count,
-        stats.total_duration.as_secs_f64() / stats.count as f64,
-        stats.max_duration.as_secs_f64(),
-        stats.total_graph_stats.candidates as f64 / stats.count as f64,
-        stats.total_graph_stats.visited as f64 / stats.count as f64,
-    );
-
-    let (search_calls, read_io) = cache_hit_stats(&connection.open_session()?)?;
-    println!(
-        "cache hit rate {:.2}% ({} reads, {} lookups)",
-        (search_calls - read_io) as f64 * 100.0 / search_calls as f64,
-        read_io,
-        search_calls,
-    );
-
-    if let Some((computer, recalled_count)) = recall_computer.zip(stats.total_recall_results) {
-        println!(
-            "recall@{} {:0.6}",
-            computer.k,
-            recalled_count as f64 / (stats.count * computer.k) as f64
-        );
-    }
-
-    Ok(())
+    Ok(stats)
 }
 
 struct SearcherState {
@@ -188,6 +250,9 @@ impl SearcherState {
             self.searcher
                 .search_with_concurrency(query, &mut self.reader, self.concurrency)?;
         let duration = Instant::now() - start;
+        if duration > Duration::new(1, 0) {
+            println!("query {} {:0.6}", index, duration.as_secs_f64());
+        }
         self.reader.session().rollback_transaction(None)?;
         Ok(AggregateSearchStats::new(
             duration,
@@ -259,7 +324,7 @@ impl Add<AggregateSearchStats> for AggregateSearchStats {
         Self {
             count: self.count + rhs.count,
             total_duration: self.total_duration + rhs.total_duration,
-            max_duration: std::cmp::max(self.total_duration, rhs.max_duration),
+            max_duration: std::cmp::max(self.max_duration, rhs.max_duration),
             total_graph_stats: self.total_graph_stats + rhs.total_graph_stats,
             total_recall_results: self
                 .total_recall_results

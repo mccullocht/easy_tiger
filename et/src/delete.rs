@@ -2,7 +2,10 @@ use std::{io, ops::Range, str::FromStr, sync::Arc};
 
 use clap::Args;
 use easy_tiger::wt::TableGraphVectorIndex;
+use indicatif::ProgressIterator;
 use wt_mdb::{Connection, RecordCursor};
+
+use crate::ui::progress_spinner;
 
 #[derive(Debug, Clone)]
 struct KeyRange(Range<i64>);
@@ -40,7 +43,7 @@ fn delete_all(
     mut graph_cursor: RecordCursor<'_>,
     mut nav_cursor: RecordCursor<'_>,
 ) -> wt_mdb::Result<()> {
-    for record in id_cursor {
+    for record in id_cursor.progress_with(progress_spinner()) {
         let key = record?.key();
         graph_cursor.remove(key)?;
         nav_cursor.remove(key)?;

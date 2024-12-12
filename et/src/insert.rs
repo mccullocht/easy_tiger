@@ -6,6 +6,7 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     wt::TableGraphVectorIndex,
 };
+use indicatif::ProgressIterator;
 use wt_mdb::{Connection, Result};
 
 use crate::ui::progress_bar;
@@ -31,7 +32,7 @@ fn insert_all<'a>(
     let mut keys: Vec<Range<i64>> = vec![];
     // I could probably write this as a fold but it seems annoying.
     let progress = progress_bar(vectors.len(), None);
-    for vector in vectors {
+    for vector in vectors.progress_with(progress) {
         let key = mutator.insert(vector)?;
         if let Some(r) = keys.last_mut() {
             if r.end == key {
@@ -42,7 +43,6 @@ fn insert_all<'a>(
         } else {
             keys.push(key..(key + 1))
         }
-        progress.inc(1);
     }
     Ok(keys)
 }

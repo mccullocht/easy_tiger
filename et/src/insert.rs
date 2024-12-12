@@ -8,6 +8,8 @@ use easy_tiger::{
 };
 use wt_mdb::{Connection, Result};
 
+use crate::ui::progress_bar;
+
 #[derive(Args)]
 pub struct InsertArgs {
     /// Path to the numpy formatted vectors to insert.
@@ -24,10 +26,11 @@ pub struct InsertArgs {
 
 fn insert_all<'a>(
     mutator: &mut IndexMutator,
-    vectors: impl Iterator<Item = &'a [f32]>,
+    vectors: impl Iterator<Item = &'a [f32]> + ExactSizeIterator,
 ) -> Result<Vec<Range<i64>>> {
     let mut keys: Vec<Range<i64>> = vec![];
     // I could probably write this as a fold but it seems annoying.
+    let progress = progress_bar(vectors.len(), None);
     for vector in vectors {
         let key = mutator.insert(vector)?;
         if let Some(r) = keys.last_mut() {
@@ -39,6 +42,7 @@ fn insert_all<'a>(
         } else {
             keys.push(key..(key + 1))
         }
+        progress.inc(1);
     }
     Ok(keys)
 }

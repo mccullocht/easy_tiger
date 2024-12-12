@@ -149,11 +149,15 @@ where
             )
             .unwrap()
         });
-        self.centroid = sum
-            .into_iter()
-            .map(|s| (s / self.limit as f64) as f32)
-            .collect();
-        self.scorer.normalize(&mut self.centroid);
+        self.centroid = self
+            .scorer
+            .normalize_vector(
+                sum.into_iter()
+                    .map(|s| (s / self.limit as f64) as f32)
+                    .collect::<Vec<_>>()
+                    .into(),
+            )
+            .into_owned();
         Ok(())
     }
 
@@ -167,7 +171,7 @@ where
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
-        let apply_mu = Mutex::new((0i64, self.scorer.score(&self.vectors[0], &self.centroid)));
+        let apply_mu = Mutex::new((0i64, self.scorer.score(&self.get_vector(0), &self.centroid)));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
         // Keep track of all in-flight concurrent insertions. These nodes will be processed at the
@@ -192,22 +196,10 @@ where
                     let mut reader = BulkLoadGraphVectorIndexReader(self, session);
                     in_flight.insert(i);
                     let mut edges = self.search_for_insert(i, &mut searcher, &mut reader)?;
-                    let worst_score = edges.last().map(|n| n.score()).unwrap_or(f64::MIN);
-                    edges.extend(in_flight.iter().filter_map(|v| {
-                        if *v == i {
-                            return None;
-                        }
-                        let p = Neighbor::new(
-                            *v as i64,
-                            self.scorer.score(&self.vectors[i], &self.vectors[*v]),
-                        );
-                        if p.score < worst_score {
-                            None
-                        } else {
-                            Some(p)
-                        }
-                    }));
-                    let centroid_score = self.scorer.score(&self.vectors[i], &self.centroid);
+                    // Insert any other in-flight edges into the candidate queue. These are vertices we may have missed because
+                    // they are being inserted concurrently in another thread.
+                    self.insert_in_flight_edges(i, in_flight.iter().map(|e| *e), &mut edges);
+                    let centroid_score = self.scorer.score(&self.get_vector(i), &self.centroid);
                     {
                         let mut entry_point = apply_mu.lock().unwrap();
                         self.apply_insert(i, edges)?;
@@ -288,7 +280,10 @@ where
                         }
                         Record::new(
                             i as i64,
-                            encode_graph_node(v, vertex.iter().map(|n| n.vertex()).collect()),
+                            encode_graph_node(
+                                &self.scorer.normalize_vector(v.into()),
+                                vertex.iter().map(|n| n.vertex()).collect(),
+                            ),
                         )
                     }),
             ),
@@ -314,6 +309,34 @@ where
         Ok(candidates)
     }
 
+    fn insert_in_flight_edges(
+        &self,
+        vertex_id: usize,
+        in_flight: impl Iterator<Item = usize>,
+        edges: &mut Vec<Neighbor>,
+    ) {
+        let vertex_vector = self.get_vector(vertex_id);
+        let limit = self.index.config().index_search_params.beam_width.get();
+        for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
+            let n = Neighbor::new(
+                in_flight_vertex as i64,
+                self.scorer
+                    .score(&vertex_vector, &self.get_vector(in_flight_vertex)),
+            );
+            // If the queue is full and n is worse than all other edges, skip.
+            if edges.len() >= limit && n >= *edges.last().unwrap() {
+                continue;
+            }
+
+            if let Err(index) = edges.binary_search(&n) {
+                if edges.len() >= limit {
+                    edges.pop();
+                }
+                edges.insert(index, n);
+            }
+        }
+    }
+
     /// This function is the only mutator of self.graph and must not be run concurrently.
     fn apply_insert(&self, index: usize, edges: Vec<Neighbor>) -> Result<()> {
         assert!(
@@ -324,9 +347,12 @@ where
         self.graph[index].write().unwrap().extend_from_slice(&edges);
         for e in edges.iter() {
             let mut guard = self.graph[e.vertex() as usize].write().unwrap();
-            guard.push(Neighbor::new(index as i64, e.score()));
-            let max_edges = NonZero::new(guard.capacity() - 1).unwrap();
-            self.maybe_prune_node(index, guard, max_edges)?;
+            let backedge = Neighbor::new(index as i64, e.score());
+            if !guard.contains(&backedge) {
+                guard.push(backedge);
+                let max_edges = NonZero::new(guard.capacity() - 1).unwrap();
+                self.maybe_prune_node(index, guard, max_edges)?;
+            }
         }
         Ok(())
     }
@@ -362,23 +388,21 @@ where
         }
         Ok(())
     }
+
+    fn get_vector(&self, index: usize) -> Cow<'_, [f32]> {
+        self.scorer.normalize_vector(self.vectors[index].into())
+    }
 }
 
 struct BulkLoadGraphVectorIndexReader<'a, D: Send>(&'a BulkLoadBuilder<D>, Session);
 
-impl<D> BulkLoadGraphVectorIndexReader<'_, D>
-where
-    D: Send,
-{
+impl<D: Send + Sync> BulkLoadGraphVectorIndexReader<'_, D> {
     fn into_session(self) -> Session {
         self.1
     }
 }
 
-impl<D> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, D>
-where
-    D: Send,
-{
+impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, D> {
     type Graph<'b>
         = BulkLoadBuilderGraph<'b, D>
     where
@@ -409,10 +433,7 @@ where
 
 struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>);
 
-impl<D> Graph for BulkLoadBuilderGraph<'_, D>
-where
-    D: Send,
-{
+impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     type Vertex<'c>
         = BulkLoadGraphVertex<'c, D>
     where
@@ -440,14 +461,14 @@ struct BulkLoadGraphVertex<'a, D> {
     vertex_id: i64,
 }
 
-impl<D> GraphVertex for BulkLoadGraphVertex<'_, D> {
+impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
     type EdgeIterator<'c>
         = BulkNodeEdgesIterator<'c>
     where
         Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
-        self.builder.vectors[self.vertex_id as usize].into()
+        self.builder.get_vector(self.vertex_id as usize)
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {

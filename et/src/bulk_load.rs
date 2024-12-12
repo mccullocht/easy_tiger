@@ -8,10 +8,9 @@ use easy_tiger::{
     scoring::VectorSimilarity,
     wt::TableGraphVectorIndex,
 };
-use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use wt_mdb::Connection;
 
-use crate::drop_index;
+use crate::{drop_index, ui::progress_bar};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -92,35 +91,22 @@ pub fn bulk_load(
     );
 
     {
-        let progress = progress_bar(limit, "load nav vectors");
+        let progress = progress_bar(limit, Some("load nav vectors"));
         builder.load_nav_vectors(|| progress.inc(1))?;
     }
     {
-        let progress = progress_bar(limit, "build graph");
+        let progress = progress_bar(limit, Some("build graph"));
         builder.insert_all(|| progress.inc(1))?;
     }
     {
-        let progress = progress_bar(limit, "cleanup graph");
+        let progress = progress_bar(limit, Some("cleanup graph"));
         builder.cleanup(|| progress.inc(1))?;
     }
     let stats = {
-        let progress = progress_bar(limit, "load graph");
+        let progress = progress_bar(limit, Some("load graph"));
         builder.load_graph(|| progress.inc(1))?
     };
     println!("{:?}", stats);
 
     Ok(())
-}
-
-fn progress_bar(len: usize, message: &'static str) -> ProgressBar {
-    ProgressBar::new(len as u64)
-        .with_style(
-            ProgressStyle::default_bar()
-                .template(
-                    "{msg} {wide_bar} {pos}/{len} ETA: {eta_precise} Elapsed: {elapsed_precise}",
-                )
-                .unwrap(),
-        )
-        .with_message(message)
-        .with_finish(ProgressFinish::AndLeave)
 }

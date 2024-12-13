@@ -42,6 +42,11 @@ impl IndexMutator {
         self.reader.into_session()
     }
 
+    /// Obtain a reference to the underlying [wt_mdb::Session]
+    pub fn session(&self) -> &Session {
+        self.reader.session()
+    }
+
     /// Insert a vertex for `vector`. Returns the assigned id.
     pub fn insert(&mut self, vector: &[f32]) -> Result<i64> {
         // A freshly initialized table might will have the metadata key but no entry point.

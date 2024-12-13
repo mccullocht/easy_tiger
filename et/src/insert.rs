@@ -17,11 +17,12 @@ pub struct InsertArgs {
     #[arg(short, long)]
     vectors: PathBuf,
     /// Index of the first vector to insert.
-    #[arg(long)]
+    #[arg(long, default_value = "0")]
     offset: usize,
     /// Number of vectors to insert from the input.
     ///
     /// This value is bound by offset and the number of input vectors.
+    #[arg(long)]
     limit: Option<NonZero<usize>>,
 }
 
@@ -33,6 +34,7 @@ fn insert_all<'a>(
     // I could probably write this as a fold but it seems annoying.
     let progress = progress_bar(vectors.len(), None);
     for vector in vectors.progress_with(progress) {
+        mutator.session().begin_transaction(None)?;
         let key = mutator.insert(vector)?;
         if let Some(r) = keys.last_mut() {
             if r.end == key {
@@ -43,6 +45,7 @@ fn insert_all<'a>(
         } else {
             keys.push(key..(key + 1))
         }
+        mutator.session().commit_transaction(None)?;
     }
     Ok(keys)
 }
@@ -55,7 +58,6 @@ pub fn insert(connection: Arc<Connection>, index_name: &str, args: InsertArgs) -
     )?;
 
     let session = connection.open_session()?;
-    session.begin_transaction(None)?;
     let mut mutator = IndexMutator::new(index, session);
     match insert_all(
         &mut mutator,
@@ -66,11 +68,10 @@ pub fn insert(connection: Arc<Connection>, index_name: &str, args: InsertArgs) -
     ) {
         Ok(keys) => {
             println!("Inserted {:?}", keys);
-            mutator.into_session().commit_transaction(None)?;
         }
         Err(e) => {
+            // TODO: custom error that tells you how far we got.
             println!("Insert failed with error {}", e);
-            mutator.into_session().rollback_transaction(None)?;
         }
     }
 

@@ -13,10 +13,11 @@ use easy_tiger::{
     wt::TableGraphVectorIndex,
     Neighbor,
 };
-use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 use memmap2::Mmap;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use wt_mdb::Connection;
+
+use crate::ui::progress_bar;
 
 #[derive(Args)]
 pub struct ExhaustiveSearchArgs {
@@ -51,16 +52,10 @@ pub fn exhaustive_search(
 
     let session = connection.open_session()?;
     let mut cursor = session.open_record_cursor(index.graph_table_name())?;
-    let limit = cursor.largest_key().unwrap().unwrap() + 1;
+    let limit = std::cmp::max(cursor.largest_key().unwrap().unwrap() + 1, 0);
     cursor.seek_exact(-1).unwrap()?;
     let mut index_vector = vec![0.0f32; index.config().dimensions.get()];
-    let progress = ProgressBar::new(limit as u64)
-        .with_style(
-            ProgressStyle::default_bar()
-                .template("{wide_bar} {pos}/{len} ETA: {eta_precise} Elapsed: {elapsed_precise}")
-                .unwrap(),
-        )
-        .with_finish(ProgressFinish::AndLeave);
+    let progress = progress_bar(limit as usize, None);
     for record_result in cursor {
         let record = record_result?;
         for (i, o) in record
@@ -91,9 +86,7 @@ pub fn exhaustive_search(
 
     let mut writer = BufWriter::new(File::create(args.neighbors)?);
     for neighbor_heap in results.into_iter() {
-        let mut neighbors = neighbor_heap.into_iter().collect::<Vec<_>>();
-        neighbors.sort();
-        for n in neighbors {
+        for n in neighbor_heap.into_sorted_vec() {
             writer.write_all(&(n.vertex() as u32).to_le_bytes())?;
         }
     }

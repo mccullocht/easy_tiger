@@ -19,11 +19,12 @@ use easy_tiger::{
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };
-use indicatif::{ProgressBar, ProgressStyle};
 use memmap2::Mmap;
 use threadpool::ThreadPool;
 use wt_mdb::{Connection, Result, Session};
 use wt_sys::{WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
+
+use crate::ui::progress_bar;
 
 #[derive(Args)]
 pub struct SearchArgs {
@@ -179,16 +180,7 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
         .cycle()
         .take(iters * limit)
         .collect::<Vec<_>>();
-    let progress = ProgressBar::new(query_indices.len() as u64)
-        .with_style(
-            ProgressStyle::default_bar()
-                .template(
-                    "{msg} {wide_bar} {pos}/{len} ETA: {eta_precise} Elapsed: {elapsed_precise}",
-                )
-                .unwrap(),
-        )
-        .with_message(name)
-        .with_finish(indicatif::ProgressFinish::AndLeave);
+    let progress = progress_bar(query_indices.len(), Some(name));
     let stats = query_indices
         .into_par_iter()
         .map_init(

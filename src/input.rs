@@ -18,7 +18,7 @@ pub trait VectorStore: Index<usize, Output = [Self::Elem]> {
     fn elem_stride(&self) -> usize;
 
     /// Return an iterator over all the vectors in the store.
-    fn iter(&self) -> impl Iterator<Item = &[Self::Elem]>;
+    fn iter(&self) -> impl ExactSizeIterator<Item = &[Self::Elem]>;
 }
 
 pub struct DerefVectorStore<E: 'static, D> {
@@ -87,7 +87,7 @@ impl<E, D> VectorStore for DerefVectorStore<E, D> {
         self.stride
     }
 
-    fn iter(&self) -> impl Iterator<Item = &[Self::Elem]> {
+    fn iter(&self) -> impl ExactSizeIterator<Item = &[Self::Elem]> {
         self.raw_vectors.chunks(self.stride)
     }
 }

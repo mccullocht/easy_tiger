@@ -21,6 +21,7 @@ use std::{
 
 use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
+use rand::prelude::*;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use wt_mdb::{Connection, Record, Result, Session};
 
@@ -158,6 +159,37 @@ where
                     .into(),
             )
             .into_owned();
+        Ok(())
+    }
+
+    pub fn init_graph<P>(&self, progress: P) -> Result<()>
+    where
+        P: Fn() + Send + Sync,
+    {
+        let ep = (0i64..self.limit as i64)
+            .into_par_iter()
+            .map_init(
+                || thread_rng(),
+                |r, i| {
+                    let mut edges = self.graph[i as usize].write().unwrap();
+                    for v in (0..self.index.config().max_edges.get())
+                        .map(|_| r.gen_range(0..self.graph.len() as i64))
+                        .filter(|x| *x != i)
+                    {
+                        edges.push(Neighbor::new(v, 0.0));
+                    }
+                    let ep_neighbor = Neighbor::new(
+                        i,
+                        self.scorer.score(&self.vectors[i as usize], &self.centroid),
+                    );
+                    progress();
+                    ep_neighbor
+                },
+            )
+            .max()
+            .unwrap();
+        self.entry_vertex
+            .store(ep.vertex(), atomic::Ordering::SeqCst);
         Ok(())
     }
 

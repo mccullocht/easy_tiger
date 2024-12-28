@@ -95,6 +95,10 @@ pub fn bulk_load(
         builder.load_nav_vectors(|| progress.inc(1))?;
     }
     {
+        let progress = progress_bar(limit, Some("init graph"));
+        builder.init_graph(|| progress.inc(1))?;
+    }
+    {
         let progress = progress_bar(limit, Some("build graph"));
         builder.insert_all(|| progress.inc(1))?;
     }

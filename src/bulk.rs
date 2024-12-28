@@ -12,16 +12,15 @@ use core::f64;
 use std::{
     borrow::Cow,
     num::NonZero,
-    ops::Range,
     sync::{
         atomic::{self, AtomicI64},
-        Arc, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc,
     },
 };
 
 use memmap2::{Mmap, MmapMut};
 use rand::prelude::*;
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use rayon::prelude::*;
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
@@ -74,7 +73,7 @@ pub struct BulkLoadBuilder<D> {
     memory_quantized_vectors: bool,
     quantized_vectors: Option<DerefVectorStore<u8, Mmap>>,
 
-    graph: Vec<RwLock<Vec<Neighbor>>>,
+    graph: Vec<Vec<Neighbor>>,
     entry_vertex: AtomicI64,
     scorer: Box<dyn F32VectorScorer>,
 }
@@ -92,10 +91,6 @@ where
         memory_quantized_vectors: bool,
         limit: usize,
     ) -> Self {
-        let mut graph = Vec::with_capacity(vectors.len());
-        graph.resize_with(vectors.len(), || {
-            RwLock::new(Vec::with_capacity(index.config().max_edges.get() * 2))
-        });
         let scorer = index.config().new_scorer();
         Self {
             connection,
@@ -105,7 +100,7 @@ where
             centroid: Vec::new(),
             memory_quantized_vectors,
             quantized_vectors: None,
-            graph,
+            graph: Vec::new(),
             entry_vertex: AtomicI64::new(-1),
             scorer,
         }
@@ -161,30 +156,31 @@ where
         Ok(())
     }
 
-    pub fn init_graph<P>(&self, progress: P) -> Result<()>
+    pub fn init_graph<P>(&mut self, progress: P) -> Result<()>
     where
         P: Fn() + Send + Sync,
     {
-        let ep = (0i64..self.limit as i64)
+        let mut r = StdRng::seed_from_u64(0xbeabadd00d);
+        self.graph = (0..self.limit)
+            .into_iter()
+            .map(|vertex| {
+                (0..self.index.config().max_edges.get())
+                    .into_iter()
+                    .map(|_| Neighbor::new(r.gen_range(0..self.limit as i64), 0.0))
+                    .filter(|x| x.vertex() != vertex as i64)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let ep = (0..self.limit)
             .into_par_iter()
-            .map_init(
-                || thread_rng(),
-                |r, i| {
-                    let mut edges = self.graph[i as usize].write().unwrap();
-                    for v in (0..self.index.config().max_edges.get())
-                        .map(|_| r.gen_range(0..self.graph.len() as i64))
-                        .filter(|x| *x != i)
-                    {
-                        edges.push(Neighbor::new(v, 0.0));
-                    }
-                    let ep_neighbor = Neighbor::new(
-                        i,
-                        self.scorer.score(&self.vectors[i as usize], &self.centroid),
-                    );
-                    progress();
-                    ep_neighbor
-                },
-            )
+            .map(|i| {
+                let ep_neighbor = Neighbor::new(
+                    i as i64,
+                    self.scorer.score(&self.vectors[i], &self.centroid),
+                );
+                progress();
+                ep_neighbor
+            })
             .max()
             .unwrap();
         self.entry_vertex
@@ -195,40 +191,31 @@ where
     /// Insert all vectors from the passed vector store into the graph.
     ///
     /// This operation uses rayon to parallelize large parts of the graph build.
-    pub fn insert_all<P>(&self, progress: P) -> Result<()>
+    pub fn insert_all<P>(&mut self, progress: P) -> Result<()>
     where
         P: Fn() + Send + Sync,
     {
         // XXX this results in a directed graph.
-        (0..self.limit)
+        self.graph = (0..self.limit)
             .into_par_iter()
-            .chunks(1_000)
-            .try_for_each(|nodes| {
-                // NB: we create a new session and cursor for each chunk. Relevant rayon APIs require these
-                // objects to be Send + Sync, but Session is only Send and wrapping it in a Mutex does not
-                // work because any RecordCursor objects returned have to be destroyed before the Mutex is
-                // released.
-                let mut session = self.connection.open_session()?;
-                let mut searcher = GraphSearcher::new(self.index.config().index_search_params);
-                for i in nodes {
-                    // Use a transaction for each search. Without this each lookup will be a separate transaction
-                    // which obtains a reader lock inside the session. Overhead for that is ~10x.
+            .map_init(
+                || {
+                    (
+                        self.connection.open_session().unwrap(),
+                        GraphSearcher::new(self.index.config().index_search_params),
+                    )
+                },
+                |(session, searcher), vertex| {
                     session.begin_transaction(None)?;
                     let mut reader = BulkLoadGraphVectorIndexReader(self, session);
-                    let new_edges = self.search_for_insert(i, &mut searcher, &mut reader)?;
-                    // XXX this is not what I intended. i guess a session per query?
-                    let mut old_edges = self.graph[i].write().unwrap();
-                    old_edges.clear();
-                    old_edges.extend_from_slice(&new_edges);
-                    drop(old_edges);
-                    // Close out the transaction. There should be no conflicts as we did not write to the database.
-                    session = reader.into_session();
+                    let new_edges = self.search_for_insert(vertex, searcher, &mut reader)?;
                     session.rollback_transaction(None)?;
                     progress();
-                }
-
-                Ok::<(), wt_mdb::Error>(())
-            })
+                    Ok::<_, wt_mdb::Error>(new_edges)
+                },
+            )
+            .collect::<Result<Vec<_>>>()?;
+        Ok::<(), wt_mdb::Error>(())
     }
 
     /// Cleanup the graph.
@@ -238,11 +225,13 @@ where
     where
         P: Fn(),
     {
+        /* XXX
         // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
         for (i, n) in self.graph.iter().enumerate().take(self.limit) {
-            self.maybe_prune_node(i, n.write().unwrap(), self.index.config().max_edges)?;
+            self.maybe_prune_node(i, n, self.index.config().max_edges)?;
             progress();
         }
+        */
         Ok(())
     }
 
@@ -281,9 +270,8 @@ where
                     .zip(self.graph.iter())
                     .enumerate()
                     .take(self.limit)
-                    .map(|(i, (v, n))| {
+                    .map(|(i, (v, vertex))| {
                         progress();
-                        let vertex = n.read().unwrap();
                         stats.vertices += 1;
                         stats.edges += vertex.len();
                         if vertex.is_empty() {
@@ -320,6 +308,7 @@ where
         Ok(candidates)
     }
 
+    /* XXX
     fn maybe_prune_node(
         &self,
         index: usize,
@@ -351,19 +340,14 @@ where
         }
         Ok(())
     }
+    */
 
     fn get_vector(&self, index: usize) -> Cow<'_, [f32]> {
         self.scorer.normalize_vector(self.vectors[index].into())
     }
 }
 
-struct BulkLoadGraphVectorIndexReader<'a, D: Send>(&'a BulkLoadBuilder<D>, Session);
-
-impl<D: Send + Sync> BulkLoadGraphVectorIndexReader<'_, D> {
-    fn into_session(self) -> Session {
-        self.1
-    }
-}
+struct BulkLoadGraphVectorIndexReader<'a, D: Send>(&'a BulkLoadBuilder<D>, &'a Session);
 
 impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, D> {
     type Graph<'b>
@@ -435,22 +419,15 @@ impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
-        BulkNodeEdgesIterator::new(self.builder.graph[self.vertex_id as usize].read().unwrap())
+        BulkNodeEdgesIterator::new(self.builder.graph[self.vertex_id as usize].iter())
     }
 }
 
-struct BulkNodeEdgesIterator<'a> {
-    guard: RwLockReadGuard<'a, Vec<Neighbor>>,
-    range: Range<usize>,
-}
+struct BulkNodeEdgesIterator<'a>(std::slice::Iter<'a, Neighbor>);
 
 impl<'a> BulkNodeEdgesIterator<'a> {
-    fn new(guard: RwLockReadGuard<'a, Vec<Neighbor>>) -> Self {
-        let len = guard.len();
-        Self {
-            guard,
-            range: 0..len,
-        }
+    fn new(it: std::slice::Iter<'a, Neighbor>) -> Self {
+        Self(it)
     }
 }
 
@@ -458,7 +435,7 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.range.next().map(|i| self.guard[i].vertex())
+        self.0.next().map(|n| n.vertex())
     }
 }
 

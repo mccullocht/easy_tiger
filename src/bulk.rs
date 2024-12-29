@@ -24,7 +24,10 @@ use rayon::prelude::*;
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{
+        prune_edges, prune_edges_with_vectors, Graph, GraphConfig, GraphVectorIndexReader,
+        GraphVertex, NavVectorStore,
+    },
     input::{DerefVectorStore, VectorStore},
     quantization::{binary_quantize, binary_quantized_bytes},
     scoring::F32VectorScorer,
@@ -338,14 +341,13 @@ where
         searcher: &mut GraphSearcher,
         reader: &mut BulkLoadGraphVectorIndexReader<'_, D>,
     ) -> Result<Vec<Neighbor>> {
-        let mut graph = BulkLoadBuilderGraph(self);
-        let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
-        let split = prune_edges(
+        let (mut candidates, vectors) = searcher.search_for_insert(vertex_id as i64, reader)?;
+        let split = prune_edges_with_vectors(
             &mut candidates,
             self.index.config().max_edges,
-            &mut graph,
+            &vectors,
             self.scorer.as_ref(),
-        )?;
+        );
         candidates.truncate(split);
         Ok(candidates)
     }

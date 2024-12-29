@@ -102,10 +102,12 @@ impl GraphSearcher {
         self.visited = 0;
 
         if max_concurrent.get() > 1 && reader.parallel_lookup() {
-            self.search_concurrently(query, reader, max_concurrent)
+            self.search_concurrently(query, reader, max_concurrent)?;
         } else {
-            self.search_serially(query, reader)
+            self.search_serially(query, reader)?;
         }
+
+        Ok(self.extract_results(&query, reader))
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -113,7 +115,7 @@ impl GraphSearcher {
         &mut self,
         vertex_id: i64,
         reader: &mut R,
-    ) -> Result<Vec<Neighbor>> {
+    ) -> Result<(Vec<Neighbor>, Vec<Vec<f32>>)> {
         self.seen.clear();
         // Insertions may be concurrent and there could already be backlinks to this vertex in the graph.
         // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
@@ -127,14 +129,32 @@ impl GraphSearcher {
             .unwrap_or(Err(Error::not_found_error()))?
             .vector()
             .to_vec();
-        self.search_serially(&query, reader)
+        self.search_serially(&query, reader)?;
+
+        if self.params.num_rerank > 0 {
+            let scorer = reader.config().new_scorer();
+            let query = scorer.normalize_vector(query.into());
+
+            self.candidates.candidates.truncate(self.params.num_rerank);
+            for c in self.candidates.candidates.iter_mut() {
+                c.neighbor.score = scorer.score(&query, c.state.vector().expect("vertex visited"));
+            }
+            self.candidates.candidates.sort_by_key(|c| c.neighbor);
+        }
+
+        Ok(self
+            .candidates
+            .candidates
+            .iter_mut()
+            .map(|c| (c.neighbor, c.state.take_vector().expect("vertex visited")))
+            .unzip())
     }
 
     fn search_serially<R: GraphVectorIndexReader>(
         &mut self,
         query: &[f32],
         reader: &mut R,
-    ) -> Result<Vec<Neighbor>> {
+    ) -> Result<()> {
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
         let nav_scorer = reader.config().new_nav_scorer();
@@ -162,7 +182,7 @@ impl GraphSearcher {
             }
         }
 
-        Ok(self.extract_results(query, reader))
+        Ok(())
     }
 
     fn search_concurrently<R>(
@@ -170,7 +190,7 @@ impl GraphSearcher {
         query: &[f32],
         reader: &mut R,
         max_concurrent: NonZero<usize>,
-    ) -> Result<Vec<Neighbor>>
+    ) -> Result<()>
     where
         R: GraphVectorIndexReader,
     {
@@ -225,7 +245,7 @@ impl GraphSearcher {
             }
         }
 
-        Ok(self.extract_results(query, reader))
+        Ok(())
     }
 
     // Initialize the candidate queue and return the binary quantized query.
@@ -295,6 +315,13 @@ impl CandidateState {
     fn vector(&self) -> Option<&[f32]> {
         match self {
             CandidateState::Visited(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    fn take_vector(&mut self) -> Option<Vec<f32>> {
+        match self {
+            CandidateState::Visited(v) => Some(std::mem::take(v)),
             _ => None,
         }
     }

@@ -215,23 +215,60 @@ where
                 },
             )
             .collect::<Result<Vec<_>>>()?;
-        Ok::<(), wt_mdb::Error>(())
+        Ok(())
     }
 
     /// Cleanup the graph.
     ///
     /// This may prune edges and/or ensure graph connectivity.
-    pub fn cleanup<P>(&self, progress: P) -> Result<()>
+    pub fn cleanup<P>(&mut self, progress: P) -> Result<()>
     where
         P: Fn(),
     {
-        /* XXX
-        // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
-        for (i, n) in self.graph.iter().enumerate().take(self.limit) {
-            self.maybe_prune_node(i, n, self.index.config().max_edges)?;
+        let max_edges = self.index.config().max_edges;
+        let mut graph: Vec<Vec<Neighbor>> = Vec::with_capacity(self.limit);
+        graph.resize_with(self.limit, || Vec::with_capacity(max_edges.get() * 2));
+        for (vertex, edges) in self.graph.iter().enumerate() {
+            for edge in edges.iter() {
+                // Skip if vertex already has this edge. Insertion below may do this as it ensures
+                // reciprocal edges.
+                if graph[vertex]
+                    .iter()
+                    .find(|n| n.vertex() == edge.vertex())
+                    .is_some()
+                {
+                    continue;
+                }
+
+                if self.insert_edge(vertex, *edge, &mut graph)? {
+                    self.insert_edge(
+                        edge.vertex() as usize,
+                        Neighbor::new(vertex as i64, edge.score()),
+                        &mut graph,
+                    )?;
+                }
+            }
+        }
+
+        for vertex in 0..self.limit {
+            if graph[vertex].len() <= max_edges.get() {
+                progress();
+                continue;
+            }
+
+            let split = prune_edges(
+                &mut graph[vertex],
+                max_edges,
+                &mut BulkLoadBuilderGraph(self),
+                self.scorer.as_ref(),
+            )?;
+            let dropped = graph[vertex].split_off(split);
+            for edge in dropped {
+                graph[edge.vertex() as usize].retain(|n| n.vertex() != vertex as i64);
+            }
             progress();
         }
-        */
+        self.graph = graph;
         Ok(())
     }
 
@@ -308,39 +345,29 @@ where
         Ok(candidates)
     }
 
-    /* XXX
-    fn maybe_prune_node(
+    fn insert_edge(
         &self,
-        index: usize,
-        mut guard: RwLockWriteGuard<'_, Vec<Neighbor>>,
-        max_edges: NonZero<usize>,
-    ) -> Result<()> {
-        if guard.len() <= max_edges.get() {
-            return Ok(());
-        }
-
-        guard.sort();
-        let split = prune_edges(
-            &mut guard,
-            self.index.config().max_edges,
-            &mut BulkLoadBuilderGraph(self),
-            self.scorer.as_ref(),
-        )?;
-        let dropped = guard.split_off(split);
-        drop(guard);
-
-        // Remove in-links from nodes that we dropped out-links to.
-        // If we maintain the invariant that all links are reciprocated then it will be easier
-        // to mutate the index without requiring a cleaning process.
-        for n in dropped {
-            self.graph[n.vertex() as usize]
-                .write()
-                .unwrap()
-                .retain(|e| e.vertex() != index as i64);
-        }
-        Ok(())
+        vertex: usize,
+        edge: Neighbor,
+        graph: &mut Vec<Vec<Neighbor>>,
+    ) -> Result<bool> {
+        let inserted_edge = if graph[vertex].len() == graph[vertex].capacity() {
+            if edge < *graph[vertex].last().unwrap() {
+                let dropped = graph[vertex].pop().unwrap();
+                graph[dropped.vertex() as usize].retain(|n| n.vertex() != vertex as i64);
+                true
+            } else {
+                false
+            }
+        } else {
+            graph[vertex].push(edge);
+            if graph[vertex].len() == graph[vertex].capacity() {
+                graph[vertex].sort();
+            }
+            true
+        };
+        Ok(inserted_edge)
     }
-    */
 
     fn get_vector(&self, index: usize) -> Cow<'_, [f32]> {
         self.scorer.normalize_vector(self.vectors[index].into())

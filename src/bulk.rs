@@ -195,7 +195,9 @@ where
     where
         P: Fn() + Send + Sync,
     {
-        // XXX this results in a directed graph.
+        // XXX at scale I am being murdered by copying vectors. this might actually be a result of
+        // page faulting. this could be fixed by allowing the searcher to return the vectors and
+        // prune_edges to accept the parallel vectors.
         self.graph = (0..self.limit)
             .into_par_iter()
             .map_init(
@@ -250,6 +252,9 @@ where
             }
         }
 
+        // XXX this is quite slow. another approach would be to prune in parallel and emit the
+        // dropped edges into another data structure. we'd then drop edges until every vertex meets
+        // the max_edges invariant.
         for vertex in 0..self.limit {
             if graph[vertex].len() <= max_edges.get() {
                 progress();

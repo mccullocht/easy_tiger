@@ -138,8 +138,8 @@ pub(crate) fn prune_edges(
     graph: &mut impl Graph,
     scorer: &dyn F32VectorScorer,
 ) -> Result<usize> {
-    if edges.is_empty() {
-        return Ok(0);
+    if edges.len() <= max_edges.get() {
+        return Ok(edges.len());
     }
 
     debug_assert!(edges.is_sorted());
@@ -154,6 +154,21 @@ pub(crate) fn prune_edges(
                 .map(|v| v.vector().to_vec())
         })
         .collect::<Result<Vec<_>>>()?;
+    Ok(prune_edges_with_vectors(edges, max_edges, &vectors, scorer))
+}
+
+pub(crate) fn prune_edges_with_vectors(
+    edges: &mut [Neighbor],
+    max_edges: NonZero<usize>,
+    vectors: &[Vec<f32>],
+    scorer: &dyn F32VectorScorer,
+) -> usize {
+    if edges.len() <= max_edges.get() {
+        return edges.len();
+    }
+
+    debug_assert_eq!(edges.len(), vectors.len());
+    debug_assert!(edges.is_sorted());
 
     // TODO: replace with a fixed length bitset
     let mut selected = BTreeSet::new();
@@ -187,5 +202,5 @@ pub(crate) fn prune_edges(
         edges.swap(i, *j);
     }
 
-    Ok(selected.len())
+    selected.len()
 }

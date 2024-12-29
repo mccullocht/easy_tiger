@@ -144,17 +144,57 @@ pub(crate) fn prune_edges(
 
     debug_assert!(edges.is_sorted());
 
-    // Obtain all the vectors to make relative neighbor graph scoring easier.
-    let vectors = edges
-        .iter()
-        .map(|n| {
-            graph
-                .get(n.vertex())
-                .unwrap_or(Err(Error::not_found_error()))
-                .map(|v| v.vector().to_vec())
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(prune_edges_with_vectors(edges, max_edges, &vectors, scorer))
+    // XXX this is faster but the redundancy is gross. maybe pass a FnMut(usize) -> Result<Vec<_>>?
+    // any caching aspect could belong to the caller.
+    // TODO: replace with a fixed length bitset
+    let mut selected = BTreeSet::new();
+    selected.insert(0); // we always keep the first node.
+    let mut vectors = Vec::with_capacity(edges.len());
+    vectors.push(
+        graph
+            .get(edges[0].vertex())
+            .unwrap_or(Err(Error::not_found_error()))
+            .map(|v| v.vector().to_vec())?,
+    );
+    for alpha in [1.0, 1.2] {
+        for (i, e) in edges.iter().enumerate().skip(1) {
+            if selected.contains(&i) {
+                continue;
+            }
+
+            if i >= vectors.len() {
+                vectors.push(
+                    graph
+                        .get(edges[i].vertex())
+                        .unwrap_or(Err(Error::not_found_error()))
+                        .map(|v| v.vector().to_vec())?,
+                );
+            }
+
+            let e_vec = &vectors[i];
+            if !selected
+                .iter()
+                .take_while(|s| **s < i)
+                .any(|s| scorer.score(e_vec, &vectors[*s]) > e.score * alpha)
+            {
+                selected.insert(i);
+                if selected.len() >= max_edges.get() {
+                    break;
+                }
+            }
+        }
+
+        if selected.len() >= max_edges.get() {
+            break;
+        }
+    }
+
+    // Partition edges into selected and unselected.
+    for (i, j) in selected.iter().enumerate() {
+        edges.swap(i, *j);
+    }
+
+    Ok(selected.len())
 }
 
 pub(crate) fn prune_edges_with_vectors(

@@ -198,9 +198,6 @@ where
     where
         P: Fn() + Send + Sync,
     {
-        // XXX at scale I am being murdered by copying vectors. this might actually be a result of
-        // page faulting. this could be fixed by allowing the searcher to return the vectors and
-        // prune_edges to accept the parallel vectors.
         self.graph = (0..self.limit)
             .into_par_iter()
             .map_init(

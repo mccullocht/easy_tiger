@@ -121,6 +121,7 @@ impl GraphSearcher {
         // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
         self.seen.insert(vertex_id);
         self.candidates.clear();
+        self.visited = 0;
 
         // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
         let query = reader

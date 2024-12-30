@@ -225,7 +225,7 @@ where
     /// This may prune edges and/or ensure graph connectivity.
     pub fn cleanup<P>(&mut self, progress: P) -> Result<()>
     where
-        P: Fn(),
+        P: Fn() + Send + Sync,
     {
         let max_edges = self.index.config().max_edges;
         let mut graph: Vec<Vec<Neighbor>> = Vec::with_capacity(self.limit);
@@ -252,28 +252,35 @@ where
             }
         }
 
-        // XXX this is quite slow. another approach would be to prune in parallel and emit the
-        // dropped edges into another data structure. we'd then drop edges until every vertex meets
-        // the max_edges invariant.
-        for vertex in 0..self.limit {
-            if graph[vertex].len() <= max_edges.get() {
+        // Prune in parallel and store the pruned and dropped edges separately.
+        // Dropped edges will be removed afterward sequentially to avoid synchronization.
+        let (mut pruned_graph, dropped): (Vec<Vec<Neighbor>>, Vec<Vec<Neighbor>>) = graph
+            .into_par_iter()
+            .map(|mut edges| {
+                let split = prune_edges(
+                    &mut edges,
+                    max_edges,
+                    &mut BulkLoadBuilderGraph(self),
+                    self.scorer.as_ref(),
+                )
+                .expect("bulk load builder graph is infalliable");
+                let dropped = edges.split_off(split);
                 progress();
-                continue;
+                (edges, dropped)
+            })
+            .unzip();
+        // XXX I might be more mileage out of this if I prune the worst edges.
+        for (vertex, edges) in dropped.into_iter().enumerate() {
+            for e in edges {
+                if pruned_graph[vertex].len() > max_edges.get()
+                    && pruned_graph[e.vertex() as usize].len() > max_edges.get()
+                {
+                    pruned_graph[vertex].retain(|n| n.vertex() != e.vertex());
+                    pruned_graph[e.vertex() as usize].retain(|n| n.vertex() != vertex as i64);
+                }
             }
-
-            let split = prune_edges(
-                &mut graph[vertex],
-                max_edges,
-                &mut BulkLoadBuilderGraph(self),
-                self.scorer.as_ref(),
-            )?;
-            let dropped = graph[vertex].split_off(split);
-            for edge in dropped {
-                graph[edge.vertex() as usize].retain(|n| n.vertex() != vertex as i64);
-            }
-            progress();
         }
-        self.graph = graph;
+        self.graph = pruned_graph;
         Ok(())
     }
 

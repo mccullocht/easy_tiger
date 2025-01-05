@@ -19,11 +19,11 @@ use crate::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
         DropOptions, RollbackTransactionOptions, Statistics, TableType,
     },
-    wt_call, Error, RecordView, Result,
+    wt_call, Error, Result,
 };
 
 pub use index_cursor::{IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordView};
-pub use record_cursor::{RecordCursor, RecordCursorGuard};
+pub use record_cursor::{Record, RecordCursor, RecordCursorGuard, RecordView};
 pub use stat_cursor::StatCursor;
 
 /// URI of a WT table encoded as a CString.

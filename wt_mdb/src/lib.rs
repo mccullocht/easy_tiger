@@ -215,23 +215,33 @@ use wt_call;
 
 #[cfg(test)]
 mod test {
-    // XXX add index cursor tests.
     use std::io::ErrorKind;
 
     use rustix::io::Errno;
 
     use crate::{
         connection::Connection,
-        options::{ConnectionOptions, ConnectionOptionsBuilder, Statistics},
-        Error, Record, RecordView, WiredTigerError,
+        options::{
+            ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
+            Statistics, TableType,
+        },
+        Error, IndexRecord, IndexRecordView, Record, RecordView, WiredTigerError,
     };
 
     fn conn_options() -> Option<ConnectionOptions> {
         Some(ConnectionOptionsBuilder::default().create().into())
     }
 
+    fn index_table_options() -> Option<CreateOptions> {
+        Some(
+            CreateOptionsBuilder::default()
+                .table_type(TableType::Index)
+                .into(),
+        )
+    }
+
     #[test]
-    fn insert_and_iterate() {
+    fn record_insert_and_iterate() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
@@ -245,7 +255,23 @@ mod test {
     }
 
     #[test]
-    fn insert_and_search() {
+    fn index_insert_and_iterate() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session
+            .create_record_table("test", index_table_options())
+            .unwrap();
+        let mut cursor = session.open_index_cursor("test").unwrap();
+        assert_eq!(cursor.set(&IndexRecordView::new(b"b", b"bar")), Ok(()));
+        assert_eq!(cursor.set(&IndexRecordView::new(b"a", b"foo")), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok(IndexRecord::new(b"a", b"foo"))));
+        assert_eq!(cursor.next(), Some(Ok(IndexRecord::new(b"b", b"bar"))));
+        assert_eq!(cursor.next(), None);
+    }
+
+    #[test]
+    fn record_insert_and_search() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
@@ -259,7 +285,29 @@ mod test {
     }
 
     #[test]
-    fn insert_and_remove() {
+    fn index_insert_and_search() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session
+            .create_record_table("test", index_table_options())
+            .unwrap();
+        let mut cursor = session.open_index_cursor("test").unwrap();
+        let value: &[u8] = b"bar";
+        assert_eq!(cursor.set(&IndexRecordView::new(b"a", value)), Ok(()));
+        assert_eq!(cursor.set(&IndexRecord::new(b"b", value)), Ok(()));
+        assert_eq!(
+            cursor.seek_exact(b"a"),
+            Some(Ok(IndexRecord::new(b"a", value)))
+        );
+        assert_eq!(
+            cursor.seek_exact(b"b"),
+            Some(Ok(IndexRecord::new(b"b", value)))
+        );
+    }
+
+    #[test]
+    fn record_insert_and_remove() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
@@ -277,7 +325,27 @@ mod test {
     }
 
     #[test]
-    fn largest_key() {
+    fn index_insert_and_remove() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session
+            .create_record_table("test", index_table_options())
+            .unwrap();
+        let mut cursor = session.open_index_cursor("test").unwrap();
+        assert_eq!(cursor.set(&IndexRecordView::new(b"b", b"bar")), Ok(()));
+        assert_eq!(cursor.set(&IndexRecordView::new(b"a", b"foo")), Ok(()));
+        assert_eq!(cursor.remove(b"a"), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok(IndexRecord::new(b"b", b"bar"))));
+        assert_eq!(cursor.next(), None);
+        assert_eq!(
+            cursor.remove(b"c"),
+            Err(Error::WiredTiger(WiredTigerError::NotFound))
+        );
+    }
+
+    #[test]
+    fn record_largest_key() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
@@ -288,6 +356,22 @@ mod test {
         assert_eq!(cursor.largest_key(), Some(Ok(-1)));
         assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
         assert_eq!(cursor.largest_key(), Some(Ok(7)));
+    }
+
+    #[test]
+    fn index_largest_key() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session
+            .create_record_table("test", index_table_options())
+            .unwrap();
+        let mut cursor = session.open_index_cursor("test").unwrap();
+        assert_eq!(cursor.largest_key(), None);
+        assert_eq!(cursor.set(&IndexRecordView::new(b"a", b"bar")), Ok(()));
+        assert_eq!(cursor.largest_key(), Some(Ok(b"a".as_ref())));
+        assert_eq!(cursor.set(&IndexRecordView::new(b"b", b"foo")), Ok(()));
+        assert_eq!(cursor.largest_key(), Some(Ok(b"b".as_ref())));
     }
 
     #[test]

@@ -160,7 +160,7 @@ pub struct CreateOptionsBuilder(TableType);
 
 impl CreateOptionsBuilder {
     /// Set the table type for this table.
-    fn table_type(self, table_type: TableType) -> Self {
+    pub fn table_type(self, table_type: TableType) -> Self {
         Self(table_type)
     }
 }

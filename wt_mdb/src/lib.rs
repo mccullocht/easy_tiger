@@ -215,6 +215,7 @@ use wt_call;
 
 #[cfg(test)]
 mod test {
+    // XXX add index cursor tests.
     use std::io::ErrorKind;
 
     use rustix::io::Errno;

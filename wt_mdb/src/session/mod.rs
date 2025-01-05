@@ -10,13 +10,14 @@ use std::{
     sync::Arc,
 };
 
+use rustix::io::Errno;
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
 
 use crate::{
     connection::Connection,
     options::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
-        DropOptions, RollbackTransactionOptions, Statistics,
+        DropOptions, RollbackTransactionOptions, Statistics, TableType,
     },
     wt_call, Error, RecordView, Result,
 };
@@ -89,6 +90,23 @@ struct InnerCursor {
 }
 
 impl InnerCursor {
+    /// Interrogate the underlying cursor for the [TableType].
+    ///
+    /// Returns `None` if the table type cannot be determined.
+    fn table_type(&self) -> Option<TableType> {
+        let key_format = unsafe {
+            NonNull::new(self.ptr.as_ref().key_format as *mut i8)
+                .map(|p| CStr::from_ptr(p.as_ptr() as *const i8))
+        }
+        .unwrap_or(c"u");
+        match key_format.to_bytes() {
+            b"q" => Some(TableType::Record),
+            b"u" => Some(TableType::Index),
+            _ => None,
+        }
+    }
+
+    /// Reset the underlying [wt_sys::WT_CURSOR].
     fn reset(&mut self) -> Result<()> {
         unsafe { wt_call!(self.ptr, reset) }
     }
@@ -131,6 +149,7 @@ impl Session {
         &self.connection
     }
 
+    // XXX fix the name. this can create index type tables too now.
     /// Create a new record table.
     pub fn create_record_table(
         &self,
@@ -148,6 +167,7 @@ impl Session {
         }
     }
 
+    // XXX fix the name. this can create index type tables too now.
     /// Drop a record table.
     ///
     /// This requires exclusive access -- if any cursors are open on the specified table the call will fail
@@ -165,6 +185,8 @@ impl Session {
     }
 
     /// Open a record cursor over the named table.
+    ///
+    /// Returns [rustix::io::Errno::INVAL] if the underlying table is not a record table.
     pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
         self.open_record_cursor_with_options(table_name, None)
     }
@@ -174,23 +196,61 @@ impl Session {
         table_name: &str,
         options: Option<&CStr>,
     ) -> Result<RecordCursor> {
-        let uri = TableUri::from(table_name);
-        self.new_cursor_pointer(&uri.0, options)
-            .map(|ptr| RecordCursor::new(InnerCursor { ptr, uri }, self))
+        self.open_typed_cursor(table_name, options, TableType::Record)
+            .map(|c| RecordCursor::new(c, self))
     }
 
-    /// Get a cached cursor or create a new cursor over `table_name`.
+    /// Open an index cursor over the named table.
+    ///
+    /// Returns [rustix::io::Errno::INVAL] if the underlying table is not an index table.
+    pub fn open_index_cursor(&self, table_name: &str) -> Result<IndexCursor> {
+        self.open_typed_cursor(table_name, None, TableType::Index)
+            .map(|c| IndexCursor::new(c, self))
+    }
+
+    fn open_typed_cursor(
+        &self,
+        table_name: &str,
+        options: Option<&CStr>,
+        expected_table_type: TableType,
+    ) -> Result<InnerCursor> {
+        let uri = TableUri::from(table_name);
+        let inner = self
+            .new_cursor_pointer(&uri.0, options)
+            .map(|ptr| InnerCursor { ptr, uri })?;
+        if inner.table_type().is_some_and(|t| t == expected_table_type) {
+            Ok(inner)
+        } else {
+            Err(Error::Errno(Errno::INVAL))
+        }
+    }
+
+    /// Get a cached [RecordCursor] or create a new cursor over `table_name`.
     pub fn get_record_cursor(&self, table_name: &str) -> Result<RecordCursorGuard<'_>> {
+        self.get_typed_cursor(table_name, TableType::Record)
+            .map(|c| RecordCursorGuard::new(self, RecordCursor::new(c, self)))
+    }
+
+    /// Get a cached [IndexCursor] or create a new cursor over `table_name`.
+    pub fn get_index_cursor(&self, table_name: &str) -> Result<IndexCursorGuard<'_>> {
+        self.get_typed_cursor(table_name, TableType::Index)
+            .map(|c| IndexCursorGuard::new(self, IndexCursor::new(c, self)))
+    }
+
+    fn get_typed_cursor(
+        &self,
+        table_name: &str,
+        expected_table_type: TableType,
+    ) -> Result<InnerCursor> {
         let mut cursor_cache = self.cached_cursors.borrow_mut();
         cursor_cache
             .iter()
             .position(|c| c.uri.table_name().to_bytes() == table_name.as_bytes())
             .map(|i| {
                 let inner = cursor_cache.remove(i);
-                Ok(RecordCursor::new(inner, self))
+                Ok(inner)
             })
-            .unwrap_or_else(|| self.open_record_cursor(table_name))
-            .map(|c| RecordCursorGuard::new(self, c))
+            .unwrap_or_else(|| self.open_typed_cursor(table_name, None, expected_table_type))
     }
 
     /// Return an `InnerCursor` to the cache for future re-use.

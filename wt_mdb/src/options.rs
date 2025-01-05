@@ -139,9 +139,31 @@ impl ConfigurationString for ConnectionOptions {
     }
 }
 
+/// Type of WiredTiger table.
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+pub enum TableType {
+    /// Record-type tables are `i64` keyed and byte-array valued.
+    Record,
+    /// Index-type tables are byte-array keyed and values.
+    Index,
+}
+
+impl Default for TableType {
+    fn default() -> Self {
+        Self::Record
+    }
+}
+
 /// An options builder for creating a table, column group, index, or file in WiredTiger.
-#[derive(Default)]
-pub struct CreateOptionsBuilder;
+#[derive(Default, Debug, Hash, Eq, PartialEq, Clone)]
+pub struct CreateOptionsBuilder(TableType);
+
+impl CreateOptionsBuilder {
+    /// Set the table type for this table.
+    fn table_type(self, table_type: TableType) -> Self {
+        Self(table_type)
+    }
+}
 
 /// Options when creating a table, column group, index, or file in WiredTiger.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
@@ -149,13 +171,16 @@ pub struct CreateOptions(CString);
 
 impl Default for CreateOptions {
     fn default() -> Self {
-        CreateOptions(CString::from(c"key_format=q,value_format=u"))
+        CreateOptionsBuilder::default().into()
     }
 }
 
 impl From<CreateOptionsBuilder> for CreateOptions {
-    fn from(_value: CreateOptionsBuilder) -> Self {
-        Self::default()
+    fn from(value: CreateOptionsBuilder) -> Self {
+        CreateOptions(match value.0 {
+            TableType::Record => c"key_format=q,value_format=u".to_owned(),
+            TableType::Index => c"key_format=u,value_format=u".to_owned(),
+        })
     }
 }
 

@@ -1,31 +1,12 @@
 use std::{
-    ffi::{c_void, CStr},
+    ffi::CStr,
     mem::ManuallyDrop,
     ops::{Bound, Deref, DerefMut, RangeBounds},
-    ptr::NonNull,
 };
 
 use crate::{map_not_found, wt_call, Record, RecordView, Result};
-use wt_sys::{WT_CURSOR, WT_ITEM};
 
-use super::{Session, TableUri};
-
-/// Inner representation of a cursor.
-///
-/// This inner representation is used by RecordCursor but also may be cached by Session.
-pub(super) struct InnerCursor {
-    pub(super) ptr: NonNull<WT_CURSOR>,
-    pub(super) uri: TableUri,
-}
-
-impl Drop for InnerCursor {
-    fn drop(&mut self) {
-        // TODO: log this.
-        let _ = unsafe { wt_call!(self.ptr, close) };
-    }
-}
-
-unsafe impl Send for InnerCursor {}
+use super::{InnerCursor, Item, Session};
 
 /// A `RecordCursor` facilities viewing and mutating data in a WiredTiger table where
 /// the table is `i64` keyed and byte-string valued.
@@ -57,7 +38,7 @@ impl<'a> RecordCursor<'a> {
             wt_call!(void
                 self.inner.ptr,
                 set_value,
-                &Self::item_from_value(record.value())
+                &Item::from(record.value()).0
             )?;
             wt_call!(self.inner.ptr, insert)
         }
@@ -167,29 +148,12 @@ impl<'a> RecordCursor<'a> {
     fn record_view(&self, known_key: Option<i64>) -> Result<RecordView<'_>> {
         let key = known_key.map(Ok).unwrap_or_else(|| self.record_key())?;
 
-        let value = unsafe {
-            let mut item = Self::default_item();
-            wt_call!(self.inner.ptr, get_value, &mut item)
-                .map(|()| std::slice::from_raw_parts(item.data as *const u8, item.size))?
+        let value: &[u8] = unsafe {
+            let mut item = Item::default();
+            wt_call!(self.inner.ptr, get_value, &mut item.0).map(|()| item.into())?
         };
 
         Ok(RecordView::new(key, value))
-    }
-
-    /// Return a default, empty WT_ITEM for fetching values.
-    fn default_item() -> WT_ITEM {
-        Self::item_from_value(&[])
-    }
-
-    /// Return a WT_ITEM that points to the contents of the value slice.
-    fn item_from_value(value: &[u8]) -> WT_ITEM {
-        WT_ITEM {
-            data: value.as_ptr() as *const c_void,
-            size: value.len(),
-            mem: std::ptr::null_mut(),
-            memsize: 0,
-            flags: 0,
-        }
     }
 }
 

@@ -3,14 +3,13 @@ mod stat_cursor;
 
 use std::{
     cell::RefCell,
-    ffi::{CStr, CString},
+    ffi::{c_void, CStr, CString},
     ops::Deref,
     ptr::NonNull,
     sync::Arc,
 };
 
-use record_cursor::InnerCursor;
-use wt_sys::{WT_CURSOR, WT_SESSION};
+use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
 
 use crate::{
     connection::Connection,
@@ -47,6 +46,54 @@ impl From<&str> for TableUri {
         Self(CString::new(format!("table:{}", value)).expect("no nulls in table name"))
     }
 }
+
+/// Wrapper around [wt_sys::WT_ITEM].
+#[derive(Copy, Clone)]
+struct Item(WT_ITEM);
+
+// Use an empty slice so that the default pointer is not null.
+const EMPTY_ITEM: &[u8] = &[];
+
+impl Default for Item {
+    fn default() -> Self {
+        Self::from(EMPTY_ITEM)
+    }
+}
+
+impl From<&[u8]> for Item {
+    fn from(value: &[u8]) -> Self {
+        Self(WT_ITEM {
+            data: value.as_ptr() as *const c_void,
+            size: value.len(),
+            mem: std::ptr::null_mut(),
+            memsize: 0,
+            flags: 0,
+        })
+    }
+}
+
+impl From<Item> for &[u8] {
+    fn from(value: Item) -> Self {
+        unsafe { std::slice::from_raw_parts(value.0.data as *const u8, value.0.size) }
+    }
+}
+
+/// Inner representation of a cursor.
+///
+/// This inner representation is used by RecordCursor but also may be cached by Session.
+struct InnerCursor {
+    pub ptr: NonNull<WT_CURSOR>,
+    pub uri: TableUri,
+}
+
+impl Drop for InnerCursor {
+    fn drop(&mut self) {
+        // TODO: log this.
+        let _ = unsafe { wt_call!(self.ptr, close) };
+    }
+}
+
+unsafe impl Send for InnerCursor {}
 
 /// A WiredTiger session.
 ///

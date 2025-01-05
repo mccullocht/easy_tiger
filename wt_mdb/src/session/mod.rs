@@ -1,3 +1,4 @@
+mod index_cursor;
 mod record_cursor;
 mod stat_cursor;
 
@@ -20,6 +21,7 @@ use crate::{
     wt_call, Error, RecordView, Result,
 };
 
+pub use index_cursor::{IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordView};
 pub use record_cursor::{RecordCursor, RecordCursorGuard};
 pub use stat_cursor::StatCursor;
 
@@ -84,6 +86,12 @@ impl From<Item> for &[u8] {
 struct InnerCursor {
     pub ptr: NonNull<WT_CURSOR>,
     pub uri: TableUri,
+}
+
+impl InnerCursor {
+    fn reset(&mut self) -> Result<()> {
+        unsafe { wt_call!(self.ptr, reset) }
+    }
 }
 
 impl Drop for InnerCursor {
@@ -185,10 +193,10 @@ impl Session {
             .map(|c| RecordCursorGuard::new(self, c))
     }
 
-    /// Return a `RecordCursor` to the cache for future re-use.
-    fn return_record_cursor(&self, mut cursor: RecordCursor) {
+    /// Return an `InnerCursor` to the cache for future re-use.
+    fn return_cursor(&self, mut cursor: InnerCursor) {
         let _ = cursor.reset();
-        self.cached_cursors.borrow_mut().push(cursor.into_inner())
+        self.cached_cursors.borrow_mut().push(cursor)
     }
 
     /// Remove all cached cursors.

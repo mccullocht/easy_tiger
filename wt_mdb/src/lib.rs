@@ -123,6 +123,7 @@ impl From<Error> for std::io::Error {
     }
 }
 
+// XXX move this into record_cursor.
 /// A `RecordView` in a WiredTiger table with an i64 key and a byte array value.
 ///
 /// The underlying byte array may or may not be owned, the `Record` type alias may be more
@@ -171,7 +172,10 @@ impl<'a> RecordView<'a> {
 pub type Record = RecordView<'static>;
 
 pub use connection::Connection;
-pub use session::{RecordCursor, RecordCursorGuard, Session, StatCursor};
+pub use session::{
+    IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordView, RecordCursor, RecordCursorGuard,
+    Session, StatCursor,
+};
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {

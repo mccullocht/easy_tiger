@@ -216,8 +216,8 @@ impl TableGraphVectorIndex {
     ) -> io::Result<Self> {
         let index = Self::from_init(config, index_name)?;
         let session = connection.open_session()?;
-        session.create_record_table(&index.graph_table_name, table_options.clone())?;
-        session.create_record_table(&index.nav_table_name, table_options)?;
+        session.create_table(&index.graph_table_name, table_options.clone())?;
+        session.create_table(&index.nav_table_name, table_options)?;
         let mut cursor = session.open_record_cursor(&index.graph_table_name)?;
         cursor.set(&Record::new(CONFIG_KEY, serde_json::to_vec(&index.config)?))?;
         Ok(index)

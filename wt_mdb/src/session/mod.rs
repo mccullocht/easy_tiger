@@ -149,13 +149,8 @@ impl Session {
         &self.connection
     }
 
-    // XXX fix the name. this can create index type tables too now.
-    /// Create a new record table.
-    pub fn create_record_table(
-        &self,
-        table_name: &str,
-        config: Option<CreateOptions>,
-    ) -> Result<()> {
+    /// Create a new table.
+    pub fn create_table(&self, table_name: &str, config: Option<CreateOptions>) -> Result<()> {
         let uri = TableUri::from(table_name);
         unsafe {
             wt_call!(
@@ -167,12 +162,11 @@ impl Session {
         }
     }
 
-    // XXX fix the name. this can create index type tables too now.
-    /// Drop a record table.
+    /// Drop a table.
     ///
     /// This requires exclusive access -- if any cursors are open on the specified table the call will fail
     /// and return an EBUSY posix error.
-    pub fn drop_record_table(&self, table_name: &str, config: Option<DropOptions>) -> Result<()> {
+    pub fn drop_table(&self, table_name: &str, config: Option<DropOptions>) -> Result<()> {
         let uri = TableUri::from(table_name);
         unsafe {
             wt_call!(
@@ -345,7 +339,7 @@ impl Session {
     where
         I: Iterator<Item = RecordView<'a>>,
     {
-        self.create_record_table(table_name, options)?;
+        self.create_table(table_name, options)?;
         let mut cursor = self.open_record_cursor_with_options(table_name, Some(c"bulk=true"))?;
         for record in iter {
             cursor.set(&record)?;

@@ -14,9 +14,9 @@ use rustix::io::Errno;
 use wt_sys::wiredtiger_strerror;
 
 use std::ffi::CStr;
+use std::io;
 use std::io::ErrorKind;
 use std::num::NonZero;
-use std::{borrow::Cow, io};
 
 /// WiredTiger specific error codes.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -123,55 +123,11 @@ impl From<Error> for std::io::Error {
     }
 }
 
-/// A `RecordView` in a WiredTiger table with an i64 key and a byte array value.
-///
-/// The underlying byte array may or may not be owned, the `Record` type alias may be more
-/// convenient when the data is owned.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub struct RecordView<'a> {
-    key: i64,
-    value: Cow<'a, [u8]>,
-}
-
-impl<'a> RecordView<'a> {
-    /// Create a new `RecordView` from a key and an unowned byte array value.
-    pub fn new<V>(key: i64, value: V) -> Self
-    where
-        V: Into<Cow<'a, [u8]>>,
-    {
-        RecordView {
-            key,
-            value: value.into(),
-        }
-    }
-
-    /// Return the key.
-    pub fn key(&self) -> i64 {
-        self.key
-    }
-
-    /// Return the value.
-    pub fn value(&self) -> &[u8] {
-        self.value.as_ref()
-    }
-
-    /// Ensure that this RecordView owns the underlying value.
-    pub fn to_owned(self) -> Record {
-        Record::new(self.key(), self.value.to_vec())
-    }
-
-    /// Returns the inner value within the `RecordView`.
-    pub fn into_inner_value(self) -> Cow<'a, [u8]> {
-        self.value
-    }
-}
-
-/// An alias for `RecordView` with `'static` lifetime, may be more convenient when the value is
-/// actually owned.
-pub type Record = RecordView<'static>;
-
 pub use connection::Connection;
-pub use session::{RecordCursor, RecordCursorGuard, Session, StatCursor};
+pub use session::{
+    IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordView, Record, RecordCursor,
+    RecordCursorGuard, RecordView, Session, StatCursor,
+};
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {
@@ -217,20 +173,31 @@ mod test {
 
     use crate::{
         connection::Connection,
-        options::{ConnectionOptions, ConnectionOptionsBuilder, Statistics},
-        Error, Record, RecordView, WiredTigerError,
+        options::{
+            ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
+            Statistics, TableType,
+        },
+        Error, IndexRecord, IndexRecordView, Record, RecordView, WiredTigerError,
     };
 
     fn conn_options() -> Option<ConnectionOptions> {
         Some(ConnectionOptionsBuilder::default().create().into())
     }
 
+    fn index_table_options() -> Option<CreateOptions> {
+        Some(
+            CreateOptionsBuilder::default()
+                .table_type(TableType::Index)
+                .into(),
+        )
+    }
+
     #[test]
-    fn insert_and_iterate() {
+    fn record_insert_and_iterate() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_record_table("test", None).unwrap();
+        session.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
         assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
@@ -240,11 +207,25 @@ mod test {
     }
 
     #[test]
-    fn insert_and_search() {
+    fn index_insert_and_iterate() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_record_table("test", None).unwrap();
+        session.create_table("test", index_table_options()).unwrap();
+        let mut cursor = session.open_index_cursor("test").unwrap();
+        assert_eq!(cursor.set(&IndexRecordView::new(b"b", b"bar")), Ok(()));
+        assert_eq!(cursor.set(&IndexRecordView::new(b"a", b"foo")), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok(IndexRecord::new(b"a", b"foo"))));
+        assert_eq!(cursor.next(), Some(Ok(IndexRecord::new(b"b", b"bar"))));
+        assert_eq!(cursor.next(), None);
+    }
+
+    #[test]
+    fn record_insert_and_search() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         let value: &[u8] = b"bar";
         assert_eq!(cursor.set(&RecordView::new(7, value)), Ok(()));
@@ -254,11 +235,31 @@ mod test {
     }
 
     #[test]
-    fn insert_and_remove() {
+    fn index_insert_and_search() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_record_table("test", None).unwrap();
+        session.create_table("test", index_table_options()).unwrap();
+        let mut cursor = session.open_index_cursor("test").unwrap();
+        let value: &[u8] = b"bar";
+        assert_eq!(cursor.set(&IndexRecordView::new(b"a", value)), Ok(()));
+        assert_eq!(cursor.set(&IndexRecord::new(b"b", value)), Ok(()));
+        assert_eq!(
+            cursor.seek_exact(b"a"),
+            Some(Ok(IndexRecord::new(b"a", value)))
+        );
+        assert_eq!(
+            cursor.seek_exact(b"b"),
+            Some(Ok(IndexRecord::new(b"b", value)))
+        );
+    }
+
+    #[test]
+    fn record_insert_and_remove() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
         assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
@@ -272,11 +273,29 @@ mod test {
     }
 
     #[test]
-    fn largest_key() {
+    fn index_insert_and_remove() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_record_table("test", None).unwrap();
+        session.create_table("test", index_table_options()).unwrap();
+        let mut cursor = session.open_index_cursor("test").unwrap();
+        assert_eq!(cursor.set(&IndexRecordView::new(b"b", b"bar")), Ok(()));
+        assert_eq!(cursor.set(&IndexRecordView::new(b"a", b"foo")), Ok(()));
+        assert_eq!(cursor.remove(b"a"), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok(IndexRecord::new(b"b", b"bar"))));
+        assert_eq!(cursor.next(), None);
+        assert_eq!(
+            cursor.remove(b"c"),
+            Err(Error::WiredTiger(WiredTigerError::NotFound))
+        );
+    }
+
+    #[test]
+    fn record_largest_key() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.largest_key(), None);
         assert_eq!(cursor.set(&RecordView::new(-1, b"bar")), Ok(()));
@@ -286,11 +305,25 @@ mod test {
     }
 
     #[test]
+    fn index_largest_key() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_table("test", index_table_options()).unwrap();
+        let mut cursor = session.open_index_cursor("test").unwrap();
+        assert_eq!(cursor.largest_key(), None);
+        assert_eq!(cursor.set(&IndexRecordView::new(b"a", b"bar")), Ok(()));
+        assert_eq!(cursor.largest_key(), Some(Ok(b"a".as_ref())));
+        assert_eq!(cursor.set(&IndexRecordView::new(b"b", b"foo")), Ok(()));
+        assert_eq!(cursor.largest_key(), Some(Ok(b"b".as_ref())));
+    }
+
+    #[test]
     fn transaction_commit() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_record_table("test", None).unwrap();
+        session.create_table("test", None).unwrap();
         let read_session = conn.open_session().unwrap();
         let mut read_cursor = read_session.open_record_cursor("test").unwrap();
 
@@ -309,7 +342,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_record_table("test", None).unwrap();
+        session.create_table("test", None).unwrap();
 
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(session.begin_transaction(None), Ok(()));
@@ -324,7 +357,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_record_table("test", None).unwrap();
+        session.create_table("test", None).unwrap();
 
         let mut cursor = session.get_record_cursor("test").unwrap();
         assert_eq!(cursor.set(&RecordView::new(1, b"foo")), Ok(()));
@@ -365,7 +398,7 @@ mod test {
         let session = conn.open_session().unwrap();
 
         // Bulk load will happily load into an empty table, so to get it to fail we insert a record.
-        assert_eq!(session.create_record_table("test", None), Ok(()));
+        assert_eq!(session.create_table("test", None), Ok(()));
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(&RecordView::new(1, b"bar")), Ok(()));
         assert_eq!(
@@ -404,7 +437,7 @@ mod test {
         )
         .unwrap();
         let session = conn.open_session().unwrap();
-        session.create_record_table("test", None).unwrap();
+        session.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
         assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));

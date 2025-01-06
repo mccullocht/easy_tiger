@@ -10,6 +10,7 @@ pub mod crud;
 pub mod graph;
 pub mod input;
 pub mod quantization;
+pub mod scann;
 pub mod scoring;
 pub mod search;
 pub mod worker_pool;

@@ -2,75 +2,52 @@
 
 A DiskANN/Vamana implementation using WiredTiger as the storage layer.
 
-# Design
+The vector index is modeled as two tables parallel to an existing collection, where one table
+contains the raw float vector and graph edges and the other contains quantized vectors -- binary
+quantized vectors in our case. This structure should allow us to serve larger than memory indices
+efficiently and with relatively low latency. See the [design](docs/design.md) for more details.
 
-An EasyTiger index for a vector field is modeled as two tables parallel to an existing collection
-sharing the same keys. Vector indices do not have any inherent order so it does not make sense to
-model them like traditional BTree indices.
+This implementation will build the WiredTiger library and provides a crude Rust wrapper around
+WT in the `wt_mdb` crate. See [implementation notes](docs/implementation_notes.md) if you'd like
+to know more about the WT wrapper.
 
-A Vamana/DiskANN graph index structure is used, placing full fidelity vectors and graph edges in
-one table and quantized vectors in another. Quantized vectors are used for navigating the graph and
-are expected to be in memory. Full fidelity vectors and graph edges are in a second table and are
-expected to be mostly on disk. This would allow you to search a vector data set using about
-`num_dimensions * num_vectors / 8` bytes of RAM, plus some additional for caching graph data.
+## Performance Testing
 
-This implementation allows you to choose either Euclidean (L2) or dot product (~cos) distance
-functions as well as all the hyper parameters mentioned in the DiskANN paper.
+Tests were run using a [Qdrant OpenAI dbpedia dataset](https://huggingface.co/datasets/Qdrant/dbpedia-entities-openai3-text-embedding-3-large-3072-1M) of 1M vectors with 3072 dimensions.
+The raw vectors for this index occupy about 12GB.
 
-## Search
+Preliminary performance numbers on an M2 Mac with 32GB RAM searching for 128 candidates:
 
-On top of this we implement a Vamana/DiskANN index -- a flat graph where each vertex is a vector and
-edges are selected based on the distance between vertices. During a search we visit a vertex by
-reading the vector value and edges from the graph table, then examine the outgoing edges and score
-them against the query using the quantized vectors to populate a candidate priority queue. When the
-search is complete we use the normalized vectors to compute high fidelity scores and rerank the
-result set.
+| Configuration                                      | Avg Latency | Recall@10 |
+| -------------------------------------------------- | ----------- | --------- |
+| EasyTiger, 16GB cache                              | 3.4 ms      | 0.967     |
+| EasyTiger, 4GB cache                               | 10.4 ms     | 0.967     |
+| EasyTiger, 4GB cache, read concurrency 4           | 7.2 ms      | 0.971     |
+| Lucene 9.12, Float HNSW, 8 segments                | 15 ms       | 0.960     |
+| Lucene 9.12, Float HNSW, 8 segments, intersegment  | 2.6 ms      | 0.969     |
+| Lucene 9.12, Float HNSW, 1 segment                 | 2.6 ms      | 0.965     |
 
-The search is greedy -- when a vertex is visited we process outgoing edges and immediately insert
-them in the candidate queue before picking the next vertex to visit. This can be very slow if most
-of the data set is on disk. This implementation allows vertex reads to occur in a thread pool, with
-a concurrency limit set per-query. When concurrency is on the algorithm will pop candidates until
-we reach the concurrency limit, issue concurrent reads, then process any results and update the
-candidate list. This reduces latency by parallelizing reads but also results in more work -- more
-vertices are read/visisted and more candidates are scored.
+Results were compared using float vectors to maximize recall figures, Lucene has other
+configurations that trade accuracy for memory consumption. At the moment there are no
+framework-level components for re-ranking using float vectors even when they are available
+on disk.
 
-## Indexing
+EasyTiger is competitive on accuracy and latency when the entire index fits in the WiredTiger
+cache. When the cache size is reduced latency is still reasonable as the cache will often contain
+vertices closer to the entry point. Some of the latency effects can be mitigated by using a read
+concurrency feature that speculatively reads multiple vertices in parallel. This also increases
+recall as we tend to perform more vector comparisons in this case. A significant chunk of the CPU
+time is spent looking up vectors in the quantized vector (nav) table since we might do thousands
+of these lookups per query. This could be mitigated by denormalizing the quantized vectors into
+the graph edges -- basically make the graph vertices much larger (increase index size 2-4x) but
+reduce the number of reads.
 
-Unlike in a typical Vamana graph our edges are undirected, so all edges have a reciprocal link.
-This simplifies processing of mutation operations (particularly deletions) but at the cost of
-pruning more edges from the graph when we can't satisfty the undirected property. It is recommended
-that higher settings of `beam_width` and `max_edges` be used with this implementation than you might
-use with a directed graph implementation.
-
-Insertion works as described in the paper. For deletions the directed graph property ensures that we
-can find and remove all in-links to the deleted vertex. During deletions we may also use the edge
-set from the deleted vertex to seed more links to maintain connectivity. Updates can be modeled as
-a delete and an insertion on the same row, although we may be able to avoid the deletion work if the
-updated vector is very similar to the existing vector.
-
-We can also support "bulk" indexing where the graph is built entirely in memory and uploaded to
-WiredTiger when indexing is complete. This only works for bootstrapping a new vector index when the
-tables are empty or do not exist at all. This is significantly faster than the regular insertion
-path because we don't have to traverse the BTree to locate vector data.
-
-# Caveats
-
-* This implementation assumes that each key in the collection contains at most 1 vector. Many
-  applications are likely to model as 1-to-many. I think this could be addressed with a compound
-  key -- 64 bits of row key + 64 bits of vector hash so that it is still possible to perform
-  predicate joins easily, although it will be difficult to estimate cardinality.
-* Quantization is inflexible -- only binary quantization is supported. Stateful quantization
-  algorithms are more difficult to maintain on mutable indices.
-* This implementation does not allow pre-quantized inputs for the "full fidelity" vectors or the
-  quantized vectors, even though some model may produce quantized vectors.
-* There are no provisions to optimize the graph entry point during continuous operations.
-* Reachability of any given vector is not guaranteed. The graph is undirected so it is easy to
-  identify vertices that have no edges and are completely unreachable, but if we end up with
-  subgraphs that is more difficult to detect.
-
-# Future Work
-
-Quantized vector lookup is a significant cost during search. This work could be parallelized, or
-we could denormalize quantized vectors into the graph table. Denormalizing these vectors would
-likely come at a cost of 2-4x storage requirements, but would also reduce lookup count by a factor
-of 10x or more and also significantly reduce memory requirements.
+Lucene is much slower in the default configuration as it applies the 128 candidate budget to
+the underlying graph in each segment, and performs many more vector comparisons as a result.
+This can't be mitigated with statistical approaches to reducing budget as the distribution of
+vectors to segments is not ~random. The latency impact can be mitigated by using intersegment
+concurrency, but the cost of this query will still be roughly 15ms of CPU time. The additional
+vector comparisons also mean that a query over a larger than memory index will suffer more due
+to additional vector reads; testing this would require running the setup in a memory container.
+Lucene performance is great with 1 segment -- it is a more efficient implementation than the WT
+version -- but this isn't representative of how Lucene is typically used.

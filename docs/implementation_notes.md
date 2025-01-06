@@ -17,7 +17,7 @@ as a collection of immutable methods on the struct and is marked `Send + Sync`. 
 work with `Arc<Connection>` to ensure that it lives as long as there are any outstanding `Session`s.
 
 `Session` and `Cursor` are trickier to model. WiredTiger documentation suggests that these are not
-safe for concurrent access by multiple threads (`!Sync) but should be fine to share across threads
+safe for concurrent access by multiple threads (`!Sync`) but should be fine to share across threads
 (`Send`). In practice mutating a `Cursor` may change the underlying `Session`(!) so they are a unit.
 These structs may be `Send` but should not be `Sync` -- additional synchronization is required.
 

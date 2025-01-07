@@ -4,12 +4,12 @@
 
 /// Return the number of output bytes required to binary quantize a vector of `dimensions` length.
 pub fn binary_quantized_bytes(dimensions: usize) -> usize {
-    BinaryQuantizer.index_bytes(dimensions)
+    BinaryQuantizer.doc_bytes(dimensions)
 }
 
 /// Return binary quantized form of `vector`.
 pub fn binary_quantize(vector: &[f32]) -> Vec<u8> {
-    BinaryQuantizer.for_index(vector)
+    BinaryQuantizer.for_doc(vector)
 }
 
 /// `Quantizer` is used to perform lossy quantization of input vectors.
@@ -26,10 +26,10 @@ pub trait Quantizer {
     fn query_bytes(&self, dimensions: usize) -> usize;
 
     /// Quantize this vector for indexing.
-    fn for_index(&self, vector: &[f32]) -> Vec<u8>;
+    fn for_doc(&self, vector: &[f32]) -> Vec<u8>;
 
     /// Return the size of a quantized index vector for the provided dimensionality.
-    fn index_bytes(&self, dimensions: usize) -> usize;
+    fn doc_bytes(&self, dimensions: usize) -> usize;
 }
 
 /// Reduce each dimension to a single bit.
@@ -40,7 +40,7 @@ pub trait Quantizer {
 pub struct BinaryQuantizer;
 
 impl Quantizer for BinaryQuantizer {
-    fn for_index(&self, vector: &[f32]) -> Vec<u8> {
+    fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
         vector
             .chunks(8)
             .map(|c| {
@@ -52,16 +52,16 @@ impl Quantizer for BinaryQuantizer {
             .collect()
     }
 
-    fn index_bytes(&self, dimensions: usize) -> usize {
+    fn doc_bytes(&self, dimensions: usize) -> usize {
         (dimensions + 7) / 8
     }
 
     fn for_query(&self, vector: &[f32]) -> Vec<u8> {
-        self.for_index(vector)
+        self.for_doc(vector)
     }
 
     fn query_bytes(&self, dimensions: usize) -> usize {
-        self.index_bytes(dimensions)
+        self.doc_bytes(dimensions)
     }
 }
 
@@ -105,12 +105,12 @@ impl AsymmetricBinaryQuantizer {
 }
 
 impl Quantizer for AsymmetricBinaryQuantizer {
-    fn for_index(&self, vector: &[f32]) -> Vec<u8> {
-        BinaryQuantizer.for_index(vector)
+    fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
+        BinaryQuantizer.for_doc(vector)
     }
 
-    fn index_bytes(&self, dimensions: usize) -> usize {
-        BinaryQuantizer.index_bytes(dimensions)
+    fn doc_bytes(&self, dimensions: usize) -> usize {
+        BinaryQuantizer.doc_bytes(dimensions)
     }
 
     fn for_query(&self, vector: &[f32]) -> Vec<u8> {
@@ -136,7 +136,7 @@ impl Quantizer for AsymmetricBinaryQuantizer {
 
         // Transform the trivially quantized vector to produce a vector containing `n` bitvectors,
         // each containing only the i'th bit of each dimension.
-        let index_bytes = self.index_bytes(vector.len());
+        let doc_bytes = self.doc_bytes(vector.len());
         let mut quantized = vec![0u8; self.query_bytes(vector.len())];
         for (i, chunk) in trivial_quantized.chunks(8).enumerate() {
             let word = if chunk.len() == 8 {
@@ -148,7 +148,7 @@ impl Quantizer for AsymmetricBinaryQuantizer {
                 u64::from_le_bytes(bytes)
             };
             for bit in 0..self.n {
-                quantized[index_bytes * bit + i] = Self::summarize_chunk(word, bit);
+                quantized[doc_bytes * bit + i] = Self::summarize_chunk(word, bit);
             }
         }
 
@@ -156,6 +156,6 @@ impl Quantizer for AsymmetricBinaryQuantizer {
     }
 
     fn query_bytes(&self, dimensions: usize) -> usize {
-        self.index_bytes(dimensions) * self.n
+        self.doc_bytes(dimensions) * self.n
     }
 }

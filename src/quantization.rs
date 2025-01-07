@@ -2,6 +2,12 @@
 //!
 //! Graph navigation during search uses these quantized vectors.
 
+use serde::{Deserialize, Serialize};
+
+use crate::scoring::{
+    AsymmetricHammingScorer, HammingScorer, QuantizedVectorScorer, VectorSimilarity,
+};
+
 /// Return the number of output bytes required to binary quantize a vector of `dimensions` length.
 pub fn binary_quantized_bytes(dimensions: usize) -> usize {
     BinaryQuantizer.doc_bytes(dimensions)
@@ -30,6 +36,40 @@ pub trait Quantizer {
 
     /// Return the size of a quantized index vector for the provided dimensionality.
     fn doc_bytes(&self, dimensions: usize) -> usize;
+}
+
+/// Methods for quantizing vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VectorQuantizer {
+    /// Reduces each dimension to a single bit around the origin point.
+    Binary,
+    /// Binary quantizes indexed vectors; produces an n-bit representation at
+    /// query time to increase precision. This is also used during indexing.
+    AsymmetricBinary { n: usize },
+}
+
+impl VectorQuantizer {
+    /// Create a new quantizer for this quantization method.
+    pub fn new_quantizer(&self) -> Box<dyn Quantizer> {
+        match self {
+            Self::Binary => Box::new(BinaryQuantizer),
+            Self::AsymmetricBinary { n } => Box::new(AsymmetricBinaryQuantizer::new(*n)),
+        }
+    }
+
+    /// Create a new scorer for this quantization method.
+    pub fn new_scorer(&self, _similarity: &VectorSimilarity) -> Box<dyn QuantizedVectorScorer> {
+        match self {
+            Self::Binary => Box::new(HammingScorer),
+            Self::AsymmetricBinary { n: _ } => Box::new(AsymmetricHammingScorer),
+        }
+    }
+}
+
+impl Default for VectorQuantizer {
+    fn default() -> Self {
+        Self::Binary
+    }
 }
 
 /// Reduce each dimension to a single bit.

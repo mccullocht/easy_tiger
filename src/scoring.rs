@@ -119,3 +119,23 @@ impl QuantizedVectorScorer for HammingScorer {
         (dim - BinarySimilarity::hamming(a, b).unwrap()) / dim
     }
 }
+
+/// Computes a score between a query and doc vectors produced by [crate::quantization::AsymmetricBinaryQuantizer]
+#[derive(Debug, Copy, Clone)]
+pub struct AsymmetricHammingScorer;
+
+impl QuantizedVectorScorer for AsymmetricHammingScorer {
+    fn score(&self, query: &[u8], doc: &[u8]) -> f64 {
+        assert_eq!(query.len() % doc.len(), 0);
+        let (sum, total) = query
+            .chunks(doc.len())
+            .enumerate()
+            .map(|(i, v)| {
+                let mult = 1usize << i;
+                let sum = BinarySimilarity::hamming(doc, v).expect("same vector length") as usize;
+                (sum * mult, doc.len() * 8 * mult)
+            })
+            .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+        (total as f64 - sum as f64) / total as f64
+    }
+}

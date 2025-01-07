@@ -7,13 +7,24 @@ use rand::{distributions::WeightedIndex, prelude::*};
 use rayon::prelude::*;
 use simsimd::SpatialSimilarity;
 
-use crate::input::VectorStore;
+use crate::input::{DerefVectorStore, VectorStore};
+
+/// How to initialize the centroids for k-means computation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CentroidInitializationAlgorithm {
+    /// Randomly choose points from the training data set to use as centroids.
+    Random,
+    /// Perform k-means++ centroid selection.
+    KmeansPlusPlus,
+}
 
 /// Parameters for computing kmeans.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Params {
     /// Maximum number of iterations to run. May run converge in fewer iterations.
     pub max_iters: usize,
+    /// How to initialize the centroids.
+    pub initialization_algorithm: CentroidInitializationAlgorithm,
     /// Minimum number of samples in each cluster. If any clusters have fewer than this many samples
     /// the computation will not converge.
     pub min_cluster_size: usize,
@@ -28,6 +39,7 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             max_iters: 10,
+            initialization_algorithm: CentroidInitializationAlgorithm::KmeansPlusPlus,
             min_cluster_size: 1,
             epsilon: 0.000_01,
             perturbation: 0.000_000_1,
@@ -39,13 +51,18 @@ impl Default for Params {
 ///
 /// Returns the centroids as well as the set of samples in `training_data` that appear in each
 /// cluster.
-pub fn compute<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
+pub fn train<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
     training_data: &V,
     clusters: NonZero<usize>,
     params: &Params,
     rng: &mut R,
-) -> (MutableVectorStore<f32>, Vec<Vec<usize>>) {
-    let mut centroids = initialize_centroids(training_data, clusters.get(), rng);
+) -> (DerefVectorStore<f32, Vec<f32>>, Vec<Vec<usize>>) {
+    let mut centroids = initialize_centroids(
+        training_data,
+        clusters.get(),
+        params.initialization_algorithm,
+        rng,
+    );
 
     let mut means = vec![0.0; clusters.get()];
     let mut cluster_sizes = vec![0usize; clusters.get()];
@@ -122,24 +139,37 @@ pub fn compute<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
         partitions[c].push(i);
     }
 
-    (centroids, partitions)
+    (centroids.into(), partitions)
 }
 
 /// Create `clusters` initial centroids from `training_data` by the kmeans++ scheme.
 fn initialize_centroids<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
     training_data: &V,
     clusters: usize,
+    algorithm: CentroidInitializationAlgorithm,
     rng: &mut R,
 ) -> MutableVectorStore<f32> {
     // Use kmeans++ initialization.
-    let mut centroids = MutableVectorStore::with_capacity(clusters, training_data[0].len());
-    centroids.push(&training_data[thread_rng().gen_range(0..training_data.len())]);
-    while centroids.len() < clusters {
-        let assignments = compute_cluster_assignments(training_data, &centroids);
-        let selected = WeightedIndex::new(assignments.iter().map(|(_, w)| w))
-            .unwrap()
-            .sample(rng);
-        centroids.push(&training_data[selected]);
+    let mut centroids = MutableVectorStore::with_capacity(training_data[0].len(), clusters);
+    match algorithm {
+        CentroidInitializationAlgorithm::Random => {
+            let mut weights = vec![1.0; training_data.len()];
+            while centroids.len() < clusters {
+                let selected = WeightedIndex::new(weights.iter()).unwrap().sample(rng);
+                centroids.push(&training_data[selected]);
+                weights[selected] = 0.0;
+            }
+        }
+        CentroidInitializationAlgorithm::KmeansPlusPlus => {
+            centroids.push(&training_data[rng.gen_range(0..training_data.len())]);
+            while centroids.len() < clusters {
+                let assignments = compute_cluster_assignments(training_data, &centroids);
+                let selected = WeightedIndex::new(assignments.iter().map(|(_, w)| w))
+                    .unwrap()
+                    .sample(rng);
+                centroids.push(&training_data[selected]);
+            }
+        }
     }
     centroids
 }
@@ -173,20 +203,12 @@ fn compute_cluster_assignments<
 }
 
 /// A mutable [crate::input::VectorStore] implementation where vector elements are of type `E`.
-pub struct MutableVectorStore<E> {
+struct MutableVectorStore<E> {
     data: Vec<E>,
     elem_stride: usize,
 }
 
 impl<E: Clone> MutableVectorStore<E> {
-    /// Create an empty MutableVectorStore with the given `elem_stride`.
-    pub fn new(elem_stride: usize) -> Self {
-        Self {
-            data: vec![],
-            elem_stride,
-        }
-    }
-
     /// Create an empty MutableVectorStore with room for `capacity` vectors.
     pub fn with_capacity(elem_stride: usize, capacity: usize) -> Self {
         Self {
@@ -246,5 +268,11 @@ impl<E: Clone> IndexMut<usize> for MutableVectorStore<E> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         let r = self.range(index);
         &mut self.data[r]
+    }
+}
+
+impl<E> From<MutableVectorStore<E>> for DerefVectorStore<E, Vec<E>> {
+    fn from(value: MutableVectorStore<E>) -> Self {
+        DerefVectorStore::new_typed(value.data, value.elem_stride)
     }
 }

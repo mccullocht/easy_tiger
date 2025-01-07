@@ -31,13 +31,13 @@ pub struct DerefVectorStore<E: 'static, D> {
     len: usize,
 }
 
-impl<E, D> DerefVectorStore<E, D>
-where
-    D: StableDeref<Target = [u8]>,
-{
+impl<E, D> DerefVectorStore<E, D> {
     /// Create a new store from byte de-refable `data` where each entry contains
     /// `stride` elements of of type `E`.
-    pub fn new(data: D, stride: NonZero<usize>) -> io::Result<Self> {
+    pub fn new(data: D, stride: NonZero<usize>) -> io::Result<Self>
+    where
+        D: StableDeref<Target = [u8]>,
+    {
         let elem_width = std::mem::size_of::<E>();
         let vectorp = data.as_ptr() as *const E;
         if !vectorp.is_aligned() {
@@ -69,6 +69,20 @@ where
             stride: stride.get(),
             len,
         })
+    }
+
+    pub fn new_typed(data: D, stride: usize) -> Self
+    where
+        D: StableDeref<Target = [E]>,
+    {
+        let len = data.len();
+        let raw_vectors: &'static [E] = unsafe { std::slice::from_raw_parts(data.as_ptr(), len) };
+        Self {
+            data,
+            raw_vectors,
+            stride,
+            len,
+        }
     }
 }
 

@@ -24,6 +24,11 @@ pub struct BulkLoadArgs {
     /// Similarity function to use for vector scoring.
     #[arg(short, long, value_enum)]
     similarity: VectorSimilarity,
+    /// Quantizer to use for navigational vectors.
+    ///
+    /// This will also dictate the quantized scoring function used.
+    #[arg(short, long, value_enum)]
+    quantizer: VectorQuantizer,
     /// If true, load all quantized vectors into a trivial memory store for bulk loading.
     /// This can be significantly faster than reading these values from WiredTiger.
     #[arg(long)]
@@ -68,7 +73,7 @@ pub fn bulk_load(
     let config = GraphConfig {
         dimensions: args.dimensions,
         similarity: args.similarity,
-        quantizer: VectorQuantizer::default(), // XXX
+        quantizer: args.quantizer,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,

@@ -2,6 +2,8 @@
 //!
 //! Graph navigation during search uses these quantized vectors.
 
+use std::{io, str::FromStr};
+
 use serde::{Deserialize, Serialize};
 
 use crate::scoring::{
@@ -59,6 +61,29 @@ impl VectorQuantizer {
 impl Default for VectorQuantizer {
     fn default() -> Self {
         Self::Binary
+    }
+}
+
+impl FromStr for VectorQuantizer {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let input_err = |s| io::Error::new(io::ErrorKind::InvalidInput, s);
+        if s == "binary" {
+            Ok(Self::Binary)
+        } else if s.starts_with("asymmetric_binary:") {
+            let bits_str = s
+                .strip_prefix("asymmetric_binary:")
+                .expect("prefix matched");
+            bits_str
+                .parse::<usize>()
+                .ok()
+                .and_then(|b| if (1..=8).contains(&b) { Some(b) } else { None })
+                .map(|n| Self::AsymmetricBinary { n })
+                .ok_or_else(|| input_err(format!("invalid asymmetric_binary bits {}", bits_str)))
+        } else {
+            Err(input_err(format!("unknown quantizer function {}", s)))
+        }
     }
 }
 

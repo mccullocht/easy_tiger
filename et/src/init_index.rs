@@ -19,6 +19,11 @@ pub struct InitIndexArgs {
     /// Similarity function to use for vector scoring.
     #[arg(short, long, value_enum)]
     similarity: VectorSimilarity,
+    /// Quantizer to use for navigational vectors.
+    ///
+    /// This will also dictate the quantized scoring function used.
+    #[arg(short, long, value_enum)]
+    quantizer: VectorQuantizer,
 
     /// Maximum number of edges for any vertex.
     #[arg(long, default_value = "64")]
@@ -64,7 +69,7 @@ pub fn init_index(
         GraphConfig {
             dimensions: args.dimensions,
             similarity: args.similarity,
-            quantizer: VectorQuantizer::default(), // XXX
+            quantizer: args.quantizer,
             max_edges: args.max_edges,
             index_search_params: GraphSearchParams {
                 beam_width: args.edge_candidates,

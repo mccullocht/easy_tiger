@@ -27,7 +27,6 @@ use wt_mdb::{Connection, Record, Result, Session};
 use crate::{
     graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
     input::{DerefVectorStore, VectorStore},
-    quantization::{binary_quantize, binary_quantized_bytes},
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
@@ -115,9 +114,10 @@ where
     pub fn load_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
+        let quantizer = self.index.config().new_quantizer();
         let mut sum = vec![0.0; dim];
         let mut quantized_vectors = if self.memory_quantized_vectors {
-            Some(MmapMut::map_anon(binary_quantized_bytes(dim) * self.vectors.len()).unwrap())
+            Some(MmapMut::map_anon(quantizer.doc_bytes(dim) * self.vectors.len()).unwrap())
         } else {
             None
         };
@@ -133,7 +133,7 @@ where
                     for (i, o) in v.iter().zip(sum.iter_mut()) {
                         *o += *i as f64;
                     }
-                    let quantized = binary_quantize(v);
+                    let quantized = quantizer.for_doc(v);
                     if let Some(q) = quantized_vectors.as_mut() {
                         let start = i * quantized.len();
                         q[start..(start + quantized.len())].copy_from_slice(&quantized);
@@ -145,7 +145,7 @@ where
         self.quantized_vectors = quantized_vectors.map(|m| {
             DerefVectorStore::new(
                 m.make_read_only().unwrap(),
-                NonZero::new(binary_quantized_bytes(dim)).unwrap(),
+                NonZero::new(quantizer.doc_bytes(dim)).unwrap(),
             )
             .unwrap()
         });

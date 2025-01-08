@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore},
-    quantization::binary_quantize,
+    quantization::Quantizer,
     scoring::QuantizedVectorScorer,
     Neighbor,
 };
@@ -137,8 +137,15 @@ impl GraphSearcher {
     ) -> Result<Vec<Neighbor>> {
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
+        let quantizer = reader.config().new_quantizer();
         let nav_scorer = reader.config().new_nav_scorer();
-        let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
+        let nav_query = self.init_candidates(
+            query,
+            &mut graph,
+            &mut nav,
+            quantizer.as_ref(),
+            nav_scorer.as_ref(),
+        )?;
 
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
             self.visited += 1;
@@ -178,8 +185,15 @@ impl GraphSearcher {
 
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
+        let quantizer = reader.config().new_quantizer();
         let nav_scorer = reader.config().new_nav_scorer();
-        let nav_query = self.init_candidates(query, &mut graph, &mut nav, nav_scorer.as_ref())?;
+        let nav_query = self.init_candidates(
+            query,
+            &mut graph,
+            &mut nav,
+            quantizer.as_ref(),
+            nav_scorer.as_ref(),
+        )?;
 
         let mut num_concurrent = 0;
         let (send, recv) = channel();
@@ -234,13 +248,14 @@ impl GraphSearcher {
         query: &[f32],
         graph: &mut G,
         nav: &mut N,
+        quantizer: &dyn Quantizer,
         nav_scorer: &dyn QuantizedVectorScorer,
     ) -> Result<Vec<u8>>
     where
         G: Graph,
         N: NavVectorStore,
     {
-        let nav_query = binary_quantize(query);
+        let nav_query = quantizer.for_query(query);
         if let Some(epr) = graph.entry_point() {
             let entry_point = epr?;
             let entry_vector = nav
@@ -455,7 +470,7 @@ mod test {
 
     use crate::{
         graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
-        quantization::binary_quantize,
+        quantization::{BinaryQuantizer, Quantizer, VectorQuantizer},
         scoring::{DotProductScorer, F32VectorScorer, VectorSimilarity},
         Neighbor,
     };
@@ -486,7 +501,7 @@ mod test {
                 .into_iter()
                 .map(|x| {
                     let v = x.into();
-                    let b = binary_quantize(&v);
+                    let b = BinaryQuantizer.for_doc(&v);
                     TestVector {
                         vector: v,
                         nav_vector: b,
@@ -501,6 +516,7 @@ mod test {
             let config = GraphConfig {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
+                quantizer: VectorQuantizer::Binary,
                 max_edges: max_edges,
                 index_search_params: GraphSearchParams {
                     beam_width: NonZero::new(usize::MAX).unwrap(),

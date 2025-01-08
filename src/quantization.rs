@@ -179,7 +179,7 @@ impl Quantizer for AsymmetricBinaryQuantizer {
 
         // Scale each dimension to be in [0, 2^n) and produce a trivially quantized vector.
         let (min, max) = vector.iter().fold((f32::MAX, f32::MIN), |(min, max), d| {
-            assert!(d.is_nan());
+            assert!(!d.is_nan());
             (min.min(*d), max.max(*d))
         });
         assert!(min <= max);

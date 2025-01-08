@@ -8,16 +8,6 @@ use crate::scoring::{
     AsymmetricHammingScorer, HammingScorer, QuantizedVectorScorer, VectorSimilarity,
 };
 
-/// Return the number of output bytes required to binary quantize a vector of `dimensions` length.
-pub fn binary_quantized_bytes(dimensions: usize) -> usize {
-    BinaryQuantizer.doc_bytes(dimensions)
-}
-
-/// Return binary quantized form of `vector`.
-pub fn binary_quantize(vector: &[f32]) -> Vec<u8> {
-    BinaryQuantizer.for_doc(vector)
-}
-
 /// `Quantizer` is used to perform lossy quantization of input vectors.
 ///
 /// Methods are exposed to quantize for indexing vectors in the database or for

@@ -2,6 +2,7 @@ use std::{
     collections::VecDeque,
     num::NonZero,
     ops::{Index, IndexMut, Range},
+    sync::Mutex,
 };
 
 use rand::{distributions::WeightedIndex, prelude::*};
@@ -39,8 +40,8 @@ pub struct Params {
 impl Default for Params {
     fn default() -> Self {
         Self {
-            max_iters: 10,
-            initialization_algorithm: CentroidInitializationAlgorithm::Random,
+            max_iters: 15,
+            initialization_algorithm: CentroidInitializationAlgorithm::KmeansPlusPlus,
             min_cluster_size: 1,
             epsilon: 0.000_01,
             perturbation: 0.000_000_1,
@@ -52,20 +53,24 @@ impl Default for Params {
 /// Leaf nodes contain `m` or fewer vectors.
 ///
 /// Returns a new order of the vector inputs that clusters by neighborhood.
-pub fn partition_reorder<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
+pub fn partition_reorder<V: VectorStore<Elem = f32> + Send + Sync, R: Rng, P: Fn(), L: Fn()>(
     vectors: &V,
     k: usize,
     m: usize,
     params: &Params,
     rng: &mut R,
+    progress: P,
+    length: L,
 ) -> Vec<usize> {
     let mut queue = VecDeque::new();
     queue.push_front(SubsetViewVectorStore::identity(vectors));
+    length();
     let mut reordered = Vec::with_capacity(vectors.len());
 
     while let Some(store) = queue.pop_front() {
         if store.len() <= m {
             reordered.extend_from_slice(store.indices());
+            progress();
             continue;
         }
 
@@ -74,7 +79,9 @@ pub fn partition_reorder<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
         let (_, subsets) = train(&store, NonZero::new(k).unwrap(), params, rng);
         for subset in subsets.into_iter().rev() {
             queue.push_front(store.subset_view(subset));
+            length();
         }
+        progress();
     }
 
     reordered
@@ -100,9 +107,14 @@ fn train<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
     let mut means = vec![0.0; clusters.get()];
     let mut cluster_sizes = vec![0usize; clusters.get()];
     let mut assignments: Vec<(usize, f64)> = vec![];
+    let mut new_centroids;
 
     for _ in 0..params.max_iters {
-        assignments = compute_cluster_assignments(training_data, &centroids);
+        // XXX maybe I should recompute centroids as I compute assignments? this avoids visiting
+        // the same vector twice which would probably help avoid paging. hard to do here because
+        // we're using rayon to parallelize cluster assignment computation.
+        (assignments, new_centroids) =
+            compute_cluster_assignments_and_update(training_data, &centroids);
         let mut new_means = vec![0.0; clusters.get()];
         cluster_sizes.fill(0);
         for (cluster, distance) in assignments.iter() {
@@ -125,23 +137,12 @@ fn train<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
             break;
         }
 
-        // Recompute centroids. Start by summing input vectors for each cluster and dividing by count.
-        centroids.fill(0.0);
-        for (i, (cluster, _)) in assignments.iter().enumerate() {
-            for (c, v) in centroids[*cluster].iter_mut().zip(&training_data[i]) {
-                *c += v;
-            }
-        }
         let min_cluster_size = std::cmp::min(
             params.min_cluster_size,
             training_data.len() / clusters.get(),
         );
         for (cluster, cluster_size) in cluster_sizes.iter().enumerate() {
-            if *cluster_size >= min_cluster_size {
-                for d in centroids[cluster].iter_mut() {
-                    *d /= *cluster_size as f32;
-                }
-            } else {
+            if *cluster_size < min_cluster_size {
                 new_means[cluster] = -1.0;
                 let (sample_index, sample_cluster) = loop {
                     let i = rng.gen_range(0..training_data.len());
@@ -158,9 +159,10 @@ fn train<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
                     .zip(sample_point.iter())
                     .map(|(c, s)| *c + params.perturbation * (*s - *c))
                     .collect();
-                centroids[cluster].copy_from_slice(&new_centroid);
+                new_centroids[cluster].copy_from_slice(&new_centroid);
             }
         }
+        centroids = new_centroids;
         means = new_means;
     }
 
@@ -183,7 +185,7 @@ fn initialize_centroids<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
     rng: &mut R,
 ) -> MutableVectorStore<f32> {
     // Use kmeans++ initialization.
-    let mut centroids = MutableVectorStore::with_capacity(training_data[0].len(), clusters);
+    let mut centroids = MutableVectorStore::with_capacity(training_data.elem_stride(), clusters);
     match algorithm {
         CentroidInitializationAlgorithm::Random => {
             let mut weights = vec![1.0; training_data.len()];
@@ -235,6 +237,62 @@ fn compute_cluster_assignments<
         .collect()
 }
 
+/// Compute the `centroid` that each sample in `training_data` is closest to as well as the distance
+/// between the sample and the centroid.
+fn compute_cluster_assignments_and_update<
+    V: VectorStore<Elem = f32> + Send + Sync,
+    C: VectorStore<Elem = f32> + Send + Sync,
+>(
+    training_data: &V,
+    centroids: &C,
+) -> (Vec<(usize, f64)>, MutableVectorStore<f32>) {
+    let mut centroid_sums = Vec::with_capacity(centroids.len());
+    centroid_sums.resize_with(centroids.len(), || {
+        Mutex::new((vec![0.0f32; centroids.elem_stride()], 0usize))
+    });
+
+    let assignments = (0..training_data.len())
+        .into_par_iter()
+        .map(|i| {
+            let v = &training_data[i];
+            let assignment = centroids
+                .iter()
+                .enumerate()
+                .map(|(ci, cv)| {
+                    (
+                        ci,
+                        SpatialSimilarity::l2(v, cv).expect("same vector length"),
+                    )
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
+                .expect("non-zero clusters");
+
+            {
+                let mut guard = centroid_sums[assignment.0].lock().unwrap();
+                for (i, o) in v.iter().zip(guard.0.iter_mut()) {
+                    *o += *i;
+                }
+                guard.1 += 1;
+            }
+
+            assignment
+        })
+        .collect();
+
+    let mut new_centroids =
+        MutableVectorStore::with_capacity(centroids.elem_stride(), centroids.len());
+    for (mut sum, count) in centroid_sums.into_iter().map(|m| m.into_inner().unwrap()) {
+        if count > 0 {
+            for d in sum.iter_mut() {
+                *d /= count as f32;
+            }
+        }
+        new_centroids.push(&sum);
+    }
+
+    (assignments, new_centroids)
+}
+
 /// A mutable [crate::input::VectorStore] implementation where vector elements are of type `E`.
 struct MutableVectorStore<E> {
     data: Vec<E>,
@@ -256,11 +314,6 @@ impl<E: Clone> MutableVectorStore<E> {
     pub fn push(&mut self, vector: &[E]) {
         assert_eq!(vector.len(), self.elem_stride);
         self.data.extend_from_slice(vector);
-    }
-
-    /// Fill all elements of all vectors in the store with `value`.
-    pub fn fill(&mut self, value: E) {
-        self.data.fill(value);
     }
 
     fn range(&self, index: usize) -> Range<usize> {

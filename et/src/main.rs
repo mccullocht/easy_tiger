@@ -5,6 +5,7 @@ mod exhaustive_search;
 mod init_index;
 mod insert;
 mod lookup;
+mod partition_reorder;
 mod search;
 mod ui;
 
@@ -21,6 +22,7 @@ use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
 use init_index::{init_index, InitIndexArgs};
 use insert::{insert, InsertArgs};
 use lookup::{lookup, LookupArgs};
+use partition_reorder::{partition_reorder, PartitionReorderArgs};
 use search::{search, SearchArgs};
 use wt_mdb::{
     options::{ConnectionOptionsBuilder, Statistics},
@@ -67,6 +69,8 @@ enum Commands {
     Insert(InsertArgs),
     /// Delete vectors by key range.
     Delete(DeleteArgs),
+    /// Produce a new numpy vector file that is reordered to optimize search.
+    PartitionReorder(PartitionReorderArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -91,5 +95,6 @@ fn main() -> io::Result<()> {
         Commands::ExhaustiveSearch(args) => {
             exhaustive_search(connection.clone(), &cli.index_name, args)
         }
+        Commands::PartitionReorder(args) => partition_reorder(args),
     }
 }

@@ -5,6 +5,7 @@ use easy_tiger::{
     bulk::BulkLoadBuilder,
     graph::{GraphConfig, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
+    quantization::VectorQuantizer,
     scoring::VectorSimilarity,
     wt::TableGraphVectorIndex,
 };
@@ -67,6 +68,7 @@ pub fn bulk_load(
     let config = GraphConfig {
         dimensions: args.dimensions,
         similarity: args.similarity,
+        quantizer: VectorQuantizer::default(), // XXX
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,

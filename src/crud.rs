@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use crate::{
     graph::{prune_edges, Graph, GraphVectorIndexReader, GraphVertex},
-    quantization::binary_quantize,
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
@@ -89,9 +88,14 @@ impl IndexMutator {
                 candidate_edges.iter().map(|n| n.vertex()).collect(),
             ),
         )?;
-        self.reader
-            .nav_vectors()?
-            .set(vertex_id, binary_quantize(vector.as_ref()).into())?;
+        self.reader.nav_vectors()?.set(
+            vertex_id,
+            self.reader
+                .config()
+                .new_quantizer()
+                .for_doc(vector.as_ref())
+                .into(),
+        )?;
 
         let mut pruned_edges = vec![];
         for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
@@ -285,6 +289,7 @@ mod tests {
 
     use crate::{
         graph::{Graph, GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVertex},
+        quantization::VectorQuantizer,
         scoring::VectorSimilarity,
         search::GraphSearcher,
         wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
@@ -350,6 +355,7 @@ mod tests {
                     GraphConfig {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
+                        quantizer: VectorQuantizer::Binary,
                         max_edges: NonZero::new(4).unwrap(),
                         index_search_params: Self::search_params(),
                     },

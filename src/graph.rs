@@ -9,10 +9,8 @@ use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
 
 use crate::{
-    scoring::{
-        DotProductScorer, EuclideanScorer, F32VectorScorer, HammingScorer, QuantizedVectorScorer,
-        VectorSimilarity,
-    },
+    quantization::{Quantizer, VectorQuantizer},
+    scoring::{F32VectorScorer, QuantizedVectorScorer, VectorSimilarity},
     Neighbor,
 };
 
@@ -32,6 +30,8 @@ pub struct GraphConfig {
     pub dimensions: NonZero<usize>,
     #[serde(default)]
     pub similarity: VectorSimilarity,
+    #[serde(default)]
+    pub quantizer: VectorQuantizer,
     pub max_edges: NonZero<usize>,
     pub index_search_params: GraphSearchParams,
 }
@@ -39,15 +39,16 @@ pub struct GraphConfig {
 impl GraphConfig {
     /// Return a scorer for high fidelity vectors in the index.
     pub fn new_scorer(&self) -> Box<dyn F32VectorScorer> {
-        match self.similarity {
-            VectorSimilarity::Euclidean => Box::new(EuclideanScorer),
-            VectorSimilarity::Dot => Box::new(DotProductScorer),
-        }
+        self.similarity.new_scorer()
+    }
+
+    pub fn new_quantizer(&self) -> Box<dyn Quantizer> {
+        self.quantizer.new_quantizer()
     }
 
     /// Return a scorer for quantized navigational vectors in the index.
     pub fn new_nav_scorer(&self) -> Box<dyn QuantizedVectorScorer> {
-        Box::new(HammingScorer)
+        self.quantizer.new_scorer(&self.similarity)
     }
 }
 

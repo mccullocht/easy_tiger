@@ -9,6 +9,7 @@ pub mod bulk;
 pub mod crud;
 pub mod graph;
 pub mod input;
+pub mod partition_reorder;
 pub mod quantization;
 pub mod scoring;
 pub mod search;

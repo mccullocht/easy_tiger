@@ -41,7 +41,7 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             max_iters: 15,
-            initialization_algorithm: CentroidInitializationAlgorithm::KmeansPlusPlus,
+            initialization_algorithm: CentroidInitializationAlgorithm::Random,
             min_cluster_size: 1,
             epsilon: 0.000_01,
             perturbation: 0.000_000_1,
@@ -62,9 +62,35 @@ pub fn partition_reorder<V: VectorStore<Elem = f32> + Send + Sync, R: Rng, P: Fn
     progress: P,
     length: L,
 ) -> Vec<usize> {
-    let mut queue = VecDeque::new();
-    queue.push_front(SubsetViewVectorStore::identity(vectors));
-    length();
+    let sample_indices = if vectors.len() > 100_000 {
+        rand::seq::index::sample(rng, vectors.len(), 100_000).into_vec()
+    } else {
+        (0..vectors.len()).collect()
+    };
+    let sample = SubsetViewVectorStore {
+        parent: vectors,
+        subset: sample_indices,
+    };
+    let root_k = std::cmp::max(k, ((vectors.len() as f32).sqrt() + 0.5).round() as usize);
+    let (centroids, _) = train(&sample, NonZero::new(root_k).unwrap(), params, rng);
+    let assignments = compute_cluster_assignments(vectors, &centroids);
+    let mut root_subsets = vec![Vec::new(); centroids.len()];
+    for (i, (cluster, _)) in assignments.into_iter().enumerate() {
+        root_subsets[cluster].push(i);
+    }
+
+    let mut queue =
+        VecDeque::from_iter(
+            root_subsets
+                .into_iter()
+                .map(|subset| SubsetViewVectorStore {
+                    parent: vectors,
+                    subset,
+                }),
+        );
+    for _ in 0..centroids.len() {
+        length();
+    }
     let mut reordered = Vec::with_capacity(vectors.len());
 
     while let Some(store) = queue.pop_front() {
@@ -110,9 +136,6 @@ fn train<V: VectorStore<Elem = f32> + Send + Sync, R: Rng>(
     let mut new_centroids;
 
     for _ in 0..params.max_iters {
-        // XXX maybe I should recompute centroids as I compute assignments? this avoids visiting
-        // the same vector twice which would probably help avoid paging. hard to do here because
-        // we're using rayon to parallelize cluster assignment computation.
         (assignments, new_centroids) =
             compute_cluster_assignments_and_update(training_data, &centroids);
         let mut new_means = vec![0.0; clusters.get()];
@@ -367,16 +390,6 @@ struct SubsetViewVectorStore<'a, V> {
 }
 
 impl<'a, V: VectorStore> SubsetViewVectorStore<'a, V> {
-    /// Create an identity view over parent that yields all input vectors.
-    ///
-    /// This is useful over the initial input set to allow subsetting.
-    pub fn identity(parent: &'a V) -> Self {
-        Self {
-            parent,
-            subset: (0..parent.len()).collect(),
-        }
-    }
-
     /// Create a view from a subset of the vectors in this store.
     ///
     /// *Panics* if the input is not sorted or if any element is out of bounds.

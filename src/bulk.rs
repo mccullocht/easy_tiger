@@ -21,11 +21,16 @@ use std::{
 
 use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+};
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{
+        prune_edges, select_pruned_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex,
+        NavVectorStore,
+    },
     input::{DerefVectorStore, VectorStore},
     scoring::F32VectorScorer,
     search::GraphSearcher,
@@ -73,6 +78,8 @@ pub struct BulkLoadBuilder<D> {
     memory_quantized_vectors: bool,
     quantized_vectors: Option<DerefVectorStore<u8, Mmap>>,
 
+    // XXX store negative neighbor ids for "unchecked" nodes.
+    // use this unchecked-ness as part of pruning.
     graph: Box<[RwLock<Vec<Neighbor>>]>,
     entry_vertex: AtomicI64,
     scorer: Box<dyn F32VectorScorer>,
@@ -225,14 +232,54 @@ where
     /// This may prune edges and/or ensure graph connectivity.
     pub fn cleanup<P>(&self, progress: P) -> Result<()>
     where
-        P: Fn(),
+        P: Fn() + Send + Sync,
     {
-        // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
-        for (i, n) in self.graph.iter().enumerate().take(self.limit) {
-            self.maybe_prune_node(i, n.write().unwrap(), self.index.config().max_edges)?;
-            progress();
-        }
-        Ok(())
+        // synchronize application of changes to the graph.
+        // this is necessary to ensure the graph remains undirected.
+        let apply_mu = Mutex::new(());
+
+        let max_edges = self.index.config().max_edges;
+        self.graph
+            .par_iter()
+            .enumerate()
+            .take(self.limit)
+            .try_for_each(|(i, m)| {
+                // Get the set of edges to prune while only holding a read lock on the vertex.
+                let pruned_edges = {
+                    let v = m.read().unwrap();
+                    let selected = select_pruned_edges(
+                        &v,
+                        max_edges,
+                        &mut BulkLoadBuilderGraph(self),
+                        self.scorer.as_ref(),
+                    )?;
+                    v.iter()
+                        .enumerate()
+                        .filter_map(|(i, e)| {
+                            if !selected.contains(&i) {
+                                Some(e.vertex())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                // Apply pruned_edges, starting with the lowest scoring edge.
+                let a = apply_mu.lock().unwrap();
+                for e in pruned_edges.into_iter().rev() {
+                    let mut iv = self.graph[i].write().unwrap();
+                    let mut ev = self.graph[e as usize].write().unwrap();
+                    if iv.len() > max_edges.get() || ev.len() > max_edges.get() {
+                        iv.retain(|n| n.vertex() != e);
+                        ev.retain(|n| n.vertex() != i as i64);
+                    }
+                }
+                drop(a);
+
+                progress();
+                Ok::<_, wt_mdb::Error>(())
+            })
     }
 
     /// Bulk load the graph table with raw vectors and graph edges.

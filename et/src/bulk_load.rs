@@ -35,13 +35,13 @@ pub struct BulkLoadArgs {
     memory_quantized_vectors: bool,
 
     /// Maximum number of edges for any vertex.
-    #[arg(short, long, default_value = "64")]
+    #[arg(short, long, default_value = "32")]
     max_edges: NonZero<usize>,
     /// Number of edges to search for when indexing a vertex.
     ///
     /// Larger values make indexing more expensive but may also produce a larger, more
     /// saturated graph that has higher recall.
-    #[arg(short, long, default_value = "256")]
+    #[arg(short, long, default_value = "128")]
     edge_candidates: NonZero<usize>,
     /// Number of edge candidates to rerank. Defaults to edge_candidates.
     ///

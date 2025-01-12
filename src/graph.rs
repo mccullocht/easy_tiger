@@ -146,7 +146,6 @@ pub(crate) fn select_pruned_edges(
 
     debug_assert!(edges.is_sorted());
 
-    // XXX do this incrementally rather than pre-emptively.
     // Obtain all the vectors to make relative neighbor graph scoring easier.
     let vectors = edges
         .iter()

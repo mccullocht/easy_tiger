@@ -384,8 +384,9 @@ where
             let v = self.graph[vertex].read().unwrap();
             if v.len() > max_edges.get() {
                 // We copy the contents of the graph because they need to be sorted to prune.
-                // XXX We still hold the mutex. why???
                 let mut edges = v.clone();
+                drop(v);
+
                 edges.sort_unstable();
                 let selected = select_pruned_edges(
                     &edges,

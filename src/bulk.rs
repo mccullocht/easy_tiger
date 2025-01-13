@@ -21,11 +21,14 @@ use std::{
 
 use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use rayon::prelude::*;
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
-    graph::{prune_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{
+        prune_edges, select_pruned_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex,
+        NavVectorStore,
+    },
     input::{DerefVectorStore, VectorStore},
     scoring::F32VectorScorer,
     search::GraphSearcher,
@@ -199,14 +202,47 @@ where
                     // Insert any other in-flight edges into the candidate queue. These are vertices we may have missed because
                     // they are being inserted concurrently in another thread.
                     self.insert_in_flight_edges(i, in_flight.iter().map(|e| *e), &mut edges);
+                    assert!(
+                        !edges.iter().any(|n| n.vertex() == i as i64),
+                        "Candidate edges for vertex {} contains self-edge.",
+                        i
+                    );
                     let centroid_score = self.scorer.score(&self.get_vector(i), &self.centroid);
-                    {
+                    // Add each edge to this vertex and a reciprocal edge to make the graph
+                    // undirected. If an edge does not fit on either vertex, save it for later.
+                    // We will prune any vertices in this state, but put together the pruned edge
+                    // list outside of `apply_mu` to maximize concurrency.
+                    loop {
                         let mut entry_point = apply_mu.lock().unwrap();
-                        self.apply_insert(i, edges)?;
-                        if centroid_score > entry_point.1 {
-                            entry_point.0 = i as i64;
-                            entry_point.1 = centroid_score;
-                            self.entry_vertex.store(i as i64, atomic::Ordering::SeqCst);
+
+                        edges.retain(|e| {
+                            let (mut iv, mut ev) = self.lock_edge(i, e.vertex() as usize);
+                            if iv.len() == iv.capacity() || ev.len() == ev.capacity() {
+                                true
+                            } else {
+                                iv.push(*e);
+                                let backedge = Neighbor::new(i as i64, e.score());
+                                if !ev.contains(&backedge) {
+                                    ev.push(backedge);
+                                }
+                                false
+                            }
+                        });
+
+                        if edges.is_empty() {
+                            if centroid_score > entry_point.1 {
+                                entry_point.0 = i as i64;
+                                entry_point.1 = centroid_score;
+                                self.entry_vertex.store(i as i64, atomic::Ordering::SeqCst);
+                            }
+                            break;
+                        }
+
+                        drop(entry_point);
+                        // Any edge still in the list is overful, so prune it.
+                        self.prune_and_apply(i, &apply_mu)?;
+                        for e in edges.iter() {
+                            self.prune_and_apply(e.vertex() as usize, &apply_mu)?;
                         }
                     }
                     // Close out the transaction. There should be no conflicts as we did not write to the database.
@@ -225,14 +261,17 @@ where
     /// This may prune edges and/or ensure graph connectivity.
     pub fn cleanup<P>(&self, progress: P) -> Result<()>
     where
-        P: Fn(),
+        P: Fn() + Send + Sync,
     {
-        // NB: this must not be run concurrently so that we can ensure edges are reciprocal.
-        for (i, n) in self.graph.iter().enumerate().take(self.limit) {
-            self.maybe_prune_node(i, n.write().unwrap(), self.index.config().max_edges)?;
+        // synchronize application of changes to the graph.
+        // this is necessary to ensure the graph remains undirected.
+        let apply_mu = Mutex::new(());
+
+        (0..self.limit).into_par_iter().try_for_each(|v| {
+            self.prune_and_apply(v, &apply_mu)?;
             progress();
-        }
-        Ok(())
+            Ok::<_, wt_mdb::Error>(())
+        })
     }
 
     /// Bulk load the graph table with raw vectors and graph edges.
@@ -298,6 +337,7 @@ where
         reader: &mut BulkLoadGraphVectorIndexReader<'_, D>,
     ) -> Result<Vec<Neighbor>> {
         let mut graph = BulkLoadBuilderGraph(self);
+        // TODO: return any vectors used for re-ranking here so that we can use them for pruning.
         let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
         let split = prune_edges(
             &mut candidates,
@@ -337,56 +377,74 @@ where
         }
     }
 
-    /// This function is the only mutator of self.graph and must not be run concurrently.
-    fn apply_insert(&self, index: usize, edges: Vec<Neighbor>) -> Result<()> {
-        assert!(
-            !edges.iter().any(|n| n.vertex() == index as i64),
-            "Candidate edges for vertex {} contains self-edge.",
-            index
-        );
-        self.graph[index].write().unwrap().extend_from_slice(&edges);
-        for e in edges.iter() {
-            let mut guard = self.graph[e.vertex() as usize].write().unwrap();
-            let backedge = Neighbor::new(index as i64, e.score());
-            if !guard.contains(&backedge) {
-                guard.push(backedge);
-                let max_edges = NonZero::new(guard.capacity() - 1).unwrap();
-                self.maybe_prune_node(index, guard, max_edges)?;
+    fn prune_and_apply<T>(&self, vertex: usize, apply_mu: &Mutex<T>) -> Result<()> {
+        // Get the set of edges to prune while only holding a read lock on the vertex.
+        let max_edges = self.index.config().max_edges;
+        let pruned_edges = {
+            let v = self.graph[vertex].read().unwrap();
+            if v.len() > max_edges.get() {
+                // We copy the contents of the graph because they need to be sorted to prune.
+                let mut edges = v.clone();
+                drop(v);
+
+                edges.sort_unstable();
+                let selected = select_pruned_edges(
+                    &edges,
+                    max_edges,
+                    &mut BulkLoadBuilderGraph(self),
+                    self.scorer.as_ref(),
+                )?;
+                edges
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, e)| {
+                        if !selected.contains(&i) {
+                            Some(e.vertex())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![]
+            }
+        };
+
+        if pruned_edges.is_empty() {
+            return Ok(());
+        }
+
+        // Apply pruned_edges, starting with the lowest scoring edge.
+        let _a = apply_mu.lock().unwrap();
+        for e in pruned_edges.into_iter().rev() {
+            let (mut iv, mut ev) = self.lock_edge(vertex, e as usize);
+            if iv.len() > max_edges.get() || ev.len() > max_edges.get() {
+                iv.retain(|n| n.vertex() != e);
+                ev.retain(|n| n.vertex() != vertex as i64);
             }
         }
         Ok(())
     }
 
-    fn maybe_prune_node(
+    // Lock the vertices related to the edge in a consistent order (lowest ord first).
+    fn lock_edge(
         &self,
-        index: usize,
-        mut guard: RwLockWriteGuard<'_, Vec<Neighbor>>,
-        max_edges: NonZero<usize>,
-    ) -> Result<()> {
-        if guard.len() <= max_edges.get() {
-            return Ok(());
+        vertex0: usize,
+        vertex1: usize,
+    ) -> (
+        RwLockWriteGuard<'_, Vec<Neighbor>>,
+        RwLockWriteGuard<'_, Vec<Neighbor>>,
+    ) {
+        assert_ne!(vertex0, vertex1);
+        if vertex0 < vertex1 {
+            (
+                self.graph[vertex0].write().unwrap(),
+                self.graph[vertex1].write().unwrap(),
+            )
+        } else {
+            let g1 = self.graph[vertex1].write().unwrap();
+            (self.graph[vertex0].write().unwrap(), g1)
         }
-
-        guard.sort();
-        let split = prune_edges(
-            &mut guard,
-            self.index.config().max_edges,
-            &mut BulkLoadBuilderGraph(self),
-            self.scorer.as_ref(),
-        )?;
-        let dropped = guard.split_off(split);
-        drop(guard);
-
-        // Remove in-links from nodes that we dropped out-links to.
-        // If we maintain the invariant that all links are reciprocated then it will be easier
-        // to mutate the index without requiring a cleaning process.
-        for n in dropped {
-            self.graph[n.vertex() as usize]
-                .write()
-                .unwrap()
-                .retain(|e| e.vertex() != index as i64);
-        }
-        Ok(())
     }
 
     fn get_vector(&self, index: usize) -> Cow<'_, [f32]> {

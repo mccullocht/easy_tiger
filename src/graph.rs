@@ -129,18 +129,19 @@ pub trait NavVectorStore {
     fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }
 
-/// Prune `edges` down to at most `max_edges`. Use `graph` and `scorer` to inform this decision.
-/// Returns a split point: all edges before that point are selected, all after are to be dropped.
+/// Select the indices of `edges` that should remain when pruning down to at most `max_edges`.
+/// `graph` is used to access vectors and `scorer` is used to compare vectors when making pruning
+/// decisions.
 /// REQUIRES: `edges.is_sorted()`.
 // TODO: alpha value(s) should be tuneable.
-pub(crate) fn prune_edges(
-    edges: &mut [Neighbor],
+pub(crate) fn select_pruned_edges(
+    edges: &[Neighbor],
     max_edges: NonZero<usize>,
     graph: &mut impl Graph,
     scorer: &dyn F32VectorScorer,
-) -> Result<usize> {
+) -> Result<BTreeSet<usize>> {
     if edges.is_empty() {
-        return Ok(0);
+        return Ok(BTreeSet::new());
     }
 
     debug_assert!(edges.is_sorted());
@@ -182,6 +183,21 @@ pub(crate) fn prune_edges(
             break;
         }
     }
+
+    Ok(selected)
+}
+
+/// Prune `edges` down to at most `max_edges`. Use `graph` and `scorer` to inform this decision.
+/// Returns a split point: all edges before that point are selected, all after are to be dropped.
+/// REQUIRES: `edges.is_sorted()`.
+// TODO: alpha value(s) should be tuneable.
+pub(crate) fn prune_edges(
+    edges: &mut [Neighbor],
+    max_edges: NonZero<usize>,
+    graph: &mut impl Graph,
+    scorer: &dyn F32VectorScorer,
+) -> Result<usize> {
+    let selected = select_pruned_edges(edges, max_edges, graph, scorer)?;
 
     // Partition edges into selected and unselected.
     for (i, j) in selected.iter().enumerate() {

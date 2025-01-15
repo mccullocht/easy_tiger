@@ -53,18 +53,16 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     params: &Params,
     rng: &mut impl Rng,
 ) -> VecVectorStore<f32> {
-    let mut batch_iter = BatchIter::new(training_data, batch_size, rng);
+    let mut centroids: Option<VecVectorStore<f32>> = None;
+    let mut centroid_counts = vec![0.0; k];
+    for batch in BatchIter::new(training_data, batch_size, rng).take(ITERS) {
+        let current_centroids = centroids.get_or_insert_with(|| {
+            initialize_batch_centroids(&batch, k, params.initialization_method, rng)
+        });
 
-    let mut batch = batch_iter.next().expect("BatchIter is perpetual");
-    // XXX initialize_batch_centroids computes assignment internally and discards them, but they
-    // would be sufficient for the first iteration.
-    let mut centroids = initialize_batch_centroids(&batch, k, params.initialization_method, rng);
-    let mut centroid_counts = vec![0.0; centroids.len()];
-
-    for _ in 0..ITERS {
-        let mut new_centroids = centroids.clone();
+        let mut new_centroids = current_centroids.clone();
         for (vector, cluster) in batch.iter().zip(
-            compute_assignments(training_data, &centroids)
+            compute_assignments(training_data, current_centroids)
                 .into_iter()
                 .map(|(c, _)| c),
         ) {
@@ -75,16 +73,17 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             }
         }
 
-        let centroid_distance_sum = compute_centroid_distance_sum(&centroids, &new_centroids);
-        centroids = new_centroids;
+        let centroid_distance_sum =
+            compute_centroid_distance_sum(current_centroids, &new_centroids);
         if centroid_distance_sum < EPSILON {
-            break;
+            return new_centroids;
+        } else {
+            centroids = Some(new_centroids);
         }
-
-        batch = batch_iter.next().expect("BatchIter is perpetual");
     }
 
-    centroids
+    // XXX I absolutely hate this
+    centroids.unwrap()
 }
 
 fn initialize_batch_centroids<V: VectorStore<Elem = f32> + Send + Sync>(

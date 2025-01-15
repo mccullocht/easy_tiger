@@ -14,8 +14,8 @@
 
 use std::iter::Cycle;
 
-use rand::prelude::*;
 use rand::seq::index;
+use rand::{distributions::WeightedIndex, prelude::*};
 use rayon::prelude::*;
 use simsimd::SpatialSimilarity;
 
@@ -24,11 +24,33 @@ use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
 const ITERS: usize = 15;
 const EPSILON: f64 = 0.01;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum InitializationMethod {
+    /// Choose centers randomly from the data set.
+    Random,
+    /// Choose centers randomly from the data set weighted by distance to other centers.
+    KMeansPlusPlus,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Params {
+    initialization_method: InitializationMethod,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            initialization_method: InitializationMethod::Random,
+        }
+    }
+}
+
 // XXX this could return Result<V, V> to indicate if we converged or not.
 pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     training_data: &V,
     k: usize,
     batch_size: usize,
+    params: &Params,
     rng: &mut impl Rng,
 ) -> VecVectorStore<f32> {
     let mut batch_iter = BatchIter::new(training_data, batch_size, rng);
@@ -36,7 +58,7 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     let mut batch = batch_iter.next().expect("BatchIter is perpetual");
     // XXX initialize_batch_centroids computes assignment internally and discards them, but they
     // would be sufficient for the first iteration.
-    let mut centroids = initialize_batch_centroids(&batch, k, rng);
+    let mut centroids = initialize_batch_centroids(&batch, k, params.initialization_method, rng);
     let mut centroid_counts = vec![0.0; centroids.len()];
 
     for _ in 0..ITERS {
@@ -68,11 +90,12 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
 fn initialize_batch_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
     training_data: &V,
     k: usize,
+    method: InitializationMethod,
     rng: &mut impl Rng,
 ) -> VecVectorStore<f32> {
     (0..ITERS)
         .map(|_| {
-            let centroids = initialize_centroids(training_data, k, rng);
+            let centroids = initialize_centroids(training_data, k, method, rng);
             let distances: f64 = compute_assignments(training_data, &centroids)
                 .into_iter()
                 .map(|a| a.1)
@@ -84,15 +107,29 @@ fn initialize_batch_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
         .0
 }
 
-fn initialize_centroids(
-    training_data: &impl VectorStore<Elem = f32>,
+fn initialize_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
+    training_data: &V,
     k: usize,
+    method: InitializationMethod,
     rng: &mut impl Rng,
 ) -> VecVectorStore<f32> {
-    // XXX kmeans++ initialization.
     let mut centroids = VecVectorStore::with_capacity(training_data.elem_stride(), k);
-    for i in index::sample(rng, training_data.len(), k) {
-        centroids.push(&training_data[i]);
+    match method {
+        InitializationMethod::Random => {
+            for i in index::sample(rng, training_data.len(), k) {
+                centroids.push(&training_data[i]);
+            }
+        }
+        InitializationMethod::KMeansPlusPlus => {
+            centroids.push(&training_data[rng.gen_range(0..training_data.len())]);
+            while centroids.len() < k {
+                let assignments = compute_assignments(training_data, &centroids);
+                let index = WeightedIndex::new(assignments.into_iter().map(|a| a.1))
+                    .unwrap()
+                    .sample(rng);
+                centroids.push(&training_data[index]);
+            }
+        }
     }
     centroids
 }

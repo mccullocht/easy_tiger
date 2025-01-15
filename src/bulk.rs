@@ -33,7 +33,8 @@ use crate::{
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_node, CursorNavVectorStore, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
+        encode_graph_node, CursorGraph, CursorGraphVertex, CursorNavVectorStore,
+        TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -68,6 +69,7 @@ pub struct Options {
 #[derive(Debug, Copy, Clone)]
 pub enum BulkLoadPhase {
     LoadNavVectors,
+    LoadRawVectors,
     BuildGraph,
     CleanupGraph,
     LoadGraph,
@@ -77,6 +79,7 @@ impl BulkLoadPhase {
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::LoadNavVectors => "load nav vectors",
+            Self::LoadRawVectors => "load raw vectors",
             Self::BuildGraph => "build graph",
             Self::CleanupGraph => "cleanup graph",
             Self::LoadGraph => "load graph",
@@ -143,12 +146,22 @@ where
     /// Phases to be executed by the builder.
     /// This can vary depending on the options.
     pub fn phases(&self) -> Vec<BulkLoadPhase> {
-        vec![
-            BulkLoadPhase::LoadNavVectors,
-            BulkLoadPhase::BuildGraph,
-            BulkLoadPhase::CleanupGraph,
-            BulkLoadPhase::LoadGraph,
-        ]
+        if self.options.wt_vector_store {
+            vec![
+                BulkLoadPhase::LoadNavVectors,
+                BulkLoadPhase::LoadRawVectors,
+                BulkLoadPhase::BuildGraph,
+                BulkLoadPhase::CleanupGraph,
+                BulkLoadPhase::LoadGraph,
+            ]
+        } else {
+            vec![
+                BulkLoadPhase::LoadNavVectors,
+                BulkLoadPhase::BuildGraph,
+                BulkLoadPhase::CleanupGraph,
+                BulkLoadPhase::LoadGraph,
+            ]
+        }
     }
 
     /// Total number of vectors to process. Useful for status reporting.
@@ -163,6 +176,7 @@ where
     {
         match phase {
             BulkLoadPhase::LoadNavVectors => self.load_nav_vectors(progress),
+            BulkLoadPhase::LoadRawVectors => self.load_raw_vectors(progress),
             BulkLoadPhase::BuildGraph => self.insert_all(progress),
             BulkLoadPhase::CleanupGraph => self.cleanup(progress),
             BulkLoadPhase::LoadGraph => {
@@ -226,6 +240,24 @@ where
             )
             .into_owned();
         Ok(())
+    }
+
+    fn load_raw_vectors<P: Fn() + Send + Sync>(&mut self, progress: P) -> Result<()> {
+        let session = self.connection.open_session()?;
+        session.bulk_load(
+            self.index.graph_table_name(),
+            None,
+            self.vectors
+                .iter()
+                .enumerate()
+                .take(self.limit)
+                .map(|(i, v)| {
+                    let normalized = self.scorer.normalize_vector(v.into());
+                    let value = encode_graph_node(&normalized, vec![]);
+                    progress();
+                    Record::new(i as i64, value)
+                }),
+        )
     }
 
     /// Insert all vectors from the passed vector store into the graph.
@@ -304,9 +336,9 @@ where
 
                         drop(entry_point);
                         // Any edge still in the list is overful, so prune it.
-                        self.prune_and_apply(i, &apply_mu)?;
+                        self.prune_and_apply(i, &mut reader, &apply_mu)?;
                         for e in edges.iter() {
-                            self.prune_and_apply(e.vertex() as usize, &apply_mu)?;
+                            self.prune_and_apply(e.vertex() as usize, &mut reader, &apply_mu)?;
                         }
                     }
                     // Close out the transaction. There should be no conflicts as we did not write to the database.
@@ -331,11 +363,23 @@ where
         // this is necessary to ensure the graph remains undirected.
         let apply_mu = Mutex::new(());
 
-        (0..self.limit).into_par_iter().try_for_each(|v| {
-            self.prune_and_apply(v, &apply_mu)?;
-            progress();
-            Ok::<_, wt_mdb::Error>(())
-        })
+        (0..self.limit)
+            .into_par_iter()
+            .chunks(1_000)
+            .try_for_each(|chunk| {
+                // XXX I gotta fix it so the reader doesn't *take* the Session.
+                // Then it would be possible to use a thread-local Session.
+                let mut session = self.connection.open_session()?;
+                for v in chunk {
+                    session.begin_transaction(None)?;
+                    let mut reader = BulkLoadGraphVectorIndexReader(self, session);
+                    self.prune_and_apply(v, &mut reader, &apply_mu)?;
+                    session = reader.into_session();
+                    session.rollback_transaction(None)?;
+                    progress();
+                }
+                Ok::<_, wt_mdb::Error>(())
+            })
     }
 
     /// Bulk load the graph table with raw vectors and graph edges.
@@ -364,6 +408,9 @@ where
             ),
         ];
         let session = self.connection.open_session()?;
+        if self.options.wt_vector_store {
+            session.drop_table(self.index.graph_table_name(), None)?;
+        }
         session.bulk_load(
             self.index.graph_table_name(),
             None,
@@ -400,9 +447,9 @@ where
         searcher: &mut GraphSearcher,
         reader: &mut BulkLoadGraphVectorIndexReader<'_, D>,
     ) -> Result<Vec<Neighbor>> {
-        let mut graph = BulkLoadBuilderGraph(self);
         // TODO: return any vectors used for re-ranking here so that we can use them for pruning.
         let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
+        let mut graph = reader.graph()?;
         let split = prune_edges(
             &mut candidates,
             self.index.config().max_edges,
@@ -441,7 +488,12 @@ where
         }
     }
 
-    fn prune_and_apply<T>(&self, vertex: usize, apply_mu: &Mutex<T>) -> Result<()> {
+    fn prune_and_apply<T>(
+        &self,
+        vertex: usize,
+        reader: &mut BulkLoadGraphVectorIndexReader<'_, D>,
+        apply_mu: &Mutex<T>,
+    ) -> Result<()> {
         // Get the set of edges to prune while only holding a read lock on the vertex.
         let max_edges = self.index.config().max_edges;
         let pruned_edges = {
@@ -455,7 +507,7 @@ where
                 let selected = select_pruned_edges(
                     &edges,
                     max_edges,
-                    &mut BulkLoadBuilderGraph(self),
+                    &mut reader.graph()?,
                     self.scorer.as_ref(),
                 )?;
                 edges
@@ -539,7 +591,15 @@ impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
-        Ok(BulkLoadBuilderGraph(self.0))
+        let cursor_graph = if self.0.options.wt_vector_store {
+            Some(CursorGraph::new(
+                self.0.index.config().clone(),
+                self.1.get_record_cursor(self.0.index.graph_table_name())?,
+            ))
+        } else {
+            None
+        };
+        Ok(BulkLoadBuilderGraph(self.0, cursor_graph))
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
@@ -553,7 +613,7 @@ impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'
     }
 }
 
-struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>);
+struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>, Option<CursorGraph<'a>>);
 
 impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     type Vertex<'c>
@@ -571,16 +631,26 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     }
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-        Some(Ok(BulkLoadGraphVertex {
-            builder: self.0,
-            vertex_id,
-        }))
+        if let Some(cursor) = self.1.as_mut() {
+            Some(cursor.get(vertex_id)?.map(|v| BulkLoadGraphVertex {
+                builder: self.0,
+                vertex_id,
+                vertex: Some(v),
+            }))
+        } else {
+            Some(Ok(BulkLoadGraphVertex {
+                builder: self.0,
+                vertex_id,
+                vertex: None,
+            }))
+        }
     }
 }
 
 struct BulkLoadGraphVertex<'a, D> {
     builder: &'a BulkLoadBuilder<D>,
     vertex_id: i64,
+    vertex: Option<CursorGraphVertex<'a>>,
 }
 
 impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
@@ -590,7 +660,10 @@ impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
         Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
-        self.builder.get_vector(self.vertex_id as usize)
+        self.vertex
+            .as_ref()
+            .map(|v| v.vector())
+            .unwrap_or_else(|| self.builder.get_vector(self.vertex_id as usize))
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {

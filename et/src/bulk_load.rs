@@ -100,23 +100,11 @@ pub fn bulk_load(
         limit,
     );
 
-    {
-        let progress = progress_bar(limit, Some("load nav vectors"));
-        builder.load_nav_vectors(|| progress.inc(1))?;
+    for phase in builder.phases() {
+        let progress = progress_bar(builder.len(), Some(phase.display_name()));
+        builder.execute_phase(phase, || progress.inc(1))?;
     }
-    {
-        let progress = progress_bar(limit, Some("build graph"));
-        builder.insert_all(|| progress.inc(1))?;
-    }
-    {
-        let progress = progress_bar(limit, Some("cleanup graph"));
-        builder.cleanup(|| progress.inc(1))?;
-    }
-    let stats = {
-        let progress = progress_bar(limit, Some("load graph"));
-        builder.load_graph(|| progress.inc(1))?
-    };
-    println!("{:?}", stats);
+    println!("{:?}", builder.graph_stats().unwrap());
 
     Ok(())
 }

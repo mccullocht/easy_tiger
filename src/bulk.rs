@@ -65,16 +65,26 @@ pub struct Options {
     pub wt_vector_store: bool,
 }
 
-// TODO: rather than relying on users calling these methods in the right order, instead
-// consume/perform/generate, e.g.:
-//
-// pub fn QuantizedVectorLoader::new(...) -> Self
-// pub fn QuantizedVectorLoader::load(self, progress_cb) -> Result<BulkGraphBuilder>
-// pub fn BulkGraphBuilder::build(self, progress_cb) -> Result<BulkGraphPruner>
-// pub fn BulkGraphPruner::load(self, progress_cb) -> Result<()>
-//
-// if you do this the graph build can be locked, but then transform into a representation that
-// is better for single-threaded access for cleanup.
+#[derive(Debug, Copy, Clone)]
+pub enum BulkLoadPhase {
+    LoadNavVectors,
+    BuildGraph,
+    CleanupGraph,
+    LoadGraph,
+}
+
+impl BulkLoadPhase {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::LoadNavVectors => "load nav vectors",
+            Self::BuildGraph => "build graph",
+            Self::CleanupGraph => "cleanup graph",
+            Self::LoadGraph => "load graph",
+        }
+    }
+}
+
+// TODO: this should use some sort of state machine pattern.
 
 // TODO: tests for bulk load builder, mostly the built graph.
 
@@ -93,6 +103,8 @@ pub struct BulkLoadBuilder<D> {
     graph: Box<[RwLock<Vec<Neighbor>>]>,
     entry_vertex: AtomicI64,
     scorer: Box<dyn F32VectorScorer>,
+
+    graph_stats: Option<GraphStats>,
 }
 
 impl<D> BulkLoadBuilder<D>
@@ -124,11 +136,49 @@ where
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
             scorer,
+            graph_stats: None,
         }
     }
 
+    /// Phases to be executed by the builder.
+    /// This can vary depending on the options.
+    pub fn phases(&self) -> Vec<BulkLoadPhase> {
+        vec![
+            BulkLoadPhase::LoadNavVectors,
+            BulkLoadPhase::BuildGraph,
+            BulkLoadPhase::CleanupGraph,
+            BulkLoadPhase::LoadGraph,
+        ]
+    }
+
+    /// Total number of vectors to process. Useful for status reporting.
+    pub fn len(&self) -> usize {
+        self.limit
+    }
+
+    /// Execute a single named phase, calling progress() as each vector is processed.
+    pub fn execute_phase<P>(&mut self, phase: BulkLoadPhase, progress: P) -> Result<()>
+    where
+        P: Fn() + Send + Sync,
+    {
+        match phase {
+            BulkLoadPhase::LoadNavVectors => self.load_nav_vectors(progress),
+            BulkLoadPhase::BuildGraph => self.insert_all(progress),
+            BulkLoadPhase::CleanupGraph => self.cleanup(progress),
+            BulkLoadPhase::LoadGraph => {
+                self.graph_stats = Some(self.load_graph(progress)?);
+                Ok(())
+            }
+        }
+    }
+
+    /// Return graph stats after execution has completed.
+    pub fn graph_stats(&self) -> Option<&GraphStats> {
+        self.graph_stats.as_ref()
+    }
+
     /// Load binary quantized vector data into the nav vectors table.
-    pub fn load_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
+    fn load_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
         let quantizer = self.index.config().new_quantizer();
@@ -181,7 +231,7 @@ where
     /// Insert all vectors from the passed vector store into the graph.
     ///
     /// This operation uses rayon to parallelize large parts of the graph build.
-    pub fn insert_all<P>(&self, progress: P) -> Result<()>
+    fn insert_all<P>(&self, progress: P) -> Result<()>
     where
         P: Fn() + Send + Sync,
     {
@@ -273,7 +323,7 @@ where
     /// Cleanup the graph.
     ///
     /// This may prune edges and/or ensure graph connectivity.
-    pub fn cleanup<P>(&self, progress: P) -> Result<()>
+    fn cleanup<P>(&self, progress: P) -> Result<()>
     where
         P: Fn() + Send + Sync,
     {
@@ -291,7 +341,7 @@ where
     /// Bulk load the graph table with raw vectors and graph edges.
     ///
     /// Returns statistics about the generated graph.
-    pub fn load_graph<P>(&self, progress: P) -> Result<GraphStats>
+    fn load_graph<P>(&self, progress: P) -> Result<GraphStats>
     where
         P: Fn(),
     {

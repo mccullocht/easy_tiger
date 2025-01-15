@@ -21,9 +21,7 @@ use simsimd::SpatialSimilarity;
 
 use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
 
-const ITERS: usize = 15;
-const EPSILON: f64 = 0.01;
-
+/// Centroid initialization method for k-means partitioning.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum InitializationMethod {
     /// Choose centers randomly from the data set.
@@ -32,37 +30,50 @@ pub enum InitializationMethod {
     KMeansPlusPlus,
 }
 
+/// Parameters for k-means partitioning.
 #[derive(Debug, PartialEq)]
 pub struct Params {
-    initialization_method: InitializationMethod,
+    /// Maximum number of iterations to run before exiting, even if the centers have not converged.
+    pub iters: usize,
+    /// Convergence epsilon. Computation is considered to have converged if the sum of distances
+    /// between two iterations of centroid is less than this amount.
+    pub epsilon: f64,
+    /// Algorithm for computing initial centroids.
+    pub initialization: InitializationMethod,
 }
 
 impl Default for Params {
     fn default() -> Self {
         Self {
-            initialization_method: InitializationMethod::Random,
+            iters: 15,
+            epsilon: 0.01,
+            initialization: InitializationMethod::Random,
         }
     }
 }
 
-// XXX this could return Result<V, V> to indicate if we converged or not.
+/// Compute batch k-means over `training_data`. `k` clusters will be produced and each batch will
+/// contain exactly `batch_size` sample vectors.
+///
+/// Returns the computed centroids -- `Ok()` if the centroid computation converged and `Err()` if
+/// we terminated by reaching max iterations.
 pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     training_data: &V,
     k: usize,
     batch_size: usize,
     params: &Params,
     rng: &mut impl Rng,
-) -> VecVectorStore<f32> {
-    let mut centroids: Option<VecVectorStore<f32>> = None;
+) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
+    let mut centroids = VecVectorStore::new(training_data.elem_stride());
     let mut centroid_counts = vec![0.0; k];
-    for batch in BatchIter::new(training_data, batch_size, rng).take(ITERS) {
-        let current_centroids = centroids.get_or_insert_with(|| {
-            initialize_batch_centroids(&batch, k, params.initialization_method, rng)
-        });
+    for batch in BatchIter::new(training_data, batch_size, rng).take(params.iters) {
+        if centroids.is_empty() {
+            centroids = initialize_batch_centroids(training_data, k, params, rng);
+        }
 
-        let mut new_centroids = current_centroids.clone();
+        let mut new_centroids = centroids.clone();
         for (vector, cluster) in batch.iter().zip(
-            compute_assignments(training_data, current_centroids)
+            compute_assignments(training_data, &centroids)
                 .into_iter()
                 .map(|(c, _)| c),
         ) {
@@ -73,28 +84,25 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             }
         }
 
-        let centroid_distance_sum =
-            compute_centroid_distance_sum(current_centroids, &new_centroids);
-        if centroid_distance_sum < EPSILON {
-            return new_centroids;
-        } else {
-            centroids = Some(new_centroids);
+        let centroid_distance_sum = compute_centroid_distance_sum(&centroids, &new_centroids);
+        centroids = new_centroids;
+        if centroid_distance_sum < params.epsilon {
+            return Ok(centroids);
         }
     }
 
-    // XXX I absolutely hate this
-    centroids.unwrap()
+    Err(centroids)
 }
 
 fn initialize_batch_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
     training_data: &V,
     k: usize,
-    method: InitializationMethod,
+    params: &Params,
     rng: &mut impl Rng,
 ) -> VecVectorStore<f32> {
-    (0..ITERS)
+    (0..params.iters)
         .map(|_| {
-            let centroids = initialize_centroids(training_data, k, method, rng);
+            let centroids = initialize_centroids(training_data, k, params.initialization, rng);
             let distances: f64 = compute_assignments(training_data, &centroids)
                 .into_iter()
                 .map(|a| a.1)

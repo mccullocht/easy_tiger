@@ -2,7 +2,7 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    bulk::BulkLoadBuilder,
+    bulk::{BulkLoadBuilder, Options},
     graph::{GraphConfig, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
     quantization::VectorQuantizer,
@@ -93,7 +93,10 @@ pub fn bulk_load(
         connection,
         index,
         f32_vectors,
-        args.memory_quantized_vectors,
+        Options {
+            memory_quantized_vectors: args.memory_quantized_vectors,
+            wt_vector_store: false,
+        },
         limit,
     );
 

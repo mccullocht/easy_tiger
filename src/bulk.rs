@@ -51,6 +51,20 @@ pub struct GraphStats {
     pub unconnected: usize,
 }
 
+/// Options for bulk loading a data set.
+#[derive(Debug, Copy, Clone)]
+pub struct Options {
+    /// If true, write the quantized vectors into an anonymous memory mapped segment.
+    /// This ensures that they will stay in memory (modulo swap) and also provides
+    /// faster access than WT.
+    pub memory_quantized_vectors: bool,
+    /// If true, load vectors into a WT table and use that backing store during build.
+    /// This may be faster for dot similarity as the vectors will only be normalized
+    /// once on input. This also allows measuring cache efficiency during build when
+    /// the data set is larger than available memory.
+    pub wt_vector_store: bool,
+}
+
 // TODO: rather than relying on users calling these methods in the right order, instead
 // consume/perform/generate, e.g.:
 //
@@ -73,7 +87,7 @@ pub struct BulkLoadBuilder<D> {
     vectors: DerefVectorStore<f32, D>,
     centroid: Vec<f32>,
 
-    memory_quantized_vectors: bool,
+    options: Options,
     quantized_vectors: Option<DerefVectorStore<u8, Mmap>>,
 
     graph: Box<[RwLock<Vec<Neighbor>>]>,
@@ -91,7 +105,7 @@ where
         connection: Arc<Connection>,
         index: TableGraphVectorIndex,
         vectors: DerefVectorStore<f32, D>,
-        memory_quantized_vectors: bool,
+        options: Options,
         limit: usize,
     ) -> Self {
         let mut graph_vec = Vec::with_capacity(vectors.len());
@@ -105,7 +119,7 @@ where
             limit,
             vectors,
             centroid: Vec::new(),
-            memory_quantized_vectors,
+            options,
             quantized_vectors: None,
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
@@ -119,7 +133,7 @@ where
         let dim = self.index.config().dimensions.get();
         let quantizer = self.index.config().new_quantizer();
         let mut sum = vec![0.0; dim];
-        let mut quantized_vectors = if self.memory_quantized_vectors {
+        let mut quantized_vectors = if self.options.memory_quantized_vectors {
             Some(MmapMut::map_anon(quantizer.doc_bytes(dim) * self.vectors.len()).unwrap())
         } else {
             None

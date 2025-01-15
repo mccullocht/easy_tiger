@@ -9,7 +9,8 @@ use easy_tiger::{
     scoring::VectorSimilarity,
     wt::TableGraphVectorIndex,
 };
-use wt_mdb::Connection;
+use wt_mdb::{Connection, Result, Session};
+use wt_sys::{WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
 
 use crate::{drop_index, ui::progress_bar};
 
@@ -31,8 +32,13 @@ pub struct BulkLoadArgs {
     quantizer: VectorQuantizer,
     /// If true, load all quantized vectors into a trivial memory store for bulk loading.
     /// This can be significantly faster than reading these values from WiredTiger.
-    #[arg(long)]
+    #[arg(long, default_value_t = false)]
     memory_quantized_vectors: bool,
+    /// If true, load all the raw vectors into WiredTiger for bulk loading.
+    /// This can be faster for dot similarity as the vectors are normalized just once.
+    /// It also moves caching policy to WT rather than allowing the OS to manage it.
+    #[arg(long, default_value_t = false)]
+    wiredtiger_vector_store: bool,
 
     /// Maximum number of edges for any vertex.
     #[arg(short, long, default_value = "32")]
@@ -90,12 +96,12 @@ pub fn bulk_load(
     let num_vectors = f32_vectors.len();
     let limit = args.limit.unwrap_or(num_vectors);
     let mut builder = BulkLoadBuilder::new(
-        connection,
+        connection.clone(),
         index,
         f32_vectors,
         Options {
             memory_quantized_vectors: args.memory_quantized_vectors,
-            wt_vector_store: false,
+            wt_vector_store: args.wiredtiger_vector_store,
         },
         limit,
     );
@@ -106,5 +112,27 @@ pub fn bulk_load(
     }
     println!("{:?}", builder.graph_stats().unwrap());
 
+    if args.wiredtiger_vector_store {
+        let (search_calls, read_io) = cache_hit_stats(&connection.open_session()?)?;
+        println!(
+            "cache hit rate {:.2}% ({} reads, {} lookups)",
+            (search_calls - read_io) as f64 * 100.0 / search_calls as f64,
+            read_io,
+            search_calls,
+        );
+    }
+
     Ok(())
+}
+
+/// Count lookup calls and read IOs. This can be used to estimate cache hit rate.
+fn cache_hit_stats(session: &Session) -> Result<(i64, i64)> {
+    let mut stat_cursor = session.new_stats_cursor(wt_mdb::options::Statistics::Fast, None)?;
+    let search_calls = stat_cursor
+        .seek_exact(WT_STAT_CONN_CURSOR_SEARCH)
+        .expect("WT_STAT_CONN_CURSOR_SEARCH")?;
+    let read_ios = stat_cursor
+        .seek_exact(WT_STAT_CONN_READ_IO)
+        .expect("WT_STAT_CONN_READ_IO")?;
+    Ok((search_calls, read_ios))
 }

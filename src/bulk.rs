@@ -165,6 +165,7 @@ where
     }
 
     /// Total number of vectors to process. Useful for status reporting.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.limit
     }
@@ -286,13 +287,13 @@ where
                 // objects to be Send + Sync, but Session is only Send and wrapping it in a Mutex does not
                 // work because any RecordCursor objects returned have to be destroyed before the Mutex is
                 // released.
-                let mut session = self.connection.open_session()?;
+                let session = self.connection.open_session()?;
                 let mut searcher = GraphSearcher::new(self.index.config().index_search_params);
                 for i in nodes {
                     // Use a transaction for each search. Without this each lookup will be a separate transaction
                     // which obtains a reader lock inside the session. Overhead for that is ~10x.
                     session.begin_transaction(None)?;
-                    let mut reader = BulkLoadGraphVectorIndexReader(self, session);
+                    let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
                     in_flight.insert(i);
                     let mut edges = self.search_for_insert(i, &mut searcher, &mut reader)?;
                     // Insert any other in-flight edges into the candidate queue. These are vertices we may have missed because
@@ -342,7 +343,6 @@ where
                         }
                     }
                     // Close out the transaction. There should be no conflicts as we did not write to the database.
-                    session = reader.into_session();
                     session.rollback_transaction(None)?;
                     in_flight.remove(&i);
                     progress();
@@ -367,14 +367,12 @@ where
             .into_par_iter()
             .chunks(1_000)
             .try_for_each(|chunk| {
-                // XXX I gotta fix it so the reader doesn't *take* the Session.
-                // Then it would be possible to use a thread-local Session.
-                let mut session = self.connection.open_session()?;
+                // XXX use a thread local session and remove the chunking.
+                let session = self.connection.open_session()?;
                 for v in chunk {
                     session.begin_transaction(None)?;
-                    let mut reader = BulkLoadGraphVectorIndexReader(self, session);
+                    let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
                     self.prune_and_apply(v, &mut reader, &apply_mu)?;
-                    session = reader.into_session();
                     session.rollback_transaction(None)?;
                     progress();
                 }
@@ -445,7 +443,7 @@ where
         &self,
         vertex_id: usize,
         searcher: &mut GraphSearcher,
-        reader: &mut BulkLoadGraphVectorIndexReader<'_, D>,
+        reader: &mut BulkLoadGraphVectorIndexReader<'_, '_, D>,
     ) -> Result<Vec<Neighbor>> {
         // TODO: return any vectors used for re-ranking here so that we can use them for pruning.
         let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
@@ -491,7 +489,7 @@ where
     fn prune_and_apply<T>(
         &self,
         vertex: usize,
-        reader: &mut BulkLoadGraphVectorIndexReader<'_, D>,
+        reader: &mut BulkLoadGraphVectorIndexReader<'_, '_, D>,
         apply_mu: &Mutex<T>,
     ) -> Result<()> {
         // Get the set of edges to prune while only holding a read lock on the vertex.
@@ -568,15 +566,9 @@ where
     }
 }
 
-struct BulkLoadGraphVectorIndexReader<'a, D: Send>(&'a BulkLoadBuilder<D>, Session);
+struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Session);
 
-impl<D: Send + Sync> BulkLoadGraphVectorIndexReader<'_, D> {
-    fn into_session(self) -> Session {
-        self.1
-    }
-}
-
-impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, D> {
+impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, '_, D> {
     type Graph<'b>
         = BulkLoadBuilderGraph<'b, D>
     where
@@ -593,7 +585,7 @@ impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'
     fn graph(&self) -> Result<Self::Graph<'_>> {
         let cursor_graph = if self.0.options.wt_vector_store {
             Some(CursorGraph::new(
-                self.0.index.config().clone(),
+                *self.0.index.config(),
                 self.1.get_record_cursor(self.0.index.graph_table_name())?,
             ))
         } else {

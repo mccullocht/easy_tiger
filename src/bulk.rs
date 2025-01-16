@@ -11,8 +11,9 @@
 use core::f64;
 use std::{
     borrow::Cow,
+    cell::RefCell,
     num::NonZero,
-    ops::Range,
+    ops::{Deref, Range},
     sync::{
         atomic::{self, AtomicI64},
         Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
@@ -22,6 +23,7 @@ use std::{
 use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
+use thread_local::ThreadLocal;
 use wt_mdb::{Connection, Record, Result, Session};
 
 use crate::{
@@ -33,7 +35,8 @@ use crate::{
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_node, CursorNavVectorStore, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
+        encode_graph_node, CursorGraph, CursorGraphVertex, CursorNavVectorStore,
+        TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -51,16 +54,42 @@ pub struct GraphStats {
     pub unconnected: usize,
 }
 
-// TODO: rather than relying on users calling these methods in the right order, instead
-// consume/perform/generate, e.g.:
-//
-// pub fn QuantizedVectorLoader::new(...) -> Self
-// pub fn QuantizedVectorLoader::load(self, progress_cb) -> Result<BulkGraphBuilder>
-// pub fn BulkGraphBuilder::build(self, progress_cb) -> Result<BulkGraphPruner>
-// pub fn BulkGraphPruner::load(self, progress_cb) -> Result<()>
-//
-// if you do this the graph build can be locked, but then transform into a representation that
-// is better for single-threaded access for cleanup.
+/// Options for bulk loading a data set.
+#[derive(Debug, Copy, Clone)]
+pub struct Options {
+    /// If true, write the quantized vectors into an anonymous memory mapped segment.
+    /// This ensures that they will stay in memory (modulo swap) and also provides
+    /// faster access than WT.
+    pub memory_quantized_vectors: bool,
+    /// If true, load vectors into a WT table and use that backing store during build.
+    /// This may be faster for dot similarity as the vectors will only be normalized
+    /// once on input. This also allows measuring cache efficiency during build when
+    /// the data set is larger than available memory.
+    pub wt_vector_store: bool,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum BulkLoadPhase {
+    LoadNavVectors,
+    LoadRawVectors,
+    BuildGraph,
+    CleanupGraph,
+    LoadGraph,
+}
+
+impl BulkLoadPhase {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::LoadNavVectors => "load nav vectors",
+            Self::LoadRawVectors => "load raw vectors",
+            Self::BuildGraph => "build graph",
+            Self::CleanupGraph => "cleanup graph",
+            Self::LoadGraph => "load graph",
+        }
+    }
+}
+
+// TODO: this should use some sort of state machine pattern.
 
 // TODO: tests for bulk load builder, mostly the built graph.
 
@@ -73,12 +102,14 @@ pub struct BulkLoadBuilder<D> {
     vectors: DerefVectorStore<f32, D>,
     centroid: Vec<f32>,
 
-    memory_quantized_vectors: bool,
+    options: Options,
     quantized_vectors: Option<DerefVectorStore<u8, Mmap>>,
 
     graph: Box<[RwLock<Vec<Neighbor>>]>,
     entry_vertex: AtomicI64,
     scorer: Box<dyn F32VectorScorer>,
+
+    graph_stats: Option<GraphStats>,
 }
 
 impl<D> BulkLoadBuilder<D>
@@ -91,7 +122,7 @@ where
         connection: Arc<Connection>,
         index: TableGraphVectorIndex,
         vectors: DerefVectorStore<f32, D>,
-        memory_quantized_vectors: bool,
+        options: Options,
         limit: usize,
     ) -> Self {
         let mut graph_vec = Vec::with_capacity(vectors.len());
@@ -105,21 +136,71 @@ where
             limit,
             vectors,
             centroid: Vec::new(),
-            memory_quantized_vectors,
+            options,
             quantized_vectors: None,
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
             scorer,
+            graph_stats: None,
         }
     }
 
+    /// Phases to be executed by the builder.
+    /// This can vary depending on the options.
+    pub fn phases(&self) -> Vec<BulkLoadPhase> {
+        if self.options.wt_vector_store {
+            vec![
+                BulkLoadPhase::LoadNavVectors,
+                BulkLoadPhase::LoadRawVectors,
+                BulkLoadPhase::BuildGraph,
+                BulkLoadPhase::CleanupGraph,
+                BulkLoadPhase::LoadGraph,
+            ]
+        } else {
+            vec![
+                BulkLoadPhase::LoadNavVectors,
+                BulkLoadPhase::BuildGraph,
+                BulkLoadPhase::CleanupGraph,
+                BulkLoadPhase::LoadGraph,
+            ]
+        }
+    }
+
+    /// Total number of vectors to process. Useful for status reporting.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.limit
+    }
+
+    /// Execute a single named phase, calling progress() as each vector is processed.
+    pub fn execute_phase<P>(&mut self, phase: BulkLoadPhase, progress: P) -> Result<()>
+    where
+        P: Fn() + Send + Sync,
+    {
+        match phase {
+            BulkLoadPhase::LoadNavVectors => self.load_nav_vectors(progress),
+            BulkLoadPhase::LoadRawVectors => self.load_raw_vectors(progress),
+            BulkLoadPhase::BuildGraph => self.insert_all(progress),
+            BulkLoadPhase::CleanupGraph => self.cleanup(progress),
+            BulkLoadPhase::LoadGraph => {
+                self.graph_stats = Some(self.load_graph(progress)?);
+                Ok(())
+            }
+        }
+    }
+
+    /// Return graph stats after execution has completed.
+    pub fn graph_stats(&self) -> Option<&GraphStats> {
+        self.graph_stats.as_ref()
+    }
+
     /// Load binary quantized vector data into the nav vectors table.
-    pub fn load_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
+    fn load_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
         let quantizer = self.index.config().new_quantizer();
         let mut sum = vec![0.0; dim];
-        let mut quantized_vectors = if self.memory_quantized_vectors {
+        let mut quantized_vectors = if self.options.memory_quantized_vectors {
             Some(MmapMut::map_anon(quantizer.doc_bytes(dim) * self.vectors.len()).unwrap())
         } else {
             None
@@ -164,10 +245,28 @@ where
         Ok(())
     }
 
+    fn load_raw_vectors<P: Fn() + Send + Sync>(&mut self, progress: P) -> Result<()> {
+        let session = self.connection.open_session()?;
+        session.bulk_load(
+            self.index.graph_table_name(),
+            None,
+            self.vectors
+                .iter()
+                .enumerate()
+                .take(self.limit)
+                .map(|(i, v)| {
+                    let normalized = self.scorer.normalize_vector(v.into());
+                    let value = encode_graph_node(&normalized, vec![]);
+                    progress();
+                    Record::new(i as i64, value)
+                }),
+        )
+    }
+
     /// Insert all vectors from the passed vector store into the graph.
     ///
     /// This operation uses rayon to parallelize large parts of the graph build.
-    pub fn insert_all<P>(&self, progress: P) -> Result<()>
+    fn insert_all<P>(&self, progress: P) -> Result<()>
     where
         P: Fn() + Send + Sync,
     {
@@ -177,6 +276,12 @@ where
         let apply_mu = Mutex::new((0i64, self.scorer.score(&self.get_vector(0), &self.centroid)));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
+        // Use thread locals to avoid recreating Session and GraphSearcher per vector. Rayon
+        // doesn't provide a good way to initialize something falliable once per thread, and the
+        // alternative is chunking which limits work-stealing.
+        let tl_session = ThreadLocalSession::new(self.connection.clone());
+        let tl_searcher = ThreadLocal::new();
+
         // Keep track of all in-flight concurrent insertions. These nodes will be processed at the
         // end of each insertion search to ensure that we are linking these nodes when appropriate as those
         // links would not be generated by a search of the graph.
@@ -184,73 +289,77 @@ where
         (0..self.limit)
             .into_par_iter()
             .skip(1) // vertex 0 has been implicitly inserted.
-            .chunks(1_000)
-            .try_for_each(|nodes| {
-                // NB: we create a new session and cursor for each chunk. Relevant rayon APIs require these
-                // objects to be Send + Sync, but Session is only Send and wrapping it in a Mutex does not
-                // work because any RecordCursor objects returned have to be destroyed before the Mutex is
-                // released.
-                let mut session = self.connection.open_session()?;
-                let mut searcher = GraphSearcher::new(self.index.config().index_search_params);
-                for i in nodes {
-                    // Use a transaction for each search. Without this each lookup will be a separate transaction
-                    // which obtains a reader lock inside the session. Overhead for that is ~10x.
-                    session.begin_transaction(None)?;
-                    let mut reader = BulkLoadGraphVectorIndexReader(self, session);
-                    in_flight.insert(i);
-                    let mut edges = self.search_for_insert(i, &mut searcher, &mut reader)?;
-                    // Insert any other in-flight edges into the candidate queue. These are vertices we may have missed because
-                    // they are being inserted concurrently in another thread.
-                    self.insert_in_flight_edges(i, in_flight.iter().map(|e| *e), &mut edges);
-                    assert!(
-                        !edges.iter().any(|n| n.vertex() == i as i64),
-                        "Candidate edges for vertex {} contains self-edge.",
-                        i
-                    );
-                    let centroid_score = self.scorer.score(&self.get_vector(i), &self.centroid);
-                    // Add each edge to this vertex and a reciprocal edge to make the graph
-                    // undirected. If an edge does not fit on either vertex, save it for later.
-                    // We will prune any vertices in this state, but put together the pruned edge
-                    // list outside of `apply_mu` to maximize concurrency.
-                    loop {
-                        let mut entry_point = apply_mu.lock().unwrap();
+            .try_for_each(|v| {
+                let session = tl_session.get()?;
+                let mut searcher = tl_searcher
+                    .get_or(|| {
+                        RefCell::new(GraphSearcher::new(self.index.config().index_search_params))
+                    })
+                    .borrow_mut();
+                // Use a transaction for each search. Without this each lookup will be a separate transaction
+                // which obtains a reader lock inside the session. Overhead for that is ~10x.
+                session.begin_transaction(None)?;
+                let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
+                in_flight.insert(v);
+                let mut edges = self.search_for_insert(v, &mut searcher, &mut reader)?;
+                // Insert any other in-flight edges into the candidate queue. These are vertices we may have missed because
+                // they are being inserted concurrently in another thread.
+                self.insert_in_flight_edges(v, in_flight.iter().map(|e| *e), &mut edges);
+                assert!(
+                    !edges.iter().any(|n| n.vertex() == v as i64),
+                    "Candidate edges for vertex {} contains self-edge.",
+                    v
+                );
 
-                        edges.retain(|e| {
-                            let (mut iv, mut ev) = self.lock_edge(i, e.vertex() as usize);
-                            if iv.len() == iv.capacity() || ev.len() == ev.capacity() {
-                                true
-                            } else {
-                                iv.push(*e);
-                                let backedge = Neighbor::new(i as i64, e.score());
-                                if !ev.contains(&backedge) {
-                                    ev.push(backedge);
-                                }
-                                false
+                let mut graph = reader.graph()?;
+                let centroid_score = self.scorer.score(
+                    &graph.get(v as i64).unwrap().unwrap().vector(),
+                    &self.centroid,
+                );
+                drop(graph);
+
+                // Add each edge to this vertex and a reciprocal edge to make the graph
+                // undirected. If an edge does not fit on either vertex, save it for later.
+                // We will prune any vertices in this state, but put together the pruned edge
+                // list outside of `apply_mu` to maximize concurrency.
+                loop {
+                    let mut entry_point = apply_mu.lock().unwrap();
+
+                    edges.retain(|e| {
+                        let (mut iv, mut ev) = self.lock_edge(v, e.vertex() as usize);
+                        if iv.len() == iv.capacity() || ev.len() == ev.capacity() {
+                            true
+                        } else {
+                            iv.push(*e);
+                            let backedge = Neighbor::new(v as i64, e.score());
+                            if !ev.contains(&backedge) {
+                                ev.push(backedge);
                             }
-                        });
-
-                        if edges.is_empty() {
-                            if centroid_score > entry_point.1 {
-                                entry_point.0 = i as i64;
-                                entry_point.1 = centroid_score;
-                                self.entry_vertex.store(i as i64, atomic::Ordering::SeqCst);
-                            }
-                            break;
+                            false
                         }
+                    });
 
-                        drop(entry_point);
-                        // Any edge still in the list is overful, so prune it.
-                        self.prune_and_apply(i, &apply_mu)?;
-                        for e in edges.iter() {
-                            self.prune_and_apply(e.vertex() as usize, &apply_mu)?;
+                    if edges.is_empty() {
+                        if centroid_score > entry_point.1 {
+                            entry_point.0 = v as i64;
+                            entry_point.1 = centroid_score;
+                            self.entry_vertex.store(v as i64, atomic::Ordering::SeqCst);
                         }
+                        break;
                     }
-                    // Close out the transaction. There should be no conflicts as we did not write to the database.
-                    session = reader.into_session();
-                    session.rollback_transaction(None)?;
-                    in_flight.remove(&i);
-                    progress();
+
+                    drop(entry_point);
+                    // Any edge still in the list is overful, so prune it.
+                    self.prune_and_apply(v, &mut reader, &apply_mu)?;
+                    for e in edges.iter() {
+                        self.prune_and_apply(e.vertex() as usize, &mut reader, &apply_mu)?;
+                    }
                 }
+
+                // Close out the transaction. There should be no conflicts as we did not write to the database.
+                session.rollback_transaction(None)?;
+                in_flight.remove(&v);
+                progress();
 
                 Ok::<(), wt_mdb::Error>(())
             })
@@ -259,7 +368,7 @@ where
     /// Cleanup the graph.
     ///
     /// This may prune edges and/or ensure graph connectivity.
-    pub fn cleanup<P>(&self, progress: P) -> Result<()>
+    fn cleanup<P>(&self, progress: P) -> Result<()>
     where
         P: Fn() + Send + Sync,
     {
@@ -267,8 +376,14 @@ where
         // this is necessary to ensure the graph remains undirected.
         let apply_mu = Mutex::new(());
 
+        let tl_session = ThreadLocalSession::new(self.connection.clone());
+
         (0..self.limit).into_par_iter().try_for_each(|v| {
-            self.prune_and_apply(v, &apply_mu)?;
+            let session = tl_session.get()?;
+            session.begin_transaction(None)?;
+            let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
+            self.prune_and_apply(v, &mut reader, &apply_mu)?;
+            session.rollback_transaction(None)?;
             progress();
             Ok::<_, wt_mdb::Error>(())
         })
@@ -277,7 +392,7 @@ where
     /// Bulk load the graph table with raw vectors and graph edges.
     ///
     /// Returns statistics about the generated graph.
-    pub fn load_graph<P>(&self, progress: P) -> Result<GraphStats>
+    fn load_graph<P>(&self, progress: P) -> Result<GraphStats>
     where
         P: Fn(),
     {
@@ -300,6 +415,9 @@ where
             ),
         ];
         let session = self.connection.open_session()?;
+        if self.options.wt_vector_store {
+            session.drop_table(self.index.graph_table_name(), None)?;
+        }
         session.bulk_load(
             self.index.graph_table_name(),
             None,
@@ -334,11 +452,11 @@ where
         &self,
         vertex_id: usize,
         searcher: &mut GraphSearcher,
-        reader: &mut BulkLoadGraphVectorIndexReader<'_, D>,
+        reader: &mut BulkLoadGraphVectorIndexReader<'_, '_, D>,
     ) -> Result<Vec<Neighbor>> {
-        let mut graph = BulkLoadBuilderGraph(self);
         // TODO: return any vectors used for re-ranking here so that we can use them for pruning.
         let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
+        let mut graph = reader.graph()?;
         let split = prune_edges(
             &mut candidates,
             self.index.config().max_edges,
@@ -377,7 +495,12 @@ where
         }
     }
 
-    fn prune_and_apply<T>(&self, vertex: usize, apply_mu: &Mutex<T>) -> Result<()> {
+    fn prune_and_apply<T>(
+        &self,
+        vertex: usize,
+        reader: &mut BulkLoadGraphVectorIndexReader<'_, '_, D>,
+        apply_mu: &Mutex<T>,
+    ) -> Result<()> {
         // Get the set of edges to prune while only holding a read lock on the vertex.
         let max_edges = self.index.config().max_edges;
         let pruned_edges = {
@@ -391,7 +514,7 @@ where
                 let selected = select_pruned_edges(
                     &edges,
                     max_edges,
-                    &mut BulkLoadBuilderGraph(self),
+                    &mut reader.graph()?,
                     self.scorer.as_ref(),
                 )?;
                 edges
@@ -452,15 +575,46 @@ where
     }
 }
 
-struct BulkLoadGraphVectorIndexReader<'a, D: Send>(&'a BulkLoadBuilder<D>, Session);
+// TODO: move this, it could be useful elsewhere.
+struct ThreadLocalSession {
+    connection: Arc<Connection>,
+    tl_session: ThreadLocal<Session>,
+}
 
-impl<D: Send + Sync> BulkLoadGraphVectorIndexReader<'_, D> {
-    fn into_session(self) -> Session {
-        self.1
+impl ThreadLocalSession {
+    fn new(connection: Arc<Connection>) -> Self {
+        ThreadLocalSession {
+            connection,
+            tl_session: ThreadLocal::new(),
+        }
+    }
+
+    fn get(&self) -> Result<SessionGuard<'_>> {
+        self.tl_session
+            .get_or_try(|| self.connection.open_session())
+            .map(SessionGuard)
     }
 }
 
-impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, D> {
+struct SessionGuard<'a>(&'a Session);
+
+impl Deref for SessionGuard<'_> {
+    type Target = Session;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl Drop for SessionGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.reset();
+    }
+}
+
+struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Session);
+
+impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, '_, D> {
     type Graph<'b>
         = BulkLoadBuilderGraph<'b, D>
     where
@@ -475,7 +629,15 @@ impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
-        Ok(BulkLoadBuilderGraph(self.0))
+        let cursor_graph = if self.0.options.wt_vector_store {
+            Some(CursorGraph::new(
+                *self.0.index.config(),
+                self.1.get_record_cursor(self.0.index.graph_table_name())?,
+            ))
+        } else {
+            None
+        };
+        Ok(BulkLoadBuilderGraph(self.0, cursor_graph))
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
@@ -489,7 +651,7 @@ impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'
     }
 }
 
-struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>);
+struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>, Option<CursorGraph<'a>>);
 
 impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     type Vertex<'c>
@@ -507,16 +669,26 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     }
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-        Some(Ok(BulkLoadGraphVertex {
-            builder: self.0,
-            vertex_id,
-        }))
+        if let Some(cursor) = self.1.as_mut() {
+            Some(cursor.get(vertex_id)?.map(|v| BulkLoadGraphVertex {
+                builder: self.0,
+                vertex_id,
+                vertex: Some(v),
+            }))
+        } else {
+            Some(Ok(BulkLoadGraphVertex {
+                builder: self.0,
+                vertex_id,
+                vertex: None,
+            }))
+        }
     }
 }
 
 struct BulkLoadGraphVertex<'a, D> {
     builder: &'a BulkLoadBuilder<D>,
     vertex_id: i64,
+    vertex: Option<CursorGraphVertex<'a>>,
 }
 
 impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
@@ -526,7 +698,10 @@ impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
         Self: 'c;
 
     fn vector(&self) -> Cow<'_, [f32]> {
-        self.builder.get_vector(self.vertex_id as usize)
+        self.vertex
+            .as_ref()
+            .map(|v| v.vector())
+            .unwrap_or_else(|| self.builder.get_vector(self.vertex_id as usize))
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {

@@ -592,13 +592,13 @@ impl ThreadLocalSession {
     fn get(&self) -> Result<SessionGuard<'_>> {
         self.tl_session
             .get_or_try(|| self.connection.open_session())
-            .map(|s| SessionGuard(s))
+            .map(SessionGuard)
     }
 }
 
 struct SessionGuard<'a>(&'a Session);
 
-impl<'a> Deref for SessionGuard<'a> {
+impl Deref for SessionGuard<'_> {
     type Target = Session;
 
     fn deref(&self) -> &Self::Target {
@@ -606,7 +606,7 @@ impl<'a> Deref for SessionGuard<'a> {
     }
 }
 
-impl<'a> Drop for SessionGuard<'a> {
+impl Drop for SessionGuard<'_> {
     fn drop(&mut self) {
         let _ = self.0.reset();
     }

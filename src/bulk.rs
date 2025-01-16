@@ -356,11 +356,12 @@ where
                     for e in edges.iter() {
                         self.prune_and_apply(e.vertex() as usize, &mut reader, &apply_mu)?;
                     }
-                    // Close out the transaction. There should be no conflicts as we did not write to the database.
-                    session.rollback_transaction(None)?;
-                    in_flight.remove(&v);
-                    progress();
                 }
+
+                // Close out the transaction. There should be no conflicts as we did not write to the database.
+                session.rollback_transaction(None)?;
+                in_flight.remove(&v);
+                progress();
 
                 Ok::<(), wt_mdb::Error>(())
             })

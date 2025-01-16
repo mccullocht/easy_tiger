@@ -276,6 +276,9 @@ where
         let apply_mu = Mutex::new((0i64, self.scorer.score(&self.get_vector(0), &self.centroid)));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
+        // Use thread locals to avoid recreating Session and GraphSearcher per vector. Rayon
+        // doesn't provide a good way to initialize something falliable once per thread, and the
+        // alternative is chunking which limits work-stealing.
         let tl_session = ThreadLocalSession::new(self.connection.clone());
         let tl_searcher = ThreadLocal::new();
 
@@ -287,11 +290,6 @@ where
             .into_par_iter()
             .skip(1) // vertex 0 has been implicitly inserted.
             .try_for_each(|v| {
-                // NB: we create a new session and cursor for each chunk. Relevant rayon APIs require these
-                // objects to be Send + Sync, but Session is only Send and wrapping it in a Mutex does not
-                // work because any RecordCursor objects returned have to be destroyed before the Mutex is
-                // released.
-
                 let session = tl_session.get()?;
                 let mut searcher = tl_searcher
                     .get_or(|| {

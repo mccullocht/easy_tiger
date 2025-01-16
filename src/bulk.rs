@@ -312,8 +312,14 @@ where
                     "Candidate edges for vertex {} contains self-edge.",
                     v
                 );
-                // XXX ESCAPE we are not using the graph here.
-                let centroid_score = self.scorer.score(&self.get_vector(v), &self.centroid);
+
+                let mut graph = reader.graph()?;
+                let centroid_score = self.scorer.score(
+                    &graph.get(v as i64).unwrap().unwrap().vector(),
+                    &self.centroid,
+                );
+                drop(graph);
+
                 // Add each edge to this vertex and a reciprocal edge to make the graph
                 // undirected. If an edge does not fit on either vertex, save it for later.
                 // We will prune any vertices in this state, but put together the pruned edge

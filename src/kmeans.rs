@@ -1,17 +1,3 @@
-// batch k-means
-// * batch is sampled randomly from total input. probably best to shuffle the indices for this.
-// * centroid initialization is done using only the first batch.
-//   - run initialization n times and compute distances, then take the lowest sum-of-distances.
-//   - kmeans++ is probably going to be unpleasant, maybe stick to random
-// * iterate over batches
-//   - compute centroid memberships and distances
-//   - cluster count is propagated between batches
-//   - update centroids incrementally
-//     + propagate cluster counts between batches
-//     + increment centroids, then add (sample - centroid) / count to the assigned centroid
-//   - terminate if sum of distances between new and old centroids is within tolerances.
-//     + make sure to use proper l2 distance.
-
 use std::iter::Cycle;
 
 use rand::seq::index;

@@ -186,7 +186,7 @@ impl<'a, V: VectorStore> SubsetViewVectorStore<'a, V> {
     }
 }
 
-impl<'a, V: VectorStore> VectorStore for SubsetViewVectorStore<'a, V> {
+impl<V: VectorStore> VectorStore for SubsetViewVectorStore<'_, V> {
     type Elem = V::Elem;
 
     fn elem_stride(&self) -> usize {

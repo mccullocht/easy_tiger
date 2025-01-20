@@ -9,6 +9,7 @@ pub mod bulk;
 pub mod crud;
 pub mod graph;
 pub mod input;
+pub mod kmeans;
 pub mod quantization;
 pub mod scoring;
 pub mod search;

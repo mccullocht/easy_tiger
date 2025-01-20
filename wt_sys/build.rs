@@ -8,6 +8,7 @@ fn build_wt() -> PathBuf {
         .define("ENABLE_STATIC", "1")
         .define("HAVE_DIAGNOSTIC", if have_diagnostic { "1" } else { "0" })
         .define("ENABLE_PYTHON", "0")
+        .cflag("-Wno-array-bounds")
         // CMake crate is not doing this correctly for whatever reason.
         .build_arg(format!("-j{}", jobs))
         .build();

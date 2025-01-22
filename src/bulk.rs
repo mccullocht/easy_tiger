@@ -29,7 +29,7 @@ use wt_mdb::{Connection, Record, Result, Session};
 use crate::{
     graph::{
         prune_edges, select_pruned_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex,
-        NavVectorStore,
+        NavVectorStore, RawVectorStore,
     },
     input::{DerefVectorStore, VectorStore},
     scoring::F32VectorScorer,
@@ -313,7 +313,7 @@ where
 
                 let mut graph = reader.graph()?;
                 let centroid_score = self.scorer.score(
-                    &graph.get(v as i64).unwrap().unwrap().vector(),
+                    &graph.get_vertex(v as i64).unwrap().unwrap().vector(),
                     &self.centroid,
                 );
                 drop(graph);
@@ -619,6 +619,10 @@ impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'
         = BulkLoadBuilderGraph<'b, D>
     where
         Self: 'b;
+    type RawVectorStore<'b>
+        = BulkLoadBuilderGraph<'b, D>
+    where
+        Self: 'b;
     type NavVectorStore<'b>
         = BulkLoadNavVectorStore<'b>
     where
@@ -629,6 +633,18 @@ impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
+        let cursor_graph = if self.0.options.wt_vector_store {
+            Some(CursorGraph::new(
+                *self.0.index.config(),
+                self.1.get_record_cursor(self.0.index.graph_table_name())?,
+            ))
+        } else {
+            None
+        };
+        Ok(BulkLoadBuilderGraph(self.0, cursor_graph))
+    }
+
+    fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
         let cursor_graph = if self.0.options.wt_vector_store {
             Some(CursorGraph::new(
                 *self.0.index.config(),
@@ -668,9 +684,9 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
         }
     }
 
-    fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+    fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
         if let Some(cursor) = self.1.as_mut() {
-            Some(cursor.get(vertex_id)?.map(|v| BulkLoadGraphVertex {
+            Some(cursor.get_vertex(vertex_id)?.map(|v| BulkLoadGraphVertex {
                 builder: self.0,
                 vertex_id,
                 vertex: Some(v),
@@ -681,6 +697,16 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
                 vertex_id,
                 vertex: None,
             }))
+        }
+    }
+}
+
+impl<D: Send + Sync> RawVectorStore for BulkLoadBuilderGraph<'_, D> {
+    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<crate::graph::RawVector<'_>>> {
+        if let Some(cursor) = self.1.as_mut() {
+            cursor.get_raw_vector(vertex_id)
+        } else {
+            Some(Ok(self.0.get_vector(vertex_id as usize).into()))
         }
     }
 }
@@ -738,9 +764,9 @@ enum BulkLoadNavVectorStore<'a> {
 }
 
 impl NavVectorStore for BulkLoadNavVectorStore<'_> {
-    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+    fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
         match self {
-            Self::Cursor(c) => c.get(vertex_id),
+            Self::Cursor(c) => c.get_nav_vector(vertex_id),
             Self::Memory(m) => {
                 if vertex_id >= 0 && (vertex_id as usize) < m.len() {
                     Some(Ok(m[vertex_id as usize].into()))

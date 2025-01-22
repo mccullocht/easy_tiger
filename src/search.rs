@@ -99,7 +99,7 @@ impl GraphSearcher {
         // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
         let query = reader
             .graph()?
-            .get(vertex_id)
+            .get_vertex(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
             .vector()
             .to_vec();
@@ -130,7 +130,7 @@ impl GraphSearcher {
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
             self.visited += 1;
             let node = graph
-                .get(best_candidate.neighbor().vertex())
+                .get_vertex(best_candidate.neighbor().vertex())
                 .unwrap_or_else(|| Err(Error::not_found_error()))?;
             // If we aren't reranking we don't need to copy the actual vector.
             best_candidate.visit(if self.params.num_rerank > 0 {
@@ -143,7 +143,9 @@ impl GraphSearcher {
                 if !self.seen.insert(edge) {
                     continue;
                 }
-                let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
+                let vec = nav
+                    .get_nav_vector(edge)
+                    .unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
                     .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
             }
@@ -169,7 +171,7 @@ impl GraphSearcher {
         if let Some(epr) = graph.entry_point() {
             let entry_point = epr?;
             let entry_vector = nav
-                .get(entry_point)
+                .get_nav_vector(entry_point)
                 .unwrap_or(Err(Error::not_found_error()))?;
             self.candidates.add_unvisited(Neighbor::new(
                 entry_point,
@@ -348,7 +350,10 @@ mod test {
     use wt_mdb::Result;
 
     use crate::{
-        graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+        graph::{
+            Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVector,
+            RawVectorStore,
+        },
         quantization::{BinaryQuantizer, Quantizer, VectorQuantizer},
         scoring::{DotProductScorer, F32VectorScorer, VectorSimilarity},
         Neighbor,
@@ -461,11 +466,15 @@ mod test {
 
     impl<'a> GraphVectorIndexReader for TestGraphVectorIndexReader<'a> {
         type Graph<'b>
-            = TestGraph<'b>
+            = TestGraphAccess<'b>
+        where
+            Self: 'b;
+        type RawVectorStore<'b>
+            = TestGraphAccess<'b>
         where
             Self: 'b;
         type NavVectorStore<'b>
-            = TestNavVectorStore<'b>
+            = TestGraphAccess<'b>
         where
             Self: 'b;
 
@@ -474,11 +483,61 @@ mod test {
         }
 
         fn graph(&self) -> Result<Self::Graph<'_>> {
-            Ok(TestGraph(self.0))
+            Ok(TestGraphAccess(self.0))
+        }
+
+        fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
+            Ok(TestGraphAccess(self.0))
         }
 
         fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-            Ok(TestNavVectorStore(self.0))
+            Ok(TestGraphAccess(self.0))
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct TestGraphAccess<'a>(&'a TestGraphVectorIndex);
+
+    impl<'a> Graph for TestGraphAccess<'a> {
+        type Vertex<'c>
+            = TestGraphVertex<'c>
+        where
+            Self: 'c;
+
+        fn entry_point(&mut self) -> Option<Result<i64>> {
+            if !self.0.data.is_empty() {
+                Some(Ok(0))
+            } else {
+                None
+            }
+        }
+
+        fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
+                Some(Ok(TestGraphVertex(&self.0.data[vertex_id as usize])))
+            } else {
+                None
+            }
+        }
+    }
+
+    impl<'a> RawVectorStore for TestGraphAccess<'a> {
+        fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<RawVector<'_>>> {
+            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
+                Some(Ok((&*self.0.data[vertex_id as usize].vector).into()))
+            } else {
+                None
+            }
+        }
+    }
+
+    impl<'a> NavVectorStore for TestGraphAccess<'a> {
+        fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
+                Some(Ok(Cow::from(&self.0.data[vertex_id as usize].nav_vector)))
+            } else {
+                None
+            }
         }
     }
 
@@ -499,7 +558,7 @@ mod test {
             }
         }
 
-        fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+        fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
             if vertex_id < 0 || vertex_id as usize >= self.0.data.len() {
                 None
             } else {
@@ -522,19 +581,6 @@ mod test {
 
         fn edges(&self) -> Self::EdgeIterator<'_> {
             self.0.edges.iter().copied()
-        }
-    }
-
-    #[derive(Debug)]
-    pub struct TestNavVectorStore<'a>(&'a TestGraphVectorIndex);
-
-    impl<'a> NavVectorStore for TestNavVectorStore<'a> {
-        fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-            if vertex_id < 0 || vertex_id as usize >= self.0.data.len() {
-                None
-            } else {
-                Some(Ok(Cow::from(&self.0.data[vertex_id as usize].nav_vector)))
-            }
         }
     }
 

@@ -111,7 +111,7 @@ impl IndexMutator {
         // TODO: group and bulk delete if there are common src_vertex_id.
         for (src_vertex_id, dst_vertex_id) in pruned_edges {
             let vertex = graph
-                .get(src_vertex_id)
+                .get_vertex(src_vertex_id)
                 .unwrap_or(Err(Error::not_found_error()))?;
             let edges = vertex.edges().filter(|v| *v != dst_vertex_id).collect();
             let encoded = encode_graph_node_internal(vertex.vector_bytes(), edges);
@@ -130,7 +130,7 @@ impl IndexMutator {
         pruned_edges: &mut Vec<(i64, i64)>,
     ) -> Result<()> {
         let vertex = graph
-            .get(src_vertex_id)
+            .get_vertex(src_vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?;
         let mut edges = std::iter::once(dst_vertex_id)
             .chain(vertex.edges().filter(|v| *v != dst_vertex_id))
@@ -141,7 +141,7 @@ impl IndexMutator {
                 .iter()
                 .map(|e| {
                     graph
-                        .get(*e)
+                        .get_vertex(*e)
                         .unwrap_or(Err(Error::not_found_error()))
                         .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst.vector())))
                 })
@@ -173,7 +173,7 @@ impl IndexMutator {
         let mut graph = self.reader.graph()?;
 
         let (vector, edges) = graph
-            .get(vertex_id)
+            .get_vertex(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))
             .map(|v| (v.vector().to_vec(), v.edges().collect::<Vec<_>>()))?;
 
@@ -186,7 +186,7 @@ impl IndexMutator {
             .into_iter()
             .map(|e| {
                 graph
-                    .get(e)
+                    .get_vertex(e)
                     .unwrap_or(Err(Error::not_found_error()))
                     .map(|v| {
                         (
@@ -418,7 +418,7 @@ mod tests {
 
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
-        let vertex = graph.get(vertex_ids[0]).unwrap()?;
+        let vertex = graph.get_vertex(vertex_ids[0]).unwrap()?;
         assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 2, 3, 5]);
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
@@ -459,14 +459,14 @@ mod tests {
 
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
-        let vertex = graph.get(vertex_ids[0]).unwrap()?;
+        let vertex = graph.get_vertex(vertex_ids[0]).unwrap()?;
         assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 2, 3, 5]);
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
         fixture.new_mutator().delete(1)?;
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
-        let vertex = graph.get(vertex_ids[0]).unwrap()?;
+        let vertex = graph.get_vertex(vertex_ids[0]).unwrap()?;
         assert_eq!(vertex.edges().collect::<Vec<_>>(), &[2, 3, 5]);
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 2, 3, 5, 4]));
 

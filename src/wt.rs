@@ -49,8 +49,8 @@ impl GraphVertex for CursorGraphVertex<'_> {
     where
         Self: 'c;
 
-    fn vector(&self) -> Cow<'_, [f32]> {
-        Cow::from(self.raw_vector.deref())
+    fn vector(&self) -> Option<Cow<'_, [f32]>> {
+        Some(Cow::from(self.raw_vector.deref()))
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {

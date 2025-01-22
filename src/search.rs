@@ -6,7 +6,10 @@ use std::{
 };
 
 use crate::{
-    graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{
+        Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
+        RawVectorStore,
+    },
     quantization::Quantizer,
     scoring::QuantizedVectorScorer,
     Neighbor,
@@ -98,10 +101,9 @@ impl GraphSearcher {
 
         // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
         let query = reader
-            .graph()?
-            .get_vertex(vertex_id)
+            .raw_vectors()?
+            .get_raw_vector(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
-            .vector()
             .to_vec();
         self.search_internal(&query, reader)
     }
@@ -134,9 +136,9 @@ impl GraphSearcher {
                 .unwrap_or_else(|| Err(Error::not_found_error()))?;
             // If we aren't reranking we don't need to copy the actual vector.
             best_candidate.visit(if self.params.num_rerank > 0 {
-                node.vector().into()
+                node.vector().map(|v| v.to_vec())
             } else {
-                Vec::new()
+                None
             });
 
             for edge in node.edges() {
@@ -190,6 +192,8 @@ impl GraphSearcher {
         reader: &R,
     ) -> Vec<Neighbor> {
         if self.params.num_rerank > 0 {
+            // XXX in this case we need to lookup raw vectors if they are not present.
+            // XXX this also implies that this function may fail now.
             let scorer = reader.config().new_scorer();
             let query = scorer.normalize_vector(query.into());
             let mut rescored = self
@@ -214,13 +218,13 @@ impl GraphSearcher {
 #[derive(Debug, PartialEq)]
 enum CandidateState {
     Unvisited,
-    Visited(Vec<f32>),
+    Visited(Option<Vec<f32>>),
 }
 
 impl CandidateState {
     fn vector(&self) -> Option<&[f32]> {
         match self {
-            CandidateState::Visited(v) => Some(v),
+            CandidateState::Visited(v) => v.as_ref().map(|x| x.as_slice()),
             _ => None,
         }
     }
@@ -324,8 +328,8 @@ impl<'a> VisitCandidateGuard<'a> {
     }
 
     /// Mark this candidate as visited and update the full fidelity vector in the candidate list.
-    fn visit(&mut self, vector: impl Into<Vec<f32>>) {
-        self.list.candidates[self.index].state = CandidateState::Visited(vector.into());
+    fn visit(&mut self, vector: Option<impl Into<Vec<f32>>>) {
+        self.list.candidates[self.index].state = CandidateState::Visited(vector.map(|v| v.into()));
         self.list.next_unvisited = self
             .list
             .candidates
@@ -575,8 +579,8 @@ mod test {
         where
             Self: 'c;
 
-        fn vector(&self) -> Cow<'_, [f32]> {
-            Cow::from(&self.0.vector)
+        fn vector(&self) -> Option<Cow<'_, [f32]>> {
+            Some(Cow::from(&self.0.vector))
         }
 
         fn edges(&self) -> Self::EdgeIterator<'_> {

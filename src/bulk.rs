@@ -311,12 +311,12 @@ where
                     v
                 );
 
-                let mut graph = reader.graph()?;
+                let mut raw_vectors = reader.raw_vectors()?;
                 let centroid_score = self.scorer.score(
-                    &graph.get_vertex(v as i64).unwrap().unwrap().vector(),
+                    &raw_vectors.get_raw_vector(v as i64).unwrap().unwrap(),
                     &self.centroid,
                 );
-                drop(graph);
+                drop(raw_vectors);
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
                 // undirected. If an edge does not fit on either vertex, save it for later.
@@ -723,11 +723,12 @@ impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
     where
         Self: 'c;
 
-    fn vector(&self) -> Cow<'_, [f32]> {
+    fn vector(&self) -> Option<Cow<'_, [f32]>> {
+        // XXX remove this, we shouldn't ever provide the vector this way.
         self.vertex
             .as_ref()
             .map(|v| v.vector())
-            .unwrap_or_else(|| self.builder.get_vector(self.vertex_id as usize))
+            .unwrap_or_else(|| Some(self.builder.get_vector(self.vertex_id as usize)))
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {

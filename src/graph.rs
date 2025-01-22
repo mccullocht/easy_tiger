@@ -100,8 +100,7 @@ pub trait GraphVertex {
     fn edges(&self) -> Self::EdgeIterator<'_>;
 
     /// Access the raw float vector if stored with the edges.
-    // XXX make it Option<Cow>
-    fn vector(&self) -> Cow<'_, [f32]>;
+    fn vector(&self) -> Option<Cow<'_, [f32]>>;
 }
 
 /// A raw float vector.
@@ -114,6 +113,7 @@ pub enum RawVector<'a> {
 }
 
 impl<'a> RawVector<'a> {
+    // TODO: rename because this is shadowing all the From impls.
     pub fn from(bytes: Cow<'a, [u8]>, dim: usize) -> Self {
         #[cfg(target_endian = "little")]
         {
@@ -194,7 +194,7 @@ pub trait NavVectorStore {
 pub(crate) fn select_pruned_edges(
     edges: &[Neighbor],
     max_edges: NonZero<usize>,
-    graph: &mut impl Graph,
+    raw_vectors: &mut impl RawVectorStore,
     scorer: &dyn F32VectorScorer,
 ) -> Result<BTreeSet<usize>> {
     if edges.is_empty() {
@@ -207,10 +207,10 @@ pub(crate) fn select_pruned_edges(
     let vectors = edges
         .iter()
         .map(|n| {
-            graph
-                .get_vertex(n.vertex())
+            raw_vectors
+                .get_raw_vector(n.vertex())
                 .unwrap_or(Err(Error::not_found_error()))
-                .map(|v| v.vector().to_vec())
+                .map(|v| v.to_vec())
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -251,10 +251,10 @@ pub(crate) fn select_pruned_edges(
 pub(crate) fn prune_edges(
     edges: &mut [Neighbor],
     max_edges: NonZero<usize>,
-    graph: &mut impl Graph,
+    raw_vectors: &mut impl RawVectorStore,
     scorer: &dyn F32VectorScorer,
 ) -> Result<usize> {
-    let selected = select_pruned_edges(edges, max_edges, graph, scorer)?;
+    let selected = select_pruned_edges(edges, max_edges, raw_vectors, scorer)?;
 
     // Partition edges into selected and unselected.
     for (i, j) in selected.iter().enumerate() {

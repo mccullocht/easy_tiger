@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use crate::{
-    graph::{prune_edges, Graph, GraphVectorIndexReader, GraphVertex},
+    graph::{prune_edges, Graph, GraphVectorIndexReader, GraphVertex, RawVectorStore},
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
@@ -135,15 +135,21 @@ impl IndexMutator {
         let mut edges = std::iter::once(dst_vertex_id)
             .chain(vertex.edges().filter(|v| *v != dst_vertex_id))
             .collect::<Vec<_>>();
-        let encoded = if edges.len() >= self.reader.config().max_edges.get() {
-            let src_vector = vertex.vector().to_vec();
+        // TODO: try to avoid copying the vector.
+        let src_vector = vertex.vector().map(|v| Ok(v.to_vec())).unwrap_or_else(|| {
+            graph
+                .get_raw_vector(src_vertex_id)
+                .expect("row exists")
+                .map(|v| v.to_vec())
+        })?;
+        if edges.len() >= self.reader.config().max_edges.get() {
             let mut neighbors = edges
                 .iter()
                 .map(|e| {
                     graph
-                        .get_vertex(*e)
+                        .get_raw_vector(*e)
                         .unwrap_or(Err(Error::not_found_error()))
-                        .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst.vector())))
+                        .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst)))
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
             neighbors.sort();
@@ -159,24 +165,30 @@ impl IndexMutator {
             }
             edges.clear();
             edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
-
-            encode_graph_node(&src_vector, edges)
-        } else {
-            encode_graph_node_internal(vertex.vector_bytes(), edges)
-        };
-        graph.set(src_vertex_id, &encoded)
+        }
+        graph.set(src_vertex_id, &encode_graph_node(&src_vector, edges))
     }
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
     pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
         let scorer = self.reader.config().new_scorer();
         let mut graph = self.reader.graph()?;
+        let mut raw_vectors = self.reader.raw_vectors()?;
 
         let (vector, edges) = graph
             .get_vertex(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))
-            .map(|v| (v.vector().to_vec(), v.edges().collect::<Vec<_>>()))?;
+            .map(|v| {
+                let raw_vector = v.vector().map(|x| Ok(x.to_vec())).unwrap_or_else(|| {
+                    raw_vectors
+                        .get_raw_vector(vertex_id)
+                        .expect("row exists")
+                        .map(|v| v.to_vec())
+                });
+                raw_vector.map(|rv| (rv, v.edges().collect::<Vec<_>>()))
+            })??;
 
+        // XXX this needs to remove from raw_vectors too.
         graph.remove(vertex_id)?;
         self.reader.nav_vectors()?.remove(vertex_id)?;
 
@@ -189,14 +201,22 @@ impl IndexMutator {
                     .get_vertex(e)
                     .unwrap_or(Err(Error::not_found_error()))
                     .map(|v| {
-                        (
-                            e,
-                            v.vector().to_vec(),
-                            v.edges().filter(|d| *d != vertex_id).collect::<Vec<_>>(),
-                        )
+                        let raw_vector = v.vector().map(|x| Ok(x.to_vec())).unwrap_or_else(|| {
+                            raw_vectors
+                                .get_raw_vector(vertex_id)
+                                .expect("row exists")
+                                .map(|rv| rv.to_vec())
+                        });
+                        raw_vector.map(|rv| {
+                            (
+                                e,
+                                rv,
+                                v.edges().filter(|d| *d != vertex_id).collect::<Vec<_>>(),
+                            )
+                        })
                     })
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Result<Vec<_>>>>()??;
 
         // Create links between edges of the deleted node if needed.
         self.cross_link_peer_vertices(&mut vertex_data, scorer.as_ref())?;

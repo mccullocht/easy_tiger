@@ -197,9 +197,11 @@ impl GraphSearcher {
 
         let scorer = reader.config().new_scorer();
         let query = scorer.normalize_vector(query.into());
-        // TODO: this may unnecessarily create a cursor. lazily creating it it difficult because
-        // the result is falliable.
-        let mut raw_vectors = reader.raw_vectors()?;
+        let mut raw_vectors = if self.candidates.iter().any(|c| c.state.vector().is_none()) {
+            Some(reader.raw_vectors()?)
+        } else {
+            None
+        };
         let rescored = self
             .candidates
             .iter()
@@ -210,6 +212,8 @@ impl GraphSearcher {
                     Ok(scorer.score(&query, &candidate_vector))
                 } else {
                     raw_vectors
+                        .as_mut()
+                        .expect("set if any")
                         .get_raw_vector(vertex)
                         .expect("row exists")
                         .map(|rv| scorer.score(&query, &rv))

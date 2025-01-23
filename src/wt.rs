@@ -30,7 +30,7 @@ pub struct CursorGraphVertex<'a> {
 
 impl<'a> CursorGraphVertex<'a> {
     fn new(config: &GraphConfig, data: Cow<'a, [u8]>) -> Self {
-        let raw_vector = RawVector::from(data.clone(), config.dimensions.get());
+        let raw_vector = RawVector::from_cow_partial(data.clone(), config.dimensions.get());
         Self {
             data,
             raw_vector,
@@ -128,7 +128,7 @@ impl RawVectorStore for CursorGraph<'_> {
     fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<RawVector<'_>>> {
         let r =
             unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
-        Some(r.map(|r| RawVector::from(r, self.config.dimensions.get())))
+        Some(r.map(|r| RawVector::from_cow_partial(r, self.config.dimensions.get())))
     }
 }
 

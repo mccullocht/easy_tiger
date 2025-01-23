@@ -113,8 +113,7 @@ pub enum RawVector<'a> {
 }
 
 impl<'a> RawVector<'a> {
-    // TODO: rename because this is shadowing all the From impls.
-    pub fn from(bytes: Cow<'a, [u8]>, dim: usize) -> Self {
+    pub fn from_cow_partial(bytes: Cow<'a, [u8]>, dim: usize) -> Self {
         #[cfg(target_endian = "little")]
         {
             // WiredTiger does not guarantee that the returned memory will be aligned, a

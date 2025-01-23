@@ -37,10 +37,6 @@ impl<'a> CursorGraphVertex<'a> {
             edges_start: config.dimensions.get() * std::mem::size_of::<f32>(),
         }
     }
-
-    pub(crate) fn vector_bytes(&self) -> &[u8] {
-        &self.data[..self.edges_start]
-    }
 }
 
 impl GraphVertex for CursorGraphVertex<'_> {
@@ -357,7 +353,9 @@ pub(crate) fn encode_graph_vertex_internal<'a>(
     // There is unfortunately no constant for this in the leb128 crate.
     let mut out: Vec<u8> =
         Vec::with_capacity(vector.as_ref().map(|v| v.byte_len()).unwrap_or(0) + edges.len() * 10);
-    if let Some(v) = vector { v.append_bytes(&mut out) }
+    if let Some(v) = vector {
+        v.append_bytes(&mut out)
+    }
 
     edges.sort();
     for (prev, next) in std::iter::once(&0).chain(edges.iter()).zip(edges.iter()) {
@@ -365,6 +363,11 @@ pub(crate) fn encode_graph_vertex_internal<'a>(
     }
 
     out
+}
+
+/// Encode the contents of a raw vector to use as a WiredTiger table value.
+pub fn encode_raw_vector(vector: &[f32]) -> Vec<u8> {
+    VectorRep::from(vector).to_byte_vec()
 }
 
 pub(crate) enum VectorRep<'a> {
@@ -389,6 +392,12 @@ impl VectorRep<'_> {
             }
             Self::Bytes(b) => vec.extend_from_slice(b),
         }
+    }
+
+    fn to_byte_vec(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.byte_len());
+        self.append_bytes(&mut bytes);
+        bytes
     }
 }
 

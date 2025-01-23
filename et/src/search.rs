@@ -15,12 +15,10 @@ use easy_tiger::{
     graph::GraphSearchParams,
     input::{DerefVectorStore, VectorStore},
     search::{GraphSearchStats, GraphSearcher},
-    worker_pool::WorkerPool,
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };
 use memmap2::Mmap;
-use threadpool::ThreadPool;
 use wt_mdb::{Connection, Result, Session};
 use wt_sys::{WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
 
@@ -41,9 +39,6 @@ pub struct SearchArgs {
     /// Maximum number of queries to run. If unset, run all queries in the vector file.
     #[arg(short, long)]
     limit: Option<usize>,
-    /// If greater than 1, do up to this many concurrent reads during graph traversal.
-    #[arg(long, default_value = "1")]
-    concurrency: NonZero<usize>,
 
     /// Path buf to numpy u32 formatted neighbors file.
     /// This should include one row of length neighbors_len for each vector in query_vectors.
@@ -76,14 +71,6 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         beam_width: args.candidates,
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
     };
-    let pool = if args.concurrency.get() > 1 {
-        Some(WorkerPool::new(
-            ThreadPool::new(args.concurrency.into()),
-            connection.clone(),
-        ))
-    } else {
-        None
-    };
     let recall_computer = if let Some((neighbors, recall_k)) = args.neighbors.zip(args.recall_k) {
         let neighbors = DerefVectorStore::<u32, _>::new(
             unsafe { Mmap::map(&File::open(neighbors)?)? },
@@ -111,10 +98,8 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             limit,
             &query_vectors,
             &index,
-            &pool,
             &connection,
             search_params,
-            args.concurrency,
             recall_computer.as_ref(),
         )?;
     }
@@ -126,10 +111,8 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             limit,
             &query_vectors,
             &index,
-            &pool,
             &connection,
             search_params,
-            args.concurrency,
             recall_computer.as_ref(),
         )?;
 
@@ -169,10 +152,8 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
     limit: usize,
     query_vectors: &DerefVectorStore<f32, Q>,
     index: &Arc<TableGraphVectorIndex>,
-    worker_pool: &Option<WorkerPool>,
     connection: &Arc<Connection>,
     search_params: GraphSearchParams,
-    concurrency: NonZero<usize>,
     recall_computer: Option<&RecallComputer<DerefVectorStore<u32, N>>>,
 ) -> io::Result<AggregateSearchStats> {
     let query_indices = (0..limit)
@@ -184,16 +165,7 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
     let stats = query_indices
         .into_par_iter()
         .map_init(
-            || {
-                SearcherState::new(
-                    &index,
-                    &connection,
-                    &worker_pool,
-                    search_params,
-                    concurrency,
-                )
-                .unwrap()
-            },
+            || SearcherState::new(&index, &connection, search_params).unwrap(),
             |searcher, index| {
                 let stats = searcher.query(index, &query_vectors[index], recall_computer);
                 progress.inc(1);
@@ -208,25 +180,17 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
 struct SearcherState {
     reader: SessionGraphVectorIndexReader,
     searcher: GraphSearcher,
-    concurrency: NonZero<usize>,
 }
 
 impl SearcherState {
     fn new(
         index: &Arc<TableGraphVectorIndex>,
         connection: &Arc<Connection>,
-        worker_pool: &Option<WorkerPool>,
         search_params: GraphSearchParams,
-        concurrency: NonZero<usize>,
     ) -> io::Result<Self> {
         Ok(Self {
-            reader: SessionGraphVectorIndexReader::new(
-                index.clone(),
-                connection.open_session()?,
-                worker_pool.clone(),
-            ),
+            reader: SessionGraphVectorIndexReader::new(index.clone(), connection.open_session()?),
             searcher: GraphSearcher::new(search_params),
-            concurrency,
         })
     }
 
@@ -238,9 +202,7 @@ impl SearcherState {
     ) -> io::Result<AggregateSearchStats> {
         self.reader.session().begin_transaction(None)?;
         let start = Instant::now();
-        let results =
-            self.searcher
-                .search_with_concurrency(query, &mut self.reader, self.concurrency)?;
+        let results = self.searcher.search(query, &mut self.reader)?;
         let duration = Instant::now() - start;
         if duration > Duration::new(1, 0) {
             println!("query {} {:0.6}", index, duration.as_secs_f64());

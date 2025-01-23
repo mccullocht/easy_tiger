@@ -11,10 +11,7 @@ use wt_mdb::{
     Session, WiredTigerError,
 };
 
-use crate::{
-    graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
-    worker_pool::WorkerPool,
-};
+use crate::graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore};
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
@@ -251,22 +248,12 @@ impl TableGraphVectorIndex {
 pub struct SessionGraphVectorIndexReader {
     index: Arc<TableGraphVectorIndex>,
     session: Session,
-    worker_pool: Option<WorkerPool>,
 }
 
 impl SessionGraphVectorIndexReader {
     /// Create a new `TableGraphVectorIndex` given a named index and a session to access that data.
-    /// Optionally provide a `WorkerPool` for use with parallel `lookup()`.
-    pub fn new(
-        index: Arc<TableGraphVectorIndex>,
-        session: Session,
-        worker_pool: Option<WorkerPool>,
-    ) -> Self {
-        Self {
-            index,
-            session,
-            worker_pool,
-        }
+    pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
+        Self { index, session }
     }
 
     /// Return a reference to the underlying `Session`.
@@ -311,38 +298,6 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         Ok(CursorNavVectorStore::new(
             self.session.get_record_cursor(&self.index.nav_table_name)?,
         ))
-    }
-
-    fn parallel_lookup(&self) -> bool {
-        self.worker_pool.is_some()
-    }
-
-    fn lookup<D>(&self, vertex_id: i64, done: D)
-    where
-        D: FnOnce(Option<Result<CursorGraphVertex<'_>>>) + Send + Sync + 'static,
-    {
-        if let Some(workers) = self.worker_pool.as_ref() {
-            let index = self.index.clone();
-            workers.execute(move |session| {
-                let mut cursor = match session.get_record_cursor(index.graph_table_name()) {
-                    Ok(cursor) => cursor,
-                    Err(e) => {
-                        done(Some(Err(e)));
-                        return;
-                    }
-                };
-                done(
-                    unsafe { cursor.seek_exact_unsafe(vertex_id) }.map(|result| {
-                        result.map(|r| CursorGraphVertex::new(index.config(), r.into_inner_value()))
-                    }),
-                );
-            });
-        } else {
-            match self.graph() {
-                Ok(mut graph) => done(graph.get(vertex_id)),
-                Err(e) => done(Some(Err(e))),
-            }
-        }
     }
 }
 

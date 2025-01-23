@@ -2,9 +2,7 @@
 
 use std::{
     collections::HashSet,
-    num::NonZero,
     ops::{Add, AddAssign},
-    sync::mpsc::channel,
 };
 
 use crate::{
@@ -78,47 +76,25 @@ impl GraphSearcher {
     /// before optionally re-ranking based on higher fidelity vectors stored in the graph.
     ///
     /// Returns an approximate list of neighbors with the highest scores.
-    pub fn search<R: GraphVectorIndexReader>(
+    pub fn search(
         &mut self,
         query: &[f32],
-        reader: &mut R,
-    ) -> Result<Vec<Neighbor>> {
-        self.search_with_concurrency(query, reader, NonZero::new(1).unwrap())
-    }
-
-    /// Search `reader` for `query` using up `max_concurrent` threads at any one time.
-    /// The query will be executed serially if `max_concurrent == 1` or if
-    /// `!reader.parallel_lookup()`.
-    ///
-    /// Return the top matching candidates.
-    pub fn search_with_concurrency<R: GraphVectorIndexReader>(
-        &mut self,
-        query: &[f32],
-        reader: &mut R,
-        max_concurrent: NonZero<usize>,
+        reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.candidates.clear();
-        self.visited = 0;
-
-        if max_concurrent.get() > 1 && reader.parallel_lookup() {
-            self.search_concurrently(query, reader, max_concurrent)
-        } else {
-            self.search_serially(query, reader)
-        }
+        self.search_internal(query, reader)
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
-    pub fn search_for_insert<R: GraphVectorIndexReader>(
+    pub fn search_for_insert(
         &mut self,
         vertex_id: i64,
-        reader: &mut R,
+        reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         // Insertions may be concurrent and there could already be backlinks to this vertex in the graph.
         // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
         self.seen.insert(vertex_id);
-        self.candidates.clear();
 
         // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
         let query = reader
@@ -127,14 +103,18 @@ impl GraphSearcher {
             .unwrap_or(Err(Error::not_found_error()))?
             .vector()
             .to_vec();
-        self.search_serially(&query, reader)
+        self.search_internal(&query, reader)
     }
 
-    fn search_serially<R: GraphVectorIndexReader>(
+    fn search_internal(
         &mut self,
         query: &[f32],
-        reader: &mut R,
+        reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
+        // TODO: come up with a better way of managing re-used state.
+        self.candidates.clear();
+        self.visited = 0;
+
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
         let quantizer = reader.config().new_quantizer();
@@ -166,76 +146,6 @@ impl GraphSearcher {
                 let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
                     .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
-            }
-        }
-
-        Ok(self.extract_results(query, reader))
-    }
-
-    fn search_concurrently<R>(
-        &mut self,
-        query: &[f32],
-        reader: &mut R,
-        max_concurrent: NonZero<usize>,
-    ) -> Result<Vec<Neighbor>>
-    where
-        R: GraphVectorIndexReader,
-    {
-        self.candidates.clear();
-
-        let mut graph = reader.graph()?;
-        let mut nav = reader.nav_vectors()?;
-        let quantizer = reader.config().new_quantizer();
-        let nav_scorer = reader.config().new_nav_scorer();
-        let nav_query = self.init_candidates(
-            query,
-            &mut graph,
-            &mut nav,
-            quantizer.as_ref(),
-            nav_scorer.as_ref(),
-        )?;
-
-        let mut num_concurrent = 0;
-        let (send, recv) = channel();
-        loop {
-            for neighbor in self
-                .candidates
-                .unvisited_iter()
-                .take(max_concurrent.get() - num_concurrent)
-                .copied()
-            {
-                let graph_send = send.clone();
-                reader.lookup(neighbor.vertex(), move |vertex| {
-                    graph_send
-                        .send(vertex.map(|result| {
-                            result.map(|v| {
-                                (neighbor, v.vector().to_vec(), v.edges().collect::<Vec<_>>())
-                            })
-                        }))
-                        .unwrap();
-                });
-                num_concurrent += 1;
-            }
-
-            // If we have no outstanding reads at this point then all of the members of the
-            // candidate list have been visited and we've converged on the result set.
-            if num_concurrent == 0 {
-                break;
-            }
-
-            for lookup_result in std::iter::once(recv.recv().unwrap()).chain(recv.try_iter()) {
-                self.visited += 1;
-                num_concurrent -= 1;
-                let (neighbor, vector, edges) =
-                    lookup_result.unwrap_or(Err(Error::not_found_error()))?;
-                self.candidates.visit_candidate(neighbor, vector);
-                for edge in edges {
-                    if self.seen.insert(edge) {
-                        let doc = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
-                        self.candidates
-                            .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &doc)));
-                    }
-                }
             }
         }
 
@@ -302,7 +212,6 @@ impl GraphSearcher {
 #[derive(Debug, PartialEq)]
 enum CandidateState {
     Unvisited,
-    Pending,
     Visited(Vec<f32>),
 }
 
@@ -381,36 +290,6 @@ impl CandidateList {
             Some(VisitCandidateGuard::new(self))
         } else {
             None
-        }
-    }
-
-    /// Return an iterator over all unvisited candidates, marking any return as Pending.
-    fn unvisited_iter(&mut self) -> impl Iterator<Item = &'_ Neighbor> {
-        self.candidates
-            .iter_mut()
-            .skip(self.next_unvisited)
-            .filter_map(|c| match c.state {
-                CandidateState::Unvisited => {
-                    c.state = CandidateState::Pending;
-                    Some(&c.neighbor)
-                }
-                _ => None,
-            })
-    }
-
-    /// Mark `neighbor` as visited and insert associated `vector`.
-    ///
-    /// Returns true if `neighbor` was successfully updated.
-    fn visit_candidate(&mut self, neighbor: Neighbor, vector: Vec<f32>) -> bool {
-        match self
-            .candidates
-            .binary_search_by_key(&neighbor, |c| c.neighbor)
-        {
-            Ok(index) => {
-                self.candidates[index].state = CandidateState::Visited(vector);
-                true
-            }
-            Err(_) => false,
         }
     }
 

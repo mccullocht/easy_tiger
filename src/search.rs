@@ -81,6 +81,8 @@ impl GraphSearcher {
         query: &[f32],
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
+        self.seen.clear();
+        self.candidates.clear();
         self.search_internal(query, reader)
     }
 

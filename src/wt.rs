@@ -102,7 +102,13 @@ impl<'a> CursorGraph<'a> {
     }
 
     pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
-        self.cursor.remove(vertex_id)
+        self.cursor.remove(vertex_id).or_else(|e| {
+            if e == Error::not_found_error() {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
     }
 }
 
@@ -147,7 +153,13 @@ impl<'a> CursorNavVectorStore<'a> {
     }
 
     pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
-        self.cursor.remove(vertex_id)
+        self.cursor.remove(vertex_id).or_else(|e| {
+            if e == Error::not_found_error() {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
     }
 }
 

@@ -188,8 +188,9 @@ impl IndexMutator {
                 raw_vector.map(|rv| (rv, v.edges().collect::<Vec<_>>()))
             })??;
 
-        // XXX this needs to remove from raw_vectors too. ideally it needs a unified mutator.
+        // TODO: unified graph index writer trait to handles removal and other mutations.
         graph.remove(vertex_id)?;
+        raw_vectors.remove(vertex_id)?;
         self.reader.nav_vectors()?.remove(vertex_id)?;
 
         // Cache information about each vertex linked to vertex_id.
@@ -266,7 +267,6 @@ impl IndexMutator {
                             None
                         }
                     })
-                    // TODO: this feels unnecessary but it doesn't compile without it.
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();

@@ -368,8 +368,8 @@ mod test {
 
     use crate::{
         graph::{
-            Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVector,
-            RawVectorStore,
+            Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
+            RawVector, RawVectorStore,
         },
         quantization::{BinaryQuantizer, Quantizer, VectorQuantizer},
         scoring::{DotProductScorer, F32VectorScorer, VectorSimilarity},
@@ -418,6 +418,7 @@ mod test {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
                 quantizer: VectorQuantizer::Binary,
+                layout: GraphLayout::RawVectorInGraph,
                 max_edges: max_edges,
                 index_search_params: GraphSearchParams {
                     beam_width: NonZero::new(usize::MAX).unwrap(),

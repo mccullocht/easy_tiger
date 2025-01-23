@@ -3,7 +3,7 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     bulk::{BulkLoadBuilder, Options},
-    graph::{GraphConfig, GraphSearchParams},
+    graph::{GraphConfig, GraphLayout, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
     quantization::VectorQuantizer,
     scoring::VectorSimilarity,
@@ -80,6 +80,7 @@ pub fn bulk_load(
         dimensions: args.dimensions,
         similarity: args.similarity,
         quantizer: args.quantizer,
+        layout: GraphLayout::RawVectorInGraph, // XXX allow args
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,

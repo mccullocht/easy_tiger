@@ -3,7 +3,7 @@
 //! Graph access traits provided here are used during graph search, and allow us to
 //! build indices with both WiredTiger backing and in-memory backing for bulk loads.
 
-use std::{borrow::Cow, collections::BTreeSet, num::NonZero, ops::Deref};
+use std::{borrow::Cow, collections::BTreeSet, io, num::NonZero, ops::Deref, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
@@ -24,14 +24,45 @@ pub struct GraphSearchParams {
     pub num_rerank: usize,
 }
 
+/// Describes how fields within the vector index are laid out -- split completely or with some
+/// colocated fields.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub enum GraphLayout {
+    /// Each field appears in its own table.
+    Split,
+    /// Raw vector is stored in the graph alongside the edges.
+    RawVectorInGraph,
+}
+
+impl Default for GraphLayout {
+    fn default() -> Self {
+        Self::RawVectorInGraph
+    }
+}
+
+impl FromStr for GraphLayout {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "split" => Ok(Self::Split),
+            "raw_vector_in_graph" => Ok(Self::RawVectorInGraph),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Unknown graph layout {}", s),
+            )),
+        }
+    }
+}
+
 /// Configuration describing graph shape and construction. Used to read and mutate the graph.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct GraphConfig {
     pub dimensions: NonZero<usize>,
-    #[serde(default)]
     pub similarity: VectorSimilarity,
-    #[serde(default)]
     pub quantizer: VectorQuantizer,
+    #[serde(default)]
+    pub layout: GraphLayout,
     pub max_edges: NonZero<usize>,
     pub index_search_params: GraphSearchParams,
 }

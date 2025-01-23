@@ -2,7 +2,7 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    graph::{GraphConfig, GraphSearchParams},
+    graph::{GraphConfig, GraphLayout, GraphSearchParams},
     quantization::VectorQuantizer,
     scoring::VectorSimilarity,
     wt::TableGraphVectorIndex,
@@ -70,6 +70,7 @@ pub fn init_index(
             dimensions: args.dimensions,
             similarity: args.similarity,
             quantizer: args.quantizer,
+            layout: GraphLayout::RawVectorInGraph, // XXX allow args
             max_edges: args.max_edges,
             index_search_params: GraphSearchParams {
                 beam_width: args.edge_candidates,

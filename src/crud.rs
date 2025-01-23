@@ -308,7 +308,9 @@ mod tests {
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
     use crate::{
-        graph::{Graph, GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVertex},
+        graph::{
+            Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
+        },
         quantization::VectorQuantizer,
         scoring::VectorSimilarity,
         search::GraphSearcher,
@@ -375,6 +377,7 @@ mod tests {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
                         quantizer: VectorQuantizer::Binary,
+                        layout: GraphLayout::Split,
                         max_edges: NonZero::new(4).unwrap(),
                         index_search_params: Self::search_params(),
                     },

@@ -82,7 +82,6 @@ impl GraphSearcher {
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.candidates.clear();
         self.search_internal(query, reader)
     }
 
@@ -96,7 +95,6 @@ impl GraphSearcher {
         // Insertions may be concurrent and there could already be backlinks to this vertex in the graph.
         // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
         self.seen.insert(vertex_id);
-        self.candidates.clear();
 
         // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
         let query = reader
@@ -113,6 +111,10 @@ impl GraphSearcher {
         query: &[f32],
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
+        // TODO: come up with a better way of managing re-used state.
+        self.candidates.clear();
+        self.visited = 0;
+
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
         let quantizer = reader.config().new_quantizer();

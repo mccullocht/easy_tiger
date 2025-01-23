@@ -35,7 +35,7 @@ use crate::{
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_node, CursorGraph, CursorNavVectorStore, TableGraphVectorIndex, CONFIG_KEY,
+        encode_graph_vertex, CursorGraph, CursorNavVectorStore, TableGraphVectorIndex, CONFIG_KEY,
         ENTRY_POINT_KEY,
     },
     Neighbor,
@@ -245,6 +245,8 @@ where
         Ok(())
     }
 
+    // XXX this should load to a raw vectors table.
+    // XXX there should be a function to encode just the vector.
     fn load_raw_vectors<P: Fn() + Send + Sync>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         session.bulk_load(
@@ -256,7 +258,7 @@ where
                 .take(self.limit)
                 .map(|(i, v)| {
                     let normalized = self.scorer.normalize_vector(v.into());
-                    let value = encode_graph_node(&normalized, vec![]);
+                    let value = encode_graph_vertex(vec![], Some(&normalized));
                     progress();
                     Record::new(i as i64, value)
                 }),
@@ -435,11 +437,12 @@ where
                         if vertex.is_empty() {
                             stats.unconnected += 1;
                         }
+                        // XXX this needs to vary based on layout.
                         Record::new(
                             i as i64,
-                            encode_graph_node(
-                                &self.scorer.normalize_vector(v.into()),
+                            encode_graph_vertex(
                                 vertex.iter().map(|n| n.vertex()).collect(),
+                                Some(&self.scorer.normalize_vector(v.into())),
                             ),
                         )
                     }),

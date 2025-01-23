@@ -209,7 +209,7 @@ impl GraphSearcher {
             .map(|c| {
                 let vertex = c.neighbor.vertex();
                 let score = if let Some(candidate_vector) = c.state.vector() {
-                    Ok(scorer.score(&query, &candidate_vector))
+                    Ok(scorer.score(&query, candidate_vector))
                 } else {
                     raw_vectors
                         .as_mut()
@@ -419,7 +419,7 @@ mod test {
                 similarity: VectorSimilarity::Euclidean,
                 quantizer: VectorQuantizer::Binary,
                 layout: GraphLayout::RawVectorInGraph,
-                max_edges: max_edges,
+                max_edges,
                 index_search_params: GraphSearchParams {
                     beam_width: NonZero::new(usize::MAX).unwrap(),
                     num_rerank: usize::MAX,
@@ -482,7 +482,7 @@ mod test {
     #[derive(Debug)]
     pub struct TestGraphVectorIndexReader<'a>(&'a TestGraphVectorIndex);
 
-    impl<'a> GraphVectorIndexReader for TestGraphVectorIndexReader<'a> {
+    impl GraphVectorIndexReader for TestGraphVectorIndexReader<'_> {
         type Graph<'b>
             = TestGraphAccess<'b>
         where
@@ -516,7 +516,7 @@ mod test {
     #[derive(Debug)]
     pub struct TestGraphAccess<'a>(&'a TestGraphVectorIndex);
 
-    impl<'a> Graph for TestGraphAccess<'a> {
+    impl Graph for TestGraphAccess<'_> {
         type Vertex<'c>
             = TestGraphVertex<'c>
         where
@@ -539,7 +539,7 @@ mod test {
         }
     }
 
-    impl<'a> RawVectorStore for TestGraphAccess<'a> {
+    impl RawVectorStore for TestGraphAccess<'_> {
         fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<RawVector<'_>>> {
             if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
                 Some(Ok((&*self.0.data[vertex_id as usize].vector).into()))
@@ -549,7 +549,7 @@ mod test {
         }
     }
 
-    impl<'a> NavVectorStore for TestGraphAccess<'a> {
+    impl NavVectorStore for TestGraphAccess<'_> {
         fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
             if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
                 Some(Ok(Cow::from(&self.0.data[vertex_id as usize].nav_vector)))
@@ -562,7 +562,7 @@ mod test {
     #[derive(Debug)]
     pub struct TestGraph<'a>(&'a TestGraphVectorIndex);
 
-    impl<'a> Graph for TestGraph<'a> {
+    impl Graph for TestGraph<'_> {
         type Vertex<'c>
             = TestGraphVertex<'c>
         where
@@ -587,7 +587,7 @@ mod test {
 
     pub struct TestGraphVertex<'a>(&'a TestVector);
 
-    impl<'a> GraphVertex for TestGraphVertex<'a> {
+    impl GraphVertex for TestGraphVertex<'_> {
         type EdgeIterator<'c>
             = std::iter::Copied<std::slice::Iter<'c, i64>>
         where

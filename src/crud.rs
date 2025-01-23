@@ -6,8 +6,8 @@ use crate::{
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_node, encode_graph_node_internal, CursorGraph, SessionGraphVectorIndexReader,
-        TableGraphVectorIndex, ENTRY_POINT_KEY,
+        encode_graph_vertex, encode_graph_vertex_internal, CursorGraph,
+        SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -81,11 +81,12 @@ impl IndexMutator {
         )?;
         candidate_edges.truncate(selected_len);
 
+        // XXX this needs to handle layout correctly.
         graph.set(
             vertex_id,
-            &encode_graph_node_internal(
-                vector.as_ref(),
+            &encode_graph_vertex(
                 candidate_edges.iter().map(|n| n.vertex()).collect(),
+                Some(vector.as_ref()),
             ),
         )?;
         self.reader.nav_vectors()?.set(
@@ -114,7 +115,8 @@ impl IndexMutator {
                 .get_vertex(src_vertex_id)
                 .unwrap_or(Err(Error::not_found_error()))?;
             let edges = vertex.edges().filter(|v| *v != dst_vertex_id).collect();
-            let encoded = encode_graph_node_internal(vertex.vector_bytes(), edges);
+            // XXX this must handle layout correctly.
+            let encoded = encode_graph_vertex_internal(edges, Some(vertex.vector_bytes()));
             graph.set(src_vertex_id, &encoded)?;
         }
 
@@ -166,7 +168,11 @@ impl IndexMutator {
             edges.clear();
             edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
         }
-        graph.set(src_vertex_id, &encode_graph_node(&src_vector, edges))
+        // XXX this must handle layout correctly.
+        graph.set(
+            src_vertex_id,
+            &encode_graph_vertex(edges, Some(&src_vector)),
+        )
     }
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
@@ -240,7 +246,8 @@ impl IndexMutator {
 
         // Write all the mutated nodes back to WT.
         for (vertex_id, vector, edges) in vertex_data {
-            graph.set(vertex_id, &encode_graph_node(&vector, edges))?;
+            // XXX this must handle layout correctly.
+            graph.set(vertex_id, &encode_graph_vertex(edges, Some(&vector)))?;
         }
 
         Ok(())

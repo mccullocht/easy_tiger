@@ -180,7 +180,7 @@ impl<'a> From<Cow<'a, [f32]>> for RawVector<'a> {
     }
 }
 
-impl<'a> From<Vec<f32>> for RawVector<'a> {
+impl From<Vec<f32>> for RawVector<'_> {
     fn from(value: Vec<f32>) -> Self {
         Self::Cow(value.into())
     }
@@ -192,14 +192,14 @@ impl<'a> From<&'a [f32]> for RawVector<'a> {
     }
 }
 
-impl<'a> Deref for RawVector<'a> {
+impl Deref for RawVector<'_> {
     type Target = [f32];
 
     fn deref(&self) -> &Self::Target {
         match self {
             // Safety: From conversion ensures that bytes is aligned before producing Borrowed.
             Self::Bytes { bytes, dim } => unsafe { &bytes.align_to::<f32>().1[..*dim] },
-            Self::Cow(v) => &v,
+            Self::Cow(v) => v,
         }
     }
 }

@@ -153,7 +153,7 @@ impl GraphSearcher {
             }
         }
 
-        Ok(self.extract_results(query, reader))
+        self.extract_results(query, reader)
     }
 
     // Initialize the candidate queue and return the binary quantized query.
@@ -190,28 +190,37 @@ impl GraphSearcher {
         &mut self,
         query: &[f32],
         reader: &R,
-    ) -> Vec<Neighbor> {
-        if self.params.num_rerank > 0 {
-            // XXX in this case we need to lookup raw vectors if they are not present.
-            // XXX this also implies that this function may fail now.
-            let scorer = reader.config().new_scorer();
-            let query = scorer.normalize_vector(query.into());
-            let mut rescored = self
-                .candidates
-                .iter()
-                .take(self.params.num_rerank)
-                .map(|c| {
-                    Neighbor::new(
-                        c.neighbor.vertex(),
-                        scorer.score(&query, c.state.vector().expect("node visited")),
-                    )
-                })
-                .collect::<Vec<_>>();
-            rescored.sort();
-            rescored
-        } else {
-            self.candidates.iter().map(|c| c.neighbor).collect()
+    ) -> Result<Vec<Neighbor>> {
+        if self.params.num_rerank == 0 {
+            return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
         }
+
+        let scorer = reader.config().new_scorer();
+        let query = scorer.normalize_vector(query.into());
+        // TODO: this may unnecessarily create a cursor. lazily creating it it difficult because
+        // the result is falliable.
+        let mut raw_vectors = reader.raw_vectors()?;
+        let rescored = self
+            .candidates
+            .iter()
+            .take(self.params.num_rerank)
+            .map(|c| {
+                let vertex = c.neighbor.vertex();
+                let score = if let Some(candidate_vector) = c.state.vector() {
+                    Ok(scorer.score(&query, &candidate_vector))
+                } else {
+                    raw_vectors
+                        .get_raw_vector(vertex)
+                        .expect("row exists")
+                        .map(|rv| scorer.score(&query, &rv))
+                };
+                score.map(|s| Neighbor::new(vertex, s))
+            })
+            .collect::<Result<Vec<_>>>();
+        rescored.map(|mut r| {
+            r.sort();
+            r
+        })
     }
 }
 

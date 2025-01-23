@@ -188,7 +188,7 @@ impl IndexMutator {
                 raw_vector.map(|rv| (rv, v.edges().collect::<Vec<_>>()))
             })??;
 
-        // XXX this needs to remove from raw_vectors too.
+        // XXX this needs to remove from raw_vectors too. ideally it needs a unified mutator.
         graph.remove(vertex_id)?;
         self.reader.nav_vectors()?.remove(vertex_id)?;
 

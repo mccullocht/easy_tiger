@@ -35,8 +35,8 @@ use crate::{
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_node, CursorGraph, CursorGraphVertex, CursorNavVectorStore,
-        TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
+        encode_graph_node, CursorGraph, CursorNavVectorStore, TableGraphVectorIndex, CONFIG_KEY,
+        ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -685,19 +685,10 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     }
 
     fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-        if let Some(cursor) = self.1.as_mut() {
-            Some(cursor.get_vertex(vertex_id)?.map(|v| BulkLoadGraphVertex {
-                builder: self.0,
-                vertex_id,
-                vertex: Some(v),
-            }))
-        } else {
-            Some(Ok(BulkLoadGraphVertex {
-                builder: self.0,
-                vertex_id,
-                vertex: None,
-            }))
-        }
+        Some(Ok(BulkLoadGraphVertex {
+            builder: self.0,
+            vertex_id,
+        }))
     }
 }
 
@@ -714,7 +705,6 @@ impl<D: Send + Sync> RawVectorStore for BulkLoadBuilderGraph<'_, D> {
 struct BulkLoadGraphVertex<'a, D> {
     builder: &'a BulkLoadBuilder<D>,
     vertex_id: i64,
-    vertex: Option<CursorGraphVertex<'a>>,
 }
 
 impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
@@ -724,11 +714,7 @@ impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
         Self: 'c;
 
     fn vector(&self) -> Option<Cow<'_, [f32]>> {
-        // XXX remove this, we shouldn't ever provide the vector this way.
-        self.vertex
-            .as_ref()
-            .map(|v| v.vector())
-            .unwrap_or_else(|| Some(self.builder.get_vector(self.vertex_id as usize)))
+        None
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {

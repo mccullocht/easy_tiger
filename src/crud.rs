@@ -31,7 +31,7 @@ impl IndexMutator {
     pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
         let searcher = GraphSearcher::new(index.config().index_search_params);
         Self {
-            reader: SessionGraphVectorIndexReader::new(index, session, None),
+            reader: SessionGraphVectorIndexReader::new(index, session),
             searcher,
         }
     }
@@ -315,7 +315,6 @@ mod tests {
             SessionGraphVectorIndexReader::new(
                 self.index.clone(),
                 self.conn.open_session().unwrap(),
-                None,
             )
         }
 

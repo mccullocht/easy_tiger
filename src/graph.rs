@@ -165,6 +165,14 @@ impl<'a> RawVector<'a> {
         }
     }
 
+    pub fn bytes_len(&self) -> usize {
+        let dim = match self {
+            Self::Bytes { bytes: _, dim } => *dim,
+            Self::Cow(v) => v.len(),
+        };
+        dim * std::mem::size_of::<f32>()
+    }
+
     fn bytes_to_vec(bytes: Cow<'_, [u8]>, dim: usize) -> Vec<f32> {
         bytes
             .chunks(std::mem::size_of::<f32>())

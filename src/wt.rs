@@ -24,17 +24,25 @@ pub const CONFIG_KEY: i64 = -2;
 /// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
 pub struct CursorGraphVertex<'a> {
     data: Cow<'a, [u8]>,
-    raw_vector: RawVector<'a>,
+    raw_vector: Option<RawVector<'a>>,
     edges_start: usize,
 }
 
 impl<'a> CursorGraphVertex<'a> {
     fn new(config: &GraphConfig, data: Cow<'a, [u8]>) -> Self {
-        let raw_vector = RawVector::from_cow_partial(data.clone(), config.dimensions.get());
+        let raw_vector = if config.layout == GraphLayout::RawVectorInGraph {
+            Some(RawVector::from_cow_partial(
+                data.clone(),
+                config.dimensions.get(),
+            ))
+        } else {
+            None
+        };
+        let edges_start = raw_vector.as_ref().map(|v| v.bytes_len()).unwrap_or(0);
         Self {
             data,
             raw_vector,
-            edges_start: config.dimensions.get() * std::mem::size_of::<f32>(),
+            edges_start,
         }
     }
 }
@@ -46,7 +54,7 @@ impl GraphVertex for CursorGraphVertex<'_> {
         Self: 'c;
 
     fn vector(&self) -> Option<Cow<'_, [f32]>> {
-        Some(Cow::from(self.raw_vector.deref()))
+        self.raw_vector.as_ref().map(|v| Cow::from(v.deref()))
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {

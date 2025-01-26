@@ -6,7 +6,7 @@ use crate::{
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_vertex, encode_raw_vector, CursorGraph, SessionGraphVectorIndexReader,
+        encode_graph_vertex, encode_raw_vector, SessionGraphVectorIndexReader,
         TableGraphVectorIndex, ENTRY_POINT_KEY,
     },
     Neighbor,
@@ -68,6 +68,7 @@ impl IndexMutator {
         // TODO: normalize input vector.
         let mut candidate_edges = self.searcher.search(&vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
+        let mut raw_vectors = self.reader.raw_vectors()?;
         if candidate_edges.is_empty() {
             // Proceed through the rest of the function so that the inserts happen.
             // This is mostly as a noop because there are no edges.
@@ -76,7 +77,7 @@ impl IndexMutator {
         let selected_len = prune_edges(
             &mut candidate_edges,
             self.reader.config().max_edges,
-            &mut graph,
+            &mut raw_vectors,
             scorer.as_ref(),
         )?;
         candidate_edges.truncate(selected_len);
@@ -96,6 +97,7 @@ impl IndexMutator {
         for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
             self.insert_edge(
                 &mut graph,
+                &mut raw_vectors,
                 scorer.as_ref(),
                 src_vertex_id,
                 vertex_id,
@@ -117,7 +119,8 @@ impl IndexMutator {
 
     fn insert_edge(
         &self,
-        graph: &mut CursorGraph<'_>,
+        graph: &mut impl Graph,
+        raw_vectors: &mut impl RawVectorStore,
         scorer: &dyn F32VectorScorer,
         src_vertex_id: i64,
         dst_vertex_id: i64,
@@ -131,7 +134,7 @@ impl IndexMutator {
             .collect::<Vec<_>>();
         // TODO: try to avoid copying the vector.
         let src_vector = vertex.vector().map(|v| Ok(v.to_vec())).unwrap_or_else(|| {
-            graph
+            raw_vectors
                 .get_raw_vector(src_vertex_id)
                 .expect("row exists")
                 .map(|v| v.to_vec())
@@ -140,7 +143,7 @@ impl IndexMutator {
             let mut neighbors = edges
                 .iter()
                 .map(|e| {
-                    graph
+                    raw_vectors
                         .get_raw_vector(*e)
                         .unwrap_or(Err(Error::not_found_error()))
                         .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst)))
@@ -150,7 +153,7 @@ impl IndexMutator {
             let selected_len = prune_edges(
                 &mut neighbors,
                 self.reader.config().max_edges,
-                graph,
+                raw_vectors,
                 scorer,
             )?;
             // Ensure the graph is undirected by removing links from pruned edges back to this node.
@@ -198,7 +201,7 @@ impl IndexMutator {
                     .map(|v| {
                         let raw_vector = v.vector().map(|x| Ok(x.to_vec())).unwrap_or_else(|| {
                             raw_vectors
-                                .get_raw_vector(vertex_id)
+                                .get_raw_vector(e)
                                 .expect("row exists")
                                 .map(|rv| rv.to_vec())
                         });
@@ -328,7 +331,7 @@ impl IndexMutator {
         match self.reader.config().layout {
             GraphLayout::Split => self
                 .reader
-                .raw_vectors()?
+                .graph()?
                 .set(vertex_id, &encode_graph_vertex(edges, None)),
             GraphLayout::RawVectorInGraph => {
                 self.set_graph_edges_vector_in_graph_layout(vertex_id, edges, raw_vector)
@@ -432,6 +435,7 @@ mod tests {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
                         quantizer: VectorQuantizer::Binary,
+                        // TODO: each test should be run in both layouts.
                         layout: GraphLayout::Split,
                         max_edges: NonZero::new(4).unwrap(),
                         index_search_params: Self::search_params(),

@@ -26,7 +26,7 @@ pub struct GraphSearchParams {
 
 /// Describes how fields within the vector index are laid out -- split completely or with some
 /// colocated fields.
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GraphLayout {
     /// Each field appears in its own table.
     Split,

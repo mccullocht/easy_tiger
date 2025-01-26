@@ -24,19 +24,19 @@ use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{Connection, Record, Result, Session};
+use wt_mdb::{options::DropOptionsBuilder, Connection, Record, Result, Session};
 
 use crate::{
     graph::{
-        prune_edges, select_pruned_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex,
-        NavVectorStore, RawVectorStore,
+        prune_edges, select_pruned_edges, Graph, GraphConfig, GraphLayout, GraphVectorIndexReader,
+        GraphVertex, NavVectorStore, RawVectorStore,
     },
     input::{DerefVectorStore, VectorStore},
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_vertex, CursorGraph, CursorNavVectorStore, TableGraphVectorIndex, CONFIG_KEY,
-        ENTRY_POINT_KEY,
+        encode_graph_vertex, encode_raw_vector, CursorGraph, CursorNavVectorStore,
+        TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -148,7 +148,9 @@ where
     /// Phases to be executed by the builder.
     /// This can vary depending on the options.
     pub fn phases(&self) -> Vec<BulkLoadPhase> {
-        if self.options.wt_vector_store {
+        if self.options.wt_vector_store
+            || self.index.config().layout == GraphLayout::RawVectorInGraph
+        {
             vec![
                 BulkLoadPhase::LoadNavVectors,
                 BulkLoadPhase::LoadRawVectors,
@@ -245,12 +247,10 @@ where
         Ok(())
     }
 
-    // XXX this should load to a raw vectors table.
-    // XXX there should be a function to encode just the vector.
     fn load_raw_vectors<P: Fn() + Send + Sync>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         session.bulk_load(
-            self.index.graph_table_name(),
+            self.index.raw_table_name(),
             None,
             self.vectors
                 .iter()
@@ -258,7 +258,7 @@ where
                 .take(self.limit)
                 .map(|(i, v)| {
                     let normalized = self.scorer.normalize_vector(v.into());
-                    let value = encode_graph_vertex(vec![], Some(&normalized));
+                    let value = encode_raw_vector(&normalized);
                     progress();
                     Record::new(i as i64, value)
                 }),
@@ -418,7 +418,10 @@ where
         ];
         let session = self.connection.open_session()?;
         if self.options.wt_vector_store {
-            session.drop_table(self.index.graph_table_name(), None)?;
+            session.drop_table(
+                self.index.graph_table_name(),
+                Some(DropOptionsBuilder::default().set_force().into()),
+            )?;
         }
         session.bulk_load(
             self.index.graph_table_name(),
@@ -437,7 +440,6 @@ where
                         if vertex.is_empty() {
                             stats.unconnected += 1;
                         }
-                        // XXX this needs to vary based on layout.
                         Record::new(
                             i as i64,
                             encode_graph_vertex(

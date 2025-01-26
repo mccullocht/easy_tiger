@@ -30,6 +30,17 @@ pub struct BulkLoadArgs {
     /// This will also dictate the quantized scoring function used.
     #[arg(short, long, value_enum)]
     quantizer: VectorQuantizer,
+
+    /// Physical layout used for graph.
+    ///
+    /// `split` puts raw vectors, nav vectors, and graph edges each in separate tables. If results
+    /// are being re-ranked this will require additional reads to complete.
+    ///
+    /// `raw_vector_in_graph` places raw vectors and graph edges in the same table. When a vertex
+    /// is visited the raw vector is read and saved for re-scoring. This minimizes the number of
+    /// reads performed and is likely better for indices with less traffic.
+    #[arg(long, value_enum, default_value = "raw_vector_in_graph")]
+    layout: GraphLayout,
     /// If true, load all quantized vectors into a trivial memory store for bulk loading.
     /// This can be significantly faster than reading these values from WiredTiger.
     #[arg(long, default_value_t = false)]
@@ -80,7 +91,7 @@ pub fn bulk_load(
         dimensions: args.dimensions,
         similarity: args.similarity,
         quantizer: args.quantizer,
-        layout: GraphLayout::RawVectorInGraph, // XXX allow args
+        layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,

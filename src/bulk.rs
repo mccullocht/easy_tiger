@@ -148,9 +148,7 @@ where
     /// Phases to be executed by the builder.
     /// This can vary depending on the options.
     pub fn phases(&self) -> Vec<BulkLoadPhase> {
-        if self.options.wt_vector_store
-            || self.index.config().layout == GraphLayout::RawVectorInGraph
-        {
+        if self.options.wt_vector_store || self.index.config().layout == GraphLayout::Split {
             vec![
                 BulkLoadPhase::LoadNavVectors,
                 BulkLoadPhase::LoadRawVectors,
@@ -300,6 +298,7 @@ where
                     .borrow_mut();
                 // Use a transaction for each search. Without this each lookup will be a separate transaction
                 // which obtains a reader lock inside the session. Overhead for that is ~10x.
+                // TODO: add session.do_in_transaction() or similar to avoid getting session into a bad state.
                 session.begin_transaction(None)?;
                 let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
                 in_flight.insert(v);
@@ -638,22 +637,14 @@ impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
-        let cursor_graph = if self.0.options.wt_vector_store {
-            Some(CursorGraph::new(
-                *self.0.index.config(),
-                self.1.get_record_cursor(self.0.index.graph_table_name())?,
-            ))
-        } else {
-            None
-        };
-        Ok(BulkLoadBuilderGraph(self.0, cursor_graph))
+        Ok(BulkLoadBuilderGraph(self.0, None))
     }
 
     fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
         let cursor_graph = if self.0.options.wt_vector_store {
             Some(CursorGraph::new(
                 *self.0.index.config(),
-                self.1.get_record_cursor(self.0.index.graph_table_name())?,
+                self.1.get_record_cursor(self.0.index.raw_table_name())?,
             ))
         } else {
             None

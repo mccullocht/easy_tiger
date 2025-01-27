@@ -24,18 +24,18 @@ use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{Connection, Record, Result, Session};
+use wt_mdb::{options::DropOptionsBuilder, Connection, Record, Result, Session};
 
 use crate::{
     graph::{
-        prune_edges, select_pruned_edges, Graph, GraphConfig, GraphVectorIndexReader, GraphVertex,
-        NavVectorStore,
+        prune_edges, select_pruned_edges, Graph, GraphConfig, GraphLayout, GraphVectorIndexReader,
+        GraphVertex, NavVectorStore, RawVectorStore,
     },
     input::{DerefVectorStore, VectorStore},
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_node, CursorGraph, CursorGraphVertex, CursorNavVectorStore,
+        encode_graph_vertex, encode_raw_vector, CursorGraph, CursorNavVectorStore,
         TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
     },
     Neighbor,
@@ -148,7 +148,7 @@ where
     /// Phases to be executed by the builder.
     /// This can vary depending on the options.
     pub fn phases(&self) -> Vec<BulkLoadPhase> {
-        if self.options.wt_vector_store {
+        if self.options.wt_vector_store || self.index.config().layout == GraphLayout::Split {
             vec![
                 BulkLoadPhase::LoadNavVectors,
                 BulkLoadPhase::LoadRawVectors,
@@ -248,7 +248,7 @@ where
     fn load_raw_vectors<P: Fn() + Send + Sync>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         session.bulk_load(
-            self.index.graph_table_name(),
+            self.index.raw_table_name(),
             None,
             self.vectors
                 .iter()
@@ -256,7 +256,7 @@ where
                 .take(self.limit)
                 .map(|(i, v)| {
                     let normalized = self.scorer.normalize_vector(v.into());
-                    let value = encode_graph_node(&normalized, vec![]);
+                    let value = encode_raw_vector(&normalized);
                     progress();
                     Record::new(i as i64, value)
                 }),
@@ -298,6 +298,7 @@ where
                     .borrow_mut();
                 // Use a transaction for each search. Without this each lookup will be a separate transaction
                 // which obtains a reader lock inside the session. Overhead for that is ~10x.
+                // TODO: add session.do_in_transaction() or similar to avoid getting session into a bad state.
                 session.begin_transaction(None)?;
                 let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
                 in_flight.insert(v);
@@ -311,12 +312,12 @@ where
                     v
                 );
 
-                let mut graph = reader.graph()?;
+                let mut raw_vectors = reader.raw_vectors()?;
                 let centroid_score = self.scorer.score(
-                    &graph.get(v as i64).unwrap().unwrap().vector(),
+                    &raw_vectors.get_raw_vector(v as i64).unwrap().unwrap(),
                     &self.centroid,
                 );
-                drop(graph);
+                drop(raw_vectors);
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
                 // undirected. If an edge does not fit on either vertex, save it for later.
@@ -416,7 +417,10 @@ where
         ];
         let session = self.connection.open_session()?;
         if self.options.wt_vector_store {
-            session.drop_table(self.index.graph_table_name(), None)?;
+            session.drop_table(
+                self.index.graph_table_name(),
+                Some(DropOptionsBuilder::default().set_force().into()),
+            )?;
         }
         session.bulk_load(
             self.index.graph_table_name(),
@@ -435,11 +439,17 @@ where
                         if vertex.is_empty() {
                             stats.unconnected += 1;
                         }
+                        let vertex_vector =
+                            if self.index.config().layout == GraphLayout::RawVectorInGraph {
+                                Some(self.scorer.normalize_vector(v.into()))
+                            } else {
+                                None
+                            };
                         Record::new(
                             i as i64,
-                            encode_graph_node(
-                                &self.scorer.normalize_vector(v.into()),
+                            encode_graph_vertex(
                                 vertex.iter().map(|n| n.vertex()).collect(),
+                                vertex_vector.as_ref().map(|vv| vv.as_ref()),
                             ),
                         )
                     }),
@@ -619,6 +629,10 @@ impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'
         = BulkLoadBuilderGraph<'b, D>
     where
         Self: 'b;
+    type RawVectorStore<'b>
+        = BulkLoadBuilderGraph<'b, D>
+    where
+        Self: 'b;
     type NavVectorStore<'b>
         = BulkLoadNavVectorStore<'b>
     where
@@ -629,10 +643,14 @@ impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
+        Ok(BulkLoadBuilderGraph(self.0, None))
+    }
+
+    fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
         let cursor_graph = if self.0.options.wt_vector_store {
             Some(CursorGraph::new(
                 *self.0.index.config(),
-                self.1.get_record_cursor(self.0.index.graph_table_name())?,
+                self.1.get_record_cursor(self.0.index.raw_table_name())?,
             ))
         } else {
             None
@@ -668,19 +686,20 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
         }
     }
 
-    fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+    fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+        Some(Ok(BulkLoadGraphVertex {
+            builder: self.0,
+            vertex_id,
+        }))
+    }
+}
+
+impl<D: Send + Sync> RawVectorStore for BulkLoadBuilderGraph<'_, D> {
+    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<crate::graph::RawVector<'_>>> {
         if let Some(cursor) = self.1.as_mut() {
-            Some(cursor.get(vertex_id)?.map(|v| BulkLoadGraphVertex {
-                builder: self.0,
-                vertex_id,
-                vertex: Some(v),
-            }))
+            cursor.get_raw_vector(vertex_id)
         } else {
-            Some(Ok(BulkLoadGraphVertex {
-                builder: self.0,
-                vertex_id,
-                vertex: None,
-            }))
+            Some(Ok(self.0.get_vector(vertex_id as usize).into()))
         }
     }
 }
@@ -688,7 +707,6 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
 struct BulkLoadGraphVertex<'a, D> {
     builder: &'a BulkLoadBuilder<D>,
     vertex_id: i64,
-    vertex: Option<CursorGraphVertex<'a>>,
 }
 
 impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
@@ -697,11 +715,8 @@ impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
     where
         Self: 'c;
 
-    fn vector(&self) -> Cow<'_, [f32]> {
-        self.vertex
-            .as_ref()
-            .map(|v| v.vector())
-            .unwrap_or_else(|| self.builder.get_vector(self.vertex_id as usize))
+    fn vector(&self) -> Option<Cow<'_, [f32]>> {
+        None
     }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
@@ -738,9 +753,9 @@ enum BulkLoadNavVectorStore<'a> {
 }
 
 impl NavVectorStore for BulkLoadNavVectorStore<'_> {
-    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+    fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
         match self {
-            Self::Cursor(c) => c.get(vertex_id),
+            Self::Cursor(c) => c.get_nav_vector(vertex_id),
             Self::Memory(m) => {
                 if vertex_id >= 0 && (vertex_id as usize) < m.len() {
                     Some(Ok(m[vertex_id as usize].into()))

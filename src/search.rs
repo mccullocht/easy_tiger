@@ -6,7 +6,10 @@ use std::{
 };
 
 use crate::{
-    graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+    graph::{
+        Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
+        RawVectorStore,
+    },
     quantization::Quantizer,
     scoring::QuantizedVectorScorer,
     Neighbor,
@@ -98,10 +101,9 @@ impl GraphSearcher {
 
         // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
         let query = reader
-            .graph()?
-            .get(vertex_id)
+            .raw_vectors()?
+            .get_raw_vector(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
-            .vector()
             .to_vec();
         self.search_internal(&query, reader)
     }
@@ -130,26 +132,28 @@ impl GraphSearcher {
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
             self.visited += 1;
             let node = graph
-                .get(best_candidate.neighbor().vertex())
+                .get_vertex(best_candidate.neighbor().vertex())
                 .unwrap_or_else(|| Err(Error::not_found_error()))?;
             // If we aren't reranking we don't need to copy the actual vector.
             best_candidate.visit(if self.params.num_rerank > 0 {
-                node.vector().into()
+                node.vector().map(|v| v.to_vec())
             } else {
-                Vec::new()
+                None
             });
 
             for edge in node.edges() {
                 if !self.seen.insert(edge) {
                     continue;
                 }
-                let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
+                let vec = nav
+                    .get_nav_vector(edge)
+                    .unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
                     .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
             }
         }
 
-        Ok(self.extract_results(query, reader))
+        self.extract_results(query, reader)
     }
 
     // Initialize the candidate queue and return the binary quantized query.
@@ -169,7 +173,7 @@ impl GraphSearcher {
         if let Some(epr) = graph.entry_point() {
             let entry_point = epr?;
             let entry_vector = nav
-                .get(entry_point)
+                .get_nav_vector(entry_point)
                 .unwrap_or(Err(Error::not_found_error()))?;
             self.candidates.add_unvisited(Neighbor::new(
                 entry_point,
@@ -186,39 +190,54 @@ impl GraphSearcher {
         &mut self,
         query: &[f32],
         reader: &R,
-    ) -> Vec<Neighbor> {
-        if self.params.num_rerank > 0 {
-            let scorer = reader.config().new_scorer();
-            let query = scorer.normalize_vector(query.into());
-            let mut rescored = self
-                .candidates
-                .iter()
-                .take(self.params.num_rerank)
-                .map(|c| {
-                    Neighbor::new(
-                        c.neighbor.vertex(),
-                        scorer.score(&query, c.state.vector().expect("node visited")),
-                    )
-                })
-                .collect::<Vec<_>>();
-            rescored.sort();
-            rescored
-        } else {
-            self.candidates.iter().map(|c| c.neighbor).collect()
+    ) -> Result<Vec<Neighbor>> {
+        if self.params.num_rerank == 0 {
+            return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
         }
+
+        let scorer = reader.config().new_scorer();
+        let query = scorer.normalize_vector(query.into());
+        let mut raw_vectors = if self.candidates.iter().any(|c| c.state.vector().is_none()) {
+            Some(reader.raw_vectors()?)
+        } else {
+            None
+        };
+        let rescored = self
+            .candidates
+            .iter()
+            .take(self.params.num_rerank)
+            .map(|c| {
+                let vertex = c.neighbor.vertex();
+                let score = if let Some(candidate_vector) = c.state.vector() {
+                    Ok(scorer.score(&query, candidate_vector))
+                } else {
+                    raw_vectors
+                        .as_mut()
+                        .expect("set if any")
+                        .get_raw_vector(vertex)
+                        .expect("row exists")
+                        .map(|rv| scorer.score(&query, &rv))
+                };
+                score.map(|s| Neighbor::new(vertex, s))
+            })
+            .collect::<Result<Vec<_>>>();
+        rescored.map(|mut r| {
+            r.sort();
+            r
+        })
     }
 }
 
 #[derive(Debug, PartialEq)]
 enum CandidateState {
     Unvisited,
-    Visited(Vec<f32>),
+    Visited(Option<Vec<f32>>),
 }
 
 impl CandidateState {
     fn vector(&self) -> Option<&[f32]> {
         match self {
-            CandidateState::Visited(v) => Some(v),
+            CandidateState::Visited(v) => v.as_ref().map(|x| x.as_slice()),
             _ => None,
         }
     }
@@ -322,8 +341,8 @@ impl<'a> VisitCandidateGuard<'a> {
     }
 
     /// Mark this candidate as visited and update the full fidelity vector in the candidate list.
-    fn visit(&mut self, vector: impl Into<Vec<f32>>) {
-        self.list.candidates[self.index].state = CandidateState::Visited(vector.into());
+    fn visit(&mut self, vector: Option<impl Into<Vec<f32>>>) {
+        self.list.candidates[self.index].state = CandidateState::Visited(vector.map(|v| v.into()));
         self.list.next_unvisited = self
             .list
             .candidates
@@ -348,7 +367,10 @@ mod test {
     use wt_mdb::Result;
 
     use crate::{
-        graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore},
+        graph::{
+            Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
+            RawVector, RawVectorStore,
+        },
         quantization::{BinaryQuantizer, Quantizer, VectorQuantizer},
         scoring::{DotProductScorer, F32VectorScorer, VectorSimilarity},
         Neighbor,
@@ -396,7 +418,8 @@ mod test {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
                 quantizer: VectorQuantizer::Binary,
-                max_edges: max_edges,
+                layout: GraphLayout::RawVectorInGraph,
+                max_edges,
                 index_search_params: GraphSearchParams {
                     beam_width: NonZero::new(usize::MAX).unwrap(),
                     num_rerank: usize::MAX,
@@ -459,13 +482,17 @@ mod test {
     #[derive(Debug)]
     pub struct TestGraphVectorIndexReader<'a>(&'a TestGraphVectorIndex);
 
-    impl<'a> GraphVectorIndexReader for TestGraphVectorIndexReader<'a> {
+    impl GraphVectorIndexReader for TestGraphVectorIndexReader<'_> {
         type Graph<'b>
-            = TestGraph<'b>
+            = TestGraphAccess<'b>
+        where
+            Self: 'b;
+        type RawVectorStore<'b>
+            = TestGraphAccess<'b>
         where
             Self: 'b;
         type NavVectorStore<'b>
-            = TestNavVectorStore<'b>
+            = TestGraphAccess<'b>
         where
             Self: 'b;
 
@@ -474,18 +501,68 @@ mod test {
         }
 
         fn graph(&self) -> Result<Self::Graph<'_>> {
-            Ok(TestGraph(self.0))
+            Ok(TestGraphAccess(self.0))
+        }
+
+        fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
+            Ok(TestGraphAccess(self.0))
         }
 
         fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-            Ok(TestNavVectorStore(self.0))
+            Ok(TestGraphAccess(self.0))
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct TestGraphAccess<'a>(&'a TestGraphVectorIndex);
+
+    impl Graph for TestGraphAccess<'_> {
+        type Vertex<'c>
+            = TestGraphVertex<'c>
+        where
+            Self: 'c;
+
+        fn entry_point(&mut self) -> Option<Result<i64>> {
+            if !self.0.data.is_empty() {
+                Some(Ok(0))
+            } else {
+                None
+            }
+        }
+
+        fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
+                Some(Ok(TestGraphVertex(&self.0.data[vertex_id as usize])))
+            } else {
+                None
+            }
+        }
+    }
+
+    impl RawVectorStore for TestGraphAccess<'_> {
+        fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<RawVector<'_>>> {
+            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
+                Some(Ok((&*self.0.data[vertex_id as usize].vector).into()))
+            } else {
+                None
+            }
+        }
+    }
+
+    impl NavVectorStore for TestGraphAccess<'_> {
+        fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
+                Some(Ok(Cow::from(&self.0.data[vertex_id as usize].nav_vector)))
+            } else {
+                None
+            }
         }
     }
 
     #[derive(Debug)]
     pub struct TestGraph<'a>(&'a TestGraphVectorIndex);
 
-    impl<'a> Graph for TestGraph<'a> {
+    impl Graph for TestGraph<'_> {
         type Vertex<'c>
             = TestGraphVertex<'c>
         where
@@ -499,7 +576,7 @@ mod test {
             }
         }
 
-        fn get(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+        fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
             if vertex_id < 0 || vertex_id as usize >= self.0.data.len() {
                 None
             } else {
@@ -510,31 +587,18 @@ mod test {
 
     pub struct TestGraphVertex<'a>(&'a TestVector);
 
-    impl<'a> GraphVertex for TestGraphVertex<'a> {
+    impl GraphVertex for TestGraphVertex<'_> {
         type EdgeIterator<'c>
             = std::iter::Copied<std::slice::Iter<'c, i64>>
         where
             Self: 'c;
 
-        fn vector(&self) -> Cow<'_, [f32]> {
-            Cow::from(&self.0.vector)
+        fn vector(&self) -> Option<Cow<'_, [f32]>> {
+            Some(Cow::from(&self.0.vector))
         }
 
         fn edges(&self) -> Self::EdgeIterator<'_> {
             self.0.edges.iter().copied()
-        }
-    }
-
-    #[derive(Debug)]
-    pub struct TestNavVectorStore<'a>(&'a TestGraphVectorIndex);
-
-    impl<'a> NavVectorStore for TestNavVectorStore<'a> {
-        fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-            if vertex_id < 0 || vertex_id as usize >= self.0.data.len() {
-                None
-            } else {
-                Some(Ok(Cow::from(&self.0.data[vertex_id as usize].nav_vector)))
-            }
         }
     }
 

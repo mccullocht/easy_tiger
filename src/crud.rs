@@ -1,12 +1,12 @@
 //! Tools for mutating WiredTiger backed vector indices.
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use crate::{
-    graph::{prune_edges, Graph, GraphVectorIndexReader, GraphVertex},
+    graph::{prune_edges, Graph, GraphLayout, GraphVectorIndexReader, GraphVertex, RawVectorStore},
     scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
-        encode_graph_node, encode_graph_node_internal, CursorGraph, SessionGraphVectorIndexReader,
+        encode_graph_vertex, encode_raw_vector, SessionGraphVectorIndexReader,
         TableGraphVectorIndex, ENTRY_POINT_KEY,
     },
     Neighbor,
@@ -68,6 +68,7 @@ impl IndexMutator {
         // TODO: normalize input vector.
         let mut candidate_edges = self.searcher.search(&vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
+        let mut raw_vectors = self.reader.raw_vectors()?;
         if candidate_edges.is_empty() {
             // Proceed through the rest of the function so that the inserts happen.
             // This is mostly as a noop because there are no edges.
@@ -76,31 +77,27 @@ impl IndexMutator {
         let selected_len = prune_edges(
             &mut candidate_edges,
             self.reader.config().max_edges,
-            &mut graph,
+            &mut raw_vectors,
             scorer.as_ref(),
         )?;
         candidate_edges.truncate(selected_len);
 
-        graph.set(
+        self.set_vertex(
             vertex_id,
-            &encode_graph_node_internal(
-                vector.as_ref(),
-                candidate_edges.iter().map(|n| n.vertex()).collect(),
-            ),
-        )?;
-        self.reader.nav_vectors()?.set(
-            vertex_id,
-            self.reader
+            candidate_edges.iter().map(|n| n.vertex()).collect(),
+            vector.as_ref(),
+            &self
+                .reader
                 .config()
                 .new_quantizer()
-                .for_doc(vector.as_ref())
-                .into(),
+                .for_doc(vector.as_ref()),
         )?;
 
         let mut pruned_edges = vec![];
         for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
             self.insert_edge(
                 &mut graph,
+                &mut raw_vectors,
                 scorer.as_ref(),
                 src_vertex_id,
                 vertex_id,
@@ -111,11 +108,10 @@ impl IndexMutator {
         // TODO: group and bulk delete if there are common src_vertex_id.
         for (src_vertex_id, dst_vertex_id) in pruned_edges {
             let vertex = graph
-                .get(src_vertex_id)
+                .get_vertex(src_vertex_id)
                 .unwrap_or(Err(Error::not_found_error()))?;
             let edges = vertex.edges().filter(|v| *v != dst_vertex_id).collect();
-            let encoded = encode_graph_node_internal(vertex.vector_bytes(), edges);
-            graph.set(src_vertex_id, &encoded)?;
+            self.set_graph_edges(src_vertex_id, edges, None)?;
         }
 
         Ok(())
@@ -123,34 +119,41 @@ impl IndexMutator {
 
     fn insert_edge(
         &self,
-        graph: &mut CursorGraph<'_>,
+        graph: &mut impl Graph,
+        raw_vectors: &mut impl RawVectorStore,
         scorer: &dyn F32VectorScorer,
         src_vertex_id: i64,
         dst_vertex_id: i64,
         pruned_edges: &mut Vec<(i64, i64)>,
     ) -> Result<()> {
         let vertex = graph
-            .get(src_vertex_id)
+            .get_vertex(src_vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?;
         let mut edges = std::iter::once(dst_vertex_id)
             .chain(vertex.edges().filter(|v| *v != dst_vertex_id))
             .collect::<Vec<_>>();
-        let encoded = if edges.len() >= self.reader.config().max_edges.get() {
-            let src_vector = vertex.vector().to_vec();
+        // TODO: try to avoid copying the vector.
+        let src_vector = vertex.vector().map(|v| Ok(v.to_vec())).unwrap_or_else(|| {
+            raw_vectors
+                .get_raw_vector(src_vertex_id)
+                .expect("row exists")
+                .map(|v| v.to_vec())
+        })?;
+        if edges.len() >= self.reader.config().max_edges.get() {
             let mut neighbors = edges
                 .iter()
                 .map(|e| {
-                    graph
-                        .get(*e)
+                    raw_vectors
+                        .get_raw_vector(*e)
                         .unwrap_or(Err(Error::not_found_error()))
-                        .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst.vector())))
+                        .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst)))
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
             neighbors.sort();
             let selected_len = prune_edges(
                 &mut neighbors,
                 self.reader.config().max_edges,
-                graph,
+                raw_vectors,
                 scorer,
             )?;
             // Ensure the graph is undirected by removing links from pruned edges back to this node.
@@ -159,25 +162,32 @@ impl IndexMutator {
             }
             edges.clear();
             edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
-
-            encode_graph_node(&src_vector, edges)
-        } else {
-            encode_graph_node_internal(vertex.vector_bytes(), edges)
-        };
-        graph.set(src_vertex_id, &encoded)
+        }
+        self.set_graph_edges(src_vertex_id, edges, Some(&src_vector))
     }
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
     pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
         let scorer = self.reader.config().new_scorer();
         let mut graph = self.reader.graph()?;
+        let mut raw_vectors = self.reader.raw_vectors()?;
 
         let (vector, edges) = graph
-            .get(vertex_id)
+            .get_vertex(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))
-            .map(|v| (v.vector().to_vec(), v.edges().collect::<Vec<_>>()))?;
+            .map(|v| {
+                let raw_vector = v.vector().map(|x| Ok(x.to_vec())).unwrap_or_else(|| {
+                    raw_vectors
+                        .get_raw_vector(vertex_id)
+                        .expect("row exists")
+                        .map(|v| v.to_vec())
+                });
+                raw_vector.map(|rv| (rv, v.edges().collect::<Vec<_>>()))
+            })??;
 
+        // TODO: unified graph index writer trait to handles removal and other mutations.
         graph.remove(vertex_id)?;
+        raw_vectors.remove(vertex_id)?;
         self.reader.nav_vectors()?.remove(vertex_id)?;
 
         // Cache information about each vertex linked to vertex_id.
@@ -186,17 +196,25 @@ impl IndexMutator {
             .into_iter()
             .map(|e| {
                 graph
-                    .get(e)
+                    .get_vertex(e)
                     .unwrap_or(Err(Error::not_found_error()))
                     .map(|v| {
-                        (
-                            e,
-                            v.vector().to_vec(),
-                            v.edges().filter(|d| *d != vertex_id).collect::<Vec<_>>(),
-                        )
+                        let raw_vector = v.vector().map(|x| Ok(x.to_vec())).unwrap_or_else(|| {
+                            raw_vectors
+                                .get_raw_vector(e)
+                                .expect("row exists")
+                                .map(|rv| rv.to_vec())
+                        });
+                        raw_vector.map(|rv| {
+                            (
+                                e,
+                                rv,
+                                v.edges().filter(|d| *d != vertex_id).collect::<Vec<_>>(),
+                            )
+                        })
                     })
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Result<Vec<_>>>>()??;
 
         // Create links between edges of the deleted node if needed.
         self.cross_link_peer_vertices(&mut vertex_data, scorer.as_ref())?;
@@ -219,7 +237,7 @@ impl IndexMutator {
 
         // Write all the mutated nodes back to WT.
         for (vertex_id, vector, edges) in vertex_data {
-            graph.set(vertex_id, &encode_graph_node(&vector, edges))?;
+            self.set_graph_edges(vertex_id, edges, Some(&vector))?;
         }
 
         Ok(())
@@ -246,7 +264,6 @@ impl IndexMutator {
                             None
                         }
                     })
-                    // TODO: this feels unnecessary but it doesn't compile without it.
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -279,6 +296,67 @@ impl IndexMutator {
         self.delete(vertex_id)?;
         self.insert_internal(vertex_id, vector)
     }
+
+    fn set_vertex(
+        &self,
+        vertex_id: i64,
+        edges: Vec<i64>,
+        raw_vector: &[f32],
+        nav_vector: &[u8],
+    ) -> Result<()> {
+        match self.reader.config().layout {
+            GraphLayout::Split => {
+                self.reader
+                    .graph()?
+                    .set(vertex_id, &encode_graph_vertex(edges, None))?;
+                self.reader
+                    .raw_vectors()?
+                    .set(vertex_id, &encode_raw_vector(raw_vector))?;
+            }
+            GraphLayout::RawVectorInGraph => {
+                self.reader
+                    .graph()?
+                    .set(vertex_id, &encode_graph_vertex(edges, Some(raw_vector)))?;
+            }
+        }
+        self.reader.nav_vectors()?.set(vertex_id, nav_vector.into())
+    }
+
+    fn set_graph_edges(
+        &self,
+        vertex_id: i64,
+        edges: Vec<i64>,
+        raw_vector: Option<&[f32]>,
+    ) -> Result<()> {
+        match self.reader.config().layout {
+            GraphLayout::Split => self
+                .reader
+                .graph()?
+                .set(vertex_id, &encode_graph_vertex(edges, None)),
+            GraphLayout::RawVectorInGraph => {
+                self.set_graph_edges_vector_in_graph_layout(vertex_id, edges, raw_vector)
+            }
+        }
+    }
+
+    fn set_graph_edges_vector_in_graph_layout(
+        &self,
+        vertex_id: i64,
+        edges: Vec<i64>,
+        raw_vector: Option<&[f32]>,
+    ) -> Result<()> {
+        let mut graph = self.reader.graph()?;
+        if let Some(raw_vector) = raw_vector {
+            graph.set(vertex_id, &encode_graph_vertex(edges, Some(raw_vector)))
+        } else {
+            // NB: this round trips the vector [u8] -> [f32] -> [u8]. Probably not a big issue.
+            let vertex = graph
+                .get_raw_vector(vertex_id)
+                .unwrap_or(Err(Error::not_found_error()))?;
+            let encoded = encode_graph_vertex(edges, Some(vertex.deref()));
+            graph.set(vertex_id, &encoded)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -288,7 +366,9 @@ mod tests {
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
     use crate::{
-        graph::{Graph, GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVertex},
+        graph::{
+            Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
+        },
         quantization::VectorQuantizer,
         scoring::VectorSimilarity,
         search::GraphSearcher,
@@ -355,6 +435,8 @@ mod tests {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
                         quantizer: VectorQuantizer::Binary,
+                        // TODO: each test should be run in both layouts.
+                        layout: GraphLayout::Split,
                         max_edges: NonZero::new(4).unwrap(),
                         index_search_params: Self::search_params(),
                     },
@@ -418,7 +500,7 @@ mod tests {
 
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
-        let vertex = graph.get(vertex_ids[0]).unwrap()?;
+        let vertex = graph.get_vertex(vertex_ids[0]).unwrap()?;
         assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 2, 3, 5]);
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
@@ -459,14 +541,14 @@ mod tests {
 
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
-        let vertex = graph.get(vertex_ids[0]).unwrap()?;
+        let vertex = graph.get_vertex(vertex_ids[0]).unwrap()?;
         assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 2, 3, 5]);
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
         fixture.new_mutator().delete(1)?;
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
-        let vertex = graph.get(vertex_ids[0]).unwrap()?;
+        let vertex = graph.get_vertex(vertex_ids[0]).unwrap()?;
         assert_eq!(vertex.edges().collect::<Vec<_>>(), &[2, 3, 5]);
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 2, 3, 5, 4]));
 

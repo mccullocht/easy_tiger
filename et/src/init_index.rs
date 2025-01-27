@@ -2,7 +2,7 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    graph::{GraphConfig, GraphSearchParams},
+    graph::{GraphConfig, GraphLayout, GraphSearchParams},
     quantization::VectorQuantizer,
     scoring::VectorSimilarity,
     wt::TableGraphVectorIndex,
@@ -24,6 +24,17 @@ pub struct InitIndexArgs {
     /// This will also dictate the quantized scoring function used.
     #[arg(short, long, value_enum)]
     quantizer: VectorQuantizer,
+
+    /// Physical layout used for graph.
+    ///
+    /// `split` puts raw vectors, nav vectors, and graph edges each in separate tables. If results
+    /// are being re-ranked this will require additional reads to complete.
+    ///
+    /// `raw_vector_in_graph` places raw vectors and graph edges in the same table. When a vertex
+    /// is visited the raw vector is read and saved for re-scoring. This minimizes the number of
+    /// reads performed and is likely better for indices with less traffic.
+    #[arg(long, value_enum, default_value = "raw_vector_in_graph")]
+    layout: GraphLayout,
 
     /// Maximum number of edges for any vertex.
     #[arg(long, default_value = "64")]
@@ -70,6 +81,7 @@ pub fn init_index(
             dimensions: args.dimensions,
             similarity: args.similarity,
             quantizer: args.quantizer,
+            layout: args.layout,
             max_edges: args.max_edges,
             index_search_params: GraphSearchParams {
                 beam_width: args.edge_candidates,

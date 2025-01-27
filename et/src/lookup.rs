@@ -28,7 +28,7 @@ pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -
         *index.config(),
         session.get_record_cursor(index.graph_table_name())?,
     );
-    match graph.get(args.id) {
+    match graph.get_vertex(args.id) {
         None => {
             println!("Not found!");
         }

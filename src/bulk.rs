@@ -439,11 +439,17 @@ where
                         if vertex.is_empty() {
                             stats.unconnected += 1;
                         }
+                        let vertex_vector =
+                            if self.index.config().layout == GraphLayout::RawVectorInGraph {
+                                Some(self.scorer.normalize_vector(v.into()))
+                            } else {
+                                None
+                            };
                         Record::new(
                             i as i64,
                             encode_graph_vertex(
                                 vertex.iter().map(|n| n.vertex()).collect(),
-                                Some(&self.scorer.normalize_vector(v.into())),
+                                vertex_vector.as_ref().map(|vv| vv.as_ref()),
                             ),
                         )
                     }),

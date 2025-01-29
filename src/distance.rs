@@ -132,3 +132,33 @@ impl QuantizedVectorDistance for AsymmetricHammingDistance {
             .sum::<usize>() as f64
     }
 }
+
+struct I8NaiveVector<'a> {
+    vector: &'a [i8],
+    #[allow(dead_code)]
+    squared_l2_norm: f32,
+}
+
+impl<'a> From<&'a [u8]> for I8NaiveVector<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        assert!(value.len() >= std::mem::size_of::<f32>());
+        let (vector_bytes, norm_bytes) = value.split_at(value.len() - std::mem::size_of::<f32>());
+        Self {
+            vector: unsafe {
+                std::slice::from_raw_parts(vector_bytes.as_ptr() as *const i8, vector_bytes.len())
+            },
+            squared_l2_norm: f32::from_le_bytes(norm_bytes.try_into().unwrap()),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I8DotScorer;
+
+impl QuantizedVectorScorer for I8DotScorer {
+    fn score(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let qv = I8NaiveVector::from(query);
+        let dv = I8NaiveVector::from(doc);
+        SpatialSimilarity::dot(qv.vector, dv.vector).unwrap()
+    }
+}

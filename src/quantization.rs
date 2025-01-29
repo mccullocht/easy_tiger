@@ -5,6 +5,7 @@
 use std::{io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
+use simsimd::SpatialSimilarity;
 
 use crate::distance::{
     AsymmetricHammingDistance, HammingDistance, QuantizedVectorDistance, VectorSimilarity,
@@ -38,6 +39,9 @@ pub enum VectorQuantizer {
     /// Binary quantizes indexed vectors; produces an n-bit representation at
     /// query time to increase precision. This is also used during indexing.
     AsymmetricBinary { n: usize },
+    /// Reduces each dimension to an 8-bit integer.
+    /// This implementation does not train on any input to decide how to quantize.
+    I8Naive,
 }
 
 impl VectorQuantizer {
@@ -46,6 +50,7 @@ impl VectorQuantizer {
         match self {
             Self::Binary => Box::new(BinaryQuantizer),
             Self::AsymmetricBinary { n } => Box::new(AsymmetricBinaryQuantizer::new(*n)),
+            Self::I8Naive => Box::new(I8NaiveQuantizer),
         }
     }
 
@@ -57,6 +62,10 @@ impl VectorQuantizer {
         match self {
             Self::Binary => Box::new(HammingDistance),
             Self::AsymmetricBinary { n: _ } => Box::new(AsymmetricHammingDistance),
+            Self::I8Naive => {
+                assert_eq!(*similarity, VectorSimilarity::Dot);
+                Box::new(I8DotScorer)
+            }
         }
     }
 }
@@ -84,6 +93,8 @@ impl FromStr for VectorQuantizer {
                 .and_then(|b| if (1..=8).contains(&b) { Some(b) } else { None })
                 .map(|n| Self::AsymmetricBinary { n })
                 .ok_or_else(|| input_err(format!("invalid asymmetric_binary bits {}", bits_str)))
+        } else if s == "i8naive" {
+            Ok(Self::I8Naive)
         } else {
             Err(input_err(format!("unknown quantizer function {}", s)))
         }
@@ -215,5 +226,41 @@ impl Quantizer for AsymmetricBinaryQuantizer {
 
     fn query_bytes(&self, dimensions: usize) -> usize {
         self.doc_bytes(dimensions) * self.n
+    }
+}
+
+// XXX I8NaiveQuantizer
+#[derive(Debug, Copy, Clone)]
+pub struct I8NaiveQuantizer;
+
+impl Quantizer for I8NaiveQuantizer {
+    fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
+        let norm = SpatialSimilarity::dot(vector, vector).unwrap().sqrt() as f32;
+        let mut normalized_vector = vector.to_vec();
+        for d in normalized_vector.iter_mut() {
+            *d /= norm;
+        }
+
+        // In the normalized vector all dimensions are in [-1.0, 1.0], so we can multiply by i8::MAX and round.
+        // Save the squared l2 norm for use computing l2 distance.
+        // TODO: only store this for l2 similarity, it's unnecessary for dot.
+        let mut quantized = Vec::with_capacity(self.doc_bytes(vector.len()));
+        for f in normalized_vector {
+            quantized.push(((f * i8::MAX as f32).round() as i8).to_le_bytes()[0]);
+        }
+        quantized.extend_from_slice(&(norm * norm).to_le_bytes());
+        quantized
+    }
+
+    fn doc_bytes(&self, dimensions: usize) -> usize {
+        dimensions + std::mem::size_of::<f32>()
+    }
+
+    fn for_query(&self, vector: &[f32]) -> Vec<u8> {
+        self.for_doc(vector)
+    }
+
+    fn query_bytes(&self, dimensions: usize) -> usize {
+        self.doc_bytes(dimensions)
     }
 }

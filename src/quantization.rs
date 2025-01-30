@@ -229,7 +229,6 @@ impl Quantizer for AsymmetricBinaryQuantizer {
     }
 }
 
-// XXX I8NaiveQuantizer
 #[derive(Debug, Copy, Clone)]
 pub struct I8NaiveQuantizer;
 
@@ -242,6 +241,9 @@ impl Quantizer for I8NaiveQuantizer {
         }
 
         // In the normalized vector all dimensions are in [-1.0, 1.0], so we can multiply by i8::MAX and round.
+        // TODO: this is very conservative, we could probably be less conservative and choose a larger value
+        // (with a clamp) based on dimensionality. We could also adjust values for matryoshka models.
+        //
         // Save the squared l2 norm for use computing l2 distance.
         // TODO: only store this for l2 similarity, it's unnecessary for dot.
         let mut quantized = Vec::with_capacity(self.doc_bytes(vector.len()));
@@ -256,6 +258,7 @@ impl Quantizer for I8NaiveQuantizer {
         dimensions + std::mem::size_of::<f32>()
     }
 
+    // TODO: "quantize" the query as [f32] and score asymmetrically to preserve precision.
     fn for_query(&self, vector: &[f32]) -> Vec<u8> {
         self.for_doc(vector)
     }

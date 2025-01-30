@@ -152,6 +152,7 @@ impl<'a> From<&'a [u8]> for I8NaiveVector<'a> {
     }
 }
 
+// XXX need a euclidean impl. to do this we might want to fix the distance function.
 #[derive(Debug, Copy, Clone)]
 pub struct I8DotScorer;
 
@@ -159,6 +160,11 @@ impl QuantizedVectorScorer for I8DotScorer {
     fn score(&self, query: &[u8], doc: &[u8]) -> f64 {
         let qv = I8NaiveVector::from(query);
         let dv = I8NaiveVector::from(doc);
-        SpatialSimilarity::dot(qv.vector, dv.vector).unwrap()
+        let divisor = i8::MAX as f32 * i8::MAX as f32;
+        qv.vector
+            .iter()
+            .zip(dv.vector.iter())
+            .map(|(q, d)| (*q as i16 * *d as i16) as f32 / divisor)
+            .sum::<f32>() as f64
     }
 }

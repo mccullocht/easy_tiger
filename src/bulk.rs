@@ -332,7 +332,7 @@ where
                             true
                         } else {
                             iv.push(*e);
-                            let backedge = Neighbor::new(v as i64, e.score());
+                            let backedge = Neighbor::new(v as i64, e.distance());
                             if !ev.contains(&backedge) {
                                 ev.push(backedge);
                             }

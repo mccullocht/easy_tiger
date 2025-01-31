@@ -265,7 +265,7 @@ pub(crate) fn select_pruned_edges(
             if !selected
                 .iter()
                 .take_while(|s| **s < i)
-                .any(|s| scorer.score(e_vec, &vectors[*s]) > e.score * alpha)
+                .any(|s| scorer.score(e_vec, &vectors[*s]) < e.distance * alpha)
             {
                 selected.insert(i);
                 if selected.len() >= max_edges.get() {

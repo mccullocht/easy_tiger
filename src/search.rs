@@ -470,7 +470,7 @@ mod test {
                 let q = &graph[n.vertex() as usize].vector;
                 if !selected
                     .iter()
-                    .any(|p| scorer.score(q, &graph[p.vertex() as usize].vector) > n.score())
+                    .any(|p| scorer.score(q, &graph[p.vertex() as usize].vector) < n.distance())
                 {
                     selected.push(*n);
                 }
@@ -620,7 +620,7 @@ mod test {
 
     fn normalize_scores(mut results: Vec<Neighbor>) -> Vec<Neighbor> {
         for n in results.iter_mut() {
-            n.score = (n.score * 100000.0).round() / 100000.0;
+            n.distance = (n.distance * 100000.0).round() / 100000.0;
         }
         results
     }
@@ -637,10 +637,10 @@ mod test {
                 .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
                 .unwrap(),
             vec![
-                Neighbor::new(0, 1.0),
-                Neighbor::new(1, 1.0),
-                Neighbor::new(4, 1.0),
-                Neighbor::new(16, 1.0)
+                Neighbor::new(0, 0.0),
+                Neighbor::new(1, 0.0),
+                Neighbor::new(4, 0.0),
+                Neighbor::new(16, 0.0)
             ]
         );
     }
@@ -659,10 +659,10 @@ mod test {
                     .unwrap()
             ),
             vec![
-                Neighbor::new(1, 0.93622),
-                Neighbor::new(4, 0.93622),
-                Neighbor::new(16, 0.93622),
-                Neighbor::new(0, 0.91743),
+                Neighbor::new(1, 0.06813),
+                Neighbor::new(4, 0.06813),
+                Neighbor::new(16, 0.06813),
+                Neighbor::new(0, 0.09),
             ]
         );
     }

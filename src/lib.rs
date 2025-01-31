@@ -17,34 +17,34 @@ pub mod wt;
 
 /// `Neighbor` is a node and a distance relative to some other node.
 ///
-/// During a search score might be relative to the query vector.
-/// In a graph index, score might be relative to another node in the index.
+/// During a search distance might be relative to the query vector.
+/// In a graph index, distance might be relative to another node in the index.
 ///
-/// When compared `Neighbor`s are ordered first in descending order by score,
+/// When compared `Neighbor`s are ordered first by distance then by vertex id.
 /// then in ascending order by vertex id.
 #[derive(Debug, Copy, Clone)]
 pub struct Neighbor {
     vertex: i64,
-    score: f64,
+    distance: f64,
 }
 
 impl Neighbor {
-    pub fn new(vertex: i64, score: f64) -> Self {
-        Self { vertex, score }
+    pub fn new(vertex: i64, distance: f64) -> Self {
+        Self { vertex, distance }
     }
 
     pub fn vertex(&self) -> i64 {
         self.vertex
     }
 
-    pub fn score(&self) -> f64 {
-        self.score
+    pub fn distance(&self) -> f64 {
+        self.distance
     }
 }
 
 impl PartialEq for Neighbor {
     fn eq(&self, other: &Self) -> bool {
-        self.vertex == other.vertex && self.score.total_cmp(&other.score).is_eq()
+        self.vertex == other.vertex && self.distance.total_cmp(&other.distance).is_eq()
     }
 }
 
@@ -58,11 +58,9 @@ impl PartialOrd for Neighbor {
 
 impl Ord for Neighbor {
     fn cmp(&self, other: &Self) -> Ordering {
-        let c = self.score.total_cmp(&other.score).reverse();
-        match c {
-            Ordering::Equal => self.vertex.cmp(&other.vertex),
-            _ => c,
-        }
+        self.distance
+            .total_cmp(&other.distance)
+            .then_with(|| self.vertex.cmp(&other.vertex))
     }
 }
 
@@ -86,11 +84,11 @@ mod test_lib {
         );
         assert_eq!(
             Neighbor::new(1, 1.1).cmp(&Neighbor::new(1, 1.0)),
-            Ordering::Less
+            Ordering::Greater
         );
         assert_eq!(
             Neighbor::new(1, 1.0).cmp(&Neighbor::new(1, 1.1)),
-            Ordering::Greater
+            Ordering::Less
         );
         assert_eq!(
             Neighbor::new(1, 1.0).cmp(&Neighbor::new(2, 1.0)),

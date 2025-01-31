@@ -1,5 +1,6 @@
 //! Dense vector scoring traits and implementations.
 
+// TODO: rename the module and everything else from scoring/scorer to distance.
 use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
@@ -86,7 +87,7 @@ pub struct EuclideanScorer;
 
 impl F32VectorScorer for EuclideanScorer {
     fn score(&self, a: &[f32], b: &[f32]) -> f64 {
-        1f64 / (1f64 + SpatialSimilarity::l2sq(a, b).unwrap())
+        SpatialSimilarity::l2sq(a, b).unwrap()
     }
 }
 
@@ -96,8 +97,8 @@ pub struct DotProductScorer;
 
 impl F32VectorScorer for DotProductScorer {
     fn score(&self, a: &[f32], b: &[f32]) -> f64 {
-        // Assuming values are normalized, this will produce a score in [0,1]
-        (1f64 + SpatialSimilarity::dot(a, b).unwrap()) / 2f64
+        // Assuming values are normalized, this will produce a distance in [0,1]
+        (-SpatialSimilarity::dot(a, b).unwrap() + 1.0) / 2.0
     }
 
     fn normalize_vector<'a>(&self, mut vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
@@ -115,8 +116,7 @@ pub struct HammingScorer;
 
 impl QuantizedVectorScorer for HammingScorer {
     fn score(&self, a: &[u8], b: &[u8]) -> f64 {
-        let dim = (a.len() * 8) as f64;
-        (dim - BinarySimilarity::hamming(a, b).unwrap()) / dim
+        BinarySimilarity::hamming(a, b).unwrap()
     }
 }
 
@@ -127,15 +127,13 @@ pub struct AsymmetricHammingScorer;
 impl QuantizedVectorScorer for AsymmetricHammingScorer {
     fn score(&self, query: &[u8], doc: &[u8]) -> f64 {
         assert_eq!(query.len() % doc.len(), 0);
-        let (sum, total) = query
+        query
             .chunks(doc.len())
             .enumerate()
             .map(|(i, v)| {
-                let mult = 1usize << i;
-                let sum = BinarySimilarity::hamming(doc, v).expect("same vector length") as usize;
-                (sum * mult, doc.len() * 8 * mult)
+                BinarySimilarity::hamming(doc, v).expect("same vector length") as usize
+                    * (1usize << i)
             })
-            .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
-        (total as f64 - sum as f64) / total as f64
+            .sum::<usize>() as f64
     }
 }

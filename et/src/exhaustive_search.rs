@@ -48,7 +48,7 @@ pub fn exhaustive_search(
     results.resize_with(query_vectors.len(), || {
         BinaryHeap::with_capacity(args.neighbors_len.get())
     });
-    let scorer = index.config().new_scorer();
+    let distance_fn = index.config().new_distance_function();
 
     let session = connection.open_session()?;
     let mut cursor = session.open_record_cursor(index.graph_table_name())?;
@@ -68,7 +68,7 @@ pub fn exhaustive_search(
 
         let similarities = (0..query_vectors.len())
             .into_par_iter()
-            .map(|i| scorer.score(&index_vector, &query_vectors[i]))
+            .map(|i| distance_fn.distance(&index_vector, &query_vectors[i]))
             .collect::<Vec<_>>();
         for (i, s) in similarities.into_iter().enumerate() {
             let n = Neighbor::new(record.key(), s);

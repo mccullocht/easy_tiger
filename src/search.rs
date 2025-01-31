@@ -6,12 +6,12 @@ use std::{
 };
 
 use crate::{
+    distance::QuantizedVectorDistance,
     graph::{
         Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
         RawVectorStore,
     },
     quantization::Quantizer,
-    scoring::QuantizedVectorScorer,
     Neighbor,
 };
 
@@ -120,13 +120,13 @@ impl GraphSearcher {
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
         let quantizer = reader.config().new_quantizer();
-        let nav_scorer = reader.config().new_nav_scorer();
+        let nav_distance_fn = reader.config().new_nav_distance_function();
         let nav_query = self.init_candidates(
             query,
             &mut graph,
             &mut nav,
             quantizer.as_ref(),
-            nav_scorer.as_ref(),
+            nav_distance_fn.as_ref(),
         )?;
 
         while let Some(mut best_candidate) = self.candidates.next_unvisited() {
@@ -148,8 +148,10 @@ impl GraphSearcher {
                 let vec = nav
                     .get_nav_vector(edge)
                     .unwrap_or(Err(Error::not_found_error()))?;
-                self.candidates
-                    .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
+                self.candidates.add_unvisited(Neighbor::new(
+                    edge,
+                    nav_distance_fn.distance(&nav_query, &vec),
+                ));
             }
         }
 
@@ -163,7 +165,7 @@ impl GraphSearcher {
         graph: &mut G,
         nav: &mut N,
         quantizer: &dyn Quantizer,
-        nav_scorer: &dyn QuantizedVectorScorer,
+        nav_distance_fn: &dyn QuantizedVectorDistance,
     ) -> Result<Vec<u8>>
     where
         G: Graph,
@@ -177,7 +179,7 @@ impl GraphSearcher {
                 .unwrap_or(Err(Error::not_found_error()))?;
             self.candidates.add_unvisited(Neighbor::new(
                 entry_point,
-                nav_scorer.score(&nav_query, &entry_vector),
+                nav_distance_fn.distance(&nav_query, &entry_vector),
             ));
             self.seen.insert(entry_point);
         }
@@ -195,8 +197,8 @@ impl GraphSearcher {
             return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
         }
 
-        let scorer = reader.config().new_scorer();
-        let query = scorer.normalize_vector(query.into());
+        let distance_fn = reader.config().new_distance_function();
+        let query = distance_fn.normalize_vector(query.into());
         let mut raw_vectors = if self.candidates.iter().any(|c| c.state.vector().is_none()) {
             Some(reader.raw_vectors()?)
         } else {
@@ -208,17 +210,17 @@ impl GraphSearcher {
             .take(self.params.num_rerank)
             .map(|c| {
                 let vertex = c.neighbor.vertex();
-                let score = if let Some(candidate_vector) = c.state.vector() {
-                    Ok(scorer.score(&query, candidate_vector))
+                let distance = if let Some(candidate_vector) = c.state.vector() {
+                    Ok(distance_fn.distance(&query, candidate_vector))
                 } else {
                     raw_vectors
                         .as_mut()
                         .expect("set if any")
                         .get_raw_vector(vertex)
                         .expect("row exists")
-                        .map(|rv| scorer.score(&query, &rv))
+                        .map(|rv| distance_fn.distance(&query, &rv))
                 };
-                score.map(|s| Neighbor::new(vertex, s))
+                distance.map(|s| Neighbor::new(vertex, s))
             })
             .collect::<Result<Vec<_>>>();
         rescored.map(|mut r| {
@@ -367,12 +369,12 @@ mod test {
     use wt_mdb::Result;
 
     use crate::{
+        distance::{DotProductDistance, F32VectorDistance, VectorSimilarity},
         graph::{
             Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
             RawVector, RawVectorStore,
         },
         quantization::{BinaryQuantizer, Quantizer, VectorQuantizer},
-        scoring::{DotProductScorer, F32VectorScorer, VectorSimilarity},
         Neighbor,
     };
 
@@ -392,9 +394,9 @@ mod test {
     }
 
     impl TestGraphVectorIndex {
-        pub fn new<S, T, V>(max_edges: NonZero<usize>, scorer: S, iter: T) -> Self
+        pub fn new<S, T, V>(max_edges: NonZero<usize>, distance_fn: S, iter: T) -> Self
         where
-            S: F32VectorScorer,
+            S: F32VectorDistance,
             T: IntoIterator<Item = V>,
             V: Into<Vec<f32>>,
         {
@@ -412,7 +414,7 @@ mod test {
                 .collect::<Vec<_>>();
 
             for i in 0..rep.len() {
-                rep[i].edges = Self::compute_edges(&rep, i, max_edges, &scorer);
+                rep[i].edges = Self::compute_edges(&rep, i, max_edges, &distance_fn);
             }
             let config = GraphConfig {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
@@ -436,10 +438,10 @@ mod test {
             graph: &[TestVector],
             index: usize,
             max_edges: NonZero<usize>,
-            scorer: &S,
+            distance_fn: &S,
         ) -> Vec<i64>
         where
-            S: F32VectorScorer,
+            S: F32VectorDistance,
         {
             let q = &graph[index].vector;
             let mut scored = graph
@@ -447,7 +449,7 @@ mod test {
                 .enumerate()
                 .filter_map(|(i, n)| {
                     if i != index {
-                        Some(Neighbor::new(i as i64, scorer.score(q, &n.vector)))
+                        Some(Neighbor::new(i as i64, distance_fn.distance(q, &n.vector)))
                     } else {
                         None
                     }
@@ -468,10 +470,9 @@ mod test {
                 }
 
                 let q = &graph[n.vertex() as usize].vector;
-                if !selected
-                    .iter()
-                    .any(|p| scorer.score(q, &graph[p.vertex() as usize].vector) > n.score())
-                {
+                if !selected.iter().any(|p| {
+                    distance_fn.distance(q, &graph[p.vertex() as usize].vector) < n.distance()
+                }) {
                     selected.push(*n);
                 }
             }
@@ -606,7 +607,7 @@ mod test {
         let dim_values = [-0.25, -0.125, 0.125, 0.25];
         TestGraphVectorIndex::new(
             NonZero::new(max_edges).unwrap(),
-            DotProductScorer,
+            DotProductDistance,
             (0..256).map(|v| {
                 Vec::from([
                     dim_values[v & 0x3],
@@ -620,7 +621,7 @@ mod test {
 
     fn normalize_scores(mut results: Vec<Neighbor>) -> Vec<Neighbor> {
         for n in results.iter_mut() {
-            n.score = (n.score * 100000.0).round() / 100000.0;
+            n.distance = (n.distance * 100000.0).round() / 100000.0;
         }
         results
     }
@@ -637,10 +638,10 @@ mod test {
                 .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
                 .unwrap(),
             vec![
-                Neighbor::new(0, 1.0),
-                Neighbor::new(1, 1.0),
-                Neighbor::new(4, 1.0),
-                Neighbor::new(16, 1.0)
+                Neighbor::new(0, 0.0),
+                Neighbor::new(1, 0.0),
+                Neighbor::new(4, 0.0),
+                Neighbor::new(16, 0.0)
             ]
         );
     }
@@ -659,10 +660,10 @@ mod test {
                     .unwrap()
             ),
             vec![
-                Neighbor::new(1, 0.93622),
-                Neighbor::new(4, 0.93622),
-                Neighbor::new(16, 0.93622),
-                Neighbor::new(0, 0.91743),
+                Neighbor::new(1, 0.06813),
+                Neighbor::new(4, 0.06813),
+                Neighbor::new(16, 0.06813),
+                Neighbor::new(0, 0.09),
             ]
         );
     }

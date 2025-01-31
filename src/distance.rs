@@ -5,20 +5,16 @@ use std::{borrow::Cow, io, str::FromStr};
 use serde::{Deserialize, Serialize};
 use simsimd::{BinarySimilarity, SpatialSimilarity};
 
-/// Scorer for `f32` vectors.
+/// Distance function for `f32` vectors.
 ///
 /// This trait is object-safe; it may be instantiated at runtime based on
 /// data that appears in a file or other backing store.
-pub trait F32VectorScorer: Send + Sync {
+pub trait F32VectorDistance: Send + Sync {
     /// Score vectors `a` and `b` against one another. Returns a score
     /// where larger values are better matches.
     ///
     /// Input vectors must be the same length or this function may panic.
-    fn score(&self, a: &[f32], b: &[f32]) -> f64;
-
-    /// Normalize a vector for use with this scoring function.
-    /// By default, does nothing.
-    fn normalize(&self, _vector: &mut [f32]) {}
+    fn distance(&self, a: &[f32], b: &[f32]) -> f64;
 
     /// Normalize a vector for use with this scoring function.
     /// By default, does nothing.
@@ -27,17 +23,17 @@ pub trait F32VectorScorer: Send + Sync {
     }
 }
 
-/// Scorer for quantized vectors.
+/// Distance function for quantized vectors.
 ///
 /// This trait is object-safe; it may be instantiated at runtime based on
 /// data that appears in a file or other backing store.
-pub trait QuantizedVectorScorer {
+pub trait QuantizedVectorDistance {
     /// Score the `query` vector against the `doc` vector. Returns a score
     /// where larger values are better matches.
     ///
     /// This function is not required to be commutative and may panic if
     /// one of the inputs is misshapen.
-    fn score(&self, query: &[u8], doc: &[u8]) -> f64;
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64;
 }
 
 /// Functions used for computing a similarity score for high fidelity vectors.
@@ -46,15 +42,15 @@ pub enum VectorSimilarity {
     /// Euclidean (l2) distance.
     Euclidean,
     /// Dot product scoring, an approximation of cosine scoring.
-    /// Vectors used for this scorer must be normalized.
+    /// Vectors used for this distance function must be normalized.
     Dot,
 }
 
 impl VectorSimilarity {
-    pub fn new_scorer(self) -> Box<dyn F32VectorScorer> {
+    pub fn new_distance_function(self) -> Box<dyn F32VectorDistance> {
         match self {
-            Self::Euclidean => Box::new(EuclideanScorer),
-            Self::Dot => Box::new(DotProductScorer),
+            Self::Euclidean => Box::new(EuclideanDistance),
+            Self::Dot => Box::new(DotProductDistance),
         }
     }
 }
@@ -82,22 +78,22 @@ impl FromStr for VectorSimilarity {
 
 /// Computes a score based on l2 distance.
 #[derive(Debug, Copy, Clone)]
-pub struct EuclideanScorer;
+pub struct EuclideanDistance;
 
-impl F32VectorScorer for EuclideanScorer {
-    fn score(&self, a: &[f32], b: &[f32]) -> f64 {
-        1f64 / (1f64 + SpatialSimilarity::l2sq(a, b).unwrap())
+impl F32VectorDistance for EuclideanDistance {
+    fn distance(&self, a: &[f32], b: &[f32]) -> f64 {
+        SpatialSimilarity::l2sq(a, b).unwrap()
     }
 }
 
 /// Computes a score based on the dot product.
 #[derive(Debug, Copy, Clone)]
-pub struct DotProductScorer;
+pub struct DotProductDistance;
 
-impl F32VectorScorer for DotProductScorer {
-    fn score(&self, a: &[f32], b: &[f32]) -> f64 {
-        // Assuming values are normalized, this will produce a score in [0,1]
-        (1f64 + SpatialSimilarity::dot(a, b).unwrap()) / 2f64
+impl F32VectorDistance for DotProductDistance {
+    fn distance(&self, a: &[f32], b: &[f32]) -> f64 {
+        // Assuming values are normalized, this will produce a distance in [0,1]
+        (-SpatialSimilarity::dot(a, b).unwrap() + 1.0) / 2.0
     }
 
     fn normalize_vector<'a>(&self, mut vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
@@ -111,31 +107,28 @@ impl F32VectorScorer for DotProductScorer {
 
 /// Computes a score from two bitmaps using hamming distance.
 #[derive(Debug, Copy, Clone)]
-pub struct HammingScorer;
+pub struct HammingDistance;
 
-impl QuantizedVectorScorer for HammingScorer {
-    fn score(&self, a: &[u8], b: &[u8]) -> f64 {
-        let dim = (a.len() * 8) as f64;
-        (dim - BinarySimilarity::hamming(a, b).unwrap()) / dim
+impl QuantizedVectorDistance for HammingDistance {
+    fn distance(&self, a: &[u8], b: &[u8]) -> f64 {
+        BinarySimilarity::hamming(a, b).unwrap()
     }
 }
 
 /// Computes a score between a query and doc vectors produced by [crate::quantization::AsymmetricBinaryQuantizer]
 #[derive(Debug, Copy, Clone)]
-pub struct AsymmetricHammingScorer;
+pub struct AsymmetricHammingDistance;
 
-impl QuantizedVectorScorer for AsymmetricHammingScorer {
-    fn score(&self, query: &[u8], doc: &[u8]) -> f64 {
+impl QuantizedVectorDistance for AsymmetricHammingDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         assert_eq!(query.len() % doc.len(), 0);
-        let (sum, total) = query
+        query
             .chunks(doc.len())
             .enumerate()
             .map(|(i, v)| {
-                let mult = 1usize << i;
-                let sum = BinarySimilarity::hamming(doc, v).expect("same vector length") as usize;
-                (sum * mult, doc.len() * 8 * mult)
+                BinarySimilarity::hamming(doc, v).expect("same vector length") as usize
+                    * (1usize << i)
             })
-            .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
-        (total as f64 - sum as f64) / total as f64
+            .sum::<usize>() as f64
     }
 }

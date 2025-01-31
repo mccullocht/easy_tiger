@@ -2,8 +2,8 @@
 use std::{ops::Deref, sync::Arc};
 
 use crate::{
+    distance::F32VectorDistance,
     graph::{prune_edges, Graph, GraphLayout, GraphVectorIndexReader, GraphVertex, RawVectorStore},
-    scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
         encode_graph_vertex, encode_raw_vector, SessionGraphVectorIndexReader,
@@ -63,9 +63,8 @@ impl IndexMutator {
         // TODO: make this an error instead of panicking.
         assert_eq!(self.reader.config().dimensions.get(), vector.len());
 
-        let scorer = self.reader.config().new_scorer();
-        let vector = scorer.normalize_vector(vector.into());
-        // TODO: normalize input vector.
+        let distance_fn = self.reader.config().new_distance_function();
+        let vector = distance_fn.normalize_vector(vector.into());
         let mut candidate_edges = self.searcher.search(&vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
         let mut raw_vectors = self.reader.raw_vectors()?;
@@ -78,7 +77,7 @@ impl IndexMutator {
             &mut candidate_edges,
             self.reader.config().max_edges,
             &mut raw_vectors,
-            scorer.as_ref(),
+            distance_fn.as_ref(),
         )?;
         candidate_edges.truncate(selected_len);
 
@@ -98,7 +97,7 @@ impl IndexMutator {
             self.insert_edge(
                 &mut graph,
                 &mut raw_vectors,
-                scorer.as_ref(),
+                distance_fn.as_ref(),
                 src_vertex_id,
                 vertex_id,
                 &mut pruned_edges,
@@ -121,7 +120,7 @@ impl IndexMutator {
         &self,
         graph: &mut impl Graph,
         raw_vectors: &mut impl RawVectorStore,
-        scorer: &dyn F32VectorScorer,
+        distance_fn: &dyn F32VectorDistance,
         src_vertex_id: i64,
         dst_vertex_id: i64,
         pruned_edges: &mut Vec<(i64, i64)>,
@@ -146,7 +145,7 @@ impl IndexMutator {
                     raw_vectors
                         .get_raw_vector(*e)
                         .unwrap_or(Err(Error::not_found_error()))
-                        .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst)))
+                        .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, &dst)))
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
             neighbors.sort();
@@ -154,7 +153,7 @@ impl IndexMutator {
                 &mut neighbors,
                 self.reader.config().max_edges,
                 raw_vectors,
-                scorer,
+                distance_fn,
             )?;
             // Ensure the graph is undirected by removing links from pruned edges back to this node.
             for v in neighbors.iter().skip(selected_len).map(Neighbor::vertex) {
@@ -168,7 +167,7 @@ impl IndexMutator {
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
     pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
-        let scorer = self.reader.config().new_scorer();
+        let distance_fn = self.reader.config().new_distance_function();
         let mut graph = self.reader.graph()?;
         let mut raw_vectors = self.reader.raw_vectors()?;
 
@@ -217,7 +216,7 @@ impl IndexMutator {
             .collect::<Result<Result<Vec<_>>>>()??;
 
         // Create links between edges of the deleted node if needed.
-        self.cross_link_peer_vertices(&mut vertex_data, scorer.as_ref())?;
+        self.cross_link_peer_vertices(&mut vertex_data, distance_fn.as_ref())?;
 
         // Oh no, we've deleted the entry point! Find the closes point amongst the
         // edges of this node to use as a new one. So long as at least one vector is in
@@ -225,7 +224,7 @@ impl IndexMutator {
         if graph.entry_point().unwrap()? == vertex_id {
             let mut neighbors = vertex_data
                 .iter()
-                .map(|(id, vec, _)| Neighbor::new(*id, scorer.score(&vector, vec)))
+                .map(|(id, vec, _)| Neighbor::new(*id, distance_fn.distance(&vector, vec)))
                 .collect::<Vec<_>>();
             neighbors.sort();
             if let Some(ep_neighbor) = neighbors.first() {
@@ -246,7 +245,7 @@ impl IndexMutator {
     fn cross_link_peer_vertices(
         &self,
         vertex_data: &mut [(i64, Vec<f32>, Vec<i64>)],
-        scorer: &dyn F32VectorScorer,
+        distance_fn: &dyn F32VectorDistance,
     ) -> Result<()> {
         // Score all pairs of vectors among the passed vertices.
         let mut candidate_links = vertex_data
@@ -259,7 +258,7 @@ impl IndexMutator {
                     .skip(src + 1)
                     .filter_map(|(dst, (dst_vertex, dst_vector, _))| {
                         if !src_edges.contains(dst_vertex) {
-                            Some((src, dst, scorer.score(src_vector, dst_vector)))
+                            Some((src, dst, distance_fn.distance(src_vector, dst_vector)))
                         } else {
                             None
                         }
@@ -268,11 +267,10 @@ impl IndexMutator {
             })
             .collect::<Vec<_>>();
 
-        // Sort candidate links in descending order by score, then apply all that fit --
+        // Sort candidate links in order by distance, then apply all that fit --
         // that is inserting the edge into both vertices does not exceed max_edges.
         candidate_links.sort_by(|a, b| {
             a.2.total_cmp(&b.2)
-                .reverse()
                 .then_with(|| a.0.cmp(&b.0))
                 .then_with(|| a.1.cmp(&b.1))
         });
@@ -366,11 +364,11 @@ mod tests {
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
     use crate::{
+        distance::VectorSimilarity,
         graph::{
             Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
         },
         quantization::VectorQuantizer,
-        scoring::VectorSimilarity,
         search::GraphSearcher,
         wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     };

@@ -27,12 +27,12 @@ use thread_local::ThreadLocal;
 use wt_mdb::{options::DropOptionsBuilder, Connection, Record, Result, Session};
 
 use crate::{
+    distance::F32VectorDistance,
     graph::{
         prune_edges, select_pruned_edges, Graph, GraphConfig, GraphLayout, GraphVectorIndexReader,
         GraphVertex, NavVectorStore, RawVectorStore,
     },
     input::{DerefVectorStore, VectorStore},
-    scoring::F32VectorScorer,
     search::GraphSearcher,
     wt::{
         encode_graph_vertex, encode_raw_vector, CursorGraph, CursorNavVectorStore,
@@ -107,7 +107,7 @@ pub struct BulkLoadBuilder<D> {
 
     graph: Box<[RwLock<Vec<Neighbor>>]>,
     entry_vertex: AtomicI64,
-    scorer: Box<dyn F32VectorScorer>,
+    distance_fn: Box<dyn F32VectorDistance>,
 
     graph_stats: Option<GraphStats>,
 }
@@ -129,7 +129,7 @@ where
         graph_vec.resize_with(vectors.len(), || {
             RwLock::new(Vec::with_capacity(index.config().max_edges.get() * 2))
         });
-        let scorer = index.config().new_scorer();
+        let distance_fn = index.config().new_distance_function();
         Self {
             connection,
             index,
@@ -140,7 +140,7 @@ where
             quantized_vectors: None,
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
-            scorer,
+            distance_fn,
             graph_stats: None,
         }
     }
@@ -234,7 +234,7 @@ where
             .unwrap()
         });
         self.centroid = self
-            .scorer
+            .distance_fn
             .normalize_vector(
                 sum.into_iter()
                     .map(|s| (s / self.limit as f64) as f32)
@@ -255,7 +255,7 @@ where
                 .enumerate()
                 .take(self.limit)
                 .map(|(i, v)| {
-                    let normalized = self.scorer.normalize_vector(v.into());
+                    let normalized = self.distance_fn.normalize_vector(v.into());
                     let value = encode_raw_vector(&normalized);
                     progress();
                     Record::new(i as i64, value)
@@ -273,7 +273,11 @@ where
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
-        let apply_mu = Mutex::new((0i64, self.scorer.score(&self.get_vector(0), &self.centroid)));
+        let apply_mu = Mutex::new((
+            0i64,
+            self.distance_fn
+                .distance(&self.get_vector(0), &self.centroid),
+        ));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
         // Use thread locals to avoid recreating Session and GraphSearcher per vector. Rayon
@@ -313,7 +317,7 @@ where
                 );
 
                 let mut raw_vectors = reader.raw_vectors()?;
-                let centroid_score = self.scorer.score(
+                let centroid_score = self.distance_fn.distance(
                     &raw_vectors.get_raw_vector(v as i64).unwrap().unwrap(),
                     &self.centroid,
                 );
@@ -332,7 +336,7 @@ where
                             true
                         } else {
                             iv.push(*e);
-                            let backedge = Neighbor::new(v as i64, e.score());
+                            let backedge = Neighbor::new(v as i64, e.distance());
                             if !ev.contains(&backedge) {
                                 ev.push(backedge);
                             }
@@ -441,7 +445,7 @@ where
                         }
                         let vertex_vector =
                             if self.index.config().layout == GraphLayout::RawVectorInGraph {
-                                Some(self.scorer.normalize_vector(v.into()))
+                                Some(self.distance_fn.normalize_vector(v.into()))
                             } else {
                                 None
                             };
@@ -471,7 +475,7 @@ where
             &mut candidates,
             self.index.config().max_edges,
             &mut graph,
-            self.scorer.as_ref(),
+            self.distance_fn.as_ref(),
         )?;
         candidates.truncate(split);
         Ok(candidates)
@@ -488,8 +492,8 @@ where
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
             let n = Neighbor::new(
                 in_flight_vertex as i64,
-                self.scorer
-                    .score(&vertex_vector, &self.get_vector(in_flight_vertex)),
+                self.distance_fn
+                    .distance(&vertex_vector, &self.get_vector(in_flight_vertex)),
             );
             // If the queue is full and n is worse than all other edges, skip.
             if edges.len() >= limit && n >= *edges.last().unwrap() {
@@ -525,7 +529,7 @@ where
                     &edges,
                     max_edges,
                     &mut reader.graph()?,
-                    self.scorer.as_ref(),
+                    self.distance_fn.as_ref(),
                 )?;
                 edges
                     .iter()
@@ -581,7 +585,8 @@ where
     }
 
     fn get_vector(&self, index: usize) -> Cow<'_, [f32]> {
-        self.scorer.normalize_vector(self.vectors[index].into())
+        self.distance_fn
+            .normalize_vector(self.vectors[index].into())
     }
 }
 

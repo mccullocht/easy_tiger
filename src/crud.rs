@@ -2,8 +2,8 @@
 use std::{ops::Deref, sync::Arc};
 
 use crate::{
+    distance::F32VectorDistance,
     graph::{prune_edges, Graph, GraphLayout, GraphVectorIndexReader, GraphVertex, RawVectorStore},
-    scoring::F32VectorDistance,
     search::GraphSearcher,
     wt::{
         encode_graph_vertex, encode_raw_vector, SessionGraphVectorIndexReader,
@@ -364,11 +364,11 @@ mod tests {
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
     use crate::{
+        distance::VectorSimilarity,
         graph::{
             Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
         },
         quantization::VectorQuantizer,
-        scoring::VectorSimilarity,
         search::GraphSearcher,
         wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     };

@@ -6,12 +6,12 @@ use std::{
 };
 
 use crate::{
+    distance::QuantizedVectorDistance,
     graph::{
         Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
         RawVectorStore,
     },
     quantization::Quantizer,
-    scoring::QuantizedVectorDistance,
     Neighbor,
 };
 
@@ -369,12 +369,12 @@ mod test {
     use wt_mdb::Result;
 
     use crate::{
+        distance::{DotProductDistance, F32VectorDistance, VectorSimilarity},
         graph::{
             Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
             RawVector, RawVectorStore,
         },
         quantization::{BinaryQuantizer, Quantizer, VectorQuantizer},
-        scoring::{DotProductDistance, F32VectorDistance, VectorSimilarity},
         Neighbor,
     };
 

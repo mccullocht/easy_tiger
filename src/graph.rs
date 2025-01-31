@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
 
 use crate::{
+    distance::{F32VectorDistance, QuantizedVectorDistance, VectorSimilarity},
     quantization::{Quantizer, VectorQuantizer},
-    scoring::{F32VectorDistance, QuantizedVectorDistance, VectorSimilarity},
     Neighbor,
 };
 

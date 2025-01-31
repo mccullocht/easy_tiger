@@ -1,6 +1,5 @@
 //! Dense vector scoring traits and implementations.
 
-// TODO: rename the module and everything else from scoring/scorer to distance.
 use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};

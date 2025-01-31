@@ -27,12 +27,12 @@ use thread_local::ThreadLocal;
 use wt_mdb::{options::DropOptionsBuilder, Connection, Record, Result, Session};
 
 use crate::{
+    distance::F32VectorDistance,
     graph::{
         prune_edges, select_pruned_edges, Graph, GraphConfig, GraphLayout, GraphVectorIndexReader,
         GraphVertex, NavVectorStore, RawVectorStore,
     },
     input::{DerefVectorStore, VectorStore},
-    scoring::F32VectorDistance,
     search::GraphSearcher,
     wt::{
         encode_graph_vertex, encode_raw_vector, CursorGraph, CursorNavVectorStore,

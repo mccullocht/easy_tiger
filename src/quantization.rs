@@ -6,7 +6,7 @@ use std::{io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::scoring::{
+use crate::distance::{
     AsymmetricHammingDistance, HammingDistance, QuantizedVectorDistance, VectorSimilarity,
 };
 

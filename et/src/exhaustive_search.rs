@@ -68,7 +68,7 @@ pub fn exhaustive_search(
 
         let similarities = (0..query_vectors.len())
             .into_par_iter()
-            .map(|i| scorer.score(&index_vector, &query_vectors[i]))
+            .map(|i| scorer.distance(&index_vector, &query_vectors[i]))
             .collect::<Vec<_>>();
         for (i, s) in similarities.into_iter().enumerate() {
             let n = Neighbor::new(record.key(), s);

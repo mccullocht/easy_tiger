@@ -273,7 +273,10 @@ where
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
-        let apply_mu = Mutex::new((0i64, self.scorer.score(&self.get_vector(0), &self.centroid)));
+        let apply_mu = Mutex::new((
+            0i64,
+            self.scorer.distance(&self.get_vector(0), &self.centroid),
+        ));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
         // Use thread locals to avoid recreating Session and GraphSearcher per vector. Rayon
@@ -313,7 +316,7 @@ where
                 );
 
                 let mut raw_vectors = reader.raw_vectors()?;
-                let centroid_score = self.scorer.score(
+                let centroid_score = self.scorer.distance(
                     &raw_vectors.get_raw_vector(v as i64).unwrap().unwrap(),
                     &self.centroid,
                 );
@@ -489,7 +492,7 @@ where
             let n = Neighbor::new(
                 in_flight_vertex as i64,
                 self.scorer
-                    .score(&vertex_vector, &self.get_vector(in_flight_vertex)),
+                    .distance(&vertex_vector, &self.get_vector(in_flight_vertex)),
             );
             // If the queue is full and n is worse than all other edges, skip.
             if edges.len() >= limit && n >= *edges.last().unwrap() {

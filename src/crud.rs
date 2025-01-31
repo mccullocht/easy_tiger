@@ -146,7 +146,7 @@ impl IndexMutator {
                     raw_vectors
                         .get_raw_vector(*e)
                         .unwrap_or(Err(Error::not_found_error()))
-                        .map(|dst| Neighbor::new(*e, scorer.score(&src_vector, &dst)))
+                        .map(|dst| Neighbor::new(*e, scorer.distance(&src_vector, &dst)))
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
             neighbors.sort();
@@ -225,7 +225,7 @@ impl IndexMutator {
         if graph.entry_point().unwrap()? == vertex_id {
             let mut neighbors = vertex_data
                 .iter()
-                .map(|(id, vec, _)| Neighbor::new(*id, scorer.score(&vector, vec)))
+                .map(|(id, vec, _)| Neighbor::new(*id, scorer.distance(&vector, vec)))
                 .collect::<Vec<_>>();
             neighbors.sort();
             if let Some(ep_neighbor) = neighbors.first() {
@@ -259,7 +259,7 @@ impl IndexMutator {
                     .skip(src + 1)
                     .filter_map(|(dst, (dst_vertex, dst_vector, _))| {
                         if !src_edges.contains(dst_vertex) {
-                            Some((src, dst, scorer.score(src_vector, dst_vector)))
+                            Some((src, dst, scorer.distance(src_vector, dst_vector)))
                         } else {
                             None
                         }
@@ -268,11 +268,10 @@ impl IndexMutator {
             })
             .collect::<Vec<_>>();
 
-        // Sort candidate links in descending order by score, then apply all that fit --
+        // Sort candidate links in order by distance, then apply all that fit --
         // that is inserting the edge into both vertices does not exceed max_edges.
         candidate_links.sort_by(|a, b| {
             a.2.total_cmp(&b.2)
-                .reverse()
                 .then_with(|| a.0.cmp(&b.0))
                 .then_with(|| a.1.cmp(&b.1))
         });

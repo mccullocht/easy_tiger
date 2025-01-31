@@ -15,11 +15,7 @@ pub trait F32VectorScorer: Send + Sync {
     /// where larger values are better matches.
     ///
     /// Input vectors must be the same length or this function may panic.
-    fn score(&self, a: &[f32], b: &[f32]) -> f64;
-
-    /// Normalize a vector for use with this scoring function.
-    /// By default, does nothing.
-    fn normalize(&self, _vector: &mut [f32]) {}
+    fn distance(&self, a: &[f32], b: &[f32]) -> f64;
 
     /// Normalize a vector for use with this scoring function.
     /// By default, does nothing.
@@ -38,7 +34,7 @@ pub trait QuantizedVectorScorer {
     ///
     /// This function is not required to be commutative and may panic if
     /// one of the inputs is misshapen.
-    fn score(&self, query: &[u8], doc: &[u8]) -> f64;
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64;
 }
 
 /// Functions used for computing a similarity score for high fidelity vectors.
@@ -86,7 +82,7 @@ impl FromStr for VectorSimilarity {
 pub struct EuclideanScorer;
 
 impl F32VectorScorer for EuclideanScorer {
-    fn score(&self, a: &[f32], b: &[f32]) -> f64 {
+    fn distance(&self, a: &[f32], b: &[f32]) -> f64 {
         SpatialSimilarity::l2sq(a, b).unwrap()
     }
 }
@@ -96,7 +92,7 @@ impl F32VectorScorer for EuclideanScorer {
 pub struct DotProductScorer;
 
 impl F32VectorScorer for DotProductScorer {
-    fn score(&self, a: &[f32], b: &[f32]) -> f64 {
+    fn distance(&self, a: &[f32], b: &[f32]) -> f64 {
         // Assuming values are normalized, this will produce a distance in [0,1]
         (-SpatialSimilarity::dot(a, b).unwrap() + 1.0) / 2.0
     }
@@ -115,7 +111,7 @@ impl F32VectorScorer for DotProductScorer {
 pub struct HammingScorer;
 
 impl QuantizedVectorScorer for HammingScorer {
-    fn score(&self, a: &[u8], b: &[u8]) -> f64 {
+    fn distance(&self, a: &[u8], b: &[u8]) -> f64 {
         BinarySimilarity::hamming(a, b).unwrap()
     }
 }
@@ -125,7 +121,7 @@ impl QuantizedVectorScorer for HammingScorer {
 pub struct AsymmetricHammingScorer;
 
 impl QuantizedVectorScorer for AsymmetricHammingScorer {
-    fn score(&self, query: &[u8], doc: &[u8]) -> f64 {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         assert_eq!(query.len() % doc.len(), 0);
         query
             .chunks(doc.len())

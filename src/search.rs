@@ -149,7 +149,7 @@ impl GraphSearcher {
                     .get_nav_vector(edge)
                     .unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
-                    .add_unvisited(Neighbor::new(edge, nav_scorer.score(&nav_query, &vec)));
+                    .add_unvisited(Neighbor::new(edge, nav_scorer.distance(&nav_query, &vec)));
             }
         }
 
@@ -177,7 +177,7 @@ impl GraphSearcher {
                 .unwrap_or(Err(Error::not_found_error()))?;
             self.candidates.add_unvisited(Neighbor::new(
                 entry_point,
-                nav_scorer.score(&nav_query, &entry_vector),
+                nav_scorer.distance(&nav_query, &entry_vector),
             ));
             self.seen.insert(entry_point);
         }
@@ -209,14 +209,14 @@ impl GraphSearcher {
             .map(|c| {
                 let vertex = c.neighbor.vertex();
                 let score = if let Some(candidate_vector) = c.state.vector() {
-                    Ok(scorer.score(&query, candidate_vector))
+                    Ok(scorer.distance(&query, candidate_vector))
                 } else {
                     raw_vectors
                         .as_mut()
                         .expect("set if any")
                         .get_raw_vector(vertex)
                         .expect("row exists")
-                        .map(|rv| scorer.score(&query, &rv))
+                        .map(|rv| scorer.distance(&query, &rv))
                 };
                 score.map(|s| Neighbor::new(vertex, s))
             })
@@ -447,7 +447,7 @@ mod test {
                 .enumerate()
                 .filter_map(|(i, n)| {
                     if i != index {
-                        Some(Neighbor::new(i as i64, scorer.score(q, &n.vector)))
+                        Some(Neighbor::new(i as i64, scorer.distance(q, &n.vector)))
                     } else {
                         None
                     }
@@ -470,7 +470,7 @@ mod test {
                 let q = &graph[n.vertex() as usize].vector;
                 if !selected
                     .iter()
-                    .any(|p| scorer.score(q, &graph[p.vertex() as usize].vector) < n.distance())
+                    .any(|p| scorer.distance(q, &graph[p.vertex() as usize].vector) < n.distance())
                 {
                     selected.push(*n);
                 }

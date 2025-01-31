@@ -7,7 +7,7 @@ use std::{io, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 use crate::scoring::{
-    AsymmetricHammingScorer, HammingScorer, QuantizedVectorScorer, VectorSimilarity,
+    AsymmetricHammingDistance, HammingDistance, QuantizedVectorDistance, VectorSimilarity,
 };
 
 /// `Quantizer` is used to perform lossy quantization of input vectors.
@@ -49,11 +49,14 @@ impl VectorQuantizer {
         }
     }
 
-    /// Create a new scorer for this quantization method.
-    pub fn new_scorer(&self, _similarity: &VectorSimilarity) -> Box<dyn QuantizedVectorScorer> {
+    /// Create a new distance function for this quantization method.
+    pub fn new_distance_function(
+        &self,
+        _similarity: &VectorSimilarity,
+    ) -> Box<dyn QuantizedVectorDistance> {
         match self {
-            Self::Binary => Box::new(HammingScorer),
-            Self::AsymmetricBinary { n: _ } => Box::new(AsymmetricHammingScorer),
+            Self::Binary => Box::new(HammingDistance),
+            Self::AsymmetricBinary { n: _ } => Box::new(AsymmetricHammingDistance),
         }
     }
 }

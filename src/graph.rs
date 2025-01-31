@@ -10,7 +10,7 @@ use wt_mdb::{Error, Result};
 
 use crate::{
     quantization::{Quantizer, VectorQuantizer},
-    scoring::{F32VectorScorer, QuantizedVectorScorer, VectorSimilarity},
+    scoring::{F32VectorDistance, QuantizedVectorDistance, VectorSimilarity},
     Neighbor,
 };
 
@@ -68,18 +68,18 @@ pub struct GraphConfig {
 }
 
 impl GraphConfig {
-    /// Return a scorer for high fidelity vectors in the index.
-    pub fn new_scorer(&self) -> Box<dyn F32VectorScorer> {
-        self.similarity.new_scorer()
+    /// Return a distance function for high fidelity vectors in the index.
+    pub fn new_distance_function(&self) -> Box<dyn F32VectorDistance> {
+        self.similarity.new_distance_function()
     }
 
     pub fn new_quantizer(&self) -> Box<dyn Quantizer> {
         self.quantizer.new_quantizer()
     }
 
-    /// Return a scorer for quantized navigational vectors in the index.
-    pub fn new_nav_scorer(&self) -> Box<dyn QuantizedVectorScorer> {
-        self.quantizer.new_scorer(&self.similarity)
+    /// Return a distance function for quantized navigational vectors in the index.
+    pub fn new_nav_distance_function(&self) -> Box<dyn QuantizedVectorDistance> {
+        self.quantizer.new_distance_function(&self.similarity)
     }
 }
 
@@ -225,7 +225,7 @@ pub trait NavVectorStore {
 }
 
 /// Select the indices of `edges` that should remain when pruning down to at most `max_edges`.
-/// `graph` is used to access vectors and `scorer` is used to compare vectors when making pruning
+/// `graph` is used to access vectors and `distance_fn` is used to compare vectors when making pruning
 /// decisions.
 /// REQUIRES: `edges.is_sorted()`.
 // TODO: alpha value(s) should be tuneable.
@@ -233,7 +233,7 @@ pub(crate) fn select_pruned_edges(
     edges: &[Neighbor],
     max_edges: NonZero<usize>,
     raw_vectors: &mut impl RawVectorStore,
-    scorer: &dyn F32VectorScorer,
+    distance_fn: &dyn F32VectorDistance,
 ) -> Result<BTreeSet<usize>> {
     if edges.is_empty() {
         return Ok(BTreeSet::new());
@@ -265,7 +265,7 @@ pub(crate) fn select_pruned_edges(
             if !selected
                 .iter()
                 .take_while(|s| **s < i)
-                .any(|s| scorer.distance(e_vec, &vectors[*s]) < e.distance * alpha)
+                .any(|s| distance_fn.distance(e_vec, &vectors[*s]) < e.distance * alpha)
             {
                 selected.insert(i);
                 if selected.len() >= max_edges.get() {
@@ -282,7 +282,7 @@ pub(crate) fn select_pruned_edges(
     Ok(selected)
 }
 
-/// Prune `edges` down to at most `max_edges`. Use `graph` and `scorer` to inform this decision.
+/// Prune `edges` down to at most `max_edges`. Use `graph` and `distance_fn` to inform this decision.
 /// Returns a split point: all edges before that point are selected, all after are to be dropped.
 /// REQUIRES: `edges.is_sorted()`.
 // TODO: alpha value(s) should be tuneable.
@@ -290,9 +290,9 @@ pub(crate) fn prune_edges(
     edges: &mut [Neighbor],
     max_edges: NonZero<usize>,
     raw_vectors: &mut impl RawVectorStore,
-    scorer: &dyn F32VectorScorer,
+    distance_fn: &dyn F32VectorDistance,
 ) -> Result<usize> {
-    let selected = select_pruned_edges(edges, max_edges, raw_vectors, scorer)?;
+    let selected = select_pruned_edges(edges, max_edges, raw_vectors, distance_fn)?;
 
     // Partition edges into selected and unselected.
     for (i, j) in selected.iter().enumerate() {

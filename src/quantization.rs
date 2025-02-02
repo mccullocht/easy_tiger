@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use simsimd::SpatialSimilarity;
 
 use crate::distance::{
-    AsymmetricHammingDistance, HammingDistance, QuantizedVectorDistance, VectorSimilarity,
+    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, QuantizedVectorDistance,
+    VectorSimilarity,
 };
 
 /// `Quantizer` is used to perform lossy quantization of input vectors.
@@ -57,15 +58,12 @@ impl VectorQuantizer {
     /// Create a new distance function for this quantization method.
     pub fn new_distance_function(
         &self,
-        _similarity: &VectorSimilarity,
+        similarity: &VectorSimilarity,
     ) -> Box<dyn QuantizedVectorDistance> {
         match self {
             Self::Binary => Box::new(HammingDistance),
             Self::AsymmetricBinary { n: _ } => Box::new(AsymmetricHammingDistance),
-            Self::I8Naive => {
-                assert_eq!(*similarity, VectorSimilarity::Dot);
-                Box::new(I8DotScorer)
-            }
+            Self::I8Naive => Box::new(I8NaiveDistance(*similarity)),
         }
     }
 }

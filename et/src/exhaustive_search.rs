@@ -29,8 +29,11 @@ pub struct ExhaustiveSearchArgs {
     #[arg(long)]
     neighbors: PathBuf,
     /// Number of neighbors for each query in the neighbors file.
-    #[arg(long, default_value = "100")]
+    #[arg(long, default_value_t = NonZero::new(100).unwrap())]
     neighbors_len: NonZero<usize>,
+    /// Maximum number of records to search for query vectors.
+    #[arg(long)]
+    record_limit: Option<usize>,
 }
 
 pub fn exhaustive_search(
@@ -51,16 +54,18 @@ pub fn exhaustive_search(
     let distance_fn = index.config().new_distance_function();
 
     let session = connection.open_session()?;
-    let mut cursor = session.open_record_cursor(index.graph_table_name())?;
-    let limit = std::cmp::max(cursor.largest_key().unwrap().unwrap() + 1, 0);
-    cursor.seek_exact(-1).unwrap()?;
+    let mut cursor = session.open_record_cursor(index.raw_table_name())?;
+    let mut limit = std::cmp::max(cursor.largest_key().unwrap().unwrap() + 1, 0) as usize;
+    limit = limit.min(args.record_limit.unwrap_or(usize::MAX));
+    cursor.set_bounds(0..)?;
     let mut index_vector = vec![0.0f32; index.config().dimensions.get()];
-    let progress = progress_bar(limit as usize, None);
-    for record_result in cursor {
+    let progress = progress_bar(limit, None);
+    for record_result in cursor.take(limit) {
         let record = record_result?;
         for (i, o) in record
             .value()
             .chunks(std::mem::size_of::<f32>())
+            .take(index.config().dimensions.get())
             .zip(index_vector.iter_mut())
         {
             *o = f32::from_le_bytes(i.try_into().expect("array of 4 conversion."));

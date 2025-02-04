@@ -1,5 +1,4 @@
 use std::{
-    collections::BinaryHeap,
     fs::File,
     io::{self, BufWriter, Write},
     num::NonZero,
@@ -14,7 +13,7 @@ use easy_tiger::{
     Neighbor,
 };
 use memmap2::Mmap;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::prelude::*;
 use wt_mdb::Connection;
 
 use crate::ui::progress_bar;
@@ -48,9 +47,8 @@ pub fn exhaustive_search(
     )?;
 
     let mut results = Vec::with_capacity(query_vectors.len());
-    results.resize_with(query_vectors.len(), || {
-        BinaryHeap::with_capacity(args.neighbors_len.get())
-    });
+    let k = args.neighbors_len.get();
+    results.resize_with(query_vectors.len(), || Vec::with_capacity(k * 2));
     let distance_fn = index.config().new_distance_function();
 
     let session = connection.open_session()?;
@@ -71,27 +69,26 @@ pub fn exhaustive_search(
             *o = f32::from_le_bytes(i.try_into().expect("array of 4 conversion."));
         }
 
-        let similarities = (0..query_vectors.len())
-            .into_par_iter()
-            .map(|i| distance_fn.distance(&index_vector, &query_vectors[i]))
-            .collect::<Vec<_>>();
-        for (i, s) in similarities.into_iter().enumerate() {
-            let n = Neighbor::new(record.key(), s);
-            if results[i].len() < results[i].capacity() {
-                results[i].push(n);
-            } else {
-                let mut peek = results[i].peek_mut().unwrap();
-                if n <= *peek {
-                    *peek = n;
+        results.par_iter_mut().enumerate().for_each(|(i, r)| {
+            let n = Neighbor::new(
+                record.key(),
+                distance_fn.distance(&index_vector, &query_vectors[i]),
+            );
+            if r.len() <= k || n < r[k] {
+                r.push(n);
+                if r.len() == r.capacity() {
+                    r.select_nth_unstable(k);
+                    r.truncate(k);
                 }
             }
-        }
+        });
         progress.inc(1);
     }
 
     let mut writer = BufWriter::new(File::create(args.neighbors)?);
-    for neighbor_heap in results.into_iter() {
-        for n in neighbor_heap.into_sorted_vec() {
+    for mut neighbors in results.into_iter() {
+        neighbors.sort_unstable();
+        for n in neighbors.into_iter().take(k) {
             writer.write_all(&(n.vertex() as u32).to_le_bytes())?;
         }
     }

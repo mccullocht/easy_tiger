@@ -39,6 +39,9 @@ pub struct SearchArgs {
     /// Maximum number of queries to run. If unset, run all queries in the vector file.
     #[arg(short, long)]
     limit: Option<usize>,
+    /// Maximum record number to consider as a valid result. Used for filtering testing.
+    #[arg(long)]
+    record_limit: Option<usize>,
 
     /// Path buf to numpy u32 formatted neighbors file.
     /// This should include one row of length neighbors_len for each vector in query_vectors.
@@ -67,6 +70,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
     );
+    let record_limit = args.record_limit.map(|l| l as i64).unwrap_or(i64::MAX);
     let search_params = GraphSearchParams {
         beam_width: args.candidates,
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
@@ -96,6 +100,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             "warmup",
             args.warmup_iters,
             limit,
+            record_limit,
             &query_vectors,
             &index,
             &connection,
@@ -109,6 +114,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             "test",
             args.test_iters,
             limit,
+            record_limit,
             &query_vectors,
             &index,
             &connection,
@@ -150,6 +156,7 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
     name: &'static str,
     iters: usize,
     limit: usize,
+    record_limit: i64,
     query_vectors: &DerefVectorStore<f32, Q>,
     index: &Arc<TableGraphVectorIndex>,
     connection: &Arc<Connection>,
@@ -167,7 +174,8 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
         .map_init(
             || SearcherState::new(&index, &connection, search_params).unwrap(),
             |searcher, index| {
-                let stats = searcher.query(index, &query_vectors[index], recall_computer);
+                let stats =
+                    searcher.query(index, &query_vectors[index], record_limit, recall_computer);
                 progress.inc(1);
                 stats
             },
@@ -198,15 +206,15 @@ impl SearcherState {
         &mut self,
         index: usize,
         query: &[f32],
+        record_limit: i64,
         recall_computer: Option<&RecallComputer<N>>,
     ) -> io::Result<AggregateSearchStats> {
         self.reader.session().begin_transaction(None)?;
         let start = Instant::now();
-        let results = self.searcher.search(query, &mut self.reader)?;
+        let results =
+            self.searcher
+                .search_with_filter(query, |i| i < record_limit, &mut self.reader)?;
         let duration = Instant::now() - start;
-        if duration > Duration::new(1, 0) {
-            println!("query {} {:0.6}", index, duration.as_secs_f64());
-        }
         self.reader.session().rollback_transaction(None)?;
         Ok(AggregateSearchStats::new(
             duration,

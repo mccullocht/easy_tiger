@@ -85,7 +85,22 @@ impl GraphSearcher {
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, reader)
+        self.search_internal(query, |_| true, reader)
+    }
+
+    /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
+    /// vertex ids are valid results. The returned results will only include vertices that match `filter_predicate`
+    /// and will assume that for any vertex id that all calls will return the same value.
+    ///
+    /// Returns an approximate list of neighbors matching `filter_predicate` with the highest scores.
+    pub fn search_with_filter(
+        &mut self,
+        query: &[f32],
+        filter_predicate: impl FnMut(i64) -> bool,
+        reader: &mut impl GraphVectorIndexReader,
+    ) -> Result<Vec<Neighbor>> {
+        self.seen.clear();
+        self.search_internal(query, filter_predicate, reader)
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -105,12 +120,13 @@ impl GraphSearcher {
             .get_raw_vector(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
             .to_vec();
-        self.search_internal(&query, reader)
+        self.search_internal(&query, |_| true, reader)
     }
 
     fn search_internal(
         &mut self,
         query: &[f32],
+        mut filter_predicate: impl FnMut(i64) -> bool,
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         // TODO: come up with a better way of managing re-used state.
@@ -129,17 +145,22 @@ impl GraphSearcher {
             nav_distance_fn.as_ref(),
         )?;
 
-        while let Some(mut best_candidate) = self.candidates.next_unvisited() {
+        while let Some(best_candidate) = self.candidates.next_unvisited() {
             self.visited += 1;
+            let vertex_id = best_candidate.neighbor().vertex();
             let node = graph
-                .get_vertex(best_candidate.neighbor().vertex())
+                .get_vertex(vertex_id)
                 .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            // If we aren't reranking we don't need to copy the actual vector.
-            best_candidate.visit(if self.params.num_rerank > 0 {
-                node.vector().map(|v| v.to_vec())
+            if filter_predicate(vertex_id) {
+                // If we aren't reranking we don't need to copy the actual vector.
+                best_candidate.visit(if self.params.num_rerank > 0 {
+                    node.vector().map(|v| v.to_vec())
+                } else {
+                    None
+                });
             } else {
-                None
-            });
+                best_candidate.remove();
+            }
 
             for edge in node.edges() {
                 if !self.seen.insert(edge) {
@@ -343,14 +364,24 @@ impl<'a> VisitCandidateGuard<'a> {
     }
 
     /// Mark this candidate as visited and update the full fidelity vector in the candidate list.
-    fn visit(&mut self, vector: Option<impl Into<Vec<f32>>>) {
+    fn visit(mut self, vector: Option<impl Into<Vec<f32>>>) {
         self.list.candidates[self.index].state = CandidateState::Visited(vector.map(|v| v.into()));
+        self.update_next_unvisited(self.index + 1)
+    }
+
+    /// Rmove this candidate from the list. May happen if filter check is not passed.
+    fn remove(mut self) {
+        self.list.candidates.remove(self.index);
+        self.update_next_unvisited(self.index);
+    }
+
+    fn update_next_unvisited(&mut self, start: usize) {
         self.list.next_unvisited = self
             .list
             .candidates
             .iter()
             .enumerate()
-            .skip(self.index + 1)
+            .skip(start)
             .find_map(|(i, c)| {
                 if c.state == CandidateState::Unvisited {
                     Some(i)

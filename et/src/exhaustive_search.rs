@@ -1,5 +1,4 @@
 use std::{
-    collections::BinaryHeap,
     fs::File,
     io::{self, BufWriter, Write},
     num::NonZero,
@@ -14,7 +13,7 @@ use easy_tiger::{
     Neighbor,
 };
 use memmap2::Mmap;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::prelude::*;
 use wt_mdb::Connection;
 
 use crate::ui::progress_bar;
@@ -29,8 +28,11 @@ pub struct ExhaustiveSearchArgs {
     #[arg(long)]
     neighbors: PathBuf,
     /// Number of neighbors for each query in the neighbors file.
-    #[arg(long, default_value = "100")]
+    #[arg(long, default_value_t = NonZero::new(100).unwrap())]
     neighbors_len: NonZero<usize>,
+    /// Maximum number of records to search for query vectors.
+    #[arg(long)]
+    record_limit: Option<usize>,
 }
 
 pub fn exhaustive_search(
@@ -45,48 +47,48 @@ pub fn exhaustive_search(
     )?;
 
     let mut results = Vec::with_capacity(query_vectors.len());
-    results.resize_with(query_vectors.len(), || {
-        BinaryHeap::with_capacity(args.neighbors_len.get())
-    });
+    let k = args.neighbors_len.get();
+    results.resize_with(query_vectors.len(), || Vec::with_capacity(k * 2));
     let distance_fn = index.config().new_distance_function();
 
     let session = connection.open_session()?;
-    let mut cursor = session.open_record_cursor(index.graph_table_name())?;
-    let limit = std::cmp::max(cursor.largest_key().unwrap().unwrap() + 1, 0);
-    cursor.seek_exact(-1).unwrap()?;
+    let mut cursor = session.open_record_cursor(index.raw_table_name())?;
+    let mut limit = std::cmp::max(cursor.largest_key().unwrap().unwrap() + 1, 0) as usize;
+    limit = limit.min(args.record_limit.unwrap_or(usize::MAX));
+    cursor.set_bounds(0..)?;
     let mut index_vector = vec![0.0f32; index.config().dimensions.get()];
-    let progress = progress_bar(limit as usize, None);
-    for record_result in cursor {
+    let progress = progress_bar(limit, None);
+    for record_result in cursor.take(limit) {
         let record = record_result?;
         for (i, o) in record
             .value()
             .chunks(std::mem::size_of::<f32>())
+            .take(index.config().dimensions.get())
             .zip(index_vector.iter_mut())
         {
             *o = f32::from_le_bytes(i.try_into().expect("array of 4 conversion."));
         }
 
-        let similarities = (0..query_vectors.len())
-            .into_par_iter()
-            .map(|i| distance_fn.distance(&index_vector, &query_vectors[i]))
-            .collect::<Vec<_>>();
-        for (i, s) in similarities.into_iter().enumerate() {
-            let n = Neighbor::new(record.key(), s);
-            if results[i].len() < results[i].capacity() {
-                results[i].push(n);
-            } else {
-                let mut peek = results[i].peek_mut().unwrap();
-                if n <= *peek {
-                    *peek = n;
+        results.par_iter_mut().enumerate().for_each(|(i, r)| {
+            let n = Neighbor::new(
+                record.key(),
+                distance_fn.distance(&index_vector, &query_vectors[i]),
+            );
+            if r.len() <= k || n < r[k] {
+                r.push(n);
+                if r.len() == r.capacity() {
+                    r.select_nth_unstable(k);
+                    r.truncate(k);
                 }
             }
-        }
+        });
         progress.inc(1);
     }
 
     let mut writer = BufWriter::new(File::create(args.neighbors)?);
-    for neighbor_heap in results.into_iter() {
-        for n in neighbor_heap.into_sorted_vec() {
+    for mut neighbors in results.into_iter() {
+        neighbors.sort_unstable();
+        for n in neighbors.into_iter().take(k) {
             writer.write_all(&(n.vertex() as u32).to_le_bytes())?;
         }
     }

@@ -144,7 +144,6 @@ impl GraphSearcher {
             quantizer.as_ref(),
             nav_distance_fn.as_ref(),
         )?;
-        let mut selected_edges = vec![];
         let mut filtered_edges = vec![];
 
         while let Some(best_candidate) = self.candidates.next_unvisited() {
@@ -164,72 +163,57 @@ impl GraphSearcher {
                 best_candidate.remove();
             }
 
-            // XXX new select_edges() for a vertex:
-            // * partition edges by predicate
-            //   - a selected edges are present in 'seen'.
-            //   - both selected and filtered edges have been checked against 'seen'.
-            // * iterate over filtered edges
-            //   - read filtered vertex.
-            //   - add all edges matching predicate and !seen to selected edge set.
-            //   - mark filtered vertex as seen, we won't ever need to visit it.
-            //   - if all filtered edges have been "replaced" then terminate to avoid over-retrieving.
-            // * run the loop to fetch and score nav vectors and add to candidate queue.
-
-            // Partition edges into a selected set that is newly marked as `seen` and will be nav scored.
-            // Filtered edges are stored for further examination.
-            selected_edges.clear();
+            let mut selected_edges = 0usize;
             filtered_edges.clear();
             for edge in node.edges() {
-                // Select all edges that match the predicate and ensure that they appear in `seen`.
-                // Filtered edges are stored for further examination without checking `seen`.
-                if !filter_predicate(edge) {
-                    filtered_edges.push(edge);
-                } else if self.seen.insert(edge) {
-                    selected_edges.push(edge);
+                if !self.seen.insert(edge) {
+                    continue;
+                }
+
+                let vec = nav
+                    .get_nav_vector(edge)
+                    .unwrap_or(Err(Error::not_found_error()))?;
+                let n = Neighbor::new(edge, nav_distance_fn.distance(&nav_query, &vec));
+
+                if filter_predicate(edge) {
+                    self.candidates.add_unvisited(n);
+                    selected_edges += 1;
+                } else {
+                    filtered_edges.push(n);
                 }
             }
             drop(node);
 
-            // Visit each filtered edge, skipping any that have already been seen. Filtered edges will be
-            // marked as seen as we will either nav score the filter vertex or any of the filtered vertex's
-            // outbound edges.
-            let selected_target = reader.config().max_edges.get();
-            for filtered_edge in filtered_edges.iter().copied() {
-                if !self.seen.insert(filtered_edge) {
-                    continue;
+            // XXX i probably don't need to score these first.
+            if selected_edges > 0 {
+                for n in filtered_edges.iter().copied() {
+                    self.candidates.add_unvisited(n);
                 }
+                continue;
+            }
+
+            for neighbor in filtered_edges.iter().copied() {
                 let mut any_added = false;
                 let filtered_vertex = graph
-                    .get_vertex(filtered_edge)
+                    .get_vertex(neighbor.vertex())
                     .unwrap_or(Err(Error::not_found_error()))?;
                 for fof in filtered_vertex.edges() {
                     if filter_predicate(fof) && !self.seen.insert(fof) {
-                        selected_edges.push(fof);
+                        let vec = nav
+                            .get_nav_vector(fof)
+                            .unwrap_or(Err(Error::not_found_error()))?;
+                        self.candidates.add_unvisited(Neighbor::new(
+                            fof,
+                            nav_distance_fn.distance(&nav_query, &vec),
+                        ));
                         any_added = true;
                     }
                 }
                 // Add filtered_edge to the select set if none of its neighbors match the predicate.
                 // This allows us to explore friends-of-friends of the filtered edge if it scores well enough.
                 if !any_added {
-                    selected_edges.push(filtered_edge);
+                    self.candidates.add_unvisited(neighbor);
                 }
-
-                // Stop selecting friends-of-friends from the filtered set if we've already reached max_edges.
-                // This prevents us from doing too much work at once.
-                // XXX should we select all remaining filtered edges here?
-                if selected_edges.len() >= selected_target {
-                    break;
-                }
-            }
-
-            for edge in selected_edges.iter().copied() {
-                let vec = nav
-                    .get_nav_vector(edge)
-                    .unwrap_or(Err(Error::not_found_error()))?;
-                self.candidates.add_unvisited(Neighbor::new(
-                    edge,
-                    nav_distance_fn.distance(&nav_query, &vec),
-                ));
             }
         }
 

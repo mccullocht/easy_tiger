@@ -42,6 +42,38 @@ impl AddAssign for GraphSearchStats {
     }
 }
 
+/// Trait for vertex filtering predicates that provides additional properties of the prediate.
+pub trait VertexPredicate {
+    /// Returns true if `vertex_id` can be accepted as a result.
+    ///
+    /// This function is expected to return the same result on repeated calls for a `vertex_id`.
+    fn accept(&self, vertex_id: i64) -> bool;
+
+    /// Estimate the number of vertices that match this predicate.
+    fn estimated_cardinality(&self) -> usize;
+
+    /// Iterate over the set of vertex ids that match the predicate.
+    fn vertex_iter(&self) -> impl Iterator<Item = i64> + '_;
+}
+
+/// A [VertexPredicate] that accepts all vertex ids.
+#[derive(Debug, Copy, Clone)]
+pub struct AcceptAllVertexPredicate;
+
+impl VertexPredicate for AcceptAllVertexPredicate {
+    fn accept(&self, _vertex_id: i64) -> bool {
+        true
+    }
+
+    fn estimated_cardinality(&self) -> usize {
+        usize::MAX
+    }
+
+    fn vertex_iter(&self) -> impl Iterator<Item = i64> + '_ {
+        (0..i64::MAX).into_iter()
+    }
+}
+
 /// Helper to search a Vamana graph.
 pub struct GraphSearcher {
     params: GraphSearchParams,
@@ -85,22 +117,21 @@ impl GraphSearcher {
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, |_| true, reader)
+        self.search_internal(query, &AcceptAllVertexPredicate, reader)
     }
 
-    /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
-    /// vertex ids are valid results. The returned results will only include vertices that match `filter_predicate`
-    /// and will assume that for any vertex id that all calls will return the same value.
+    /// Search for `query` in the given graph `reader` and a `predicate` that filters the valid results.
+    /// All returned results will match `predicate`.
     ///
     /// Returns an approximate list of neighbors matching `filter_predicate` with the highest scores.
     pub fn search_with_filter(
         &mut self,
         query: &[f32],
-        filter_predicate: impl FnMut(i64) -> bool,
+        predicate: &impl VertexPredicate,
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, filter_predicate, reader)
+        self.search_internal(query, predicate, reader)
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -120,13 +151,13 @@ impl GraphSearcher {
             .get_raw_vector(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
             .to_vec();
-        self.search_internal(&query, |_| true, reader)
+        self.search_internal(&query, &AcceptAllVertexPredicate, reader)
     }
 
     fn search_internal(
         &mut self,
         query: &[f32],
-        mut filter_predicate: impl FnMut(i64) -> bool,
+        predicate: &impl VertexPredicate,
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         // TODO: come up with a better way of managing re-used state.
@@ -152,7 +183,7 @@ impl GraphSearcher {
             let node = graph
                 .get_vertex(vertex_id)
                 .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            if filter_predicate(vertex_id) {
+            if predicate.accept(vertex_id) {
                 // If we aren't reranking we don't need to copy the actual vector.
                 best_candidate.visit(if self.params.num_rerank > 0 {
                     node.vector().map(|v| v.to_vec())
@@ -175,7 +206,7 @@ impl GraphSearcher {
                     .unwrap_or(Err(Error::not_found_error()))?;
                 let n = Neighbor::new(edge, nav_distance_fn.distance(&nav_query, &vec));
 
-                if filter_predicate(edge) {
+                if predicate.accept(edge) {
                     self.candidates.add_unvisited(n);
                     selected_edges += 1;
                 } else {
@@ -198,7 +229,7 @@ impl GraphSearcher {
                     .get_vertex(neighbor.vertex())
                     .unwrap_or(Err(Error::not_found_error()))?;
                 for fof in filtered_vertex.edges() {
-                    if filter_predicate(fof) && !self.seen.insert(fof) {
+                    if predicate.accept(fof) && !self.seen.insert(fof) {
                         let vec = nav
                             .get_nav_vector(fof)
                             .unwrap_or(Err(Error::not_found_error()))?;

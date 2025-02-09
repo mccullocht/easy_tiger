@@ -14,7 +14,7 @@ use clap::Args;
 use easy_tiger::{
     graph::GraphSearchParams,
     input::{DerefVectorStore, VectorStore},
-    search::{GraphSearchStats, GraphSearcher},
+    search::{GraphSearchStats, GraphSearcher, VertexPredicate},
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };
@@ -150,6 +150,23 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     }
 
     Ok(())
+}
+
+#[derive(Debug, Copy, Clone)]
+struct RangeVertexPredicate(i64);
+
+impl VertexPredicate for RangeVertexPredicate {
+    fn accept(&self, vertex_id: i64) -> bool {
+        vertex_id < self.0
+    }
+
+    fn estimated_cardinality(&self) -> usize {
+        self.0 as usize
+    }
+
+    fn vertex_iter(&self) -> impl Iterator<Item = i64> + '_ {
+        (0..self.0).into_iter()
+    }
 }
 
 fn search_phase<Q: Send + Sync, N: Send + Sync>(

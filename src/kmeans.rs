@@ -1,3 +1,5 @@
+//! An implementation of k-means algorithms for clustering vectors.
+
 use std::iter::Cycle;
 
 use rand::seq::index;
@@ -127,17 +129,18 @@ fn initialize_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
     centroids
 }
 
-fn compute_assignments<
+/// For each input vector compute the closest centroid and the distance to that centroid.
+pub fn compute_assignments<
     V: VectorStore<Elem = f32> + Send + Sync,
     C: VectorStore<Elem = f32> + Send + Sync,
 >(
-    training_data: &V,
+    data: &V,
     centroids: &C,
 ) -> Vec<(usize, f64)> {
-    (0..training_data.len())
+    (0..data.len())
         .into_par_iter()
         .map(|i| {
-            let v = &training_data[i];
+            let v = &data[i];
             centroids
                 .iter()
                 .map(|c| SpatialSimilarity::l2(v, c).expect("same vector len"))
@@ -169,6 +172,7 @@ struct BatchIter<'a, V> {
 
 impl<'a, V: VectorStore<Elem = f32>> BatchIter<'a, V> {
     fn new(training_data: &'a V, batch_size: usize, rng: &mut impl Rng) -> Self {
+        let batch_size = batch_size.min(training_data.len());
         let mut shuffled_indices = (0..training_data.len()).collect::<Vec<_>>();
         shuffled_indices.shuffle(rng);
         Self {

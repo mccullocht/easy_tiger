@@ -60,11 +60,10 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
         }
 
         let mut new_centroids = centroids.clone();
-        for (vector, cluster) in batch.iter().zip(
-            compute_assignments(&batch, &centroids)
-                .into_iter()
-                .map(|(c, _)| c),
-        ) {
+        for (vector, (cluster, _)) in batch
+            .iter()
+            .zip(compute_assignments(&batch, &centroids).into_iter())
+        {
             // XXX store centroid sums separately? needs extra state (3rd copy of centroids)
             centroid_counts[cluster] += 1.0;
             // Update means vectors in new_centroids.
@@ -80,9 +79,16 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
 
         // XXX should I track centroid_distance_sum and refuse updates that don't improve things?
         let centroid_distance_sum = compute_centroid_distance_sum(&centroids, &new_centroids);
+        let mut centroid_distances = centroids
+            .iter()
+            .zip(new_centroids.iter())
+            .enumerate()
+            .map(|(i, (o, n))| (i, SpatialSimilarity::l2(o, n).unwrap()))
+            .collect::<Vec<_>>();
+        centroid_distances.sort_by(|a, b| a.1.total_cmp(&b.1).reverse());
         println!(
-            "  [batch_kmeans] distance sum {:6.3}",
-            centroid_distance_sum
+            "  [batch_kmeans] centroid distance sum {:7.3} biggest delta {:4.3} smallest delta {:4.3}",
+            centroid_distance_sum, centroid_distances.first().unwrap().1, centroid_distances.last().unwrap().1
         );
         centroids = new_centroids;
         // XXX I don't know if this is ever going to terminate early, it doesn't feel like it can.

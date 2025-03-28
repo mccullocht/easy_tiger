@@ -56,18 +56,16 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     let mut centroid_counts = vec![0.0; k];
     for batch in BatchIter::new(training_data, batch_size, rng).take(params.iters) {
         if centroids.is_empty() {
-            // XXX we're computing against batch which is maybe not great, but for k-means++ we
-            // absolutely need to work on a batch to have any chance.
             centroids = initialize_batch_centroids(&batch, k, params, rng);
         }
 
-        println!("  [batch_kmeans] recomputing assignments");
         let mut new_centroids = centroids.clone();
         for (vector, cluster) in batch.iter().zip(
             compute_assignments(&batch, &centroids)
                 .into_iter()
                 .map(|(c, _)| c),
         ) {
+            // XXX store centroid sums separately? needs extra state (3rd copy of centroids)
             centroid_counts[cluster] += 1.0;
             // Update means vectors in new_centroids.
             for (v, c) in vector.iter().zip(new_centroids[cluster].iter_mut()) {
@@ -83,7 +81,7 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
         // XXX should I track centroid_distance_sum and refuse updates that don't improve things?
         let centroid_distance_sum = compute_centroid_distance_sum(&centroids, &new_centroids);
         println!(
-            "  [batch_kmeans] centroid sum {:6.3}",
+            "  [batch_kmeans] distance sum {:6.3}",
             centroid_distance_sum
         );
         centroids = new_centroids;
@@ -104,16 +102,7 @@ fn initialize_batch_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
     rng: &mut impl Rng,
 ) -> VecVectorStore<f32> {
     (0..params.iters)
-        .map(|_| {
-            // XXX computing the aggregate distances could be done inside initialize_centroids.
-            // in kmeans++ we already know this.
-            let centroids = initialize_centroids(training_data, k, params.initialization, rng);
-            let distances: f64 = compute_assignments(training_data, &centroids)
-                .into_iter()
-                .map(|a| a.1)
-                .sum();
-            (centroids, distances)
-        })
+        .map(|_| initialize_centroids(training_data, k, params.initialization, rng))
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .expect("non-zero iters")
         .0
@@ -124,19 +113,25 @@ fn initialize_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
     k: usize,
     method: InitializationMethod,
     rng: &mut impl Rng,
-) -> VecVectorStore<f32> {
+) -> (VecVectorStore<f32>, f64) {
     let mut centroids = VecVectorStore::with_capacity(training_data.elem_stride(), k);
-    match method {
+    let assignments = match method {
         InitializationMethod::Random => {
             for i in index::sample(rng, training_data.len(), k) {
                 centroids.push(&training_data[i]);
             }
+            compute_assignments(training_data, &centroids)
         }
         InitializationMethod::KMeansPlusPlus => {
             centroids.push(&training_data[rng.gen_range(0..training_data.len())]);
-            let mut assignments = vec![(usize::MAX, f64::MAX); training_data.len()];
+            let mut assignments = compute_assignments(training_data, &centroids);
             while centroids.len() < k {
-                let centroid = centroids.len() - 1;
+                let index = WeightedIndex::new(assignments.iter().map(|a| a.1))
+                    .unwrap()
+                    .sample(rng);
+
+                let centroid = centroids.len();
+                centroids.push(&training_data[index]);
                 let centroid_vector = &centroids[centroid];
                 let distances = (0..training_data.len())
                     .into_par_iter()
@@ -150,14 +145,12 @@ fn initialize_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
                         *distance = new_distance;
                     }
                 }
-                let index = WeightedIndex::new(assignments.iter().map(|a| a.1))
-                    .unwrap()
-                    .sample(rng);
-                centroids.push(&training_data[index]);
             }
+            assignments
         }
-    }
-    centroids
+    };
+    let distance_sum = assignments.into_iter().map(|a| a.1).sum::<f64>();
+    (centroids, distance_sum)
 }
 
 /// For each input vector compute the closest centroid and the distance to that centroid.

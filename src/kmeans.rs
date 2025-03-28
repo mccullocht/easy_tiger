@@ -56,12 +56,15 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     let mut centroid_counts = vec![0.0; k];
     for batch in BatchIter::new(training_data, batch_size, rng).take(params.iters) {
         if centroids.is_empty() {
-            centroids = initialize_batch_centroids(training_data, k, params, rng);
+            // XXX we're computing against batch which is maybe not great, but for k-means++ we
+            // absolutely need to work on a batch to have any chance.
+            centroids = initialize_batch_centroids(&batch, k, params, rng);
         }
 
+        println!("  [batch_kmeans] recomputing assignments");
         let mut new_centroids = centroids.clone();
         for (vector, cluster) in batch.iter().zip(
-            compute_assignments(training_data, &centroids)
+            compute_assignments(&batch, &centroids)
                 .into_iter()
                 .map(|(c, _)| c),
         ) {
@@ -72,8 +75,20 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             }
         }
 
+        // XXX consider replacement of centroids? some centers have few/no vectors and we could
+        // reassign these to maybe improve things?
+        //
+        // lambda addition to score based on current cluster count.
+
+        // XXX should I track centroid_distance_sum and refuse updates that don't improve things?
         let centroid_distance_sum = compute_centroid_distance_sum(&centroids, &new_centroids);
+        println!(
+            "  [batch_kmeans] centroid sum {:6.3}",
+            centroid_distance_sum
+        );
         centroids = new_centroids;
+        // XXX I don't know if this is ever going to terminate early, it doesn't feel like it can.
+        // if I iterate over the entire data set I can get the value down to 5.
         if centroid_distance_sum < params.epsilon {
             return Ok(centroids);
         }
@@ -90,6 +105,8 @@ fn initialize_batch_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
 ) -> VecVectorStore<f32> {
     (0..params.iters)
         .map(|_| {
+            // XXX computing the aggregate distances could be done inside initialize_centroids.
+            // in kmeans++ we already know this.
             let centroids = initialize_centroids(training_data, k, params.initialization, rng);
             let distances: f64 = compute_assignments(training_data, &centroids)
                 .into_iter()
@@ -117,9 +134,23 @@ fn initialize_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
         }
         InitializationMethod::KMeansPlusPlus => {
             centroids.push(&training_data[rng.gen_range(0..training_data.len())]);
+            let mut assignments = vec![(usize::MAX, f64::MAX); training_data.len()];
             while centroids.len() < k {
-                let assignments = compute_assignments(training_data, &centroids);
-                let index = WeightedIndex::new(assignments.into_iter().map(|a| a.1))
+                let centroid = centroids.len() - 1;
+                let centroid_vector = &centroids[centroid];
+                let distances = (0..training_data.len())
+                    .into_par_iter()
+                    .map(|i| SpatialSimilarity::l2(&training_data[i], centroid_vector).unwrap())
+                    .collect::<Vec<_>>();
+                for ((cluster, distance), new_distance) in
+                    assignments.iter_mut().zip(distances.into_iter())
+                {
+                    if new_distance < *distance {
+                        *cluster = centroid;
+                        *distance = new_distance;
+                    }
+                }
+                let index = WeightedIndex::new(assignments.iter().map(|a| a.1))
                     .unwrap()
                     .sample(rng);
                 centroids.push(&training_data[index]);

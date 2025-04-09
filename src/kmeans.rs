@@ -23,6 +23,8 @@ pub enum InitializationMethod {
 pub struct Params {
     /// Maximum number of iterations to run before exiting, even if the centers have not converged.
     pub iters: usize,
+    /// Maximum number of iterations when initializing centroids.
+    pub init_iters: usize,
     /// Convergence epsilon. Computation is considered to have converged if the sum of distances
     /// between two iterations of centroid is less than this amount.
     pub epsilon: f64,
@@ -34,6 +36,7 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             iters: 15,
+            init_iters: 3,
             epsilon: 0.01,
             initialization: InitializationMethod::Random,
         }
@@ -107,7 +110,7 @@ fn initialize_batch_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
     params: &Params,
     rng: &mut impl Rng,
 ) -> VecVectorStore<f32> {
-    (0..params.iters)
+    (0..params.init_iters)
         .map(|_| initialize_centroids(training_data, k, params.initialization, rng))
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .expect("non-zero iters")

@@ -26,6 +26,9 @@ struct Cli {
     /// Run up to this many k-means iterations before terminating.
     #[arg(short, long, default_value_t = NonZero::new(15).unwrap())]
     iters: NonZero<usize>,
+    /// Run this many initializations of the centroids before proceeding.
+    #[arg(long, default_value_t = NonZero::new(3).unwrap())]
+    init_iters: NonZero<usize>,
     /// Size of k-means batches. Larger numbers improve convergence rate but are more expensive.
     #[arg(short, long, default_value_t = NonZero::new(10_000).unwrap())]
     batch_size: NonZero<usize>,
@@ -39,7 +42,6 @@ fn main() -> io::Result<()> {
         cli.dimensions,
     )?;
 
-    // XXX iterations for centroid selection vs batch iteration.
     println!("Computing {} centroids", cli.num_partitions.get());
     let centroids = match batch_kmeans(
         &input_vectors,
@@ -47,7 +49,7 @@ fn main() -> io::Result<()> {
         cli.batch_size.get(),
         &Params {
             iters: cli.iters.get(),
-            // XXX add an option to use kmeans++.
+            init_iters: cli.init_iters.get(),
             ..Default::default()
         },
         &mut thread_rng(),
@@ -70,7 +72,7 @@ fn main() -> io::Result<()> {
     for (c, _) in assignments.iter() {
         centroid_counts[*c] += 1;
     }
-    let mut histogram = Histogram::new(2, 16).unwrap();
+    let mut histogram = Histogram::new(2, 18).unwrap();
     for c in centroid_counts.iter() {
         histogram.add(*c as u64, 1).unwrap();
     }

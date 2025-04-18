@@ -161,10 +161,9 @@ impl QuantizedVectorDistance for I8NaiveDistance {
             .map(|(q, d)| *q as i32 * *d as i32)
             .sum::<i32>() as f64
             / divisor as f64;
-        let distance = (-dot + 1.0) / 2.0;
         match self.0 {
-            VectorSimilarity::Dot => distance,
-            VectorSimilarity::Euclidean => distance + qnorm as f64 + dnorm as f64,
+            VectorSimilarity::Dot => (-dot + 1.0) / 2.0,
+            VectorSimilarity::Euclidean => qnorm as f64 + dnorm as f64 - (2.0 * dot),
         }
     }
 }

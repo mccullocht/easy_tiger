@@ -55,13 +55,9 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     params: &Params,
     rng: &mut impl Rng,
 ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
-    let mut centroids = VecVectorStore::new(training_data.elem_stride());
+    let mut centroids = initialize_batch_centroids(training_data, k, batch_size, params, rng);
     let mut centroid_counts = vec![0.0; k];
     for batch in BatchIter::new(training_data, batch_size, rng).take(params.iters) {
-        if centroids.is_empty() {
-            centroids = initialize_batch_centroids(&batch, k, params, rng);
-        }
-
         let mut new_centroids = centroids.clone();
         for (vector, (cluster, _)) in batch
             .iter()
@@ -80,23 +76,10 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
         //
         // lambda addition to score based on current cluster count.
 
-        // XXX should I track centroid_distance_sum and refuse updates that don't improve things?
-        let centroid_distance_sum = compute_centroid_distance_sum(&centroids, &new_centroids);
-        let mut centroid_distances = centroids
-            .iter()
-            .zip(new_centroids.iter())
-            .enumerate()
-            .map(|(i, (o, n))| (i, SpatialSimilarity::l2(o, n).unwrap()))
-            .collect::<Vec<_>>();
-        centroid_distances.sort_by(|a, b| a.1.total_cmp(&b.1).reverse());
-        println!(
-            "  [batch_kmeans] centroid distance sum {:7.3} biggest delta {:4.3} smallest delta {:4.3}",
-            centroid_distance_sum, centroid_distances.first().unwrap().1, centroid_distances.last().unwrap().1
-        );
+        let centroid_distance_max = compute_centroid_distance_max(&centroids, &new_centroids);
         centroids = new_centroids;
-        // XXX I don't know if this is ever going to terminate early, it doesn't feel like it can.
-        // if I iterate over the entire data set I can get the value down to 5.
-        if centroid_distance_sum < params.epsilon {
+        // Terminate if _every_ centroid distance is less than epsilon.
+        if centroid_distance_max < params.epsilon {
             return Ok(centroids);
         }
     }
@@ -105,34 +88,43 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
 }
 
 fn initialize_batch_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
-    training_data: &V,
+    dataset: &V,
     k: usize,
+    batch_size: usize,
     params: &Params,
     rng: &mut impl Rng,
 ) -> VecVectorStore<f32> {
+    let training_data = SubsetViewVectorStore::new(
+        dataset,
+        index::sample(rng, dataset.len(), batch_size.min(dataset.len())).into_vec(),
+    );
     (0..params.init_iters)
-        .map(|_| initialize_centroids(training_data, k, params.initialization, rng))
+        .map(|_| initialize_centroids(dataset, &training_data, k, params.initialization, rng))
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .expect("non-zero iters")
         .0
 }
 
-fn initialize_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
-    training_data: &V,
+fn initialize_centroids<
+    D: VectorStore<Elem = f32> + Send + Sync,
+    T: VectorStore<Elem = f32> + Send + Sync,
+>(
+    dataset: &D,
+    training_data: &T,
     k: usize,
     method: InitializationMethod,
     rng: &mut impl Rng,
 ) -> (VecVectorStore<f32>, f64) {
-    let mut centroids = VecVectorStore::with_capacity(training_data.elem_stride(), k);
+    let mut centroids = VecVectorStore::with_capacity(dataset.elem_stride(), k);
     let assignments = match method {
         InitializationMethod::Random => {
-            for i in index::sample(rng, training_data.len(), k) {
-                centroids.push(&training_data[i]);
+            for i in index::sample(rng, dataset.len(), k) {
+                centroids.push(&dataset[i]);
             }
             compute_assignments(training_data, &centroids)
         }
         InitializationMethod::KMeansPlusPlus => {
-            centroids.push(&training_data[rng.gen_range(0..training_data.len())]);
+            centroids.push(&dataset[rng.gen_range(0..dataset.len())]);
             let mut assignments = compute_assignments(training_data, &centroids);
             while centroids.len() < k {
                 let index = WeightedIndex::new(assignments.iter().map(|a| a.1))
@@ -184,7 +176,8 @@ pub fn compute_assignments<
         .collect()
 }
 
-fn compute_centroid_distance_sum<
+/// Compute the maximum distance between new and old centroids.
+fn compute_centroid_distance_max<
     C: VectorStore<Elem = f32> + Send + Sync,
     D: VectorStore<Elem = f32> + Send + Sync,
 >(
@@ -194,7 +187,8 @@ fn compute_centroid_distance_sum<
     (0..old.len())
         .into_par_iter()
         .map(|i| SpatialSimilarity::l2(&old[i], &new[i]).expect("same vector len"))
-        .sum()
+        .max_by(|a, b| a.total_cmp(&b))
+        .expect("non-zero k")
 }
 
 struct BatchIter<'a, V> {

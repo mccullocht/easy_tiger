@@ -26,6 +26,9 @@ struct Cli {
     /// Run up to this many k-means iterations before terminating.
     #[arg(short, long, default_value_t = NonZero::new(15).unwrap())]
     iters: NonZero<usize>,
+    /// Exit early from iteration if new centroids are within epsilon of the previous iteration.
+    #[arg(long, default_value_t = 0.01)]
+    epsilon: f64,
     /// Run this many initializations of the centroids before proceeding.
     #[arg(long, default_value_t = NonZero::new(3).unwrap())]
     init_iters: NonZero<usize>,
@@ -50,6 +53,7 @@ fn main() -> io::Result<()> {
         &Params {
             iters: cli.iters.get(),
             init_iters: cli.init_iters.get(),
+            epsilon: cli.epsilon,
             ..Default::default()
         },
         &mut thread_rng(),

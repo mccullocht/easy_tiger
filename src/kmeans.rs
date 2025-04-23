@@ -57,7 +57,17 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
 ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
     let mut centroids = initialize_batch_centroids(training_data, k, batch_size, params, rng);
     let mut centroid_counts = vec![0.0; k];
-    for batch in BatchIter::new(training_data, batch_size, rng).take(params.iters) {
+    for (iter, batch) in BatchIter::new(training_data, batch_size, rng)
+        .take(params.iters)
+        .enumerate()
+    {
+        // XXX two balancing techniques:
+        // * balance factor: allow injecting an update to score, do so based on factor * count.
+        // * iterative partitioning: take members of largest centroid, divide it N ways with some
+        //   target number of members involved. must globally recompute assignments afterward.
+        // XXX assignment is a big problem when k is large (> 256). failure to converge, very slow.
+        // * build a graph lol.
+        // * quantize and re-score at the top.
         let mut new_centroids = centroids.clone();
         for (vector, (cluster, _)) in batch
             .iter()
@@ -80,6 +90,7 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
         centroids = new_centroids;
         // Terminate if _every_ centroid distance is less than epsilon.
         if centroid_distance_max < params.epsilon {
+            println!("  converge at batch {}", iter);
             return Ok(centroids);
         }
     }

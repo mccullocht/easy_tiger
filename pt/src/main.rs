@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::num::NonZero;
@@ -9,6 +10,8 @@ use easy_tiger::kmeans::{self, Params, batch_kmeans, compute_assignments};
 use histogram::Histogram;
 use memmap2::Mmap;
 use rand::{Rng, thread_rng};
+use rayon::prelude::*;
+use simsimd::SpatialSimilarity;
 
 #[derive(Parser)]
 #[command(version, about = "Tool for instrumenting vector partitioning techniques", long_about = None)]
@@ -41,6 +44,8 @@ struct Cli {
     iter_target_size: Option<usize>,
 }
 
+// XXX rather than splitting to a target size I think I'd prefer to specify k and k' or something.
+// I can then target a size that is N*1.5/k or similar and just keep splitting until I reach k.
 fn split_to_target_size<V: VectorStore<Elem = f32> + Send + Sync>(
     dataset: &V,
     mut centroids: VecVectorStore<f32>,
@@ -64,9 +69,12 @@ fn split_to_target_size<V: VectorStore<Elem = f32> + Send + Sync>(
             break (centroids, assignments);
         }
 
+        let mut unsplit_centroid_indices = HashMap::new();
+        let mut new_centroid_indices = vec![];
         let mut new_centroids = VecVectorStore::new(centroids.elem_stride());
         for (c, centroid_vectors) in centroid_assignments.into_iter().enumerate() {
             if centroid_vectors.len() <= target_size {
+                unsplit_centroid_indices.insert(c, new_centroids.len());
                 new_centroids.push(&centroids[c]);
                 continue;
             }
@@ -88,6 +96,7 @@ fn split_to_target_size<V: VectorStore<Elem = f32> + Send + Sync>(
             };
 
             for c in subset_centroids.iter() {
+                new_centroid_indices.push(new_centroids.len());
                 new_centroids.push(c);
             }
         }
@@ -99,9 +108,38 @@ fn split_to_target_size<V: VectorStore<Elem = f32> + Send + Sync>(
 
         centroids = new_centroids;
         println!("  recomputing assignments to {} centroids", centroids.len());
-        // XXX I can make this less exhaustive -- if the assigned centroid was not split then I only
-        // need to compute distances against the added centroids.
-        assignments = compute_assignments(dataset, &centroids);
+        assignments = (0..dataset.len())
+            .into_par_iter()
+            .map(|i| {
+                let old_assignment = assignments[i];
+                let v = &dataset[i];
+                // XXX I need a map of old -> new for unchanged centroids.
+                if let Some(mapped_centroid) = unsplit_centroid_indices.get(&old_assignment.0) {
+                    // The previously assigned centroid was not split, we only need to examine new
+                    // centroids and compare to existing assignment.
+                    new_centroid_indices
+                        .iter()
+                        .map(|i| {
+                            (
+                                *i,
+                                SpatialSimilarity::l2(v, &centroids[*i]).expect("same vector_len"),
+                            )
+                        })
+                        .chain(std::iter::once((*mapped_centroid, old_assignment.1)))
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .expect("at least one centroid")
+                } else {
+                    // The previously assigned centroid was split. Since we don't know what the
+                    // second closest centroid was we need to completely re-do assignment.
+                    centroids
+                        .iter()
+                        .map(|c| SpatialSimilarity::l2(v, c).expect("same vector len"))
+                        .enumerate()
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .expect("at least one centroid")
+                }
+            })
+            .collect();
     }
 }
 

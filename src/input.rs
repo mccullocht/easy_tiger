@@ -188,6 +188,10 @@ impl<'a, V: VectorStore> SubsetViewVectorStore<'a, V> {
     pub fn new(parent: &'a V, subset: Vec<usize>) -> Self {
         Self { parent, subset }
     }
+
+    pub fn original_index(&self, index: usize) -> usize {
+        self.subset[index]
+    }
 }
 
 impl<V: VectorStore> VectorStore for SubsetViewVectorStore<'_, V> {

@@ -309,6 +309,7 @@ where
         let in_flight = SkipSet::new();
         reordered
             .into_par_iter()
+            .by_uniform_blocks(64)
             .filter(|i| *i != 0)
             .try_for_each(|v| {
                 let session = tl_session.get()?;

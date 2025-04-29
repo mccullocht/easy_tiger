@@ -1,17 +1,14 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::num::NonZero;
 use std::path::PathBuf;
 
 use clap::Parser;
-use easy_tiger::input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore};
-use easy_tiger::kmeans::{self, Params, batch_kmeans, compute_assignments};
+use easy_tiger::input::{DerefVectorStore, VectorStore};
+use easy_tiger::kmeans::{Params, iterative_balanced_kmeans};
 use histogram::Histogram;
 use memmap2::Mmap;
-use rand::{Rng, thread_rng};
-use rayon::prelude::*;
-use simsimd::SpatialSimilarity;
+use rand::thread_rng;
 
 #[derive(Parser)]
 #[command(version, about = "Tool for instrumenting vector partitioning techniques", long_about = None)]
@@ -38,109 +35,6 @@ struct Cli {
     /// Size of k-means batches. Larger numbers improve convergence rate but are more expensive.
     #[arg(short, long, default_value_t = NonZero::new(10_000).unwrap())]
     batch_size: NonZero<usize>,
-
-    /// Keep splitting the largest centroid until no centroid is larger than this target size.
-    #[arg(long)]
-    iter_target_size: Option<usize>,
-}
-
-// XXX rather than splitting to a target size I think I'd prefer to specify k and k' or something.
-// I can then target a size that is N*1.5/k or similar and just keep splitting until I reach k.
-fn split_to_target_size<V: VectorStore<Elem = f32> + Send + Sync>(
-    dataset: &V,
-    mut centroids: VecVectorStore<f32>,
-    mut assignments: Vec<(usize, f64)>,
-    target_size: usize,
-    batch_size: usize,
-    params: &kmeans::Params,
-    rng: &mut impl Rng,
-) -> (VecVectorStore<f32>, Vec<(usize, f64)>) {
-    loop {
-        let centroid_assignments = assignments.iter().enumerate().fold(
-            vec![vec![]; centroids.len()],
-            |mut centroids, (i, (c, _))| {
-                centroids[*c].push(i);
-                centroids
-            },
-        );
-
-        if centroid_assignments.iter().all(|c| c.len() <= target_size) {
-            println!("  reached max target_size {}; terminating", target_size);
-            break (centroids, assignments);
-        }
-
-        let mut unsplit_centroid_indices = HashMap::new();
-        let mut new_centroid_indices = vec![];
-        let mut new_centroids = VecVectorStore::new(centroids.elem_stride());
-        for (c, centroid_vectors) in centroid_assignments.into_iter().enumerate() {
-            if centroid_vectors.len() <= target_size {
-                unsplit_centroid_indices.insert(c, new_centroids.len());
-                new_centroids.push(&centroids[c]);
-                continue;
-            }
-
-            let k = centroid_vectors.len() / target_size + 1;
-            println!(
-                "  partitioning centroid {} of {} vectors into {} parts",
-                c,
-                centroid_vectors.len(),
-                k,
-            );
-            let subset = SubsetViewVectorStore::new(dataset, centroid_vectors);
-            let subset_centroids = match batch_kmeans(&subset, k, batch_size, params, rng) {
-                Ok(c) => c,
-                Err(e) => {
-                    println!("k-means failed to converge!");
-                    e
-                }
-            };
-
-            for c in subset_centroids.iter() {
-                new_centroid_indices.push(new_centroids.len());
-                new_centroids.push(c);
-            }
-        }
-
-        // enumerate split centroids (old indices)
-        // enumerate split generated centroids (new indices)
-        // - if the previous assignment is in the first set need to totally recompute centroids.
-        // - else compute against only the new centroids.
-
-        centroids = new_centroids;
-        println!("  recomputing assignments to {} centroids", centroids.len());
-        assignments = (0..dataset.len())
-            .into_par_iter()
-            .map(|i| {
-                let old_assignment = assignments[i];
-                let v = &dataset[i];
-                // XXX I need a map of old -> new for unchanged centroids.
-                if let Some(mapped_centroid) = unsplit_centroid_indices.get(&old_assignment.0) {
-                    // The previously assigned centroid was not split, we only need to examine new
-                    // centroids and compare to existing assignment.
-                    new_centroid_indices
-                        .iter()
-                        .map(|i| {
-                            (
-                                *i,
-                                SpatialSimilarity::l2(v, &centroids[*i]).expect("same vector_len"),
-                            )
-                        })
-                        .chain(std::iter::once((*mapped_centroid, old_assignment.1)))
-                        .min_by(|a, b| a.1.total_cmp(&b.1))
-                        .expect("at least one centroid")
-                } else {
-                    // The previously assigned centroid was split. Since we don't know what the
-                    // second closest centroid was we need to completely re-do assignment.
-                    centroids
-                        .iter()
-                        .map(|c| SpatialSimilarity::l2(v, c).expect("same vector len"))
-                        .enumerate()
-                        .min_by(|a, b| a.1.total_cmp(&b.1))
-                        .expect("at least one centroid")
-                }
-            })
-            .collect();
-    }
 }
 
 fn main() -> io::Result<()> {
@@ -152,44 +46,22 @@ fn main() -> io::Result<()> {
     )?;
 
     println!("Computing {} centroids", cli.num_partitions.get());
-    let kemans_params = Params {
+    let kmeans_params = Params {
         iters: cli.iters.get(),
         init_iters: cli.init_iters.get(),
         epsilon: cli.epsilon,
         ..Default::default()
     };
-    let mut centroids = match batch_kmeans(
+
+    let (centroids, assignments) = iterative_balanced_kmeans(
         &input_vectors,
         cli.num_partitions.get(),
+        cli.num_partitions.get().min(64),
+        1.5,
         cli.batch_size.get(),
-        &kemans_params,
+        &kmeans_params,
         &mut thread_rng(),
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            println!("k-means failed to converge!");
-            e
-        }
-    };
-
-    println!(
-        "Computing assignments for {} vectors into {} centroids",
-        input_vectors.len(),
-        cli.num_partitions.get()
     );
-    let mut assignments = compute_assignments(&input_vectors, &centroids);
-
-    if let Some(target_size) = cli.iter_target_size {
-        (centroids, assignments) = split_to_target_size(
-            &input_vectors,
-            centroids,
-            assignments,
-            target_size,
-            cli.batch_size.get(),
-            &kemans_params,
-            &mut thread_rng(),
-        );
-    }
 
     let centroid_counts =
         assignments

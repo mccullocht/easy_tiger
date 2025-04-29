@@ -134,6 +134,10 @@ impl<E: Clone> VecVectorStore<E> {
         self.data.extend_from_slice(vector);
     }
 
+    pub fn capacity(&self) -> usize {
+        self.data.capacity() / self.elem_stride
+    }
+
     fn index_range(&self, index: usize) -> Range<usize> {
         let start = index * self.elem_stride;
         start..(start + self.elem_stride)

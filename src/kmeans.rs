@@ -37,10 +37,184 @@ impl Default for Params {
         Self {
             iters: 15,
             init_iters: 3,
-            epsilon: 0.01,
+            epsilon: 0.0001,
             initialization: InitializationMethod::Random,
         }
     }
+}
+
+/// Iteratively compute k-means over `dataset`.
+///
+/// To do this we partition the dataset into `intermediate_k` partitions, then begin dividing
+/// the largest partitions into no more than `intermediate_k` sub-partitions until we have `k`
+/// total partitions. `balance_factor` is a number > 1.0 that tries to control max imbalance
+/// relative to the average number of vectors you would expect in a single partition. Lower values
+/// should reduce imbalance but at greater cost.
+///
+/// This is intended to be used when `k` is large (> 100) as it reduces the cost of re-computing
+/// centroid assignments.
+///
+/// Returns a set of `k` centroids and the assignment of each vector in `dataset` to the centroids.
+pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
+    dataset: &V,
+    k: usize,
+    intermediate_k: usize,
+    balance_factor: f64,
+    batch_size: usize,
+    params: &Params,
+    rng: &mut impl Rng,
+) -> (VecVectorStore<f32>, Vec<(usize, f64)>) {
+    assert!(intermediate_k < k);
+
+    let mut centroids = match batch_kmeans(dataset, intermediate_k, batch_size, params, rng) {
+        Ok(c) => c,
+        Err(c) => {
+            eprintln!("Initial iterative_balanced_kmeans step failed to converge!");
+            c
+        }
+    };
+    let mut assignments = compute_assignments(dataset, &centroids);
+
+    // XXX maybe also have a minimum size and try to combine small clusters with others?
+    // in that case we need to know the closest centroid(s) for small centroids to do the
+    // combination step.
+    let max_centroid_size = ((dataset.len() as f64 * balance_factor) / k as f64) as usize;
+    println!("  max_centroid_size {}", max_centroid_size);
+    while centroids.len() < k {
+        let mut centroid_to_vectors = assignments.iter().enumerate().fold(
+            vec![vec![]; centroids.len()],
+            |mut c2v, (i, (c, _))| {
+                c2v[*c].push(i);
+                c2v
+            },
+        );
+
+        // Count the number of vectors in each centroid, then decide how pieces to divide each
+        // centroid into. This is done greedily starting from the large centroid, and we terminate
+        // once the splits would result in `k` centroids.
+        let mut centroid_counts = centroid_to_vectors
+            .iter()
+            .map(|v| v.len())
+            .enumerate()
+            .collect::<Vec<_>>();
+        centroid_counts.sort_unstable_by_key(|(i, c)| (*c, *i));
+        let mut remaining_centroids = k - centroids.len();
+        for (_, count) in centroid_counts.iter_mut().rev() {
+            if remaining_centroids == 0 || *count <= max_centroid_size {
+                *count = 1;
+            } else {
+                remaining_centroids += 1; // we're going to split this one.
+                *count = remaining_centroids.min((*count / max_centroid_size) + 1);
+                remaining_centroids -= *count;
+            }
+        }
+
+        // Everything in centroid_count before unsplit_len will not be divided. This has
+        // implications for re-computing assignment since these only need to compute centroid
+        // assignment against added centroids.
+        let unsplit_len = centroid_counts
+            .iter()
+            .position(|(_, p)| *p > 1)
+            .unwrap_or(centroid_counts.len());
+
+        if unsplit_len == centroid_counts.len() {
+            println!(
+                "  unexpectedly could not sub-partition any centroids! {} centroids; {} vectors",
+                centroid_counts.len(),
+                centroid_to_vectors.iter().map(|v| v.len()).sum::<usize>()
+            );
+            break;
+        }
+
+        let mut new_centroids = VecVectorStore::with_capacity(
+            centroids.elem_stride(),
+            centroid_counts.iter().map(|(_, c)| *c).sum::<usize>(),
+        );
+        println!(
+            "  splitting from {} to {}; {} unchanged",
+            centroids.len(),
+            new_centroids.capacity(),
+            unsplit_len
+        );
+        for (i, (c, nk)) in centroid_counts.iter().enumerate() {
+            // Update assignment indexes for all the centroid vectors; assignment distances will be
+            // recomputed once all centroids have been split.
+            let centroid_vectors = std::mem::take(&mut centroid_to_vectors[*c]);
+            for i in centroid_vectors.iter().copied() {
+                assignments[i].0 = new_centroids.len();
+            }
+
+            if i < unsplit_len {
+                new_centroids.push(&centroids[*c]);
+            } else {
+                println!(
+                    "  partitioning centroid {} of {} vectors into {} parts",
+                    i,
+                    centroid_vectors.len(),
+                    *nk
+                );
+                let subset_centroids = match batch_kmeans(
+                    &SubsetViewVectorStore::new(dataset, centroid_vectors),
+                    *nk,
+                    batch_size,
+                    params,
+                    rng,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        println!("iterative_balanced_kmeans centroid split failed to converge!");
+                        e
+                    }
+                };
+                for c in subset_centroids.iter() {
+                    new_centroids.push(c);
+                }
+            }
+        }
+
+        println!("  update assignments");
+        update_assignment_centroid_split(dataset, &new_centroids, unsplit_len, &mut assignments);
+        centroids = new_centroids;
+    }
+
+    (centroids, assignments)
+}
+
+fn update_assignment_centroid_split<
+    V: VectorStore<Elem = f32> + Send + Sync,
+    C: VectorStore<Elem = f32> + Send + Sync,
+>(
+    dataset: &V,
+    centroids: &C,
+    unsplit_len: usize,
+    assignments: &mut [(usize, f64)],
+) {
+    assignments
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, assignment)| {
+            let v = &dataset[i];
+            *assignment = if assignment.0 < unsplit_len {
+                // This centroid was not split so we only need to compare to new centroids, making
+                // sure to include the original assigned centroid in the mix.
+                centroids
+                    .iter()
+                    .enumerate()
+                    .skip(unsplit_len)
+                    .map(|(i, c)| (i, SpatialSimilarity::l2(v, c).expect("same vector len")))
+                    .chain(std::iter::once(*assignment))
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .expect("at least one centroid")
+            } else {
+                // This centroid was split so we need to completely recompute assignment.
+                centroids
+                    .iter()
+                    .map(|c| SpatialSimilarity::l2(v, c).expect("same vector len"))
+                    .enumerate()
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .expect("at least one centroid")
+            };
+        });
 }
 
 /// Compute batch k-means over `training_data`. `k` clusters will be produced and each batch will
@@ -57,23 +231,12 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
 ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
     let mut centroids = initialize_batch_centroids(training_data, k, batch_size, params, rng);
     let mut centroid_counts = vec![0.0; k];
-    for (iter, batch) in BatchIter::new(training_data, batch_size, rng)
-        .take(params.iters)
-        .enumerate()
-    {
-        // XXX two balancing techniques:
-        // * balance factor: allow injecting an update to score, do so based on factor * count.
-        // * iterative partitioning: take members of largest centroid, divide it N ways with some
-        //   target number of members involved. must globally recompute assignments afterward.
-        // XXX assignment is a big problem when k is large (> 256). failure to converge, very slow.
-        // * build a graph lol.
-        // * quantize and re-score at the top.
+    for batch in BatchIter::new(training_data, batch_size, rng).take(params.iters) {
         let mut new_centroids = centroids.clone();
         for (vector, (cluster, _)) in batch
             .iter()
             .zip(compute_assignments(&batch, &centroids).into_iter())
         {
-            // XXX store centroid sums separately? needs extra state (3rd copy of centroids)
             centroid_counts[cluster] += 1.0;
             // Update means vectors in new_centroids.
             for (v, c) in vector.iter().zip(new_centroids[cluster].iter_mut()) {
@@ -81,16 +244,13 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             }
         }
 
-        // XXX consider replacement of centroids? some centers have few/no vectors and we could
+        // TODO: consider replacement of centroids? some centers have few/no vectors and we could
         // reassign these to maybe improve things?
-        //
-        // lambda addition to score based on current cluster count.
 
         let centroid_distance_max = compute_centroid_distance_max(&centroids, &new_centroids);
         centroids = new_centroids;
         // Terminate if _every_ centroid distance is less than epsilon.
         if centroid_distance_max < params.epsilon {
-            println!("  converge at batch {}", iter);
             return Ok(centroids);
         }
     }
@@ -170,13 +330,13 @@ pub fn compute_assignments<
     V: VectorStore<Elem = f32> + Send + Sync,
     C: VectorStore<Elem = f32> + Send + Sync,
 >(
-    data: &V,
+    dataset: &V,
     centroids: &C,
 ) -> Vec<(usize, f64)> {
-    (0..data.len())
+    (0..dataset.len())
         .into_par_iter()
         .map(|i| {
-            let v = &data[i];
+            let v = &dataset[i];
             centroids
                 .iter()
                 .map(|c| SpatialSimilarity::l2(v, c).expect("same vector len"))
@@ -198,7 +358,7 @@ fn compute_centroid_distance_max<
     (0..old.len())
         .into_par_iter()
         .map(|i| SpatialSimilarity::l2(&old[i], &new[i]).expect("same vector len"))
-        .max_by(|a, b| a.total_cmp(&b))
+        .max_by(|a, b| a.total_cmp(b))
         .expect("non-zero k")
 }
 

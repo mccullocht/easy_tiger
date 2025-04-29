@@ -120,7 +120,7 @@ impl Quantizer for BinaryQuantizer {
     }
 
     fn doc_bytes(&self, dimensions: usize) -> usize {
-        (dimensions + 7) / 8
+        dimensions.div_ceil(8)
     }
 
     fn for_query(&self, vector: &[f32]) -> Vec<u8> {

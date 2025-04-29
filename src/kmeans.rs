@@ -75,11 +75,10 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     };
     let mut assignments = compute_assignments(dataset, &centroids);
 
-    // XXX maybe also have a minimum size and try to combine small clusters with others?
+    // TODO: maybe also have a minimum size and try to combine small clusters with others?
     // in that case we need to know the closest centroid(s) for small centroids to do the
     // combination step.
     let max_centroid_size = ((dataset.len() as f64 * balance_factor) / k as f64) as usize;
-    println!("  max_centroid_size {}", max_centroid_size);
     while centroids.len() < k {
         let mut centroid_to_vectors = assignments.iter().enumerate().fold(
             vec![vec![]; centroids.len()],
@@ -117,24 +116,15 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             .position(|(_, p)| *p > 1)
             .unwrap_or(centroid_counts.len());
 
+        // If all the centroids are too big to split based on our balance factor and we haven't
+        // reached k we'll just terminate.
         if unsplit_len == centroid_counts.len() {
-            println!(
-                "  unexpectedly could not sub-partition any centroids! {} centroids; {} vectors",
-                centroid_counts.len(),
-                centroid_to_vectors.iter().map(|v| v.len()).sum::<usize>()
-            );
             break;
         }
 
         let mut new_centroids = VecVectorStore::with_capacity(
             centroids.elem_stride(),
             centroid_counts.iter().map(|(_, c)| *c).sum::<usize>(),
-        );
-        println!(
-            "  splitting from {} to {}; {} unchanged",
-            centroids.len(),
-            new_centroids.capacity(),
-            unsplit_len
         );
         for (i, (c, nk)) in centroid_counts.iter().enumerate() {
             // Update assignment indexes for all the centroid vectors; assignment distances will be
@@ -147,12 +137,6 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             if i < unsplit_len {
                 new_centroids.push(&centroids[*c]);
             } else {
-                println!(
-                    "  partitioning centroid {} of {} vectors into {} parts",
-                    i,
-                    centroid_vectors.len(),
-                    *nk
-                );
                 let subset_centroids = match batch_kmeans(
                     &SubsetViewVectorStore::new(dataset, centroid_vectors),
                     *nk,
@@ -162,7 +146,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                 ) {
                     Ok(c) => c,
                     Err(e) => {
-                        println!("iterative_balanced_kmeans centroid split failed to converge!");
+                        eprintln!("iterative_balanced_kmeans centroid split failed to converge!");
                         e
                     }
                 };
@@ -172,7 +156,6 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             }
         }
 
-        println!("  update assignments");
         update_assignment_centroid_split(dataset, &new_centroids, unsplit_len, &mut assignments);
         centroids = new_centroids;
     }

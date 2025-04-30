@@ -15,16 +15,20 @@ pub fn cluster_for_reordering<V: VectorStore<Elem = f32> + Send + Sync>(
     params: &kmeans::Params,
     rng: &mut impl Rng,
 ) -> Vec<usize> {
-    //let batch_size = (dataset.len() as f64 * 0.005).round() as usize;
     let batch_size = 1000;
     let mut new_order = Vec::with_capacity(dataset.len());
     let mut queue = VecDeque::new();
     queue.push_back((0..dataset.len()).collect::<Vec<_>>());
     while let Some(subset) = queue.pop_front() {
         if subset.len() <= m {
+            let print_update =
+                (new_order.len() / 50_000) != ((new_order.len() + subset.len()) / 50_000);
             new_order.extend_from_slice(&subset);
-            // XXX this is actually a pretty good way of measuring progress.
-            println!("  {:7}/{:7}", new_order.len(), dataset.len());
+            if print_update {
+                // XXX this is actually a pretty good way of measuring progress. this should be
+                // part of an update bar.
+                println!("  {:7}/{:7}", new_order.len(), dataset.len());
+            }
             continue;
         }
 

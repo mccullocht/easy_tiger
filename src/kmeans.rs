@@ -214,6 +214,7 @@ pub fn batch_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
 ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
     let mut centroids = initialize_batch_centroids(training_data, k, batch_size, params, rng);
     let mut centroid_counts = vec![0.0; k];
+    // XXX we might want to reset centroids and counts when batch_size < training_data.size().
     for batch in BatchIter::new(training_data, batch_size, rng).take(params.iters) {
         let mut new_centroids = centroids.clone();
         for (vector, (cluster, _)) in batch

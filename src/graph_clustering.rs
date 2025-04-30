@@ -9,11 +9,15 @@ use crate::{
     kmeans::{self, batch_kmeans, compute_assignments},
 };
 
-pub fn cluster_for_reordering<V: VectorStore<Elem = f32> + Send + Sync>(
+pub fn cluster_for_reordering<
+    V: VectorStore<Elem = f32> + Send + Sync,
+    P: Fn(u64) + Send + Sync,
+>(
     dataset: &V,
     m: usize,
     params: &kmeans::Params,
     rng: &mut impl Rng,
+    progress: P,
 ) -> Vec<usize> {
     let batch_size = 1000;
     let mut new_order = Vec::with_capacity(dataset.len());
@@ -21,14 +25,8 @@ pub fn cluster_for_reordering<V: VectorStore<Elem = f32> + Send + Sync>(
     queue.push_back((0..dataset.len()).collect::<Vec<_>>());
     while let Some(subset) = queue.pop_front() {
         if subset.len() <= m {
-            let print_update =
-                (new_order.len() / 50_000) != ((new_order.len() + subset.len()) / 50_000);
             new_order.extend_from_slice(&subset);
-            if print_update {
-                // XXX this is actually a pretty good way of measuring progress. this should be
-                // part of an update bar.
-                println!("  {:7}/{:7}", new_order.len(), dataset.len());
-            }
+            progress(subset.len() as u64);
             continue;
         }
 
@@ -46,7 +44,6 @@ pub fn cluster_for_reordering<V: VectorStore<Elem = f32> + Send + Sync>(
             }
         };
 
-        // XXX this is producing assignments densely in subset vectors.
         let assignments = compute_assignments(&subset_vectors, &centroids);
         let centroid_to_vectors = assignments.iter().enumerate().fold(
             vec![vec![]; centroids.len()],

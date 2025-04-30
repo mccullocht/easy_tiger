@@ -50,6 +50,11 @@ pub struct BulkLoadArgs {
     /// It also moves caching policy to WT rather than allowing the OS to manage it.
     #[arg(long, default_value_t = false)]
     wiredtiger_vector_store: bool,
+    /// If true, cluster the input data set to choose insertion order. This improves locality
+    /// during the insertion step, yielding higher cache hit rates and graph build times, at the
+    /// expense of a compute intensive k-means clustering step.
+    #[arg(long, default_value_t = false)]
+    cluster_ordered_insert: bool,
 
     /// Maximum number of edges for any vertex.
     #[arg(short, long, default_value = "32")]
@@ -114,13 +119,14 @@ pub fn bulk_load(
         Options {
             memory_quantized_vectors: args.memory_quantized_vectors,
             wt_vector_store: args.wiredtiger_vector_store,
+            cluster_ordered_insert: args.cluster_ordered_insert,
         },
         limit,
     );
 
     for phase in builder.phases() {
         let progress = progress_bar(builder.len(), Some(phase.display_name()));
-        builder.execute_phase(phase, || progress.inc(1))?;
+        builder.execute_phase(phase, |n| progress.inc(n))?;
     }
     println!("{:?}", builder.graph_stats().unwrap());
 
@@ -139,6 +145,9 @@ pub fn bulk_load(
 
 /// Count lookup calls and read IOs. This can be used to estimate cache hit rate.
 fn cache_hit_stats(session: &Session) -> Result<(i64, i64)> {
+    // XXX count bytes read
+    // WT_STAT_CONN_CACHE_READ is for pages read
+    // WT_STAT_CONN_CACHE_BYTES_READ is for read _bytes_.
     let mut stat_cursor = session.new_stats_cursor(wt_mdb::options::Statistics::Fast, None)?;
     let search_calls = stat_cursor
         .seek_exact(WT_STAT_CONN_CURSOR_SEARCH)

@@ -10,7 +10,7 @@ use easy_tiger::{
     wt::TableGraphVectorIndex,
 };
 use wt_mdb::{Connection, Result, Session};
-use wt_sys::{WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
+use wt_sys::{WT_STAT_CONN_CACHE_BYTES_READ, WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
 
 use crate::{drop_index, ui::progress_bar};
 
@@ -130,30 +130,36 @@ pub fn bulk_load(
     }
     println!("{:?}", builder.graph_stats().unwrap());
 
-    if args.wiredtiger_vector_store {
-        let (search_calls, read_io) = cache_hit_stats(&connection.open_session()?)?;
-        println!(
-            "cache hit rate {:.2}% ({} reads, {} lookups)",
-            (search_calls - read_io) as f64 * 100.0 / search_calls as f64,
-            read_io,
-            search_calls,
-        );
-    }
+    let stats = wired_tiger_stats(&connection.open_session()?)?;
+    println!(
+        "cache hit rate {:.2}% ({} reads, {} lookups); {} bytes read into cache",
+        (stats.search_calls - stats.read_ios) as f64 * 100.0 / stats.search_calls as f64,
+        stats.read_ios,
+        stats.search_calls,
+        stats.read_bytes,
+    );
 
     Ok(())
 }
 
+struct WiredTigerStats {
+    search_calls: i64,
+    read_ios: i64,
+    read_bytes: i64,
+}
+
 /// Count lookup calls and read IOs. This can be used to estimate cache hit rate.
-fn cache_hit_stats(session: &Session) -> Result<(i64, i64)> {
-    // XXX count bytes read
-    // WT_STAT_CONN_CACHE_READ is for pages read
-    // WT_STAT_CONN_CACHE_BYTES_READ is for read _bytes_.
+fn wired_tiger_stats(session: &Session) -> Result<WiredTigerStats> {
     let mut stat_cursor = session.new_stats_cursor(wt_mdb::options::Statistics::Fast, None)?;
-    let search_calls = stat_cursor
-        .seek_exact(WT_STAT_CONN_CURSOR_SEARCH)
-        .expect("WT_STAT_CONN_CURSOR_SEARCH")?;
-    let read_ios = stat_cursor
-        .seek_exact(WT_STAT_CONN_READ_IO)
-        .expect("WT_STAT_CONN_READ_IO")?;
-    Ok((search_calls, read_ios))
+    Ok(WiredTigerStats {
+        search_calls: stat_cursor
+            .seek_exact(WT_STAT_CONN_CURSOR_SEARCH)
+            .expect("WT_STAT_CONN_CURSOR_SEARCH")?,
+        read_ios: stat_cursor
+            .seek_exact(WT_STAT_CONN_READ_IO)
+            .expect("WT_STAT_CONN_READ_IO")?,
+        read_bytes: stat_cursor
+            .seek_exact(WT_STAT_CONN_CACHE_BYTES_READ)
+            .expect("WT_STATE_CONN_CACHE_BYTES_READ")?,
+    })
 }

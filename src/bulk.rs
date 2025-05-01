@@ -30,8 +30,8 @@ use wt_mdb::{options::DropOptionsBuilder, Connection, Record, Result, Session};
 use crate::{
     distance::F32VectorDistance,
     graph::{
-        prune_edges, select_pruned_edges, Graph, GraphConfig, GraphLayout, GraphVectorIndexReader,
-        GraphVertex, NavVectorStore, RawVectorStore,
+        prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig, GraphLayout,
+        GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVectorStore,
     },
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
@@ -490,12 +490,11 @@ where
     ) -> Result<Vec<Neighbor>> {
         // TODO: return any vectors used for re-ranking here so that we can use them for pruning.
         let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
-        let mut graph = reader.graph()?;
+        let edge_set_distance_computer = EdgeSetDistanceComputer::new(reader, &candidates)?;
         let split = prune_edges(
             &mut candidates,
             self.index.config().max_edges,
-            &mut graph,
-            self.distance_fn.as_ref(),
+            edge_set_distance_computer,
         )?;
         candidates.truncate(split);
         Ok(candidates)
@@ -548,8 +547,7 @@ where
                 let selected = select_pruned_edges(
                     &edges,
                     max_edges,
-                    &mut reader.graph()?,
-                    self.distance_fn.as_ref(),
+                    EdgeSetDistanceComputer::new(reader, &edges)?,
                 )?;
                 edges
                     .iter()

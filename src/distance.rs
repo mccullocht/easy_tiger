@@ -27,7 +27,7 @@ pub trait F32VectorDistance: Send + Sync {
 ///
 /// This trait is object-safe; it may be instantiated at runtime based on
 /// data that appears in a file or other backing store.
-pub trait QuantizedVectorDistance {
+pub trait QuantizedVectorDistance: Send + Sync {
     /// Score the `query` vector against the `doc` vector. Returns a score
     /// where larger values are better matches.
     ///

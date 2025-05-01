@@ -114,7 +114,8 @@ impl GraphSearcher {
         // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
         self.seen.insert(vertex_id);
 
-        // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
+        // XXX if we are not re-ranking then search _quantized_ without performing this read.
+        // it would put way less pressure on the cache.
         let query = reader
             .raw_vectors()?
             .get_raw_vector(vertex_id)

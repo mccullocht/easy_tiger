@@ -22,6 +22,7 @@ use std::{
 
 use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
+use rand::thread_rng;
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
 use wt_mdb::{options::DropOptionsBuilder, Connection, Record, Result, Session};
@@ -32,7 +33,8 @@ use crate::{
         prune_edges, select_pruned_edges, Graph, GraphConfig, GraphLayout, GraphVectorIndexReader,
         GraphVertex, NavVectorStore, RawVectorStore,
     },
-    input::{DerefVectorStore, VectorStore},
+    graph_clustering,
+    input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
     wt::{
         encode_graph_vertex, encode_raw_vector, CursorGraph, CursorNavVectorStore,
@@ -55,7 +57,7 @@ pub struct GraphStats {
 }
 
 /// Options for bulk loading a data set.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Default, Copy, Clone)]
 pub struct Options {
     /// If true, write the quantized vectors into an anonymous memory mapped segment.
     /// This ensures that they will stay in memory (modulo swap) and also provides
@@ -66,12 +68,17 @@ pub struct Options {
     /// once on input. This also allows measuring cache efficiency during build when
     /// the data set is larger than available memory.
     pub wt_vector_store: bool,
+    /// If true, cluster the input data set to choose insertion order. This improves locality
+    /// during the insertion step, yielding higher cache hit rates and graph build times, at the
+    /// expense of a compute intensive k-means clustering step.
+    pub cluster_ordered_insert: bool,
 }
 
 #[derive(Debug, Copy, Clone)]
 pub enum BulkLoadPhase {
     LoadNavVectors,
     LoadRawVectors,
+    ClusterVectors,
     BuildGraph,
     CleanupGraph,
     LoadGraph,
@@ -82,6 +89,7 @@ impl BulkLoadPhase {
         match self {
             Self::LoadNavVectors => "load nav vectors",
             Self::LoadRawVectors => "load raw vectors",
+            Self::ClusterVectors => "cluster vectors",
             Self::BuildGraph => "build graph",
             Self::CleanupGraph => "cleanup graph",
             Self::LoadGraph => "load graph",
@@ -104,6 +112,7 @@ pub struct BulkLoadBuilder<D> {
 
     options: Options,
     quantized_vectors: Option<DerefVectorStore<u8, Mmap>>,
+    clustered_order: Option<Vec<usize>>,
 
     graph: Box<[RwLock<Vec<Neighbor>>]>,
     entry_vertex: AtomicI64,
@@ -138,6 +147,7 @@ where
             centroid: Vec::new(),
             options,
             quantized_vectors: None,
+            clustered_order: None,
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
             distance_fn,
@@ -148,22 +158,19 @@ where
     /// Phases to be executed by the builder.
     /// This can vary depending on the options.
     pub fn phases(&self) -> Vec<BulkLoadPhase> {
+        let mut phases = vec![BulkLoadPhase::LoadNavVectors];
         if self.options.wt_vector_store || self.index.config().layout == GraphLayout::Split {
-            vec![
-                BulkLoadPhase::LoadNavVectors,
-                BulkLoadPhase::LoadRawVectors,
-                BulkLoadPhase::BuildGraph,
-                BulkLoadPhase::CleanupGraph,
-                BulkLoadPhase::LoadGraph,
-            ]
-        } else {
-            vec![
-                BulkLoadPhase::LoadNavVectors,
-                BulkLoadPhase::BuildGraph,
-                BulkLoadPhase::CleanupGraph,
-                BulkLoadPhase::LoadGraph,
-            ]
+            phases.push(BulkLoadPhase::LoadRawVectors);
         }
+        if self.options.cluster_ordered_insert {
+            phases.push(BulkLoadPhase::ClusterVectors);
+        }
+        phases.extend_from_slice(&[
+            BulkLoadPhase::BuildGraph,
+            BulkLoadPhase::CleanupGraph,
+            BulkLoadPhase::LoadGraph,
+        ]);
+        phases
     }
 
     /// Total number of vectors to process. Useful for status reporting.
@@ -175,11 +182,12 @@ where
     /// Execute a single named phase, calling progress() as each vector is processed.
     pub fn execute_phase<P>(&mut self, phase: BulkLoadPhase, progress: P) -> Result<()>
     where
-        P: Fn() + Send + Sync,
+        P: Fn(u64) + Send + Sync,
     {
         match phase {
             BulkLoadPhase::LoadNavVectors => self.load_nav_vectors(progress),
             BulkLoadPhase::LoadRawVectors => self.load_raw_vectors(progress),
+            BulkLoadPhase::ClusterVectors => self.cluster_vectors(progress),
             BulkLoadPhase::BuildGraph => self.insert_all(progress),
             BulkLoadPhase::CleanupGraph => self.cleanup(progress),
             BulkLoadPhase::LoadGraph => {
@@ -195,7 +203,7 @@ where
     }
 
     /// Load binary quantized vector data into the nav vectors table.
-    fn load_nav_vectors<P: Fn()>(&mut self, progress: P) -> Result<()> {
+    fn load_nav_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
         let quantizer = self.index.config().new_quantizer();
@@ -213,7 +221,7 @@ where
                 .enumerate()
                 .take(self.limit)
                 .map(|(i, v)| {
-                    progress();
+                    progress(1);
                     for (i, o) in v.iter().zip(sum.iter_mut()) {
                         *o += *i as f64;
                     }
@@ -245,7 +253,7 @@ where
         Ok(())
     }
 
-    fn load_raw_vectors<P: Fn() + Send + Sync>(&mut self, progress: P) -> Result<()> {
+    fn load_raw_vectors<P: Fn(u64) + Send + Sync>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         session.bulk_load(
             self.index.raw_table_name(),
@@ -257,19 +265,30 @@ where
                 .map(|(i, v)| {
                     let normalized = self.distance_fn.normalize_vector(v.into());
                     let value = encode_raw_vector(&normalized);
-                    progress();
+                    progress(1);
                     Record::new(i as i64, value)
                 }),
         )
     }
 
-    /// Insert all vectors from the passed vector store into the graph.
-    ///
-    /// This operation uses rayon to parallelize large parts of the graph build.
-    fn insert_all<P>(&self, progress: P) -> Result<()>
-    where
-        P: Fn() + Send + Sync,
-    {
+    fn cluster_vectors<P: Fn(u64) + Send + Sync>(&mut self, progress: P) -> Result<()> {
+        let subset = SubsetViewVectorStore::new(&self.vectors, (0..self.limit).collect());
+        self.clustered_order = Some(graph_clustering::cluster_for_reordering(
+            &subset,
+            self.index.config().max_edges.get(),
+            &crate::kmeans::Params {
+                iters: 100,
+                init_iters: 10,
+                epsilon: 0.01,
+                ..Default::default()
+            },
+            &mut thread_rng(),
+            progress,
+        ));
+        Ok(())
+    }
+
+    fn insert_all<P: Fn(u64) + Send + Sync>(&self, progress: P) -> Result<()> {
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
@@ -290,9 +309,16 @@ where
         // end of each insertion search to ensure that we are linking these nodes when appropriate as those
         // links would not be generated by a search of the graph.
         let in_flight = SkipSet::new();
-        (0..self.limit)
-            .into_par_iter()
-            .skip(1) // vertex 0 has been implicitly inserted.
+        let order = self
+            .clustered_order
+            .as_ref()
+            .map(Cow::from)
+            .unwrap_or_else(|| Cow::from((0..self.limit).collect::<Vec<_>>()));
+        order
+            .par_iter()
+            .by_uniform_blocks(self.index.config().max_edges.get() * 2)
+            .copied()
+            .filter(|i| *i != 0)
             .try_for_each(|v| {
                 let session = tl_session.get()?;
                 let mut searcher = tl_searcher
@@ -364,7 +390,7 @@ where
                 // Close out the transaction. There should be no conflicts as we did not write to the database.
                 session.rollback_transaction(None)?;
                 in_flight.remove(&v);
-                progress();
+                progress(1);
 
                 Ok::<(), wt_mdb::Error>(())
             })
@@ -373,10 +399,7 @@ where
     /// Cleanup the graph.
     ///
     /// This may prune edges and/or ensure graph connectivity.
-    fn cleanup<P>(&self, progress: P) -> Result<()>
-    where
-        P: Fn() + Send + Sync,
-    {
+    fn cleanup<P: Fn(u64) + Send + Sync>(&self, progress: P) -> Result<()> {
         // synchronize application of changes to the graph.
         // this is necessary to ensure the graph remains undirected.
         let apply_mu = Mutex::new(());
@@ -389,7 +412,7 @@ where
             let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
             self.prune_and_apply(v, &mut reader, &apply_mu)?;
             session.rollback_transaction(None)?;
-            progress();
+            progress(1);
             Ok::<_, wt_mdb::Error>(())
         })
     }
@@ -397,10 +420,7 @@ where
     /// Bulk load the graph table with raw vectors and graph edges.
     ///
     /// Returns statistics about the generated graph.
-    fn load_graph<P>(&self, progress: P) -> Result<GraphStats>
-    where
-        P: Fn(),
-    {
+    fn load_graph<P: Fn(u64)>(&self, progress: P) -> Result<GraphStats> {
         let mut stats = GraphStats {
             vertices: 0,
             edges: 0,
@@ -436,7 +456,6 @@ where
                     .enumerate()
                     .take(self.limit)
                     .map(|(i, (v, n))| {
-                        progress();
                         let vertex = n.read().unwrap();
                         stats.vertices += 1;
                         stats.edges += vertex.len();
@@ -449,6 +468,7 @@ where
                             } else {
                                 None
                             };
+                        progress(1);
                         Record::new(
                             i as i64,
                             encode_graph_vertex(

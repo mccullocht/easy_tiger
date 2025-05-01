@@ -9,6 +9,7 @@ pub mod bulk;
 pub mod crud;
 pub mod distance;
 pub mod graph;
+pub mod graph_clustering;
 pub mod input;
 pub mod kmeans;
 pub mod quantization;

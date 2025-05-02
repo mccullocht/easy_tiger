@@ -294,14 +294,13 @@ impl EdgeSetDistanceComputer {
 /// decisions.
 /// REQUIRES: `edges.is_sorted()`.
 // TODO: alpha value(s) should be tuneable.
-// XXX this no longer fails
-pub(crate) fn select_pruned_edges<'a>(
+pub(crate) fn select_pruned_edges(
     edges: &[Neighbor],
     max_edges: NonZero<usize>,
     edge_distance_computer: EdgeSetDistanceComputer,
-) -> Result<BTreeSet<usize>> {
+) -> BTreeSet<usize> {
     if edges.is_empty() {
-        return Ok(BTreeSet::new());
+        return BTreeSet::new();
     }
 
     debug_assert!(edges.is_sorted());
@@ -332,25 +331,22 @@ pub(crate) fn select_pruned_edges<'a>(
         }
     }
 
-    Ok(selected)
+    selected
 }
 
 /// Prune `edges` down to at most `max_edges`. Use `graph` and `distance_fn` to inform this decision.
 /// Returns a split point: all edges before that point are selected, all after are to be dropped.
 /// REQUIRES: `edges.is_sorted()`.
 // TODO: alpha value(s) should be tuneable.
-// XXX this no longer fails
-pub(crate) fn prune_edges<'a>(
+pub(crate) fn prune_edges(
     edges: &mut [Neighbor],
     max_edges: NonZero<usize>,
     edge_distance_computer: EdgeSetDistanceComputer,
-) -> Result<usize> {
-    let selected = select_pruned_edges(edges, max_edges, edge_distance_computer)?;
-
+) -> usize {
+    let selected = select_pruned_edges(edges, max_edges, edge_distance_computer);
     // Partition edges into selected and unselected.
     for (i, j) in selected.iter().enumerate() {
         edges.swap(i, *j);
     }
-
-    Ok(selected.len())
+    selected.len()
 }

@@ -494,7 +494,7 @@ where
             &mut candidates,
             self.index.config().max_edges,
             edge_set_distance_computer,
-        )?;
+        );
         candidates.truncate(split);
         Ok(candidates)
     }
@@ -547,7 +547,7 @@ where
                     &edges,
                     max_edges,
                     EdgeSetDistanceComputer::new(reader, &edges)?,
-                )?;
+                );
                 edges
                     .iter()
                     .enumerate()

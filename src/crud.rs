@@ -82,7 +82,7 @@ impl IndexMutator {
             &mut candidate_edges,
             self.reader.config().max_edges,
             edge_set_distance_computer,
-        )?;
+        );
         candidate_edges.truncate(selected_len);
 
         self.set_vertex(
@@ -159,7 +159,7 @@ impl IndexMutator {
                 &mut neighbors,
                 self.reader.config().max_edges,
                 edge_set_distance_computer,
-            )?;
+            );
             // Ensure the graph is undirected by removing links from pruned edges back to this node.
             for v in neighbors.iter().skip(selected_len).map(Neighbor::vertex) {
                 pruned_edges.push((v, src_vertex_id))

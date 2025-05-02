@@ -6,12 +6,10 @@ use std::{
 };
 
 use crate::{
-    distance::QuantizedVectorDistance,
     graph::{
         Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
         RawVectorStore,
     },
-    quantization::Quantizer,
     Neighbor,
 };
 
@@ -85,7 +83,7 @@ impl GraphSearcher {
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, |_| true, reader)
+        self.search_internal_raw(query, |_| true, reader)
     }
 
     /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
@@ -100,7 +98,7 @@ impl GraphSearcher {
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, filter_predicate, reader)
+        self.search_internal_raw(query, filter_predicate, reader)
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -114,106 +112,34 @@ impl GraphSearcher {
         // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
         self.seen.insert(vertex_id);
 
-        // NB: if inserting in a WT backed graph this will create a cursor that we immediately discard.
-        let query = reader
-            .raw_vectors()?
-            .get_raw_vector(vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))?
-            .to_vec();
-        self.search_internal(&query, |_| true, reader)
+        if self.params.num_rerank > 0 {
+            let query = reader
+                .raw_vectors()?
+                .get_raw_vector(vertex_id)
+                .unwrap_or(Err(Error::not_found_error()))?
+                .to_vec();
+            self.search_internal_raw(&query, |_| true, reader)
+        } else {
+            let nav_query = reader
+                .nav_vectors()?
+                .get_nav_vector(vertex_id)
+                .unwrap_or(Err(Error::not_found_error()))?
+                .to_vec();
+            self.search_internal_quantized(&nav_query, |_| true, reader)?;
+            Ok(self.candidates.iter().map(|c| c.neighbor).collect())
+        }
     }
 
-    fn search_internal(
+    fn search_internal_raw(
         &mut self,
         query: &[f32],
-        mut filter_predicate: impl FnMut(i64) -> bool,
+        filter_predicate: impl FnMut(i64) -> bool,
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
-        // TODO: come up with a better way of managing re-used state.
-        self.candidates.clear();
-        self.visited = 0;
-
-        let mut graph = reader.graph()?;
-        let mut nav = reader.nav_vectors()?;
         let quantizer = reader.config().new_quantizer();
-        let nav_distance_fn = reader.config().new_nav_distance_function();
-        let nav_query = self.init_candidates(
-            query,
-            &mut graph,
-            &mut nav,
-            quantizer.as_ref(),
-            nav_distance_fn.as_ref(),
-        )?;
-
-        while let Some(best_candidate) = self.candidates.next_unvisited() {
-            self.visited += 1;
-            let vertex_id = best_candidate.neighbor().vertex();
-            let node = graph
-                .get_vertex(vertex_id)
-                .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            if filter_predicate(vertex_id) {
-                // If we aren't reranking we don't need to copy the actual vector.
-                best_candidate.visit(if self.params.num_rerank > 0 {
-                    node.vector().map(|v| v.to_vec())
-                } else {
-                    None
-                });
-            } else {
-                best_candidate.remove();
-            }
-
-            for edge in node.edges() {
-                if !self.seen.insert(edge) {
-                    continue;
-                }
-                let vec = nav
-                    .get_nav_vector(edge)
-                    .unwrap_or(Err(Error::not_found_error()))?;
-                self.candidates.add_unvisited(Neighbor::new(
-                    edge,
-                    nav_distance_fn.distance(&nav_query, &vec),
-                ));
-            }
-        }
-
-        self.extract_results(query, reader)
-    }
-
-    // Initialize the candidate queue and return the binary quantized query.
-    fn init_candidates<G, N>(
-        &mut self,
-        query: &[f32],
-        graph: &mut G,
-        nav: &mut N,
-        quantizer: &dyn Quantizer,
-        nav_distance_fn: &dyn QuantizedVectorDistance,
-    ) -> Result<Vec<u8>>
-    where
-        G: Graph,
-        N: NavVectorStore,
-    {
         let nav_query = quantizer.for_query(query);
-        if let Some(epr) = graph.entry_point() {
-            let entry_point = epr?;
-            let entry_vector = nav
-                .get_nav_vector(entry_point)
-                .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates.add_unvisited(Neighbor::new(
-                entry_point,
-                nav_distance_fn.distance(&nav_query, &entry_vector),
-            ));
-            self.seen.insert(entry_point);
-        }
-        // We don't treat failing to obtain an entry point as an error because
-        // the graph may be empty.
-        Ok(nav_query)
-    }
+        self.search_internal_quantized(&nav_query, filter_predicate, reader)?;
 
-    fn extract_results<R: GraphVectorIndexReader>(
-        &mut self,
-        query: &[f32],
-        reader: &R,
-    ) -> Result<Vec<Neighbor>> {
         if self.params.num_rerank == 0 {
             return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
         }
@@ -248,6 +174,63 @@ impl GraphSearcher {
             r.sort();
             r
         })
+    }
+
+    fn search_internal_quantized(
+        &mut self,
+        query: &[u8],
+        mut filter_predicate: impl FnMut(i64) -> bool,
+        reader: &mut impl GraphVectorIndexReader,
+    ) -> Result<()> {
+        // TODO: come up with a better way of managing re-used state.
+        self.candidates.clear();
+        self.visited = 0;
+
+        let mut graph = reader.graph()?;
+        let mut nav = reader.nav_vectors()?;
+        let nav_distance_fn = reader.config().new_nav_distance_function();
+        if let Some(epr) = graph.entry_point() {
+            let entry_point = epr?;
+            let entry_vector = nav
+                .get_nav_vector(entry_point)
+                .unwrap_or(Err(Error::not_found_error()))?;
+            self.candidates.add_unvisited(Neighbor::new(
+                entry_point,
+                nav_distance_fn.distance(query, &entry_vector),
+            ));
+            self.seen.insert(entry_point);
+        }
+
+        while let Some(best_candidate) = self.candidates.next_unvisited() {
+            self.visited += 1;
+            let vertex_id = best_candidate.neighbor().vertex();
+            let node = graph
+                .get_vertex(vertex_id)
+                .unwrap_or_else(|| Err(Error::not_found_error()))?;
+            if filter_predicate(vertex_id) {
+                // If we aren't reranking we don't need to copy the actual vector.
+                best_candidate.visit(if self.params.num_rerank > 0 {
+                    node.vector().map(|v| v.to_vec())
+                } else {
+                    None
+                });
+            } else {
+                best_candidate.remove();
+            }
+
+            for edge in node.edges() {
+                if !self.seen.insert(edge) {
+                    continue;
+                }
+                let vec = nav
+                    .get_nav_vector(edge)
+                    .unwrap_or(Err(Error::not_found_error()))?;
+                self.candidates
+                    .add_unvisited(Neighbor::new(edge, nav_distance_fn.distance(query, &vec)));
+            }
+        }
+
+        Ok(())
     }
 }
 

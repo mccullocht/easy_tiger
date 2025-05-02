@@ -3,7 +3,10 @@ use std::{ops::Deref, sync::Arc};
 
 use crate::{
     distance::F32VectorDistance,
-    graph::{prune_edges, Graph, GraphLayout, GraphVectorIndexReader, GraphVertex, RawVectorStore},
+    graph::{
+        prune_edges, EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndexReader,
+        GraphVertex, RawVectorStore,
+    },
     search::GraphSearcher,
     wt::{
         encode_graph_vertex, encode_raw_vector, SessionGraphVectorIndexReader,
@@ -73,12 +76,13 @@ impl IndexMutator {
             // This is mostly as a noop because there are no edges.
             graph.set_entry_point(vertex_id)?;
         }
+        let edge_set_distance_computer =
+            EdgeSetDistanceComputer::new(&self.reader, &candidate_edges)?;
         let selected_len = prune_edges(
             &mut candidate_edges,
             self.reader.config().max_edges,
-            &mut raw_vectors,
-            distance_fn.as_ref(),
-        )?;
+            edge_set_distance_computer,
+        );
         candidate_edges.truncate(selected_len);
 
         self.set_vertex(
@@ -149,12 +153,13 @@ impl IndexMutator {
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
             neighbors.sort();
+            let edge_set_distance_computer =
+                EdgeSetDistanceComputer::new(&self.reader, &neighbors)?;
             let selected_len = prune_edges(
                 &mut neighbors,
                 self.reader.config().max_edges,
-                raw_vectors,
-                distance_fn,
-            )?;
+                edge_set_distance_computer,
+            );
             // Ensure the graph is undirected by removing links from pruned edges back to this node.
             for v in neighbors.iter().skip(selected_len).map(Neighbor::vertex) {
                 pruned_edges.push((v, src_vertex_id))

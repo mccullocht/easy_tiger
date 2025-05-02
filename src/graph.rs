@@ -224,6 +224,71 @@ pub trait NavVectorStore {
     fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }
 
+/// Computes the distance between two edges in a set to assist in pruning.
+///
+/// This abstraction allows us to switch between raw (float) and nav (quantized) vectors.
+pub enum EdgeSetDistanceComputer {
+    Raw {
+        distance_fn: Box<dyn F32VectorDistance>,
+        // TODO: flat representation of the vectors instead of nesting.
+        vectors: Vec<Vec<f32>>,
+    },
+    Nav {
+        distance_fn: Box<dyn QuantizedVectorDistance>,
+        // TODO: flat representation of the vectors instead of nesting.
+        vectors: Vec<Vec<u8>>,
+    },
+}
+
+impl EdgeSetDistanceComputer {
+    pub fn new<R: GraphVectorIndexReader>(reader: &R, edges: &[Neighbor]) -> Result<Self> {
+        if reader.config().index_search_params.num_rerank > 0 {
+            let mut vector_store = reader.raw_vectors()?;
+            let vectors = edges
+                .iter()
+                .map(|n| {
+                    vector_store
+                        .get_raw_vector(n.vertex())
+                        .unwrap_or(Err(Error::not_found_error()))
+                        .map(|v| v.to_vec())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Self::Raw {
+                distance_fn: reader.config().new_distance_function(),
+                vectors,
+            })
+        } else {
+            let mut vector_store = reader.nav_vectors()?;
+            let vectors = edges
+                .iter()
+                .map(|n| {
+                    vector_store
+                        .get_nav_vector(n.vertex())
+                        .unwrap_or(Err(Error::not_found_error()))
+                        .map(|v| v.to_vec())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Self::Nav {
+                distance_fn: reader.config().new_nav_distance_function(),
+                vectors,
+            })
+        }
+    }
+
+    pub fn distance(&self, i: usize, j: usize) -> f64 {
+        match self {
+            Self::Raw {
+                distance_fn,
+                vectors,
+            } => distance_fn.distance(&vectors[i], &vectors[j]),
+            Self::Nav {
+                distance_fn,
+                vectors,
+            } => distance_fn.distance(&vectors[i], &vectors[j]),
+        }
+    }
+}
+
 /// Select the indices of `edges` that should remain when pruning down to at most `max_edges`.
 /// `graph` is used to access vectors and `distance_fn` is used to compare vectors when making pruning
 /// decisions.
@@ -232,25 +297,13 @@ pub trait NavVectorStore {
 pub(crate) fn select_pruned_edges(
     edges: &[Neighbor],
     max_edges: NonZero<usize>,
-    raw_vectors: &mut impl RawVectorStore,
-    distance_fn: &dyn F32VectorDistance,
-) -> Result<BTreeSet<usize>> {
+    edge_distance_computer: EdgeSetDistanceComputer,
+) -> BTreeSet<usize> {
     if edges.is_empty() {
-        return Ok(BTreeSet::new());
+        return BTreeSet::new();
     }
 
     debug_assert!(edges.is_sorted());
-
-    // Obtain all the vectors to make relative neighbor graph scoring easier.
-    let vectors = edges
-        .iter()
-        .map(|n| {
-            raw_vectors
-                .get_raw_vector(n.vertex())
-                .unwrap_or(Err(Error::not_found_error()))
-                .map(|v| v.to_vec())
-        })
-        .collect::<Result<Vec<_>>>()?;
 
     // TODO: replace with a fixed length bitset
     let mut selected = BTreeSet::new();
@@ -261,11 +314,10 @@ pub(crate) fn select_pruned_edges(
                 continue;
             }
 
-            let e_vec = &vectors[i];
             if !selected
                 .iter()
                 .take_while(|s| **s < i)
-                .any(|s| distance_fn.distance(e_vec, &vectors[*s]) < e.distance * alpha)
+                .any(|s| edge_distance_computer.distance(i, *s) < e.distance * alpha)
             {
                 selected.insert(i);
                 if selected.len() >= max_edges.get() {
@@ -279,7 +331,7 @@ pub(crate) fn select_pruned_edges(
         }
     }
 
-    Ok(selected)
+    selected
 }
 
 /// Prune `edges` down to at most `max_edges`. Use `graph` and `distance_fn` to inform this decision.
@@ -289,15 +341,12 @@ pub(crate) fn select_pruned_edges(
 pub(crate) fn prune_edges(
     edges: &mut [Neighbor],
     max_edges: NonZero<usize>,
-    raw_vectors: &mut impl RawVectorStore,
-    distance_fn: &dyn F32VectorDistance,
-) -> Result<usize> {
-    let selected = select_pruned_edges(edges, max_edges, raw_vectors, distance_fn)?;
-
+    edge_distance_computer: EdgeSetDistanceComputer,
+) -> usize {
+    let selected = select_pruned_edges(edges, max_edges, edge_distance_computer);
     // Partition edges into selected and unselected.
     for (i, j) in selected.iter().enumerate() {
         edges.swap(i, *j);
     }
-
-    Ok(selected.len())
+    selected.len()
 }

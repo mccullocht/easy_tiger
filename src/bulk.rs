@@ -342,12 +342,11 @@ where
                     v
                 );
 
-                let mut raw_vectors = reader.raw_vectors()?;
-                let centroid_score = self.distance_fn.distance(
-                    &raw_vectors.get_raw_vector(v as i64).unwrap().unwrap(),
-                    &self.centroid,
-                );
-                drop(raw_vectors);
+                // TODO: consider using quantized scores here to avoid reading f32 vectors when
+                // reranking is turned off.
+                let centroid_distance = self
+                    .distance_fn
+                    .distance(&self.get_vector(v), &self.centroid);
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
                 // undirected. If an edge does not fit on either vertex, save it for later.
@@ -371,9 +370,9 @@ where
                     });
 
                     if edges.is_empty() {
-                        if centroid_score > entry_point.1 {
+                        if centroid_distance < entry_point.1 {
                             entry_point.0 = v as i64;
-                            entry_point.1 = centroid_score;
+                            entry_point.1 = centroid_distance;
                             self.entry_vertex.store(v as i64, atomic::Ordering::SeqCst);
                         }
                         break;

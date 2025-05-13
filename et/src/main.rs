@@ -6,6 +6,7 @@ mod init_index;
 mod insert;
 mod lookup;
 mod search;
+mod spann_load;
 mod ui;
 
 use std::{

@@ -347,6 +347,11 @@ impl Session {
         Ok(())
     }
 
+    /// Checkpoint the database.
+    pub fn checkpoint(&self) -> Result<()> {
+        unsafe { wt_call!(self.ptr, checkpoint, std::ptr::null()) }
+    }
+
     /// Reset this session, which also resets any outstanding cursors.
     pub fn reset(&self) -> Result<()> {
         unsafe { wt_call!(self.ptr, reset) }

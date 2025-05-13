@@ -424,6 +424,15 @@ mod test {
     }
 
     #[test]
+    fn checkpoint() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_table("test", None).unwrap();
+        session.checkpoint().unwrap();
+    }
+
+    #[test]
     fn statistics() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(

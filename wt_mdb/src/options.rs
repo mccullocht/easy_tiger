@@ -29,6 +29,8 @@ pub struct ConnectionOptionsBuilder {
     create: bool,
     cache_size_mb: Option<NonZero<usize>>,
     statistics: Statistics,
+    checkpoint_log_size: usize,
+    checkpoint_wait_seconds: usize,
 }
 
 impl ConnectionOptionsBuilder {
@@ -44,8 +46,21 @@ impl ConnectionOptionsBuilder {
         self
     }
 
+    /// Configure statistics collection.
     pub fn statistics(mut self, statistics: Statistics) -> Self {
         self.statistics = statistics;
+        self
+    }
+
+    /// If non-zero, write a checkpoint every N bytes.
+    pub fn checkpoint_log_size(mut self, log_size: usize) -> Self {
+        self.checkpoint_log_size = log_size;
+        self
+    }
+
+    /// If non-zero, write a checkpoint every N seconds.
+    pub fn checkpoint_wait_seconds(mut self, wait_seconds: usize) -> Self {
+        self.checkpoint_wait_seconds = wait_seconds;
         self
     }
 }
@@ -122,6 +137,12 @@ impl From<ConnectionOptionsBuilder> for ConnectionOptions {
         }
         if let Some(clause) = value.statistics.to_config_string_clause() {
             options.push(clause);
+        }
+        if value.checkpoint_log_size > 0 || value.checkpoint_wait_seconds > 0 {
+            options.push(format!(
+                "checkpoint=(log_size={},wait={})",
+                value.checkpoint_log_size, value.checkpoint_wait_seconds
+            ))
         }
         if options.is_empty() {
             Self(None)

@@ -107,7 +107,7 @@ pub struct BulkLoadBuilder<D> {
     index: TableGraphVectorIndex,
     limit: usize,
 
-    vectors: DerefVectorStore<f32, D>,
+    vectors: D,
     centroid: Vec<f32>,
 
     options: Options,
@@ -123,14 +123,14 @@ pub struct BulkLoadBuilder<D> {
 
 impl<D> BulkLoadBuilder<D>
 where
-    D: Send + Sync,
+    D: VectorStore<Elem = f32> + Send + Sync,
 {
     /// Create a new bulk graph builder with the passed vector set and configuration.
     /// `limit` limits the number of vectors processed to less than the full set.
     pub fn new(
         connection: Arc<Connection>,
         index: TableGraphVectorIndex,
-        vectors: DerefVectorStore<f32, D>,
+        vectors: D,
         options: Options,
         limit: usize,
     ) -> Self {
@@ -646,7 +646,9 @@ impl Drop for SessionGuard<'_> {
 
 struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Session);
 
-impl<D: Send + Sync> GraphVectorIndexReader for BulkLoadGraphVectorIndexReader<'_, '_, D> {
+impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
+    for BulkLoadGraphVectorIndexReader<'_, '_, D>
+{
     type Graph<'b>
         = BulkLoadBuilderGraph<'b, D>
     where
@@ -716,7 +718,7 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     }
 }
 
-impl<D: Send + Sync> RawVectorStore for BulkLoadBuilderGraph<'_, D> {
+impl<D: VectorStore<Elem = f32> + Send + Sync> RawVectorStore for BulkLoadBuilderGraph<'_, D> {
     fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<crate::graph::RawVector<'_>>> {
         if let Some(cursor) = self.1.as_mut() {
             cursor.get_raw_vector(vertex_id)

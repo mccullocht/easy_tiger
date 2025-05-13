@@ -14,6 +14,7 @@ pub mod input;
 pub mod kmeans;
 pub mod quantization;
 pub mod search;
+pub mod spann;
 pub mod wt;
 
 /// `Neighbor` is a node and a distance relative to some other node.

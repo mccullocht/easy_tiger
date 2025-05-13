@@ -7,8 +7,8 @@
 use std::{borrow::Cow, io, ops::Deref, sync::Arc};
 
 use wt_mdb::{
-    options::CreateOptions, Connection, Error, Record, RecordCursorGuard, RecordView, Result,
-    Session, WiredTigerError,
+    options::{CreateOptions, DropOptions},
+    Connection, Error, Record, RecordCursorGuard, RecordView, Result, Session, WiredTigerError,
 };
 
 use crate::graph::{
@@ -175,6 +175,7 @@ impl NavVectorStore for CursorNavVectorStore<'_> {
 
 /// Immutable features of a WiredTiger graph vector index. These can be read from the db and
 /// stored in a catalog for convenient access at runtime.
+#[derive(Clone)]
 pub struct TableGraphVectorIndex {
     graph_table_name: String,
     raw_table_name: Option<String>,
@@ -233,6 +234,18 @@ impl TableGraphVectorIndex {
         let mut cursor = session.open_record_cursor(&index.graph_table_name)?;
         cursor.set(&Record::new(CONFIG_KEY, serde_json::to_vec(&index.config)?))?;
         Ok(index)
+    }
+
+    /// Drop all tables for `index_name`.
+    pub fn drop_tables(
+        session: &Session,
+        index_name: &str,
+        options: &Option<DropOptions>,
+    ) -> Result<()> {
+        for table_name in Self::generate_table_names(index_name) {
+            session.drop_table(&table_name, options.clone())?;
+        }
+        Ok(())
     }
 
     /// Generate the names of the tables used for `index_name`.

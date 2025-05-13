@@ -3,16 +3,19 @@
 //! This implemented by clustering the input dataset and building a graph-based index over the
 //! select centroids. This index is used to build and navigate a posting index.
 
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, io, sync::Arc};
 
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use wt_mdb::{
+    options::{CreateOptions, DropOptions},
     Connection, Error, IndexCursorGuard, IndexRecordView, Record, RecordCursorGuard, Result,
+    Session, WiredTigerError,
 };
 
 use crate::{
     bulk::{self, BulkLoadBuilder},
-    graph::{GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
+    graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
     kmeans::{self, iterative_balanced_kmeans},
     quantization::VectorQuantizer,
@@ -31,12 +34,13 @@ use crate::{
 /// Select or compute roughly `dataset.len() * ratio` vectors from `dataset` to use as the head.
 /// A graph-based index will be built over these vectors and used to build and search the rest of
 /// the index.
-pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync>(
+pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + Sync + Copy>(
     dataset: &V,
     ratio: f64,
     kmeans_params: kmeans::Params,
     connection: Arc<Connection>,
-    index: TableGraphVectorIndex,
+    index: &TableGraphVectorIndex,
+    progress: P,
     rng: &mut impl Rng,
 ) -> Result<()> {
     let head_len = (dataset.len() as f64 * ratio + 0.5).round() as usize;
@@ -52,7 +56,7 @@ pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync>(
     );
     let mut loader = BulkLoadBuilder::new(
         connection,
-        index,
+        index.clone(),
         centroids,
         bulk::Options {
             memory_quantized_vectors: false,
@@ -63,18 +67,22 @@ pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync>(
     );
     for phase in loader.phases() {
         // XXX gotta find a way to jam progress in here.
-        loader.execute_phase(phase, |_| {})?;
+        loader.execute_phase(phase, progress)?;
     }
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Clone)]
 pub struct IndexConfig {
     pub replica_count: usize,
     pub head_search_params: GraphSearchParams,
     pub quantizer: VectorQuantizer,
 }
 
+#[derive(Clone)]
 pub struct TableIndex {
+    // Head vector index containing the centroids.
+    head: Arc<TableGraphVectorIndex>,
     // Table that maps (centroid_id,record_id) -> quantized vector.
     // Ranges of this table are searched based on the outcome of searching the head.
     posting_table_name: String,
@@ -82,6 +90,92 @@ pub struct TableIndex {
     // This table is used when deleting a vector; it allows us to locate rows to delete.
     centroid_table_name: String,
     config: IndexConfig,
+}
+
+impl TableIndex {
+    pub fn head_config(&self) -> &Arc<TableGraphVectorIndex> {
+        &self.head
+    }
+
+    pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {
+        let head = Arc::new(TableGraphVectorIndex::from_db(connection, index_name)?);
+
+        let [centroid_table_name, posting_table_name] = Self::table_names(index_name);
+        let session = connection.open_session()?;
+        let mut cursor = session.open_record_cursor(&centroid_table_name)?;
+        let config_json = unsafe { cursor.seek_exact_unsafe(-1) }
+            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
+        let config: IndexConfig = serde_json::from_slice(config_json.value())?;
+
+        Ok(Self {
+            head,
+            posting_table_name,
+            centroid_table_name,
+            config,
+        })
+    }
+
+    pub fn from_init(
+        index_name: &str,
+        head_config: GraphConfig,
+        spann_config: IndexConfig,
+    ) -> Self {
+        let head = Arc::new(TableGraphVectorIndex::from_init(head_config, index_name).unwrap());
+        let [centroid_table_name, posting_table_name] = Self::table_names(index_name);
+        Self {
+            head,
+            posting_table_name,
+            centroid_table_name,
+            config: spann_config,
+        }
+    }
+
+    pub fn init_index(
+        connection: &Arc<Connection>,
+        index_name: &str,
+        table_options: &Option<CreateOptions>,
+        head_config: GraphConfig,
+        spann_config: IndexConfig,
+    ) -> io::Result<Self> {
+        let head = Arc::new(TableGraphVectorIndex::init_index(
+            connection,
+            table_options.clone(),
+            head_config,
+            index_name,
+        )?);
+        let [centroid_table_name, posting_table_name] = Self::table_names(index_name);
+        let session = connection.open_session()?;
+        session.create_table(&centroid_table_name, table_options.clone())?;
+        session.create_table(&posting_table_name, table_options.clone())?;
+        let mut cursor = session.open_record_cursor(&centroid_table_name)?;
+        cursor.set(&Record::new(-1, serde_json::to_vec(&spann_config)?))?;
+        Ok(Self {
+            head,
+            posting_table_name,
+            centroid_table_name,
+            config: spann_config,
+        })
+    }
+
+    pub fn drop_tables(
+        session: &Session,
+        index_name: &str,
+        options: &Option<DropOptions>,
+    ) -> Result<()> {
+        // XXX this should probably accept a session instead.
+        TableGraphVectorIndex::drop_tables(session, index_name, options)?;
+        for table_name in Self::table_names(index_name) {
+            session.drop_table(&table_name, options.clone())?;
+        }
+        Ok(())
+    }
+
+    fn table_names(index_name: &str) -> [String; 2] {
+        [
+            format!("{}.centroids", index_name),
+            format!("{}.postings", index_name),
+        ]
+    }
 }
 
 /// A key in the posting table.
@@ -119,13 +213,18 @@ pub struct SessionIndexWriter {
 }
 
 impl SessionIndexWriter {
-    pub fn new(index: Arc<TableIndex>, head_reader: SessionGraphVectorIndexReader) -> Self {
+    pub fn new(index: Arc<TableIndex>, session: Session) -> Self {
+        let head_reader = SessionGraphVectorIndexReader::new(index.head.clone(), session);
         let head_searcher = GraphSearcher::new(index.config.head_search_params);
         Self {
             index,
             head_reader,
             head_searcher,
         }
+    }
+
+    pub fn session(&self) -> &Session {
+        self.head_reader.session()
     }
 
     pub fn upsert(&mut self, record_id: i64, vector: &[f32]) -> Result<()> {
@@ -147,13 +246,10 @@ impl SessionIndexWriter {
                     .collect::<Vec<u8>>(),
             ),
         ))?;
-        let quantized = self
-            .head_reader
-            .index()
-            .config()
-            .new_quantizer()
-            .for_doc(vector);
-        // TODO: try centering vector on each centroid before quantizing.
+        let quantized = self.index.config.quantizer.new_quantizer().for_doc(vector);
+        // TODO: try centering vector on each centroid before quantizing. This would likely reduce
+        // error but would also require quantizing the vector for each centroid during search and
+        // would complicate de-duplication (would have to accept best score).
         for centroid_id in centroid_ids {
             let key: [u8; 12] = PostingKey {
                 centroid_id,

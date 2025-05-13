@@ -226,7 +226,7 @@ impl DropOptionsBuilder {
 }
 
 /// Options for dropping a table, column group, index, or file in WiredTiger.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct DropOptions(Option<CString>);
 
 impl From<DropOptionsBuilder> for DropOptions {

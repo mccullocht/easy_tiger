@@ -5,7 +5,6 @@ use std::iter::Cycle;
 use rand::seq::index;
 use rand::{distributions::WeightedIndex, prelude::*};
 use rayon::prelude::*;
-use simsimd::SpatialSimilarity;
 
 use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
 
@@ -184,7 +183,7 @@ fn update_assignment_centroid_split<
                     .iter()
                     .enumerate()
                     .skip(unsplit_len)
-                    .map(|(i, c)| (i, SpatialSimilarity::l2(v, c).expect("same vector len")))
+                    .map(|(i, c)| (i, crate::distance::l2(v, c)))
                     .chain(std::iter::once(*assignment))
                     .min_by(|a, b| a.1.total_cmp(&b.1))
                     .expect("at least one centroid")
@@ -192,7 +191,7 @@ fn update_assignment_centroid_split<
                 // This centroid was split so we need to completely recompute assignment.
                 centroids
                     .iter()
-                    .map(|c| SpatialSimilarity::l2(v, c).expect("same vector len"))
+                    .map(|c| crate::distance::l2(v, c))
                     .enumerate()
                     .min_by(|a, b| a.1.total_cmp(&b.1))
                     .expect("at least one centroid")
@@ -290,7 +289,7 @@ fn initialize_centroids<
                 let centroid_vector = &centroids[centroid];
                 let distances = (0..training_data.len())
                     .into_par_iter()
-                    .map(|i| SpatialSimilarity::l2(&training_data[i], centroid_vector).unwrap())
+                    .map(|i| crate::distance::l2(&training_data[i], centroid_vector))
                     .collect::<Vec<_>>();
                 for ((cluster, distance), new_distance) in
                     assignments.iter_mut().zip(distances.into_iter())
@@ -322,7 +321,7 @@ pub fn compute_assignments<
             let v = &dataset[i];
             centroids
                 .iter()
-                .map(|c| SpatialSimilarity::l2(v, c).expect("same vector len"))
+                .map(|c| crate::distance::l2(v, c))
                 .enumerate()
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .expect("at least one centroid")
@@ -340,7 +339,7 @@ fn compute_centroid_distance_max<
 ) -> f64 {
     (0..old.len())
         .into_par_iter()
-        .map(|i| SpatialSimilarity::l2(&old[i], &new[i]).expect("same vector len"))
+        .map(|i| crate::distance::l2(&old[i], &new[i]))
         .max_by(|a, b| a.total_cmp(b))
         .expect("non-zero k")
 }

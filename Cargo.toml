@@ -3,6 +3,10 @@ name = "easy_tiger"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["simsimd"]
+simsimd = ["dep:simsimd"]
+
 [dependencies]
 crossbeam-skiplist = "0.1.3"
 leb128 = "0.2.5"
@@ -11,7 +15,7 @@ rand = "0.8.5"
 rayon = "1.10.0"
 serde = { version = "1.0.215", features = ["serde_derive"] }
 serde_json = "1.0.132"
-simsimd = "6.4.4"
+simsimd = { version = "6.4.4", optional = true }
 stable_deref_trait = "1.2.0"
 tempfile = "3.14.0"
 thread_local = "1.1.8"

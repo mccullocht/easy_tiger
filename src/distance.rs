@@ -3,7 +3,6 @@
 use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
-use simsimd::{BinarySimilarity, SpatialSimilarity};
 
 /// Distance function for `f32` vectors.
 ///
@@ -82,7 +81,7 @@ pub struct EuclideanDistance;
 
 impl F32VectorDistance for EuclideanDistance {
     fn distance(&self, a: &[f32], b: &[f32]) -> f64 {
-        SpatialSimilarity::l2sq(a, b).unwrap()
+        l2sq(a, b)
     }
 }
 
@@ -93,11 +92,11 @@ pub struct DotProductDistance;
 impl F32VectorDistance for DotProductDistance {
     fn distance(&self, a: &[f32], b: &[f32]) -> f64 {
         // Assuming values are normalized, this will produce a distance in [0,1]
-        (-SpatialSimilarity::dot(a, b).unwrap() + 1.0) / 2.0
+        (-dot(a, b) + 1.0) / 2.0
     }
 
     fn normalize_vector<'a>(&self, mut vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
-        let norm = SpatialSimilarity::dot(&vector, &vector).unwrap().sqrt() as f32;
+        let norm = dot(&vector, &vector).sqrt() as f32;
         for d in vector.to_mut().iter_mut() {
             *d /= norm;
         }
@@ -111,7 +110,7 @@ pub struct HammingDistance;
 
 impl QuantizedVectorDistance for HammingDistance {
     fn distance(&self, a: &[u8], b: &[u8]) -> f64 {
-        BinarySimilarity::hamming(a, b).unwrap()
+        hamming(a, b)
     }
 }
 
@@ -125,10 +124,7 @@ impl QuantizedVectorDistance for AsymmetricHammingDistance {
         query
             .chunks(doc.len())
             .enumerate()
-            .map(|(i, v)| {
-                BinarySimilarity::hamming(doc, v).expect("same vector length") as usize
-                    * (1usize << i)
-            })
+            .map(|(i, v)| hamming(doc, v) as usize * (1usize << i))
             .sum::<usize>() as f64
     }
 }
@@ -167,4 +163,60 @@ impl QuantizedVectorDistance for I8NaiveDistance {
             VectorSimilarity::Euclidean => distance + qnorm as f64 + dnorm as f64,
         }
     }
+}
+
+#[cfg(feature = "simsimd")]
+pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
+    use simsimd::BinarySimilarity;
+    u8::hamming(q, d).expect("same dimensionality")
+}
+
+#[cfg(not(feature = "simsimd"))]
+pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
+    assert_eq!(q.len(), d.len());
+    q.iter()
+        .zip(d.iter())
+        .map(|(a, b)| (a ^ b).count_ones())
+        .sum::<u32>() as f64
+}
+
+#[cfg(feature = "simsimd")]
+pub(crate) fn l2sq(q: &[f32], d: &[f32]) -> f64 {
+    use simsimd::SpatialSimilarity;
+    f32::l2sq(q, d).expect("same dimensionality")
+}
+
+#[cfg(not(feature = "simsimd"))]
+pub(crate) fn l2sq(q: &[f32], d: &[f32]) -> f64 {
+    assert_eq!(q.len(), d.len());
+    q.iter()
+        .zip(d.iter())
+        .map(|(a, b)| {
+            let d = a - b;
+            d * d
+        })
+        .sum::<f32>() as f64
+}
+
+#[cfg(feature = "simsimd")]
+pub(crate) fn l2(q: &[f32], d: &[f32]) -> f64 {
+    use simsimd::SpatialSimilarity;
+    f32::l2(q, d).expect("same dimensionality")
+}
+
+#[cfg(not(feature = "simsimd"))]
+pub(crate) fn l2(q: &[f32], d: &[f32]) -> f64 {
+    l2sq(q, d).sqrt()
+}
+
+#[cfg(feature = "simsimd")]
+pub(crate) fn dot(q: &[f32], d: &[f32]) -> f64 {
+    use simsimd::SpatialSimilarity;
+    f32::dot(q, d).expect("same dimensionality")
+}
+
+#[cfg(not(feature = "simsimd"))]
+pub(crate) fn dot(q: &[f32], d: &[f32]) -> f64 {
+    assert_eq!(q.len(), d.len());
+    q.iter().zip(d.iter()).map(|(a, b)| a * b).sum::<f32>() as f64
 }

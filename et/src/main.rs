@@ -23,6 +23,7 @@ use init_index::{init_index, InitIndexArgs};
 use insert::{insert, InsertArgs};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
+use spann_load::{spann_load, SpannLoadArgs};
 use wt_mdb::{
     options::{ConnectionOptionsBuilder, Statistics},
     Connection,
@@ -68,6 +69,8 @@ enum Commands {
     Insert(InsertArgs),
     /// Delete vectors by key range.
     Delete(DeleteArgs),
+    /// Bulk load vectors into a SPANN-ish index.
+    SpannLoad(SpannLoadArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -77,11 +80,13 @@ fn main() -> io::Result<()> {
     // TODO: Connection.filename should accept &Path. This will likely be very annoying to plumb to CString.
     let mut connection_options = ConnectionOptionsBuilder::default()
         .cache_size_mb(cli.wiredtiger_cache_size_mb)
-        .statistics(Statistics::Fast);
+        .statistics(Statistics::Fast)
+        .checkpoint_log_size(128 << 20);
     if cli.wiredtiger_create_db {
         connection_options = connection_options.create();
     }
     let connection = Connection::open(&cli.wiredtiger_db_path, Some(connection_options.into()))?;
+    let session = connection.open_session()?;
 
     match cli.command {
         Commands::BulkLoad(args) => bulk_load(connection, args, &cli.index_name),
@@ -94,5 +99,9 @@ fn main() -> io::Result<()> {
         Commands::ExhaustiveSearch(args) => {
             exhaustive_search(connection.clone(), &cli.index_name, args)
         }
-    }
+        Commands::SpannLoad(args) => spann_load(connection, &cli.index_name, args),
+    }?;
+
+    session.checkpoint()?;
+    Ok(())
 }

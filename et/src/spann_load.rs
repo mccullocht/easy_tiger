@@ -88,8 +88,8 @@ pub struct SpannLoadArgs {
 
 pub fn spann_load(
     connection: Arc<Connection>,
-    args: SpannLoadArgs,
     index_name: &str,
+    args: SpannLoadArgs,
 ) -> io::Result<()> {
     let f32_vectors = DerefVectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },

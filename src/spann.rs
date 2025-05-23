@@ -87,8 +87,10 @@ pub struct TableIndex {
     // Ranges of this table are searched based on the outcome of searching the head.
     posting_table_name: String,
     // Table that maps record_id -> centroid_id*.
-    // This table is used when deleting a vector; it allows us to locate rows to delete.
+    // This table is necessary when deleting a vector to locate rows posting rows to delete.
+    // It may also be useful for determining matching centroids in a filtered search.
     centroid_table_name: String,
+    // XXX I also need to write the raw vectors.
     config: IndexConfig,
 }
 
@@ -98,7 +100,10 @@ impl TableIndex {
     }
 
     pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {
-        let head = Arc::new(TableGraphVectorIndex::from_db(connection, index_name)?);
+        let head = Arc::new(TableGraphVectorIndex::from_db(
+            connection,
+            &Self::head_name(index_name),
+        )?);
 
         let [centroid_table_name, posting_table_name] = Self::table_names(index_name);
         let session = connection.open_session()?;
@@ -120,7 +125,9 @@ impl TableIndex {
         head_config: GraphConfig,
         spann_config: IndexConfig,
     ) -> Self {
-        let head = Arc::new(TableGraphVectorIndex::from_init(head_config, index_name).unwrap());
+        let head = Arc::new(
+            TableGraphVectorIndex::from_init(head_config, &Self::head_name(index_name)).unwrap(),
+        );
         let [centroid_table_name, posting_table_name] = Self::table_names(index_name);
         Self {
             head,
@@ -141,7 +148,7 @@ impl TableIndex {
             connection,
             table_options.clone(),
             head_config,
-            index_name,
+            &Self::head_name(index_name),
         )?);
         let [centroid_table_name, posting_table_name] = Self::table_names(index_name);
         let session = connection.open_session()?;
@@ -162,12 +169,15 @@ impl TableIndex {
         index_name: &str,
         options: &Option<DropOptions>,
     ) -> Result<()> {
-        // XXX this should probably accept a session instead.
-        TableGraphVectorIndex::drop_tables(session, index_name, options)?;
+        TableGraphVectorIndex::drop_tables(session, &Self::head_name(index_name), options)?;
         for table_name in Self::table_names(index_name) {
             session.drop_table(&table_name, options.clone())?;
         }
         Ok(())
+    }
+
+    fn head_name(index_name: &str) -> String {
+        format!("{}.head", index_name)
     }
 
     fn table_names(index_name: &str) -> [String; 2] {
@@ -354,6 +364,3 @@ impl SessionIndexWriter {
         todo!()
     }
 }
-
-// XXX configure automatic checkpointing, something like checkpoint=(log_size=67108864,wait=15)
-// XXX also explicitly checkpoint when closing a db?

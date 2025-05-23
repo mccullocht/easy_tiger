@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::{map_not_found, wt_call, Error, Result};
+use tracing::error;
 use wt_sys::WT_CURSOR;
 
 use super::Session;
@@ -62,6 +63,8 @@ impl Iterator for StatCursor<'_> {
 impl Drop for StatCursor<'_> {
     fn drop(&mut self) {
         // TODO: print something if this returns an error.
-        let _ = unsafe { wt_call!(self.ptr, close) };
+        if let Err(e) = unsafe { wt_call!(self.ptr, close) } {
+            error!("Failed to close statistics WT_CURSOR: {}", e);
+        }
     }
 }

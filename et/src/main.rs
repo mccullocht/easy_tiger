@@ -70,6 +70,8 @@ enum Commands {
 }
 
 fn main() -> io::Result<()> {
+    tracing_subscriber::fmt::init();
+
     let cli = Cli::parse();
     // TODO: Connection.filename should accept &Path. This will likely be very annoying to plumb to CString.
     let mut connection_options = ConnectionOptionsBuilder::default()

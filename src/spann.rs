@@ -80,17 +80,43 @@ pub struct IndexConfig {
 }
 
 #[derive(Clone)]
-pub struct TableIndex {
-    // Head vector index containing the centroids.
-    head: Arc<TableGraphVectorIndex>,
+struct TableNames {
     // Table that maps (centroid_id,record_id) -> quantized vector.
     // Ranges of this table are searched based on the outcome of searching the head.
-    posting_table_name: String,
+    postings: String,
     // Table that maps record_id -> centroid_id*.
     // This table is necessary when deleting a vector to locate rows posting rows to delete.
     // It may also be useful for determining matching centroids in a filtered search.
-    centroid_table_name: String,
-    // XXX I also need to write the raw vectors.
+    centroids: String,
+    // Table that maps record_id -> raw vector.
+    // This is used for re-scoring after a SPANN search.
+    raw_vectors: String,
+}
+
+impl TableNames {
+    fn from_index_name(index_name: &str) -> Self {
+        TableNames {
+            postings: format!("{}.postings", index_name),
+            centroids: format!("{}.centroids", index_name),
+            raw_vectors: format!("{}.raw_vectors", index_name),
+        }
+    }
+
+    fn all_names(&self) -> impl Iterator<Item = &str> {
+        [
+            self.postings.as_str(),
+            self.centroids.as_str(),
+            self.raw_vectors.as_str(),
+        ]
+        .into_iter()
+    }
+}
+
+#[derive(Clone)]
+pub struct TableIndex {
+    // Head vector index containing the centroids.
+    head: Arc<TableGraphVectorIndex>,
+    table_names: TableNames,
     config: IndexConfig,
 }
 
@@ -105,17 +131,16 @@ impl TableIndex {
             &Self::head_name(index_name),
         )?);
 
-        let [centroid_table_name, posting_table_name] = Self::table_names(index_name);
+        let table_names = TableNames::from_index_name(index_name);
         let session = connection.open_session()?;
-        let mut cursor = session.open_record_cursor(&centroid_table_name)?;
+        let mut cursor = session.open_record_cursor(&table_names.centroids)?;
         let config_json = unsafe { cursor.seek_exact_unsafe(-1) }
             .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
         let config: IndexConfig = serde_json::from_slice(config_json.value())?;
 
         Ok(Self {
             head,
-            posting_table_name,
-            centroid_table_name,
+            table_names,
             config,
         })
     }
@@ -128,11 +153,9 @@ impl TableIndex {
         let head = Arc::new(
             TableGraphVectorIndex::from_init(head_config, &Self::head_name(index_name)).unwrap(),
         );
-        let [centroid_table_name, posting_table_name] = Self::table_names(index_name);
         Self {
             head,
-            posting_table_name,
-            centroid_table_name,
+            table_names: TableNames::from_index_name(index_name),
             config: spann_config,
         }
     }
@@ -150,16 +173,16 @@ impl TableIndex {
             head_config,
             &Self::head_name(index_name),
         )?);
-        let [centroid_table_name, posting_table_name] = Self::table_names(index_name);
+        let table_names = TableNames::from_index_name(index_name);
         let session = connection.open_session()?;
-        session.create_table(&centroid_table_name, table_options.clone())?;
-        session.create_table(&posting_table_name, table_options.clone())?;
-        let mut cursor = session.open_record_cursor(&centroid_table_name)?;
+        for table_name in table_names.all_names() {
+            session.create_table(&table_name, table_options.clone())?;
+        }
+        let mut cursor = session.open_record_cursor(&table_names.centroids)?;
         cursor.set(&Record::new(-1, serde_json::to_vec(&spann_config)?))?;
         Ok(Self {
             head,
-            posting_table_name,
-            centroid_table_name,
+            table_names,
             config: spann_config,
         })
     }
@@ -170,7 +193,7 @@ impl TableIndex {
         options: &Option<DropOptions>,
     ) -> Result<()> {
         TableGraphVectorIndex::drop_tables(session, &Self::head_name(index_name), options)?;
-        for table_name in Self::table_names(index_name) {
+        for table_name in TableNames::from_index_name(index_name).all_names() {
             session.drop_table(&table_name, options.clone())?;
         }
         Ok(())
@@ -178,13 +201,6 @@ impl TableIndex {
 
     fn head_name(index_name: &str) -> String {
         format!("{}.head", index_name)
-    }
-
-    fn table_names(index_name: &str) -> [String; 2] {
-        [
-            format!("{}.centroids", index_name),
-            format!("{}.postings", index_name),
-        ]
     }
 }
 
@@ -247,6 +263,15 @@ impl SessionIndexWriter {
             Self::remove_postings(centroid_ids, record_id, &mut posting_cursor)?;
         }
 
+        let mut raw_vector_cursor = self.raw_vector_cursor()?;
+        // XXX shared methods for doing the right thing with float vectors -> bytes.
+        raw_vector_cursor.set(&Record::new(
+            record_id,
+            vector
+                .iter()
+                .flat_map(|d| d.to_le_bytes())
+                .collect::<Vec<_>>(),
+        ))?;
         centroid_cursor.set(&Record::new(
             record_id,
             Cow::from(
@@ -278,6 +303,8 @@ impl SessionIndexWriter {
             let mut posting_cursor = self.posting_cursor()?;
             Self::remove_postings(centroid_ids, record_id, &mut posting_cursor)?;
             centroid_cursor.remove(record_id)?;
+            let mut raw_vector_cursor = self.raw_vector_cursor()?;
+            raw_vector_cursor.remove(record_id)?;
         }
         Ok(())
     }
@@ -285,13 +312,19 @@ impl SessionIndexWriter {
     fn posting_cursor(&self) -> Result<IndexCursorGuard<'_>> {
         self.head_reader
             .session()
-            .get_index_cursor(&self.index.posting_table_name)
+            .get_index_cursor(&self.index.table_names.postings)
     }
 
     fn centroid_cursor(&self) -> Result<RecordCursorGuard<'_>> {
         self.head_reader
             .session()
-            .get_record_cursor(&self.index.centroid_table_name)
+            .get_record_cursor(&self.index.table_names.centroids)
+    }
+
+    fn raw_vector_cursor(&self) -> Result<RecordCursorGuard<'_>> {
+        self.head_reader
+            .session()
+            .get_record_cursor(&self.index.table_names.raw_vectors)
     }
 
     fn select_centroids(&self, candidates: Vec<Neighbor>) -> Result<Vec<u32>> {

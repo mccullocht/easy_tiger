@@ -56,7 +56,7 @@ fn main() -> io::Result<()> {
     let (centroids, assignments) = iterative_balanced_kmeans(
         &input_vectors,
         cli.num_partitions.get(),
-        cli.num_partitions.get().min(32),
+        cli.num_partitions.get().min(64),
         1.5,
         cli.batch_size.get(),
         &kmeans_params,

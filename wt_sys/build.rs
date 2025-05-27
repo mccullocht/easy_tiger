@@ -8,9 +8,12 @@ fn build_wt() -> PathBuf {
         .define("ENABLE_STATIC", "1")
         .define("HAVE_DIAGNOSTIC", if have_diagnostic { "1" } else { "0" })
         .define("ENABLE_PYTHON", "0")
-        .cflag("-Wno-array-bounds")
+        .define("HAVE_UNITTEST", "0")
+        // We have quasi-vendored WT and won't change upstream source to handle errors from new compiler versions.
+        .cflag("-Wno-everything")
         // CMake crate is not doing this correctly for whatever reason.
         .build_arg(format!("-j{}", jobs))
+        .build_target("wiredtiger_static")
         .build();
     PathBuf::from_iter([build_path, PathBuf::from("build")])
 }

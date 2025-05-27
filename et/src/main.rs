@@ -7,7 +7,6 @@ mod insert;
 mod lookup;
 mod search;
 mod spann;
-mod spann_load;
 mod ui;
 
 use std::{
@@ -25,7 +24,6 @@ use insert::{insert, InsertArgs};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
 use spann::{spann_command, SpannArgs};
-use spann_load::{spann_load, SpannLoadArgs};
 use wt_mdb::{
     options::{ConnectionOptionsBuilder, Statistics},
     Connection,
@@ -71,8 +69,6 @@ enum Commands {
     Insert(InsertArgs),
     /// Delete vectors by key range.
     Delete(DeleteArgs),
-    /// Bulk load vectors into a SPANN-ish index.
-    SpannLoad(SpannLoadArgs),
     /// Perform SPANN index operations.
     Spann(SpannArgs),
 }
@@ -103,7 +99,6 @@ fn main() -> io::Result<()> {
         Commands::ExhaustiveSearch(args) => {
             exhaustive_search(connection.clone(), &cli.index_name, args)
         }
-        Commands::SpannLoad(args) => spann_load(connection, &cli.index_name, args),
         Commands::Spann(args) => spann_command(connection, &cli.index_name, args),
     }?;
 

@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     distance::VectorSimilarity,
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
-    input::{DerefVectorStore, VectorStore},
+    input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     kmeans::Params,
     quantization::VectorQuantizer,
     spann::{build_head, IndexConfig, SessionIndexWriter, TableIndex},
@@ -15,7 +15,7 @@ use wt_mdb::{options::DropOptionsBuilder, Connection};
 use crate::ui::{progress_bar, progress_spinner};
 
 #[derive(Args)]
-pub struct SpannLoadArgs {
+pub struct BulkLoadArgs {
     /// Path to the input vectors to bulk ingest.
     #[arg(short, long)]
     f32_vectors: PathBuf,
@@ -86,10 +86,10 @@ pub struct SpannLoadArgs {
     limit: Option<usize>,
 }
 
-pub fn spann_load(
+pub fn bulk_load(
     connection: Arc<Connection>,
     index_name: &str,
-    args: SpannLoadArgs,
+    args: BulkLoadArgs,
 ) -> io::Result<()> {
     let f32_vectors = DerefVectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
@@ -127,30 +127,47 @@ pub fn spann_load(
         },
         quantizer: args.posting_quantizer,
     };
-    let index = Arc::new(TableIndex::from_init(index_name, head_config, spann_config));
+    let index = Arc::new(TableIndex::init_index(
+        &connection,
+        index_name,
+        head_config,
+        spann_config,
+    )?);
 
-    let spinner = progress_spinner();
-    build_head(
-        &f32_vectors,
-        1.0 / 128.0,
-        Params::default(),
-        connection.clone(),
-        index.head_config(),
-        |i| spinner.inc(i),
-        &mut thread_rng(),
-    )?;
-
-    let num_vectors = f32_vectors.len();
-    let limit = args.limit.unwrap_or(num_vectors);
-    let mut writer = SessionIndexWriter::new(index.clone(), connection.open_session()?);
-    let progress = progress_bar(limit, "postings index".into());
-    // XXX maybe I can do this in parallel. Really nothing should ever conflict in this case.
-    for (i, v) in f32_vectors.iter().enumerate().take(limit) {
-        writer.session().begin_transaction(None)?;
-        writer.upsert(i as i64, v)?;
-        writer.session().commit_transaction(None)?;
-        progress.inc(1);
+    let limit = args.limit.unwrap_or(f32_vectors.len());
+    let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).into_iter().collect());
+    {
+        let spinner = progress_spinner();
+        build_head(
+            &index_vectors,
+            1.0 / 128.0,
+            Params {
+                iters: 100,
+                epsilon: 0.01,
+                ..Params::default()
+            },
+            connection.clone(),
+            index.head_config(),
+            |i| spinner.inc(i),
+            &mut thread_rng(),
+        )?;
     }
+
+    let inserted = {
+        let mut writer = SessionIndexWriter::new(index.clone(), connection.open_session()?);
+        let progress = progress_bar(limit, "postings index".into());
+        // TODO: parallelize writes. Each key in a write contains the record id so there should not be any conflicts, and during
+        // a bulk load there won't be any rebalancing process. We would need a writer and a session per thread.
+        let mut inserted = 0usize;
+        for (i, v) in index_vectors.iter().enumerate() {
+            writer.session().begin_transaction(None)?;
+            inserted += writer.upsert(i as i64, v)?;
+            writer.session().commit_transaction(None)?;
+            progress.inc(1);
+        }
+        inserted
+    };
+    println!("Inserted {} posting entries", inserted);
 
     Ok(())
 }

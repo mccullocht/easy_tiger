@@ -8,17 +8,18 @@ use std::{borrow::Cow, io, sync::Arc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use wt_mdb::{
-    options::{CreateOptions, DropOptions},
+    options::{CreateOptionsBuilder, DropOptions},
     Connection, Error, IndexCursorGuard, IndexRecordView, Record, RecordCursorGuard, Result,
     Session, WiredTigerError,
 };
 
 use crate::{
     bulk::{self, BulkLoadBuilder},
+    distance::F32VectorDistance,
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
     kmeans::{self, iterative_balanced_kmeans},
-    quantization::VectorQuantizer,
+    quantization::{Quantizer, VectorQuantizer},
     search::GraphSearcher,
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
@@ -54,6 +55,7 @@ pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + 
         &kmeans_params,
         rng,
     );
+    let centroids_len = centroids.len();
     let mut loader = BulkLoadBuilder::new(
         connection,
         index.clone(),
@@ -63,7 +65,7 @@ pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + 
             wt_vector_store: true,
             cluster_ordered_insert: false,
         },
-        head_len,
+        centroids_len,
     );
     for phase in loader.phases() {
         // XXX gotta find a way to jam progress in here.
@@ -100,6 +102,14 @@ impl TableNames {
             centroids: format!("{}.centroids", index_name),
             raw_vectors: format!("{}.raw_vectors", index_name),
         }
+    }
+
+    fn record_table_names(&self) -> impl Iterator<Item = &str> {
+        [self.centroids.as_str(), self.raw_vectors.as_str()].into_iter()
+    }
+
+    fn index_table_names(&self) -> impl Iterator<Item = &str> {
+        [self.postings.as_str()].into_iter()
     }
 
     fn all_names(&self) -> impl Iterator<Item = &str> {
@@ -163,20 +173,36 @@ impl TableIndex {
     pub fn init_index(
         connection: &Arc<Connection>,
         index_name: &str,
-        table_options: &Option<CreateOptions>,
         head_config: GraphConfig,
         spann_config: IndexConfig,
     ) -> io::Result<Self> {
         let head = Arc::new(TableGraphVectorIndex::init_index(
             connection,
-            table_options.clone(),
+            None,
             head_config,
             &Self::head_name(index_name),
         )?);
         let table_names = TableNames::from_index_name(index_name);
         let session = connection.open_session()?;
-        for table_name in table_names.all_names() {
-            session.create_table(&table_name, table_options.clone())?;
+        for table_name in table_names.record_table_names() {
+            session.create_table(
+                table_name,
+                Some(
+                    CreateOptionsBuilder::default()
+                        .table_type(wt_mdb::options::TableType::Record)
+                        .into(),
+                ),
+            )?;
+        }
+        for table_name in table_names.index_table_names() {
+            session.create_table(
+                table_name,
+                Some(
+                    CreateOptionsBuilder::default()
+                        .table_type(wt_mdb::options::TableType::Index)
+                        .into(),
+                ),
+            )?;
         }
         let mut cursor = session.open_record_cursor(&table_names.centroids)?;
         cursor.set(&Record::new(-1, serde_json::to_vec(&spann_config)?))?;
@@ -194,7 +220,7 @@ impl TableIndex {
     ) -> Result<()> {
         TableGraphVectorIndex::drop_tables(session, &Self::head_name(index_name), options)?;
         for table_name in TableNames::from_index_name(index_name).all_names() {
-            session.drop_table(&table_name, options.clone())?;
+            session.drop_table(table_name, options.clone())?;
         }
         Ok(())
     }
@@ -234,16 +260,23 @@ impl From<PostingKey> for [u8; 12] {
 
 pub struct SessionIndexWriter {
     index: Arc<TableIndex>,
+    distance_fn: Box<dyn F32VectorDistance + 'static>,
+    posting_quantizer: Box<dyn Quantizer + 'static>,
+
     head_reader: SessionGraphVectorIndexReader,
     head_searcher: GraphSearcher,
 }
 
 impl SessionIndexWriter {
     pub fn new(index: Arc<TableIndex>, session: Session) -> Self {
+        let distance_fn = index.head.config().new_distance_function();
+        let posting_quantizer = index.config.quantizer.new_quantizer();
         let head_reader = SessionGraphVectorIndexReader::new(index.head.clone(), session);
         let head_searcher = GraphSearcher::new(index.config.head_search_params);
         Self {
             index,
+            distance_fn,
+            posting_quantizer,
             head_reader,
             head_searcher,
         }
@@ -253,8 +286,11 @@ impl SessionIndexWriter {
         self.head_reader.session()
     }
 
-    pub fn upsert(&mut self, record_id: i64, vector: &[f32]) -> Result<()> {
-        let candidates = self.head_searcher.search(vector, &mut self.head_reader)?;
+    pub fn upsert(&mut self, record_id: i64, vector: &[f32]) -> Result<usize> {
+        let vector = self.distance_fn.normalize_vector(vector.into());
+        let candidates = self
+            .head_searcher
+            .search(vector.as_ref(), &mut self.head_reader)?;
         let centroid_ids = self.select_centroids(candidates)?;
 
         let mut centroid_cursor = self.centroid_cursor()?;
@@ -281,10 +317,11 @@ impl SessionIndexWriter {
                     .collect::<Vec<u8>>(),
             ),
         ))?;
-        let quantized = self.index.config.quantizer.new_quantizer().for_doc(vector);
+        let quantized = self.posting_quantizer.for_doc(vector.as_ref());
         // TODO: try centering vector on each centroid before quantizing. This would likely reduce
         // error but would also require quantizing the vector for each centroid during search and
         // would complicate de-duplication (would have to accept best score).
+        let num_centroids = centroid_ids.len();
         for centroid_id in centroid_ids {
             let key: [u8; 12] = PostingKey {
                 centroid_id,
@@ -294,7 +331,7 @@ impl SessionIndexWriter {
             posting_cursor.set(&IndexRecordView::new(&key, &quantized))?;
         }
 
-        Ok(())
+        Ok(num_centroids)
     }
 
     pub fn delete(&self, record_id: i64) -> Result<()> {
@@ -331,7 +368,6 @@ impl SessionIndexWriter {
         assert!(!candidates.is_empty());
         let replica_count = self.index.config.replica_count;
         let mut raw_vectors = self.head_reader.raw_vectors()?;
-        let distance_fn = self.head_reader.index().config().new_distance_function();
 
         let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
         let mut centroids = VecVectorStore::with_capacity(
@@ -348,7 +384,7 @@ impl SessionIndexWriter {
                 .expect("returned vector should exist")?;
             if !centroids
                 .iter()
-                .any(|c| distance_fn.distance(c, &v) < candidate.distance())
+                .any(|c| self.distance_fn.distance(c, &v) < candidate.distance())
             {
                 centroid_ids.push(
                     candidate

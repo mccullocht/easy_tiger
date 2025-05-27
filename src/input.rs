@@ -192,6 +192,11 @@ impl<'a, V: VectorStore> SubsetViewVectorStore<'a, V> {
     pub fn original_index(&self, index: usize) -> usize {
         self.subset[index]
     }
+
+    /// Extract the subset passed to `new()``.
+    pub fn into_subset(self) -> Vec<usize> {
+        self.subset
+    }
 }
 
 impl<V: VectorStore> VectorStore for SubsetViewVectorStore<'_, V> {

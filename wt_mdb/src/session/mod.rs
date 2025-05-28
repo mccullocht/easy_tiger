@@ -11,6 +11,7 @@ use std::{
 };
 
 use rustix::io::Errno;
+use tracing::error;
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
 
 use crate::{
@@ -114,8 +115,9 @@ impl InnerCursor {
 
 impl Drop for InnerCursor {
     fn drop(&mut self) {
-        // TODO: log this.
-        let _ = unsafe { wt_call!(self.ptr, close) };
+        if let Err(e) = unsafe { wt_call!(self.ptr, close) } {
+            error!("Failed to close WT_CURSOR: {}", e);
+        }
     }
 }
 
@@ -362,8 +364,9 @@ impl Drop for Session {
     fn drop(&mut self) {
         // Empty the cursor cache otherwise closing the session may fail.
         self.clear_cursor_cache();
-        // TODO: print something if this returns an error.
-        let _ = unsafe { wt_call!(self.ptr, close, std::ptr::null()) };
+        if let Err(e) = unsafe { wt_call!(self.ptr, close, std::ptr::null()) } {
+            error!("Failed to close WT_SESSION: {}", e);
+        }
     }
 }
 

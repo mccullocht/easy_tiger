@@ -10,6 +10,7 @@ use std::{
     sync::Arc,
 };
 
+use tracing::error;
 use wt_sys::{wiredtiger_open, WT_CONNECTION, WT_SESSION};
 
 /// A connection to a WiredTiger database.
@@ -63,8 +64,8 @@ unsafe impl Sync for Connection {}
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        // TODO: log something when an error occurs here.
-        // This would be unexpected as the connection can't be dropped until all cursors and sessions have also been dropped.
-        let _ = unsafe { wt_call!(self.0, close, std::ptr::null()) };
+        if let Err(e) = unsafe { wt_call!(self.0, close, std::ptr::null()) } {
+            error!("Failed to close WT_CONNECTION: {}", e);
+        }
     }
 }

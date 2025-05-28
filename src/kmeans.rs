@@ -148,6 +148,14 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                 },
             );
 
+            // TODO: consider incrementally eliminating small centroids from the sub partition.
+            // This matters more if we have > 2 centroids, so at the beginning of clustering rather than the end.
+
+            // TODO: consider special casing 2 centroids.
+            // - store both distances and "draft" vectors greedily to get a more balanced partition.
+            // - do some sort of weighted selection?
+            // - use kmeanspp initialization (tried, it is mid).
+
             // For any new subset centroids that have less than min_centroid_size assigned vectors we will skip
             // adding them to the new centroid set and reassign them to existing centroids.
             // TODO: consider building a tree and using that as a mechansim to explore "nearby" vectors.
@@ -279,6 +287,7 @@ fn initialize_centroids<
                 let centroid = centroids.len();
                 centroids.push(&training_data[index]);
                 let centroid_vector = &centroids[centroid];
+                // XXX this is unnecessary, we could use assignments.par_iter_mut().
                 let distances = (0..training_data.len())
                     .into_par_iter()
                     .map(|i| crate::distance::l2(&training_data[i], centroid_vector))

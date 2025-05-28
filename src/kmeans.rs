@@ -78,7 +78,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
 
     let max_centroid_size = ((dataset.len() as f64 * balance_factor) / k as f64) as usize;
     // XXX split until everything is below max_centroid_size w/o considering k.
-    while centroids.len() < k {
+    loop {
         eprintln!("do split centroids {} < {}", centroids.len(), k);
         let mut centroid_to_vectors = assignments.iter().enumerate().fold(
             vec![vec![]; centroids.len()],
@@ -97,16 +97,11 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             .enumerate()
             .collect::<Vec<_>>();
         centroid_counts.sort_unstable_by_key(|(i, c)| (*c, *i));
-        let mut remaining_centroids = k - centroids.len();
         for (_, count) in centroid_counts.iter_mut().rev() {
-            if remaining_centroids == 0 || *count <= max_centroid_size {
-                *count = 1;
-            } else {
-                remaining_centroids += 1; // we're going to split this one.
-                let target_k = intermediate_k.min((*count / max_centroid_size) + 1);
-                *count = remaining_centroids.min(target_k);
-                remaining_centroids -= *count;
-            }
+            *count = intermediate_k.min((*count / max_centroid_size) + 1);
+        }
+        if centroid_counts.iter().all(|(_, count)| *count == 1) {
+            break;
         }
 
         let unsplit_len = centroid_counts

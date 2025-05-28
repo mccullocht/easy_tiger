@@ -87,7 +87,7 @@ fn main() -> io::Result<()> {
 
     let total_dist = assignments.iter().map(|(_, d)| *d).sum::<f64>();
     println!(
-        "centroids {:5} vectors {:9} min {:9} max {:9} total dist {:8.3} avg dist {:7.1}",
+        "centroids {:5} vectors {:9} min {:9} max {:9} total dist {:8.3} avg dist {:8.6}",
         centroid_counts.len(),
         centroid_counts.iter().copied().sum::<usize>(),
         centroid_counts.iter().copied().min().unwrap(),

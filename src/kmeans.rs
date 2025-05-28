@@ -74,10 +74,10 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     };
     let mut assignments = compute_assignments(dataset, &centroids);
 
-    // TODO: maybe also have a minimum size and try to combine small clusters with others?
-    // in that case we need to know the closest centroid(s) for small centroids to do the
-    // combination step.
+    let mut split_counter = (0usize, 0usize);
+
     let max_centroid_size = ((dataset.len() as f64 * balance_factor) / k as f64) as usize;
+    // XXX split until everything is below max_centroid_size w/o considering k.
     while centroids.len() < k {
         eprintln!("do split centroids {} < {}", centroids.len(), k);
         let mut centroid_to_vectors = assignments.iter().enumerate().fold(
@@ -109,16 +109,13 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             }
         }
 
-        // Everything in centroid_count before unsplit_len will not be divided. This has
-        // implications for re-computing assignment since these only need to compute centroid
-        // assignment against added centroids.
         let unsplit_len = centroid_counts
             .iter()
             .position(|(_, p)| *p > 1)
             .unwrap_or(centroid_counts.len());
 
-        // If all the centroids are too big to split based on our balance factor and we haven't
-        // reached k we'll just terminate.
+        // Terminate if nothing can be split either because we've hit k or all the clusters are too
+        // small to split.
         if unsplit_len == centroid_counts.len() {
             break;
         }
@@ -172,8 +169,20 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             // - Consider reassigning vectors assigned to very small clusters to other clusters generated at the same time.
             // - Consider keeping these clusters but merging them with other, larger nearby clusters later. This sounds like
             //   a worse version of the above.
+            // do i have to eliminate clusters iteratively? if i eliminate the smallest cluster some
+            // of those might go to another small cluster and make it not too small.
             // XXX this needs meaningful targeting.
-            if subset_cluster_size_counts.iter().any(|c| *c < 50) {
+
+            // XXX we frequently fail to split into 2. it might be best to kill the centroid and
+            // re-assign all "free" vectors to other centroids, then repeat the loop. More likely
+            // to converge?
+            if subset_cluster_size_counts.iter().any(|c| *c < 66) {
+                // XXX many more small splits than large split (716 vs 450). many may be repeats.
+                if subset_cluster_size_counts.len() == 2 {
+                    split_counter.0 += 1;
+                } else {
+                    split_counter.1 += 1;
+                }
                 for i in centroid_vectors.iter().copied() {
                     assignments[i].0 = new_centroids.len();
                 }
@@ -193,6 +202,8 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
         }
         centroids = new_centroids;
     }
+
+    eprintln!("split_counter: {:?}", split_counter);
 
     (centroids, assignments)
 }

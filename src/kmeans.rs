@@ -54,6 +54,8 @@ impl Default for Params {
 /// centroid assignments.
 ///
 /// Returns a set of `k` centroids and the assignment of each vector in `dataset` to the centroids.
+// TODO: guarantee that this terminates by giving up at some point, like if the number of centroids
+// hasn't changed in some number of iterations.
 pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     dataset: &V,
     k: usize,
@@ -74,10 +76,8 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     };
     let mut assignments = compute_assignments(dataset, &centroids);
 
-    let mut split_counter = (0usize, 0usize);
-
+    let min_centroid_size = ((dataset.len() as f64) * (1.0 / balance_factor) / k as f64) as usize;
     let max_centroid_size = ((dataset.len() as f64 * balance_factor) / k as f64) as usize;
-    // XXX split until everything is below max_centroid_size w/o considering k.
     loop {
         eprintln!("do split centroids {} < {}", centroids.len(), k);
         let mut centroid_to_vectors = assignments.iter().enumerate().fold(
@@ -100,9 +100,6 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
         for (_, count) in centroid_counts.iter_mut().rev() {
             *count = intermediate_k.min((*count / max_centroid_size) + 1);
         }
-        if centroid_counts.iter().all(|(_, count)| *count == 1) {
-            break;
-        }
 
         let unsplit_len = centroid_counts
             .iter()
@@ -119,19 +116,20 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             centroids.elem_stride(),
             centroid_counts.iter().map(|(_, c)| *c).sum::<usize>(),
         );
-        for (i, (c, nk)) in centroid_counts.iter().enumerate() {
+        // For centroids that are not being split, add the new centroid and update assignments.
+        for (c, _) in centroid_counts.iter().take(unsplit_len) {
             let centroid_vectors = std::mem::take(&mut centroid_to_vectors[*c]);
-            if i < unsplit_len {
-                // Unsplit centroids need very little processing.
-                for i in centroid_vectors.iter().copied() {
-                    assignments[i].0 = new_centroids.len();
-                }
-                new_centroids.push(&centroids[*c]);
-                continue;
+            for i in centroid_vectors.iter().copied() {
+                assignments[i].0 = new_centroids.len();
             }
+            new_centroids.push(&centroids[*c]);
+        }
 
-            // Split this centroid into *nk new partitions, and re-compute the assignment of all vectors in the
-            // cluster into the new partitions created this way.
+        // For centroids that are being split, re-partition them and discard any smol clusters,
+        // then update assignments for the next pass through the loop.
+        let mut unassigned_vectors = vec![];
+        for (c, nk) in centroid_counts.iter().skip(unsplit_len) {
+            let centroid_vectors = std::mem::take(&mut centroid_to_vectors[*c]);
             let subset_vectors = SubsetViewVectorStore::new(dataset, centroid_vectors);
             let subset_centroids =
                 match batch_kmeans(&subset_vectors, *nk, batch_size, &params, rng) {
@@ -141,64 +139,54 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                         e
                     }
                 };
+            let subset_assignments = compute_assignments(&subset_vectors, &subset_centroids);
+            let subset_centroids_to_vectors = subset_assignments.iter().enumerate().fold(
+                vec![vec![]; subset_centroids.len()],
+                |mut c2v, (i, (c, d))| {
+                    c2v[*c].push((subset_vectors.original_index(i), *d));
+                    c2v
+                },
+            );
 
-            let centroid_vectors = subset_vectors.into_subset();
-            let subset_assignments = centroid_vectors
-                .par_iter()
-                .map(|i| {
-                    let v = &dataset[*i];
-                    subset_centroids
-                        .iter()
-                        .enumerate()
-                        .map(|(j, c)| (j, crate::distance::l2(v, c)))
-                        .min_by(|a, b| a.1.total_cmp(&b.1))
-                        .expect("at least one centroid")
-                })
-                .collect::<Vec<_>>();
-
-            let mut subset_cluster_size_counts = vec![0usize; subset_centroids.len()];
-            for (i, _) in subset_assignments.iter() {
-                subset_cluster_size_counts[*i] += 1;
-            }
-            // REJECT updates that generate really small clusters. In practice this converges.
-            // - Consider reassigning vectors assigned to very small clusters to other clusters generated at the same time.
-            // - Consider keeping these clusters but merging them with other, larger nearby clusters later. This sounds like
-            //   a worse version of the above.
-            // do i have to eliminate clusters iteratively? if i eliminate the smallest cluster some
-            // of those might go to another small cluster and make it not too small.
-            // XXX this needs meaningful targeting.
-
-            // XXX we frequently fail to split into 2. it might be best to kill the centroid and
-            // re-assign all "free" vectors to other centroids, then repeat the loop. More likely
-            // to converge?
-            if subset_cluster_size_counts.iter().any(|c| *c < 66) {
-                // XXX many more small splits than large split (716 vs 450). many may be repeats.
-                if subset_cluster_size_counts.len() == 2 {
-                    split_counter.0 += 1;
+            // For any new subset centroids that have less than min_centroid_size assigned vectors we will skip
+            // adding them to the new centroid set and reassign them to existing centroids.
+            // TODO: consider building a tree and using that as a mechansim to explore "nearby" vectors.
+            for (c, v) in subset_centroids
+                .iter()
+                .zip(subset_centroids_to_vectors.iter())
+            {
+                if v.len() < min_centroid_size {
+                    unassigned_vectors.extend(v.into_iter().map(|(v, _)| *v));
                 } else {
-                    split_counter.1 += 1;
+                    let centroid_id = new_centroids.len();
+                    for (i, d) in v {
+                        assignments[*i] = (centroid_id, *d);
+                    }
+                    new_centroids.push(c);
                 }
-                for i in centroid_vectors.iter().copied() {
-                    assignments[i].0 = new_centroids.len();
-                }
-                new_centroids.push(&centroids[*c]);
-                continue;
-            }
-
-            let base_assignment_index = new_centroids.len();
-            // Add new vectors
-            for c in subset_centroids.iter() {
-                new_centroids.push(c);
-            }
-            // Update assignments
-            for (i, (c, d)) in centroid_vectors.iter().zip(subset_assignments.iter()) {
-                assignments[*i] = (*c + base_assignment_index, *d);
             }
         }
-        centroids = new_centroids;
-    }
 
-    eprintln!("split_counter: {:?}", split_counter);
+        centroids = new_centroids;
+
+        if !unassigned_vectors.is_empty() {
+            eprintln!(
+                "  assigning {} unassigned vectors to {} centroids",
+                unassigned_vectors.len(),
+                centroids.len(),
+            );
+            unassigned_vectors.sort();
+            let unassigned_vector_store = SubsetViewVectorStore::new(dataset, unassigned_vectors);
+            let unassigned_assignments = compute_assignments(&unassigned_vector_store, &centroids);
+            for (i, (c, d)) in unassigned_vector_store
+                .into_subset()
+                .into_iter()
+                .zip(unassigned_assignments.into_iter())
+            {
+                assignments[i] = (c, d);
+            }
+        }
+    }
 
     (centroids, assignments)
 }

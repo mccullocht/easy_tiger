@@ -151,14 +151,13 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             // TODO: consider incrementally eliminating small centroids from the sub partition.
             // This matters more if we have > 2 centroids, so at the beginning of clustering rather than the end.
 
-            // TODO: consider special casing 2 centroids.
-            // - store both distances and "draft" vectors greedily to get a more balanced partition.
-            // - do some sort of weighted selection?
-            // - use kmeanspp initialization (tried, it is mid).
+            // TODO: special case 2 centroids:
+            // - partition. pick 2 centroids, then compute the difference of the distances and order
+            //   iterate until partitions stabilize.
 
             // For any new subset centroids that have less than min_centroid_size assigned vectors we will skip
             // adding them to the new centroid set and reassign them to existing centroids.
-            // TODO: consider building a tree and using that as a mechansim to explore "nearby" vectors.
+            // XXX reassign partitions within the subset once we've handled the nk=2 case.
             for (c, v) in subset_centroids
                 .iter()
                 .zip(subset_centroids_to_vectors.iter())
@@ -197,6 +196,69 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     }
 
     (centroids, assignments)
+}
+
+// XXX this must produce assignments since otherwise this won't work.
+fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
+    dataset: &V,
+    max_iters: usize,
+) -> VecVectorStore<f32> {
+    let split = dataset.len() / 2;
+    let mut left_vectors = (0..split).collect::<std::collections::HashSet<_>>();
+    let mut left_centroid = vec![0.0; dataset.elem_stride()];
+    let mut right_centroid = vec![0.0; dataset.elem_stride()];
+    let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
+    for _ in 0..max_iters {
+        bp_update_centroids(
+            dataset,
+            &left_vectors,
+            &mut left_centroid,
+            &mut right_centroid,
+        );
+        distances.par_iter_mut().enumerate().for_each(|(i, d)| {
+            let ldist = crate::distance::l2sq(&dataset[i], &left_centroid);
+            let rdist = crate::distance::l2sq(&dataset[i], &right_centroid);
+            *d = (i, ldist, rdist, ldist - rdist)
+        });
+        distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
+        if distances
+            .iter()
+            .take(split)
+            .all(|d| left_vectors.contains(&d.0))
+        {
+            break; // we converged!
+        }
+
+        left_vectors.clear();
+        left_vectors.extend(distances.iter().map(|d| d.0).take(split));
+    }
+    // at this point we have the centroids
+    // yield assignments from distances.
+    todo!()
+}
+
+fn bp_update_centroids<V: VectorStore<Elem = f32>>(
+    dataset: &V,
+    left_vectors: &std::collections::HashSet<usize>,
+    left_centroid: &mut [f32],
+    right_centroid: &mut [f32],
+) {
+    left_centroid.fill(0.0);
+    right_centroid.fill(0.0);
+    for (i, v) in dataset.iter().enumerate() {
+        let target = if left_vectors.contains(&i) {
+            &mut *left_centroid
+        } else {
+            &mut *right_centroid
+        };
+        for (d, o) in v.iter().zip(target.iter_mut()) {
+            *o += *d;
+        }
+    }
+    for (l, r) in left_centroid.iter_mut().zip(right_centroid.iter_mut()) {
+        *l /= left_vectors.len() as f32;
+        *r /= (dataset.len() - left_vectors.len()) as f32;
+    }
 }
 
 /// Compute batch k-means over `training_data`. `k` clusters will be produced and each batch will

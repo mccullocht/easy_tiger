@@ -134,6 +134,10 @@ impl<E: Clone> VecVectorStore<E> {
         self.data.extend_from_slice(vector);
     }
 
+    pub fn clear(&mut self) {
+        self.data.clear();
+    }
+
     pub fn capacity(&self) -> usize {
         self.data.capacity() / self.elem_stride
     }

@@ -129,7 +129,6 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
         // For centroids that are being split, re-partition them and discard any smol clusters,
         // then update assignments for the next pass through the loop.
         for (c, nk) in centroid_counts.iter().skip(unsplit_len) {
-            // XXX we should check that centroids_to_vectors doesn't contain any dupes.
             let subset_vectors =
                 SubsetViewVectorStore::new(dataset, std::mem::take(&mut centroid_to_vectors[*c]));
             let (mut subset_centroids, mut subset_assignments) = match *nk {
@@ -213,7 +212,6 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                                 .into_iter()
                                 .enumerate()
                         {
-                            // XXX check that the vector to push doesn't appear in the target.
                             subset_centroids_to_vectors
                                 [kept_centroids.original_index(new_centroid)]
                             .push((reassign_vectors.original_index(i), d));

@@ -128,11 +128,11 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
 
         // For centroids that are being split, re-partition them and discard any smol clusters,
         // then update assignments for the next pass through the loop.
-        let mut unassigned_vectors = vec![];
         for (c, nk) in centroid_counts.iter().skip(unsplit_len) {
+            // XXX we should check that centroids_to_vectors doesn't contain any dupes.
             let subset_vectors =
                 SubsetViewVectorStore::new(dataset, std::mem::take(&mut centroid_to_vectors[*c]));
-            let (subset_centroids, subset_assignments) = match *nk {
+            let (mut subset_centroids, mut subset_assignments) = match *nk {
                 2 => bp_vectors(&subset_vectors, params.iters, min_centroid_size),
                 _ => {
                     let subset_centroids =
@@ -150,7 +150,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                     (subset_centroids, subset_assignments)
                 }
             };
-            let subset_centroids_to_vectors = subset_assignments.iter().enumerate().fold(
+            let mut subset_centroids_to_vectors = subset_assignments.iter().enumerate().fold(
                 vec![vec![]; subset_centroids.len()],
                 |mut c2v, (i, (c, d))| {
                     c2v[*c].push((subset_vectors.original_index(i), *d));
@@ -158,45 +158,91 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                 },
             );
 
-            // For any new subset centroids that have less than min_centroid_size assigned vectors we will skip
-            // adding them to the new centroid set and reassign them to existing centroids.
-            // XXX reassign partitions within the subset once we've handled the nk=2 case. consider doing so incrementally,
-            // so eliminating undersize centroids from smallest to largest, terminating early if we are adequately balanced.
+            // XXX dump all of this into refine_centroids() or something. this function is like 200 lines long!
+            // Remove any partitions that do not meet minimum size requirements. The partition count logic should ensure that at least
+            // one centroid is above the size enforced by policy. This should never happen when *nk == 2 as binary partition will ensure
+            // that the smaller cluster meets the minimum size.
+            // This was large enough to partition so at least _one_ centroid should be above the size enforced by policy.
+            let centroids_to_keep = subset_centroids_to_vectors
+                .iter()
+                .map(|v| v.len())
+                .filter(|v| *v >= min_centroid_size)
+                .count();
+            assert_ne!(centroids_to_keep, 0);
+            if centroids_to_keep < *nk {
+                if centroids_to_keep == 1 {
+                    // An N-way partition only produced one viable partition. Break the deadlock by binary partitioning.
+                    (subset_centroids, subset_assignments) =
+                        bp_vectors(&subset_vectors, params.iters, min_centroid_size);
+                    subset_centroids_to_vectors.resize(2, vec![]);
+                    subset_centroids_to_vectors[0].clear();
+                    subset_centroids_to_vectors[1].clear();
+                    for (i, (c, d)) in subset_assignments.iter().enumerate() {
+                        subset_centroids_to_vectors[*c]
+                            .push((subset_vectors.original_index(i), *d));
+                    }
+                } else {
+                    // Iteratively remove the smallest partition and reassign vectors until all remaining centroids are larger
+                    // than min_centroid_size.
+                    let mut centroids_to_prune = subset_centroids_to_vectors
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, v)| !v.is_empty() && v.len() < min_centroid_size)
+                        .map(|(i, v)| (v.len(), i))
+                        .collect::<Vec<_>>();
+                    centroids_to_prune.sort_unstable();
+                    for (_, pruned_centroid) in centroids_to_prune {
+                        let reassign_vectors = SubsetViewVectorStore::new(
+                            dataset,
+                            std::mem::take(&mut subset_centroids_to_vectors[pruned_centroid])
+                                .into_iter()
+                                .map(|(i, _)| i)
+                                .collect(),
+                        );
+                        let kept_centroids = SubsetViewVectorStore::new(
+                            &subset_centroids,
+                            subset_centroids_to_vectors
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, v)| !v.is_empty())
+                                .map(|(i, _)| i)
+                                .collect(),
+                        );
+                        for (i, (new_centroid, d)) in
+                            compute_assignments(&reassign_vectors, &kept_centroids)
+                                .into_iter()
+                                .enumerate()
+                        {
+                            // XXX check that the vector to push doesn't appear in the target.
+                            subset_centroids_to_vectors
+                                [kept_centroids.original_index(new_centroid)]
+                            .push((reassign_vectors.original_index(i), d));
+                        }
+
+                        if subset_centroids_to_vectors
+                            .iter()
+                            .all(|v| v.is_empty() || v.len() >= min_centroid_size)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+
             for (c, v) in subset_centroids
                 .iter()
                 .zip(subset_centroids_to_vectors.iter())
+                .filter(|(_, v)| !v.is_empty())
             {
-                if v.len() < min_centroid_size {
-                    unassigned_vectors.extend(v.iter().map(|(v, _)| *v));
-                } else {
-                    let centroid_id = new_centroids.len();
-                    for (i, d) in v {
-                        assignments[*i] = (centroid_id, *d);
-                    }
-                    new_centroids.push(c);
+                let centroid_id = new_centroids.len();
+                for (i, d) in v {
+                    assignments[*i] = (centroid_id, *d);
                 }
+                new_centroids.push(c);
             }
         }
 
         centroids = new_centroids;
-
-        if !unassigned_vectors.is_empty() {
-            eprintln!(
-                "  assigning {} unassigned vectors to {} centroids",
-                unassigned_vectors.len(),
-                centroids.len(),
-            );
-            unassigned_vectors.sort();
-            let unassigned_vector_store = SubsetViewVectorStore::new(dataset, unassigned_vectors);
-            let unassigned_assignments = compute_assignments(&unassigned_vector_store, &centroids);
-            for (i, (c, d)) in unassigned_vector_store
-                .into_subset()
-                .into_iter()
-                .zip(unassigned_assignments.into_iter())
-            {
-                assignments[i] = (c, d);
-            }
-        }
     }
 
     (centroids, assignments)

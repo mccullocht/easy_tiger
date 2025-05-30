@@ -133,18 +133,32 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             let subset_vectors =
                 SubsetViewVectorStore::new(dataset, std::mem::take(&mut centroid_to_vectors[*c]));
             let (mut subset_centroids, subset_assignments) = match *nk {
-                2 => bp_vectors(&subset_vectors, params.iters, *centroid_size_bounds.start()),
+                2 => match bp_vectors(&subset_vectors, params.iters, *centroid_size_bounds.start())
+                {
+                    Ok(r) => r,
+                    Err(r) => {
+                        eprintln!(
+                            "iterative_balanced_kmeans bp_vector partition failed to converge!"
+                        );
+                        r
+                    }
+                },
                 _ => {
-                    let subset_centroids =
-                        match batch_kmeans(&subset_vectors, *nk, batch_size, params, rng) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                eprintln!(
-                                    "iterative_balanced_kmeans centroid split failed to converge!"
+                    let subset_centroids = match batch_kmeans(
+                        &subset_vectors,
+                        *nk,
+                        batch_size,
+                        params,
+                        rng,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!(
+                                    "iterative_balanced_kmeans batch_kmeans partition failed to converge!"
                                 );
-                                e
-                            }
-                        };
+                            e
+                        }
+                    };
                     let subset_assignments =
                         compute_assignments(&subset_vectors, &subset_centroids);
                     (subset_centroids, subset_assignments)
@@ -215,7 +229,13 @@ fn prune_iterative_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
         // rather than teratively trying kmeans and hoping it converges.
         //
         // This typically only happens if k is 2 or 3.
-        let (centroids, assignments) = bp_vectors(vectors, iters, min_centroid_size);
+        let (centroids, assignments) = match bp_vectors(vectors, iters, min_centroid_size) {
+            Ok(r) => r,
+            Err(r) => {
+                eprintln!("iterative_balanced_kmeans prune_iterative_centroids bp_vector partition failed to converge!");
+                r
+            }
+        };
         centroids_to_vectors.resize(2, vec![]);
         centroids_to_vectors[0].clear();
         centroids_to_vectors[1].clear();
@@ -279,12 +299,11 @@ fn prune_iterative_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
 ///
 /// Returns a vector store containing a "left" and a "right" centroid along with cluster assignment.
 /// Note that these cluster assignments may not match the results of compute_assignments().
-/// XXX this should return a Result to indicate when it failed to converge.
 fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
     dataset: &V,
     max_iters: usize,
     min_cluster_size: usize,
-) -> (VecVectorStore<f32>, Vec<(usize, f64)>) {
+) -> Result<(VecVectorStore<f32>, Vec<(usize, f64)>), (VecVectorStore<f32>, Vec<(usize, f64)>)> {
     let acceptable_split = min_cluster_size..=(dataset.len() - min_cluster_size);
     assert!(!acceptable_split.is_empty());
 
@@ -296,6 +315,7 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
     centroids.push(&vec![0.0; dataset.elem_stride()]);
     centroids.push(&vec![0.0; dataset.elem_stride()]);
     let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
+    let mut converged = false;
     for _ in 0..max_iters {
         bp_update_centroid(&left_vectors, &mut centroids[0]);
         bp_update_centroid(&right_vectors, &mut centroids[1]);
@@ -314,6 +334,7 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
                 .position(|d| d.3 >= 0.0)
                 .unwrap_or(dataset.len()),
         ) {
+            converged = true;
             break;
         }
 
@@ -341,7 +362,11 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
         assignments[*i] = (1, *d);
     }
 
-    (centroids, assignments)
+    if converged {
+        Ok((centroids, assignments))
+    } else {
+        Err((centroids, assignments))
+    }
 }
 
 fn bp_update_centroid<V: VectorStore<Elem = f32>>(dataset: &V, centroid: &mut [f32]) {

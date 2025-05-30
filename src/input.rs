@@ -134,6 +134,10 @@ impl<E: Clone> VecVectorStore<E> {
         self.data.extend_from_slice(vector);
     }
 
+    pub fn clear(&mut self) {
+        self.data.clear();
+    }
+
     pub fn capacity(&self) -> usize {
         self.data.capacity() / self.elem_stride
     }
@@ -191,6 +195,15 @@ impl<'a, V: VectorStore> SubsetViewVectorStore<'a, V> {
 
     pub fn original_index(&self, index: usize) -> usize {
         self.subset[index]
+    }
+
+    pub fn parent(&self) -> &V {
+        self.parent
+    }
+
+    /// Extract the subset passed to `new()``.
+    pub fn into_subset(self) -> Vec<usize> {
+        self.subset
     }
 }
 

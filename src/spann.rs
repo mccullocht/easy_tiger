@@ -301,6 +301,7 @@ impl SessionIndexWriter {
 
         let mut raw_vector_cursor = self.raw_vector_cursor()?;
         // XXX shared methods for doing the right thing with float vectors -> bytes.
+        // XXX normalize the quantized vectors.
         raw_vector_cursor.set(&Record::new(
             record_id,
             vector

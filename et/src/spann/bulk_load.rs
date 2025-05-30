@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
+use std::{cell::RefCell, fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
@@ -10,6 +10,8 @@ use easy_tiger::{
     spann::{build_head, IndexConfig, SessionIndexWriter, TableIndex},
 };
 use rand::thread_rng;
+use rayon::prelude::*;
+use thread_local::ThreadLocal;
 use wt_mdb::{options::DropOptionsBuilder, Connection};
 
 use crate::ui::{progress_bar, progress_spinner};
@@ -153,21 +155,37 @@ pub fn bulk_load(
         )?;
     }
 
+    // TODO: consider writing a dedicated bulk loader. The bulk loader should at least do the raw vectors
+    // to avoid checkpointing.
     let inserted = {
-        let mut writer = SessionIndexWriter::new(index.clone(), connection.open_session()?);
+        let tl_writer: ThreadLocal<RefCell<SessionIndexWriter>> = ThreadLocal::new();
         let progress = progress_bar(limit, "postings index".into());
-        // TODO: parallelize writes. Each key in a write contains the record id so there should not be any conflicts, and during
-        // a bulk load there won't be any rebalancing process. We would need a writer and a session per thread.
-        let mut inserted = 0usize;
-        for (i, v) in index_vectors.iter().enumerate() {
-            writer.session().begin_transaction(None)?;
-            inserted += writer.upsert(i as i64, v)?;
-            writer.session().commit_transaction(None)?;
-            progress.inc(1);
-        }
-        inserted
+        (0..index_vectors.len())
+            .into_par_iter()
+            .map(|i| {
+                let mut writer = tl_writer
+                    .get_or_try(|| {
+                        let session = connection.open_session()?;
+                        Ok::<_, wt_mdb::Error>(RefCell::new(SessionIndexWriter::new(
+                            index.clone(),
+                            session,
+                        )))
+                    })?
+                    .borrow_mut();
+                writer.session().begin_transaction(None)?;
+                let inserted = writer.upsert(i as i64, &f32_vectors[i])?;
+                writer.session().commit_transaction(None)?;
+                progress.inc(1);
+                Ok::<_, wt_mdb::Error>(inserted)
+            })
+            .try_reduce(|| 0usize, |a, b| Ok(a + b))?
     };
-    println!("Inserted {} posting entries", inserted);
+
+    println!(
+        "Inserted {} posting entries (avg {:4.2})",
+        inserted,
+        inserted as f64 / limit as f64
+    );
 
     Ok(())
 }

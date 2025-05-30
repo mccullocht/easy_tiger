@@ -267,15 +267,16 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
     let mut left_vectors = SubsetViewVectorStore::new(dataset, (0..split).collect());
     let mut right_vectors = SubsetViewVectorStore::new(dataset, (split..dataset.len()).collect());
 
-    let mut left_centroid = vec![0.0; dataset.elem_stride()];
-    let mut right_centroid = vec![0.0; dataset.elem_stride()];
+    let mut centroids = VecVectorStore::with_capacity(dataset.elem_stride(), 2);
+    centroids.push(&vec![0.0; dataset.elem_stride()]);
+    centroids.push(&vec![0.0; dataset.elem_stride()]);
     let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
     for _ in 0..max_iters {
-        bp_update_centroid(&left_vectors, &mut left_centroid);
-        bp_update_centroid(&right_vectors, &mut right_centroid);
+        bp_update_centroid(&left_vectors, &mut centroids[0]);
+        bp_update_centroid(&right_vectors, &mut centroids[1]);
         distances.par_iter_mut().enumerate().for_each(|(i, d)| {
-            let ldist = crate::distance::l2sq(&dataset[i], &left_centroid);
-            let rdist = crate::distance::l2sq(&dataset[i], &right_centroid);
+            let ldist = crate::distance::l2sq(&dataset[i], &centroids[0]);
+            let rdist = crate::distance::l2sq(&dataset[i], &centroids[1]);
             *d = (i, ldist, rdist, ldist - rdist)
         });
         distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
@@ -291,20 +292,11 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
             break;
         }
 
-        left_vectors = SubsetViewVectorStore::new(
-            dataset,
-            distances.iter().take(split).map(|d| d.0).collect(),
-        );
-        right_vectors = SubsetViewVectorStore::new(
-            dataset,
-            distances.iter().skip(split).map(|d| d.0).collect(),
-        );
+        left_vectors =
+            SubsetViewVectorStore::new(dataset, distances[..split].iter().map(|d| d.0).collect());
+        right_vectors =
+            SubsetViewVectorStore::new(dataset, distances[split..].iter().map(|d| d.0).collect());
     }
-
-    // XXX maybe left and right should always be in centroids???
-    let mut centroids = VecVectorStore::with_capacity(dataset.elem_stride(), 2);
-    centroids.push(&left_centroid);
-    centroids.push(&right_centroid);
 
     let split_point = (*acceptable_split.end()).min(
         (*acceptable_split.start()).max(
@@ -317,12 +309,11 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
     assert!(acceptable_split.contains(&split_point));
 
     let mut assignments = vec![(0, 0.0); dataset.len()];
-    for (i, (vidx, ldist, rdist, _)) in distances.iter().enumerate() {
-        if i < split_point {
-            assignments[*vidx] = (0, *ldist);
-        } else {
-            assignments[*vidx] = (1, *rdist);
-        }
+    for (i, d, _, _) in distances[..split_point].iter() {
+        assignments[*i] = (0, *d);
+    }
+    for (i, _, d, _) in distances[split_point..].iter() {
+        assignments[*i] = (1, *d);
     }
 
     (centroids, assignments)

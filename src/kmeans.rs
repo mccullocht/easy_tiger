@@ -428,19 +428,12 @@ fn initialize_centroids<
                 let centroid = centroids.len();
                 centroids.push(&training_data[index]);
                 let centroid_vector = &centroids[centroid];
-                // XXX this is unnecessary, we could use assignments.par_iter_mut().
-                let distances = (0..training_data.len())
-                    .into_par_iter()
-                    .map(|i| crate::distance::l2(&training_data[i], centroid_vector))
-                    .collect::<Vec<_>>();
-                for ((cluster, distance), new_distance) in
-                    assignments.iter_mut().zip(distances.into_iter())
-                {
-                    if new_distance < *distance {
-                        *cluster = centroid;
-                        *distance = new_distance;
+                assignments.par_iter_mut().enumerate().for_each(|(i, a)| {
+                    let d = crate::distance::l2(&training_data[i], centroid_vector);
+                    if d < a.1 {
+                        *a = (centroid, d);
                     }
-                }
+                });
             }
             assignments
         }

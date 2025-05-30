@@ -35,6 +35,7 @@ use crate::{
 /// Select or compute roughly `dataset.len() * ratio` vectors from `dataset` to use as the head.
 /// A graph-based index will be built over these vectors and used to build and search the rest of
 /// the index.
+// XXX remove ratio, or at least make it make sense?
 pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + Sync + Copy>(
     dataset: &V,
     ratio: f64,
@@ -48,9 +49,8 @@ pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + 
     // TODO: consider cluster ordering the centroids to make graph search faster.
     let (centroids, _) = iterative_balanced_kmeans(
         dataset,
-        head_len,
+        64..=192,
         head_len.min(32),
-        1.5,
         1000,
         &kmeans_params,
         rng,

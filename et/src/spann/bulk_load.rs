@@ -140,6 +140,7 @@ pub fn bulk_load(
     let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).into_iter().collect());
     {
         let spinner = progress_spinner();
+        // XXX return the size of the head index.
         build_head(
             &index_vectors,
             1.0 / 128.0,

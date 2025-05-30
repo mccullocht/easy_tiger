@@ -239,6 +239,19 @@ struct PostingKey {
     record_id: i64,
 }
 
+impl PostingKey {
+    fn for_centroid(centroid_id: u32) -> Self {
+        Self {
+            centroid_id,
+            record_id: 0,
+        }
+    }
+
+    fn into_key(self) -> [u8; 12] {
+        <[u8; 12]>::from(self)
+    }
+}
+
 impl From<[u8; 12]> for PostingKey {
     fn from(value: [u8; 12]) -> Self {
         let (c, r) = value.as_ref().split_at(std::mem::size_of::<u32>());
@@ -432,5 +445,59 @@ impl SessionIndexWriter {
             })?;
         }
         todo!()
+    }
+}
+
+pub struct PostingIter<'a>(IndexCursorGuard<'a>);
+
+impl<'a> PostingIter<'a> {
+    fn new(reader: &'a SessionIndexReader, centroid_id: u32) -> Result<Self> {
+        // I _think_ wt copies bounds so we should be cool with temporaries here.
+        let mut cursor = reader
+            .session()
+            .get_index_cursor(&reader.index().table_names.postings)?;
+        cursor.set_bounds(
+            PostingKey::for_centroid(centroid_id).into_key().as_slice()
+                ..PostingKey::for_centroid(centroid_id + 1)
+                    .into_key()
+                    .as_slice(),
+        )?;
+        Ok(Self(cursor))
+    }
+}
+
+impl<'a> Iterator for PostingIter<'a> {
+    type Item = Result<(i64, Cow<'a, [u8]>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // NB: this will copy the vector. We are pessimizing in the name of composability.
+        // Otherwise we must inject enough state to check if record_id has been scored, then immediately
+        // score it. We could also add next_unsafe() if the caller can guarantee that no one else
+        // will
+        let record_or = self.0.next()?;
+        Some(record_or.map(|r| {
+            let (raw_posting_key, vector) = r.into_inner();
+            let record_id = PostingKey::from(
+                <[u8; 12]>::try_from(raw_posting_key.as_ref()).expect("12-byte posting key"),
+            )
+            .record_id;
+            (record_id, vector)
+        }))
+    }
+}
+
+struct SessionIndexReader {
+    index: Arc<TableIndex>,
+
+    head_reader: SessionGraphVectorIndexReader,
+}
+
+impl SessionIndexReader {
+    pub fn session(&self) -> &Session {
+        self.head_reader.session()
+    }
+
+    pub fn index(&self) -> &TableIndex {
+        self.index.as_ref()
     }
 }

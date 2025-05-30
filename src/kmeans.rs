@@ -1,6 +1,7 @@
 //! An implementation of k-means algorithms for clustering vectors.
 
 use std::iter::Cycle;
+use std::ops::RangeInclusive;
 
 use rand::seq::index;
 use rand::{distributions::WeightedIndex, prelude::*};
@@ -42,33 +43,37 @@ impl Default for Params {
     }
 }
 
-/// Iteratively compute k-means over `dataset`.
+/// Iteratively compute k-means over `dataset` in a way that produces balanced cluster sizes.
 ///
-/// To do this we partition the dataset into `intermediate_k` partitions, then begin dividing
-/// the largest partitions into no more than `intermediate_k` sub-partitions until we have `k`
-/// total partitions. `balance_factor` is a number > 1.0 that tries to control max imbalance
-/// relative to the average number of vectors you would expect in a single partition. Lower values
-/// should reduce imbalance but at greater cost.
+/// To do this we partition the dataset into up to `max_k` partitions, then divide each of those
+/// sub partitions, etc, terminating when each partition has a vector count in centroid_size_bounds.
+/// For each sub-partition we may reduce the `k` value to some number less than `max_k`, and use a
+/// binary partitioning scheme when `k == 2`.
 ///
-/// This is intended to be used when `k` is large (> 100) as it reduces the cost of re-computing
-/// centroid assignments.
+/// In general using a larger range for `centroid_size_bound` will cause this clustering to converge
+/// faster.
 ///
-/// Returns a set of `k` centroids and the assignment of each vector in `dataset` to the centroids.
-// TODO: guarantee that this terminates by giving up at some point, like if the number of centroids
-// hasn't changed in some number of iterations.
-// XXX should accept a range of cluster sizes, and max must be at least 2x min
+/// Returns a centroid set and the assignment of each vector in `dataset` to the centroids.
+///
+/// *Panics* if `centroid_size_bounds.end() / 2 <= centroid_size_bounds.start()`. When we divide a
+/// centroid that is just larger than the size bounds it must be possible to generate a valid split.
+/// `centroid_size_bounds` must be set such that `end() / 2 > start()` `
 pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     dataset: &V,
-    k: usize,
-    intermediate_k: usize,
-    balance_factor: f64,
+    centroid_size_bounds: RangeInclusive<usize>,
+    max_k: usize,
     batch_size: usize,
     params: &Params,
     rng: &mut impl Rng,
 ) -> (VecVectorStore<f32>, Vec<(usize, f64)>) {
-    assert!(intermediate_k < k);
+    assert!(
+        !centroid_size_bounds.is_empty()
+            && *centroid_size_bounds.end() / 2 > *centroid_size_bounds.start(),
+        "maximum centroid size must be at least 2x minimum size to facilitate partitioning."
+    );
 
-    let mut centroids = match batch_kmeans(dataset, intermediate_k, batch_size, params, rng) {
+    // TODO: if the input dataset is very smol what should we do?
+    let mut centroids = match batch_kmeans(dataset, max_k, batch_size, params, rng) {
         Ok(c) => c,
         Err(c) => {
             eprintln!("Initial iterative_balanced_kmeans step failed to converge!");
@@ -77,10 +82,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     };
     let mut assignments = compute_assignments(dataset, &centroids);
 
-    let min_centroid_size = ((dataset.len() as f64) * (1.0 / balance_factor) / k as f64) as usize;
-    let max_centroid_size = ((dataset.len() as f64 * balance_factor) / k as f64) as usize;
     loop {
-        eprintln!("do split centroids {} < {}", centroids.len(), k);
         let mut centroid_to_vectors = assignments.iter().enumerate().fold(
             vec![vec![]; centroids.len()],
             |mut c2v, (i, (c, _))| {
@@ -99,7 +101,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             .collect::<Vec<_>>();
         centroid_counts.sort_unstable_by_key(|(i, c)| (*c, *i));
         for (_, count) in centroid_counts.iter_mut().rev() {
-            *count = intermediate_k.min((*count / max_centroid_size) + 1);
+            *count = max_k.min((*count / *centroid_size_bounds.end()) + 1);
         }
 
         let unsplit_len = centroid_counts
@@ -132,7 +134,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             let subset_vectors =
                 SubsetViewVectorStore::new(dataset, std::mem::take(&mut centroid_to_vectors[*c]));
             let (mut subset_centroids, mut subset_assignments) = match *nk {
-                2 => bp_vectors(&subset_vectors, params.iters, min_centroid_size),
+                2 => bp_vectors(&subset_vectors, params.iters, *centroid_size_bounds.start()),
                 _ => {
                     let subset_centroids =
                         match batch_kmeans(&subset_vectors, *nk, batch_size, params, rng) {
@@ -165,14 +167,14 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             let centroids_to_keep = subset_centroids_to_vectors
                 .iter()
                 .map(|v| v.len())
-                .filter(|v| *v >= min_centroid_size)
+                .filter(|v| *v >= *centroid_size_bounds.start())
                 .count();
             assert_ne!(centroids_to_keep, 0);
             if centroids_to_keep < *nk {
                 if centroids_to_keep == 1 {
                     // An N-way partition only produced one viable partition. Break the deadlock by binary partitioning.
                     (subset_centroids, subset_assignments) =
-                        bp_vectors(&subset_vectors, params.iters, min_centroid_size);
+                        bp_vectors(&subset_vectors, params.iters, *centroid_size_bounds.start());
                     subset_centroids_to_vectors.resize(2, vec![]);
                     subset_centroids_to_vectors[0].clear();
                     subset_centroids_to_vectors[1].clear();
@@ -186,7 +188,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                     let mut centroids_to_prune = subset_centroids_to_vectors
                         .iter()
                         .enumerate()
-                        .filter(|(_, v)| !v.is_empty() && v.len() < min_centroid_size)
+                        .filter(|(_, v)| !v.is_empty() && v.len() < *centroid_size_bounds.start())
                         .map(|(i, v)| (v.len(), i))
                         .collect::<Vec<_>>();
                     centroids_to_prune.sort_unstable();
@@ -219,7 +221,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
 
                         if subset_centroids_to_vectors
                             .iter()
-                            .all(|v| v.is_empty() || v.len() >= min_centroid_size)
+                            .all(|v| v.is_empty() || v.len() >= *centroid_size_bounds.start())
                         {
                             break;
                         }

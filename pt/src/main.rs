@@ -20,9 +20,12 @@ struct Cli {
     #[arg(short, long)]
     dimensions: NonZero<usize>,
 
-    /// Number of partitions to divide the input set into.
-    #[arg(short = 'k', long)]
-    num_partitions: NonZero<usize>,
+    /// Minimum size of each centroid.
+    #[arg(long)]
+    min_centroid_size: NonZero<usize>,
+    /// Maximum size of each centroid.
+    #[arg(long)]
+    max_centroid_size: NonZero<usize>,
     /// Run up to this many k-means iterations before terminating.
     #[arg(short, long, default_value_t = NonZero::new(15).unwrap())]
     iters: NonZero<usize>,
@@ -45,7 +48,11 @@ fn main() -> io::Result<()> {
         cli.dimensions,
     )?;
 
-    println!("Computing {} centroids", cli.num_partitions.get());
+    let centroid_size_bounds = cli.min_centroid_size.get()..=cli.max_centroid_size.get();
+    println!(
+        "Computing centroids size bounds=({:?})",
+        centroid_size_bounds
+    );
     let kmeans_params = Params {
         iters: cli.iters.get(),
         init_iters: cli.init_iters.get(),
@@ -55,9 +62,8 @@ fn main() -> io::Result<()> {
 
     let (centroids, assignments) = iterative_balanced_kmeans(
         &input_vectors,
-        cli.num_partitions.get(),
-        cli.num_partitions.get().min(32),
-        1.5,
+        centroid_size_bounds,
+        32,
         cli.batch_size.get(),
         &kmeans_params,
         &mut thread_rng(),

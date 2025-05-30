@@ -91,9 +91,8 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
             },
         );
 
-        // Count the number of vectors in each centroid, then decide how pieces to divide each
-        // centroid into. This is done greedily starting from the large centroid, and we terminate
-        // once the splits would result in `k` centroids.
+        // Count the number of vectors in each centroid, then decide how many pieces to divide each
+        // centroid into targeting the maximum centroid size.
         let mut centroid_counts = centroid_to_vectors
             .iter()
             .map(|v| v.len())
@@ -133,7 +132,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
         for (c, nk) in centroid_counts.iter().skip(unsplit_len) {
             let subset_vectors =
                 SubsetViewVectorStore::new(dataset, std::mem::take(&mut centroid_to_vectors[*c]));
-            let (mut subset_centroids, mut subset_assignments) = match *nk {
+            let (mut subset_centroids, subset_assignments) = match *nk {
                 2 => bp_vectors(&subset_vectors, params.iters, *centroid_size_bounds.start()),
                 _ => {
                     let subset_centroids =
@@ -159,75 +158,16 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                 },
             );
 
-            // XXX dump all of this into refine_centroids() or something. this function is like 200 lines long!
-            // Remove any partitions that do not meet minimum size requirements. The partition count logic should ensure that at least
-            // one centroid is above the size enforced by policy. This should never happen when *nk == 2 as binary partition will ensure
-            // that the smaller cluster meets the minimum size.
-            // This was large enough to partition so at least _one_ centroid should be above the size enforced by policy.
-            let centroids_to_keep = subset_centroids_to_vectors
-                .iter()
-                .map(|v| v.len())
-                .filter(|v| *v >= *centroid_size_bounds.start())
-                .count();
-            assert_ne!(centroids_to_keep, 0);
-            if centroids_to_keep < *nk {
-                if centroids_to_keep == 1 {
-                    // An N-way partition only produced one viable partition. Break the deadlock by binary partitioning.
-                    (subset_centroids, subset_assignments) =
-                        bp_vectors(&subset_vectors, params.iters, *centroid_size_bounds.start());
-                    subset_centroids_to_vectors.resize(2, vec![]);
-                    subset_centroids_to_vectors[0].clear();
-                    subset_centroids_to_vectors[1].clear();
-                    for (i, (c, d)) in subset_assignments.iter().enumerate() {
-                        subset_centroids_to_vectors[*c]
-                            .push((subset_vectors.original_index(i), *d));
-                    }
-                } else {
-                    // Iteratively remove the smallest partition and reassign vectors until all remaining centroids are larger
-                    // than min_centroid_size.
-                    let mut centroids_to_prune = subset_centroids_to_vectors
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, v)| !v.is_empty() && v.len() < *centroid_size_bounds.start())
-                        .map(|(i, v)| (v.len(), i))
-                        .collect::<Vec<_>>();
-                    centroids_to_prune.sort_unstable();
-                    for (_, pruned_centroid) in centroids_to_prune {
-                        let reassign_vectors = SubsetViewVectorStore::new(
-                            dataset,
-                            std::mem::take(&mut subset_centroids_to_vectors[pruned_centroid])
-                                .into_iter()
-                                .map(|(i, _)| i)
-                                .collect(),
-                        );
-                        let kept_centroids = SubsetViewVectorStore::new(
-                            &subset_centroids,
-                            subset_centroids_to_vectors
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, v)| !v.is_empty())
-                                .map(|(i, _)| i)
-                                .collect(),
-                        );
-                        for (i, (new_centroid, d)) in
-                            compute_assignments(&reassign_vectors, &kept_centroids)
-                                .into_iter()
-                                .enumerate()
-                        {
-                            subset_centroids_to_vectors
-                                [kept_centroids.original_index(new_centroid)]
-                            .push((reassign_vectors.original_index(i), d));
-                        }
-
-                        if subset_centroids_to_vectors
-                            .iter()
-                            .all(|v| v.is_empty() || v.len() >= *centroid_size_bounds.start())
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
+            // Prune out any centroids that are too small. This may yield empty centroids that we
+            // skip when updating new centroids and assignments.
+            (subset_centroids, subset_centroids_to_vectors) = prune_iterative_centroids(
+                *nk,
+                *centroid_size_bounds.start(),
+                params.iters,
+                &subset_vectors,
+                subset_centroids,
+                subset_centroids_to_vectors,
+            );
 
             for (c, v) in subset_centroids
                 .iter()
@@ -248,15 +188,98 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     (centroids, assignments)
 }
 
-// Build a binary partition of the vectors between two centroids.
-//
-// Split the dataset in half and produce two centroids, then measure the distance for each vector to both centroids
-// and the weight of vectors to each centroid. Terminate if the centroids would produce two clusters of at least
-// min_cluster_size, otherwise split the dataset into a new grouping and try again.
-//
-// Returns a "left" centroid, a "right" centroid, and cluster assignments for each vector in dataset.
-// The returned assignments use 0 for left, 1 for right, and provide the distance.
-// XXX this should return a Result to indicate when it failed to converge.
+fn prune_iterative_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
+    k: usize,
+    min_centroid_size: usize,
+    iters: usize,
+    vectors: &SubsetViewVectorStore<'_, V>,
+    centroids: VecVectorStore<f32>,
+    mut centroids_to_vectors: Vec<Vec<(usize, f64)>>,
+) -> (VecVectorStore<f32>, Vec<Vec<(usize, f64)>>) {
+    // Count centroids that meet minimum assignment size requirements. Initial clustering should
+    // produce _at least_ one centroid that meets this requirement by splitting conservatively based
+    // on maximum centroid size.
+    let centroids_to_keep = centroids_to_vectors
+        .iter()
+        .map(|v| v.len())
+        .filter(|v| *v >= min_centroid_size)
+        .count();
+    assert_ne!(centroids_to_keep, 0);
+    if k == centroids_to_keep {
+        // all vectors meet minimum size policy.
+        return (centroids, centroids_to_vectors);
+    }
+
+    if centroids_to_keep == 1 {
+        // Only one centroid qualified, so perform a binary partitioning to keep making progress
+        // rather than teratively trying kmeans and hoping it converges.
+        //
+        // This typically only happens if k is 2 or 3.
+        let (centroids, assignments) = bp_vectors(vectors, iters, min_centroid_size);
+        centroids_to_vectors.resize(2, vec![]);
+        centroids_to_vectors[0].clear();
+        centroids_to_vectors[1].clear();
+        for (i, (c, d)) in assignments.iter().enumerate() {
+            centroids_to_vectors[*c].push((vectors.original_index(i), *d));
+        }
+        return (centroids, centroids_to_vectors);
+    }
+
+    // Iteratively remove the smallest partition and reassign vectors until all remaining centroids
+    // are larger than min_centroid_size.
+    let mut centroids_to_prune = centroids_to_vectors
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_empty() && v.len() < min_centroid_size)
+        .map(|(i, v)| (v.len(), i))
+        .collect::<Vec<_>>();
+    centroids_to_prune.sort_unstable();
+    for (_, pruned_centroid) in centroids_to_prune {
+        let reassign_vectors = SubsetViewVectorStore::new(
+            vectors.parent(),
+            std::mem::take(&mut centroids_to_vectors[pruned_centroid])
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect(),
+        );
+        let kept_centroids = SubsetViewVectorStore::new(
+            &centroids,
+            centroids_to_vectors
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(i, _)| i)
+                .collect(),
+        );
+        for (i, (new_centroid, d)) in compute_assignments(&reassign_vectors, &kept_centroids)
+            .into_iter()
+            .enumerate()
+        {
+            centroids_to_vectors[kept_centroids.original_index(new_centroid)]
+                .push((reassign_vectors.original_index(i), d));
+        }
+
+        if centroids_to_vectors
+            .iter()
+            .all(|v| v.is_empty() || v.len() >= min_centroid_size)
+        {
+            break;
+        }
+    }
+
+    (centroids, centroids_to_vectors)
+}
+
+/// Build a binary partition of the vectors between two centroids.
+///
+/// Split the dataset in half and produce two centroids, then measure the distance for each vector
+/// to both centroids and the weight of vectors to each centroid. Terminate if the centroids would
+/// produce two clusters of at least min_cluster_size, otherwise split the dataset into a new
+/// grouping and try again.
+///
+/// Returns a vector store containing a "left" and a "right" centroid along with cluster assignment.
+/// Note that these cluster assignments may not match the results of compute_assignments().
+/// XXX this should return a Result to indicate when it failed to converge.
 fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
     dataset: &V,
     max_iters: usize,

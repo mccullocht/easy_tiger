@@ -197,6 +197,10 @@ impl<'a, V: VectorStore> SubsetViewVectorStore<'a, V> {
         self.subset[index]
     }
 
+    pub fn parent(&self) -> &V {
+        self.parent
+    }
+
     /// Extract the subset passed to `new()``.
     pub fn into_subset(self) -> Vec<usize> {
         self.subset

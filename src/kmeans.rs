@@ -6,6 +6,7 @@ use std::ops::RangeInclusive;
 use rand::seq::index;
 use rand::{distributions::WeightedIndex, prelude::*};
 use rayon::prelude::*;
+use tracing::debug;
 
 use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
 
@@ -76,7 +77,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     let mut centroids = match batch_kmeans(dataset, max_k, batch_size, params, rng) {
         Ok(c) => c,
         Err(c) => {
-            eprintln!("Initial iterative_balanced_kmeans step failed to converge!");
+            debug!("iterative_balanced_kmeans initial partitioning failed to converge!");
             c
         }
     };
@@ -137,9 +138,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                 {
                     Ok(r) => r,
                     Err(r) => {
-                        eprintln!(
-                            "iterative_balanced_kmeans bp_vector partition failed to converge!"
-                        );
+                        debug!("iterative_balanced_kmeans bp_vector partition failed to converge!");
                         r
                     }
                 },
@@ -153,7 +152,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                     ) {
                         Ok(c) => c,
                         Err(e) => {
-                            eprintln!(
+                            debug!(
                                     "iterative_balanced_kmeans batch_kmeans partition failed to converge!"
                                 );
                             e
@@ -232,7 +231,7 @@ fn prune_iterative_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
         let (centroids, assignments) = match bp_vectors(vectors, iters, min_centroid_size) {
             Ok(r) => r,
             Err(r) => {
-                eprintln!("iterative_balanced_kmeans prune_iterative_centroids bp_vector partition failed to converge!");
+                debug!("iterative_balanced_kmeans prune_iterative_centroids bp_vector partition failed to converge!");
                 r
             }
         };

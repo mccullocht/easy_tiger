@@ -3,12 +3,14 @@
 use std::collections::VecDeque;
 
 use rand::Rng;
+use tracing::debug;
 
 use crate::{
     input::{SubsetViewVectorStore, VectorStore},
     kmeans::{self, batch_kmeans, compute_assignments},
 };
 
+// TODO: use iterative_balanced_kmeans instead.
 pub fn cluster_for_reordering<
     V: VectorStore<Elem = f32> + Send + Sync,
     P: Fn(u64) + Send + Sync,
@@ -36,7 +38,7 @@ pub fn cluster_for_reordering<
         let centroids = match batch_kmeans(&subset_vectors, sm, batch_size, params, rng) {
             Ok(c) => c,
             Err(c) => {
-                eprintln!(
+                debug!(
                     "batch_kmeans did not converge on cluster of size {} k={} batch_size={}",
                     len, sm, batch_size
                 );

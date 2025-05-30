@@ -290,6 +290,8 @@ fn prune_iterative_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
     (centroids, centroids_to_vectors)
 }
 
+type CentroidsAndAssignments = (VecVectorStore<f32>, Vec<(usize, f64)>);
+
 /// Build a binary partition of the vectors between two centroids.
 ///
 /// Split the dataset in half and produce two centroids, then measure the distance for each vector
@@ -303,7 +305,7 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
     dataset: &V,
     max_iters: usize,
     min_cluster_size: usize,
-) -> Result<(VecVectorStore<f32>, Vec<(usize, f64)>), (VecVectorStore<f32>, Vec<(usize, f64)>)> {
+) -> Result<CentroidsAndAssignments, CentroidsAndAssignments> {
     let acceptable_split = min_cluster_size..=(dataset.len() - min_cluster_size);
     assert!(!acceptable_split.is_empty());
 

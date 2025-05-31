@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+use bytemuck::try_cast_slice;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -571,9 +572,13 @@ impl SpannSearcher {
             .config()
             .quantizer
             .new_distance_function(&reader.index().head_config().config().similarity);
+        // XXX I don't really need a heap, try https://quickwit.io/blog/top-k-complexity
         let mut results = BinaryHeap::with_capacity(self.params.limit.get());
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
+            // XXX this unnecessarily pulls cursors in and out of the freelist when I could use the
+            // same one over and over again. It could also accept all of the centroid ids and yield
+            // a single stream which would be nice.
             for posting in reader.posting_iter(centroid_id)? {
                 if let Ok((record_id, doc_vector)) = posting {
                     if !self.seen.insert(record_id) {
@@ -598,8 +603,42 @@ impl SpannSearcher {
             }
         }
 
-        // XXX need to rerank here.
+        if self.params.num_rerank == 0 {
+            return Ok(results.into_sorted_vec());
+        }
 
-        Ok(results.into_sorted_vec())
+        let distance_fn = reader.head_reader.config().new_distance_function();
+        let mut raw_cursor = reader
+            .session()
+            .open_record_cursor(&reader.index().table_names.raw_vectors)?;
+        let mut reranked = results
+            .into_sorted_vec()
+            .into_iter()
+            .take(self.params.num_rerank)
+            .map(|n| {
+                let raw_vector_bytes = unsafe {
+                    raw_cursor
+                        .seek_exact_unsafe(n.vertex())
+                        .expect("raw vector for candidate")
+                }?
+                .into_inner_value();
+                let raw_vector: Cow<'_, [f32]> = try_cast_slice(raw_vector_bytes.as_ref())
+                    .map(Cow::from)
+                    .unwrap_or_else(|_| {
+                        raw_vector_bytes
+                            .chunks(4)
+                            .map(|d| f32::from_le_bytes(d.try_into().expect("chunk size 4")))
+                            .collect::<Vec<_>>()
+                            .into()
+                    });
+                Ok(Neighbor::new(
+                    n.vertex(),
+                    distance_fn.distance(query, &raw_vector),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        reranked.sort_unstable();
+
+        Ok(reranked)
     }
 }

@@ -3,10 +3,17 @@
 //! This implemented by clustering the input dataset and building a graph-based index over the
 //! select centroids. This index is used to build and navigate a posting index.
 
-use std::{borrow::Cow, io, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::{BinaryHeap, HashSet},
+    io,
+    num::NonZero,
+    sync::Arc,
+};
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
     Connection, Error, IndexCursorGuard, IndexRecordView, Record, RecordCursorGuard, Result,
@@ -133,6 +140,10 @@ pub struct TableIndex {
 impl TableIndex {
     pub fn head_config(&self) -> &Arc<TableGraphVectorIndex> {
         &self.head
+    }
+
+    pub fn config(&self) -> &IndexConfig {
+        &self.config
     }
 
     pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {
@@ -470,10 +481,9 @@ impl<'a> Iterator for PostingIter<'a> {
     type Item = Result<(i64, Cow<'a, [u8]>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // NB: this will copy the vector. We are pessimizing in the name of composability.
-        // Otherwise we must inject enough state to check if record_id has been scored, then immediately
-        // score it. We could also add next_unsafe() if the caller can guarantee that no one else
-        // will
+        // NB: this will copy the vector -- it's pessimistic but will be correct in the face of a
+        // rollback that invalidates cursors. To avoid this we either need to inject dupe checks and
+        // scoring into this iterator or fix the WT bindings to behave better in this case.
         let record_or = self.0.next()?;
         Some(record_or.map(|r| {
             let (raw_posting_key, vector) = r.into_inner();
@@ -486,18 +496,110 @@ impl<'a> Iterator for PostingIter<'a> {
     }
 }
 
-struct SessionIndexReader {
+pub struct SessionIndexReader {
     index: Arc<TableIndex>,
-
     head_reader: SessionGraphVectorIndexReader,
 }
 
 impl SessionIndexReader {
+    pub fn new(index: &Arc<TableIndex>, session: Session) -> Self {
+        let head_reader = SessionGraphVectorIndexReader::new(index.head_config().clone(), session);
+        Self {
+            index: index.clone(),
+            head_reader,
+        }
+    }
+
     pub fn session(&self) -> &Session {
         self.head_reader.session()
     }
 
     pub fn index(&self) -> &TableIndex {
         self.index.as_ref()
+    }
+
+    pub fn posting_iter(&self, centroid_id: u32) -> Result<PostingIter<'_>> {
+        PostingIter::new(self, centroid_id)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SpannSearchParams {
+    /// Parameters for searching the head graph.
+    /// NB: `head_params.beam_width` should be at least as large as `num_centroids`
+    pub head_params: GraphSearchParams,
+    /// The number of centroids to search.
+    pub num_centroids: NonZero<usize>,
+    /// The number of vectors to rerank using raw vectors.
+    pub num_rerank: usize,
+    /// The number of results to return.
+    pub limit: NonZero<usize>,
+}
+
+pub struct SpannSearcher {
+    params: SpannSearchParams,
+    head_searcher: GraphSearcher,
+    seen: HashSet<i64>,
+}
+
+impl SpannSearcher {
+    pub fn new(params: SpannSearchParams) -> Self {
+        Self {
+            params,
+            head_searcher: GraphSearcher::new(params.head_params),
+            seen: HashSet::new(),
+        }
+    }
+
+    pub fn search(
+        &mut self,
+        query: &[f32],
+        reader: &mut SessionIndexReader,
+    ) -> Result<Vec<Neighbor>> {
+        let mut centroids = self.head_searcher.search(query, &mut reader.head_reader)?;
+        // TODO: be clever about choosing centroids.
+        centroids.truncate(self.params.num_centroids.get());
+        if centroids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        self.seen.clear();
+        let quantizer = reader.index().config().quantizer.new_quantizer();
+        let quantized_query = quantizer.for_query(query);
+        let distance_fn = reader
+            .index
+            .config()
+            .quantizer
+            .new_distance_function(&reader.index().head_config().config().similarity);
+        let mut results = BinaryHeap::with_capacity(self.params.limit.get());
+        for c in centroids {
+            let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
+            for posting in reader.posting_iter(centroid_id)? {
+                if let Ok((record_id, doc_vector)) = posting {
+                    if !self.seen.insert(record_id) {
+                        continue;
+                    }
+
+                    let result = Neighbor::new(
+                        record_id,
+                        distance_fn.distance(&quantized_query, &doc_vector),
+                    );
+                    if results.len() < self.params.limit.get() {
+                        results.push(result);
+                    } else {
+                        let mut top = results.peek_mut().expect("pq full");
+                        if result < *top {
+                            *top = result;
+                        }
+                    }
+                } else {
+                    warn!("Failed to read posting in centroid {}", centroid_id);
+                }
+            }
+        }
+
+        // XXX need to rerank here.
+
+        Ok(results.into_sorted_vec())
     }
 }

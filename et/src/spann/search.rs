@@ -1,7 +1,5 @@
 // XXX factor out common components with graph search.
 
-use rayon::prelude::*;
-
 use std::{
     fs::File,
     io::{self},
@@ -180,17 +178,36 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
         .take(iters * limit)
         .collect::<Vec<_>>();
     let progress = progress_bar(query_indices.len(), Some(name));
-    let stats = query_indices
-        .into_par_iter()
-        .map_init(
-            || SearcherState::new(&index, &connection, search_params).unwrap(),
-            |searcher, index| {
-                let stats = searcher.query(index, &query_vectors[index], recall_computer);
-                progress.inc(1);
-                stats
-            },
-        )
-        .try_reduce(|| AggregateSearchStats::default(), |a, b| Ok(a + b))?;
+    #[cfg(feature = "serial_search")]
+    let stats: AggregateSearchStats = {
+        use indicatif::ProgressIterator;
+        let mut searcher = SearcherState::new(&index, &connection, search_params).unwrap();
+        query_indices
+            .into_iter()
+            .progress_with(progress.clone())
+            .map(|index| searcher.query(index, &query_vectors[index], recall_computer))
+            .reduce(|a, b| match (a, b) {
+                (Ok(a), Ok(b)) => Ok(a + b),
+                (Ok(_), Err(b)) => Err(b),
+                (Err(a), _) => Err(a),
+            })
+            .expect("at least one query")?
+    };
+    #[cfg(not(feature = "serial_search"))]
+    let stats: AggregateSearchStats = {
+        use rayon::prelude::*;
+        query_indices
+            .into_par_iter()
+            .map_init(
+                || SearcherState::new(&index, &connection, search_params).unwrap(),
+                |searcher, index| {
+                    let stats = searcher.query(index, &query_vectors[index], recall_computer);
+                    progress.inc(1);
+                    stats
+                },
+            )
+            .try_reduce(|| AggregateSearchStats::default(), |a, b| Ok(a + b))?
+    };
     progress.finish_using_style();
     Ok(stats)
 }

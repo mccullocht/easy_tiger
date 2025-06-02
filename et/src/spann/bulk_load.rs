@@ -61,9 +61,13 @@ pub struct BulkLoadArgs {
     #[arg(short, long)]
     rerank_edges: Option<usize>,
 
-    /// If true, drop any WiredTiger tables with the same name before bulk upload.
-    #[arg(long, default_value_t = false)]
-    drop_tables: bool,
+    /// Minimum number of vectors that should map to each head centroid.
+    #[arg(long, default_value_t = 64)]
+    head_min_centroid_len: usize,
+    /// Maximum number of vectors that should map to each head centroid.
+    /// This should be at least 2x --head-min-centroid-len.
+    #[arg(long, default_value_t = 192)]
+    head_max_centroid_len: usize,
 
     /// Maximum number of replica centroids to assign each vector to.
     #[arg(long)]
@@ -86,6 +90,10 @@ pub struct BulkLoadArgs {
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
     limit: Option<usize>,
+
+    /// If true, drop any WiredTiger tables with the same name before bulk upload.
+    #[arg(long, default_value_t = false)]
+    drop_tables: bool,
 }
 
 pub fn bulk_load(
@@ -142,7 +150,7 @@ pub fn bulk_load(
         let spinner = progress_spinner();
         build_head(
             &index_vectors,
-            1.0 / 128.0,
+            args.head_min_centroid_len..=args.head_max_centroid_len,
             Params {
                 iters: 100,
                 epsilon: 0.01,

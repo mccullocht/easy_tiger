@@ -113,7 +113,7 @@ fn byte_slice_to_float_vec(slice: &[u8]) -> Vec<f32> {
 
 // We may be able to cast the slice if the alignment is correct.
 #[cfg(target_endian = "little")]
-fn byte_slice_to_float_slice<'a>(slice: &'a [u8]) -> Cow<'a, [f32]> {
+fn byte_slice_to_float_slice(slice: &[u8]) -> Cow<'_, [f32]> {
     assert_eq!(slice.len() % std::mem::size_of::<f32>(), 0);
     bytemuck::try_cast_slice(slice)
         .map(Cow::from)

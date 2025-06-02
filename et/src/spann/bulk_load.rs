@@ -138,9 +138,8 @@ pub fn bulk_load(
 
     let limit = args.limit.unwrap_or(f32_vectors.len());
     let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).into_iter().collect());
-    {
+    let centroids_len = {
         let spinner = progress_spinner();
-        // XXX return the size of the head index.
         build_head(
             &index_vectors,
             1.0 / 128.0,
@@ -153,8 +152,13 @@ pub fn bulk_load(
             index.head_config(),
             |i| spinner.inc(i),
             &mut thread_rng(),
-        )?;
-    }
+        )?
+    };
+    println!(
+        "Head contains {} centroids ({:4.2}%)",
+        centroids_len,
+        (centroids_len as f64 / index_vectors.len() as f64) * 100.0
+    );
 
     // TODO: consider writing a dedicated bulk loader. The bulk loader should at least do the raw vectors
     // to avoid checkpointing.

@@ -34,11 +34,6 @@ use crate::{
     Neighbor,
 };
 
-// XXX high level method structure:
-// * cluster input vector, build graph
-// * iterate input vectors, assign to centroid(s) and quantize to build pls
-// * search
-
 /// Build the head of the SPANN index.
 ///
 /// Select or compute roughly `dataset.len() * ratio` vectors from `dataset` to use as the head.
@@ -53,7 +48,7 @@ pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + 
     index: &TableGraphVectorIndex,
     progress: P,
     rng: &mut impl Rng,
-) -> Result<()> {
+) -> Result<usize> {
     let head_len = (dataset.len() as f64 * ratio + 0.5).round() as usize;
     // TODO: consider cluster ordering the centroids to make graph search faster.
     let (centroids, _) = iterative_balanced_kmeans(
@@ -80,7 +75,7 @@ pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + 
         // XXX gotta find a way to jam progress in here.
         loader.execute_phase(phase, progress)?;
     }
-    Ok(())
+    Ok(centroids_len)
 }
 
 #[derive(Serialize, Deserialize, Clone)]

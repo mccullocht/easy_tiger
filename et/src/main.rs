@@ -8,6 +8,7 @@ mod lookup;
 mod search;
 mod spann;
 mod ui;
+mod wt_stats;
 
 use std::{
     io::{self},

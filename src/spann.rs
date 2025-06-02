@@ -509,7 +509,7 @@ impl<'a, 'b, 'c, 'd> Iterator for PostingIter<'a, 'b, 'c, 'd> {
             )
             .record_id;
             if self.seen.insert(record_id) {
-                let dist = self.distance_fn.distance(&self.query, &vector);
+                let dist = self.distance_fn.distance(self.query, &vector);
                 return Some(Ok(Neighbor::new(record_id, dist)));
             }
         }

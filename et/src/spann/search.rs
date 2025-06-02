@@ -1,4 +1,4 @@
-// XXX factor out common components with graph search.
+// TODO: factor out common components with vamana graph search.
 
 use std::{
     fs::File,
@@ -18,10 +18,9 @@ use easy_tiger::{
     Neighbor,
 };
 use memmap2::Mmap;
-use wt_mdb::{Connection, Result, Session};
-use wt_sys::{WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
+use wt_mdb::Connection;
 
-use crate::ui::progress_bar;
+use crate::{ui::progress_bar, wt_stats::WiredTigerConnectionStats};
 
 #[derive(Args)]
 pub struct SearchArgs {
@@ -141,13 +140,10 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             stats.max_duration.as_secs_f64(),
         );
 
-        // TODO: reset connection stats so this is more accurate.
-        let (search_calls, read_io) = cache_hit_stats(&connection.open_session()?)?;
+        let wt_stats = WiredTigerConnectionStats::try_from(&connection)?;
         println!(
-            "cache hit rate {:.2}% ({} reads, {} lookups)",
-            (search_calls - read_io) as f64 * 100.0 / search_calls as f64,
-            read_io,
-            search_calls,
+            "WT {:15} bytes read on {:12} lookups",
+            wt_stats.read_bytes, wt_stats.read_ios
         );
 
         if let Some((computer, recalled_count)) = recall_computer.zip(stats.total_recall_results) {
@@ -247,6 +243,7 @@ impl SearcherState {
     }
 }
 
+// XXX factor out recall computer
 pub struct RecallComputer<N> {
     k: usize,
     neighbors: N,
@@ -316,16 +313,4 @@ impl Add<AggregateSearchStats> for AggregateSearchStats {
                 .or(rhs.total_recall_results),
         }
     }
-}
-
-/// Count lookup calls and read IOs. This can be used to estimate cache hit rate.
-fn cache_hit_stats(session: &Session) -> Result<(i64, i64)> {
-    let mut stat_cursor = session.new_stats_cursor(wt_mdb::options::Statistics::Fast, None)?;
-    let search_calls = stat_cursor
-        .seek_exact(WT_STAT_CONN_CURSOR_SEARCH)
-        .expect("WT_STAT_CONN_CURSOR_SEARCH")?;
-    let read_ios = stat_cursor
-        .seek_exact(WT_STAT_CONN_READ_IO)
-        .expect("WT_STAT_CONN_READ_IO")?;
-    Ok((search_calls, read_ios))
 }

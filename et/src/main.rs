@@ -5,6 +5,7 @@ mod exhaustive_search;
 mod init_index;
 mod insert;
 mod lookup;
+mod recall;
 mod search;
 mod spann;
 mod ui;

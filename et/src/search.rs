@@ -14,12 +14,11 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     search::{GraphSearchStats, GraphSearcher},
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
-    Neighbor,
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;
 
-use crate::{ui::progress_bar, wt_stats::WiredTigerConnectionStats};
+use crate::{recall::RecallComputer, ui::progress_bar, wt_stats::WiredTigerConnectionStats};
 
 #[derive(Args)]
 pub struct SearchArgs {
@@ -138,12 +137,8 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             wt_stats.read_bytes,
         );
 
-        if let Some((computer, recalled_count)) = recall_computer.zip(stats.total_recall_results) {
-            println!(
-                "recall@{} {:0.6}",
-                computer.k,
-                recalled_count as f64 / (stats.count * computer.k) as f64
-            );
+        if let Some((computer, mean_recall)) = recall_computer.zip(stats.mean_recall()) {
+            println!("recall@{} {:0.6}", computer.k(), mean_recall);
         }
     }
 
@@ -242,58 +237,28 @@ impl SearcherState {
     }
 }
 
-pub struct RecallComputer<N> {
-    k: usize,
-    neighbors: N,
-}
-
-impl<N> RecallComputer<N>
-where
-    N: VectorStore<Elem = u32>,
-{
-    fn new(k: NonZero<usize>, neighbors: N) -> io::Result<Self> {
-        if k.get() <= neighbors.elem_stride() {
-            Ok(Self {
-                k: k.get(),
-                neighbors,
-            })
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "recall k must be <= neighbors_len",
-            ))
-        }
-    }
-
-    fn compute_recall(&self, query_index: usize, query_results: &[Neighbor]) -> usize {
-        let mut expected = self.neighbors[query_index][..self.k].to_vec();
-        expected.sort();
-        query_results
-            .iter()
-            .take(self.k)
-            .filter(|n| expected.binary_search(&(n.vertex() as u32)).is_ok())
-            .count()
-    }
-}
-
 #[derive(Default)]
 struct AggregateSearchStats {
     count: usize,
     total_duration: Duration,
     max_duration: Duration,
     total_graph_stats: GraphSearchStats,
-    total_recall_results: Option<usize>,
+    sum_recall: Option<f64>,
 }
 
 impl AggregateSearchStats {
-    fn new(duration: Duration, graph_stats: GraphSearchStats, recall: Option<usize>) -> Self {
+    fn new(duration: Duration, graph_stats: GraphSearchStats, recall: Option<f64>) -> Self {
         Self {
             count: 1,
             total_duration: duration,
             max_duration: duration,
             total_graph_stats: graph_stats,
-            total_recall_results: recall,
+            sum_recall: recall,
         }
+    }
+
+    fn mean_recall(&self) -> Option<f64> {
+        self.sum_recall.map(|s| s / self.count as f64)
     }
 }
 
@@ -306,12 +271,12 @@ impl Add<AggregateSearchStats> for AggregateSearchStats {
             total_duration: self.total_duration + rhs.total_duration,
             max_duration: std::cmp::max(self.max_duration, rhs.max_duration),
             total_graph_stats: self.total_graph_stats + rhs.total_graph_stats,
-            total_recall_results: self
-                .total_recall_results
-                .zip(rhs.total_recall_results)
+            sum_recall: self
+                .sum_recall
+                .zip(rhs.sum_recall)
                 .map(|(a, b)| a + b)
-                .or(self.total_recall_results)
-                .or(rhs.total_recall_results),
+                .or(self.sum_recall)
+                .or(rhs.sum_recall),
         }
     }
 }

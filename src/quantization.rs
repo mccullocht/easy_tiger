@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::distance::{
     AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, QuantizedVectorDistance,
-    VectorSimilarity,
+    TrivialQuantizedDistance, VectorSimilarity,
 };
 
 /// `Quantizer` is used to perform lossy quantization of input vectors.
@@ -42,6 +42,8 @@ pub enum VectorQuantizer {
     /// Reduces each dimension to an 8-bit integer.
     /// This implementation does not train on any input to decide how to quantize.
     I8Naive,
+    /// Encodes a float vector as a byte array in little-endian order.
+    Trivial,
 }
 
 impl VectorQuantizer {
@@ -51,6 +53,7 @@ impl VectorQuantizer {
             Self::Binary => Box::new(BinaryQuantizer),
             Self::AsymmetricBinary { n } => Box::new(AsymmetricBinaryQuantizer::new(*n)),
             Self::I8Naive => Box::new(I8NaiveQuantizer),
+            Self::Trivial => Box::new(TrivialQuantizer),
         }
     }
 
@@ -63,6 +66,7 @@ impl VectorQuantizer {
             Self::Binary => Box::new(HammingDistance),
             Self::AsymmetricBinary { n: _ } => Box::new(AsymmetricHammingDistance),
             Self::I8Naive => Box::new(I8NaiveDistance(*similarity)),
+            Self::Trivial => Box::new(TrivialQuantizedDistance(*similarity)),
         }
     }
 }
@@ -78,23 +82,46 @@ impl FromStr for VectorQuantizer {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let input_err = |s| io::Error::new(io::ErrorKind::InvalidInput, s);
-        if s == "binary" {
-            Ok(Self::Binary)
-        } else if s.starts_with("asymmetric_binary:") {
-            let bits_str = s
-                .strip_prefix("asymmetric_binary:")
-                .expect("prefix matched");
-            bits_str
-                .parse::<usize>()
-                .ok()
-                .and_then(|b| if (1..=8).contains(&b) { Some(b) } else { None })
-                .map(|n| Self::AsymmetricBinary { n })
-                .ok_or_else(|| input_err(format!("invalid asymmetric_binary bits {}", bits_str)))
-        } else if s == "i8naive" {
-            Ok(Self::I8Naive)
-        } else {
-            Err(input_err(format!("unknown quantizer function {}", s)))
+        match s {
+            "binary" => Ok(Self::Binary),
+            ab if ab.starts_with("asymmetric_binary:") => {
+                let bits_str = ab
+                    .strip_prefix("asymmetric_binary:")
+                    .expect("prefix matched");
+                bits_str
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|b| if (1..=8).contains(&b) { Some(b) } else { None })
+                    .map(|n| Self::AsymmetricBinary { n })
+                    .ok_or_else(|| {
+                        input_err(format!("invalid asymmetric_binary bits {}", bits_str))
+                    })
+            }
+            "i8naive" => Ok(Self::I8Naive),
+            "trivial" => Ok(Self::Trivial),
+            _ => Err(input_err(format!("unknown quantizer function {}", s))),
         }
+    }
+}
+
+/// Trivial quantization just encodes a float vector as a little-endian byte vector.
+pub struct TrivialQuantizer;
+
+impl Quantizer for TrivialQuantizer {
+    fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
+        vector.iter().flat_map(|d| d.to_le_bytes()).collect()
+    }
+
+    fn doc_bytes(&self, dimensions: usize) -> usize {
+        dimensions * std::mem::size_of::<f32>()
+    }
+
+    fn for_query(&self, vector: &[f32]) -> Vec<u8> {
+        self.for_doc(vector)
+    }
+
+    fn query_bytes(&self, dimensions: usize) -> usize {
+        self.doc_bytes(dimensions)
     }
 }
 

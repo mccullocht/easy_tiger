@@ -204,6 +204,7 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
             )
             .try_reduce(|| AggregateSearchStats::default(), |a, b| Ok(a + b))?
     };
+    // TODO: collect and return wt stats with search stats, reseting after collection.
     progress.finish_using_style();
     Ok(stats)
 }

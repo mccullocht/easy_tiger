@@ -104,6 +104,42 @@ impl F32VectorDistance for DotProductDistance {
     }
 }
 
+fn byte_slice_to_float_vec(slice: &[u8]) -> Vec<f32> {
+    slice
+        .chunks(4)
+        .map(|d| f32::from_le_bytes(d.try_into().expect("slice len divide by 4")))
+        .collect()
+}
+
+// We may be able to cast the slice if the alignment is correct.
+#[cfg(target_endian = "little")]
+fn byte_slice_to_float_slice(slice: &[u8]) -> Cow<'_, [f32]> {
+    assert_eq!(slice.len() % std::mem::size_of::<f32>(), 0);
+    bytemuck::try_cast_slice(slice)
+        .map(Cow::from)
+        .unwrap_or_else(|_| Cow::from(byte_slice_to_float_vec(slice)))
+}
+
+#[cfg(not(target_endian = "little"))]
+fn byte_slice_to_float_slice<'a>(slice: &'a [u8]) -> Cow<'a, [f32]> {
+    assert_eq!(slice.len() % std::mem::size_of::<f32>(), 0);
+    byte_slice_to_float_vec(slice).into()
+}
+
+/// Computes a score from two bitmaps using hamming distance.
+pub struct TrivialQuantizedDistance(pub(crate) VectorSimilarity);
+
+impl QuantizedVectorDistance for TrivialQuantizedDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = byte_slice_to_float_slice(query);
+        let doc = byte_slice_to_float_slice(doc);
+        match self.0 {
+            VectorSimilarity::Euclidean => EuclideanDistance.distance(&query, &doc),
+            VectorSimilarity::Dot => DotProductDistance.distance(&query, &doc),
+        }
+    }
+}
+
 /// Computes a score from two bitmaps using hamming distance.
 #[derive(Debug, Copy, Clone)]
 pub struct HammingDistance;

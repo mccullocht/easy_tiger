@@ -7,6 +7,7 @@ use std::{
     borrow::Cow,
     collections::{BinaryHeap, HashSet},
     io,
+    iter::FusedIterator,
     num::NonZero,
     sync::Arc,
 };
@@ -23,7 +24,7 @@ use wt_mdb::{
 
 use crate::{
     bulk::{self, BulkLoadBuilder},
-    distance::F32VectorDistance,
+    distance::{F32VectorDistance, QuantizedVectorDistance},
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
     kmeans::{self, iterative_balanced_kmeans},
@@ -460,10 +461,21 @@ impl SessionIndexWriter {
     }
 }
 
-pub struct PostingIter<'a>(IndexCursorGuard<'a>);
+struct PostingIter<'a, 'b, 'c, 'd> {
+    cursor: IndexCursorGuard<'a>,
+    seen: &'b mut HashSet<i64>,
+    query: &'c [u8],
+    distance_fn: &'d dyn QuantizedVectorDistance,
+}
 
-impl<'a> PostingIter<'a> {
-    fn new(reader: &'a SessionIndexReader, centroid_id: u32) -> Result<Self> {
+impl<'a, 'b, 'c, 'd> PostingIter<'a, 'b, 'c, 'd> {
+    fn new(
+        reader: &'a SessionIndexReader,
+        centroid_id: u32,
+        seen: &'b mut HashSet<i64>,
+        query: &'c [u8],
+        distance_fn: &'d dyn QuantizedVectorDistance,
+    ) -> Result<Self> {
         // I _think_ wt copies bounds so we should be cool with temporaries here.
         let mut cursor = reader
             .session()
@@ -474,28 +486,38 @@ impl<'a> PostingIter<'a> {
                     .into_key()
                     .as_slice(),
         )?;
-        Ok(Self(cursor))
+        Ok(Self {
+            cursor,
+            seen,
+            query,
+            distance_fn,
+        })
     }
 }
 
-impl<'a> Iterator for PostingIter<'a> {
-    type Item = Result<(i64, Cow<'a, [u8]>)>;
+impl<'a, 'b, 'c, 'd> Iterator for PostingIter<'a, 'b, 'c, 'd> {
+    type Item = Result<Neighbor>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // NB: this will copy the vector -- it's pessimistic but will be correct in the face of a
-        // rollback that invalidates cursors. To avoid this we either need to inject dupe checks and
-        // scoring into this iterator or fix the WT bindings to behave better in this case.
-        let record_or = self.0.next()?;
-        Some(record_or.map(|r| {
-            let (raw_posting_key, vector) = r.into_inner();
+        while let Some(record_result) = unsafe { self.cursor.next_unsafe() } {
+            let (raw_key, vector) = match record_result {
+                Ok(r) => r.into_inner(),
+                Err(e) => return Some(Err(e)),
+            };
             let record_id = PostingKey::from(
-                <[u8; 12]>::try_from(raw_posting_key.as_ref()).expect("12-byte posting key"),
+                <[u8; 12]>::try_from(raw_key.as_ref()).expect("12-byte posting key"),
             )
             .record_id;
-            (record_id, vector)
-        }))
+            if self.seen.insert(record_id) {
+                let dist = self.distance_fn.distance(&self.query, &vector);
+                return Some(Ok(Neighbor::new(record_id, dist)));
+            }
+        }
+        None
     }
 }
+
+impl FusedIterator for PostingIter<'_, '_, '_, '_> {}
 
 pub struct SessionIndexReader {
     index: Arc<TableIndex>,
@@ -517,10 +539,6 @@ impl SessionIndexReader {
 
     pub fn index(&self) -> &TableIndex {
         self.index.as_ref()
-    }
-
-    pub fn posting_iter(&self, centroid_id: u32) -> Result<PostingIter<'_>> {
-        PostingIter::new(self, centroid_id)
     }
 }
 
@@ -572,33 +590,31 @@ impl SpannSearcher {
             .config()
             .quantizer
             .new_distance_function(&reader.index().head_config().config().similarity);
-        // XXX I don't really need a heap, try https://quickwit.io/blog/top-k-complexity
+        // TODO: replace the heap, try https://quickwit.io/blog/top-k-complexity
         let mut results = BinaryHeap::with_capacity(self.params.limit.get());
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
-            // XXX this unnecessarily pulls cursors in and out of the freelist when I could use the
-            // same one over and over again. It could also accept all of the centroid ids and yield
-            // a single stream which would be nice.
-            for posting in reader.posting_iter(centroid_id)? {
-                if let Ok((record_id, doc_vector)) = posting {
-                    if !self.seen.insert(record_id) {
-                        continue;
-                    }
-
-                    let result = Neighbor::new(
-                        record_id,
-                        distance_fn.distance(&quantized_query, &doc_vector),
-                    );
-                    if results.len() < self.params.limit.get() {
-                        results.push(result);
-                    } else {
-                        let mut top = results.peek_mut().expect("pq full");
-                        if result < *top {
-                            *top = result;
+            // TODO: consider structuring as a single iterator over centroids to avoid cursor freelisting.
+            // TODO: if I can't read a posting list then skip and warn rather than exiting early.
+            for candidate_result in PostingIter::new(
+                reader,
+                centroid_id,
+                &mut self.seen,
+                &quantized_query,
+                distance_fn.as_ref(),
+            )? {
+                match candidate_result {
+                    Ok(candidate) => {
+                        if results.len() < self.params.limit.get() {
+                            results.push(candidate);
+                        } else {
+                            let mut top = results.peek_mut().expect("pq full");
+                            if candidate < *top {
+                                *top = candidate;
+                            }
                         }
                     }
-                } else {
-                    warn!("Failed to read posting in centroid {}", centroid_id);
+                    Err(e) => warn!("Failed to read posting in centroid {}: {}", centroid_id, e),
                 }
             }
         }

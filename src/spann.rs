@@ -9,12 +9,10 @@ use std::{
     io,
     iter::FusedIterator,
     num::NonZero,
-    ops::RangeInclusive,
     sync::Arc,
 };
 
 use bytemuck::try_cast_slice;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use wt_mdb::{
@@ -24,11 +22,9 @@ use wt_mdb::{
 };
 
 use crate::{
-    bulk::{self, BulkLoadBuilder},
     distance::{F32VectorDistance, QuantizedVectorDistance},
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
-    kmeans::{self, iterative_balanced_kmeans},
     quantization::{Quantizer, VectorQuantizer},
     search::GraphSearcher,
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
@@ -278,7 +274,7 @@ impl SessionIndexWriter {
         }
 
         let mut raw_vector_cursor = self.raw_vector_cursor()?;
-        let vector = self.distance_fn.normalize_vector(vector.into());
+        let vector = self.distance_fn.normalize_vector(vector);
         // TODO: factor out handling of high fidelity vector tables.
         raw_vector_cursor.set(&Record::new(
             record_id,
@@ -447,7 +443,7 @@ impl<'a, 'b, 'c, 'd> PostingIter<'a, 'b, 'c, 'd> {
     }
 }
 
-impl<'a, 'b, 'c, 'd> Iterator for PostingIter<'a, 'b, 'c, 'd> {
+impl Iterator for PostingIter<'_, '_, '_, '_> {
     type Item = Result<Neighbor>;
 
     fn next(&mut self) -> Option<Self::Item> {

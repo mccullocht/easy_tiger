@@ -8,7 +8,6 @@ use easy_tiger::input::{DerefVectorStore, VectorStore};
 use easy_tiger::kmeans::{Params, iterative_balanced_kmeans};
 use histogram::Histogram;
 use memmap2::Mmap;
-use rand::thread_rng;
 
 #[derive(Parser)]
 #[command(version, about = "Tool for instrumenting vector partitioning techniques", long_about = None)]
@@ -66,7 +65,7 @@ fn main() -> io::Result<()> {
         32,
         cli.batch_size.get(),
         &kmeans_params,
-        &mut thread_rng(),
+        &mut rand::rng(),
         |_| {},
     );
 

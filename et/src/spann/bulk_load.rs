@@ -10,7 +10,7 @@ use easy_tiger::{
     quantization::VectorQuantizer,
     spann::{IndexConfig, SessionIndexWriter, TableIndex},
 };
-use rand::thread_rng;
+use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
 use wt_mdb::{options::DropOptionsBuilder, Connection};
@@ -92,6 +92,11 @@ pub struct BulkLoadArgs {
     #[arg(short, long)]
     limit: Option<usize>,
 
+    /// Random seed used for clustering computations.
+    /// Use a fixed value for repeatability.
+    #[arg(long, default_value_t = 0x7774_7370414E4E)]
+    seed: u64,
+
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value_t = false)]
     drop_tables: bool,
@@ -144,6 +149,7 @@ pub fn bulk_load(
         head_config,
         spann_config,
     )?);
+    let mut rng = Xoshiro128PlusPlus::seed_from_u64(args.seed);
 
     let limit = args.limit.unwrap_or(f32_vectors.len());
     let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).into_iter().collect());
@@ -159,7 +165,7 @@ pub fn bulk_load(
                 epsilon: 0.01,
                 ..Params::default()
             },
-            &mut thread_rng(),
+            &mut rng,
             |x| progress.inc(x),
         );
         centroids

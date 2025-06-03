@@ -70,14 +70,6 @@ pub struct BulkLoadArgs {
     #[arg(long, default_value_t = 192)]
     head_max_centroid_len: usize,
 
-    /// Maximum number of replica centroids to assign each vector to.
-    #[arg(long)]
-    replica_count: NonZero<usize>,
-
-    /// Quantizer to use for vectors written to centroid posting lists.
-    #[arg(long)]
-    posting_quantizer: VectorQuantizer,
-
     /// Number of edge candidates when searching head table for centroid ids during insertion.
     /// This should be at least as many as --replica-count
     #[arg(long)]
@@ -87,6 +79,18 @@ pub struct BulkLoadArgs {
     /// If unset, re-ranks all edge candidates.
     #[arg(long)]
     head_rerank_edges: Option<usize>,
+
+    /// If set replace each head centroid with a representative mediod.
+    #[arg(long, default_value_t = false)]
+    head_use_mediods: bool,
+
+    /// Maximum number of replica centroids to assign each vector to.
+    #[arg(long)]
+    replica_count: NonZero<usize>,
+
+    /// Quantizer to use for vectors written to centroid posting lists.
+    #[arg(long)]
+    posting_quantizer: VectorQuantizer,
 
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
@@ -155,7 +159,7 @@ pub fn bulk_load(
     let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).into_iter().collect());
     let centroids = {
         let progress = progress_spinner("clustering head");
-        let (centroids, _) = iterative_balanced_kmeans(
+        let (mut centroids, assignments) = iterative_balanced_kmeans(
             &index_vectors,
             args.head_min_centroid_len..=args.head_max_centroid_len,
             32,
@@ -168,6 +172,22 @@ pub fn bulk_load(
             &mut rng,
             |x| progress.inc(x),
         );
+
+        if args.head_use_mediods {
+            let mediods = assignments.into_iter().enumerate().fold(
+                vec![(usize::MAX, f64::MAX); centroids.len()],
+                |mut m, (i, (c, d))| {
+                    if d < m[c].1 {
+                        m[c] = (i, d);
+                    }
+                    m
+                },
+            );
+            for (i, c) in mediods.into_iter().map(|(c, _)| c).enumerate() {
+                centroids[i].copy_from_slice(&index_vectors[c]);
+            }
+        }
+
         centroids
     };
     let centroids_len = centroids.len();

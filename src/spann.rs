@@ -261,7 +261,7 @@ impl SessionIndexWriter {
         self.head_reader.session()
     }
 
-    pub fn upsert(&mut self, record_id: i64, vector: &[f32]) -> Result<usize> {
+    pub fn upsert(&mut self, record_id: i64, vector: &[f32]) -> Result<Vec<u32>> {
         let vector = self.distance_fn.normalize_vector(vector.into());
         let candidates = self
             .head_searcher
@@ -297,8 +297,7 @@ impl SessionIndexWriter {
         // TODO: try centering vector on each centroid before quantizing. This would likely reduce
         // error but would also require quantizing the vector for each centroid during search and
         // would complicate de-duplication (would have to accept best score).
-        let num_centroids = centroid_ids.len();
-        for centroid_id in centroid_ids {
+        for centroid_id in centroid_ids.iter().copied() {
             let key: [u8; 12] = PostingKey {
                 centroid_id,
                 record_id,
@@ -307,7 +306,7 @@ impl SessionIndexWriter {
             posting_cursor.set(&IndexRecordView::new(&key, &quantized))?;
         }
 
-        Ok(num_centroids)
+        Ok(centroid_ids)
     }
 
     pub fn delete(&self, record_id: i64) -> Result<()> {

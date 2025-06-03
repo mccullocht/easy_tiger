@@ -169,11 +169,13 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
         query_indices
             .into_iter()
             .progress_with(progress.clone())
-            .map(|index| searcher.query(index, &query_vectors[index], recall_computer))
+            .map(|index| {
+                searcher.query(index, &query_vectors[index], record_limit, recall_computer)
+            })
             .reduce(|a, b| match (a, b) {
                 (Ok(a), Ok(b)) => Ok(a + b),
                 (Err(e), _) => Err(e),
-                (_, Err(e)) => Err(3),
+                (_, Err(e)) => Err(e),
             })
             .expect("at least one query")?
     };

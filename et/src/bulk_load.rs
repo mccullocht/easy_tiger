@@ -125,7 +125,7 @@ pub fn bulk_load(
     );
 
     for phase in builder.phases() {
-        let progress = progress_bar(builder.len(), Some(phase.display_name()));
+        let progress = progress_bar(builder.len(), phase.display_name());
         builder.execute_phase(phase, |n| progress.inc(n))?;
     }
     println!("{:?}", builder.graph_stats().unwrap());

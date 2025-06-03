@@ -2,12 +2,13 @@ use std::{cell::RefCell, fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
+    bulk::{self, BulkLoadBuilder},
     distance::VectorSimilarity,
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
-    kmeans::Params,
+    kmeans::{iterative_balanced_kmeans, Params},
     quantization::VectorQuantizer,
-    spann::{build_head, IndexConfig, SessionIndexWriter, TableIndex},
+    spann::{IndexConfig, SessionIndexWriter, TableIndex},
 };
 use rand::thread_rng;
 use rayon::prelude::*;
@@ -146,33 +147,48 @@ pub fn bulk_load(
 
     let limit = args.limit.unwrap_or(f32_vectors.len());
     let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).into_iter().collect());
-    let centroids_len = {
-        let spinner = progress_spinner();
-        build_head(
+    let centroids = {
+        let progress = progress_spinner("clustering head");
+        let (centroids, _) = iterative_balanced_kmeans(
             &index_vectors,
             args.head_min_centroid_len..=args.head_max_centroid_len,
-            Params {
+            32,
+            1000, // batch size
+            &Params {
                 iters: 100,
                 epsilon: 0.01,
                 ..Params::default()
             },
-            connection.clone(),
-            index.head_config(),
-            |i| spinner.inc(i),
             &mut thread_rng(),
-        )?
+            |x| progress.inc(x),
+        );
+        centroids
     };
-    println!(
-        "Head contains {} centroids ({:4.2}%)",
-        centroids_len,
-        (centroids_len as f64 / index_vectors.len() as f64) * 100.0
-    );
+    let centroids_len = centroids.len();
 
-    // TODO: consider writing a dedicated bulk loader. The bulk loader should at least do the raw vectors
-    // to avoid checkpointing.
+    {
+        let mut head_loader = BulkLoadBuilder::new(
+            connection.clone(),
+            Arc::unwrap_or_clone(index.head_config().clone()),
+            centroids,
+            bulk::Options {
+                memory_quantized_vectors: false,
+                wt_vector_store: true,
+                cluster_ordered_insert: false,
+            },
+            centroids_len,
+        );
+        for phase in head_loader.phases() {
+            let progress = progress_bar(centroids_len, format!("head {}", phase.display_name()));
+            head_loader.execute_phase(phase, |x| progress.inc(x))?;
+        }
+    }
+
+    // TODO: consider writing a dedicated bulk loader. The bulk loader should at least do the raw
+    // vectors to avoid writing to the checkpoint.
     let inserted = {
         let tl_writer: ThreadLocal<RefCell<SessionIndexWriter>> = ThreadLocal::new();
-        let progress = progress_bar(limit, "postings index".into());
+        let progress = progress_bar(limit, "postings index");
         (0..index_vectors.len())
             .into_par_iter()
             .map(|i| {
@@ -194,6 +210,11 @@ pub fn bulk_load(
             .try_reduce(|| 0usize, |a, b| Ok(a + b))?
     };
 
+    println!(
+        "Head contains {} centroids ({:4.2}%)",
+        centroids_len,
+        (centroids_len as f64 / index_vectors.len() as f64) * 100.0
+    );
     println!(
         "Inserted {} posting entries (avg {:4.2})",
         inserted,

@@ -35,42 +35,6 @@ use crate::{
     Neighbor,
 };
 
-/// Build the head of the SPANN index.
-///
-/// Select a set of centroids where each centroid maps to a number of vectors in centroid_size_bounds.
-/// These centroids are then built into a graph-based index that will be used to identify postings to
-/// search.
-pub fn build_head<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + Sync + Copy>(
-    dataset: &V,
-    centroid_size_bounds: RangeInclusive<usize>,
-    kmeans_params: kmeans::Params,
-    connection: Arc<Connection>,
-    index: &TableGraphVectorIndex,
-    progress: P,
-    rng: &mut impl Rng,
-) -> Result<usize> {
-    // TODO: consider cluster ordering the centroids to make graph search faster.
-    let (centroids, _) =
-        iterative_balanced_kmeans(dataset, centroid_size_bounds, 32, 1000, &kmeans_params, rng);
-    let centroids_len = centroids.len();
-    let mut loader = BulkLoadBuilder::new(
-        connection,
-        index.clone(),
-        centroids,
-        bulk::Options {
-            memory_quantized_vectors: false,
-            wt_vector_store: true,
-            cluster_ordered_insert: false,
-        },
-        centroids_len,
-    );
-    for phase in loader.phases() {
-        // XXX gotta find a way to jam progress in here.
-        loader.execute_phase(phase, progress)?;
-    }
-    Ok(centroids_len)
-}
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct IndexConfig {
     pub replica_count: usize,

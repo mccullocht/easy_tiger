@@ -1,32 +1,42 @@
+use std::borrow::Cow;
+
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 
-pub(crate) fn progress_bar(len: usize, message: Option<&'static str>) -> ProgressBar {
-    if let Some(message) = message {
-        ProgressBar::new(len as u64)
-            .with_style(
-                ProgressStyle::default_bar()
-                    .template(
-                        "{msg} {wide_bar} {pos}/{len} ETA: {eta_precise} Elapsed: {elapsed_precise}",
-                    )
-                    .unwrap(),
-            )
-            .with_message(message)
+pub(crate) fn progress_bar(len: usize, message: impl Into<Cow<'static, str>>) -> ProgressBar {
+    let message = message.into();
+    let fmt = if !message.is_empty() {
+        "{msg} {wide_bar} {pos:>8}/{len:>8} ETA: {eta_precise} Elapsed: {elapsed_precise}"
     } else {
-        ProgressBar::new(len as u64).with_style(
-            ProgressStyle::default_bar()
-                .template("{wide_bar} {pos}/{len} ETA: {eta_precise} Elapsed: {elapsed_precise}")
-                .unwrap(),
-        )
-    }
-    .with_finish(ProgressFinish::AndLeave)
+        "{wide_bar} {pos:>8}/{len:>8} ETA: {eta_precise} Elapsed: {elapsed_precise}"
+    };
+    ProgressBar::new(len as u64)
+        .with_style(ProgressStyle::default_bar().template(fmt).unwrap())
+        .with_finish(ProgressFinish::AndLeave)
+        .with_message(message)
 }
 
-pub(crate) fn progress_spinner() -> ProgressBar {
+pub(crate) fn progress_spinner(message: impl Into<Cow<'static, str>>) -> ProgressBar {
+    let message = message.into();
+    let fmt = if !message.is_empty() {
+        "{msg} {wide_bar} {pos:>8} Elapsed: {elapsed_precise}"
+    } else {
+        "{wide_bar} {pos:>8} Elapsed: {elapsed_precise}"
+    };
     ProgressBar::new_spinner()
         .with_style(
             ProgressStyle::default_spinner()
-                .template("{wide_bar} {pos} Elapsed: {elapsed_precise}")
+                .tick_strings(&[
+                    "▹▹▹▹▹",
+                    "▸▹▹▹▹",
+                    "▹▸▹▹▹",
+                    "▹▹▸▹▹",
+                    "▹▹▹▸▹",
+                    "▹▹▹▹▸",
+                    "▪▪▪▪▪",
+                ])
+                .template(fmt)
                 .unwrap(),
         )
         .with_finish(ProgressFinish::AndLeave)
+        .with_message(message)
 }

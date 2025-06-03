@@ -161,7 +161,7 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
         .cycle()
         .take(iters * limit)
         .collect::<Vec<_>>();
-    let progress = progress_bar(query_indices.len(), Some(name));
+    let progress = progress_bar(query_indices.len(), name);
     #[cfg(feature = "serial_search")]
     let stats: AggregateSearchStats = {
         use indicatif::ProgressIterator;

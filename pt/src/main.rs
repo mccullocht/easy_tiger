@@ -67,6 +67,7 @@ fn main() -> io::Result<()> {
         cli.batch_size.get(),
         &kmeans_params,
         &mut thread_rng(),
+        |_| {},
     );
 
     let centroid_counts =

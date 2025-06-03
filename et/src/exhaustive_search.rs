@@ -57,7 +57,7 @@ pub fn exhaustive_search(
     limit = limit.min(args.record_limit.unwrap_or(usize::MAX));
     cursor.set_bounds(0..)?;
     let mut index_vector = vec![0.0f32; index.config().dimensions.get()];
-    let progress = progress_bar(limit, None);
+    let progress = progress_bar(limit, "");
     for record_result in cursor.take(limit) {
         let record = record_result?;
         for (i, o) in record

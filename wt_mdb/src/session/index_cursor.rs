@@ -155,8 +155,8 @@ impl<'a> IndexCursor<'a> {
             Bound::Excluded(key) => (Some(*key), c"bound=lower,action=set,inclusive=false"),
             Bound::Unbounded => (None, c"bound=lower,action=clear"),
         };
-        if let Some(k) = start_key {
-            unsafe { wt_call!(void self.inner.ptr, set_key, k) }?;
+        if let Some(k) = start_key.map(Item::from) {
+            unsafe { wt_call!(void self.inner.ptr, set_key, &k) }?;
         }
         unsafe { wt_call!(self.inner.ptr, bound, start_config_str.as_ptr())? };
         let (end_key, end_config_str) = match bounds.end_bound() {
@@ -164,8 +164,8 @@ impl<'a> IndexCursor<'a> {
             Bound::Excluded(key) => (Some(*key), c"bound=upper,action=set,inclusive=false"),
             Bound::Unbounded => (None, c"bound=upper,action=clear"),
         };
-        if let Some(k) = end_key {
-            unsafe { wt_call!(void self.inner.ptr, set_key, k) }?;
+        if let Some(k) = end_key.map(Item::from) {
+            unsafe { wt_call!(void self.inner.ptr, set_key, &k) }?;
         }
         unsafe { wt_call!(self.inner.ptr, bound, end_config_str.as_ptr()) }
     }

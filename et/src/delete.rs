@@ -43,7 +43,7 @@ fn delete_all(
     mut graph_cursor: RecordCursor<'_>,
     mut nav_cursor: RecordCursor<'_>,
 ) -> wt_mdb::Result<()> {
-    for record in id_cursor.progress_with(progress_spinner()) {
+    for record in id_cursor.progress_with(progress_spinner("deleting vectors")) {
         let key = record?.key();
         graph_cursor.remove(key)?;
         nav_cursor.remove(key)?;

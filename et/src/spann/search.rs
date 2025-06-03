@@ -1,3 +1,5 @@
+// TODO: factor out common components with vamana graph search.
+
 use std::{
     fs::File,
     io::{self},
@@ -12,8 +14,7 @@ use clap::Args;
 use easy_tiger::{
     graph::GraphSearchParams,
     input::{DerefVectorStore, VectorStore},
-    search::{GraphSearchStats, GraphSearcher},
-    wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
+    spann::{SessionIndexReader, SpannSearchParams, SpannSearcher, TableIndex},
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;
@@ -25,19 +26,26 @@ pub struct SearchArgs {
     /// Path to numpy formatted little-endian float vectors.
     #[arg(short, long)]
     query_vectors: PathBuf,
-    /// Number candidates in the search list.
-    #[arg(short, long)]
-    candidates: NonZero<usize>,
-    /// Number of results to re-rank at the end of each search.
-    /// If unset, use the same figure as candidates.
-    #[arg(short, long)]
-    rerank_budget: Option<usize>,
+    /// Number head (centroid) candidates in the search list.
+    #[arg(long)]
+    head_candidates: NonZero<usize>,
+    /// Number of head (centroid) results to re-rank at the end of each search.
+    /// If unset, use the same figure as --head-candidates.
+    #[arg(long)]
+    head_rerank_budget: Option<usize>,
+    /// Number of centroids to search postings of. Must be >= than --head-rerank-budget
+    #[arg(long)]
+    posting_centroids: NonZero<usize>,
+    /// Number of posting list candidates to keep, effectively a limit.
+    #[arg(long)]
+    posting_candidates: NonZero<usize>,
+    /// Number of posting results to keep.
+    /// If unset, use the same figure as --posting-candidates
+    #[arg(long)]
+    posting_rerank_budget: Option<usize>,
     /// Maximum number of queries to run. If unset, run all queries in the vector file.
     #[arg(short, long)]
     limit: Option<usize>,
-    /// Maximum record number to consider as a valid result. Used for filtering testing.
-    #[arg(long)]
-    record_limit: Option<usize>,
 
     /// Path buf to numpy u32 formatted neighbors file.
     /// This should include one row of length neighbors_len for each vector in query_vectors.
@@ -57,19 +65,27 @@ pub struct SearchArgs {
 }
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
-    let index = Arc::new(TableGraphVectorIndex::from_db(&connection, index_name)?);
+    let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
     let query_vectors = easy_tiger::input::DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
-        index.config().dimensions,
+        index.head_config().config().dimensions,
     )?;
     let limit = std::cmp::min(
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
     );
-    let record_limit = args.record_limit.map(|l| l as i64).unwrap_or(i64::MAX);
-    let search_params = GraphSearchParams {
-        beam_width: args.candidates,
-        num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
+    let search_params = SpannSearchParams {
+        head_params: GraphSearchParams {
+            beam_width: args.head_candidates,
+            num_rerank: args
+                .head_rerank_budget
+                .unwrap_or(args.head_candidates.get()),
+        },
+        num_centroids: args.posting_centroids,
+        limit: args.posting_candidates,
+        num_rerank: args
+            .posting_rerank_budget
+            .unwrap_or(args.posting_candidates.get()),
     };
     let recall_computer = if let Some((neighbors, recall_k)) = args.neighbors.zip(args.recall_k) {
         let neighbors = DerefVectorStore::<u32, _>::new(
@@ -96,7 +112,6 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             "warmup",
             args.warmup_iters,
             limit,
-            record_limit,
             &query_vectors,
             &index,
             &connection,
@@ -110,7 +125,6 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             "test",
             args.test_iters,
             limit,
-            record_limit,
             &query_vectors,
             &index,
             &connection,
@@ -119,22 +133,16 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         )?;
 
         println!(
-            "queries {} avg duration {:0.6}s max duration {:0.6}s  avg candidates {:.2} avg visited {:.2}",
+            "queries {} avg duration {:0.6}s max duration {:0.6}s",
             stats.count,
             stats.total_duration.as_secs_f64() / stats.count as f64,
             stats.max_duration.as_secs_f64(),
-            stats.total_graph_stats.candidates as f64 / stats.count as f64,
-            stats.total_graph_stats.visited as f64 / stats.count as f64,
         );
 
         let wt_stats = WiredTigerConnectionStats::try_from(&connection)?;
         println!(
-            "WT cache hit rate {:5.2}% ({} reads, {} lookups); {:15} bytes read",
-            (wt_stats.search_calls - wt_stats.read_ios) as f64 * 100.0
-                / wt_stats.search_calls as f64,
-            wt_stats.read_ios,
-            wt_stats.search_calls,
-            wt_stats.read_bytes,
+            "WT {:15} bytes read on {:12} lookups",
+            wt_stats.read_bytes, wt_stats.read_ios
         );
 
         if let Some((computer, mean_recall)) = recall_computer.zip(stats.mean_recall()) {
@@ -149,11 +157,10 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
     name: &'static str,
     iters: usize,
     limit: usize,
-    record_limit: i64,
     query_vectors: &DerefVectorStore<f32, Q>,
-    index: &Arc<TableGraphVectorIndex>,
+    index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
-    search_params: GraphSearchParams,
+    search_params: SpannSearchParams,
     recall_computer: Option<&RecallComputer<DerefVectorStore<u32, N>>>,
 ) -> io::Result<AggregateSearchStats> {
     let query_indices = (0..limit)
@@ -172,8 +179,8 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
             .map(|index| searcher.query(index, &query_vectors[index], recall_computer))
             .reduce(|a, b| match (a, b) {
                 (Ok(a), Ok(b)) => Ok(a + b),
-                (Err(e), _) => Err(e),
-                (_, Err(e)) => Err(3),
+                (Ok(_), Err(b)) => Err(b),
+                (Err(a), _) => Err(a),
             })
             .expect("at least one query")?
     };
@@ -185,8 +192,7 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
             .map_init(
                 || SearcherState::new(&index, &connection, search_params).unwrap(),
                 |searcher, index| {
-                    let stats =
-                        searcher.query(index, &query_vectors[index], record_limit, recall_computer);
+                    let stats = searcher.query(index, &query_vectors[index], recall_computer);
                     progress.inc(1);
                     stats
                 },
@@ -199,19 +205,19 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
 }
 
 struct SearcherState {
-    reader: SessionGraphVectorIndexReader,
-    searcher: GraphSearcher,
+    reader: SessionIndexReader,
+    searcher: SpannSearcher,
 }
 
 impl SearcherState {
     fn new(
-        index: &Arc<TableGraphVectorIndex>,
+        index: &Arc<TableIndex>,
         connection: &Arc<Connection>,
-        search_params: GraphSearchParams,
+        search_params: SpannSearchParams,
     ) -> io::Result<Self> {
         Ok(Self {
-            reader: SessionGraphVectorIndexReader::new(index.clone(), connection.open_session()?),
-            searcher: GraphSearcher::new(search_params),
+            reader: SessionIndexReader::new(&index, connection.open_session()?),
+            searcher: SpannSearcher::new(search_params),
         })
     }
 
@@ -219,19 +225,15 @@ impl SearcherState {
         &mut self,
         index: usize,
         query: &[f32],
-        record_limit: i64,
         recall_computer: Option<&RecallComputer<N>>,
     ) -> io::Result<AggregateSearchStats> {
         self.reader.session().begin_transaction(None)?;
         let start = Instant::now();
-        let results =
-            self.searcher
-                .search_with_filter(query, |i| i < record_limit, &mut self.reader)?;
+        let results = self.searcher.search(query, &mut self.reader)?;
         let duration = Instant::now() - start;
         self.reader.session().rollback_transaction(None)?;
         Ok(AggregateSearchStats::new(
             duration,
-            self.searcher.stats(),
             recall_computer.map(|r| r.compute_recall(index, &results)),
         ))
     }
@@ -242,17 +244,15 @@ struct AggregateSearchStats {
     count: usize,
     total_duration: Duration,
     max_duration: Duration,
-    total_graph_stats: GraphSearchStats,
     sum_recall: Option<f64>,
 }
 
 impl AggregateSearchStats {
-    fn new(duration: Duration, graph_stats: GraphSearchStats, recall: Option<f64>) -> Self {
+    fn new(duration: Duration, recall: Option<f64>) -> Self {
         Self {
             count: 1,
             total_duration: duration,
             max_duration: duration,
-            total_graph_stats: graph_stats,
             sum_recall: recall,
         }
     }
@@ -270,7 +270,6 @@ impl Add<AggregateSearchStats> for AggregateSearchStats {
             count: self.count + rhs.count,
             total_duration: self.total_duration + rhs.total_duration,
             max_duration: std::cmp::max(self.max_duration, rhs.max_duration),
-            total_graph_stats: self.total_graph_stats + rhs.total_graph_stats,
             sum_recall: self
                 .sum_recall
                 .zip(rhs.sum_recall)

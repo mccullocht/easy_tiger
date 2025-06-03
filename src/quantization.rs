@@ -17,7 +17,7 @@ use crate::distance::{
 /// querying. In simpler schemes these methods are identical and quantization is
 /// symmetric; some implementations are asymmetric and use larger vectors for
 /// querying to produce higher fidelity scores.
-pub trait Quantizer {
+pub trait Quantizer: Send + Sync {
     /// Quantize this vector for querying an index.
     fn for_query(&self, vector: &[f32]) -> Vec<u8>;
 

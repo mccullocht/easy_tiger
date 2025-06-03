@@ -8,8 +8,13 @@ clap = { version = "4.5.20", features = ["derive"] }
 easy_tiger = { path = "../" }
 indicatif = "0.17.8"
 memmap2 = { version = "0.9.5", features = ["stable_deref_trait"] }
+rand = "0.8.5"
 rayon = "1.10.0"
 stable_deref_trait = "1.2.0"
+thread_local = "1.1.8"
 tracing-subscriber = "0.3.19"
 wt_mdb = { path = "../wt_mdb" }
 wt_sys = { path = "../wt_sys" }
+
+[features]
+serial_search = []

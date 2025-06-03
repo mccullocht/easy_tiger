@@ -66,6 +66,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     batch_size: usize,
     params: &Params,
     rng: &mut impl Rng,
+    progress: impl Fn(u64),
 ) -> (VecVectorStore<f32>, Vec<(usize, f64)>) {
     assert!(
         !centroid_size_bounds.is_empty()
@@ -126,6 +127,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                 assignments[i].0 = new_centroids.len();
             }
             new_centroids.push(&centroids[*c]);
+            progress(1);
         }
 
         // For centroids that are being split, re-partition them and discard any smol clusters,
@@ -163,6 +165,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                     (subset_centroids, subset_assignments)
                 }
             };
+            progress(1);
             let mut subset_centroids_to_vectors = subset_assignments.iter().enumerate().fold(
                 vec![vec![]; subset_centroids.len()],
                 |mut c2v, (i, (c, d))| {
@@ -192,6 +195,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                     assignments[*i] = (centroid_id, *d);
                 }
                 new_centroids.push(c);
+                progress(1);
             }
         }
 

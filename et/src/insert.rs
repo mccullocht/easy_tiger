@@ -32,7 +32,7 @@ fn insert_all<'a>(
 ) -> Result<Vec<Range<i64>>> {
     let mut keys: Vec<Range<i64>> = vec![];
     // I could probably write this as a fold but it seems annoying.
-    let progress = progress_bar(vectors.len(), None);
+    let progress = progress_bar(vectors.len(), "");
     for vector in vectors.progress_with(progress) {
         mutator.session().begin_transaction(None)?;
         let key = mutator.insert(vector)?;

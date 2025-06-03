@@ -14,7 +14,7 @@ use clap::Args;
 use easy_tiger::{
     graph::GraphSearchParams,
     input::{DerefVectorStore, VectorStore},
-    spann::{SessionIndexReader, SpannSearchParams, SpannSearcher, TableIndex},
+    spann::{SessionIndexReader, SpannSearchParams, SpannSearchStats, SpannSearcher, TableIndex},
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;
@@ -138,6 +138,17 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             stats.total_duration.as_secs_f64() / stats.count as f64,
             stats.max_duration.as_secs_f64(),
         );
+        println!(
+            "head search avg candidates {:.2} avg visited {:2}",
+            stats.total_stats.head.candidates as f64 / stats.count as f64,
+            stats.total_stats.head.visited as f64 / stats.count as f64
+        );
+        println!(
+            "tail search avg postings {:.2} avg read {:.2} avg scored {:.2}",
+            stats.total_stats.postings_read as f64 / stats.count as f64,
+            stats.total_stats.posting_entries_read as f64 / stats.count as f64,
+            stats.total_stats.posting_entries_scored as f64 / stats.count as f64
+        );
 
         let wt_stats = WiredTigerConnectionStats::try_from(&connection)?;
         println!(
@@ -234,6 +245,7 @@ impl SearcherState {
         self.reader.session().rollback_transaction(None)?;
         Ok(AggregateSearchStats::new(
             duration,
+            self.searcher.stats(),
             recall_computer.map(|r| r.compute_recall(index, &results)),
         ))
     }
@@ -244,15 +256,17 @@ struct AggregateSearchStats {
     count: usize,
     total_duration: Duration,
     max_duration: Duration,
+    total_stats: SpannSearchStats,
     sum_recall: Option<f64>,
 }
 
 impl AggregateSearchStats {
-    fn new(duration: Duration, recall: Option<f64>) -> Self {
+    fn new(duration: Duration, total_stats: SpannSearchStats, recall: Option<f64>) -> Self {
         Self {
             count: 1,
             total_duration: duration,
             max_duration: duration,
+            total_stats,
             sum_recall: recall,
         }
     }
@@ -270,6 +284,7 @@ impl Add<AggregateSearchStats> for AggregateSearchStats {
             count: self.count + rhs.count,
             total_duration: self.total_duration + rhs.total_duration,
             max_duration: std::cmp::max(self.max_duration, rhs.max_duration),
+            total_stats: self.total_stats + rhs.total_stats,
             sum_recall: self
                 .sum_recall
                 .zip(rhs.sum_recall)

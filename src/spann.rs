@@ -9,6 +9,7 @@ use std::{
     io,
     iter::FusedIterator,
     num::NonZero,
+    ops::{Add, AddAssign},
     sync::Arc,
 };
 
@@ -26,7 +27,7 @@ use crate::{
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
     quantization::{Quantizer, VectorQuantizer},
-    search::GraphSearcher,
+    search::{GraphSearchStats, GraphSearcher},
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };
@@ -414,6 +415,8 @@ struct PostingIter<'a, 'b, 'c, 'd> {
     seen: &'b mut HashSet<i64>,
     query: &'c [u8],
     distance_fn: &'d dyn QuantizedVectorDistance,
+
+    read: usize,
 }
 
 impl<'a, 'b, 'c, 'd> PostingIter<'a, 'b, 'c, 'd> {
@@ -439,7 +442,12 @@ impl<'a, 'b, 'c, 'd> PostingIter<'a, 'b, 'c, 'd> {
             seen,
             query,
             distance_fn,
+            read: 0,
         })
+    }
+
+    fn read(&self) -> usize {
+        self.read
     }
 }
 
@@ -448,6 +456,7 @@ impl Iterator for PostingIter<'_, '_, '_, '_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(record_result) = unsafe { self.cursor.next_unsafe() } {
+            self.read += 1;
             let (raw_key, vector) = match record_result {
                 Ok(r) => r.into_inner(),
                 Err(e) => return Some(Err(e)),
@@ -490,7 +499,8 @@ impl SessionIndexReader {
     }
 }
 
-#[derive(Clone, Copy)]
+/// Parameters for SPANN searches.
+#[derive(Debug, Clone, Copy)]
 pub struct SpannSearchParams {
     /// Parameters for searching the head graph.
     /// NB: `head_params.beam_width` should be at least as large as `num_centroids`
@@ -503,10 +513,43 @@ pub struct SpannSearchParams {
     pub limit: NonZero<usize>,
 }
 
+/// Statistics for SPANN searches.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct SpannSearchStats {
+    /// Stats from the search of the head graph.
+    pub head: GraphSearchStats,
+    /// Number of posting lists read.
+    pub postings_read: usize,
+    /// Number of posting entries read.
+    pub posting_entries_read: usize,
+    /// Number of posting entries scored.
+    pub posting_entries_scored: usize,
+}
+
+impl Add for SpannSearchStats {
+    type Output = SpannSearchStats;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            head: self.head + rhs.head,
+            postings_read: self.postings_read + rhs.postings_read,
+            posting_entries_read: self.posting_entries_read + rhs.posting_entries_read,
+            posting_entries_scored: self.posting_entries_scored + rhs.posting_entries_scored,
+        }
+    }
+}
+
+impl AddAssign for SpannSearchStats {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
 pub struct SpannSearcher {
     params: SpannSearchParams,
     head_searcher: GraphSearcher,
     seen: HashSet<i64>,
+    stats: SpannSearchStats,
 }
 
 impl SpannSearcher {
@@ -515,7 +558,12 @@ impl SpannSearcher {
             params,
             head_searcher: GraphSearcher::new(params.head_params),
             seen: HashSet::new(),
+            stats: SpannSearchStats::default(),
         }
+    }
+
+    pub fn stats(&self) -> SpannSearchStats {
+        self.stats
     }
 
     pub fn search(
@@ -523,9 +571,13 @@ impl SpannSearcher {
         query: &[f32],
         reader: &mut SessionIndexReader,
     ) -> Result<Vec<Neighbor>> {
+        self.stats = SpannSearchStats::default();
+
         let mut centroids = self.head_searcher.search(query, &mut reader.head_reader)?;
+        self.stats.head = self.head_searcher.stats();
         // TODO: be clever about choosing centroids.
         centroids.truncate(self.params.num_centroids.get());
+        self.stats.postings_read = centroids.len();
         if centroids.is_empty() {
             return Ok(vec![]);
         }
@@ -544,13 +596,14 @@ impl SpannSearcher {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
             // TODO: consider structuring as a single iterator over centroids to avoid cursor freelisting.
             // TODO: if I can't read a posting list then skip and warn rather than exiting early.
-            for candidate_result in PostingIter::new(
+            let mut it = PostingIter::new(
                 reader,
                 centroid_id,
                 &mut self.seen,
                 &quantized_query,
                 distance_fn.as_ref(),
-            )? {
+            )?;
+            for candidate_result in &mut it {
                 match candidate_result {
                     Ok(candidate) => {
                         if results.len() < self.params.limit.get() {
@@ -561,10 +614,12 @@ impl SpannSearcher {
                                 *top = candidate;
                             }
                         }
+                        self.stats.posting_entries_scored += 1;
                     }
                     Err(e) => warn!("Failed to read posting in centroid {}: {}", centroid_id, e),
                 }
             }
+            self.stats.posting_entries_read += it.read();
         }
 
         if self.params.num_rerank == 0 {

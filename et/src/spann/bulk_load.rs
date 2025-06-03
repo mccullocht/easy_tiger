@@ -105,6 +105,10 @@ pub struct BulkLoadArgs {
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value_t = false)]
     drop_tables: bool,
+
+    /// If true, print additional information about tail assignments.
+    #[arg(long, default_value_t = false)]
+    print_tail_assignment_stats: bool,
 }
 
 pub fn bulk_load(
@@ -254,12 +258,16 @@ pub fn bulk_load(
         inserted,
         inserted as f64 / limit as f64
     );
-    println!("Primary assignments per centroid:");
-    CentroidAssignmentStats::print_histogram(assignment_stats.primary_assignment_histogram())?;
-    println!("Secondary assignments per centroid:");
-    CentroidAssignmentStats::print_histogram(assignment_stats.secondary_assignment_histogram())?;
-    println!("Total assignments per centroid:");
-    CentroidAssignmentStats::print_histogram(assignment_stats.total_assignment_histogram())?;
+    if args.print_tail_assignment_stats {
+        println!("Primary assignments per centroid:");
+        CentroidAssignmentStats::print_histogram(assignment_stats.primary_assignment_histogram())?;
+        println!("Secondary assignments per centroid:");
+        CentroidAssignmentStats::print_histogram(
+            assignment_stats.secondary_assignment_histogram(),
+        )?;
+        println!("Total assignments per centroid:");
+        CentroidAssignmentStats::print_histogram(assignment_stats.total_assignment_histogram())?;
+    }
 
     Ok(())
 }
@@ -334,7 +342,7 @@ impl CentroidAssignmentStats {
             .unwrap()
             .next_power_of_two()
             .ilog2() as u8;
-        let mut histogram = Histogram::new(2, max_value_power.max(2)).unwrap();
+        let mut histogram = Histogram::new(2, max_value_power.max(3)).unwrap();
         for c in centroid_sizes {
             histogram.add(c as u64, 1).unwrap();
         }

@@ -1,5 +1,6 @@
 //mod bulk_load;
 //mod search;
+mod init_index;
 
 use std::{io, sync::Arc};
 
@@ -7,6 +8,8 @@ use std::{io, sync::Arc};
 use clap::{Args, Subcommand};
 //use search::{search, SearchArgs};
 use wt_mdb::Connection;
+
+use init_index::{init_index, InitIndexArgs};
 
 #[derive(Args)]
 pub struct VamanaArgs {
@@ -16,6 +19,8 @@ pub struct VamanaArgs {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Initialize a new (empty) index.
+    InitIndex(InitIndexArgs),
     /*
     /// Bulk load a set of vectors into an empty SPANN-ish index.
     BulkLoad(BulkLoadArgs),
@@ -30,6 +35,7 @@ pub fn vamana_command(
     args: VamanaArgs,
 ) -> io::Result<()> {
     match args.command {
+        Command::InitIndex(args) => init_index(connection, index_name, args),
         //Command::BulkLoad(args) => bulk_load(connection, index_name, args),
         //Command::Search(args) => search(connection, index_name, args),
     }

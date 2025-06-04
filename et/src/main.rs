@@ -2,7 +2,6 @@ mod bulk_load;
 mod delete;
 mod drop_index;
 mod exhaustive_search;
-mod init_index;
 mod insert;
 mod lookup;
 mod recall;
@@ -22,7 +21,6 @@ use clap::{command, Parser, Subcommand};
 use delete::{delete, DeleteArgs};
 use drop_index::drop_index;
 use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
-use init_index::{init_index, InitIndexArgs};
 use insert::{insert, InsertArgs};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
@@ -56,8 +54,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new (empty) index.
-    InitIndex(InitIndexArgs),
     /// Bulk load a set of vectors into an index.
     /// Requires that the index be uninitialized.
     BulkLoad(BulkLoadArgs),
@@ -98,7 +94,6 @@ fn main() -> io::Result<()> {
         Commands::BulkLoad(args) => bulk_load(connection, args, &cli.index_name),
         Commands::Delete(args) => delete(connection, &cli.index_name, args),
         Commands::DropIndex => drop_index(connection, &cli.index_name),
-        Commands::InitIndex(args) => init_index(connection, &cli.index_name, args),
         Commands::Insert(args) => insert(connection, &cli.index_name, args),
         Commands::Lookup(args) => lookup(connection, &cli.index_name, args),
         Commands::Search(args) => search(connection, &cli.index_name, args),

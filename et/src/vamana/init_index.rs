@@ -9,7 +9,7 @@ use easy_tiger::{
 };
 use wt_mdb::Connection;
 
-use crate::drop_index::drop_index;
+use super::drop_index::drop_index;
 
 #[derive(Args)]
 pub struct InitIndexArgs {

@@ -9,6 +9,7 @@ mod recall;
 mod search;
 mod spann;
 mod ui;
+mod vamana;
 mod wt_stats;
 
 use std::{
@@ -26,6 +27,7 @@ use insert::{insert, InsertArgs};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
 use spann::{spann_command, SpannArgs};
+use vamana::{vamana_command, VamanaArgs};
 use wt_mdb::{
     options::{ConnectionOptionsBuilder, Statistics},
     Connection,
@@ -73,6 +75,8 @@ enum Commands {
     Delete(DeleteArgs),
     /// Perform SPANN index operations.
     Spann(SpannArgs),
+    /// Perform Vamana/DiskANN index operations.
+    Vamana(VamanaArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -102,6 +106,7 @@ fn main() -> io::Result<()> {
             exhaustive_search(connection.clone(), &cli.index_name, args)
         }
         Commands::Spann(args) => spann_command(connection, &cli.index_name, args),
+        Commands::Vamana(args) => vamana_command(connection, &cli.index_name, args),
     }?;
 
     session.checkpoint()?;

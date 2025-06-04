@@ -84,8 +84,8 @@ pub struct BulkLoadArgs {
 
 pub fn bulk_load(
     connection: Arc<Connection>,
-    args: BulkLoadArgs,
     index_name: &str,
+    args: BulkLoadArgs,
 ) -> io::Result<()> {
     let f32_vectors = DerefVectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },

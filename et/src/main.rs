@@ -1,4 +1,3 @@
-mod bulk_load;
 mod delete;
 mod exhaustive_search;
 mod insert;
@@ -15,7 +14,6 @@ use std::{
     num::NonZero,
 };
 
-use bulk_load::{bulk_load, BulkLoadArgs};
 use clap::{command, Parser, Subcommand};
 use delete::{delete, DeleteArgs};
 use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
@@ -52,9 +50,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Bulk load a set of vectors into an index.
-    /// Requires that the index be uninitialized.
-    BulkLoad(BulkLoadArgs),
     /// Lookup the contents of a single vertex.
     Lookup(LookupArgs),
     /// Search for a list of vectors and time the operation.
@@ -87,7 +82,6 @@ fn main() -> io::Result<()> {
     let session = connection.open_session()?;
 
     match cli.command {
-        Commands::BulkLoad(args) => bulk_load(connection, args, &cli.index_name),
         Commands::Delete(args) => delete(connection, &cli.index_name, args),
         Commands::Insert(args) => insert(connection, &cli.index_name, args),
         Commands::Lookup(args) => lookup(connection, &cli.index_name, args),

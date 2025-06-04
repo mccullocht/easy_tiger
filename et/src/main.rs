@@ -1,6 +1,4 @@
-mod delete;
 mod exhaustive_search;
-mod insert;
 mod recall;
 mod spann;
 mod ui;
@@ -13,9 +11,7 @@ use std::{
 };
 
 use clap::{command, Parser, Subcommand};
-use delete::{delete, DeleteArgs};
 use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
-use insert::{insert, InsertArgs};
 use spann::{spann_command, SpannArgs};
 use vamana::{vamana_command, VamanaArgs};
 use wt_mdb::{
@@ -46,10 +42,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Insert a vectors from a file into the index.
-    Insert(InsertArgs),
-    /// Delete vectors by key range.
-    Delete(DeleteArgs),
     /// Perform SPANN index operations.
     Spann(SpannArgs),
     /// Perform Vamana/DiskANN index operations.
@@ -74,8 +66,6 @@ fn main() -> io::Result<()> {
     let session = connection.open_session()?;
 
     match cli.command {
-        Commands::Delete(args) => delete(connection, &cli.index_name, args),
-        Commands::Insert(args) => insert(connection, &cli.index_name, args),
         Commands::Spann(args) => spann_command(connection, &cli.index_name, args),
         Commands::Vamana(args) => vamana_command(connection, &cli.index_name, args),
         Commands::ExhaustiveSearch(args) => {

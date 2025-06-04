@@ -1,6 +1,5 @@
 mod bulk_load;
 mod delete;
-mod drop_index;
 mod exhaustive_search;
 mod insert;
 mod lookup;
@@ -19,7 +18,6 @@ use std::{
 use bulk_load::{bulk_load, BulkLoadArgs};
 use clap::{command, Parser, Subcommand};
 use delete::{delete, DeleteArgs};
-use drop_index::drop_index;
 use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
 use insert::{insert, InsertArgs};
 use lookup::{lookup, LookupArgs};
@@ -57,8 +55,6 @@ enum Commands {
     /// Bulk load a set of vectors into an index.
     /// Requires that the index be uninitialized.
     BulkLoad(BulkLoadArgs),
-    /// Drop an index.
-    DropIndex,
     /// Lookup the contents of a single vertex.
     Lookup(LookupArgs),
     /// Search for a list of vectors and time the operation.
@@ -93,7 +89,6 @@ fn main() -> io::Result<()> {
     match cli.command {
         Commands::BulkLoad(args) => bulk_load(connection, args, &cli.index_name),
         Commands::Delete(args) => delete(connection, &cli.index_name, args),
-        Commands::DropIndex => drop_index(connection, &cli.index_name),
         Commands::Insert(args) => insert(connection, &cli.index_name, args),
         Commands::Lookup(args) => lookup(connection, &cli.index_name, args),
         Commands::Search(args) => search(connection, &cli.index_name, args),

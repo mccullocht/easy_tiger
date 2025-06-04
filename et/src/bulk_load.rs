@@ -12,7 +12,7 @@ use easy_tiger::{
 use wt_mdb::{Connection, Result, Session};
 use wt_sys::{WT_STAT_CONN_CACHE_BYTES_READ, WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
 
-use crate::{drop_index, ui::progress_bar};
+use crate::{ui::progress_bar, vamana::drop_index::drop_index};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {

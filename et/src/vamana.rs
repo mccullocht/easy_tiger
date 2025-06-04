@@ -1,6 +1,7 @@
 mod bulk_load;
 mod drop_index;
 mod init_index;
+mod lookup;
 mod search;
 
 use std::{io, sync::Arc};
@@ -11,6 +12,7 @@ use wt_mdb::Connection;
 use bulk_load::{bulk_load, BulkLoadArgs};
 use drop_index::drop_index;
 use init_index::{init_index, InitIndexArgs};
+use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
 
 #[derive(Args)]
@@ -30,10 +32,8 @@ pub enum Command {
     InitIndex(InitIndexArgs),
     /// Drop an index.
     DropIndex,
-    /*
-    /// Search a SPANN-ish index.
-    Search(SearchArgs),
-    */
+    /// Lookup the contents of a single vertex.
+    Lookup(LookupArgs),
 }
 
 pub fn vamana_command(
@@ -46,5 +46,6 @@ pub fn vamana_command(
         Command::Search(args) => search(connection, index_name, args),
         Command::InitIndex(args) => init_index(connection, index_name, args),
         Command::DropIndex => drop_index(connection, index_name),
+        Command::Lookup(args) => lookup(connection, index_name, args),
     }
 }

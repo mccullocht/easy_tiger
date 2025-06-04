@@ -1,7 +1,6 @@
 mod delete;
 mod exhaustive_search;
 mod insert;
-mod lookup;
 mod recall;
 mod spann;
 mod ui;
@@ -17,7 +16,6 @@ use clap::{command, Parser, Subcommand};
 use delete::{delete, DeleteArgs};
 use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
 use insert::{insert, InsertArgs};
-use lookup::{lookup, LookupArgs};
 use spann::{spann_command, SpannArgs};
 use vamana::{vamana_command, VamanaArgs};
 use wt_mdb::{
@@ -48,10 +46,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Lookup the contents of a single vertex.
-    Lookup(LookupArgs),
-    /// Exhaustively search an index and create new Neighbors files.
-    ExhaustiveSearch(ExhaustiveSearchArgs),
     /// Insert a vectors from a file into the index.
     Insert(InsertArgs),
     /// Delete vectors by key range.
@@ -60,6 +54,8 @@ enum Commands {
     Spann(SpannArgs),
     /// Perform Vamana/DiskANN index operations.
     Vamana(VamanaArgs),
+    /// Exhaustively search an index and create new Neighbors files.
+    ExhaustiveSearch(ExhaustiveSearchArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -80,12 +76,11 @@ fn main() -> io::Result<()> {
     match cli.command {
         Commands::Delete(args) => delete(connection, &cli.index_name, args),
         Commands::Insert(args) => insert(connection, &cli.index_name, args),
-        Commands::Lookup(args) => lookup(connection, &cli.index_name, args),
+        Commands::Spann(args) => spann_command(connection, &cli.index_name, args),
+        Commands::Vamana(args) => vamana_command(connection, &cli.index_name, args),
         Commands::ExhaustiveSearch(args) => {
             exhaustive_search(connection.clone(), &cli.index_name, args)
         }
-        Commands::Spann(args) => spann_command(connection, &cli.index_name, args),
-        Commands::Vamana(args) => vamana_command(connection, &cli.index_name, args),
     }?;
 
     session.checkpoint()?;

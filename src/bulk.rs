@@ -22,7 +22,6 @@ use std::{
 
 use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
-use rand::thread_rng;
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
 use wt_mdb::{options::DropOptionsBuilder, Connection, Record, Result, Session};
@@ -272,6 +271,7 @@ where
     }
 
     fn cluster_vectors<P: Fn(u64) + Send + Sync>(&mut self, progress: P) -> Result<()> {
+        // TODO: this should accept a random number generator
         let subset = SubsetViewVectorStore::new(&self.vectors, (0..self.limit).collect());
         self.clustered_order = Some(graph_clustering::cluster_for_reordering(
             &subset,
@@ -282,7 +282,7 @@ where
                 epsilon: 0.01,
                 ..Default::default()
             },
-            &mut thread_rng(),
+            &mut rand::rng(),
             progress,
         ));
         Ok(())

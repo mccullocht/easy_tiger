@@ -10,7 +10,8 @@ use easy_tiger::{
     quantization::VectorQuantizer,
     spann::{IndexConfig, SessionIndexWriter, TableIndex},
 };
-use rand::thread_rng;
+use histogram::Histogram;
+use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
 use wt_mdb::{options::DropOptionsBuilder, Connection};
@@ -70,14 +71,6 @@ pub struct BulkLoadArgs {
     #[arg(long, default_value_t = 192)]
     head_max_centroid_len: usize,
 
-    /// Maximum number of replica centroids to assign each vector to.
-    #[arg(long)]
-    replica_count: NonZero<usize>,
-
-    /// Quantizer to use for vectors written to centroid posting lists.
-    #[arg(long)]
-    posting_quantizer: VectorQuantizer,
-
     /// Number of edge candidates when searching head table for centroid ids during insertion.
     /// This should be at least as many as --replica-count
     #[arg(long)]
@@ -88,13 +81,34 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     head_rerank_edges: Option<usize>,
 
+    /// If set replace each head centroid with a representative mediod.
+    #[arg(long, default_value_t = false)]
+    head_use_mediods: bool,
+
+    /// Maximum number of replica centroids to assign each vector to.
+    #[arg(long)]
+    replica_count: NonZero<usize>,
+
+    /// Quantizer to use for vectors written to centroid posting lists.
+    #[arg(long)]
+    posting_quantizer: VectorQuantizer,
+
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
     limit: Option<usize>,
 
+    /// Random seed used for clustering computations.
+    /// Use a fixed value for repeatability.
+    #[arg(long, default_value_t = 0x7774_7370414E4E)]
+    seed: u64,
+
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value_t = false)]
     drop_tables: bool,
+
+    /// If true, print additional information about tail assignments.
+    #[arg(long, default_value_t = false)]
+    print_tail_assignment_stats: bool,
 }
 
 pub fn bulk_load(
@@ -144,12 +158,13 @@ pub fn bulk_load(
         head_config,
         spann_config,
     )?);
+    let mut rng = Xoshiro128PlusPlus::seed_from_u64(args.seed);
 
     let limit = args.limit.unwrap_or(f32_vectors.len());
     let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).into_iter().collect());
     let centroids = {
         let progress = progress_spinner("clustering head");
-        let (centroids, _) = iterative_balanced_kmeans(
+        let (mut centroids, assignments) = iterative_balanced_kmeans(
             &index_vectors,
             args.head_min_centroid_len..=args.head_max_centroid_len,
             32,
@@ -159,9 +174,25 @@ pub fn bulk_load(
                 epsilon: 0.01,
                 ..Params::default()
             },
-            &mut thread_rng(),
+            &mut rng,
             |x| progress.inc(x),
         );
+
+        if args.head_use_mediods {
+            let mediods = assignments.into_iter().enumerate().fold(
+                vec![(usize::MAX, f64::MAX); centroids.len()],
+                |mut m, (i, (c, d))| {
+                    if d < m[c].1 {
+                        m[c] = (i, d);
+                    }
+                    m
+                },
+            );
+            for (i, c) in mediods.into_iter().map(|(c, _)| c).enumerate() {
+                centroids[i].copy_from_slice(&index_vectors[c]);
+            }
+        }
+
         centroids
     };
     let centroids_len = centroids.len();
@@ -186,19 +217,17 @@ pub fn bulk_load(
 
     // TODO: consider writing a dedicated bulk loader. The bulk loader should at least do the raw
     // vectors to avoid writing to the checkpoint.
-    let inserted = {
+    let (inserted, assignment_stats) = {
         let tl_writer: ThreadLocal<RefCell<SessionIndexWriter>> = ThreadLocal::new();
         let progress = progress_bar(limit, "postings index");
-        (0..index_vectors.len())
+        let assignment_stats = (0..limit)
             .into_par_iter()
             .map(|i| {
                 let mut writer = tl_writer
                     .get_or_try(|| {
-                        let session = connection.open_session()?;
-                        Ok::<_, wt_mdb::Error>(RefCell::new(SessionIndexWriter::new(
-                            index.clone(),
-                            session,
-                        )))
+                        connection
+                            .open_session()
+                            .map(|s| RefCell::new(SessionIndexWriter::new(index.clone(), s)))
                     })?
                     .borrow_mut();
                 writer.session().begin_transaction(None)?;
@@ -207,7 +236,16 @@ pub fn bulk_load(
                 progress.inc(1);
                 Ok::<_, wt_mdb::Error>(inserted)
             })
-            .try_reduce(|| 0usize, |a, b| Ok(a + b))?
+            .try_fold(
+                || CentroidAssignmentStats::new(centroids_len),
+                |stats, r| r.map(|c| stats.fold(&c)),
+            )
+            .try_reduce(
+                || CentroidAssignmentStats::new(centroids_len),
+                CentroidAssignmentStats::reduce,
+            )?;
+        let inserted = assignment_stats.total_assigned();
+        (inserted, assignment_stats)
     };
 
     println!(
@@ -216,10 +254,98 @@ pub fn bulk_load(
         (centroids_len as f64 / index_vectors.len() as f64) * 100.0
     );
     println!(
-        "Inserted {} posting entries (avg {:4.2})",
+        "Inserted {} tail posting entries (avg {:4.2})",
         inserted,
         inserted as f64 / limit as f64
     );
+    if args.print_tail_assignment_stats {
+        println!("Primary assignments per centroid:");
+        CentroidAssignmentStats::print_histogram(assignment_stats.primary_assignment_histogram())?;
+        println!("Secondary assignments per centroid:");
+        CentroidAssignmentStats::print_histogram(
+            assignment_stats.secondary_assignment_histogram(),
+        )?;
+        println!("Total assignments per centroid:");
+        CentroidAssignmentStats::print_histogram(assignment_stats.total_assignment_histogram())?;
+    }
 
     Ok(())
+}
+
+struct CentroidAssignmentStats {
+    primary: Vec<usize>,
+    secondary: Vec<usize>,
+}
+
+impl CentroidAssignmentStats {
+    pub fn new(centroids_len: usize) -> Self {
+        Self {
+            primary: vec![0; centroids_len],
+            secondary: vec![0; centroids_len],
+        }
+    }
+
+    pub fn fold(mut self, centroids: &[u32]) -> Self {
+        if let Some((primary, secondaries)) = centroids.split_first() {
+            self.primary[*primary as usize] += 1;
+            for s in secondaries {
+                self.secondary[*s as usize] += 1;
+            }
+        }
+        self
+    }
+
+    pub fn reduce(mut a: Self, b: Self) -> wt_mdb::Result<Self> {
+        for (a, b) in a.primary.iter_mut().zip(b.primary.iter()) {
+            *a += *b;
+        }
+        for (a, b) in a.secondary.iter_mut().zip(b.secondary.iter()) {
+            *a += *b;
+        }
+        Ok(a)
+    }
+
+    pub fn total_assigned(&self) -> usize {
+        self.primary.iter().copied().sum::<usize>() + self.secondary.iter().copied().sum::<usize>()
+    }
+
+    pub fn primary_assignment_histogram(&self) -> Histogram {
+        Self::make_histogram(self.primary.iter().copied())
+    }
+
+    pub fn secondary_assignment_histogram(&self) -> Histogram {
+        Self::make_histogram(self.secondary.iter().copied())
+    }
+
+    pub fn total_assignment_histogram(&self) -> Histogram {
+        Self::make_histogram(
+            self.primary
+                .iter()
+                .zip(self.secondary.iter())
+                .map(|(p, s)| *p + *s),
+        )
+    }
+
+    pub fn print_histogram(histogram: Histogram) -> io::Result<()> {
+        use std::io::Write;
+        let mut lock = std::io::stdout().lock();
+        for b in histogram.into_iter().filter(|b| b.count() > 0) {
+            writeln!(lock, "[{:5}..{:5}] {:7}", b.start(), b.end(), b.count())?;
+        }
+        Ok(())
+    }
+
+    fn make_histogram(centroid_sizes: impl Iterator<Item = usize> + Clone) -> Histogram {
+        let max_value_power = centroid_sizes
+            .clone()
+            .max()
+            .unwrap()
+            .next_power_of_two()
+            .ilog2() as u8;
+        let mut histogram = Histogram::new(2, max_value_power.max(3)).unwrap();
+        for c in centroid_sizes {
+            histogram.add(c as u64, 1).unwrap();
+        }
+        histogram
+    }
 }

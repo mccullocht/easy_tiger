@@ -4,7 +4,7 @@ use std::iter::Cycle;
 use std::ops::RangeInclusive;
 
 use rand::seq::index;
-use rand::{distributions::WeightedIndex, prelude::*};
+use rand::{distr::weighted::WeightedIndex, prelude::*};
 use rayon::prelude::*;
 use tracing::debug;
 
@@ -464,7 +464,7 @@ fn initialize_centroids<
             compute_assignments(training_data, &centroids)
         }
         InitializationMethod::KMeansPlusPlus => {
-            centroids.push(&dataset[rng.gen_range(0..dataset.len())]);
+            centroids.push(&dataset[rng.random_range(0..dataset.len())]);
             let mut assignments = compute_assignments(training_data, &centroids);
             while centroids.len() < k {
                 let index = WeightedIndex::new(assignments.iter().map(|a| a.1))

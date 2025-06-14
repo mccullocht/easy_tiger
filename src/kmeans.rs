@@ -320,7 +320,7 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
     centroids.push(&vec![0.0; dataset.elem_stride()]);
     centroids.push(&vec![0.0; dataset.elem_stride()]);
     let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
-    let mut current_split_point = 0usize;
+    let mut prev_inertia = dataset.len();
     for _ in 0..max_iters {
         bp_update_centroid(&left_vectors, &mut centroids[0]);
         bp_update_centroid(&right_vectors, &mut centroids[1]);
@@ -332,30 +332,26 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
         distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
         let split_point = distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
         let inertia = split.abs_diff(split_point);
-        let current_inertia = split.abs_diff(current_split_point);
-        // We may terminate if the partition sizes are acceptable.
-        if acceptable_split.contains(&split_point) {
-            if split_point == split {
-                // Perfect split for terminate.
-                // TODO: accept split+1 for odd sized data sets.
-                current_split_point = split_point;
-                break;
-            } else if acceptable_split.contains(&current_split_point) && current_inertia < inertia {
-                // Previous split was acceptable and we've stopped getting closer to a perfect split.
-                break;
-            }
+        // We may terminate if the partition sizes are acceptable and we aren't improving the split.
+        if acceptable_split.contains(&split_point) && (inertia == 0 || prev_inertia <= inertia) {
+            break;
         }
 
+        prev_inertia = inertia;
         left_vectors =
             SubsetViewVectorStore::new(dataset, distances[..split].iter().map(|d| d.0).collect());
         right_vectors =
             SubsetViewVectorStore::new(dataset, distances[split..].iter().map(|d| d.0).collect());
     }
 
-    let converged = acceptable_split.contains(&current_split_point);
-    let split_point =
-        (*acceptable_split.end()).min((*acceptable_split.start()).max(current_split_point));
-    assert!(acceptable_split.contains(&split_point));
+    let mut split_point = distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
+    let converged = acceptable_split.contains(&split_point);
+    if !converged {
+        split_point = split_point
+            .max(*acceptable_split.start())
+            .min(*acceptable_split.end());
+        assert!(acceptable_split.contains(&split_point));
+    }
 
     left_vectors = SubsetViewVectorStore::new(
         dataset,

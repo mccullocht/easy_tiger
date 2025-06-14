@@ -320,7 +320,7 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
     centroids.push(&vec![0.0; dataset.elem_stride()]);
     centroids.push(&vec![0.0; dataset.elem_stride()]);
     let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
-    let mut converged = false;
+    let mut current_split_point = 0usize;
     for _ in 0..max_iters {
         bp_update_centroid(&left_vectors, &mut centroids[0]);
         bp_update_centroid(&right_vectors, &mut centroids[1]);
@@ -330,17 +330,20 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
             *d = (i, ldist, rdist, ldist - rdist)
         });
         distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
-        // We want to produce two clusters of at least min_cluster_size and are happy to accept any such outcome.
-        // TODO: consider iterating a couple more times after we are happy with the outcome to see if the split can get better.
-        // TODO: exit early if we are not making progress.
-        if acceptable_split.contains(
-            &distances
-                .iter()
-                .position(|d| d.3 >= 0.0)
-                .unwrap_or(dataset.len()),
-        ) {
-            converged = true;
-            break;
+        let split_point = distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
+        let inertia = split.abs_diff(split_point);
+        let current_inertia = split.abs_diff(current_split_point);
+        // We may terminate if the partition sizes are acceptable.
+        if acceptable_split.contains(&split_point) {
+            if split_point == split {
+                // Perfect split for terminate.
+                // TODO: accept split+1 for odd sized data sets.
+                current_split_point = split_point;
+                break;
+            } else if acceptable_split.contains(&current_split_point) && current_inertia < inertia {
+                // Previous split was acceptable and we've stopped getting closer to a perfect split.
+                break;
+            }
         }
 
         left_vectors =
@@ -349,22 +352,28 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
             SubsetViewVectorStore::new(dataset, distances[split..].iter().map(|d| d.0).collect());
     }
 
-    let split_point = (*acceptable_split.end()).min(
-        (*acceptable_split.start()).max(
-            distances
-                .iter()
-                .position(|d| d.3 >= 0.0)
-                .unwrap_or(dataset.len()),
-        ),
-    );
+    let converged = acceptable_split.contains(&current_split_point);
+    let split_point =
+        (*acceptable_split.end()).min((*acceptable_split.start()).max(current_split_point));
     assert!(acceptable_split.contains(&split_point));
 
+    left_vectors = SubsetViewVectorStore::new(
+        dataset,
+        distances[..split_point].iter().map(|x| x.0).collect(),
+    );
+    bp_update_centroid(&left_vectors, &mut centroids[0]);
+    right_vectors = SubsetViewVectorStore::new(
+        dataset,
+        distances[split_point..].iter().map(|x| x.0).collect(),
+    );
+    bp_update_centroid(&right_vectors, &mut centroids[1]);
+
     let mut assignments = vec![(0, 0.0); dataset.len()];
-    for (i, d, _, _) in distances[..split_point].iter() {
-        assignments[*i] = (0, *d);
+    for i in left_vectors.into_subset().into_iter() {
+        assignments[i] = (0, crate::distance::l2sq(&centroids[0], &dataset[i]));
     }
-    for (i, _, d, _) in distances[split_point..].iter() {
-        assignments[*i] = (1, *d);
+    for i in right_vectors.into_subset().into_iter() {
+        assignments[i] = (1, crate::distance::l2sq(&centroids[1], &dataset[i]));
     }
 
     if converged {

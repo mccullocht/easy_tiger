@@ -324,3 +324,15 @@ impl Quantizer for I8ScaledUniformQuantizer {
 
 // TODO: quantizer that is non-uniform for MRL vectors.
 // Bonus points if it can still be scored on the quantized rep instead of de-quantizing.
+
+/// Based on https://github.com/apache/lucene/blob/c8147c9e6fa19e12390f1b2f66e18c0af3654d44/lucene/core/src/java/org/apache/lucene/util/quantization/OptimizedScalarQuantizer.java
+///
+/// Unlike Lucene OptimizedScalarQuantizer we do not:
+/// 1) utilize the centroid. this allows us to drop the raw vector.
+/// 2) minimize anisotropic loss
+struct OptimizedScalarQuantizer;
+
+// compute min, max, norm^2 (sum(dx*dx))
+// compute quantized value for each dimension
+// compute sum of quantized values
+// store (packed) vector, min, max, norm^2, sum of quantized values.

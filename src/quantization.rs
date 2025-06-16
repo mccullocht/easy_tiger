@@ -342,33 +342,20 @@ pub struct OptimizedScalarQuantizer7;
 
 impl Quantizer for OptimizedScalarQuantizer7 {
     fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
-        let (lower, upper, norm_sq) = vector
-            .iter()
-            .fold((f32::MAX, f32::MIN, 0f32), |(lower, upper, norm_sq), d| {
-                (lower.min(*d), upper.max(*d), norm_sq + *d * *d)
-            });
-
-        let step = (upper - lower) / 127.0f32;
-        let (mut quantized, component_sum) = vector.iter().fold(
+        let (quantized_it, stats) = optimized_scalar_quantize::<7>(vector);
+        let (mut quantized, component_sum) = quantized_it.fold(
             (Vec::with_capacity(self.doc_bytes(vector.len())), 0u32),
-            |(mut vec, sum), d| {
-                let q = ((d.clamp(lower, upper) - lower) / step).round() as u8;
+            |(mut vec, sum), q| {
                 vec.push(q);
-                (vec, sum + q as u32)
+                (vec, sum + u32::from(q))
             },
         );
-        quantized.extend_from_slice(&<[u8; 16]>::from(OptimizedScalarQuantizer7VectorMeta {
-            lower,
-            upper,
-            norm_sq,
-            component_sum,
-        }));
-
+        OptimizedScalarQuantizedVector::pack_meta(&mut quantized, stats, component_sum);
         quantized
     }
 
     fn doc_bytes(&self, dimensions: usize) -> usize {
-        dimensions + 16
+        dimensions + OptimizedScalarQuantizedVector::META_BYTES
     }
 
     fn for_query(&self, vector: &[f32]) -> Vec<u8> {
@@ -380,48 +367,134 @@ impl Quantizer for OptimizedScalarQuantizer7 {
     }
 }
 
-pub(crate) struct OptimizedScalarQuantizer7VectorMeta {
-    pub(crate) lower: f32,
-    pub(crate) upper: f32,
-    pub(crate) norm_sq: f32,
-    pub(crate) component_sum: u32,
+/// Representation of an optimized scalar quantized vector.
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct OptimizedScalarQuantizedVector<'a> {
+    vector: &'a [u8],
+    lower: f32,
+    upper: f32,
+    norm_sq: f32,
+    component_sum: u32,
 }
 
-impl OptimizedScalarQuantizer7VectorMeta {
-    pub(crate) fn unpack_vector(bytes: &[u8]) -> (&[i8], OptimizedScalarQuantizer7VectorMeta) {
-        let (vector_bytes, meta_bytes) = bytes.split_at(bytes.len() - 16);
-        (
-            bytemuck::cast_slice(vector_bytes),
-            Self::from(<[u8; 16]>::try_from(meta_bytes).expect("16 bytes")),
-        )
+impl<'a> OptimizedScalarQuantizedVector<'a> {
+    const META_BYTES: usize = 16;
+
+    /// Pack metadata on the end of the vector.
+    fn pack_meta(packed_vector: &mut Vec<u8>, stats: OSQStats, component_sum: u32) {
+        packed_vector.extend_from_slice(&stats.lower.to_le_bytes());
+        packed_vector.extend_from_slice(&stats.upper.to_le_bytes());
+        packed_vector.extend_from_slice(&stats.norm_sq.to_le_bytes());
+        packed_vector.extend_from_slice(&component_sum.to_le_bytes());
     }
-}
 
-impl From<[u8; 16]> for OptimizedScalarQuantizer7VectorMeta {
-    fn from(value: [u8; 16]) -> Self {
-        Self {
-            lower: f32::from_le_bytes(value[0..4].try_into().expect("4 byte conversion")),
-            upper: f32::from_le_bytes(value[4..8].try_into().expect("4 byte conversion")),
-            norm_sq: f32::from_le_bytes(value[8..12].try_into().expect("4 byte conversion")),
-            component_sum: u32::from_le_bytes(value[12..16].try_into().expect("4 byte conversion")),
+    /// Initialize from raw bytes.
+    ///
+    /// Provides access to the packed, quantized vector bytes and unpacked metadata.
+    ///
+    /// Returns `None` if the input bytes are too short to contain a vector + metadata.
+    pub fn from_bytes(bytes: &'a [u8]) -> Option<Self> {
+        if bytes.len() <= Self::META_BYTES {
+            return None;
+        }
+
+        let (vector, meta) = bytes.split_at(bytes.len() - Self::META_BYTES);
+        let lower = f32::from_le_bytes(meta[0..4].try_into().expect("4 bytes"));
+        let upper = f32::from_le_bytes(meta[4..8].try_into().expect("4 bytes"));
+        let norm_sq = f32::from_le_bytes(meta[8..12].try_into().expect("4 bytes"));
+        let component_sum = u32::from_le_bytes(meta[12..16].try_into().expect("4 bytes"));
+        Some(Self {
+            vector,
+            lower,
+            upper,
+            norm_sq,
+            component_sum,
+        })
+    }
+
+    /// Return the packed, quantized vector.
+    ///
+    /// This may pack multiple dimensions into a single byte, depending on configuration.
+    pub fn vector(&self) -> &[u8] {
+        self.vector
+    }
+
+    /// Compute the distance between `query` and `doc`.
+    ///
+    /// `QBITS` is the number of bits each dimension of query vector is quantized into.
+    /// `DBITS` is the number of bits each dimension of doc vector is quantized into.
+    /// `dimensions` is the number of dimensions in both vectors.
+    /// `dot` is the dot product distance between the two vectors.
+    /// `similarity` is the expected similarity mode.
+    pub fn distance<const QBITS: usize, const DBITS: usize>(
+        query: &Self,
+        doc: &Self,
+        dimensions: usize,
+        dot: f64,
+        similarity: VectorSimilarity,
+    ) -> f64 {
+        let qrange = (query.upper as f64 - query.lower as f64) / ((1 << QBITS) - 1) as f64;
+        let drange = (doc.upper as f64 - doc.lower as f64) / ((1 << DBITS) - 1) as f64;
+        let dist = doc.lower as f64 * query.lower as f64 * dimensions as f64
+            + query.lower as f64 * drange * doc.component_sum as f64
+            + doc.lower as f64 * qrange * query.component_sum as f64
+            + drange * qrange * dot;
+        match similarity {
+            VectorSimilarity::Dot => (-dist + 1.0) / 2.0,
+            VectorSimilarity::Euclidean => query.norm_sq as f64 + doc.norm_sq as f64 - (2.0 * dist),
         }
     }
 }
 
-impl From<OptimizedScalarQuantizer7VectorMeta> for [u8; 16] {
-    fn from(value: OptimizedScalarQuantizer7VectorMeta) -> Self {
-        [
-            value.lower.to_le_bytes(),
-            value.upper.to_le_bytes(),
-            value.norm_sq.to_le_bytes(),
-            value.component_sum.to_le_bytes(),
-        ]
-        .into_iter()
-        .flat_map(|x| x)
-        .collect::<Vec<_>>()
-        .try_into()
-        .expect("16 byte array")
+#[derive(Copy, Clone, Debug)]
+struct OSQStats {
+    lower: f32,
+    upper: f32,
+    norm_sq: f32,
+    mean: f64,
+    variance: f64,
+}
+
+impl Default for OSQStats {
+    fn default() -> Self {
+        Self {
+            lower: f32::MAX,
+            upper: f32::MIN,
+            norm_sq: 0.0,
+            mean: 0.0,
+            variance: 0.0,
+        }
     }
+}
+
+impl From<&[f32]> for OSQStats {
+    fn from(vector: &[f32]) -> Self {
+        let mut stats = Self::default();
+        for (i, v) in vector.iter().copied().enumerate() {
+            stats.lower = stats.lower.min(v);
+            stats.upper = stats.upper.max(v);
+            stats.norm_sq += v * v;
+            let delta = v as f64 - stats.mean;
+            stats.mean += delta / (i as f64 + 1.0);
+            stats.variance += delta * (v as f64 - stats.mean);
+        }
+        stats
+    }
+}
+
+fn optimized_scalar_quantize<'a, const NBITS: usize>(
+    vector: &'a [f32],
+) -> (impl ExactSizeIterator<Item = u8> + 'a, OSQStats) {
+    let stats = OSQStats::from(vector);
+    let lower = stats.lower;
+    let upper = stats.upper;
+    let step = (stats.upper - stats.lower) / ((1 << NBITS) - 1) as f32;
+    (
+        vector
+            .iter()
+            .map(move |d| ((d.clamp(lower, upper) - lower) / step).round() as u8),
+        stats,
+    )
 }
 
 // compute min, max, norm^2 (sum(dx*dx))

@@ -168,12 +168,7 @@ impl VectorDistance for I8NaiveDistance {
         let (dv, dnorm) = Self::unpack(doc);
         let divisor = i8::MAX as f32 * i8::MAX as f32;
         // NB: we may be able to accelerate this further with manual SIMD implementations.
-        let dot = qv
-            .iter()
-            .zip(dv.iter())
-            .map(|(q, d)| *q as i32 * *d as i32)
-            .sum::<i32>() as f64
-            / divisor as f64;
+        let dot = SpatialSimilarity::dot(qv, dv).unwrap() / divisor as f64;
         match self.0 {
             VectorSimilarity::Dot => (-dot + 1.0) / 2.0,
             VectorSimilarity::Euclidean => qnorm as f64 + dnorm as f64 - (2.0 * dot),
@@ -310,13 +305,12 @@ impl VectorDistance for OptimizedScalarDistance7 {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let (qvec, qmeta) = OptimizedScalarQuantizer7VectorMeta::unpack_vector(query);
         let (dvec, dmeta) = OptimizedScalarQuantizer7VectorMeta::unpack_vector(doc);
-        let qrange = qmeta.upper as f64 - qmeta.lower as f64;
-        let drange = dmeta.upper as f64 - dmeta.lower as f64;
-        let dot = SpatialSimilarity::dot(qvec, dvec).expect("vector dim");
-        // XXX this is wrong.
-        let dist = dmeta.lower as f64 * qmeta.lower as f64 * doc.len() as f64
-            + qmeta.lower as f64 * drange * (dmeta.component_sum as f64 / 127.0f64)
-            + dmeta.lower as f64 * qrange * (qmeta.component_sum as f64 / 127.0f64)
+        let qrange = (qmeta.upper as f64 - qmeta.lower as f64) / 127.0f64;
+        let drange = (dmeta.upper as f64 - dmeta.lower as f64) / 127.0f64;
+        let dot = SpatialSimilarity::dot(qvec, dvec).unwrap();
+        let dist = dmeta.lower as f64 * qmeta.lower as f64 * dvec.len() as f64
+            + qmeta.lower as f64 * drange * dmeta.component_sum as f64
+            + dmeta.lower as f64 * qrange * qmeta.component_sum as f64
             + drange * qrange * dot;
         match self.0 {
             VectorSimilarity::Dot => (-dist as f64 + 1.0) / 2.0,

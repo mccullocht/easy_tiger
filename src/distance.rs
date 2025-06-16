@@ -5,7 +5,7 @@ use std::{borrow::Cow, io, str::FromStr};
 use serde::{Deserialize, Serialize};
 use simsimd::SpatialSimilarity;
 
-use crate::quantization::OptimizedScalarQuantizer7VectorMeta;
+use crate::quantization::OptimizedScalarQuantizedVector;
 
 /// Distance function for `f32` vectors.
 ///
@@ -203,21 +203,21 @@ pub struct OptimizedScalarDistance7(pub(crate) VectorSimilarity);
 
 impl QuantizedVectorDistance for OptimizedScalarDistance7 {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let (qvec, qmeta) = OptimizedScalarQuantizer7VectorMeta::unpack_vector(query);
-        let (dvec, dmeta) = OptimizedScalarQuantizer7VectorMeta::unpack_vector(doc);
-        let qrange = (qmeta.upper as f64 - qmeta.lower as f64) / 127.0f64;
-        let drange = (dmeta.upper as f64 - dmeta.lower as f64) / 127.0f64;
-        let dot = SpatialSimilarity::dot(qvec, dvec).unwrap();
-        let dist = dmeta.lower as f64 * qmeta.lower as f64 * dvec.len() as f64
-            + qmeta.lower as f64 * drange * dmeta.component_sum as f64
-            + dmeta.lower as f64 * qrange * qmeta.component_sum as f64
-            + drange * qrange * dot;
-        match self.0 {
-            VectorSimilarity::Dot => (-dist as f64 + 1.0) / 2.0,
-            VectorSimilarity::Euclidean => {
-                qmeta.norm_sq as f64 + dmeta.norm_sq as f64 - (2.0 * dist)
-            }
-        }
+        let query = OptimizedScalarQuantizedVector::from_bytes(query).expect("contains meta");
+        let doc = OptimizedScalarQuantizedVector::from_bytes(doc).expect("contains meta");
+        // NB: casts will always succeed as src and dst type have same size and alignment.
+        let dot = SpatialSimilarity::dot(
+            bytemuck::cast_slice::<_, i8>(query.vector()),
+            bytemuck::cast_slice::<_, i8>(doc.vector()),
+        )
+        .expect("same vector len");
+        OptimizedScalarQuantizedVector::distance::<7, 7>(
+            &query,
+            &doc,
+            doc.vector().len(),
+            dot,
+            self.0,
+        )
     }
 }
 

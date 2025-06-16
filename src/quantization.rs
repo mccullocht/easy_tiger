@@ -7,8 +7,8 @@ use std::{io, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 use crate::distance::{
-    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, OptimizedScalarDistance7,
-    QuantizedVectorDistance, TrivialQuantizedDistance, VectorSimilarity,
+    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, OptimizedScalarDistance1,
+    OptimizedScalarDistance7, QuantizedVectorDistance, TrivialQuantizedDistance, VectorSimilarity,
 };
 
 /// `Quantizer` is used to perform lossy quantization of input vectors.
@@ -46,6 +46,8 @@ pub enum VectorQuantizer {
     Trivial,
     /// Optimized scalar; 7 bits.
     OSQ7,
+    /// Optimized scalar; 1 bit.
+    OSQ1,
 }
 
 impl VectorQuantizer {
@@ -57,6 +59,7 @@ impl VectorQuantizer {
             Self::I8Naive => Box::new(I8NaiveQuantizer),
             Self::Trivial => Box::new(TrivialQuantizer),
             Self::OSQ7 => Box::new(OptimizedScalarQuantizer7),
+            Self::OSQ1 => Box::new(OptimizedScalarQuantizer1),
         }
     }
 
@@ -71,6 +74,7 @@ impl VectorQuantizer {
             Self::I8Naive => Box::new(I8NaiveDistance(*similarity)),
             Self::Trivial => Box::new(TrivialQuantizedDistance(*similarity)),
             Self::OSQ7 => Box::new(OptimizedScalarDistance7(*similarity)),
+            Self::OSQ1 => Box::new(OptimizedScalarDistance1(*similarity)),
         }
     }
 }
@@ -104,6 +108,7 @@ impl FromStr for VectorQuantizer {
             "i8naive" => Ok(Self::I8Naive),
             "trivial" => Ok(Self::Trivial),
             "osq7" => Ok(Self::OSQ7),
+            "osq1" => Ok(Self::OSQ1),
             _ => Err(input_err(format!("unknown quantizer function {}", s))),
         }
     }
@@ -323,6 +328,36 @@ impl Quantizer for OptimizedScalarQuantizer7 {
 
     fn doc_bytes(&self, dimensions: usize) -> usize {
         dimensions + OptimizedScalarQuantizedVector::META_BYTES
+    }
+
+    fn for_query(&self, vector: &[f32]) -> Vec<u8> {
+        self.for_doc(vector)
+    }
+
+    fn query_bytes(&self, dimensions: usize) -> usize {
+        self.doc_bytes(dimensions)
+    }
+}
+
+/// Like [`OptimizedScalarQuantizer7``] but produces a 1-bit quantization.
+pub struct OptimizedScalarQuantizer1;
+
+impl Quantizer for OptimizedScalarQuantizer1 {
+    fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
+        let (quantized_it, stats) = optimized_scalar_quantize::<1>(vector);
+        // Pack 8 dimensions into a single byte.
+        let mut quantized = Vec::with_capacity(self.doc_bytes(vector.len()));
+        quantized.resize(vector.len().div_ceil(8), 0);
+        let component_sum = quantized_it.enumerate().fold(0u32, |sum, (i, q)| {
+            quantized[i / 8] |= q << (i % 8);
+            sum + u32::from(q)
+        });
+        OptimizedScalarQuantizedVector::pack_meta(&mut quantized, stats, component_sum);
+        quantized
+    }
+
+    fn doc_bytes(&self, dimensions: usize) -> usize {
+        dimensions.div_ceil(8) + OptimizedScalarQuantizedVector::META_BYTES
     }
 
     fn for_query(&self, vector: &[f32]) -> Vec<u8> {

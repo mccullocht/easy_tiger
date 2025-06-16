@@ -3,7 +3,7 @@
 use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
-use simsimd::SpatialSimilarity;
+use simsimd::{BinarySimilarity, SpatialSimilarity};
 
 use crate::quantization::OptimizedScalarQuantizedVector;
 
@@ -212,6 +212,25 @@ impl QuantizedVectorDistance for OptimizedScalarDistance7 {
         )
         .expect("same vector len");
         OptimizedScalarQuantizedVector::distance::<7, 7>(
+            &query,
+            &doc,
+            doc.vector().len(),
+            dot,
+            self.0,
+        )
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct OptimizedScalarDistance1(pub(crate) VectorSimilarity);
+
+impl QuantizedVectorDistance for OptimizedScalarDistance1 {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = OptimizedScalarQuantizedVector::from_bytes(query).expect("contains meta");
+        let doc = OptimizedScalarQuantizedVector::from_bytes(doc).expect("contains meta");
+        // NB: casts will always succeed as src and dst type have same size and alignment.
+        let dot = BinarySimilarity::hamming(query.vector(), doc.vector()).expect("same vector len");
+        OptimizedScalarQuantizedVector::distance::<1, 1>(
             &query,
             &doc,
             doc.vector().len(),

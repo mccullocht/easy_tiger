@@ -3,6 +3,9 @@
 use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
+use simsimd::SpatialSimilarity;
+
+use crate::quantization::OptimizedScalarQuantizer7VectorMeta;
 
 use crate::query_distance::QueryVectorDistance;
 
@@ -300,7 +303,30 @@ impl QueryVectorDistance for I8ScaledUniformEuclideanQueryDistance<'_> {
     }
 }
 
-#[inline(always)]
+#[derive(Debug, Copy, Clone)]
+pub struct OptimizedScalarDistance7(pub(crate) VectorSimilarity);
+
+impl VectorDistance for OptimizedScalarDistance7 {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let (qvec, qmeta) = OptimizedScalarQuantizer7VectorMeta::unpack_vector(query);
+        let (dvec, dmeta) = OptimizedScalarQuantizer7VectorMeta::unpack_vector(doc);
+        let qrange = qmeta.upper as f64 - qmeta.lower as f64;
+        let drange = dmeta.upper as f64 - dmeta.lower as f64;
+        let dot = SpatialSimilarity::dot(qvec, dvec).expect("vector dim");
+        // XXX this is wrong.
+        let dist = dmeta.lower as f64 * qmeta.lower as f64 * doc.len() as f64
+            + qmeta.lower as f64 * drange * (dmeta.component_sum as f64 / 127.0f64)
+            + dmeta.lower as f64 * qrange * (qmeta.component_sum as f64 / 127.0f64)
+            + drange * qrange * dot;
+        match self.0 {
+            VectorSimilarity::Dot => (-dist as f64 + 1.0) / 2.0,
+            VectorSimilarity::Euclidean => {
+                qmeta.norm_sq as f64 + dmeta.norm_sq as f64 - (2.0 * dist)
+            }
+        }
+    }
+}
+
 pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
     use simsimd::BinarySimilarity;
     u8::hamming(q, d).expect("same dimensionality")

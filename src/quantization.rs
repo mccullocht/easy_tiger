@@ -7,8 +7,8 @@ use std::{io, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 use crate::distance::{
-    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, QuantizedVectorDistance,
-    TrivialQuantizedDistance, VectorSimilarity,
+    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, OptimizedScalarDistance7,
+    QuantizedVectorDistance, TrivialQuantizedDistance, VectorSimilarity,
 };
 
 /// `Quantizer` is used to perform lossy quantization of input vectors.
@@ -44,6 +44,8 @@ pub enum VectorQuantizer {
     I8Naive,
     /// Encodes a float vector as a byte array in little-endian order.
     Trivial,
+    /// Optimized scalar; 7 bits.
+    OSQ7,
 }
 
 impl VectorQuantizer {
@@ -54,6 +56,7 @@ impl VectorQuantizer {
             Self::AsymmetricBinary { n } => Box::new(AsymmetricBinaryQuantizer::new(*n)),
             Self::I8Naive => Box::new(I8NaiveQuantizer),
             Self::Trivial => Box::new(TrivialQuantizer),
+            Self::OSQ7 => Box::new(OptimizedScalarQuantizer7),
         }
     }
 
@@ -67,6 +70,7 @@ impl VectorQuantizer {
             Self::AsymmetricBinary { n: _ } => Box::new(AsymmetricHammingDistance),
             Self::I8Naive => Box::new(I8NaiveDistance(*similarity)),
             Self::Trivial => Box::new(TrivialQuantizedDistance(*similarity)),
+            Self::OSQ7 => Box::new(OptimizedScalarDistance7(*similarity)),
         }
     }
 }
@@ -99,6 +103,7 @@ impl FromStr for VectorQuantizer {
             }
             "i8naive" => Ok(Self::I8Naive),
             "trivial" => Ok(Self::Trivial),
+            "osq7" => Ok(Self::OSQ7),
             _ => Err(input_err(format!("unknown quantizer function {}", s))),
         }
     }
@@ -294,12 +299,107 @@ impl Quantizer for I8NaiveQuantizer {
 
 /// Based on https://github.com/apache/lucene/blob/c8147c9e6fa19e12390f1b2f66e18c0af3654d44/lucene/core/src/java/org/apache/lucene/util/quantization/OptimizedScalarQuantizer.java
 ///
-/// Unlike Lucene OptimizedScalarQuantizer we do not:
-/// 1) utilize the centroid. this allows us to drop the raw vector.
-/// 2) minimize anisotropic loss
-struct OptimizedScalarQuantizer;
+/// Unlike lucene OSQ this does not center, which means we don't need to re-quantize if the dataset
+/// change. It also doesn't adjust for anisotropic loss, mostly because it's complicated but would
+/// probably make the results better.
+///
+/// Compared to I8Naive this has a lower range (7 bits instead of 8) and stores 12 more bytes of
+/// metadata in each vector but also reduces quantization error in the bits it does use.
+pub struct OptimizedScalarQuantizer7;
+
+impl Quantizer for OptimizedScalarQuantizer7 {
+    fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
+        let (lower, upper, norm_sq) = vector
+            .iter()
+            .fold((f32::MAX, f32::MIN, 0f32), |(lower, upper, norm_sq), d| {
+                (lower.min(*d), upper.max(*d), norm_sq + *d * *d)
+            });
+
+        let step = (upper - lower) / 127.0f32;
+        let (mut quantized, component_sum) = vector.iter().fold(
+            (Vec::with_capacity(self.doc_bytes(vector.len())), 0u32),
+            |(mut vec, sum), d| {
+                let q = ((d.clamp(lower, upper) - lower) / step).round() as u8;
+                vec.push(q);
+                (vec, sum + q as u32)
+            },
+        );
+        quantized.extend_from_slice(&<[u8; 16]>::from(OptimizedScalarQuantizer7VectorMeta {
+            lower,
+            upper,
+            norm_sq,
+            component_sum,
+        }));
+
+        quantized
+    }
+
+    fn doc_bytes(&self, dimensions: usize) -> usize {
+        dimensions + 16
+    }
+
+    fn for_query(&self, vector: &[f32]) -> Vec<u8> {
+        self.for_doc(vector)
+    }
+
+    fn query_bytes(&self, dimensions: usize) -> usize {
+        self.doc_bytes(dimensions)
+    }
+}
+
+pub(crate) struct OptimizedScalarQuantizer7VectorMeta {
+    pub(crate) lower: f32,
+    pub(crate) upper: f32,
+    pub(crate) norm_sq: f32,
+    pub(crate) component_sum: u32,
+}
+
+impl OptimizedScalarQuantizer7VectorMeta {
+    pub(crate) fn unpack_vector(bytes: &[u8]) -> (&[i8], OptimizedScalarQuantizer7VectorMeta) {
+        let (vector_bytes, meta_bytes) = bytes.split_at(bytes.len() - 16);
+        (
+            bytemuck::cast_slice(vector_bytes),
+            Self::from(<[u8; 16]>::try_from(meta_bytes).expect("16 bytes")),
+        )
+    }
+}
+
+impl From<[u8; 16]> for OptimizedScalarQuantizer7VectorMeta {
+    fn from(value: [u8; 16]) -> Self {
+        Self {
+            lower: f32::from_le_bytes(value[0..4].try_into().expect("4 byte conversion")),
+            upper: f32::from_le_bytes(value[4..8].try_into().expect("4 byte conversion")),
+            norm_sq: f32::from_le_bytes(value[8..12].try_into().expect("4 byte conversion")),
+            component_sum: u32::from_le_bytes(value[12..16].try_into().expect("4 byte conversion")),
+        }
+    }
+}
+
+impl From<OptimizedScalarQuantizer7VectorMeta> for [u8; 16] {
+    fn from(value: OptimizedScalarQuantizer7VectorMeta) -> Self {
+        [
+            value.lower.to_le_bytes(),
+            value.upper.to_le_bytes(),
+            value.norm_sq.to_le_bytes(),
+            value.component_sum.to_le_bytes(),
+        ]
+        .into_iter()
+        .flat_map(|x| x)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("16 byte array")
+    }
+}
 
 // compute min, max, norm^2 (sum(dx*dx))
 // compute quantized value for each dimension
 // compute sum of quantized values
 // store (packed) vector, min, max, norm^2, sum of quantized values.
+
+// for 1 we need only store magnitude and norm^2. can do signed values, 8 bytes
+
+// for 2 add sum of assigned values to output and try to do correction
+
+// for 3 allow n bit reps, we really only do 1, 4, 8.
+
+// for 4 try doing the loss function.

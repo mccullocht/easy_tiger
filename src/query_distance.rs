@@ -11,12 +11,12 @@ use crate::{
         AsymmetricHammingDistance, F32DotProductDistance, F32EuclideanDistance, F32VectorDistance,
         HammingDistance, I8NaiveDistance, I8ScaledUniformDotProduct,
         I8ScaledUniformDotProductQueryDistance, I8ScaledUniformEuclidean,
-        I8ScaledUniformEuclideanQueryDistance, OptimizedScalarDistance7, VectorDistance,
-        VectorSimilarity,
+        I8ScaledUniformEuclideanQueryDistance, OptimizedScalarDistance1, OptimizedScalarDistance7,
+        VectorDistance, VectorSimilarity,
     },
     quantization::{
-        AsymmetricBinaryQuantizer, BinaryQuantizer, I8NaiveQuantizer, OptimizedScalarQuantizer7,
-        Quantizer, VectorQuantizer,
+        AsymmetricBinaryQuantizer, BinaryQuantizer, I8NaiveQuantizer, OptimizedScalarQuantizer1,
+        OptimizedScalarQuantizer7, Quantizer, VectorQuantizer,
     },
 };
 
@@ -114,6 +114,11 @@ pub fn new_query_vector_distance_f32<'a>(
             query,
             OptimizedScalarQuantizer7,
         )),
+        (_, Some(VectorQuantizer::OSQ1)) => Box::new(QuantizedQueryVectorDistance::from_f32(
+            OptimizedScalarDistance1(similarity),
+            query,
+            OptimizedScalarQuantizer1,
+        )),
     }
 }
 
@@ -149,6 +154,10 @@ pub fn new_query_vector_distance_indexing<'a>(
         ),
         (_, Some(VectorQuantizer::OSQ7)) => Box::new(QuantizedQueryVectorDistance::from_quantized(
             OptimizedScalarDistance7(similarity),
+            query,
+        )),
+        (_, Some(VectorQuantizer::OSQ1)) => Box::new(QuantizedQueryVectorDistance::from_quantized(
+            OptimizedScalarDistance1(similarity),
             query,
         )),
     }

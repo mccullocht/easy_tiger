@@ -2,7 +2,7 @@
 //!
 //! Graph navigation during search uses these quantized vectors.
 
-use std::{io, str::FromStr};
+use std::{io, iter::FusedIterator, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -507,6 +507,58 @@ fn optimized_scalar_quantize<'a, const NBITS: usize>(
         stats,
     )
 }
+
+pub(crate) struct DWordChunkIter<I> {
+    iter: I,
+    buf: [u8; 8],
+    nbuf: usize,
+}
+
+impl<I: FusedIterator<Item = u8>> DWordChunkIter<I> {
+    pub(crate) fn new(iter: I) -> Self {
+        Self {
+            iter,
+            buf: [0u8; 8],
+            nbuf: 0,
+        }
+    }
+}
+
+impl<I: FusedIterator<Item = u8>> Iterator for DWordChunkIter<I> {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(b) = self.iter.next() {
+            self.buf[self.nbuf] = b;
+            self.nbuf += 1;
+            if self.nbuf == 8 {
+                let w = u64::from_le_bytes(self.buf);
+                self.buf.fill(0);
+                self.nbuf = 0;
+                return Some(w);
+            }
+        }
+
+        if self.nbuf > 0 {
+            self.nbuf = 0;
+            Some(u64::from_le_bytes(self.buf))
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (l, u) = self.iter.size_hint();
+        (
+            (l + self.nbuf).div_ceil(8),
+            u.map(|u| (u + self.nbuf).div_ceil(8)),
+        )
+    }
+}
+
+impl<I: FusedIterator<Item = u8>> FusedIterator for DWordChunkIter<I> {}
+
+impl<I: FusedIterator<Item = u8>> ExactSizeIterator for DWordChunkIter<I> where I: ExactSizeIterator {}
 
 // compute min, max, norm^2 (sum(dx*dx))
 // compute quantized value for each dimension

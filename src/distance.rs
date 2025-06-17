@@ -3,9 +3,9 @@
 use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
-use simsimd::{BinarySimilarity, SpatialSimilarity};
+use simsimd::SpatialSimilarity;
 
-use crate::quantization::OptimizedScalarQuantizedVector;
+use crate::quantization::{DWordChunkIter, OptimizedScalarQuantizedVector};
 
 /// Distance function for `f32` vectors.
 ///
@@ -228,14 +228,10 @@ impl QuantizedVectorDistance for OptimizedScalarDistance1 {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = OptimizedScalarQuantizedVector::from_bytes(query).expect("contains meta");
         let doc = OptimizedScalarQuantizedVector::from_bytes(doc).expect("contains meta");
-        // NB: casts will always succeed as src and dst type have same size and alignment.
-        // XXX this works since this is dot in [0,1] instead of [-1, 1] like hamming(?)
         // XXX recall is still _very_ poor -- 0.405 w/o rerank, 0.764 with.
-        let dot = query
-            .vector()
-            .iter()
-            .zip(doc.vector().iter())
-            .map(|(q, d)| ((q & d) as u32).count_ones())
+        let dot = DWordChunkIter::new(query.vector().iter().copied())
+            .zip(DWordChunkIter::new(doc.vector().iter().copied()))
+            .map(|(qw, dw)| (qw & dw).count_ones())
             .sum::<u32>() as f64;
         OptimizedScalarQuantizedVector::distance::<1, 1>(
             &query,

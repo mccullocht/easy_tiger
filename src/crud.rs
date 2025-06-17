@@ -305,7 +305,7 @@ impl IndexMutator {
             GraphLayout::Split => {
                 self.reader
                     .graph()?
-                    .set(vertex_id, &encode_graph_vertex(edges, None))?;
+                    .set(vertex_id, &encode_graph_vertex(edges))?;
                 self.reader
                     .raw_vectors()?
                     .set(vertex_id, &encode_raw_vector(raw_vector))?;
@@ -325,7 +325,7 @@ impl IndexMutator {
             GraphLayout::Split => self
                 .reader
                 .graph()?
-                .set(vertex_id, &encode_graph_vertex(edges, None)),
+                .set(vertex_id, &encode_graph_vertex(edges)),
         }
     }
 }

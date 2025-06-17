@@ -463,10 +463,9 @@ where
                             stats.unconnected += 1;
                         }
                         progress(1);
-                        // XXX remove optional vector arg.
                         Record::new(
                             i as i64,
-                            encode_graph_vertex(vertex.iter().map(|n| n.vertex()).collect(), None),
+                            encode_graph_vertex(vertex.iter().map(|n| n.vertex()).collect()),
                         )
                     }),
             ),

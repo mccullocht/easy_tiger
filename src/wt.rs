@@ -22,15 +22,11 @@ pub const ENTRY_POINT_KEY: i64 = -1;
 pub const CONFIG_KEY: i64 = -2;
 
 /// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
-pub struct CursorGraphVertex<'a> {
-    // XXX unit struct?
-    data: Cow<'a, [u8]>,
-}
+pub struct CursorGraphVertex<'a>(Cow<'a, [u8]>);
 
 impl<'a> CursorGraphVertex<'a> {
-    // XXX unused arg.
-    fn new(_config: &GraphConfig, data: Cow<'a, [u8]>) -> Self {
-        Self { data }
+    fn new(data: Cow<'a, [u8]>) -> Self {
+        Self(data)
     }
 }
 
@@ -42,7 +38,7 @@ impl GraphVertex for CursorGraphVertex<'_> {
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
         Leb128EdgeIterator {
-            data: self.data.as_ref(),
+            data: self.0.as_ref(),
             prev: 0,
         }
     }
@@ -113,7 +109,7 @@ impl Graph for CursorGraph<'_> {
     fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
         let r =
             unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
-        Some(r.map(|r| CursorGraphVertex::new(&self.config, r)))
+        Some(r.map(|r| CursorGraphVertex::new(r)))
     }
 }
 
@@ -331,23 +327,10 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
 ///
 /// Vector ought to be provided if using [crate::graph::GraphLayout::VectorInGraph],
 /// in which case the vector is
-pub fn encode_graph_vertex(edges: Vec<i64>, vector: Option<&[f32]>) -> Vec<u8> {
-    encode_graph_vertex_internal(edges, vector)
-}
-
-pub(crate) fn encode_graph_vertex_internal<'a>(
-    mut edges: Vec<i64>,
-    into_vector: Option<impl Into<VectorRep<'a>>>,
-) -> Vec<u8> {
-    let vector = into_vector.map(|v| v.into());
+pub fn encode_graph_vertex(mut edges: Vec<i64>) -> Vec<u8> {
     // A 64-bit value may occupy up to 10 bytes when leb128 encoded so reserve enough space for that.
     // There is unfortunately no constant for this in the leb128 crate.
-    let mut out: Vec<u8> =
-        Vec::with_capacity(vector.as_ref().map(|v| v.byte_len()).unwrap_or(0) + edges.len() * 10);
-    if let Some(v) = vector {
-        v.append_bytes(&mut out)
-    }
-
+    let mut out: Vec<u8> = Vec::with_capacity(edges.len() * 10);
     edges.sort();
     for (prev, next) in std::iter::once(&0).chain(edges.iter()).zip(edges.iter()) {
         leb128::write::signed(&mut out, *next - *prev).unwrap();
@@ -357,49 +340,7 @@ pub(crate) fn encode_graph_vertex_internal<'a>(
 }
 
 /// Encode the contents of a raw vector to use as a WiredTiger table value.
+// TODO: replace this with a more compreshensive vector table offering.
 pub fn encode_raw_vector(vector: &[f32]) -> Vec<u8> {
-    VectorRep::from(vector).to_byte_vec()
-}
-
-pub(crate) enum VectorRep<'a> {
-    Float(&'a [f32]),
-    Bytes(&'a [u8]),
-}
-
-impl VectorRep<'_> {
-    fn byte_len(&self) -> usize {
-        match *self {
-            Self::Float(f) => std::mem::size_of_val(f),
-            Self::Bytes(b) => b.len(),
-        }
-    }
-
-    fn append_bytes(&self, vec: &mut Vec<u8>) {
-        match *self {
-            Self::Float(f) => {
-                for d in f {
-                    vec.extend_from_slice(&d.to_le_bytes());
-                }
-            }
-            Self::Bytes(b) => vec.extend_from_slice(b),
-        }
-    }
-
-    fn to_byte_vec(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.byte_len());
-        self.append_bytes(&mut bytes);
-        bytes
-    }
-}
-
-impl<'a> From<&'a [f32]> for VectorRep<'a> {
-    fn from(value: &'a [f32]) -> Self {
-        VectorRep::Float(value)
-    }
-}
-
-impl<'a> From<&'a [u8]> for VectorRep<'a> {
-    fn from(value: &'a [u8]) -> Self {
-        VectorRep::Bytes(value)
-    }
+    vector.iter().flat_map(|d| d.to_le_bytes()).collect()
 }

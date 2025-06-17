@@ -114,7 +114,7 @@ impl IndexMutator {
                 .get_vertex(src_vertex_id)
                 .unwrap_or(Err(Error::not_found_error()))?;
             let edges = vertex.edges().filter(|v| *v != dst_vertex_id).collect();
-            self.set_graph_edges(src_vertex_id, edges, None)?;
+            self.set_graph_edges(src_vertex_id, edges)?;
         }
 
         Ok(())
@@ -165,7 +165,7 @@ impl IndexMutator {
             edges.clear();
             edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
         }
-        self.set_graph_edges(src_vertex_id, edges, Some(&src_vector))
+        self.set_graph_edges(src_vertex_id, edges)
     }
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
@@ -235,7 +235,7 @@ impl IndexMutator {
 
         // Write all the mutated nodes back to WT.
         for (vertex_id, _, edges) in vertex_data {
-            self.set_graph_edges(vertex_id, edges, None)?;
+            self.set_graph_edges(vertex_id, edges)?;
         }
 
         Ok(())
@@ -314,13 +314,7 @@ impl IndexMutator {
         self.reader.nav_vectors()?.set(vertex_id, nav_vector.into())
     }
 
-    // XXX remove unused arg.
-    fn set_graph_edges(
-        &self,
-        vertex_id: i64,
-        edges: Vec<i64>,
-        _raw_vector: Option<&[f32]>,
-    ) -> Result<()> {
+    fn set_graph_edges(&self, vertex_id: i64, edges: Vec<i64>) -> Result<()> {
         match self.reader.config().layout {
             GraphLayout::Split => self
                 .reader

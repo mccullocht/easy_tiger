@@ -4,7 +4,7 @@
 //! is recommeded that callers begin a transaction before performing their search or mutation
 //! and commit or rollback the transaction when they are done.
 
-use std::{borrow::Cow, io, ops::Deref, sync::Arc};
+use std::{borrow::Cow, io, sync::Arc};
 
 use wt_mdb::{
     options::{CreateOptions, DropOptions},
@@ -12,8 +12,8 @@ use wt_mdb::{
 };
 
 use crate::graph::{
-    Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
-    RawVector, RawVectorStore,
+    Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVector,
+    RawVectorStore,
 };
 
 /// Key in the graph table containing the entry point.
@@ -22,28 +22,11 @@ pub const ENTRY_POINT_KEY: i64 = -1;
 pub const CONFIG_KEY: i64 = -2;
 
 /// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
-pub struct CursorGraphVertex<'a> {
-    data: Cow<'a, [u8]>,
-    raw_vector: Option<RawVector<'a>>,
-    edges_start: usize,
-}
+pub struct CursorGraphVertex<'a>(Cow<'a, [u8]>);
 
 impl<'a> CursorGraphVertex<'a> {
-    fn new(config: &GraphConfig, data: Cow<'a, [u8]>) -> Self {
-        let raw_vector = if config.layout == GraphLayout::RawVectorInGraph {
-            Some(RawVector::from_cow_partial(
-                data.clone(),
-                config.dimensions.get(),
-            ))
-        } else {
-            None
-        };
-        let edges_start = raw_vector.as_ref().map(|v| v.bytes_len()).unwrap_or(0);
-        Self {
-            data,
-            raw_vector,
-            edges_start,
-        }
+    fn new(data: Cow<'a, [u8]>) -> Self {
+        Self(data)
     }
 }
 
@@ -53,13 +36,9 @@ impl GraphVertex for CursorGraphVertex<'_> {
     where
         Self: 'c;
 
-    fn vector(&self) -> Option<Cow<'_, [f32]>> {
-        self.raw_vector.as_ref().map(|v| Cow::from(v.deref()))
-    }
-
     fn edges(&self) -> Self::EdgeIterator<'_> {
         Leb128EdgeIterator {
-            data: &self.data.as_ref()[self.edges_start..],
+            data: self.0.as_ref(),
             prev: 0,
         }
     }
@@ -130,7 +109,7 @@ impl Graph for CursorGraph<'_> {
     fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
         let r =
             unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
-        Some(r.map(|r| CursorGraphVertex::new(&self.config, r)))
+        Some(r.map(CursorGraphVertex::new))
     }
 }
 
@@ -178,7 +157,7 @@ impl NavVectorStore for CursorNavVectorStore<'_> {
 #[derive(Clone)]
 pub struct TableGraphVectorIndex {
     graph_table_name: String,
-    raw_table_name: Option<String>,
+    raw_table_name: String,
     nav_table_name: String,
     config: GraphConfig,
 }
@@ -194,7 +173,6 @@ impl TableGraphVectorIndex {
         let config_json = unsafe { cursor.seek_exact_unsafe(CONFIG_KEY) }
             .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
         let config: GraphConfig = serde_json::from_slice(config_json.value())?;
-        let raw_table_name = Self::compute_raw_table_name(config.layout, raw_table_name);
         Ok(Self {
             graph_table_name,
             raw_table_name,
@@ -208,7 +186,6 @@ impl TableGraphVectorIndex {
     pub fn from_init(config: GraphConfig, index_name: &str) -> io::Result<Self> {
         let [graph_table_name, raw_table_name, nav_table_name] =
             Self::generate_table_names(index_name);
-        let raw_table_name = Self::compute_raw_table_name(config.layout, raw_table_name);
         Ok(Self {
             graph_table_name,
             raw_table_name,
@@ -227,9 +204,7 @@ impl TableGraphVectorIndex {
         let index = Self::from_init(config, index_name)?;
         let session = connection.open_session()?;
         session.create_table(&index.graph_table_name, table_options.clone())?;
-        if let Some(raw_table_name) = index.raw_table_name.as_ref() {
-            session.create_table(raw_table_name, table_options.clone())?;
-        }
+        session.create_table(&index.raw_table_name, table_options.clone())?;
         session.create_table(&index.nav_table_name, table_options)?;
         let mut cursor = session.open_record_cursor(&index.graph_table_name)?;
         cursor.set(&Record::new(CONFIG_KEY, serde_json::to_vec(&index.config)?))?;
@@ -269,21 +244,12 @@ impl TableGraphVectorIndex {
 
     /// Return the name of the table containing raw vectors.
     pub fn raw_table_name(&self) -> &str {
-        self.raw_table_name
-            .as_ref()
-            .unwrap_or(&self.graph_table_name)
+        &self.raw_table_name
     }
 
     /// Return the name of the table containing the navigational vectors.
     pub fn nav_table_name(&self) -> &str {
         &self.nav_table_name
-    }
-
-    fn compute_raw_table_name(layout: GraphLayout, raw_table_name: String) -> Option<String> {
-        match layout {
-            GraphLayout::RawVectorInGraph => None,
-            GraphLayout::Split => Some(raw_table_name),
-        }
     }
 }
 
@@ -361,23 +327,10 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
 ///
 /// Vector ought to be provided if using [crate::graph::GraphLayout::VectorInGraph],
 /// in which case the vector is
-pub fn encode_graph_vertex(edges: Vec<i64>, vector: Option<&[f32]>) -> Vec<u8> {
-    encode_graph_vertex_internal(edges, vector)
-}
-
-pub(crate) fn encode_graph_vertex_internal<'a>(
-    mut edges: Vec<i64>,
-    into_vector: Option<impl Into<VectorRep<'a>>>,
-) -> Vec<u8> {
-    let vector = into_vector.map(|v| v.into());
+pub fn encode_graph_vertex(mut edges: Vec<i64>) -> Vec<u8> {
     // A 64-bit value may occupy up to 10 bytes when leb128 encoded so reserve enough space for that.
     // There is unfortunately no constant for this in the leb128 crate.
-    let mut out: Vec<u8> =
-        Vec::with_capacity(vector.as_ref().map(|v| v.byte_len()).unwrap_or(0) + edges.len() * 10);
-    if let Some(v) = vector {
-        v.append_bytes(&mut out)
-    }
-
+    let mut out: Vec<u8> = Vec::with_capacity(edges.len() * 10);
     edges.sort();
     for (prev, next) in std::iter::once(&0).chain(edges.iter()).zip(edges.iter()) {
         leb128::write::signed(&mut out, *next - *prev).unwrap();
@@ -387,49 +340,7 @@ pub(crate) fn encode_graph_vertex_internal<'a>(
 }
 
 /// Encode the contents of a raw vector to use as a WiredTiger table value.
+// TODO: replace this with a more comprehensive vector table offering.
 pub fn encode_raw_vector(vector: &[f32]) -> Vec<u8> {
-    VectorRep::from(vector).to_byte_vec()
-}
-
-pub(crate) enum VectorRep<'a> {
-    Float(&'a [f32]),
-    Bytes(&'a [u8]),
-}
-
-impl VectorRep<'_> {
-    fn byte_len(&self) -> usize {
-        match *self {
-            Self::Float(f) => std::mem::size_of_val(f),
-            Self::Bytes(b) => b.len(),
-        }
-    }
-
-    fn append_bytes(&self, vec: &mut Vec<u8>) {
-        match *self {
-            Self::Float(f) => {
-                for d in f {
-                    vec.extend_from_slice(&d.to_le_bytes());
-                }
-            }
-            Self::Bytes(b) => vec.extend_from_slice(b),
-        }
-    }
-
-    fn to_byte_vec(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.byte_len());
-        self.append_bytes(&mut bytes);
-        bytes
-    }
-}
-
-impl<'a> From<&'a [f32]> for VectorRep<'a> {
-    fn from(value: &'a [f32]) -> Self {
-        VectorRep::Float(value)
-    }
-}
-
-impl<'a> From<&'a [u8]> for VectorRep<'a> {
-    fn from(value: &'a [u8]) -> Self {
-        VectorRep::Bytes(value)
-    }
+    vector.iter().flat_map(|d| d.to_le_bytes()).collect()
 }

@@ -146,28 +146,17 @@ impl GraphSearcher {
 
         let distance_fn = reader.config().new_distance_function();
         let query = distance_fn.normalize_vector(query.into());
-        let mut raw_vectors = if self.candidates.iter().any(|c| c.state.vector().is_none()) {
-            Some(reader.raw_vectors()?)
-        } else {
-            None
-        };
+        let mut raw_vectors = reader.raw_vectors()?;
         let rescored = self
             .candidates
             .iter()
             .take(self.params.num_rerank)
             .map(|c| {
                 let vertex = c.neighbor.vertex();
-                let distance = if let Some(candidate_vector) = c.state.vector() {
-                    Ok(distance_fn.distance(&query, candidate_vector))
-                } else {
-                    raw_vectors
-                        .as_mut()
-                        .expect("set if any")
-                        .get_raw_vector(vertex)
-                        .expect("row exists")
-                        .map(|rv| distance_fn.distance(&query, &rv))
-                };
-                distance.map(|s| Neighbor::new(vertex, s))
+                raw_vectors
+                    .get_raw_vector(vertex)
+                    .expect("row exists")
+                    .map(|rv| Neighbor::new(vertex, distance_fn.distance(&query, &rv)))
             })
             .collect::<Result<Vec<_>>>();
         rescored.map(|mut r| {
@@ -208,12 +197,7 @@ impl GraphSearcher {
                 .get_vertex(vertex_id)
                 .unwrap_or_else(|| Err(Error::not_found_error()))?;
             if filter_predicate(vertex_id) {
-                // If we aren't reranking we don't need to copy the actual vector.
-                best_candidate.visit(if self.params.num_rerank > 0 {
-                    node.vector().map(|v| v.to_vec())
-                } else {
-                    None
-                });
+                best_candidate.visit();
             } else {
                 best_candidate.remove();
             }
@@ -234,33 +218,18 @@ impl GraphSearcher {
     }
 }
 
-#[derive(Debug, PartialEq)]
-enum CandidateState {
-    Unvisited,
-    Visited(Option<Vec<f32>>),
-}
-
-impl CandidateState {
-    fn vector(&self) -> Option<&[f32]> {
-        match self {
-            CandidateState::Visited(v) => v.as_ref().map(|x| x.as_slice()),
-            _ => None,
-        }
-    }
-}
-
 /// A candidate in the search list. Once visited, the candidate becomes a result.
 #[derive(Debug)]
 struct Candidate {
     neighbor: Neighbor,
-    state: CandidateState,
+    visited: bool,
 }
 
 impl From<Neighbor> for Candidate {
     fn from(neighbor: Neighbor) -> Self {
         Candidate {
             neighbor,
-            state: CandidateState::Unvisited,
+            visited: false,
         }
     }
 }
@@ -347,8 +316,8 @@ impl<'a> VisitCandidateGuard<'a> {
     }
 
     /// Mark this candidate as visited and update the full fidelity vector in the candidate list.
-    fn visit(mut self, vector: Option<impl Into<Vec<f32>>>) {
-        self.list.candidates[self.index].state = CandidateState::Visited(vector.map(|v| v.into()));
+    fn visit(mut self) {
+        self.list.candidates[self.index].visited = true;
         self.update_next_unvisited(self.index + 1)
     }
 
@@ -365,13 +334,7 @@ impl<'a> VisitCandidateGuard<'a> {
             .iter()
             .enumerate()
             .skip(start)
-            .find_map(|(i, c)| {
-                if c.state == CandidateState::Unvisited {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
+            .find_map(|(i, c)| if c.visited { None } else { Some(i) })
             .unwrap_or(self.list.candidates.len());
     }
 }
@@ -434,7 +397,7 @@ mod test {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
                 quantizer: VectorQuantizer::Binary,
-                layout: GraphLayout::RawVectorInGraph,
+                layout: GraphLayout::Split,
                 max_edges,
                 index_search_params: GraphSearchParams {
                     beam_width: NonZero::new(usize::MAX).unwrap(),
@@ -607,10 +570,6 @@ mod test {
             = std::iter::Copied<std::slice::Iter<'c, i64>>
         where
             Self: 'c;
-
-        fn vector(&self) -> Option<Cow<'_, [f32]>> {
-            Some(Cow::from(&self.0.vector))
-        }
 
         fn edges(&self) -> Self::EdgeIterator<'_> {
             self.0.edges.iter().copied()

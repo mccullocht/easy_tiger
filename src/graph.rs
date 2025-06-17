@@ -30,13 +30,11 @@ pub struct GraphSearchParams {
 pub enum GraphLayout {
     /// Each field appears in its own table.
     Split,
-    /// Raw vector is stored in the graph alongside the edges.
-    RawVectorInGraph,
 }
 
 impl Default for GraphLayout {
     fn default() -> Self {
-        Self::RawVectorInGraph
+        Self::Split
     }
 }
 
@@ -46,7 +44,6 @@ impl FromStr for GraphLayout {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "split" => Ok(Self::Split),
-            "raw_vector_in_graph" => Ok(Self::RawVectorInGraph),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("Unknown graph layout {}", s),
@@ -129,9 +126,6 @@ pub trait GraphVertex {
 
     /// Access the edges of the graph. These may be returned in an arbitrary order.
     fn edges(&self) -> Self::EdgeIterator<'_>;
-
-    /// Access the raw float vector if stored with the edges.
-    fn vector(&self) -> Option<Cow<'_, [f32]>>;
 }
 
 /// A raw float vector.

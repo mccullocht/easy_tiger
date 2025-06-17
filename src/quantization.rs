@@ -395,11 +395,30 @@ impl Quantizer for OptimizedScalarQuantizer1 {
     }
 
     fn for_query(&self, vector: &[f32]) -> Vec<u8> {
-        self.for_doc(vector)
+        let (quantized_it, stats) = optimized_scalar_quantize::<4>(vector);
+        let mut quantized = Vec::with_capacity(self.query_bytes(vector.len()));
+        let doc_bytes = vector.len().div_ceil(8);
+        quantized.resize(doc_bytes * 4, 0);
+        let component_sum =
+            DWordChunkIter::new(quantized_it)
+                .enumerate()
+                .fold(0u32, |sum, (i, dword)| {
+                    let hsum =
+                        (dword & 0x00ff_00ff_00ff_00ff) + ((dword >> 8) & 0x00ff_00ff_00ff_00ff);
+                    let wsum = (hsum & 0xffff_0000_ffff) + ((hsum >> 16) & 0xffff_0000_ffff);
+                    let dwsum = (wsum & 0xffff_ffff) + ((wsum >> 32) & 0xffff_ffff);
+                    for bit in 0..4 {
+                        quantized[doc_bytes * bit + i] =
+                            AsymmetricBinaryQuantizer::summarize_chunk(dword, bit);
+                    }
+                    sum + dwsum as u32
+                });
+        OptimizedScalarQuantizedVector::pack_meta(&mut quantized, stats, component_sum);
+        quantized
     }
 
     fn query_bytes(&self, dimensions: usize) -> usize {
-        self.doc_bytes(dimensions)
+        dimensions.div_ceil(8) * 4 + OptimizedScalarQuantizedVector::META_BYTES
     }
 }
 
@@ -527,9 +546,10 @@ impl From<&[f32]> for OSQStats {
     }
 }
 
+// XXX return lower/upper/norm and a packing function? would give the caller more leeway.
 fn optimized_scalar_quantize<'a, const NBITS: usize>(
     vector: &'a [f32],
-) -> (impl ExactSizeIterator<Item = u8> + 'a, OSQStats) {
+) -> (impl FusedIterator<Item = u8> + 'a, OSQStats) {
     let stats = OSQStats::from(vector);
     let lower = stats.lower;
     let upper = stats.upper;
@@ -562,7 +582,7 @@ impl<I: FusedIterator<Item = u8>> Iterator for DWordChunkIter<I> {
     type Item = u64;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(b) = self.iter.next() {
+        for b in self.iter.by_ref() {
             self.buf[self.nbuf] = b;
             self.nbuf += 1;
             if self.nbuf == 8 {

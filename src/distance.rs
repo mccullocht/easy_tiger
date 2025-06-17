@@ -5,7 +5,7 @@ use std::{borrow::Cow, io, str::FromStr};
 use serde::{Deserialize, Serialize};
 use simsimd::SpatialSimilarity;
 
-use crate::quantization::{DWordChunkIter, OptimizedScalarQuantizedVector};
+use crate::quantization::OptimizedScalarQuantizedVector;
 
 use crate::query_distance::QueryVectorDistance;
 
@@ -326,20 +326,42 @@ pub struct OptimizedScalarDistance1(pub(crate) VectorSimilarity);
 
 impl VectorDistance for OptimizedScalarDistance1 {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        // XXX this still doesn't do very well: 0.524 w/o rerank, 0.913 w/rerank.
         let query = OptimizedScalarQuantizedVector::from_bytes(query).expect("contains meta");
         let doc = OptimizedScalarQuantizedVector::from_bytes(doc).expect("contains meta");
-        // XXX recall is still _very_ poor -- 0.405 w/o rerank, 0.764 with.
-        let dot = DWordChunkIter::new(query.vector().iter().copied())
-            .zip(DWordChunkIter::new(doc.vector().iter().copied()))
-            .map(|(qw, dw)| (qw & dw).count_ones())
-            .sum::<u32>() as f64;
-        OptimizedScalarQuantizedVector::distance::<1, 1>(
+        assert_eq!(query.vector().len(), doc.vector().len() * 4);
+        let dot = query
+            .vector()
+            .chunks(doc.vector().len())
+            .enumerate()
+            .map(|(i, q)| {
+                (q.chunks(16)
+                    .map(chunk_to_u128)
+                    .zip(doc.vector().chunks(16).map(chunk_to_u128))
+                    .map(|(qw, dw)| (qw & dw).count_ones())
+                    .sum::<u32>()
+                    << i) as f64
+            })
+            .sum::<f64>();
+        OptimizedScalarQuantizedVector::distance::<4, 1>(
             &query,
             &doc,
             doc.vector().len() * 8,
             dot,
             self.0,
         )
+    }
+}
+
+fn chunk_to_u128(chunk: &[u8]) -> u128 {
+    match chunk.len() {
+        16 => u128::from_le_bytes(chunk.try_into().expect("16 bytes")),
+        l if l < 16 => {
+            let mut buf = [0u8; 16];
+            buf[..l].copy_from_slice(chunk);
+            u128::from_le_bytes(buf)
+        }
+        _ => unreachable!(),
     }
 }
 

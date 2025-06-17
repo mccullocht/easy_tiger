@@ -348,15 +348,12 @@ pub struct OptimizedScalarQuantizer7;
 
 impl Quantizer for OptimizedScalarQuantizer7 {
     fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
-        let (quantized_it, stats) = optimized_scalar_quantize::<7>(vector);
-        let (mut quantized, component_sum) = quantized_it.fold(
-            (Vec::with_capacity(self.doc_bytes(vector.len())), 0u32),
-            |(mut vec, sum), q| {
-                vec.push(q);
-                (vec, sum + u32::from(q))
-            },
-        );
-        OptimizedScalarQuantizedVector::pack_meta(&mut quantized, stats, component_sum);
+        let mut qiter = OSQIter::new(vector, 7);
+        let mut quantized = Vec::with_capacity(self.doc_bytes(vector.len()));
+        for q in qiter.by_ref() {
+            quantized.push(q);
+        }
+        OptimizedScalarQuantizedVector::pack_meta(&mut quantized, *qiter.meta());
         quantized
     }
 
@@ -378,15 +375,14 @@ pub struct OptimizedScalarQuantizer1;
 
 impl Quantizer for OptimizedScalarQuantizer1 {
     fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
-        let (quantized_it, stats) = optimized_scalar_quantize::<1>(vector);
-        // Pack 8 dimensions into a single byte.
+        let mut qiter = OSQIter::new(vector, 1);
         let mut quantized = Vec::with_capacity(self.doc_bytes(vector.len()));
+        // Pack 8 dimensions into a single byte.
         quantized.resize(vector.len().div_ceil(8), 0);
-        let component_sum = quantized_it.enumerate().fold(0u32, |sum, (i, q)| {
+        for (i, q) in qiter.by_ref().enumerate() {
             quantized[i / 8] |= q << (i % 8);
-            sum + u32::from(q)
-        });
-        OptimizedScalarQuantizedVector::pack_meta(&mut quantized, stats, component_sum);
+        }
+        OptimizedScalarQuantizedVector::pack_meta(&mut quantized, *qiter.meta());
         quantized
     }
 
@@ -395,25 +391,17 @@ impl Quantizer for OptimizedScalarQuantizer1 {
     }
 
     fn for_query(&self, vector: &[f32]) -> Vec<u8> {
-        let (quantized_it, stats) = optimized_scalar_quantize::<4>(vector);
+        let mut qiter = OSQIter::new(vector, 4);
         let mut quantized = Vec::with_capacity(self.query_bytes(vector.len()));
         let doc_bytes = vector.len().div_ceil(8);
         quantized.resize(doc_bytes * 4, 0);
-        let component_sum =
-            DWordChunkIter::new(quantized_it)
-                .enumerate()
-                .fold(0u32, |sum, (i, dword)| {
-                    let hsum =
-                        (dword & 0x00ff_00ff_00ff_00ff) + ((dword >> 8) & 0x00ff_00ff_00ff_00ff);
-                    let wsum = (hsum & 0xffff_0000_ffff) + ((hsum >> 16) & 0xffff_0000_ffff);
-                    let dwsum = (wsum & 0xffff_ffff) + ((wsum >> 32) & 0xffff_ffff);
-                    for bit in 0..4 {
-                        quantized[doc_bytes * bit + i] =
-                            AsymmetricBinaryQuantizer::summarize_chunk(dword, bit);
-                    }
-                    sum + dwsum as u32
-                });
-        OptimizedScalarQuantizedVector::pack_meta(&mut quantized, stats, component_sum);
+        for (i, q) in qiter.by_ref().enumerate() {
+            // Like in asymmetric binary each bit is packed into a like group.
+            for bit in 0..4 {
+                quantized[doc_bytes * bit + i / 8] |= ((q >> bit) & 0x1) << (i % 8);
+            }
+        }
+        OptimizedScalarQuantizedVector::pack_meta(&mut quantized, *qiter.meta());
         quantized
     }
 
@@ -436,11 +424,12 @@ impl<'a> OptimizedScalarQuantizedVector<'a> {
     const META_BYTES: usize = 16;
 
     /// Pack metadata on the end of the vector.
-    fn pack_meta(packed_vector: &mut Vec<u8>, stats: OSQStats, component_sum: u32) {
-        packed_vector.extend_from_slice(&stats.lower.to_le_bytes());
-        packed_vector.extend_from_slice(&stats.upper.to_le_bytes());
-        packed_vector.extend_from_slice(&stats.norm_sq.to_le_bytes());
-        packed_vector.extend_from_slice(&component_sum.to_le_bytes());
+    // XXX FIXME
+    fn pack_meta(packed_vector: &mut Vec<u8>, meta: OSQMeta) {
+        packed_vector.extend_from_slice(&meta.lower.to_le_bytes());
+        packed_vector.extend_from_slice(&meta.upper.to_le_bytes());
+        packed_vector.extend_from_slice(&meta.norm_sq.to_le_bytes());
+        packed_vector.extend_from_slice(&meta.component_sum.to_le_bytes());
     }
 
     /// Initialize from raw bytes.
@@ -510,109 +499,80 @@ impl<'a> OptimizedScalarQuantizedVector<'a> {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-struct OSQStats {
+#[derive(Debug, Copy, Clone)]
+struct OSQMeta {
     lower: f32,
     upper: f32,
     norm_sq: f32,
-    mean: f64,
-    variance: f64,
+    component_sum: u32,
 }
 
-impl Default for OSQStats {
-    fn default() -> Self {
+struct OSQIter<'a> {
+    raw_iter: std::slice::Iter<'a, f32>,
+    meta: OSQMeta,
+    step: f32,
+}
+
+impl<'a> OSQIter<'a> {
+    fn new(vector: &'a [f32], bits: usize) -> Self {
+        assert!(bits <= 8);
+        let meta = Self::compute_meta(vector);
+        let step = (meta.upper - meta.lower) as f64 / ((1 << bits) - 1) as f64;
         Self {
-            lower: f32::MAX,
-            upper: f32::MIN,
-            norm_sq: 0.0,
-            mean: 0.0,
-            variance: 0.0,
+            raw_iter: vector.iter(),
+            meta,
+            step: step as f32,
+        }
+    }
+
+    fn meta(&self) -> &OSQMeta {
+        // This should only be read when the iterator has been consumed.
+        assert_eq!(self.raw_iter.len(), 0);
+        &self.meta
+    }
+
+    fn compute_meta(vector: &[f32]) -> OSQMeta {
+        let (min, max, mean, var, norm_sq) = vector.iter().enumerate().fold(
+            (f32::MAX, f32::MIN, 0.0, 0.0, 0.0),
+            |(min, max, mean, var, norm_sq), (i, v)| {
+                let delta = *v as f64 - mean;
+                (
+                    min.min(*v),
+                    max.max(*v),
+                    mean + delta / (i + 1) as f64,
+                    var + delta * (*v as f64 - mean),
+                    norm_sq + (*v as f64 * *v as f64),
+                )
+            },
+        );
+        OSQMeta {
+            lower: min,
+            upper: max,
+            norm_sq: norm_sq as f32,
+            component_sum: 0,
         }
     }
 }
 
-impl From<&[f32]> for OSQStats {
-    fn from(vector: &[f32]) -> Self {
-        let mut stats = Self::default();
-        for (i, v) in vector.iter().copied().enumerate() {
-            stats.lower = stats.lower.min(v);
-            stats.upper = stats.upper.max(v);
-            stats.norm_sq += v * v;
-            let delta = v as f64 - stats.mean;
-            stats.mean += delta / (i as f64 + 1.0);
-            stats.variance += delta * (v as f64 - stats.mean);
-        }
-        stats
-    }
-}
-
-// XXX return lower/upper/norm and a packing function? would give the caller more leeway.
-fn optimized_scalar_quantize<'a, const NBITS: usize>(
-    vector: &'a [f32],
-) -> (impl FusedIterator<Item = u8> + 'a, OSQStats) {
-    let stats = OSQStats::from(vector);
-    let lower = stats.lower;
-    let upper = stats.upper;
-    let step = (stats.upper - stats.lower) / ((1 << NBITS) - 1) as f32;
-    (
-        vector
-            .iter()
-            .map(move |d| ((d.clamp(lower, upper) - lower) / step).round() as u8),
-        stats,
-    )
-}
-
-pub(crate) struct DWordChunkIter<I> {
-    iter: I,
-    buf: [u8; 8],
-    nbuf: usize,
-}
-
-impl<I: FusedIterator<Item = u8>> DWordChunkIter<I> {
-    pub(crate) fn new(iter: I) -> Self {
-        Self {
-            iter,
-            buf: [0u8; 8],
-            nbuf: 0,
-        }
-    }
-}
-
-impl<I: FusedIterator<Item = u8>> Iterator for DWordChunkIter<I> {
-    type Item = u64;
+impl Iterator for OSQIter<'_> {
+    type Item = u8;
 
     fn next(&mut self) -> Option<Self::Item> {
-        for b in self.iter.by_ref() {
-            self.buf[self.nbuf] = b;
-            self.nbuf += 1;
-            if self.nbuf == 8 {
-                let w = u64::from_le_bytes(self.buf);
-                self.buf.fill(0);
-                self.nbuf = 0;
-                return Some(w);
-            }
-        }
-
-        if self.nbuf > 0 {
-            self.nbuf = 0;
-            Some(u64::from_le_bytes(self.buf))
-        } else {
-            None
-        }
+        let d = *self.raw_iter.next()?;
+        let q = ((d.clamp(self.meta.lower, self.meta.upper) - self.meta.lower) / self.step).round()
+            as u8;
+        self.meta.component_sum += q as u32;
+        Some(q)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (l, u) = self.iter.size_hint();
-        (
-            (l + self.nbuf).div_ceil(8),
-            u.map(|u| (u + self.nbuf).div_ceil(8)),
-        )
+        self.raw_iter.size_hint()
     }
 }
 
-impl<I: FusedIterator<Item = u8>> FusedIterator for DWordChunkIter<I> {}
+impl FusedIterator for OSQIter<'_> {}
 
-impl<I: FusedIterator<Item = u8>> ExactSizeIterator for DWordChunkIter<I> where I: ExactSizeIterator {}
+impl ExactSizeIterator for OSQIter<'_> {}
 
 // compute min, max, norm^2 (sum(dx*dx))
 // compute quantized value for each dimension

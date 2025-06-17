@@ -380,6 +380,7 @@ impl Quantizer for OptimizedScalarQuantizer1 {
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct OptimizedScalarQuantizedVector<'a> {
     vector: &'a [u8],
+    // XXX the rep of this should just be OSQMeta.
     lower: f32,
     upper: f32,
     norm_sq: f32,
@@ -390,7 +391,6 @@ impl<'a> OptimizedScalarQuantizedVector<'a> {
     const META_BYTES: usize = 16;
 
     /// Pack metadata on the end of the vector.
-    // XXX FIXME
     fn pack_meta(packed_vector: &mut Vec<u8>, meta: OSQMeta) {
         packed_vector.extend_from_slice(&meta.lower.to_le_bytes());
         packed_vector.extend_from_slice(&meta.upper.to_le_bytes());
@@ -482,7 +482,7 @@ struct OSQIter<'a> {
 impl<'a> OSQIter<'a> {
     fn new(vector: &'a [f32], bits: usize) -> Self {
         assert!(bits <= 8);
-        let meta = Self::compute_meta(vector);
+        let meta = Self::compute_meta(vector, bits);
         let step = (meta.upper - meta.lower) as f64 / ((1 << bits) - 1) as f64;
         Self {
             raw_iter: vector.iter(),
@@ -497,26 +497,127 @@ impl<'a> OSQIter<'a> {
         &self.meta
     }
 
-    fn compute_meta(vector: &[f32]) -> OSQMeta {
+    // The intial interval is set to the minimum MSE grid for each number of bits.
+    // These starting points are derived from the optimal MSE grid for a uniform distribution.
+    const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
+        (-0.798, 0.798),
+        (-1.493, 1.493),
+        (-2.051, 2.051),
+        (-2.514, 2.514),
+        (-2.916, 2.916),
+        (-3.278, 3.278),
+        (-3.611, 3.611),
+        (-3.922, 3.922),
+    ];
+
+    fn compute_meta(vector: &[f32], bits: usize) -> OSQMeta {
         let (min, max, mean, var, norm_sq) = vector.iter().enumerate().fold(
             (f32::MAX, f32::MIN, 0.0, 0.0, 0.0),
             |(min, max, mean, var, norm_sq), (i, v)| {
                 let delta = *v as f64 - mean;
+                let mean = mean + delta / (i + 1) as f64;
                 (
                     min.min(*v),
                     max.max(*v),
-                    mean + delta / (i + 1) as f64,
+                    mean,
                     var + delta * (*v as f64 - mean),
                     norm_sq + (*v as f64 * *v as f64),
                 )
             },
         );
+        let std_dev = (var / vector.len() as f64).sqrt();
+        let (lower, upper) = Self::optimize_intervals(
+            vector,
+            bits,
+            (
+                ((Self::MINIMUM_MSE_GRID[bits - 1].0 as f64 * std_dev + mean) as f32)
+                    .clamp(min, max),
+                ((Self::MINIMUM_MSE_GRID[bits - 1].1 as f64 * std_dev + mean) as f32)
+                    .clamp(min, max),
+            ),
+            norm_sq,
+            0.1,
+            5,
+        );
         OSQMeta {
-            lower: min,
-            upper: max,
+            lower,
+            upper,
             norm_sq: norm_sq as f32,
             component_sum: 0,
         }
+    }
+
+    fn optimize_intervals(
+        vector: &[f32],
+        bits: usize,
+        mut interval: (f32, f32),
+        norm_sq: f64,
+        lambda: f64,
+        iters: usize,
+    ) -> (f32, f32) {
+        // XXX osq1 recall is mid -- poorer at the outset, about the same when re-scored.
+        // might be related to this.
+        let qmax = ((1 << bits) - 1) as f64;
+        let mut loss = Self::loss(vector, interval, qmax, norm_sq, lambda);
+        let scale = (1.0 - lambda) / norm_sq;
+        if !scale.is_finite() {
+            return interval;
+        }
+        for _ in 0..iters {
+            let step_inv = qmax as f32 / (interval.1 - interval.0);
+            let (daa, dab, dbb, dax, dbx) =
+                vector
+                    .iter()
+                    .fold((0.0, 0.0, 0.0, 0.0, 0.0), |(daa, dab, dbb, dax, dbx), v| {
+                        let s = (v.clamp(interval.0, interval.1) * step_inv).round() as f64 / qmax;
+                        (
+                            daa + (1.0 - s) * (1.0 - s),
+                            dab + (1.0 - s) * s,
+                            dbb + s * s,
+                            dax + *v as f64 * (1.0 - s),
+                            dbx + *v as f64 * s,
+                        )
+                    });
+            let m0 = scale * dax * dax + lambda * daa;
+            let m1 = scale * dax * dbx + lambda * dab;
+            let m2 = scale * dbx * dbx + lambda * dbb;
+            let det = m0 * m2 - m1 * m1;
+            // If the determinant is 0 then we can't update the interval.
+            if det == 0.0 {
+                break;
+            }
+            let new_interval = (
+                ((m2 * dax - m1 * dbx) / det) as f32,
+                (((m0 * dbx - m1 * dax) / det) as f32),
+            );
+            // If the interval doesn't change appreciably, then stop.
+            if (new_interval.0 - interval.0).abs() < 1e-8
+                && (new_interval.1 - interval.1).abs() < 1e-8
+            {
+                break;
+            }
+            let new_loss = Self::loss(vector, new_interval, qmax, norm_sq, lambda);
+            // If the new loss is worse, skip updating the interval and exit.
+            if new_loss > loss {
+                break;
+            }
+            interval = new_interval;
+            loss = new_loss;
+        }
+        interval
+    }
+
+    fn loss(vector: &[f32], interval: (f32, f32), qmax: f64, norm_sq: f64, lambda: f64) -> f64 {
+        let step = (interval.1 - interval.0) as f64 / qmax;
+        let step_inv = 1.0 / step;
+        let (ve, e) = vector.iter().fold((0.0, 0.0), |(ve, e), v| {
+            // quantize and dequantize the vector to measure the difference.
+            let vq = interval.0 as f64
+                + step * ((v.clamp(interval.0, interval.1) - interval.0) as f64 * step_inv).round();
+            let delta = *v as f64 - vq;
+            (ve + *v as f64 * delta, e + delta * delta)
+        });
+        (1.0 - lambda) * ve * ve / norm_sq + lambda * e
     }
 }
 

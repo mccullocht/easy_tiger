@@ -208,12 +208,8 @@ impl GraphSearcher {
                 .get_vertex(vertex_id)
                 .unwrap_or_else(|| Err(Error::not_found_error()))?;
             if filter_predicate(vertex_id) {
-                // If we aren't reranking we don't need to copy the actual vector.
-                best_candidate.visit(if self.params.num_rerank > 0 {
-                    node.vector().map(|v| v.to_vec())
-                } else {
-                    None
-                });
+                // XXX eliminate vector arg
+                best_candidate.visit();
             } else {
                 best_candidate.remove();
             }
@@ -237,6 +233,7 @@ impl GraphSearcher {
 #[derive(Debug, PartialEq)]
 enum CandidateState {
     Unvisited,
+    // XXX remove this.
     Visited(Option<Vec<f32>>),
 }
 
@@ -347,8 +344,8 @@ impl<'a> VisitCandidateGuard<'a> {
     }
 
     /// Mark this candidate as visited and update the full fidelity vector in the candidate list.
-    fn visit(mut self, vector: Option<impl Into<Vec<f32>>>) {
-        self.list.candidates[self.index].state = CandidateState::Visited(vector.map(|v| v.into()));
+    fn visit(mut self) {
+        self.list.candidates[self.index].state = CandidateState::Visited(None);
         self.update_next_unvisited(self.index + 1)
     }
 
@@ -434,7 +431,7 @@ mod test {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
                 quantizer: VectorQuantizer::Binary,
-                layout: GraphLayout::RawVectorInGraph,
+                layout: GraphLayout::Split,
                 max_edges,
                 index_search_params: GraphSearchParams {
                     beam_width: NonZero::new(usize::MAX).unwrap(),
@@ -607,10 +604,6 @@ mod test {
             = std::iter::Copied<std::slice::Iter<'c, i64>>
         where
             Self: 'c;
-
-        fn vector(&self) -> Option<Cow<'_, [f32]>> {
-            Some(Cow::from(&self.0.vector))
-        }
 
         fn edges(&self) -> Self::EdgeIterator<'_> {
             self.0.edges.iter().copied()

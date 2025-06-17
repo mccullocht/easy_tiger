@@ -439,6 +439,7 @@ where
             ),
         ];
         let session = self.connection.open_session()?;
+        // XXX this isn't necessary if the graph and vector table are no longer shared.
         if self.options.wt_vector_store {
             session.drop_table(
                 self.index.graph_table_name(),
@@ -454,26 +455,18 @@ where
                     .zip(self.graph.iter())
                     .enumerate()
                     .take(self.limit)
-                    .map(|(i, (v, n))| {
+                    .map(|(i, (_, n))| {
                         let vertex = n.read().unwrap();
                         stats.vertices += 1;
                         stats.edges += vertex.len();
                         if vertex.is_empty() {
                             stats.unconnected += 1;
                         }
-                        let vertex_vector =
-                            if self.index.config().layout == GraphLayout::RawVectorInGraph {
-                                Some(self.distance_fn.normalize_vector(v.into()))
-                            } else {
-                                None
-                            };
                         progress(1);
+                        // XXX remove optional vector arg.
                         Record::new(
                             i as i64,
-                            encode_graph_vertex(
-                                vertex.iter().map(|n| n.vertex()).collect(),
-                                vertex_vector.as_ref().map(|vv| vv.as_ref()),
-                            ),
+                            encode_graph_vertex(vertex.iter().map(|n| n.vertex()).collect(), None),
                         )
                     }),
             ),
@@ -738,10 +731,6 @@ impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
         = BulkNodeEdgesIterator<'c>
     where
         Self: 'c;
-
-    fn vector(&self) -> Option<Cow<'_, [f32]>> {
-        None
-    }
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
         BulkNodeEdgesIterator::new(self.builder.graph[self.vertex_id as usize].read().unwrap())

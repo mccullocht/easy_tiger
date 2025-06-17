@@ -13,9 +13,6 @@ pub struct LookupArgs {
     #[arg(short, long)]
     id: i64,
 
-    /// If true, print the contents of the vector.
-    #[arg(short, long, default_value = "false")]
-    vector: bool,
     /// If true, print the undirected graph edges.
     #[arg(short, long, default_value = "true")]
     edges: bool,
@@ -35,9 +32,6 @@ pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -
         Some(result) => match result {
             Err(e) => println!("Error: {}", e),
             Ok(v) => {
-                if args.vector {
-                    println!("{:?}", v.vector());
-                }
                 if args.edges {
                     println!("{:?}", v.edges().collect::<Vec<_>>());
                 }

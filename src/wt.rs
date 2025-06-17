@@ -4,7 +4,7 @@
 //! is recommeded that callers begin a transaction before performing their search or mutation
 //! and commit or rollback the transaction when they are done.
 
-use std::{borrow::Cow, io, ops::Deref, sync::Arc};
+use std::{borrow::Cow, io, sync::Arc};
 
 use wt_mdb::{
     options::{CreateOptions, DropOptions},
@@ -12,8 +12,8 @@ use wt_mdb::{
 };
 
 use crate::graph::{
-    Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
-    RawVector, RawVectorStore,
+    Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVector,
+    RawVectorStore,
 };
 
 /// Key in the graph table containing the entry point.
@@ -23,27 +23,14 @@ pub const CONFIG_KEY: i64 = -2;
 
 /// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
 pub struct CursorGraphVertex<'a> {
+    // XXX unit struct?
     data: Cow<'a, [u8]>,
-    raw_vector: Option<RawVector<'a>>,
-    edges_start: usize,
 }
 
 impl<'a> CursorGraphVertex<'a> {
-    fn new(config: &GraphConfig, data: Cow<'a, [u8]>) -> Self {
-        let raw_vector = if config.layout == GraphLayout::RawVectorInGraph {
-            Some(RawVector::from_cow_partial(
-                data.clone(),
-                config.dimensions.get(),
-            ))
-        } else {
-            None
-        };
-        let edges_start = raw_vector.as_ref().map(|v| v.bytes_len()).unwrap_or(0);
-        Self {
-            data,
-            raw_vector,
-            edges_start,
-        }
+    // XXX unused arg.
+    fn new(_config: &GraphConfig, data: Cow<'a, [u8]>) -> Self {
+        Self { data }
     }
 }
 
@@ -53,13 +40,9 @@ impl GraphVertex for CursorGraphVertex<'_> {
     where
         Self: 'c;
 
-    fn vector(&self) -> Option<Cow<'_, [f32]>> {
-        self.raw_vector.as_ref().map(|v| Cow::from(v.deref()))
-    }
-
     fn edges(&self) -> Self::EdgeIterator<'_> {
         Leb128EdgeIterator {
-            data: &self.data.as_ref()[self.edges_start..],
+            data: self.data.as_ref(),
             prev: 0,
         }
     }
@@ -178,7 +161,7 @@ impl NavVectorStore for CursorNavVectorStore<'_> {
 #[derive(Clone)]
 pub struct TableGraphVectorIndex {
     graph_table_name: String,
-    raw_table_name: Option<String>,
+    raw_table_name: String,
     nav_table_name: String,
     config: GraphConfig,
 }
@@ -194,7 +177,6 @@ impl TableGraphVectorIndex {
         let config_json = unsafe { cursor.seek_exact_unsafe(CONFIG_KEY) }
             .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
         let config: GraphConfig = serde_json::from_slice(config_json.value())?;
-        let raw_table_name = Self::compute_raw_table_name(config.layout, raw_table_name);
         Ok(Self {
             graph_table_name,
             raw_table_name,
@@ -208,7 +190,6 @@ impl TableGraphVectorIndex {
     pub fn from_init(config: GraphConfig, index_name: &str) -> io::Result<Self> {
         let [graph_table_name, raw_table_name, nav_table_name] =
             Self::generate_table_names(index_name);
-        let raw_table_name = Self::compute_raw_table_name(config.layout, raw_table_name);
         Ok(Self {
             graph_table_name,
             raw_table_name,
@@ -227,9 +208,7 @@ impl TableGraphVectorIndex {
         let index = Self::from_init(config, index_name)?;
         let session = connection.open_session()?;
         session.create_table(&index.graph_table_name, table_options.clone())?;
-        if let Some(raw_table_name) = index.raw_table_name.as_ref() {
-            session.create_table(raw_table_name, table_options.clone())?;
-        }
+        session.create_table(&index.raw_table_name, table_options.clone())?;
         session.create_table(&index.nav_table_name, table_options)?;
         let mut cursor = session.open_record_cursor(&index.graph_table_name)?;
         cursor.set(&Record::new(CONFIG_KEY, serde_json::to_vec(&index.config)?))?;
@@ -269,21 +248,12 @@ impl TableGraphVectorIndex {
 
     /// Return the name of the table containing raw vectors.
     pub fn raw_table_name(&self) -> &str {
-        self.raw_table_name
-            .as_ref()
-            .unwrap_or(&self.graph_table_name)
+        &self.raw_table_name
     }
 
     /// Return the name of the table containing the navigational vectors.
     pub fn nav_table_name(&self) -> &str {
         &self.nav_table_name
-    }
-
-    fn compute_raw_table_name(layout: GraphLayout, raw_table_name: String) -> Option<String> {
-        match layout {
-            GraphLayout::RawVectorInGraph => None,
-            GraphLayout::Split => Some(raw_table_name),
-        }
     }
 }
 

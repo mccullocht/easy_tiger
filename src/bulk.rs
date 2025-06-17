@@ -439,7 +439,7 @@ where
             ),
         ];
         let session = self.connection.open_session()?;
-        // XXX this isn't necessary if the graph and vector table are no longer shared.
+        // TODO: maybe this isn't needed? was needed when vectors might be colocated with graph.
         if self.options.wt_vector_store {
             session.drop_table(
                 self.index.graph_table_name(),

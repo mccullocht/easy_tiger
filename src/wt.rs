@@ -109,7 +109,7 @@ impl Graph for CursorGraph<'_> {
     fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
         let r =
             unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
-        Some(r.map(|r| CursorGraphVertex::new(r)))
+        Some(r.map(CursorGraphVertex::new))
     }
 }
 

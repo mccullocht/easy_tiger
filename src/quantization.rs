@@ -455,6 +455,15 @@ impl<'a> OptimizedScalarQuantizedVector<'a> {
         self.vector
     }
 
+    fn normalized_range<const BITS: usize>(&self) -> f64 {
+        let r = self.upper as f64 - self.lower as f64;
+        if BITS == 1 {
+            r
+        } else {
+            r / ((1 << BITS) - 1) as f64
+        }
+    }
+
     /// Compute the distance between `query` and `doc`.
     ///
     /// `QBITS` is the number of bits each dimension of query vector is quantized into.
@@ -469,15 +478,15 @@ impl<'a> OptimizedScalarQuantizedVector<'a> {
         dot: f64,
         similarity: VectorSimilarity,
     ) -> f64 {
-        let qrange = (query.upper as f64 - query.lower as f64) / ((1 << QBITS) - 1) as f64;
-        let drange = (doc.upper as f64 - doc.lower as f64) / ((1 << DBITS) - 1) as f64;
-        let dist = doc.lower as f64 * query.lower as f64 * dimensions as f64
-            + query.lower as f64 * drange * doc.component_sum as f64
-            + doc.lower as f64 * qrange * query.component_sum as f64
-            + drange * qrange * dot;
+        let adjusted_dot = doc.lower as f64 * query.lower as f64 * dimensions as f64
+            + query.lower as f64 * doc.normalized_range::<DBITS>() * doc.component_sum as f64
+            + doc.lower as f64 * query.normalized_range::<QBITS>() * query.component_sum as f64
+            + doc.normalized_range::<DBITS>() * query.normalized_range::<QBITS>() * dot;
         match similarity {
-            VectorSimilarity::Dot => (-dist + 1.0) / 2.0,
-            VectorSimilarity::Euclidean => query.norm_sq as f64 + doc.norm_sq as f64 - (2.0 * dist),
+            VectorSimilarity::Dot => (-adjusted_dot + 1.0) / 2.0,
+            VectorSimilarity::Euclidean => {
+                query.norm_sq as f64 + doc.norm_sq as f64 - (2.0 * adjusted_dot)
+            }
         }
     }
 }

@@ -329,11 +329,18 @@ impl VectorDistance for OptimizedScalarDistance1 {
         let query = OptimizedScalarQuantizedVector::from_bytes(query).expect("contains meta");
         let doc = OptimizedScalarQuantizedVector::from_bytes(doc).expect("contains meta");
         // NB: casts will always succeed as src and dst type have same size and alignment.
-        let dot = BinarySimilarity::hamming(query.vector(), doc.vector()).expect("same vector len");
+        // XXX this works since this is dot in [0,1] instead of [-1, 1] like hamming(?)
+        // XXX recall is still _very_ poor -- 0.405 w/o rerank, 0.764 with.
+        let dot = query
+            .vector()
+            .iter()
+            .zip(doc.vector().iter())
+            .map(|(q, d)| ((q & d) as u32).count_ones())
+            .sum::<u32>() as f64;
         OptimizedScalarQuantizedVector::distance::<1, 1>(
             &query,
             &doc,
-            doc.vector().len(),
+            doc.vector().len() * 8,
             dot,
             self.0,
         )

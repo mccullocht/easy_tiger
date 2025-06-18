@@ -6,6 +6,7 @@
 //!
 //! Unlike the general-purpose WiredTiger library, this library only allows tables
 //! that are keyed by `i64` with byte array payloads.
+pub mod config;
 mod connection;
 pub mod options;
 mod session;
@@ -472,6 +473,28 @@ mod test {
                 .unwrap()
                 .unwrap()
                 > 0
+        );
+    }
+
+    #[test]
+    fn metadata_cursors() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session = conn.open_session().unwrap();
+        session.create_table("test", None).unwrap();
+        let cursor = session.open_metadata_cursor().unwrap();
+        assert_eq!(
+            cursor
+                .map(|e| e.map(|(k, _)| k))
+                .collect::<Result<Vec<_>, crate::Error>>()
+                .unwrap(),
+            vec![
+                "metadata:",
+                "colgroup:test",
+                "file:WiredTigerHS.wt",
+                "file:test.wt",
+                "table:test"
+            ],
         );
     }
 

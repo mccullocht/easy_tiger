@@ -62,7 +62,6 @@ impl Iterator for StatCursor<'_> {
 
 impl Drop for StatCursor<'_> {
     fn drop(&mut self) {
-        // TODO: print something if this returns an error.
         if let Err(e) = unsafe { wt_call!(self.ptr, close) } {
             error!("Failed to close statistics WT_CURSOR: {}", e);
         }

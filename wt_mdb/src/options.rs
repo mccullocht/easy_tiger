@@ -221,9 +221,7 @@ impl From<CreateOptionsBuilder> for CreateOptions {
         if let Some(metadata) = value.app_metadata {
             parts.push(metadata);
         }
-        let mut s = parts.join(",").into_bytes();
-        s.push(0);
-        Self(CString::from_vec_with_nul(s).expect("no nulls"))
+        Self(CString::new(parts.join(",")).expect("no nulls"))
     }
 }
 

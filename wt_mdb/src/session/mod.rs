@@ -29,7 +29,7 @@ pub use index_cursor::{IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordVi
 pub use record_cursor::{Record, RecordCursor, RecordCursorGuard, RecordView};
 pub use stat_cursor::StatCursor;
 
-const METADATA_URI: &'static CStr = c"metadata:";
+const METADATA_URI: &CStr = c"metadata:";
 
 /// URI of a WT table encoded as a CString.
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]

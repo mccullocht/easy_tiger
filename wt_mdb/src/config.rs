@@ -46,10 +46,8 @@ impl<'a> ConfigParser<'a> {
     }
 
     pub fn get(&mut self, key: &str) -> Option<Result<ConfigItem<'a>>> {
-        // NB: the expected key is a null-terminated cstring.
-        let mut key_bytes = key.to_string().into_bytes();
-        key_bytes.push(0);
-        let key = CString::from_vec_with_nul(key_bytes).expect("key doesn't contain nulls");
+        // NB: WT expects a null terminated string.
+        let key = CString::new(key.to_string()).expect("key doesn't contain nulls");
         let mut item = ConfigItem::default_wt_item();
         map_not_found(
             unsafe { wt_call!(self.ptr, get, key.as_ptr(), &mut item) }

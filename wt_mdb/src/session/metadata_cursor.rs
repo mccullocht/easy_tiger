@@ -93,9 +93,7 @@ impl<'a> MetadataCursor<'a> {
     }
 
     fn str_to_cstring(s: &str) -> Result<CString> {
-        let mut sbytes: Vec<u8> = s.to_owned().into();
-        sbytes.push(0);
-        CString::from_vec_with_nul(sbytes).map_err(|_| Error::Errno(Errno::INVAL))
+        CString::new(s.to_owned()).map_err(|_| Error::Errno(Errno::INVAL))
     }
 }
 

@@ -1,4 +1,5 @@
 mod index_cursor;
+mod metadata_cursor;
 mod record_cursor;
 mod stat_cursor;
 
@@ -10,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+use metadata_cursor::{MetadataCursor, MetadataCursorGuard};
 use rustix::io::Errno;
 use tracing::error;
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
@@ -221,6 +223,19 @@ impl Session {
         }
     }
 
+    /// Open a cursor over database metadata.
+    pub fn open_metadata_cursor(&self) -> Result<MetadataCursor> {
+        self.new_cursor_pointer(c"metadata:", None).map(|ptr| {
+            MetadataCursor::new(
+                InnerCursor {
+                    ptr,
+                    uri: TableUri(c"metadata:".to_owned()),
+                },
+                self,
+            )
+        })
+    }
+
     /// Get a cached [RecordCursor] or create a new cursor over `table_name`.
     pub fn get_record_cursor(&self, table_name: &str) -> Result<RecordCursorGuard<'_>> {
         self.get_typed_cursor(table_name, TableType::Record)
@@ -247,6 +262,16 @@ impl Session {
                 Ok(inner)
             })
             .unwrap_or_else(|| self.open_typed_cursor(table_name, None, expected_table_type))
+    }
+
+    pub fn get_metadata_cursor(&self) -> Result<MetadataCursorGuard<'_>> {
+        let mut cursor_cache = self.cached_cursors.borrow_mut();
+        cursor_cache
+            .iter()
+            .position(|c| c.uri.table_name() == c"metadata:")
+            .map(|i| Ok(MetadataCursor::new(cursor_cache.remove(i), self)))
+            .unwrap_or_else(|| self.open_metadata_cursor())
+            .map(MetadataCursorGuard::new)
     }
 
     /// Return an `InnerCursor` to the cache for future re-use.

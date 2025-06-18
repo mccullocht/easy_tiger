@@ -29,6 +29,8 @@ pub use index_cursor::{IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordVi
 pub use record_cursor::{Record, RecordCursor, RecordCursorGuard, RecordView};
 pub use stat_cursor::StatCursor;
 
+const METADATA_URI: &'static CStr = c"metadata:";
+
 /// URI of a WT table encoded as a CString.
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct TableUri(CString);
@@ -225,11 +227,11 @@ impl Session {
 
     /// Open a cursor over database metadata.
     pub fn open_metadata_cursor(&self) -> Result<MetadataCursor> {
-        self.new_cursor_pointer(c"metadata:", None).map(|ptr| {
+        self.new_cursor_pointer(METADATA_URI, None).map(|ptr| {
             MetadataCursor::new(
                 InnerCursor {
                     ptr,
-                    uri: TableUri(c"metadata:".to_owned()),
+                    uri: TableUri(METADATA_URI.to_owned()),
                 },
                 self,
             )
@@ -268,7 +270,7 @@ impl Session {
         let mut cursor_cache = self.cached_cursors.borrow_mut();
         cursor_cache
             .iter()
-            .position(|c| c.uri.table_name() == c"metadata:")
+            .position(|c| c.uri.table_name() == METADATA_URI)
             .map(|i| Ok(MetadataCursor::new(cursor_cache.remove(i), self)))
             .unwrap_or_else(|| self.open_metadata_cursor())
             .map(MetadataCursorGuard::new)

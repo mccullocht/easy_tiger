@@ -121,7 +121,7 @@ impl<'a> ConfigItem<'a> {
         // NB: we assume that because the source string is utf8 that a substring gnereated from it
         // will also be utf8.
         unsafe {
-            str::from_utf8(std::slice::from_raw_parts::<'a, _>(
+            std::str::from_utf8(std::slice::from_raw_parts::<'a, _>(
                 item.str_ as *const u8,
                 item.len,
             ))

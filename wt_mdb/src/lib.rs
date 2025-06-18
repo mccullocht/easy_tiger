@@ -6,6 +6,7 @@
 //!
 //! Unlike the general-purpose WiredTiger library, this library only allows tables
 //! that are keyed by `i64` with byte array payloads.
+pub mod config;
 mod connection;
 pub mod options;
 mod session;

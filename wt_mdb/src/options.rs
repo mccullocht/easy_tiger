@@ -177,12 +177,25 @@ impl Default for TableType {
 
 /// An options builder for creating a table, column group, index, or file in WiredTiger.
 #[derive(Default, Debug, Hash, Eq, PartialEq, Clone)]
-pub struct CreateOptionsBuilder(TableType);
+pub struct CreateOptionsBuilder {
+    table_type: TableType,
+    app_metadata: Option<String>,
+}
 
 impl CreateOptionsBuilder {
     /// Set the table type for this table.
-    pub fn table_type(self, table_type: TableType) -> Self {
-        Self(table_type)
+    pub fn table_type(mut self, table_type: TableType) -> Self {
+        self.table_type = table_type;
+        self
+    }
+
+    pub fn app_metadata(mut self, metadata: &str) -> Self {
+        assert!(
+            !metadata.as_bytes().contains(&0),
+            "metadata may not contain a NULL character"
+        );
+        self.app_metadata = Some(metadata.to_owned());
+        self
     }
 }
 
@@ -198,10 +211,19 @@ impl Default for CreateOptions {
 
 impl From<CreateOptionsBuilder> for CreateOptions {
     fn from(value: CreateOptionsBuilder) -> Self {
-        CreateOptions(match value.0 {
-            TableType::Record => c"key_format=q,value_format=u".to_owned(),
-            TableType::Index => c"key_format=u,value_format=u".to_owned(),
-        })
+        let mut parts = vec![
+            match value.table_type {
+                TableType::Record => "key_format=q".to_owned(),
+                TableType::Index => "key_format=u".to_owned(),
+            },
+            "value_format=u".into(),
+        ];
+        if let Some(metadata) = value.app_metadata {
+            parts.push(metadata);
+        }
+        let mut s = parts.join(",").into_bytes();
+        s.push(0);
+        Self(CString::from_vec_with_nul(s).expect("no nulls"))
     }
 }
 

@@ -45,7 +45,7 @@ impl<'a> ConfigParser<'a> {
         self.config
     }
 
-    pub fn get(&self, key: &str) -> Option<Result<ConfigItem<'a>>> {
+    pub fn get(&mut self, key: &str) -> Option<Result<ConfigItem<'a>>> {
         // NB: the expected key is a null-terminated cstring.
         let mut key_bytes = key.to_string().into_bytes();
         key_bytes.push(0);
@@ -83,13 +83,13 @@ impl Drop for ConfigParser<'_> {
 unsafe impl Send for ConfigParser<'_> {}
 
 /// Types of entries that can appear in config.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ConfigItem<'a> {
-    /// A string
+    /// A quoted string
     String(&'a str),
     /// A boolean literal ("true" or "false")
     Bool(bool),
-    /// Something that is like a string but not exactly a string.
+    /// An unquoted string, possibly an identifier.
     Id(&'a str),
     /// An integer, but not a floating point number.
     Num(i64),
@@ -139,5 +139,71 @@ impl<'a> ConfigItem<'a> {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::config::{ConfigItem, ConfigParser};
+
+    const CONFIG: &'static str = "id=anid,str=\"astring\",enabled=true,disabled=false,pos_num=7,neg_num=-7,float_num=3.14,doc={ \"json\": true }";
+
+    #[test]
+    fn get_id() {
+        let mut parser = ConfigParser::new(CONFIG).unwrap();
+        assert_eq!(parser.get("id"), Some(Ok(ConfigItem::Id("anid"))));
+    }
+
+    #[test]
+    fn get_string() {
+        let mut parser = ConfigParser::new(CONFIG).unwrap();
+        assert_eq!(parser.get("str"), Some(Ok(ConfigItem::String("astring"))));
+    }
+
+    #[test]
+    fn get_bool() {
+        let mut parser = ConfigParser::new(CONFIG).unwrap();
+        assert_eq!(parser.get("enabled"), Some(Ok(ConfigItem::Bool(true))));
+        assert_eq!(parser.get("disabled"), Some(Ok(ConfigItem::Bool(false))));
+    }
+
+    #[test]
+    fn get_num() {
+        let mut parser = ConfigParser::new(CONFIG).unwrap();
+        assert_eq!(parser.get("pos_num"), Some(Ok(ConfigItem::Num(7))));
+        assert_eq!(parser.get("neg_num"), Some(Ok(ConfigItem::Num(-7))));
+        assert_eq!(parser.get("float_num"), Some(Ok(ConfigItem::Id("3.14"))));
+    }
+
+    #[test]
+    fn get_struct() {
+        let mut parser = ConfigParser::new(CONFIG).unwrap();
+        assert_eq!(
+            parser.get("doc"),
+            Some(Ok(ConfigItem::Struct("{ \"json\": true }")))
+        );
+    }
+
+    #[test]
+    fn get_unknown() {
+        let mut parser = ConfigParser::new(CONFIG).unwrap();
+        assert_eq!(parser.get("unknown"), None);
+    }
+
+    #[test]
+    fn iterate() {
+        assert_eq!(
+            ConfigParser::new(CONFIG).unwrap().collect::<Vec<_>>(),
+            vec![
+                Ok(("id", ConfigItem::Id("anid"))),
+                Ok(("str", ConfigItem::String("astring"))),
+                Ok(("enabled", ConfigItem::Bool(true))),
+                Ok(("disabled", ConfigItem::Bool(false))),
+                Ok(("pos_num", ConfigItem::Num(7))),
+                Ok(("neg_num", ConfigItem::Num(-7))),
+                Ok(("float_num", ConfigItem::Id("3.14"))),
+                Ok(("doc", ConfigItem::Struct("{ \"json\": true }"))),
+            ]
+        );
     }
 }

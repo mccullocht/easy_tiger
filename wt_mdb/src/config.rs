@@ -116,7 +116,7 @@ impl<'a> ConfigItem<'a> {
     }
 
     fn get_str(item: &WT_CONFIG_ITEM) -> &'a str {
-        // NB: we assume that because the source string is utf8 that a substring gnereated from it
+        // NB: we assume that because the source string is utf8 that a substring generated from it
         // will also be utf8.
         unsafe {
             std::str::from_utf8(std::slice::from_raw_parts::<'a, _>(

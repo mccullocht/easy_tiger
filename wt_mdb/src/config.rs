@@ -98,6 +98,16 @@ pub enum ConfigItem<'a> {
 }
 
 impl<'a> ConfigItem<'a> {
+    /// If this is a [ConfigItem::String](`String`) or [ConfigItem::Id](`Id`) then return the inner
+    /// string value.
+    pub fn str_or_id(&self) -> Option<&'a str> {
+        match self {
+            Self::String(s) => Some(s),
+            Self::Id(s) => Some(s),
+            _ => None,
+        }
+    }
+
     fn default_wt_item() -> WT_CONFIG_ITEM {
         WT_CONFIG_ITEM {
             str_: std::ptr::null(),
@@ -205,5 +215,20 @@ mod test {
                 Ok(("doc", ConfigItem::Struct("{ \"json\": true }"))),
             ]
         );
+    }
+
+    #[test]
+    fn parse_json() {
+        let mut parser = ConfigParser::new("{ \"json\": true }").unwrap();
+        assert_eq!(parser.get("json"), Some(Ok(ConfigItem::Bool(true))));
+    }
+
+    #[test]
+    fn item_str_or_id() {
+        assert_eq!(ConfigItem::String("s").str_or_id(), Some("s"));
+        assert_eq!(ConfigItem::Id("s").str_or_id(), Some("s"));
+        assert_eq!(ConfigItem::Struct("s").str_or_id(), None);
+        assert_eq!(ConfigItem::Num(1).str_or_id(), None);
+        assert_eq!(ConfigItem::Bool(true).str_or_id(), None);
     }
 }

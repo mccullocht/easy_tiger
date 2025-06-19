@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use simsimd::SpatialSimilarity;
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
-    options::CreateOptionsBuilder,
-    Error, RecordCursor, RecordView, Result, Session,
+    options::{CreateOptions, CreateOptionsBuilder},
+    Error, Record, RecordCursor, RecordView, Result, Session,
 };
 
 use crate::distance::VectorSimilarity;
@@ -38,6 +38,7 @@ impl<'a> From<&'a [f32]> for Float32Vector<'a> {
     }
 }
 
+// XXX this should be TryFrom
 impl<'a> From<&'a [u8]> for Float32Vector<'a> {
     fn from(value: &'a [u8]) -> Self {
         #[cfg(target_endian = "little")]
@@ -169,6 +170,7 @@ pub struct Metadata {
 
 impl Metadata {
     /// Return a new distance scorer bound to `query`.
+    // XXX falliable
     fn new_query_scorer<'a>(&self, query: &'a [f32]) -> Box<dyn QueryDistance + 'a> {
         match (self.representation, self.similarity) {
             (Representation::Float32, VectorSimilarity::Euclidean) => {
@@ -202,7 +204,7 @@ impl VectorTable {
             Some(
                 CreateOptionsBuilder::default()
                     .table_type(wt_mdb::options::TableType::Record)
-                    .app_metadata(&serde_json::to_string(&metadata)?)
+                    .app_metadata(serde_json::to_string(&metadata)?)
                     .into(),
             ),
         )?;
@@ -217,12 +219,30 @@ impl VectorTable {
     ///
     /// REQUIRES: iter yields records by increasing key.
     pub fn bulk_load<'a, I>(
-        _session: &Session,
-        _table_name: &str,
-        _metadata: Metadata,
-        _iter: impl Iterator<Item = (i64, &'a [f32])>,
-    ) -> Result<Self> {
-        todo!()
+        session: &Session,
+        table_name: &str,
+        metadata: Metadata,
+        iter: impl Iterator<Item = (i64, &'a [f32])>,
+    ) -> io::Result<Self> {
+        // TODO: re-use a buffer across all encoded vectors during bulk load. this requires a custom
+        // iterator to get right.
+        let encoder = metadata.vector_encoder();
+        session.bulk_load(
+            table_name,
+            Some(Self::create_options(&metadata)?),
+            iter.map(|(k, v)| Record::new(k, encoder.encode(v))),
+        )?;
+        Ok(Self {
+            table_name: table_name.to_string(),
+            metadata,
+        })
+    }
+
+    fn create_options(metadata: &Metadata) -> io::Result<CreateOptions> {
+        Ok(CreateOptionsBuilder::default()
+            .table_type(wt_mdb::options::TableType::Record)
+            .app_metadata(&serde_json::to_string(&metadata)?)
+            .into())
     }
 
     /// Initialize table information from the database.

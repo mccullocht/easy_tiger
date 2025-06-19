@@ -189,12 +189,13 @@ impl CreateOptionsBuilder {
         self
     }
 
-    pub fn app_metadata(mut self, metadata: &str) -> Self {
+    pub fn app_metadata(mut self, metadata: impl Into<String>) -> Self {
+        let metadata = metadata.into();
         assert!(
             !metadata.as_bytes().contains(&0),
             "metadata may not contain a NULL character"
         );
-        self.app_metadata = Some(metadata.to_owned());
+        self.app_metadata = Some(metadata);
         self
     }
 }

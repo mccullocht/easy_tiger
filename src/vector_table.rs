@@ -1,8 +1,17 @@
-use std::{borrow::Cow, ops::Deref, sync::Arc};
+use std::{
+    borrow::Cow,
+    io,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 use simsimd::SpatialSimilarity;
-use wt_mdb::{RecordCursor, Result, Session};
+use wt_mdb::{
+    config::{ConfigItem, ConfigParser},
+    options::CreateOptionsBuilder,
+    Error, RecordCursor, RecordView, Result, Session,
+};
 
 use crate::distance::VectorSimilarity;
 
@@ -135,6 +144,15 @@ pub enum Representation {
     I8Naive,
 }
 
+impl Representation {
+    fn vector_encoder(&self) -> &dyn VectorEncoder {
+        match self {
+            Self::Float32 => &FloatVectorEncoder,
+            _ => unimplemented!(),
+        }
+    }
+}
+
 /// Describe the shape and encoding of vectors stored in a table.
 ///
 /// This is stored as JSON in the `app_metadata` config passed when a table is created.
@@ -150,7 +168,8 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    pub fn new_query_scorer<'a>(&self, query: &'a [f32]) -> Box<dyn QueryDistance + 'a> {
+    /// Return a new distance scorer bound to `query`.
+    fn new_query_scorer<'a>(&self, query: &'a [f32]) -> Box<dyn QueryDistance + 'a> {
         match (self.representation, self.similarity) {
             (Representation::Float32, VectorSimilarity::Euclidean) => {
                 Box::new(Float32EuclideanDistance::from(query))
@@ -162,24 +181,35 @@ impl Metadata {
         }
     }
 
-    pub fn new_vector_encoder(&self) -> Box<dyn VectorEncoder> {
-        match self.representation {
-            Representation::Float32 => Box::new(FloatVectorEncoder),
-            _ => todo!(),
-        }
+    /// Return the vector encoder used to marshall vector data for storage.
+    // NB: if vector encoders become stateful we could have VectorTable store the encoder.
+    fn vector_encoder(&self) -> &dyn VectorEncoder {
+        self.representation.vector_encoder()
     }
 }
 
 /// A record id keyed table where the values are all vectors.
 pub struct VectorTable {
-    _table_name: String,
-    _metadata: Metadata,
+    table_name: String,
+    metadata: Metadata,
 }
 
 impl VectorTable {
     /// Create an empty table with the given name and configuration.
-    pub fn create(_table_name: &str, _metadata: Metadata) -> Result<Self> {
-        todo!()
+    pub fn create(session: &Session, table_name: &str, metadata: Metadata) -> io::Result<Self> {
+        session.create_table(
+            table_name,
+            Some(
+                CreateOptionsBuilder::default()
+                    .table_type(wt_mdb::options::TableType::Record)
+                    .app_metadata(&serde_json::to_string(&metadata)?)
+                    .into(),
+            ),
+        )?;
+        Ok(Self {
+            table_name: table_name.to_string(),
+            metadata,
+        })
     }
 
     /// Create a new table with the given name and configuration, then bulk load the
@@ -187,6 +217,7 @@ impl VectorTable {
     ///
     /// REQUIRES: iter yields records by increasing key.
     pub fn bulk_load<'a, I>(
+        _session: &Session,
         _table_name: &str,
         _metadata: Metadata,
         _iter: impl Iterator<Item = (i64, &'a [f32])>,
@@ -194,46 +225,191 @@ impl VectorTable {
         todo!()
     }
 
-    /// Access a table in the database.
-    pub fn from_table(_table_name: &str) -> Result<Self> {
-        todo!()
+    /// Initialize table information from the database.
+    pub fn from_db(session: &Session, table_name: &str) -> io::Result<Self> {
+        let mut meta_cursor = session.get_metadata_cursor()?;
+        let config = meta_cursor
+            .seek_exact(&format!("table:{}", table_name))
+            .ok_or(Error::not_found_error())??;
+        let mut parser = ConfigParser::new(&config)?;
+        if let ConfigItem::Struct(app_metadata) = parser
+            .get("app_metadata")
+            .ok_or(Error::not_found_error())??
+        {
+            Ok(Self {
+                table_name: table_name.to_string(),
+                metadata: serde_json::from_str::<Metadata>(app_metadata)?,
+            })
+        } else {
+            Err(Error::not_found_error().into())
+        }
+    }
+
+    /// The name of the underlying table.
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+
+    /// Metadata for this table type.
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
     }
 
     /// Create a new cursor over table in `session`.
-    pub fn new_cursor<'a>(
-        self: &Arc<Self>,
-        _session: &'a Session,
-    ) -> Result<VectorTableCursor<'a>> {
-        todo!()
+    pub fn new_cursor<'a>(self: &Arc<Self>, session: &'a Session) -> Result<VectorTableCursor<'a>> {
+        Ok(VectorTableCursor {
+            table: Arc::clone(self),
+            cursor: session.open_record_cursor(&self.table_name)?,
+        })
     }
 }
 
+/// A cursor over a vector table.
 pub struct VectorTableCursor<'a> {
-    _table: Arc<VectorTable>,
-    _cursor: RecordCursor<'a>,
+    table: Arc<VectorTable>,
+    cursor: RecordCursor<'a>,
 }
 
-// XXX VectorTableCursor can deref to a RecordCursor
-// XXX VectorTableCursor can accept f32 input and write it.
-// XXX VectorTableCursor can get the raw bytes for a vector (unsafely or unsafely)
-// XXX VectorTableCursor can be created from an existing cursor if desired (but not duplicated)
+impl<'a> VectorTableCursor<'a> {
+    /// The table this cursor is acting over.
+    ///
+    /// This reference may also be used to quasi-clone the cursor using [`VectorTable::new_cursor`].
+    pub fn table(&self) -> &Arc<VectorTable> {
+        &self.table
+    }
+
+    pub fn set_vector(&mut self, key: i64, vector: &[f32]) -> Result<()> {
+        // XXX make it falliable.
+        assert_eq!(vector.len(), self.table.metadata.dimensions);
+        self.cursor.set(&RecordView::new(
+            key,
+            self.table.metadata.vector_encoder().encode(vector),
+        ))
+    }
+
+    pub fn into_distance_scorer<'q>(self, query: &'q [f32]) -> VectorTableQueryDistance<'a, 'q> {
+        // XXX make it falliable.
+        assert_eq!(query.len(), self.table.metadata.dimensions);
+        VectorTableQueryDistance::new(self, query)
+    }
+}
+
+// XXX cursors have a reference to the session so they could be returned instead of having a custom
+// guard for each cursor type. would probably need a trait for cursors.
+
+// XXX on the fence about this but we shall see.
+impl<'a> Deref for VectorTableCursor<'a> {
+    type Target = RecordCursor<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.cursor
+    }
+}
+
+impl<'a> DerefMut for VectorTableCursor<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.cursor
+    }
+}
 
 /// Score a fixed query provided at object creation against vectors in the table.
-pub struct VectorTableQueryDistance<'a> {
-    _cursor: VectorTableCursor<'a>,
-    _distance: Box<dyn QueryDistance>,
+pub struct VectorTableQueryDistance<'a, 'q> {
+    cursor: VectorTableCursor<'a>,
+    scorer: Box<dyn QueryDistance + 'q>,
 }
 
-// XXX scoring:
-// * each vector type has an in-memory representation and on-disk representation
-// * in-memory rep may have different alignments reqs (float vs u8)
-// * in-memory rep may need non-trivial transforms from on-disk (little->big endian)
-// * in-memory => on-disk is isolated (?) to the ingestion path
-// * when query scoring (vec x id) we want query to be in-memory and we will do on-disk -> in-memory transformation
-// * edge computation needs to read a bunch of vectors and produce their in-memory rep for scoring.
+impl<'a, 'q> VectorTableQueryDistance<'a, 'q> {
+    fn new(cursor: VectorTableCursor<'a>, query: &'q [f32]) -> Self {
+        let scorer = cursor.table.metadata.new_query_scorer(query);
+        Self { cursor, scorer }
+    }
+
+    /// Compute the distance between the bound query vector and the vector at `record_id`
+    pub fn distance(&mut self, record_id: i64) -> Option<Result<f64>> {
+        unsafe { self.cursor.seek_exact_unsafe(record_id) }
+            .map(|r| r.map(|v| self.scorer.distance(v.value())))
+    }
+
+    /// Extract the underlying [VectorTableCursor].
+    pub fn into_cursor(self) -> VectorTableCursor<'a> {
+        self.cursor
+    }
+}
 
 // XXX for edge computation:
-// * wrap VectorTableCursor
-// * enum CachedVector { RecordId(i64), Vector(V) }
-// problem: i don't know what V is
-// i could also have an object-safe trait for edge computation and the implementation could be templated(?)
+// * use a cursor to extract all the raw vectors
+// * custom implementation for each on-disk vector rep x similarity.
+// * just need an efficient implementation, probably per vector rep.
+// * impl can manufacture a QueryDistance as needed.
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use wt_mdb::{
+        options::{ConnectionOptions, ConnectionOptionsBuilder},
+        Connection, Session,
+    };
+
+    use crate::{
+        distance::VectorSimilarity,
+        vector_table::{Metadata, Representation, VectorTable},
+    };
+
+    fn conn_options() -> Option<ConnectionOptions> {
+        Some(ConnectionOptionsBuilder::default().create().into())
+    }
+
+    // NB: fields are dropped _in the order they appear_.
+    // conn/session depend on the tempdir being around.
+    #[allow(dead_code)]
+    struct Fixture {
+        session: Session,
+        conn: Arc<Connection>,
+        tmpdir: TempDir,
+    }
+
+    impl Default for Fixture {
+        fn default() -> Self {
+            let tmpdir = tempfile::tempdir().unwrap();
+            let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+            let session = conn.open_session().unwrap();
+            Self {
+                tmpdir,
+                conn,
+                session,
+            }
+        }
+    }
+
+    #[test]
+    fn create_table() {
+        let f = Fixture::default();
+        let metadata = Metadata {
+            dimensions: 2,
+            similarity: VectorSimilarity::Euclidean,
+            representation: Representation::Float32,
+        };
+        let create_table = VectorTable::create(&f.session, "test", metadata.clone()).unwrap();
+        let read_table = VectorTable::from_db(&f.session, "test").unwrap();
+        assert_eq!(create_table.metadata(), read_table.metadata());
+    }
+
+    #[test]
+    fn mutate_f32_table() {
+        let f = Fixture::default();
+        let metadata = Metadata {
+            dimensions: 2,
+            similarity: VectorSimilarity::Euclidean,
+            representation: Representation::Float32,
+        };
+        let table = Arc::new(VectorTable::create(&f.session, "test", metadata.clone()).unwrap());
+        let mut cursor = table.new_cursor(&f.session).unwrap();
+        cursor.set_vector(1, &[0.0, 1.0]).unwrap();
+        cursor.set_vector(2, &[1.0, 0.0]).unwrap();
+        let mut scorer = cursor.into_distance_scorer(&[1.0, 1.0]);
+        assert_eq!(scorer.distance(0), None);
+        assert_eq!(scorer.distance(1), Some(Ok(1.0)));
+        assert_eq!(scorer.distance(2), Some(Ok(1.0)));
+    }
+}

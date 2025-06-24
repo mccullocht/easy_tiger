@@ -6,7 +6,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use simsimd::SpatialSimilarity;
+use simsimd::{BinarySimilarity, SpatialSimilarity};
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
     options::{CreateOptions, CreateOptionsBuilder},
@@ -64,33 +64,47 @@ impl<'a> Deref for Float32Vector<'a> {
     }
 }
 
-struct Float32EuclideanDistance<'a>(Float32Vector<'a>);
+struct Float32EuclideanQueryDistance<'a>(Float32Vector<'a>);
 
-impl<'a, V: Into<Float32Vector<'a>>> From<V> for Float32EuclideanDistance<'a> {
+impl<'a, V: Into<Float32Vector<'a>>> From<V> for Float32EuclideanQueryDistance<'a> {
     fn from(value: V) -> Self {
         Self(value.into())
     }
 }
 
-impl QueryDistance for Float32EuclideanDistance<'_> {
+impl QueryDistance for Float32EuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = Float32Vector::from(vector);
         SpatialSimilarity::l2sq(&self.0, &vector).expect("same size")
     }
 }
 
-struct Float32DotProductDistance<'a>(Float32Vector<'a>);
+struct Float32DotProductQueryDistance<'a>(Float32Vector<'a>);
 
-impl<'a, V: Into<Float32Vector<'a>>> From<V> for Float32DotProductDistance<'a> {
+impl<'a, V: Into<Float32Vector<'a>>> From<V> for Float32DotProductQueryDistance<'a> {
     fn from(value: V) -> Self {
         Self(value.into())
     }
 }
 
-impl QueryDistance for Float32DotProductDistance<'_> {
+impl QueryDistance for Float32DotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = Float32Vector::from(vector);
         SpatialSimilarity::dot(&self.0, &vector).expect("same size")
+    }
+}
+
+struct HammingQueryDistance<'a>(Cow<'a, [u8]>);
+
+impl<'a, V: Into<Cow<'a, [u8]>>> From<V> for HammingQueryDistance<'a> {
+    fn from(value: V) -> Self {
+        Self(value.into())
+    }
+}
+
+impl QueryDistance for HammingQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        BinarySimilarity::hamming(&self.0, vector).expect("same size")
     }
 }
 
@@ -130,6 +144,28 @@ impl VectorEncoder for FloatVectorEncoder {
     }
 }
 
+struct BinaryVectorEncoder;
+
+impl VectorEncoder for BinaryVectorEncoder {
+    fn encode_into(&self, vector: &[f32], out: &mut Vec<u8>) {
+        out.extend(vector.chunks(8).map(|c| {
+            c.iter()
+                .enumerate()
+                .map(|(i, d)| {
+                    let b = if *d > 0.0 { 1u8 } else { 0 };
+                    b << i
+                })
+                .reduce(|a, b| a | b)
+                .expect("chunk > 0")
+        }));
+        todo!()
+    }
+
+    fn encoded_bytes(&self, dimensions: usize) -> usize {
+        dimensions.div_ceil(8)
+    }
+}
+
 // XXX =============== QUANTIZATION MOVE END ===============
 
 /// Describes the format used for vectors on disk.
@@ -149,6 +185,7 @@ impl Representation {
     fn vector_encoder(&self) -> &dyn VectorEncoder {
         match self {
             Self::Float32 => &FloatVectorEncoder,
+            Self::Binary => &BinaryVectorEncoder,
             _ => unimplemented!(),
         }
     }
@@ -170,15 +207,18 @@ pub struct Metadata {
 
 impl Metadata {
     /// Return a new distance scorer bound to `query`.
-    // XXX falliable
+    // XXX make falliable
     fn new_query_scorer<'a>(&self, query: &'a [f32]) -> Box<dyn QueryDistance + 'a> {
         match (self.representation, self.similarity) {
             (Representation::Float32, VectorSimilarity::Euclidean) => {
-                Box::new(Float32EuclideanDistance::from(query))
+                Box::new(Float32EuclideanQueryDistance::from(query))
             }
             (Representation::Float32, VectorSimilarity::Dot) => {
-                Box::new(Float32DotProductDistance::from(query))
+                Box::new(Float32DotProductQueryDistance::from(query))
             }
+            (Representation::Binary, _) => Box::new(HammingQueryDistance::from(
+                BinaryVectorEncoder.encode(query),
+            )),
             _ => todo!(),
         }
     }
@@ -313,9 +353,6 @@ impl<'a> VectorTableCursor<'a> {
         VectorTableQueryDistance::new(self, query)
     }
 }
-
-// XXX cursors have a reference to the session so they could be returned instead of having a custom
-// guard for each cursor type. would probably need a trait for cursors.
 
 // XXX on the fence about this but we shall see.
 impl<'a> Deref for VectorTableCursor<'a> {

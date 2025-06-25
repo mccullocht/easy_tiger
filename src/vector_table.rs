@@ -21,8 +21,7 @@ use crate::distance::VectorSimilarity;
 /// Score a fixed query provided at object creation against an arbitrary vector.
 pub trait QueryDistance {
     /// Compute the distance between the bound query and doc.
-    // TODO: make this return optional so we don't panic if the size is unexpected.
-    fn distance(&self, doc: &[u8]) -> f64;
+    fn distance(&self, doc: &[u8]) -> Option<f64>;
 }
 
 /// Utility for coercing [f32] and [u8] into a float-vector-comparable shape as cheaply as possible.
@@ -70,9 +69,9 @@ impl<'a, V: Into<Float32Vector<'a>>> From<V> for Float32EuclideanQueryDistance<'
 }
 
 impl QueryDistance for Float32EuclideanQueryDistance<'_> {
-    fn distance(&self, doc: &[u8]) -> f64 {
+    fn distance(&self, doc: &[u8]) -> Option<f64> {
         let doc = Float32Vector::from(doc);
-        SpatialSimilarity::l2sq(&self.0, &doc).expect("same size")
+        SpatialSimilarity::l2sq(&self.0, &doc)
     }
 }
 
@@ -85,9 +84,9 @@ impl<'a, V: Into<Float32Vector<'a>>> From<V> for Float32DotProductQueryDistance<
 }
 
 impl QueryDistance for Float32DotProductQueryDistance<'_> {
-    fn distance(&self, doc: &[u8]) -> f64 {
+    fn distance(&self, doc: &[u8]) -> Option<f64> {
         let doc = Float32Vector::from(doc);
-        SpatialSimilarity::dot(&self.0, &doc).expect("same size")
+        SpatialSimilarity::dot(&self.0, &doc)
     }
 }
 
@@ -100,8 +99,8 @@ impl<'a, V: Into<Cow<'a, [u8]>>> From<V> for HammingQueryDistance<'a> {
 }
 
 impl QueryDistance for HammingQueryDistance<'_> {
-    fn distance(&self, doc: &[u8]) -> f64 {
-        BinarySimilarity::hamming(&self.0, doc).expect("same size")
+    fn distance(&self, doc: &[u8]) -> Option<f64> {
+        BinarySimilarity::hamming(&self.0, doc)
     }
 }
 
@@ -153,9 +152,12 @@ struct I8NaiveQueryDistance<'a> {
 }
 
 impl QueryDistance for I8NaiveQueryDistance<'_> {
-    fn distance(&self, vector: &[u8]) -> f64 {
+    fn distance(&self, vector: &[u8]) -> Option<f64> {
         let doc = I8NaiveVector::from(vector);
         let divisor = i8::MAX as f32 * i8::MAX as f32;
+        if self.query.vector().len() != doc.vector().len() {
+            return None;
+        }
         // NB: we may be able to accelerate this further with manual SIMD implementations.
         let dot = self
             .query
@@ -166,9 +168,9 @@ impl QueryDistance for I8NaiveQueryDistance<'_> {
             .sum::<i32>() as f64
             / divisor as f64;
         match self.similarity {
-            VectorSimilarity::Dot => (-dot + 1.0) / 2.0,
+            VectorSimilarity::Dot => Some((-dot + 1.0) / 2.0),
             VectorSimilarity::Euclidean => {
-                self.query.norm_sq as f64 + doc.norm_sq as f64 - (2.0 * dot)
+                Some(self.query.norm_sq as f64 + doc.norm_sq as f64 - (2.0 * dot))
             }
         }
     }
@@ -494,8 +496,14 @@ impl<'a, 'q> VectorTableQueryDistance<'a, 'q> {
 
     /// Compute the distance between the bound query vector and the vector at `record_id`
     pub fn distance(&mut self, record_id: i64) -> Option<Result<f64>> {
-        unsafe { self.cursor.seek_exact_unsafe(record_id) }
-            .map(|r| r.map(|v| self.scorer.distance(v.value())))
+        // TODO: more specific error for invalid scoring case.
+        unsafe { self.cursor.seek_exact_unsafe(record_id) }.map(|r| {
+            r.and_then(|v| {
+                self.scorer
+                    .distance(v.value())
+                    .ok_or(Error::generic_error())
+            })
+        })
     }
 
     /// Extract the underlying [VectorTableCursor].

@@ -86,7 +86,7 @@ pub enum Error {
 }
 
 impl Error {
-    fn generic_error() -> Self {
+    pub fn generic_error() -> Self {
         Error::WiredTiger(WiredTigerError::Generic)
     }
 

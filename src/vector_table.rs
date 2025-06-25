@@ -18,14 +18,10 @@ use crate::distance::VectorSimilarity;
 // XXX =============== DISTANCE MOVE BEGIN ===============
 
 /// Score a fixed query provided at object creation against an arbitrary vector.
-// XXX this will have all of our existing quantized implementations + f32.
-// XXX I can build a trivial edge computer that builds a store of byte vectors a creates
-// new QueryDistance for each pruning pass.
 pub trait QueryDistance {
-    /// Compute the distance between the bound query and vector.
-    // XXX it's annoying as fuck but maybe this should return Option<f64>? almost everything
-    // has the ability to bail with an error at this point.
-    fn distance(&self, vector: &[u8]) -> f64;
+    /// Compute the distance between the bound query and doc.
+    // TODO: make this return optional so we don't panic if the size is unexpected.
+    fn distance(&self, doc: &[u8]) -> f64;
 }
 
 /// Utility for coercing [f32] and [u8] into a float-vector-comparable shape as cheaply as possible.
@@ -73,9 +69,9 @@ impl<'a, V: Into<Float32Vector<'a>>> From<V> for Float32EuclideanQueryDistance<'
 }
 
 impl QueryDistance for Float32EuclideanQueryDistance<'_> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = Float32Vector::from(vector);
-        SpatialSimilarity::l2sq(&self.0, &vector).expect("same size")
+    fn distance(&self, doc: &[u8]) -> f64 {
+        let doc = Float32Vector::from(doc);
+        SpatialSimilarity::l2sq(&self.0, &doc).expect("same size")
     }
 }
 
@@ -88,9 +84,9 @@ impl<'a, V: Into<Float32Vector<'a>>> From<V> for Float32DotProductQueryDistance<
 }
 
 impl QueryDistance for Float32DotProductQueryDistance<'_> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = Float32Vector::from(vector);
-        SpatialSimilarity::dot(&self.0, &vector).expect("same size")
+    fn distance(&self, doc: &[u8]) -> f64 {
+        let doc = Float32Vector::from(doc);
+        SpatialSimilarity::dot(&self.0, &doc).expect("same size")
     }
 }
 
@@ -103,8 +99,77 @@ impl<'a, V: Into<Cow<'a, [u8]>>> From<V> for HammingQueryDistance<'a> {
 }
 
 impl QueryDistance for HammingQueryDistance<'_> {
+    fn distance(&self, doc: &[u8]) -> f64 {
+        BinarySimilarity::hamming(&self.0, doc).expect("same size")
+    }
+}
+
+struct I8NaiveVector<'a> {
+    /// One byte per dimension. Since the underlying rep may be a Vec and casting this is not safe
+    /// even if the target type is the same size and alignment, we store [u8] here.
+    vector_bytes: Cow<'a, [u8]>,
+    /// Squared l2 norm.
+    norm_sq: f32,
+}
+
+impl I8NaiveVector<'_> {
+    fn vector(&self) -> &[i8] {
+        // NB: cast should always succeed as element size and alignment are identical.
+        bytemuck::cast_slice(self.vector_bytes.as_ref())
+    }
+}
+
+const NORM_LEN: usize = std::mem::size_of::<f32>();
+
+impl<'a, V: Into<Cow<'a, [u8]>>> From<V> for I8NaiveVector<'a> {
+    fn from(value: V) -> Self {
+        let value = value.into();
+        let (_, nb) = value
+            .split_last_chunk::<{ NORM_LEN }>()
+            .expect("at least 4 bytes");
+        let norm_sq = f32::from_le_bytes(*nb);
+        let vector_bytes = match value {
+            Cow::Owned(mut vb) => {
+                vb.truncate(vb.len() - NORM_LEN);
+                Cow::Owned(vb)
+            }
+            Cow::Borrowed(vb) => Cow::Borrowed(
+                vb.split_last_chunk::<{ NORM_LEN }>()
+                    .expect("at least 4 bytes")
+                    .0,
+            ),
+        };
+        Self {
+            vector_bytes,
+            norm_sq,
+        }
+    }
+}
+
+struct I8NaiveQueryDistance<'a> {
+    similarity: VectorSimilarity,
+    query: I8NaiveVector<'a>,
+}
+
+impl QueryDistance for I8NaiveQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        BinarySimilarity::hamming(&self.0, vector).expect("same size")
+        let doc = I8NaiveVector::from(vector);
+        let divisor = i8::MAX as f32 * i8::MAX as f32;
+        // NB: we may be able to accelerate this further with manual SIMD implementations.
+        let dot = self
+            .query
+            .vector()
+            .iter()
+            .zip(doc.vector().iter())
+            .map(|(q, d)| *q as i32 * *d as i32)
+            .sum::<i32>() as f64
+            / divisor as f64;
+        match self.similarity {
+            VectorSimilarity::Dot => (-dot + 1.0) / 2.0,
+            VectorSimilarity::Euclidean => {
+                self.query.norm_sq as f64 + doc.norm_sq as f64 - (2.0 * dot)
+            }
+        }
     }
 }
 
@@ -166,10 +231,37 @@ impl VectorEncoder for BinaryVectorEncoder {
     }
 }
 
+struct I8NaiveVectorEncoder;
+
+impl VectorEncoder for I8NaiveVectorEncoder {
+    fn encode_into(&self, vector: &[f32], out: &mut Vec<u8>) {
+        let norm = SpatialSimilarity::dot(vector, vector)
+            .expect("same length!")
+            .sqrt() as f32;
+        let normalized_vector = vector.iter().map(|d| *d / norm).collect::<Vec<_>>();
+
+        // In the normalized vector all dimensions are in [-1.0, 1.0], so we can multiply by i8::MAX
+        // and round. This is very conservative but ensures we can encode as -1.0 or 1.0 even if
+        // that is now an improbably outcome.
+        //
+        // Save the squared l2 norm for use computing l2 distance.
+        // TODO: only store this for l2 similarity, it's unnecessary for dot.
+        out.extend(
+            normalized_vector
+                .iter()
+                .map(|d| ((*d * i8::MAX as f32).round() as i8).to_le_bytes()[0]),
+        );
+        out.extend_from_slice(&(norm * norm).to_le_bytes());
+    }
+
+    fn encoded_bytes(&self, dimensions: usize) -> usize {
+        dimensions + std::mem::size_of::<f32>()
+    }
+}
+
 // XXX =============== QUANTIZATION MOVE END ===============
 
 /// Describes the format used for vectors on disk.
-// XXX this should generate a (narrow!) quantizer or vector coder for this purpose
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Representation {
     /// Each dimension is an [`f32`]. This is effectively un-quantized.
@@ -186,7 +278,7 @@ impl Representation {
         match self {
             Self::Float32 => &FloatVectorEncoder,
             Self::Binary => &BinaryVectorEncoder,
-            _ => unimplemented!(),
+            Self::I8Naive => &I8NaiveVectorEncoder,
         }
     }
 }
@@ -219,7 +311,10 @@ impl Metadata {
             (Representation::Binary, _) => Box::new(HammingQueryDistance::from(
                 BinaryVectorEncoder.encode(query),
             )),
-            _ => todo!(),
+            (Representation::I8Naive, _) => Box::new(I8NaiveQueryDistance {
+                similarity: self.similarity,
+                query: I8NaiveVector::from(I8NaiveVectorEncoder.encode(query)),
+            }),
         }
     }
 
@@ -339,7 +434,7 @@ impl<'a> VectorTableCursor<'a> {
     }
 
     pub fn set_vector(&mut self, key: i64, vector: &[f32]) -> Result<()> {
-        // XXX make it falliable.
+        // TODO: return an error instead of panicking.
         assert_eq!(vector.len(), self.table.metadata.dimensions);
         self.cursor.set(&RecordView::new(
             key,
@@ -348,13 +443,12 @@ impl<'a> VectorTableCursor<'a> {
     }
 
     pub fn into_distance_scorer<'q>(self, query: &'q [f32]) -> VectorTableQueryDistance<'a, 'q> {
-        // XXX make it falliable.
+        // TODO: return an error instead of panicking.
         assert_eq!(query.len(), self.table.metadata.dimensions);
         VectorTableQueryDistance::new(self, query)
     }
 }
 
-// XXX on the fence about this but we shall see.
 impl<'a> Deref for VectorTableCursor<'a> {
     type Target = RecordCursor<'a>;
 
@@ -469,4 +563,7 @@ mod test {
         assert_eq!(scorer.distance(1), Some(Ok(1.0)));
         assert_eq!(scorer.distance(2), Some(Ok(1.0)));
     }
+
+    // XXX add tests for binary
+    // XXX add tests for i8 naive.
 }

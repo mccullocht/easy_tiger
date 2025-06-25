@@ -118,6 +118,13 @@ pub trait Graph {
     fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>>;
 }
 
+/// Distance scorer to invoke during graph exploration.
+pub trait QueryTableDistanceScorer {
+    /// Compute distance between a fixed query and the given vertex_id.
+    /// May return [Error::not_found_error()] if `vertex_id` is not known.
+    fn distance(&mut self, vertex_id: i64) -> Result<f64>;
+}
+
 /// A node in the Vamana graph.
 pub trait GraphVertex {
     type EdgeIterator<'a>: Iterator<Item = i64>

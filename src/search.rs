@@ -8,7 +8,7 @@ use std::{
 use crate::{
     graph::{
         Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
-        RawVectorStore,
+        QueryTableDistanceScorer, RawVectorStore,
     },
     Neighbor,
 };
@@ -216,12 +216,56 @@ impl GraphSearcher {
 
         Ok(())
     }
+
+    // XXX this is roughly the right approach.
+    fn search_graph(
+        &mut self,
+        query_distance: &mut impl QueryTableDistanceScorer,
+        graph: &mut impl Graph,
+        mut filter_predicate: impl FnMut(i64) -> bool,
+    ) -> Result<()> {
+        self.candidates.clear();
+        self.visited = 0;
+
+        if let Some(epr) = graph.entry_point() {
+            let entry_point = epr?;
+            self.candidates.add_unvisited(Neighbor::new(
+                entry_point,
+                query_distance.distance(entry_point)?,
+            ));
+            self.seen.insert(entry_point);
+        }
+
+        while let Some(best_candidate) = self.candidates.next_unvisited() {
+            self.visited += 1;
+            let vertex_id = best_candidate.neighbor().vertex();
+            let node = graph
+                .get_vertex(vertex_id)
+                .unwrap_or_else(|| Err(Error::not_found_error()))?;
+            if filter_predicate(vertex_id) {
+                best_candidate.visit();
+            } else {
+                best_candidate.remove();
+            }
+
+            for edge in node.edges() {
+                if !self.seen.insert(edge) {
+                    continue;
+                }
+                self.candidates
+                    .add_unvisited(Neighbor::new(edge, query_distance.distance(edge)?));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// A candidate in the search list. Once visited, the candidate becomes a result.
 #[derive(Debug)]
 struct Candidate {
     neighbor: Neighbor,
+    // TODO: stash this in the high bit of neighbor.vertex_id.
     visited: bool,
 }
 

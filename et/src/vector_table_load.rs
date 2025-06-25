@@ -6,8 +6,11 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vector_table::{Metadata, Representation, VectorTable},
 };
+use indicatif::ProgressIterator;
 use memmap2::Mmap;
 use wt_mdb::Connection;
+
+use crate::ui::progress_bar;
 
 #[derive(Args)]
 pub struct VectorTableLoadArgs {
@@ -51,6 +54,8 @@ pub fn vector_table_load(
     if args.drop_table {
         session.drop_table(index_name, None)?;
     }
+    let limit = args.limit.unwrap_or(input_vectors.len());
+    let progress_bar = progress_bar(limit, "vector table load");
     VectorTable::bulk_load(
         &session,
         index_name,
@@ -58,7 +63,8 @@ pub fn vector_table_load(
         input_vectors
             .iter()
             .enumerate()
-            .take(args.limit.unwrap_or(input_vectors.len()))
+            .take(limit)
+            .progress_with(progress_bar)
             .map(|(i, v)| (i as i64, v)),
     )
     .map(|_| ())

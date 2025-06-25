@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     io,
     ops::{Deref, DerefMut},
+    str::FromStr,
     sync::Arc,
 };
 
@@ -283,6 +284,22 @@ impl Representation {
     }
 }
 
+impl FromStr for Representation {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "f32" => Ok(Self::Float32),
+            "i1" => Ok(Self::Binary),
+            "i8" => Ok(Self::I8Naive),
+            x => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown similarity fuction {}", x),
+            )),
+        }
+    }
+}
+
 /// Describe the shape and encoding of vectors stored in a table.
 ///
 /// This is stored as JSON in the `app_metadata` config passed when a table is created.
@@ -353,7 +370,7 @@ impl VectorTable {
     /// contents of `iter`.
     ///
     /// REQUIRES: iter yields records by increasing key.
-    pub fn bulk_load<'a, I>(
+    pub fn bulk_load<'a>(
         session: &Session,
         table_name: &str,
         metadata: Metadata,

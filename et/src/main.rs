@@ -3,6 +3,7 @@ mod recall;
 mod spann;
 mod ui;
 mod vamana;
+mod vector_table_load;
 mod wt_stats;
 
 use std::{
@@ -18,6 +19,8 @@ use wt_mdb::{
     options::{ConnectionOptionsBuilder, Statistics},
     Connection,
 };
+
+use crate::vector_table_load::{vector_table_load, VectorTableLoadArgs};
 
 #[derive(Parser)]
 #[command(version, about = "EasyTiger vector indexing tool", long_about = None)]
@@ -48,6 +51,8 @@ enum Commands {
     Vamana(VamanaArgs),
     /// Exhaustively search an index and create new Neighbors files.
     ExhaustiveSearch(ExhaustiveSearchArgs),
+    /// Load a new table of vectors.
+    VectorTableLoad(VectorTableLoadArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -70,6 +75,9 @@ fn main() -> io::Result<()> {
         Commands::Vamana(args) => vamana_command(connection, &cli.index_name, args),
         Commands::ExhaustiveSearch(args) => {
             exhaustive_search(connection.clone(), &cli.index_name, args)
+        }
+        Commands::VectorTableLoad(args) => {
+            vector_table_load(connection.clone(), &cli.index_name, args)
         }
     }?;
 

@@ -217,6 +217,9 @@ pub fn bulk_load(
 
     // TODO: consider writing a dedicated bulk loader. The bulk loader should at least do the raw
     // vectors to avoid writing to the checkpoint.
+    // XXX this also results in poor locality - splitting a centroid might result in data in two
+    // different locations. options are to either assign then bulk load in (centroid,record_id)
+    // order _or_ to write a collection for each centroid (too many files)
     let (inserted, assignment_stats) = {
         let tl_writer: ThreadLocal<RefCell<SessionIndexWriter>> = ThreadLocal::new();
         let progress = progress_bar(limit, "postings index");

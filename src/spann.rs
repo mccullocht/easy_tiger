@@ -3,6 +3,8 @@
 //! This implemented by clustering the input dataset and building a graph-based index over the
 //! select centroids. This index is used to build and navigate a posting index.
 
+mod bulk;
+
 use std::{
     collections::{BinaryHeap, HashSet},
     io,
@@ -265,7 +267,12 @@ impl SessionIndexWriter {
         let candidates = self
             .head_searcher
             .search(vector.as_ref(), &mut self.head_reader)?;
-        let centroid_ids = self.select_centroids(candidates)?;
+        let centroid_ids = select_centroids(
+            &self.head_reader,
+            candidates,
+            self.distance_fn.as_ref(),
+            self.index.config.replica_count,
+        )?;
 
         let mut centroid_cursor = self.centroid_cursor()?;
         let mut posting_cursor = self.posting_cursor()?;
@@ -334,40 +341,6 @@ impl SessionIndexWriter {
             .get_record_cursor(&self.index.table_names.raw_vectors)
     }
 
-    fn select_centroids(&self, candidates: Vec<Neighbor>) -> Result<Vec<u32>> {
-        assert!(!candidates.is_empty());
-        let replica_count = self.index.config.replica_count;
-        let mut raw_vectors = self.head_reader.raw_vectors()?;
-
-        let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
-        let mut centroids = VecVectorStore::with_capacity(
-            self.head_reader.index().config().dimensions.get() * 4,
-            replica_count,
-        );
-        for candidate in candidates {
-            if centroid_ids.len() >= replica_count {
-                break;
-            }
-
-            let v = raw_vectors
-                .get_raw_vector(candidate.vertex())
-                .expect("returned vector should exist")?;
-            if !centroids
-                .iter()
-                .any(|c| self.distance_fn.distance(c, &v) < candidate.distance())
-            {
-                centroid_ids.push(
-                    candidate
-                        .vertex()
-                        .try_into()
-                        .expect("centroid_ids <= u32::MAX"),
-                );
-                centroids.push(&v);
-            }
-        }
-        Ok(centroid_ids)
-    }
-
     fn read_centroid_ids(
         record_id: i64,
         cursor: &mut RecordCursorGuard<'_>,
@@ -397,6 +370,42 @@ impl SessionIndexWriter {
         }
         Ok(())
     }
+}
+
+fn select_centroids(
+    head_reader: &impl GraphVectorIndexReader,
+    candidates: Vec<Neighbor>,
+    distance_fn: &dyn F32VectorDistance,
+    replica_count: usize,
+) -> Result<Vec<u32>> {
+    assert!(!candidates.is_empty());
+    let mut raw_vectors = head_reader.raw_vectors()?;
+
+    let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
+    let mut centroids =
+        VecVectorStore::with_capacity(head_reader.config().dimensions.get(), replica_count);
+    for candidate in candidates {
+        if centroid_ids.len() >= replica_count {
+            break;
+        }
+
+        let v = raw_vectors
+            .get_raw_vector(candidate.vertex())
+            .expect("returned vector should exist")?;
+        if !centroids
+            .iter()
+            .any(|c| distance_fn.distance(c, &v) < candidate.distance())
+        {
+            centroid_ids.push(
+                candidate
+                    .vertex()
+                    .try_into()
+                    .expect("centroid_ids <= u32::MAX"),
+            );
+            centroids.push(&v);
+        }
+    }
+    Ok(centroid_ids)
 }
 
 struct PostingIter<'a, 'b, 'c, 'd> {

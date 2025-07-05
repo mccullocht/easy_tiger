@@ -1,5 +1,6 @@
 mod index_cursor;
 mod metadata_cursor;
+mod packing;
 mod record_cursor;
 mod stat_cursor;
 

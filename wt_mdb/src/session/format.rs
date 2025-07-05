@@ -1,9 +1,9 @@
 //! Wrap WT routines to pack and unpack values store in a table.
 
-#![allow(dead_code)] // XXX and rename module to "format"
+#![allow(dead_code)] // XXX remove me.
 
 use std::{
-    ffi::{c_char, c_void, CStr},
+    ffi::{c_char, c_void, CStr, CString},
     marker::PhantomData,
 };
 
@@ -92,7 +92,6 @@ impl PartialEq<CStr> for FormatString {
 
 /// Primitive types that can be formatted into column values in WiredTiger.
 // TODO: seal this trait. All primitive should be defined in the crate.
-// XXX rename to ColumnValue
 pub trait ColumnValue<'b> {
     /// Maximum encoded length of this value.
     fn max_len(&self) -> usize;
@@ -439,11 +438,16 @@ impl Drop for PackedFormatReader<'_> {
     }
 }
 
+/// Something that can be formatted/packed into a key or value in WiredTiger.
 pub trait Formatter<'b> {
     /// The format of this packed value.
     ///
     /// This is used to validate that a cursor key or value matches the expected format.
     const FORMAT: FormatString;
+
+    type FormatterOwned: FormatterOwned;
+
+    fn to_formatter_owned(&self) -> Self::FormatterOwned;
 
     /// Format the contents of this object into `writer`.
     fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()>;
@@ -451,8 +455,6 @@ pub trait Formatter<'b> {
     fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
     where
         Self: Sized;
-
-    // XXX add traits for conversion to/from FormattedOwned.
 
     /// Return a "packed" byte array for trivially packed formats, to avoid a copy.
     /// Most implementations can simply return `None`.
@@ -463,7 +465,7 @@ pub trait Formatter<'b> {
     /// Return an "unpacked" byte array for trivially packed formats, to avoid a copy.
     /// Most implementations can simply return `None`.
     #[allow(unused)]
-    fn format_unpack_trivial(&self, packed: &'b [u8]) -> Option<Self>
+    fn format_unpack_trivial(packed: &'b [u8]) -> Option<Self>
     where
         Self: Sized,
     {
@@ -471,40 +473,64 @@ pub trait Formatter<'b> {
     }
 }
 
-// XXX add Formatter implementations for all of the types implementing ColumnValuePrimitive
-
-impl<'b> Formatter<'b> for i64 {
-    const FORMAT: FormatString = FormatString::new(c"q");
-
-    fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
-        writer.pack(*self)
-    }
-
-    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
+pub trait FormatterOwned {
+    type Formatter<'b>: Formatter<'b>
     where
-        Self: Sized,
-    {
-        reader.unpack()
-    }
+        Self: 'b;
+
+    fn to_formatter_ref(&self) -> Self::Formatter<'_>;
 }
 
-impl<'b> Formatter<'b> for u64 {
-    const FORMAT: FormatString = FormatString::new(c"Q");
+macro_rules! define_primitive_formatter {
+    ($primitive:ty, $format:literal) => {
+        impl<'b> Formatter<'b> for $primitive {
+            const FORMAT: FormatString = FormatString::new($format);
 
-    fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
-        writer.pack(*self)
-    }
+            type FormatterOwned = $primitive;
 
-    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
-    where
-        Self: Sized,
-    {
-        reader.unpack()
-    }
+            fn to_formatter_owned(&self) -> $primitive {
+                *self
+            }
+
+            fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
+                writer.pack(*self)
+            }
+
+            fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
+            where
+                Self: Sized,
+            {
+                reader.unpack()
+            }
+        }
+
+        impl FormatterOwned for $primitive {
+            type Formatter<'b> = $primitive;
+
+            fn to_formatter_ref(&self) -> $primitive {
+                *self
+            }
+        }
+    };
 }
+
+define_primitive_formatter!(i8, c"b");
+define_primitive_formatter!(i16, c"h");
+define_primitive_formatter!(i32, c"i");
+define_primitive_formatter!(i64, c"q");
+define_primitive_formatter!(u8, c"B");
+define_primitive_formatter!(u16, c"H");
+define_primitive_formatter!(u32, c"I");
+define_primitive_formatter!(u64, c"Q");
 
 impl<'b> Formatter<'b> for &'b [u8] {
     const FORMAT: FormatString = FormatString::new(c"u");
+
+    type FormatterOwned = Vec<u8>;
+
+    fn to_formatter_owned(&self) -> Self::FormatterOwned {
+        self.to_vec()
+    }
 
     fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
         writer.pack(*self)
@@ -521,7 +547,7 @@ impl<'b> Formatter<'b> for &'b [u8] {
         Some(self)
     }
 
-    fn format_unpack_trivial(&self, packed: &'b [u8]) -> Option<Self>
+    fn format_unpack_trivial(packed: &'b [u8]) -> Option<Self>
     where
         Self: Sized,
     {
@@ -529,8 +555,22 @@ impl<'b> Formatter<'b> for &'b [u8] {
     }
 }
 
+impl FormatterOwned for Vec<u8> {
+    type Formatter<'b> = &'b [u8];
+
+    fn to_formatter_ref(&self) -> Self::Formatter<'_> {
+        self.as_ref()
+    }
+}
+
 impl<'b> Formatter<'b> for &'b CStr {
     const FORMAT: FormatString = FormatString::new(c"S");
+
+    type FormatterOwned = CString;
+
+    fn to_formatter_owned(&self) -> Self::FormatterOwned {
+        CString::from(*self)
+    }
 
     fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
         writer.pack(*self)
@@ -547,7 +587,7 @@ impl<'b> Formatter<'b> for &'b CStr {
         Some(self.to_bytes_with_nul())
     }
 
-    fn format_unpack_trivial(&self, packed: &'b [u8]) -> Option<Self>
+    fn format_unpack_trivial(packed: &'b [u8]) -> Option<Self>
     where
         Self: Sized,
     {
@@ -555,14 +595,33 @@ impl<'b> Formatter<'b> for &'b CStr {
     }
 }
 
-pub struct StatValue<'b> {
+impl FormatterOwned for CString {
+    type Formatter<'b> = &'b CStr;
+
+    fn to_formatter_ref(&self) -> Self::Formatter<'_> {
+        self.as_ref()
+    }
+}
+
+// TODO: this belongs with a typed cursor for stats.
+pub struct StatValueRef<'b> {
     pub description: &'static CStr,
     pub value_str: &'b CStr,
     pub value: i64,
 }
 
-impl<'b> Formatter<'b> for StatValue<'b> {
+impl<'b> Formatter<'b> for StatValueRef<'b> {
     const FORMAT: FormatString = FormatString::new(c"SSq");
+
+    type FormatterOwned = StatValue;
+
+    fn to_formatter_owned(&self) -> Self::FormatterOwned {
+        StatValue {
+            description: self.description,
+            value_str: CString::from(self.value_str),
+            value: self.value,
+        }
+    }
 
     fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
         writer.pack(self.description)?;
@@ -586,5 +645,23 @@ impl<'b> Formatter<'b> for StatValue<'b> {
             value_str,
             value,
         })
+    }
+}
+
+pub struct StatValue {
+    pub description: &'static CStr,
+    pub value_str: CString,
+    pub value: i64,
+}
+
+impl FormatterOwned for StatValue {
+    type Formatter<'b> = StatValueRef<'b>;
+
+    fn to_formatter_ref(&self) -> Self::Formatter<'_> {
+        StatValueRef {
+            description: self.description,
+            value_str: &self.value_str,
+            value: self.value,
+        }
     }
 }

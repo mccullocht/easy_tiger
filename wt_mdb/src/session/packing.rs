@@ -1,5 +1,7 @@
 //! Wrap WT routines to pack and unpack values store in a table.
-#![allow(dead_code)] // XXX
+
+#![allow(dead_code)] // XXX and rename module to "format"
+
 use std::{
     ffi::{c_char, c_void, CStr},
     marker::PhantomData,
@@ -14,11 +16,6 @@ use wt_sys::{
 };
 
 /// Classification of the format to help optimize packing and unpacking.
-// XXX during packing/set:
-// * Variable results in packing to size estimate, allocate a vector, pack to write.
-// * Trivial results in packing to a trivial FormatWriter that records a slice.
-// * Fixed results in allocation of a vector, pack to write.
-// XXX trivial can also be implemented by extending the trait -- trivial pack can return Option<&[u8]>
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum FormatClassification {
     /// Contains multiple columns, at least one of which is variable length.
@@ -53,7 +50,6 @@ impl FormatClassification {
 ///
 /// This only supports a subset of of the documented WT types, in particular it does not support
 /// strings of a fixed length.
-// XXX extend to allow sizes. i think this can be made to work.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct FormatString(&'static CStr, FormatClassification);
 
@@ -79,7 +75,6 @@ impl FormatString {
     }
 
     /// Return the number of columns in the format.
-    // TODO: if we support fixed length fields then push this information into format classification.
     pub const fn column_len(&self) -> usize {
         self.0.to_bytes().len()
     }
@@ -95,151 +90,155 @@ impl PartialEq<CStr> for FormatString {
     }
 }
 
-/// A single column value suitable for packing.
-// XXX consider replacing this with a trait ColumnValuePrimitive.
-#[derive(Debug, Clone, Copy)]
-pub enum ColumnValue<'b> {
-    I8(i8),
-    U8(u8),
-    I16(i16),
-    U16(u16),
-    I32(i32),
-    U32(u32),
-    I64(i64),
-    U64(u64),
+/// Primitive types that can be formatted into column values in WiredTiger.
+// TODO: seal this trait. All primitive should be defined in the crate.
+// XXX rename to ColumnValue
+pub trait ColumnValue<'b> {
+    /// Maximum encoded length of this value.
+    fn max_len(&self) -> usize;
+
+    /// Returns true if the format type matches this type.
+    fn format_match(format: u8) -> bool;
+
+    /// Transform this into an element for packing.
+    fn to_packed(&self) -> PackedElement<'b>;
+
+    /// Transform packed back into this primitive value type.
+    ///
+    /// Returns `None` on type mismatch or overflow.
+    fn from_packed(packed: PackedElement<'b>) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+macro_rules! define_column_value_primitive {
+    ($p:ty, $max_len:expr, $match:literal, $packed:ty) => {
+        impl<'b> ColumnValue<'b> for $p {
+            fn max_len(&self) -> usize {
+                $max_len
+            }
+
+            fn format_match(format: u8) -> bool {
+                $match.to_bytes().contains(&format)
+            }
+
+            fn to_packed(&self) -> PackedElement<'b> {
+                PackedElement::from(<$packed>::from(*self))
+            }
+
+            fn from_packed(packed: PackedElement<'b>) -> Option<Self> {
+                <$p>::try_from(<$packed>::try_from(packed).ok()?).ok()
+            }
+        }
+    };
+}
+
+define_column_value_primitive!(i8, 5, c"b", i64);
+define_column_value_primitive!(i16, 5, c"h", i64);
+define_column_value_primitive!(i32, 5, c"il", i64);
+define_column_value_primitive!(i64, 9, c"q", i64);
+define_column_value_primitive!(u8, 5, c"B", u64);
+define_column_value_primitive!(u16, 5, c"H", u64);
+define_column_value_primitive!(u32, 5, c"IL", u64);
+define_column_value_primitive!(u64, 9, c"Qr", u64);
+
+impl<'b> ColumnValue<'b> for &'b CStr {
+    fn max_len(&self) -> usize {
+        self.to_bytes_with_nul().len()
+    }
+
+    fn format_match(format: u8) -> bool {
+        format == b'S'
+    }
+
+    fn to_packed(&self) -> PackedElement<'b> {
+        PackedElement::from(*self)
+    }
+
+    fn from_packed(packed: PackedElement<'b>) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        Self::try_from(packed).ok()
+    }
+}
+
+impl<'b> ColumnValue<'b> for &'b [u8] {
+    fn max_len(&self) -> usize {
+        self.len() + 5
+    }
+
+    fn format_match(format: u8) -> bool {
+        format == b'u'
+    }
+
+    fn to_packed(&self) -> PackedElement<'b> {
+        PackedElement::from(*self)
+    }
+
+    fn from_packed(packed: PackedElement<'b>) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        Self::try_from(packed).ok()
+    }
+}
+
+/// A single element in the format stream.
+pub enum PackedElement<'b> {
+    Signed(i64),
+    Unsigned(u64),
     CStr(&'b CStr),
     Item(&'b [u8]),
 }
 
-impl<'b> ColumnValue<'b> {
-    /// Maximum encoded length of any particular column value.
-    pub const fn max_len(&self) -> usize {
-        match self {
-            // NB: for whatever reason the constant for this (WT_INTPACK32_MAXSIZE) is not being
-            // produced by bindgen. This is a bit pessimistic.
-            Self::I8(_)
-            | Self::U8(_)
-            | Self::I16(_)
-            | Self::U16(_)
-            | Self::I32(_)
-            | Self::U32(_) => 5,
-            // NB: for whatever reason the constant for this (WT_INTPACK64_MAXSIZE) is not being
-            // produced by bindgen.
-            Self::I64(_) | Self::U64(_) => 9,
-            Self::CStr(s) => s.to_bytes_with_nul().len(),
-            Self::Item(b) => b.len() + 5,
-        }
-    }
+pub struct TypeMismatchError;
 
-    fn format_match(&self, format: u8) -> bool {
-        match self {
-            Self::I8(_) => format == b'b',
-            Self::U8(_) => format == b'B',
-            Self::I16(_) => format == b'h',
-            Self::U16(_) => format == b'H',
-            Self::I32(_) => format == b'i' || format == b'l',
-            Self::U32(_) => format == b'I' || format == b'L',
-            Self::I64(_) => format == b'q',
-            Self::U64(_) => format == b'Q' || format == b'r',
-            Self::CStr(_) => format == b'S',
-            Self::Item(_) => format == b'u',
-        }
-    }
-}
-
-// XXX dunno if it makes sense to perform TryFrom conversion here -- could do From and panic?
-macro_rules! column_value_conversion {
-    ($src:ty, $var:ident) => {
-        impl From<$src> for ColumnValue<'_> {
-            fn from(value: $src) -> Self {
-                Self::$var(value)
-            }
-        }
-
-        impl TryFrom<ColumnValue<'_>> for $src {
-            type Error = Error;
-
-            fn try_from(value: ColumnValue<'_>) -> Result<Self> {
-                match value {
-                    ColumnValue::$var(v) => Ok(v),
-                    _ => Err(Error::Errno(Errno::INVAL)),
+macro_rules! packed_element_convert {
+    ($($var:ident = $other:ty),*) => {
+        $(
+            impl<'b> From<$other> for PackedElement<'b> {
+                fn from(value: $other) -> PackedElement<'b> {
+                    Self::$var(value)
                 }
             }
-        }
-    };
-    (l $src:ty, $var:ident) => {
-        impl<'b> From<&'b $src> for ColumnValue<'b> {
-            fn from(value: &'b $src) -> Self {
-                Self::$var(value)
-            }
-        }
 
-        impl<'b> TryFrom<ColumnValue<'b>> for &'b $src {
-            type Error = Error;
+            impl<'b> TryFrom<PackedElement<'b>> for $other {
+                type Error = TypeMismatchError;
 
-            fn try_from(value: ColumnValue<'b>) -> Result<Self> {
-                match value {
-                    ColumnValue::$var(v) => Ok(v),
-                    _ => Err(Error::Errno(Errno::INVAL)),
+                fn try_from(value: PackedElement<'b>) -> std::result::Result<$other, Self::Error> {
+                    if let PackedElement::$var(v) = value {
+                        Ok(v)
+                    } else {
+                        Err(TypeMismatchError)
+                    }
                 }
             }
-        }
+        )*
     };
 }
-
-column_value_conversion!(i8, I8);
-column_value_conversion!(i16, I16);
-column_value_conversion!(i32, I32);
-column_value_conversion!(i64, I64);
-column_value_conversion!(u8, U8);
-column_value_conversion!(u16, U16);
-column_value_conversion!(u32, U32);
-column_value_conversion!(u64, U64);
-column_value_conversion!(l CStr, CStr);
-column_value_conversion!(l[u8], Item);
-
-pub enum PackedElement<'b> {
-    Signed(i64),
-    Unsigned(u64),
-    Str(&'b CStr),
-    Item(&'b [u8]),
-}
-
-impl<'b> From<ColumnValue<'b>> for PackedElement<'b> {
-    fn from(value: ColumnValue<'b>) -> Self {
-        match value {
-            ColumnValue::I8(v) => Self::Signed(v.into()),
-            ColumnValue::I16(v) => Self::Signed(v.into()),
-            ColumnValue::I32(v) => Self::Signed(v.into()),
-            ColumnValue::I64(v) => Self::Signed(v),
-            ColumnValue::U8(v) => Self::Unsigned(v.into()),
-            ColumnValue::U16(v) => Self::Unsigned(v.into()),
-            ColumnValue::U32(v) => Self::Unsigned(v.into()),
-            ColumnValue::U64(v) => Self::Unsigned(v),
-            ColumnValue::CStr(s) => Self::Str(s),
-            ColumnValue::Item(b) => Self::Item(b),
-        }
-    }
-}
+packed_element_convert!(Signed = i64, Unsigned = u64, CStr = &'b CStr, Item = &'b [u8]);
 
 /// Used by formatted objects to pack their data.
 pub trait FormatWriter {
     /// Add a single value to the writer.
     ///
     /// This may fail if the passed value does not match the expect format.
-    // TODO: add an unchecked version for use in derive macros.
-    fn pack<'a>(&mut self, v: impl Into<ColumnValue<'a>>) -> Result<()>;
+    fn pack<'a, V: ColumnValue<'a>>(&mut self, v: V) -> Result<()>;
+
+    // TODO: add an unchecked pack for use in derive macros.
 }
 
 /// Pack a stream of values described by a format into a byte array for using in WT.
-pub struct PackFormatWriter<'b> {
+pub struct PackedFormatWriter<'b> {
     format: FormatString,
     format_it: FormatStringIter,
     stream: *mut WT_PACK_STREAM,
     buffer: PhantomData<&'b [u8]>,
 }
 
-impl<'b> PackFormatWriter<'b> {
+impl<'b> PackedFormatWriter<'b> {
+    /// Create a writer that will pack a series of values described by `format` into `buffer`.
     pub fn new(format: FormatString, buffer: &'b mut [u8]) -> Result<Self> {
         let format_it = format.iter();
         let mut stream = std::ptr::null_mut();
@@ -263,6 +262,7 @@ impl<'b> PackFormatWriter<'b> {
         })
     }
 
+    /// Close this writer and return the number of bytes written to the input buffer.
     pub fn close(mut self) -> Result<usize> {
         if self.format_it.next().is_some() {
             return Err(Error::Errno(Errno::INVAL));
@@ -278,19 +278,18 @@ impl<'b> PackFormatWriter<'b> {
     }
 }
 
-impl FormatWriter for PackFormatWriter<'_> {
-    fn pack<'a>(&mut self, v: impl Into<ColumnValue<'a>>) -> Result<()> {
-        let cv: ColumnValue<'_> = v.into();
+impl FormatWriter for PackedFormatWriter<'_> {
+    fn pack<'a, V: ColumnValue<'a>>(&mut self, v: V) -> Result<()> {
         let f = self.format_it.next().ok_or(Error::Errno(Errno::INVAL))?;
-        if !cv.format_match(f) {
+        if !V::format_match(f) {
             return Err(Error::Errno(Errno::INVAL));
         }
         make_result(
             unsafe {
-                match PackedElement::from(cv) {
+                match v.to_packed() {
                     PackedElement::Signed(v) => wiredtiger_pack_int(self.stream, v),
                     PackedElement::Unsigned(v) => wiredtiger_pack_uint(self.stream, v),
-                    PackedElement::Str(v) => wiredtiger_pack_str(self.stream, v.as_ptr()),
+                    PackedElement::CStr(v) => wiredtiger_pack_str(self.stream, v.as_ptr()),
                     PackedElement::Item(v) => {
                         wiredtiger_pack_item(self.stream, &mut Item::from(v).0)
                     }
@@ -301,7 +300,7 @@ impl FormatWriter for PackFormatWriter<'_> {
     }
 }
 
-impl Drop for PackFormatWriter<'_> {
+impl Drop for PackedFormatWriter<'_> {
     fn drop(&mut self) {
         if !self.stream.is_null() {
             let mut used = 0;
@@ -319,6 +318,8 @@ pub struct MaxLenFormatWriter {
 }
 
 impl MaxLenFormatWriter {
+    /// Create a new writer to record an upper bound length for a sequences of values described by
+    /// `format`.
     pub fn new(format: FormatString) -> Self {
         Self {
             format,
@@ -340,9 +341,9 @@ impl MaxLenFormatWriter {
 }
 
 impl FormatWriter for MaxLenFormatWriter {
-    fn pack<'a>(&mut self, v: impl Into<ColumnValue<'a>>) -> Result<()> {
-        let v: ColumnValue<'a> = v.into();
-        if v.format_match(*self.it.next().ok_or(Error::Errno(Errno::INVAL))?) {
+    fn pack<'a, V: ColumnValue<'a>>(&mut self, v: V) -> Result<()> {
+        if V::format_match(*self.it.next().ok_or(Error::Errno(Errno::INVAL))?) {
+            self.max_len += v.max_len();
             Ok(())
         } else {
             Err(Error::Errno(Errno::INVAL))
@@ -350,17 +351,14 @@ impl FormatWriter for MaxLenFormatWriter {
     }
 }
 
-// XXX I want a trivial writer but it's going to have to do lifetime casting to work correctly, and
-// is still somewhat unsound as I'm assuming the value will live longer than it might.
-
-pub struct UnpackStream<'b> {
+pub struct PackedFormatReader<'b> {
     format: FormatString,
     format_it: FormatStringIter,
     stream: *mut WT_PACK_STREAM,
     buffer: PhantomData<&'b [u8]>,
 }
 
-impl<'b> UnpackStream<'b> {
+impl<'b> PackedFormatReader<'b> {
     pub fn new(format: FormatString, buffer: &'b [u8]) -> Result<Self> {
         let format_it = format.iter();
         let mut stream = std::ptr::null_mut();
@@ -384,49 +382,41 @@ impl<'b> UnpackStream<'b> {
         })
     }
 
-    pub fn unpack<V: TryFrom<ColumnValue<'b>, Error = Error>>(&mut self) -> Result<V> {
+    pub fn unpack<V: ColumnValue<'b>>(&mut self) -> Result<V> {
         let f = self.format_it.next().ok_or(Error::not_found_error())?;
-        let cv = match f {
-            b'b' => ColumnValue::I8(self.unpack_int()? as i8),
-            b'h' => ColumnValue::I16(self.unpack_int()? as i16),
-            b'i' | b'l' => ColumnValue::I32(self.unpack_int()? as i32),
-            b'q' => ColumnValue::I64(self.unpack_int()?),
-            b'B' => ColumnValue::U8(self.unpack_uint()? as u8),
-            b'H' => ColumnValue::U16(self.unpack_uint()? as u16),
-            b'I' | b'L' => ColumnValue::U32(self.unpack_uint()? as u32),
-            b'Q' | b'r' => ColumnValue::U64(self.unpack_uint()?),
-            b'S' => ColumnValue::CStr(self.unpack_str()?),
-            b'u' => ColumnValue::Item(self.unpack_item()?),
+        if !V::format_match(f) {
+            return Err(Error::Errno(Errno::INVAL));
+        }
+        // OK at this point I need to go from format => packed value.
+        let element: PackedElement<'b> = match f {
+            b'b' | b'h' | b'i' | b'l' | b'q' => {
+                let mut v = 0;
+                make_result(unsafe { wiredtiger_unpack_int(self.stream, &mut v) }, ())?;
+                v.into()
+            }
+            b'B' | b'H' | b'I' | b'L' | b'Q' | b'r' => {
+                let mut v = 0;
+                make_result(unsafe { wiredtiger_unpack_uint(self.stream, &mut v) }, ())?;
+                v.into()
+            }
+            b'S' => {
+                // NB: this only works because we don't allow length-delimited strings, which are not null
+                // terminated if they reach length.
+                let mut p: *const c_char = std::ptr::null_mut();
+                make_result(unsafe { wiredtiger_unpack_str(self.stream, &mut p) }, ())?;
+                unsafe { CStr::from_ptr(p) }.into()
+            }
+            b'u' => {
+                let mut item = Item::default();
+                make_result(
+                    unsafe { wiredtiger_unpack_item(self.stream, &mut item.0) },
+                    (),
+                )?;
+                <&'b [u8]>::from(item).into()
+            }
             _ => unreachable!("unexpected type from validated FormatString"),
         };
-        V::try_from(cv)
-    }
-
-    fn unpack_int(&mut self) -> Result<i64> {
-        let mut v = 0;
-        make_result(unsafe { wiredtiger_unpack_int(self.stream, &mut v) }, ()).map(|()| v)
-    }
-
-    fn unpack_uint(&mut self) -> Result<u64> {
-        let mut v = 0;
-        make_result(unsafe { wiredtiger_unpack_uint(self.stream, &mut v) }, ()).map(|()| v)
-    }
-
-    fn unpack_str(&mut self) -> Result<&'b CStr> {
-        // NB: this only works because we don't allow length-delimited strings, which are not null
-        // terminated if they reach length.
-        let mut p: *const c_char = std::ptr::null_mut();
-        make_result(unsafe { wiredtiger_unpack_str(self.stream, &mut p) }, ())
-            .map(|()| unsafe { CStr::from_ptr(p) })
-    }
-
-    fn unpack_item(&mut self) -> Result<&'b [u8]> {
-        let mut item = Item::default();
-        make_result(
-            unsafe { wiredtiger_unpack_item(self.stream, &mut item.0) },
-            (),
-        )
-        .map(|()| item.into())
+        V::from_packed(element).ok_or(Error::Errno(Errno::INVAL))
     }
 
     pub fn close(mut self) -> Result<()> {
@@ -440,7 +430,7 @@ impl<'b> UnpackStream<'b> {
     }
 }
 
-impl Drop for UnpackStream<'_> {
+impl Drop for PackedFormatReader<'_> {
     fn drop(&mut self) {
         if !self.stream.is_null() {
             let mut len = 0;
@@ -449,84 +439,119 @@ impl Drop for UnpackStream<'_> {
     }
 }
 
-pub trait Packed<'b> {
+pub trait Formatter<'b> {
     /// The format of this packed value.
     ///
     /// This is used to validate that a cursor key or value matches the expected format.
     const FORMAT: FormatString;
 
-    // XXX pack estimate size with a stream object. only used for variable size formats.
-    // XXX pack into a buffer. uses a small vec. cow-ish return type. trivial formats just return a ref.
-
-    // XXX Packed trait ought to be able to predict the size (from &self) and write to a &mut [u8].
-    // Avoid exposing the stream it is crazy town. Should return the size if serializing into a
-    // buffer but we ought to be able to serialize to a vector.
-    // XXX there also need to be a fast path for packing 'u' where we do _nothing_.
+    /// Format the contents of this object into `writer`.
     fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()>;
-    // XXX again: avoid the stream (accept &[u8] or Item) and fast path for 'u' (should be trivial).
-    fn unpack(packed: &'b [u8]) -> Result<Self>
+    /// Unpack formatted data into a new object.
+    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
     where
         Self: Sized;
+
+    // XXX add traits for conversion to/from FormattedOwned.
+
+    /// Return a "packed" byte array for trivially packed formats, to avoid a copy.
+    /// Most implementations can simply return `None`.
+    fn format_pack_trivial(&self) -> Option<&'b [u8]> {
+        None
+    }
+
+    /// Return an "unpacked" byte array for trivially packed formats, to avoid a copy.
+    /// Most implementations can simply return `None`.
+    #[allow(unused)]
+    fn format_unpack_trivial(&self, packed: &'b [u8]) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
 
-impl<'b> Packed<'b> for i64 {
+// XXX add Formatter implementations for all of the types implementing ColumnValuePrimitive
+
+impl<'b> Formatter<'b> for i64 {
     const FORMAT: FormatString = FormatString::new(c"q");
 
     fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
         writer.pack(*self)
     }
 
-    fn unpack(packed: &'b [u8]) -> Result<Self> {
-        let mut stream = UnpackStream::new(Self::FORMAT, packed)?;
-        stream.unpack()
+    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        reader.unpack()
     }
 }
 
-impl<'b> Packed<'b> for u64 {
+impl<'b> Formatter<'b> for u64 {
     const FORMAT: FormatString = FormatString::new(c"Q");
 
     fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
         writer.pack(*self)
     }
 
-    fn unpack(packed: &'b [u8]) -> Result<Self>
+    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
     where
         Self: Sized,
     {
-        let mut stream = UnpackStream::new(Self::FORMAT, packed)?;
-        stream.unpack()
+        reader.unpack()
     }
 }
 
-impl<'b> Packed<'b> for &'b [u8] {
+impl<'b> Formatter<'b> for &'b [u8] {
     const FORMAT: FormatString = FormatString::new(c"u");
 
     fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
         writer.pack(*self)
     }
 
-    fn unpack(packed: &'b [u8]) -> Result<Self>
+    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
     where
         Self: Sized,
     {
-        // NB: for a packed byte array with no other fields this is a valid transform.
-        Ok(packed)
+        reader.unpack()
+    }
+
+    fn format_pack_trivial(&self) -> Option<&'b [u8]> {
+        Some(self)
+    }
+
+    fn format_unpack_trivial(&self, packed: &'b [u8]) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        Some(packed)
     }
 }
 
-impl<'b> Packed<'b> for &'b CStr {
+impl<'b> Formatter<'b> for &'b CStr {
     const FORMAT: FormatString = FormatString::new(c"S");
 
     fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
         writer.pack(*self)
     }
 
-    fn unpack(packed: &'b [u8]) -> Result<Self>
+    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
     where
         Self: Sized,
     {
-        // XXX is this a good idea?
-        Ok(unsafe { CStr::from_bytes_with_nul_unchecked(packed) })
+        reader.unpack()
+    }
+
+    fn format_pack_trivial(&self) -> Option<&'b [u8]> {
+        Some(self.to_bytes_with_nul())
+    }
+
+    fn format_unpack_trivial(&self, packed: &'b [u8]) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        CStr::from_bytes_with_nul(packed).ok()
     }
 }
 
@@ -536,7 +561,7 @@ pub struct StatValue<'b> {
     pub value: i64,
 }
 
-impl<'b> Packed<'b> for StatValue<'b> {
+impl<'b> Formatter<'b> for StatValue<'b> {
     const FORMAT: FormatString = FormatString::new(c"SSq");
 
     fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
@@ -545,18 +570,17 @@ impl<'b> Packed<'b> for StatValue<'b> {
         writer.pack(self.value)
     }
 
-    fn unpack(packed: &'b [u8]) -> Result<Self>
+    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
     where
         Self: Sized,
     {
-        let mut stream = UnpackStream::new(Self::FORMAT, packed)?;
         let description = {
-            let d: &CStr = stream.unpack()?;
+            let d: &CStr = reader.unpack()?;
             // Safety: description strings in wt metadata cursors are statically defined.
             unsafe { CStr::from_ptr::<'static>(d.as_ptr()) }
         };
-        let value_str = stream.unpack()?;
-        let value = stream.unpack()?;
+        let value_str = reader.unpack()?;
+        let value = reader.unpack()?;
         Ok(Self {
             description,
             value_str,

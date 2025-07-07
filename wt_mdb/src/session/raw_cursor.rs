@@ -6,11 +6,10 @@
 
 use std::{
     ffi::CStr,
-    mem::ManuallyDrop,
-    ops::{Bound, Deref, DerefMut, RangeBounds},
+    ops::{Bound, RangeBounds},
 };
 
-use crate::{map_not_found, wt_call, Result};
+use crate::{wt_call, Result};
 
 use super::{InnerCursor, Item, Session};
 
@@ -18,13 +17,13 @@ use super::{InnerCursor, Item, Session};
 ///
 /// Note that the underlying format of the table may vary
 /// the table is byte-string keyed and byte-string valued.
-// XXX maybe this shouldn't concern itself too much with ownership.
 pub struct RawCursor<'a> {
     inner: InnerCursor,
     session: &'a Session,
 }
 
 impl<'a> RawCursor<'a> {
+    #[allow(unused)] // XXX
     pub(super) fn new(inner: InnerCursor, session: &'a Session) -> Self {
         Self { inner, session }
     }
@@ -41,7 +40,7 @@ impl<'a> RawCursor<'a> {
     /// Underlying format of keys.
     /// All keys passed are expected to be packed according to this format.
     pub fn key_format(&self) -> &CStr {
-        self.inner.value_format()
+        self.inner.key_format()
     }
 
     /// Underlying format of values.
@@ -130,6 +129,39 @@ impl<'a> RawCursor<'a> {
             unsafe { wt_call!(void self.inner.ptr, set_key, &k) }?;
         }
         unsafe { wt_call!(self.inner.ptr, bound, end_config_str.as_ptr()) }
+    }
+
+    pub fn set_bound(&mut self, bound: Bound<&[u8]>, upper: bool) -> Result<()> {
+        let (key, config_str) = match bound {
+            Bound::Included(key) => (
+                Some(key),
+                if upper {
+                    c"bound=upper,action=set"
+                } else {
+                    c"bound=lower,action=set"
+                },
+            ),
+            Bound::Excluded(key) => (
+                Some(key),
+                if upper {
+                    c"bound=upper,action=set,inclusive=false"
+                } else {
+                    c"bound=lower,action=set,inclusive=false"
+                },
+            ),
+            Bound::Unbounded => (
+                None,
+                if upper {
+                    c"bound=upper,action=clear"
+                } else {
+                    c"bound=lower,action=clear"
+                },
+            ),
+        };
+        if let Some(k) = key.map(Item::from) {
+            unsafe { wt_call!(void self.inner.ptr, set_key, &k) }?;
+        }
+        unsafe { wt_call!(self.inner.ptr, bound, config_str.as_ptr()) }
     }
 
     /// Reset the cursor to an unpositioned state.

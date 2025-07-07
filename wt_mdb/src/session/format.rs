@@ -473,200 +473,228 @@ impl Drop for PackedFormatReader<'_> {
 }
 
 /// Something that can be formatted/packed into a key or value in WiredTiger.
-pub trait Formatter<'b> {
+pub trait Formatter {
     /// The format of this packed value.
     ///
     /// This is used to validate that a cursor key or value matches the expected format.
     const FORMAT: FormatString;
 
-    type FormatterOwned: FormatterOwned;
-
-    fn to_formatter_owned(&self) -> Self::FormatterOwned;
+    type Ref<'a>: FormatterRef<'a, Self::Owned>;
+    type Owned: FormatterOwned;
 
     /// Format the contents of this object into `writer`.
-    fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()>;
+    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()>;
     /// Unpack formatted data into a new object.
-    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
-    where
-        Self: Sized;
+    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>>;
 
     /// Return a "packed" byte array for trivially packed formats, to avoid a copy.
     /// Most implementations can simply return `None`.
-    fn format_pack_trivial(&self) -> Option<&'b [u8]> {
+    #[allow(unused)]
+    fn pack_trivial<'b>(value: &Self::Ref<'b>) -> Option<&'b [u8]> {
         None
     }
 
     /// Return an "unpacked" byte array for trivially packed formats, to avoid a copy.
     /// Most implementations can simply return `None`.
     #[allow(unused)]
-    fn format_unpack_trivial(packed: &'b [u8]) -> Option<Self>
-    where
-        Self: Sized,
-    {
+    fn unpack_trivial<'b>(packed: &'b [u8]) -> Option<Self::Ref<'b>> {
         None
     }
 }
 
-pub trait FormatterOwned {
-    type Formatter<'b>: Formatter<'b>
-    where
-        Self: 'b;
+/// A reference to a value unpacked by the formatter.
+pub trait FormatterRef<'a, Owned>: Sized {
+    /// Get an owned copy of the ref value.
+    fn to_formatter_owned(&self) -> Owned;
+}
 
-    fn to_formatter_ref(&self) -> Self::Formatter<'_>;
+/// An owned value unpacked by the formatter.
+pub trait FormatterOwned: Sized {
+    type Ref<'a>: FormatterRef<'a, Self>
+    where
+        Self: 'a;
+
+    /// Get a reference to this owned value.
+    fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a>;
 }
 
 macro_rules! define_primitive_formatter {
-    ($primitive:ty, $format:literal) => {
-        impl<'b> Formatter<'b> for $primitive {
-            const FORMAT: FormatString = FormatString::new($format);
-
-            type FormatterOwned = $primitive;
-
+    ($name: ident, $primitive:ty, $format:literal) => {
+        impl<'a> FormatterRef<'a, $primitive> for $primitive {
             fn to_formatter_owned(&self) -> $primitive {
                 *self
-            }
-
-            fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
-                writer.pack(*self)
-            }
-
-            fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
-            where
-                Self: Sized,
-            {
-                reader.unpack()
             }
         }
 
         impl FormatterOwned for $primitive {
-            type Formatter<'b> = $primitive;
+            type Ref<'a> = $primitive;
 
-            fn to_formatter_ref(&self) -> $primitive {
+            fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
                 *self
+            }
+        }
+
+        #[derive(Debug, Copy, Clone)]
+        pub struct $name;
+
+        impl Formatter for $name {
+            const FORMAT: FormatString = FormatString::new($format);
+
+            type Ref<'a> = $primitive;
+            type Owned = $primitive;
+
+            fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
+                writer.pack(*value)
+            }
+
+            fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
+                reader.unpack()
             }
         }
     };
 }
 
-define_primitive_formatter!(i8, c"b");
-define_primitive_formatter!(i16, c"h");
-define_primitive_formatter!(i32, c"i");
-define_primitive_formatter!(i64, c"q");
-define_primitive_formatter!(u8, c"B");
-define_primitive_formatter!(u16, c"H");
-define_primitive_formatter!(u32, c"I");
-define_primitive_formatter!(u64, c"Q");
+define_primitive_formatter!(I8Formatter, i8, c"b");
+define_primitive_formatter!(I16Formatter, i16, c"h");
+define_primitive_formatter!(I32Formatter, i32, c"i");
+define_primitive_formatter!(I64Formatter, i64, c"q");
+define_primitive_formatter!(U8Formatter, u8, c"B");
+define_primitive_formatter!(U16Formatter, u16, c"H");
+define_primitive_formatter!(U32Formatter, u32, c"I");
+define_primitive_formatter!(U64Formatter, u64, c"Q");
 
-impl<'b> Formatter<'b> for &'b [u8] {
-    const FORMAT: FormatString = FormatString::new(c"u");
+impl FormatterOwned for Vec<u8> {
+    type Ref<'a> = &'a [u8];
+    fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
+        self.as_slice()
+    }
+}
 
-    type FormatterOwned = Vec<u8>;
-
-    fn to_formatter_owned(&self) -> Self::FormatterOwned {
+impl<'a> FormatterRef<'a, Vec<u8>> for &'a [u8] {
+    fn to_formatter_owned(&self) -> Vec<u8> {
         self.to_vec()
     }
+}
 
-    fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
-        writer.pack(*self)
+#[derive(Debug, Copy, Clone)]
+pub struct ByteSliceFormatter;
+
+impl Formatter for ByteSliceFormatter {
+    const FORMAT: FormatString = FormatString::new(c"u");
+
+    type Ref<'a> = &'a [u8];
+    type Owned = Vec<u8>;
+
+    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
+        writer.pack(*value)
     }
 
-    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
-    where
-        Self: Sized,
-    {
+    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
         reader.unpack()
     }
 
-    fn format_pack_trivial(&self) -> Option<&'b [u8]> {
-        Some(self)
+    fn pack_trivial<'b>(value: &Self::Ref<'b>) -> Option<&'b [u8]> {
+        Some(*value)
     }
 
-    fn format_unpack_trivial(packed: &'b [u8]) -> Option<Self>
-    where
-        Self: Sized,
-    {
+    fn unpack_trivial<'b>(packed: &'b [u8]) -> Option<Self::Ref<'b>> {
         Some(packed)
     }
 }
 
-impl FormatterOwned for Vec<u8> {
-    type Formatter<'b> = &'b [u8];
-
-    fn to_formatter_ref(&self) -> Self::Formatter<'_> {
-        self.as_ref()
+impl FormatterOwned for CString {
+    type Ref<'a> = &'a CStr;
+    fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
+        self.as_c_str()
     }
 }
 
-impl<'b> Formatter<'b> for &'b CStr {
-    const FORMAT: FormatString = FormatString::new(c"S");
-
-    type FormatterOwned = CString;
-
-    fn to_formatter_owned(&self) -> Self::FormatterOwned {
+impl<'a> FormatterRef<'a, CString> for &'a CStr {
+    fn to_formatter_owned(&self) -> CString {
         CString::from(*self)
     }
+}
 
-    fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
-        writer.pack(*self)
+#[derive(Debug, Copy, Clone)]
+pub struct CStringFormatter;
+
+impl Formatter for CStringFormatter {
+    const FORMAT: FormatString = FormatString::new(c"S");
+
+    type Ref<'a> = &'a CStr;
+    type Owned = CString;
+
+    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
+        writer.pack(*value)
     }
 
-    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
-    where
-        Self: Sized,
-    {
+    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
         reader.unpack()
     }
 
-    fn format_pack_trivial(&self) -> Option<&'b [u8]> {
-        Some(self.to_bytes_with_nul())
+    fn pack_trivial<'b>(value: &Self::Ref<'b>) -> Option<&'b [u8]> {
+        Some(value.to_bytes_with_nul())
     }
 
-    fn format_unpack_trivial(packed: &'b [u8]) -> Option<Self>
-    where
-        Self: Sized,
-    {
+    fn unpack_trivial<'b>(packed: &'b [u8]) -> Option<Self::Ref<'b>> {
         CStr::from_bytes_with_nul(packed).ok()
     }
 }
 
-impl FormatterOwned for CString {
-    type Formatter<'b> = &'b CStr;
-
-    fn to_formatter_ref(&self) -> Self::Formatter<'_> {
-        self.as_ref()
-    }
+// XXX this belongs with a typed cursor for stats.
+#[derive(Debug, Clone)]
+pub struct StatValue {
+    pub description: &'static CStr,
+    pub value_str: CString,
+    pub value: i64,
 }
 
-// TODO: this belongs with a typed cursor for stats.
+// XXX this belongs with a typed cursor for stats.
+#[derive(Debug, Copy, Clone)]
 pub struct StatValueRef<'b> {
     pub description: &'static CStr,
     pub value_str: &'b CStr,
     pub value: i64,
 }
 
-impl<'b> Formatter<'b> for StatValueRef<'b> {
-    const FORMAT: FormatString = FormatString::new(c"SSq");
-
-    type FormatterOwned = StatValue;
-
-    fn to_formatter_owned(&self) -> Self::FormatterOwned {
+impl<'a> FormatterRef<'a, StatValue> for StatValueRef<'a> {
+    fn to_formatter_owned(&self) -> StatValue {
         StatValue {
             description: self.description,
-            value_str: CString::from(self.value_str),
+            value_str: self.value_str.into(),
             value: self.value,
         }
     }
+}
 
-    fn format_pack(&self, writer: &mut impl FormatWriter) -> Result<()> {
-        writer.pack(self.description)?;
-        writer.pack(self.value_str)?;
-        writer.pack(self.value)
+impl FormatterOwned for StatValue {
+    type Ref<'a> = StatValueRef<'a>;
+
+    fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
+        StatValueRef {
+            description: self.description,
+            value_str: self.value_str.as_c_str(),
+            value: self.value,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct StatValueFormatter;
+
+impl Formatter for StatValueFormatter {
+    const FORMAT: FormatString = FormatString::new(c"SSq");
+
+    type Ref<'a> = StatValueRef<'a>;
+    type Owned = StatValue;
+
+    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
+        writer.pack(value.description)?;
+        writer.pack(value.value_str)?;
+        writer.pack(value.value)
     }
 
-    fn format_unpack(reader: &mut PackedFormatReader<'b>) -> Result<Self>
-    where
-        Self: Sized,
-    {
+    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
         let description = {
             let d: &CStr = reader.unpack()?;
             // Safety: description strings in wt metadata cursors are statically defined.
@@ -674,28 +702,10 @@ impl<'b> Formatter<'b> for StatValueRef<'b> {
         };
         let value_str = reader.unpack()?;
         let value = reader.unpack()?;
-        Ok(Self {
+        Ok(StatValueRef {
             description,
             value_str,
             value,
         })
-    }
-}
-
-pub struct StatValue {
-    pub description: &'static CStr,
-    pub value_str: CString,
-    pub value: i64,
-}
-
-impl FormatterOwned for StatValue {
-    type Formatter<'b> = StatValueRef<'b>;
-
-    fn to_formatter_ref(&self) -> Self::Formatter<'_> {
-        StatValueRef {
-            description: self.description,
-            value_str: &self.value_str,
-            value: self.value,
-        }
     }
 }

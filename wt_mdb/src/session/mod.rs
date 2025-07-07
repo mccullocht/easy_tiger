@@ -1,12 +1,14 @@
 mod format;
 mod index_cursor;
 mod metadata_cursor;
+mod raw_cursor;
 mod record_cursor;
 mod stat_cursor;
+mod typed_cursor;
 
 use std::{
     cell::RefCell,
-    ffi::{c_void, CStr, CString},
+    ffi::{c_char, c_void, CStr, CString},
     ops::Deref,
     ptr::NonNull,
     sync::Arc,
@@ -29,6 +31,7 @@ use crate::{
 pub use index_cursor::{IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordView};
 pub use record_cursor::{Record, RecordCursor, RecordCursorGuard, RecordView};
 pub use stat_cursor::StatCursor;
+pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
 const METADATA_URI: &CStr = c"metadata:";
 
@@ -109,6 +112,22 @@ impl InnerCursor {
             b"q" => Some(TableType::Record),
             b"u" => Some(TableType::Index),
             _ => None,
+        }
+    }
+
+    fn key_format(&self) -> &CStr {
+        self.format_or_default(unsafe { self.ptr.as_ref().key_format })
+    }
+
+    fn value_format(&self) -> &CStr {
+        self.format_or_default(unsafe { self.ptr.as_ref().key_format })
+    }
+
+    fn format_or_default(&self, format: *const c_char) -> &CStr {
+        if format.is_null() {
+            c"u"
+        } else {
+            unsafe { CStr::from_ptr(format) }
         }
     }
 

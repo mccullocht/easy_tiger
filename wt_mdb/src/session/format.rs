@@ -16,8 +16,9 @@ use wt_sys::{
 };
 
 /// Classification of the format to help optimize packing and unpacking.
+// XXX figure out visibility
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum FormatClassification {
+pub(crate) enum FormatClassification {
     /// Contains multiple columns, at least one of which is variable length.
     Variable,
     /// Contains a single variable-length column and can be trivially packed.
@@ -79,19 +80,35 @@ impl FormatString {
         self.0.to_bytes().len()
     }
 
+    pub(crate) fn max_len(&self) -> Option<usize> {
+        if let FormatClassification::Fixed(n) = self.1 {
+            Some(n)
+        } else {
+            None
+        }
+    }
+
     fn iter(&self) -> FormatStringIter {
         self.0.to_bytes().iter().copied()
     }
 }
 
-impl PartialEq<CStr> for FormatString {
-    fn eq(&self, other: &CStr) -> bool {
-        self.0 == other
+impl PartialEq<&CStr> for FormatString {
+    fn eq(&self, other: &&CStr) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<FormatString> for &CStr {
+    fn eq(&self, other: &FormatString) -> bool {
+        self == &other.0
     }
 }
 
 /// Primitive types that can be formatted into column values in WiredTiger.
 // TODO: seal this trait. All primitive should be defined in the crate.
+// XXX so packing is not my problem, the lifetime is ugly but not a real problem.
+// XXX I'm struggling mightily with unpacking because I cannot assign a lifetime to return Self.
 pub trait ColumnValue<'b> {
     /// Maximum encoded length of this value.
     fn max_len(&self) -> usize;
@@ -180,6 +197,23 @@ impl<'b> ColumnValue<'b> for &'b [u8] {
         Self: Sized,
     {
         Self::try_from(packed).ok()
+    }
+}
+
+trait CV2 {
+    type Unpacked<'a>: Sized;
+
+    fn from_packed<'a>(packed: PackedElement<'a>) -> Option<Self::Unpacked<'a>>;
+}
+
+impl CV2 for &[u8] {
+    type Unpacked<'a> = &'a [u8];
+
+    fn from_packed<'a>(packed: PackedElement<'a>) -> Option<Self::Unpacked<'a>> {
+        match packed {
+            PackedElement::Item(v) => Some(v),
+            _ => None,
+        }
     }
 }
 

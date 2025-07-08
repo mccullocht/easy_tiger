@@ -28,6 +28,7 @@ use crate::{
     wt_call, Error, Result,
 };
 
+pub use format::{FormatString, Formatter, FormatterOwned, FormatterRef};
 pub use index_cursor::{IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordView};
 pub use record_cursor::{Record, RecordCursor, RecordCursorGuard, RecordView};
 pub use stat_cursor::StatCursor;

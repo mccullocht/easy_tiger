@@ -17,7 +17,7 @@ use wt_sys::{
 
 /// Classification of the format to help optimize packing and unpacking.
 // XXX figure out visibility
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum FormatClassification {
     /// Contains multiple columns, at least one of which is variable length.
     Variable,
@@ -51,7 +51,7 @@ impl FormatClassification {
 ///
 /// This only supports a subset of of the documented WT types, in particular it does not support
 /// strings of a fixed length.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct FormatString(&'static CStr, FormatClassification);
 
 type FormatStringIter = std::iter::Copied<std::slice::Iter<'static, u8>>;
@@ -73,6 +73,10 @@ impl FormatString {
             }
         }
         Self(format, FormatClassification::new(format))
+    }
+
+    pub fn format_str(&self) -> &'static str {
+        self.0.to_str().expect("valid format strings are ASCII")
     }
 
     /// Return the number of columns in the format.

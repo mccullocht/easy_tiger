@@ -4,6 +4,8 @@ use std::{
     str::FromStr,
 };
 
+use crate::{FormatString, Formatter};
+
 pub(crate) trait ConfigurationString {
     fn as_config_string(&self) -> Option<&CStr>;
 
@@ -176,16 +178,41 @@ impl Default for TableType {
 }
 
 /// An options builder for creating a table, column group, index, or file in WiredTiger.
-#[derive(Default, Debug, Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub struct CreateOptionsBuilder {
-    table_type: TableType,
+    key_format: FormatString,
+    value_format: FormatString,
     app_metadata: Option<String>,
+}
+
+impl Default for CreateOptionsBuilder {
+    fn default() -> Self {
+        Self {
+            key_format: FormatString::new(c"q"),
+            value_format: FormatString::new(c"u"),
+            app_metadata: None,
+        }
+    }
 }
 
 impl CreateOptionsBuilder {
     /// Set the table type for this table.
     pub fn table_type(mut self, table_type: TableType) -> Self {
-        self.table_type = table_type;
+        match table_type {
+            TableType::Record => self.key_format = FormatString::new(c"q"),
+            TableType::Index => self.key_format = FormatString::new(c"u"),
+        }
+        self.value_format = FormatString::new(c"u");
+        self
+    }
+
+    pub fn key_format<K: Formatter>(mut self) -> Self {
+        self.key_format = K::FORMAT;
+        self
+    }
+
+    pub fn value_format<V: Formatter>(mut self) -> Self {
+        self.value_format = V::FORMAT;
         self
     }
 
@@ -212,11 +239,8 @@ impl Default for CreateOptions {
 impl From<CreateOptionsBuilder> for CreateOptions {
     fn from(value: CreateOptionsBuilder) -> Self {
         let mut parts = vec![
-            match value.table_type {
-                TableType::Record => "key_format=q".to_owned(),
-                TableType::Index => "key_format=u".to_owned(),
-            },
-            "value_format=u".into(),
+            format!("key_format={}", value.key_format.format_str()),
+            format!("value_format={}", value.value_format.format_str()),
         ];
         if let Some(metadata) = value.app_metadata {
             parts.push(metadata);

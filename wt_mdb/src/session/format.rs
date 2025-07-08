@@ -1,7 +1,5 @@
 //! Wrap WT routines to pack and unpack values store in a table.
 
-#![allow(dead_code)] // XXX remove me.
-
 use std::{
     ffi::{c_char, c_void, CStr, CString},
     marker::PhantomData,
@@ -16,7 +14,6 @@ use wt_sys::{
 };
 
 /// Classification of the format to help optimize packing and unpacking.
-// XXX figure out visibility
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum FormatClassification {
     /// Contains multiple columns, at least one of which is variable length.
@@ -202,23 +199,6 @@ impl<'b> ColumnValue<'b> for &'b [u8] {
     }
 }
 
-trait CV2 {
-    type Unpacked<'a>: Sized;
-
-    fn from_packed<'a>(packed: PackedElement<'a>) -> Option<Self::Unpacked<'a>>;
-}
-
-impl CV2 for &[u8] {
-    type Unpacked<'a> = &'a [u8];
-
-    fn from_packed<'a>(packed: PackedElement<'a>) -> Option<Self::Unpacked<'a>> {
-        match packed {
-            PackedElement::Item(v) => Some(v),
-            _ => None,
-        }
-    }
-}
-
 /// A single element in the format stream.
 pub enum PackedElement<'b> {
     Signed(i64),
@@ -266,7 +246,6 @@ pub trait FormatWriter {
 
 /// Pack a stream of values described by a format into a byte array for using in WT.
 pub struct PackedFormatWriter<'b> {
-    format: FormatString,
     format_it: FormatStringIter,
     stream: *mut WT_PACK_STREAM,
     buffer: PhantomData<&'b [u8]>,
@@ -290,7 +269,6 @@ impl<'b> PackedFormatWriter<'b> {
             (),
         )
         .map(|()| Self {
-            format,
             format_it,
             stream,
             buffer: PhantomData,
@@ -347,7 +325,6 @@ impl Drop for PackedFormatWriter<'_> {
 /// Pack a stream of values according to a format string and estimate an upper bound of the number
 /// of bytes required to encode the value.
 pub struct MaxLenFormatWriter {
-    format: FormatString,
     it: std::slice::Iter<'static, u8>,
     max_len: usize,
 }
@@ -357,7 +334,6 @@ impl MaxLenFormatWriter {
     /// `format`.
     pub fn new(format: FormatString) -> Self {
         Self {
-            format,
             it: format.0.to_bytes().iter(),
             max_len: 0usize,
         }
@@ -387,7 +363,6 @@ impl FormatWriter for MaxLenFormatWriter {
 }
 
 pub struct PackedFormatReader<'b> {
-    format: FormatString,
     format_it: FormatStringIter,
     stream: *mut WT_PACK_STREAM,
     buffer: PhantomData<&'b [u8]>,
@@ -410,7 +385,6 @@ impl<'b> PackedFormatReader<'b> {
             (),
         )
         .map(|()| Self {
-            format,
             format_it,
             stream,
             buffer: PhantomData,
@@ -640,74 +614,5 @@ impl Formatter for CStringFormatter {
 
     fn unpack_trivial<'b>(packed: &'b [u8]) -> Option<Self::Ref<'b>> {
         CStr::from_bytes_with_nul(packed).ok()
-    }
-}
-
-// XXX this belongs with a typed cursor for stats.
-#[derive(Debug, Clone)]
-pub struct StatValue {
-    pub description: &'static CStr,
-    pub value_str: CString,
-    pub value: i64,
-}
-
-// XXX this belongs with a typed cursor for stats.
-#[derive(Debug, Copy, Clone)]
-pub struct StatValueRef<'b> {
-    pub description: &'static CStr,
-    pub value_str: &'b CStr,
-    pub value: i64,
-}
-
-impl<'a> FormatterRef<'a, StatValue> for StatValueRef<'a> {
-    fn to_formatter_owned(&self) -> StatValue {
-        StatValue {
-            description: self.description,
-            value_str: self.value_str.into(),
-            value: self.value,
-        }
-    }
-}
-
-impl FormatterOwned for StatValue {
-    type Ref<'a> = StatValueRef<'a>;
-
-    fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
-        StatValueRef {
-            description: self.description,
-            value_str: self.value_str.as_c_str(),
-            value: self.value,
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct StatValueFormatter;
-
-impl Formatter for StatValueFormatter {
-    const FORMAT: FormatString = FormatString::new(c"SSq");
-
-    type Ref<'a> = StatValueRef<'a>;
-    type Owned = StatValue;
-
-    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
-        writer.pack(value.description)?;
-        writer.pack(value.value_str)?;
-        writer.pack(value.value)
-    }
-
-    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
-        let description = {
-            let d: &CStr = reader.unpack()?;
-            // Safety: description strings in wt metadata cursors are statically defined.
-            unsafe { CStr::from_ptr::<'static>(d.as_ptr()) }
-        };
-        let value_str = reader.unpack()?;
-        let value = reader.unpack()?;
-        Ok(StatValueRef {
-            description,
-            value_str,
-            value,
-        })
     }
 }

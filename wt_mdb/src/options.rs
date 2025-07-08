@@ -163,6 +163,7 @@ impl ConfigurationString for ConnectionOptions {
 }
 
 /// Type of WiredTiger table.
+// XXX this must go away.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub enum TableType {
     /// Record-type tables are `i64` keyed and byte-array valued.

@@ -453,26 +453,30 @@ mod test {
         assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
         assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
 
-        for stat in session.new_stats_cursor(Statistics::Fast, None).unwrap() {
-            let (desc, value) = stat.unwrap();
-            assert!(value >= 0, "{}", desc);
+        for stat in session
+            .new_stats_cursor(Statistics::Fast, None)
+            .expect("new cursor")
+        {
+            let (_, stat) = stat.unwrap();
+            assert!(stat.value >= 0, "{}", stat.description.to_string_lossy());
         }
 
         for stat in session
             .new_stats_cursor(Statistics::Fast, Some("test"))
             .unwrap()
         {
-            let (desc, value) = stat.unwrap();
-            assert!(value >= 0, "{}", desc);
+            let (_, stat) = stat.unwrap();
+            assert!(stat.value >= 0, "{}", stat.description.to_string_lossy());
         }
 
         assert!(
             session
                 .new_stats_cursor(Statistics::Fast, None)
                 .unwrap()
-                .seek_exact(wt_sys::WT_STAT_CONN_READ_IO)
+                .seek_exact(&(wt_sys::WT_STAT_CONN_READ_IO as i32))
                 .unwrap()
                 .unwrap()
+                .value
                 > 0
         );
     }

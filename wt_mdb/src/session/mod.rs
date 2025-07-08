@@ -1,9 +1,7 @@
 mod format;
 mod index_cursor;
 mod metadata_cursor;
-mod raw_cursor;
 mod record_cursor;
-mod stat_cursor;
 mod typed_cursor;
 
 use std::{
@@ -25,13 +23,13 @@ use crate::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
         DropOptions, RollbackTransactionOptions, Statistics, TableType,
     },
+    session::format::{FormatWriter, I32Formatter, PackedFormatReader},
     wt_call, Error, Result,
 };
 
 pub use format::{FormatString, Formatter, FormatterOwned, FormatterRef};
 pub use index_cursor::{IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordView};
 pub use record_cursor::{Record, RecordCursor, RecordCursorGuard, RecordView};
-pub use stat_cursor::StatCursor;
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
 const METADATA_URI: &CStr = c"metadata:";
@@ -121,7 +119,7 @@ impl InnerCursor {
     }
 
     fn value_format(&self) -> &CStr {
-        self.format_or_default(unsafe { self.ptr.as_ref().key_format })
+        self.format_or_default(unsafe { self.ptr.as_ref().value_format })
     }
 
     fn format_or_default(&self, format: *const c_char) -> &CStr {
@@ -318,14 +316,18 @@ impl Session {
             CString::new(format!("statistics:table:{t}")).expect("no nulls in table name")
         });
         let uri = table_stats_uri.as_deref().unwrap_or(c"statistics:");
-        let options = level
-            .to_config_string_clause()
-            .map(|s| CString::new(s).expect("no nulls in stats options"));
-        self.new_cursor_pointer(uri, options.as_deref())
-            .map(|ptr| StatCursor {
+        let mut parts = vec!["raw".into()];
+        if let Some(level) = level.to_config_string_clause() {
+            parts.push(level);
+        };
+        let options = CString::new(parts.join(",")).expect("no nulls in stats options");
+        let inner = self
+            .new_cursor_pointer(uri, Some(&options))
+            .map(|ptr| InnerCursor {
                 ptr,
-                _session: self,
-            })
+                uri: TableUri(CString::from(uri)),
+            })?;
+        StatCursor::new(inner, self)
     }
 
     fn new_cursor_pointer(&self, uri: &CStr, options: Option<&CStr>) -> Result<NonNull<WT_CURSOR>> {
@@ -380,6 +382,7 @@ impl Session {
     ///
     /// Bulk load requires that `table_name` not exist or be empty and that `iter` yields records in
     /// order by `key()`.
+    // XXX fix this to work with formatters.
     pub fn bulk_load<'a, I>(
         &self,
         table_name: &str,
@@ -419,3 +422,77 @@ impl Drop for Session {
 }
 
 unsafe impl Send for Session {}
+
+/// Owned value produced by a StatCursor.
+#[derive(Debug, Clone)]
+pub struct StatValue {
+    pub description: &'static CStr,
+    pub value_str: CString,
+    pub value: i64,
+}
+
+/// Ref value produced by a StatCursor.
+#[derive(Debug, Copy, Clone)]
+pub struct StatValueRef<'b> {
+    /// Description of this stat.
+    pub description: &'static CStr,
+    /// The value of the stat rendered as a string.
+    pub value_str: &'b CStr,
+    /// The value of the stat coerced to a number if possible.
+    pub value: i64,
+}
+
+impl<'a> FormatterRef<'a, StatValue> for StatValueRef<'a> {
+    fn to_formatter_owned(&self) -> StatValue {
+        StatValue {
+            description: self.description,
+            value_str: self.value_str.into(),
+            value: self.value,
+        }
+    }
+}
+
+impl FormatterOwned for StatValue {
+    type Ref<'a> = StatValueRef<'a>;
+
+    fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
+        StatValueRef {
+            description: self.description,
+            value_str: self.value_str.as_c_str(),
+            value: self.value,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct StatValueFormatter;
+
+impl Formatter for StatValueFormatter {
+    const FORMAT: FormatString = FormatString::new(c"SSq");
+
+    type Ref<'a> = StatValueRef<'a>;
+    type Owned = StatValue;
+
+    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
+        writer.pack(value.description)?;
+        writer.pack(value.value_str)?;
+        writer.pack(value.value)
+    }
+
+    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
+        let description = {
+            let d: &CStr = reader.unpack()?;
+            // Safety: description strings in wt metadata cursors are statically defined.
+            unsafe { CStr::from_ptr::<'static>(d.as_ptr()) }
+        };
+        let value_str = reader.unpack()?;
+        let value = reader.unpack()?;
+        Ok(StatValueRef {
+            description,
+            value_str,
+            value,
+        })
+    }
+}
+
+pub type StatCursor<'a> = TypedCursor<'a, I32Formatter, StatValueFormatter>;

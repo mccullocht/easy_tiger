@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     ffi::CStr,
     marker::PhantomData,
     mem::ManuallyDrop,
@@ -21,8 +20,45 @@ use crate::{
 
 use super::Session;
 
+// XXX move RawCursor in here.
+
+/// Pack a value that needs non-trivial formatting into buf.
+fn pack_non_trivial<F: Formatter>(value: &F::Ref<'_>, buf: &mut Vec<u8>) -> Result<()> {
+    let max_len = if let Some(n) = F::FORMAT.max_len() {
+        n
+    } else {
+        let mut writer = MaxLenFormatWriter::new(F::FORMAT);
+        F::pack(&mut writer, value)?;
+        writer.close()?
+    };
+
+    buf.resize(max_len, 0);
+    let mut writer = PackedFormatWriter::new(F::FORMAT, buf.as_mut_slice())?;
+    F::pack(&mut writer, value)?;
+    let len = writer.close()?;
+    buf.truncate(len);
+    Ok(())
+}
+
+/// Format a variable using the passed formatter into buf (if necessary).
+///
+/// This is an end run around lifetime issues as Formatter::pack_trivial and the buffer will have
+/// different lifetimes.
+macro_rules! format_to_buf {
+    ($var:ident, $formatter:ident, $buf:expr) => {{
+        if let Some(packed) = $formatter::pack_trivial($var) {
+            Ok(packed)
+        } else {
+            pack_non_trivial::<$formatter>($var, &mut $buf).map(|()| $buf.as_slice())
+        }
+    }};
+}
 pub struct TypedCursor<'a, K, V> {
     raw: RawCursor<'a>,
+    // TODO: consider using SmallVec for buffers. This will make the cursor larger but will require
+    // zero allocations, particularly for small keys.
+    key_buf: Vec<u8>,
+    value_buf: Vec<u8>,
     _km: PhantomData<&'a K>,
     _vm: PhantomData<&'a V>,
 }
@@ -32,6 +68,8 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
         if raw.key_format() == K::FORMAT && raw.value_format() == V::FORMAT {
             Ok(Self {
                 raw,
+                key_buf: vec![],
+                value_buf: vec![],
                 _km: PhantomData,
                 _vm: PhantomData,
             })
@@ -51,16 +89,16 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
 
     /// Set the contents of `record` in the collection.
     pub fn set(&mut self, key: &K::Ref<'_>, value: &V::Ref<'_>) -> Result<()> {
-        let key = Self::pack_cow::<K>(key)?;
-        let value = Self::pack_cow::<V>(value)?;
-        self.raw.set(key.as_ref(), value.as_ref())
+        let key = format_to_buf!(key, K, self.key_buf)?;
+        let value = format_to_buf!(value, V, self.value_buf)?;
+        self.raw.set(key, value)
     }
 
     /// Remove a record by `key`.
     ///
     /// This may return a `WiredTigerError::NotFound` if the key does not exist in the collection.
     pub fn remove(&mut self, key: &K::Ref<'_>) -> Result<()> {
-        let key = Self::pack_cow::<K>(key)?;
+        let key = format_to_buf!(key, K, self.key_buf)?;
         self.raw.remove(key.as_ref())
     }
 
@@ -90,7 +128,7 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
     /// is rolled back, we cannot guarantee that view value data is safe to access. Use
     /// `seek_exact()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn seek_exact_unsafe(&mut self, key: &K::Ref<'_>) -> Option<Result<V::Ref<'_>>> {
-        let key = match Self::pack_cow::<K>(key) {
+        let key = match format_to_buf!(key, K, self.key_buf) {
             Ok(k) => k,
             Err(e) => return Some(Err(e)),
         };
@@ -120,8 +158,8 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
 
     fn set_bound<'b>(&mut self, bound: Bound<&K::Ref<'b>>, upper: bool) -> Result<()> {
         let bound = match bound {
-            Bound::Included(k) => Bound::Included(Self::pack_cow::<K>(k)?),
-            Bound::Excluded(k) => Bound::Excluded(Self::pack_cow::<K>(k)?),
+            Bound::Included(k) => Bound::Included(format_to_buf!(k, K, self.key_buf)?),
+            Bound::Excluded(k) => Bound::Excluded(format_to_buf!(k, K, self.key_buf)?),
             Bound::Unbounded => Bound::Unbounded,
         };
         self.raw
@@ -131,30 +169,6 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
     /// Reset the cursor to an unpositioned state.
     pub fn reset(&mut self) -> Result<()> {
         self.raw.reset()
-    }
-
-    // TODO: this may cause us to create a new buffer on every single pack call which sucks.
-    // Consider implementing some sort of cow guard and freelisting these on the cursor or session.
-    // Also consider using Smallvec here to avoid allocation for small cases (like i64).
-    fn pack_cow<'b, F: Formatter>(value: &F::Ref<'b>) -> Result<Cow<'b, [u8]>> {
-        if let Some(f) = F::pack_trivial(value) {
-            return Ok(f.into());
-        }
-
-        let max_len = if let Some(n) = F::FORMAT.max_len() {
-            n
-        } else {
-            let mut writer = MaxLenFormatWriter::new(F::FORMAT);
-            F::pack(&mut writer, value)?;
-            writer.close()?
-        };
-
-        let mut buf = vec![0u8; max_len];
-        let mut writer = PackedFormatWriter::new(F::FORMAT, buf.as_mut_slice())?;
-        F::pack(&mut writer, value)?;
-        let len = writer.close()?;
-        buf.truncate(len);
-        Ok(buf.into())
     }
 
     fn unpack<'b, F: Formatter>(packed: &'b [u8]) -> Result<F::Ref<'b>> {
@@ -173,16 +187,16 @@ impl<'a, K: Formatter, V: Formatter> Iterator for TypedCursor<'a, K, V> {
     /// Advance and return the next record.
     ///
     /// If this cursor is unpositioned, returns values from the start of the collection or any bound.
-    // XXX I can't set a lifetime on &mut self without breaking the trait so i'm fucked.
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        unsafe { self.next_unsafe() }
+            .map(|r| r.map(|(k, v)| (k.to_formatter_owned(), v.to_formatter_owned())))
     }
 }
 
 pub struct TypedCursorGuard<'a, K, V>(ManuallyDrop<TypedCursor<'a, K, V>>);
 
 impl<'a, K, V> TypedCursorGuard<'a, K, V> {
-    pub(super) fn new(cursor: TypedCursor<'a, K, V>) -> Self {
+    pub fn new(cursor: TypedCursor<'a, K, V>) -> Self {
         Self(ManuallyDrop::new(cursor))
     }
 }

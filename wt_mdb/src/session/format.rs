@@ -107,8 +107,6 @@ impl PartialEq<FormatString> for &CStr {
 
 /// Primitive types that can be formatted into column values in WiredTiger.
 // TODO: seal this trait. All primitive should be defined in the crate.
-// XXX so packing is not my problem, the lifetime is ugly but not a real problem.
-// XXX I'm struggling mightily with unpacking because I cannot assign a lifetime to return Self.
 pub trait ColumnValue<'b> {
     /// Maximum encoded length of this value.
     fn max_len(&self) -> usize;

@@ -1,6 +1,5 @@
 mod format;
 mod index_cursor;
-mod metadata_cursor;
 mod record_cursor;
 mod typed_cursor;
 
@@ -12,7 +11,6 @@ use std::{
     sync::Arc,
 };
 
-use metadata_cursor::{MetadataCursor, MetadataCursorGuard};
 use rustix::io::Errno;
 use tracing::error;
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
@@ -23,7 +21,7 @@ use crate::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
         DropOptions, RollbackTransactionOptions, Statistics, TableType,
     },
-    session::format::{FormatWriter, I32Formatter, PackedFormatReader},
+    session::format::{CStringFormatter, FormatWriter, I32Formatter, PackedFormatReader},
     wt_call, Error, Result,
 };
 
@@ -246,15 +244,13 @@ impl Session {
 
     /// Open a cursor over database metadata.
     pub fn open_metadata_cursor(&self) -> Result<MetadataCursor> {
-        self.new_cursor_pointer(METADATA_URI, None).map(|ptr| {
-            MetadataCursor::new(
-                InnerCursor {
-                    ptr,
-                    uri: TableUri(METADATA_URI.to_owned()),
-                },
-                self,
-            )
-        })
+        // XXX need to fix this so that the pointer is always created with c"raw"
+        self.new_cursor_pointer(METADATA_URI, Some(c"raw"))
+            .map(|ptr| InnerCursor {
+                ptr,
+                uri: TableUri(METADATA_URI.to_owned()),
+            })
+            .and_then(|ic| MetadataCursor::new(ic, self))
     }
 
     /// Get a cached [RecordCursor] or create a new cursor over `table_name`.
@@ -290,7 +286,7 @@ impl Session {
         cursor_cache
             .iter()
             .position(|c| c.uri.table_name() == METADATA_URI)
-            .map(|i| Ok(MetadataCursor::new(cursor_cache.remove(i), self)))
+            .map(|i| MetadataCursor::new(cursor_cache.remove(i), self))
             .unwrap_or_else(|| self.open_metadata_cursor())
             .map(MetadataCursorGuard::new)
     }
@@ -495,4 +491,6 @@ impl Formatter for StatValueFormatter {
     }
 }
 
+pub type MetadataCursor<'a> = TypedCursor<'a, CStringFormatter, CStringFormatter>;
+pub type MetadataCursorGuard<'a> = TypedCursorGuard<'a, CStringFormatter, CStringFormatter>;
 pub type StatCursor<'a> = TypedCursor<'a, I32Formatter, StatValueFormatter>;

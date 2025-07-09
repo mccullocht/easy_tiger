@@ -490,9 +490,9 @@ mod test {
         let cursor = session.open_metadata_cursor().unwrap();
         assert_eq!(
             cursor
-                .map(|e| e.map(|(k, _)| k))
+                .map(|e| e.map(|(k, _)| k.into_string().expect("key into string")))
                 .collect::<Result<Vec<_>, crate::Error>>()
-                .unwrap(),
+                .expect("collect keys"),
             vec![
                 "metadata:",
                 "colgroup:test",

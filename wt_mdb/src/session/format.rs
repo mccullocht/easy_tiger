@@ -108,26 +108,40 @@ impl PartialEq<FormatString> for &CStr {
 
 /// Primitive types that can be formatted into column values in WiredTiger.
 // TODO: seal this trait. All primitive should be defined in the crate.
-pub trait ColumnValue<'b> {
+pub trait ColumnValue<'b>:
+    Into<PackedElement<'b>> + TryFrom<PackedElement<'b>, Error = TypeMismatchError>
+{
     /// Maximum encoded length of this value.
     fn max_len(&self) -> usize;
 
     /// Returns true if the format type matches this type.
     fn format_match(format: u8) -> bool;
+}
 
-    /// Transform this into an element for packing.
-    fn to_packed(&self) -> PackedElement<'b>;
+macro_rules! define_column_value_conversions {
+    ($primitive:ty, $elemvar:ident) => {
+        impl<'b> From<$primitive> for PackedElement<'b> {
+            fn from(value: $primitive) -> Self {
+                PackedElement::$elemvar(value.into())
+            }
+        }
 
-    /// Transform packed back into this primitive value type.
-    ///
-    /// Returns `None` on type mismatch or overflow.
-    fn from_packed(packed: PackedElement<'b>) -> Option<Self>
-    where
-        Self: Sized;
+        impl<'b> TryFrom<PackedElement<'b>> for $primitive {
+            type Error = TypeMismatchError;
+
+            fn try_from(v: PackedElement<'b>) -> std::result::Result<$primitive, Self::Error> {
+                if let PackedElement::$elemvar(v) = v {
+                    v.try_into().map_err(|_| TypeMismatchError)
+                } else {
+                    Err(TypeMismatchError)
+                }
+            }
+        }
+    };
 }
 
 macro_rules! define_column_value_primitive {
-    ($p:ty, $max_len:expr, $match:literal, $packed:ty) => {
+    ($p:ty, $max_len:expr, $match:literal, $elemvar:ident) => {
         impl<'b> ColumnValue<'b> for $p {
             fn max_len(&self) -> usize {
                 $max_len
@@ -136,26 +150,20 @@ macro_rules! define_column_value_primitive {
             fn format_match(format: u8) -> bool {
                 $match.to_bytes().contains(&format)
             }
-
-            fn to_packed(&self) -> PackedElement<'b> {
-                PackedElement::from(<$packed>::from(*self))
-            }
-
-            fn from_packed(packed: PackedElement<'b>) -> Option<Self> {
-                <$p>::try_from(<$packed>::try_from(packed).ok()?).ok()
-            }
         }
+
+        define_column_value_conversions!($p, $elemvar);
     };
 }
 
-define_column_value_primitive!(i8, 5, c"b", i64);
-define_column_value_primitive!(i16, 5, c"h", i64);
-define_column_value_primitive!(i32, 5, c"il", i64);
-define_column_value_primitive!(i64, 9, c"q", i64);
-define_column_value_primitive!(u8, 5, c"B", u64);
-define_column_value_primitive!(u16, 5, c"H", u64);
-define_column_value_primitive!(u32, 5, c"IL", u64);
-define_column_value_primitive!(u64, 9, c"Qr", u64);
+define_column_value_primitive!(i8, 5, c"b", Signed);
+define_column_value_primitive!(i16, 5, c"h", Signed);
+define_column_value_primitive!(i32, 5, c"il", Signed);
+define_column_value_primitive!(i64, 9, c"q", Signed);
+define_column_value_primitive!(u8, 5, c"B", Unsigned);
+define_column_value_primitive!(u16, 5, c"H", Unsigned);
+define_column_value_primitive!(u32, 5, c"IL", Unsigned);
+define_column_value_primitive!(u64, 9, c"Qr", Unsigned);
 
 impl<'b> ColumnValue<'b> for &'b CStr {
     fn max_len(&self) -> usize {
@@ -165,18 +173,9 @@ impl<'b> ColumnValue<'b> for &'b CStr {
     fn format_match(format: u8) -> bool {
         format == b'S'
     }
-
-    fn to_packed(&self) -> PackedElement<'b> {
-        PackedElement::from(*self)
-    }
-
-    fn from_packed(packed: PackedElement<'b>) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        Self::try_from(packed).ok()
-    }
 }
+
+define_column_value_conversions!(&'b CStr, CStr);
 
 impl<'b> ColumnValue<'b> for &'b [u8] {
     fn max_len(&self) -> usize {
@@ -186,18 +185,9 @@ impl<'b> ColumnValue<'b> for &'b [u8] {
     fn format_match(format: u8) -> bool {
         format == b'u'
     }
-
-    fn to_packed(&self) -> PackedElement<'b> {
-        PackedElement::from(*self)
-    }
-
-    fn from_packed(packed: PackedElement<'b>) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        Self::try_from(packed).ok()
-    }
 }
+
+define_column_value_conversions!(&'b [u8], Item);
 
 /// A single element in the format stream.
 pub enum PackedElement<'b> {
@@ -208,31 +198,6 @@ pub enum PackedElement<'b> {
 }
 
 pub struct TypeMismatchError;
-
-macro_rules! packed_element_convert {
-    ($($var:ident = $other:ty),*) => {
-        $(
-            impl<'b> From<$other> for PackedElement<'b> {
-                fn from(value: $other) -> PackedElement<'b> {
-                    Self::$var(value)
-                }
-            }
-
-            impl<'b> TryFrom<PackedElement<'b>> for $other {
-                type Error = TypeMismatchError;
-
-                fn try_from(value: PackedElement<'b>) -> std::result::Result<$other, Self::Error> {
-                    if let PackedElement::$var(v) = value {
-                        Ok(v)
-                    } else {
-                        Err(TypeMismatchError)
-                    }
-                }
-            }
-        )*
-    };
-}
-packed_element_convert!(Signed = i64, Unsigned = u64, CStr = &'b CStr, Item = &'b [u8]);
 
 /// Used by formatted objects to pack their data.
 pub trait FormatWriter {
@@ -299,7 +264,7 @@ impl FormatWriter for PackedFormatWriter<'_> {
         }
         make_result(
             unsafe {
-                match v.to_packed() {
+                match v.into() {
                     PackedElement::Signed(v) => wiredtiger_pack_int(self.stream, v),
                     PackedElement::Unsigned(v) => wiredtiger_pack_uint(self.stream, v),
                     PackedElement::CStr(v) => wiredtiger_pack_str(self.stream, v.as_ptr()),
@@ -343,11 +308,10 @@ impl MaxLenFormatWriter {
     ///
     /// Returns an error if the pack stream does not match `format.columns_len()`.
     pub fn close(mut self) -> Result<usize> {
-        if self.it.next().is_none() {
-            Ok(self.max_len)
-        } else {
-            Err(Error::Errno(Errno::INVAL))
-        }
+        self.it
+            .next()
+            .map(|_| Err(Error::Errno(Errno::INVAL)))
+            .unwrap_or(Ok(self.max_len))
     }
 }
 
@@ -425,7 +389,7 @@ impl<'b> PackedFormatReader<'b> {
             }
             _ => unreachable!("unexpected type from validated FormatString"),
         };
-        V::from_packed(element).ok_or(Error::Errno(Errno::INVAL))
+        V::try_from(element).map_err(|_| Error::Errno(Errno::INVAL))
     }
 
     pub fn close(mut self) -> Result<()> {
@@ -495,18 +459,28 @@ pub trait FormatterOwned: Sized {
 }
 
 macro_rules! define_primitive_formatter {
-    ($name: ident, $primitive:ty, $format:literal) => {
-        impl<'a> FormatterRef<'a, $primitive> for $primitive {
-            fn to_formatter_owned(&self) -> $primitive {
-                *self
+    ($name:ident, $primitive:ty, $format:literal) => {
+        define_primitive_formatter!(
+            $name,
+            $primitive,
+            $primitive,
+            into,
+            $format,
+            default_trivial_pack,
+            default_trivial_unpack
+        );
+    };
+    ($name:ident, $primitive:ty, $owned:ty, $as_ref:ident, $format:literal, $pack_trivial:ident, $unpack_trivial:ident) => {
+        impl FormatterOwned for $owned {
+            type Ref<'a> = $primitive;
+            fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
+                (*self).$as_ref()
             }
         }
 
-        impl FormatterOwned for $primitive {
-            type Ref<'a> = $primitive;
-
-            fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
-                *self
+        impl<'a> FormatterRef<'a, $owned> for $primitive {
+            fn to_formatter_owned(&self) -> $owned {
+                (*self).into()
             }
         }
 
@@ -517,7 +491,7 @@ macro_rules! define_primitive_formatter {
             const FORMAT: FormatString = FormatString::new($format);
 
             type Ref<'a> = $primitive;
-            type Owned = $primitive;
+            type Owned = $owned;
 
             fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
                 writer.pack(*value)
@@ -525,6 +499,14 @@ macro_rules! define_primitive_formatter {
 
             fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
                 reader.unpack()
+            }
+
+            fn pack_trivial<'b>(value: &Self::Ref<'b>) -> Option<&'b [u8]> {
+                $pack_trivial(value)
+            }
+
+            fn unpack_trivial<'b>(packed: &'b [u8]) -> Option<Self::Ref<'b>> {
+                $unpack_trivial(packed)
             }
         }
     };
@@ -538,81 +520,41 @@ define_primitive_formatter!(U8Formatter, u8, c"B");
 define_primitive_formatter!(U16Formatter, u16, c"H");
 define_primitive_formatter!(U32Formatter, u32, c"I");
 define_primitive_formatter!(U64Formatter, u64, c"Q");
+define_primitive_formatter!(
+    ByteSliceFormatter,
+    &'a [u8],
+    Vec<u8>,
+    as_ref,
+    c"u",
+    Some,
+    Some
+);
+define_primitive_formatter!(
+    CStringFormatter,
+    &'a CStr,
+    CString,
+    as_ref,
+    c"S",
+    pack_trivial_cstr,
+    unpack_trivial_cstr
+);
 
-impl FormatterOwned for Vec<u8> {
-    type Ref<'a> = &'a [u8];
-    fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
-        self.as_slice()
-    }
+#[inline(always)]
+fn default_trivial_pack<'b, T>(_t: &T) -> Option<&'b [u8]> {
+    None
 }
 
-impl<'a> FormatterRef<'a, Vec<u8>> for &'a [u8] {
-    fn to_formatter_owned(&self) -> Vec<u8> {
-        self.to_vec()
-    }
+#[inline(always)]
+fn default_trivial_unpack<T>(_p: &[u8]) -> Option<T> {
+    None
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct ByteSliceFormatter;
-
-impl Formatter for ByteSliceFormatter {
-    const FORMAT: FormatString = FormatString::new(c"u");
-
-    type Ref<'a> = &'a [u8];
-    type Owned = Vec<u8>;
-
-    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
-        writer.pack(*value)
-    }
-
-    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
-        reader.unpack()
-    }
-
-    fn pack_trivial<'b>(value: &Self::Ref<'b>) -> Option<&'b [u8]> {
-        Some(*value)
-    }
-
-    fn unpack_trivial<'b>(packed: &'b [u8]) -> Option<Self::Ref<'b>> {
-        Some(packed)
-    }
+#[inline(always)]
+fn pack_trivial_cstr<'b>(value: &'b CStr) -> Option<&'b [u8]> {
+    Some(value.to_bytes_with_nul())
 }
 
-impl FormatterOwned for CString {
-    type Ref<'a> = &'a CStr;
-    fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
-        self.as_c_str()
-    }
-}
-
-impl<'a> FormatterRef<'a, CString> for &'a CStr {
-    fn to_formatter_owned(&self) -> CString {
-        CString::from(*self)
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct CStringFormatter;
-
-impl Formatter for CStringFormatter {
-    const FORMAT: FormatString = FormatString::new(c"S");
-
-    type Ref<'a> = &'a CStr;
-    type Owned = CString;
-
-    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
-        writer.pack(*value)
-    }
-
-    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
-        reader.unpack()
-    }
-
-    fn pack_trivial<'b>(value: &Self::Ref<'b>) -> Option<&'b [u8]> {
-        Some(value.to_bytes_with_nul())
-    }
-
-    fn unpack_trivial<'b>(packed: &'b [u8]) -> Option<Self::Ref<'b>> {
-        CStr::from_bytes_with_nul(packed).ok()
-    }
+#[inline(always)]
+fn unpack_trivial_cstr<'b>(packed: &'b [u8]) -> Option<&'b CStr> {
+    CStr::from_bytes_with_nul(packed).ok()
 }

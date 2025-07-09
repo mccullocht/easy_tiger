@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
-    Connection, Error, IndexCursorGuard, IndexRecordView, Record, RecordCursorGuard, Result,
-    Session, WiredTigerError,
+    Connection, Error, IndexCursorGuard, Record, RecordCursorGuard, Result, Session,
+    WiredTigerError,
 };
 
 use crate::{
@@ -302,7 +302,8 @@ impl SessionIndexWriter {
                 record_id,
             }
             .into();
-            posting_cursor.set(&IndexRecordView::new(&key, &quantized))?;
+            // XXX this is pretty horrid for byte slices.
+            posting_cursor.set(&key.as_slice(), &quantized.as_slice())?;
         }
 
         Ok(centroid_ids)
@@ -396,7 +397,7 @@ impl SessionIndexWriter {
                 record_id,
             }
             .into();
-            cursor.remove(&key).or_else(|e| {
+            cursor.remove(&key.as_slice()).or_else(|e| {
                 if e == Error::not_found_error() {
                     Ok(())
                 } else {
@@ -456,7 +457,7 @@ impl Iterator for PostingIter<'_, '_, '_, '_> {
         while let Some(record_result) = unsafe { self.cursor.next_unsafe() } {
             self.read += 1;
             let (raw_key, vector) = match record_result {
-                Ok(r) => r.into_inner(),
+                Ok((k, v)) => (k, v),
                 Err(e) => return Some(Err(e)),
             };
             let record_id = PostingKey::from(

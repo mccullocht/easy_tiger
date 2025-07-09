@@ -1,5 +1,4 @@
 mod format;
-mod index_cursor;
 mod record_cursor;
 mod typed_cursor;
 
@@ -21,12 +20,13 @@ use crate::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
         DropOptions, RollbackTransactionOptions, Statistics, TableType,
     },
-    session::format::{CStringFormatter, FormatWriter, I32Formatter, PackedFormatReader},
+    session::format::{
+        ByteSliceFormatter, CStringFormatter, FormatWriter, I32Formatter, PackedFormatReader,
+    },
     wt_call, Error, Result,
 };
 
 pub use format::{FormatString, Formatter, FormatterOwned, FormatterRef};
-pub use index_cursor::{IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordView};
 pub use record_cursor::{Record, RecordCursor, RecordCursorGuard, RecordView};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
@@ -220,9 +220,9 @@ impl Session {
     /// Open an index cursor over the named table.
     ///
     /// Returns [rustix::io::Errno::INVAL] if the underlying table is not an index table.
-    pub fn open_index_cursor(&self, table_name: &str) -> Result<IndexCursor> {
-        self.open_typed_cursor(table_name, None, TableType::Index)
-            .map(|c| IndexCursor::new(c, self))
+    pub fn open_index_cursor(&self, table_name: &str) -> Result<IndexCursor<'_>> {
+        self.open_typed_cursor(table_name, Some(c"raw"), TableType::Index)
+            .and_then(|c| IndexCursor::new(c, self))
     }
 
     fn open_typed_cursor(
@@ -262,7 +262,8 @@ impl Session {
     /// Get a cached [IndexCursor] or create a new cursor over `table_name`.
     pub fn get_index_cursor(&self, table_name: &str) -> Result<IndexCursorGuard<'_>> {
         self.get_typed_cursor(table_name, TableType::Index)
-            .map(|c| IndexCursorGuard::new(self, IndexCursor::new(c, self)))
+            .and_then(|c| IndexCursor::new(c, self))
+            .map(IndexCursorGuard::new)
     }
 
     fn get_typed_cursor(
@@ -491,6 +492,8 @@ impl Formatter for StatValueFormatter {
     }
 }
 
+pub type IndexCursor<'a> = TypedCursor<'a, ByteSliceFormatter, ByteSliceFormatter>;
+pub type IndexCursorGuard<'a> = TypedCursorGuard<'a, ByteSliceFormatter, ByteSliceFormatter>;
 pub type MetadataCursor<'a> = TypedCursor<'a, CStringFormatter, CStringFormatter>;
 pub type MetadataCursorGuard<'a> = TypedCursorGuard<'a, CStringFormatter, CStringFormatter>;
 pub type StatCursor<'a> = TypedCursor<'a, I32Formatter, StatValueFormatter>;

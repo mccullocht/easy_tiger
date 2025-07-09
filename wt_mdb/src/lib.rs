@@ -126,9 +126,9 @@ impl From<Error> for std::io::Error {
 
 pub use connection::Connection;
 pub use session::{
-    FormatString, Formatter, FormatterOwned, FormatterRef, IndexCursor, IndexCursorGuard,
-    IndexRecord, IndexRecordView, Record, RecordCursor, RecordCursorGuard, RecordView, Session,
-    StatCursor, TypedCursor, TypedCursorGuard,
+    FormatString, Formatter, FormatterOwned, FormatterRef, IndexCursor, IndexCursorGuard, Record,
+    RecordCursor, RecordCursorGuard, RecordView, Session, StatCursor, TypedCursor,
+    TypedCursorGuard,
 };
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -179,7 +179,7 @@ mod test {
             ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
             Statistics, TableType,
         },
-        Error, IndexRecord, IndexRecordView, Record, RecordView, WiredTigerError,
+        Error, Record, RecordView, WiredTigerError,
     };
 
     fn conn_options() -> Option<ConnectionOptions> {
@@ -215,10 +215,10 @@ mod test {
         let session = conn.open_session().unwrap();
         session.create_table("test", index_table_options()).unwrap();
         let mut cursor = session.open_index_cursor("test").unwrap();
-        assert_eq!(cursor.set(&IndexRecordView::new(b"b", b"bar")), Ok(()));
-        assert_eq!(cursor.set(&IndexRecordView::new(b"a", b"foo")), Ok(()));
-        assert_eq!(cursor.next(), Some(Ok(IndexRecord::new(b"a", b"foo"))));
-        assert_eq!(cursor.next(), Some(Ok(IndexRecord::new(b"b", b"bar"))));
+        assert_eq!(cursor.set(&b"b".as_slice(), &b"bar".as_slice()), Ok(()));
+        assert_eq!(cursor.set(&b"a".as_slice(), &b"foo".as_slice()), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok((b"a".to_vec(), b"foo".to_vec()))));
+        assert_eq!(cursor.next(), Some(Ok((b"b".to_vec(), b"bar".to_vec()))));
         assert_eq!(cursor.next(), None);
     }
 
@@ -243,17 +243,13 @@ mod test {
         let session = conn.open_session().unwrap();
         session.create_table("test", index_table_options()).unwrap();
         let mut cursor = session.open_index_cursor("test").unwrap();
-        let value: &[u8] = b"bar";
-        assert_eq!(cursor.set(&IndexRecordView::new(b"a", value)), Ok(()));
-        assert_eq!(cursor.set(&IndexRecord::new(b"b", value)), Ok(()));
-        assert_eq!(
-            cursor.seek_exact(b"a"),
-            Some(Ok(IndexRecord::new(b"a", value)))
-        );
-        assert_eq!(
-            cursor.seek_exact(b"b"),
-            Some(Ok(IndexRecord::new(b"b", value)))
-        );
+        let value = b"bar".to_vec();
+        // XXX we might want formatted types to be AsRef? this is very annoying.
+        // OTOH don't know how this will work for more compex types.
+        assert_eq!(cursor.set(&b"a".as_slice(), &value.as_slice()), Ok(()));
+        assert_eq!(cursor.set(&b"b".as_slice(), &value.as_slice()), Ok(()));
+        assert_eq!(cursor.seek_exact(&b"a".as_slice()), Some(Ok(value.clone())));
+        assert_eq!(cursor.seek_exact(&b"b".as_slice()), Some(Ok(value.clone())));
     }
 
     #[test]
@@ -281,13 +277,14 @@ mod test {
         let session = conn.open_session().unwrap();
         session.create_table("test", index_table_options()).unwrap();
         let mut cursor = session.open_index_cursor("test").unwrap();
-        assert_eq!(cursor.set(&IndexRecordView::new(b"b", b"bar")), Ok(()));
-        assert_eq!(cursor.set(&IndexRecordView::new(b"a", b"foo")), Ok(()));
-        assert_eq!(cursor.remove(b"a"), Ok(()));
-        assert_eq!(cursor.next(), Some(Ok(IndexRecord::new(b"b", b"bar"))));
+        // XXX or maybe it's just that we need to be able to Into?
+        assert_eq!(cursor.set(&b"b".as_slice(), &b"bar".as_slice()), Ok(()));
+        assert_eq!(cursor.set(&b"a".as_slice(), &b"foo".as_slice()), Ok(()));
+        assert_eq!(cursor.remove(&b"a".as_slice()), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok((b"b".to_vec(), b"bar".to_vec()))));
         assert_eq!(cursor.next(), None);
         assert_eq!(
-            cursor.remove(b"c"),
+            cursor.remove(&b"c".as_slice()),
             Err(Error::WiredTiger(WiredTigerError::NotFound))
         );
     }
@@ -314,10 +311,10 @@ mod test {
         session.create_table("test", index_table_options()).unwrap();
         let mut cursor = session.open_index_cursor("test").unwrap();
         assert_eq!(cursor.largest_key(), None);
-        assert_eq!(cursor.set(&IndexRecordView::new(b"a", b"bar")), Ok(()));
-        assert_eq!(cursor.largest_key(), Some(Ok(b"a".as_ref())));
-        assert_eq!(cursor.set(&IndexRecordView::new(b"b", b"foo")), Ok(()));
-        assert_eq!(cursor.largest_key(), Some(Ok(b"b".as_ref())));
+        assert_eq!(cursor.set(&b"a".as_slice(), &b"bar".as_slice()), Ok(()));
+        assert_eq!(cursor.largest_key(), Some(Ok(b"a".to_vec())));
+        assert_eq!(cursor.set(&b"b".as_slice(), &b"foo".as_slice()), Ok(()));
+        assert_eq!(cursor.largest_key(), Some(Ok(b"b".to_vec())));
     }
 
     #[test]

@@ -126,9 +126,8 @@ impl From<Error> for std::io::Error {
 
 pub use connection::Connection;
 pub use session::{
-    FormatString, Formatter, FormatterOwned, FormatterRef, IndexCursor, IndexCursorGuard, Record,
-    RecordCursor, RecordCursorGuard, RecordView, Session, StatCursor, TypedCursor,
-    TypedCursorGuard,
+    FormatString, Formatter, IndexCursor, IndexCursorGuard, Record, RecordCursor,
+    RecordCursorGuard, RecordView, Session, StatCursor, TypedCursor, TypedCursorGuard,
 };
 pub type Result<T> = std::result::Result<T, Error>;
 

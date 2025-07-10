@@ -195,6 +195,7 @@ impl TableIndex {
 ///
 /// Serialized posting keys should result in entries ordered by centroid_id and then record_id,
 /// allowing each centroid to be read as a contiguous range.
+// XXX PostingKey should have a Formatter.
 struct PostingKey {
     centroid_id: u32,
     record_id: i64,
@@ -460,12 +461,11 @@ impl Iterator for PostingIter<'_, '_, '_, '_> {
                 Ok((k, v)) => (k, v),
                 Err(e) => return Some(Err(e)),
             };
-            let record_id = PostingKey::from(
-                <[u8; 12]>::try_from(raw_key.as_ref()).expect("12-byte posting key"),
-            )
-            .record_id;
+            let record_id =
+                PostingKey::from(<[u8; 12]>::try_from(raw_key).expect("12-byte posting key"))
+                    .record_id;
             if self.seen.insert(record_id) {
-                let dist = self.distance_fn.distance(self.query, &vector);
+                let dist = self.distance_fn.distance(self.query, vector);
                 return Some(Ok(Neighbor::new(record_id, dist)));
             }
         }

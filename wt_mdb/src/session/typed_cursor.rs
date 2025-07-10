@@ -10,9 +10,7 @@ use rustix::io::Errno;
 use crate::{
     map_not_found,
     session::{
-        format::{
-            Formatter, FormatterRef, MaxLenFormatWriter, PackedFormatReader, PackedFormatWriter,
-        },
+        format::{Formatter, MaxLenFormatWriter, PackedFormatReader, PackedFormatWriter},
         InnerCursor, Item,
     },
     wt_call, Error, Result,
@@ -288,15 +286,14 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
     }
 
     /// Seek to the for `key` and return any associated `Record` if present.
-    pub fn seek_exact(&mut self, key: &K::Ref<'_>) -> Option<Result<V::Owned>> {
-        unsafe { self.seek_exact_unsafe(key) }.map(|r| r.map(|v| v.to_formatter_owned()))
+    pub fn seek_exact(&mut self, key: &K::Ref<'_>) -> Option<Result<V>> {
+        unsafe { self.seek_exact_unsafe(key) }.map(|r| r.map(|v| v.into()))
     }
 
     /// Return the largest key in the collection or `None` if the collection is empty.
-    pub fn largest_key(&mut self) -> Option<Result<K::Owned>> {
+    pub fn largest_key(&mut self) -> Option<Result<K>> {
         map_not_found(
-            unsafe { self.raw.largest_key() }
-                .and_then(|k| Self::unpack::<K>(k).map(|k| k.to_formatter_owned())),
+            unsafe { self.raw.largest_key() }.and_then(|k| Self::unpack::<K>(k).map(|k| k.into())),
         )
     }
 
@@ -335,14 +332,13 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
 }
 
 impl<'a, K: Formatter, V: Formatter> Iterator for TypedCursor<'a, K, V> {
-    type Item = Result<(K::Owned, V::Owned)>;
+    type Item = Result<(K, V)>;
 
     /// Advance and return the next record.
     ///
     /// If this cursor is unpositioned, returns values from the start of the collection or any bound.
     fn next(&mut self) -> Option<Self::Item> {
-        unsafe { self.next_unsafe() }
-            .map(|r| r.map(|(k, v)| (k.to_formatter_owned(), v.to_formatter_owned())))
+        unsafe { self.next_unsafe() }.map(|r| r.map(|(k, v)| (k.into(), v.into())))
     }
 }
 

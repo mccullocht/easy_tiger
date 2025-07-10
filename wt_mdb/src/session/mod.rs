@@ -20,13 +20,11 @@ use crate::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
         DropOptions, RollbackTransactionOptions, Statistics, TableType,
     },
-    session::format::{
-        ByteSliceFormatter, CStringFormatter, FormatWriter, I32Formatter, PackedFormatReader,
-    },
+    session::format::{FormatWriter, PackedFormatReader},
     wt_call, Error, Result,
 };
 
-pub use format::{FormatString, Formatter, FormatterOwned, FormatterRef};
+pub use format::{FormatString, Formatter};
 pub use record_cursor::{Record, RecordCursor, RecordCursorGuard, RecordView};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
@@ -439,36 +437,28 @@ pub struct StatValueRef<'b> {
     pub value: i64,
 }
 
-impl<'a> FormatterRef<'a, StatValue> for StatValueRef<'a> {
-    fn to_formatter_owned(&self) -> StatValue {
+impl<'a> From<StatValueRef<'a>> for StatValue {
+    fn from(value: StatValueRef<'a>) -> Self {
         StatValue {
-            description: self.description,
-            value_str: self.value_str.into(),
-            value: self.value,
+            description: value.description,
+            value_str: value.value_str.into(),
+            value: value.value,
         }
     }
 }
 
-impl FormatterOwned for StatValue {
-    type Ref<'a> = StatValueRef<'a>;
-
-    fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
-        StatValueRef {
-            description: self.description,
-            value_str: self.value_str.as_c_str(),
-            value: self.value,
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct StatValueFormatter;
-
-impl Formatter for StatValueFormatter {
+impl Formatter for StatValue {
     const FORMAT: FormatString = FormatString::new(c"SSq");
 
     type Ref<'a> = StatValueRef<'a>;
-    type Owned = StatValue;
+
+    fn to_formatter_ref(&self) -> Self::Ref<'_> {
+        StatValueRef {
+            description: self.description,
+            value_str: &self.value_str,
+            value: self.value,
+        }
+    }
 
     fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
         writer.pack(value.description)?;
@@ -492,8 +482,8 @@ impl Formatter for StatValueFormatter {
     }
 }
 
-pub type IndexCursor<'a> = TypedCursor<'a, ByteSliceFormatter, ByteSliceFormatter>;
-pub type IndexCursorGuard<'a> = TypedCursorGuard<'a, ByteSliceFormatter, ByteSliceFormatter>;
-pub type MetadataCursor<'a> = TypedCursor<'a, CStringFormatter, CStringFormatter>;
-pub type MetadataCursorGuard<'a> = TypedCursorGuard<'a, CStringFormatter, CStringFormatter>;
-pub type StatCursor<'a> = TypedCursor<'a, I32Formatter, StatValueFormatter>;
+pub type IndexCursor<'a> = TypedCursor<'a, Vec<u8>, Vec<u8>>;
+pub type IndexCursorGuard<'a> = TypedCursorGuard<'a, Vec<u8>, Vec<u8>>;
+pub type MetadataCursor<'a> = TypedCursor<'a, CString, CString>;
+pub type MetadataCursorGuard<'a> = TypedCursorGuard<'a, CString, CString>;
+pub type StatCursor<'a> = TypedCursor<'a, i32, StatValue>;

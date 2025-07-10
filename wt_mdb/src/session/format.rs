@@ -413,14 +413,23 @@ impl Drop for PackedFormatReader<'_> {
 }
 
 /// Something that can be formatted/packed into a key or value in WiredTiger.
-pub trait Formatter {
+// XXX _Formatted_
+pub trait Formatter: Sized {
     /// The format of this packed value.
     ///
     /// This is used to validate that a cursor key or value matches the expected format.
     const FORMAT: FormatString;
 
-    type Ref<'a>: FormatterRef<'a, Self::Owned>;
-    type Owned: FormatterOwned;
+    /// A reference to this this type. This may be a partial references with some unpacked
+    /// primitives (ints, etc) but also fields referencing strings or bytes.
+    type Ref<'a>: Into<Self>;
+
+    /// Obtain a reference type.
+    // NB: this cannot simply be another trait, unfortunately:
+    // * Borrow doesn't work for formatted structs that contain some references.
+    // * AsRef doesn't work for primitive integer types.
+    // * From/Into doesn't work for CString or Vec<u8>
+    fn to_formatter_ref(&self) -> Self::Ref<'_>;
 
     /// Format the contents of this object into `writer`.
     fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()>;
@@ -442,26 +451,9 @@ pub trait Formatter {
     }
 }
 
-/// A reference to a value unpacked by the formatter.
-pub trait FormatterRef<'a, Owned>: Sized {
-    /// Get an owned copy of the ref value.
-    fn to_formatter_owned(&self) -> Owned;
-}
-
-/// An owned value unpacked by the formatter.
-pub trait FormatterOwned: Sized {
-    type Ref<'a>: FormatterRef<'a, Self>
-    where
-        Self: 'a;
-
-    /// Get a reference to this owned value.
-    fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a>;
-}
-
 macro_rules! define_primitive_formatter {
-    ($name:ident, $primitive:ty, $format:literal) => {
+    ($primitive:ty, $format:literal) => {
         define_primitive_formatter!(
-            $name,
             $primitive,
             $primitive,
             into,
@@ -470,28 +462,15 @@ macro_rules! define_primitive_formatter {
             default_trivial_unpack
         );
     };
-    ($name:ident, $primitive:ty, $owned:ty, $as_ref:ident, $format:literal, $pack_trivial:ident, $unpack_trivial:ident) => {
-        impl FormatterOwned for $owned {
-            type Ref<'a> = $primitive;
-            fn to_formatter_ref<'a>(&'a self) -> Self::Ref<'a> {
-                (*self).$as_ref()
-            }
-        }
-
-        impl<'a> FormatterRef<'a, $owned> for $primitive {
-            fn to_formatter_owned(&self) -> $owned {
-                (*self).into()
-            }
-        }
-
-        #[derive(Debug, Copy, Clone)]
-        pub struct $name;
-
-        impl Formatter for $name {
+    ($owned:ty, $ref:ty, $as_ref:ident, $format:literal, $pack_trivial:ident, $unpack_trivial:ident) => {
+        impl Formatter for $owned {
             const FORMAT: FormatString = FormatString::new($format);
 
-            type Ref<'a> = $primitive;
-            type Owned = $owned;
+            type Ref<'a> = $ref;
+
+            fn to_formatter_ref(&self) -> Self::Ref<'_> {
+                (*self).$as_ref()
+            }
 
             fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
                 writer.pack(*value)
@@ -512,27 +491,18 @@ macro_rules! define_primitive_formatter {
     };
 }
 
-define_primitive_formatter!(I8Formatter, i8, c"b");
-define_primitive_formatter!(I16Formatter, i16, c"h");
-define_primitive_formatter!(I32Formatter, i32, c"i");
-define_primitive_formatter!(I64Formatter, i64, c"q");
-define_primitive_formatter!(U8Formatter, u8, c"B");
-define_primitive_formatter!(U16Formatter, u16, c"H");
-define_primitive_formatter!(U32Formatter, u32, c"I");
-define_primitive_formatter!(U64Formatter, u64, c"Q");
+define_primitive_formatter!(i8, c"b");
+define_primitive_formatter!(i16, c"h");
+define_primitive_formatter!(i32, c"i");
+define_primitive_formatter!(i64, c"q");
+define_primitive_formatter!(u8, c"B");
+define_primitive_formatter!(u16, c"H");
+define_primitive_formatter!(u32, c"I");
+define_primitive_formatter!(u64, c"Q");
+define_primitive_formatter!(Vec<u8>, &'a [u8], as_ref, c"u", Some, Some);
 define_primitive_formatter!(
-    ByteSliceFormatter,
-    &'a [u8],
-    Vec<u8>,
-    as_ref,
-    c"u",
-    Some,
-    Some
-);
-define_primitive_formatter!(
-    CStringFormatter,
-    &'a CStr,
     CString,
+    &'a CStr,
     as_ref,
     c"S",
     pack_trivial_cstr,
@@ -550,11 +520,11 @@ fn default_trivial_unpack<T>(_p: &[u8]) -> Option<T> {
 }
 
 #[inline(always)]
-fn pack_trivial_cstr<'b>(value: &'b CStr) -> Option<&'b [u8]> {
+fn pack_trivial_cstr(value: &CStr) -> Option<&[u8]> {
     Some(value.to_bytes_with_nul())
 }
 
 #[inline(always)]
-fn unpack_trivial_cstr<'b>(packed: &'b [u8]) -> Option<&'b CStr> {
+fn unpack_trivial_cstr(packed: &[u8]) -> Option<&CStr> {
     CStr::from_bytes_with_nul(packed).ok()
 }

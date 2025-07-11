@@ -193,10 +193,10 @@ fn pack_non_trivial<F: Formatter>(value: &F::Ref<'_>, buf: &mut Vec<u8>) -> Resu
 /// different lifetimes.
 macro_rules! format_to_buf {
     ($var:ident, $formatter:ident, $buf:expr) => {{
-        if let Some(packed) = $formatter::pack_trivial($var) {
+        if let Some(packed) = $formatter::pack_trivial(&$var) {
             Ok(packed)
         } else {
-            pack_non_trivial::<$formatter>($var, &mut $buf).map(|()| $buf.as_slice())
+            pack_non_trivial::<$formatter>(&$var, &mut $buf).map(|()| $buf.as_slice())
         }
     }};
 }
@@ -236,7 +236,7 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
     }
 
     /// Set the contents of `record` in the collection.
-    pub fn set(&mut self, key: &K::Ref<'_>, value: &V::Ref<'_>) -> Result<()> {
+    pub fn set(&mut self, key: K::Ref<'_>, value: V::Ref<'_>) -> Result<()> {
         let key = format_to_buf!(key, K, self.key_buf)?;
         let value = format_to_buf!(value, V, self.value_buf)?;
         self.raw.set(key, value)
@@ -245,7 +245,7 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
     /// Remove a record by `key`.
     ///
     /// This may return a `WiredTigerError::NotFound` if the key does not exist in the collection.
-    pub fn remove(&mut self, key: &K::Ref<'_>) -> Result<()> {
+    pub fn remove(&mut self, key: K::Ref<'_>) -> Result<()> {
         let key = format_to_buf!(key, K, self.key_buf)?;
         self.raw.remove(key.as_ref())
     }
@@ -275,7 +275,7 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
     /// If the cursor's parent session returns this record during a transaction and that transaction
     /// is rolled back, we cannot guarantee that view value data is safe to access. Use
     /// `seek_exact()` to ensure safe access at the cost of a copy of the record value.
-    pub unsafe fn seek_exact_unsafe(&mut self, key: &K::Ref<'_>) -> Option<Result<V::Ref<'_>>> {
+    pub unsafe fn seek_exact_unsafe(&mut self, key: K::Ref<'_>) -> Option<Result<V::Ref<'_>>> {
         let key = match format_to_buf!(key, K, self.key_buf) {
             Ok(k) => k,
             Err(e) => return Some(Err(e)),
@@ -286,7 +286,7 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
     }
 
     /// Seek to the for `key` and return any associated `Record` if present.
-    pub fn seek_exact(&mut self, key: &K::Ref<'_>) -> Option<Result<V>> {
+    pub fn seek_exact(&mut self, key: K::Ref<'_>) -> Option<Result<V>> {
         unsafe { self.seek_exact_unsafe(key) }.map(|r| r.map(|v| v.into()))
     }
 

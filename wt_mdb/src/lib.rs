@@ -469,7 +469,7 @@ mod test {
             session
                 .new_stats_cursor(Statistics::Fast, None)
                 .unwrap()
-                .seek_exact(&(wt_sys::WT_STAT_CONN_READ_IO as i32))
+                .seek_exact(wt_sys::WT_STAT_CONN_READ_IO as i32)
                 .unwrap()
                 .unwrap()
                 .value

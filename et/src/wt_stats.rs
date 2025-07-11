@@ -18,15 +18,15 @@ impl TryFrom<&Session> for WiredTigerConnectionStats {
     fn try_from(value: &Session) -> Result<Self, Self::Error> {
         let mut stat_cursor = value.new_stats_cursor(wt_mdb::options::Statistics::Fast, None)?;
         let search_calls = stat_cursor
-            .seek_exact(&(WT_STAT_CONN_CURSOR_SEARCH as i32))
+            .seek_exact(WT_STAT_CONN_CURSOR_SEARCH as i32)
             .expect("WT_STAT_CONN_CURSOR_SEARCH")?
             .value;
         let read_ios = stat_cursor
-            .seek_exact(&(WT_STAT_CONN_BLOCK_READ as i32))
+            .seek_exact(WT_STAT_CONN_BLOCK_READ as i32)
             .expect("WT_STAT_CONN_BLOCK_READ")?
             .value;
         let read_bytes = stat_cursor
-            .seek_exact(&(WT_STAT_CONN_BLOCK_BYTE_READ as i32))
+            .seek_exact(WT_STAT_CONN_BLOCK_BYTE_READ as i32)
             .expect("WT_STAT_CONN_BLOCK_BYTE_READ")?
             .value;
         Ok(Self {

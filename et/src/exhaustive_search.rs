@@ -41,7 +41,7 @@ pub fn exhaustive_search(
     args: ExhaustiveSearchArgs,
 ) -> io::Result<()> {
     let index = TableGraphVectorIndex::from_db(&connection, index_name)?;
-    let query_vectors = DerefVectorStore::new(
+    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         index.config().dimensions,
     )?;
@@ -56,23 +56,13 @@ pub fn exhaustive_search(
     let mut limit = std::cmp::max(cursor.largest_key().unwrap().unwrap() + 1, 0) as usize;
     limit = limit.min(args.record_limit.unwrap_or(usize::MAX));
     cursor.set_bounds(0..)?;
-    let mut index_vector = vec![0.0f32; index.config().dimensions.get()];
     let progress = progress_bar(limit, "");
     for record_result in cursor.take(limit) {
         let record = record_result?;
-        for (i, o) in record
-            .value()
-            .chunks(std::mem::size_of::<f32>())
-            .take(index.config().dimensions.get())
-            .zip(index_vector.iter_mut())
-        {
-            *o = f32::from_le_bytes(i.try_into().expect("array of 4 conversion."));
-        }
-
         results.par_iter_mut().enumerate().for_each(|(i, r)| {
             let n = Neighbor::new(
                 record.key(),
-                distance_fn.distance_f32(&index_vector, &query_vectors[i]),
+                distance_fn.distance(bytemuck::cast_slice(&query_vectors[i]), record.value()),
             );
             if r.len() <= k || n < r[k] {
                 r.push(n);

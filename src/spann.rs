@@ -23,7 +23,7 @@ use wt_mdb::{
 };
 
 use crate::{
-    distance::{F32VectorDistance, QuantizedVectorDistance},
+    distance::{F32VectorDistance, VectorDistance},
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
     quantization::{Quantizer, VectorQuantizer},
@@ -413,7 +413,7 @@ struct PostingIter<'a, 'b, 'c, 'd> {
     cursor: IndexCursorGuard<'a>,
     seen: &'b mut HashSet<i64>,
     query: &'c [u8],
-    distance_fn: &'d dyn QuantizedVectorDistance,
+    distance_fn: &'d dyn VectorDistance,
 
     read: usize,
 }
@@ -424,7 +424,7 @@ impl<'a, 'b, 'c, 'd> PostingIter<'a, 'b, 'c, 'd> {
         centroid_id: u32,
         seen: &'b mut HashSet<i64>,
         query: &'c [u8],
-        distance_fn: &'d dyn QuantizedVectorDistance,
+        distance_fn: &'d dyn VectorDistance,
     ) -> Result<Self> {
         // I _think_ wt copies bounds so we should be cool with temporaries here.
         let mut cursor = reader

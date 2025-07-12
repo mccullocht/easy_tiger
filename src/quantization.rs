@@ -7,8 +7,7 @@ use std::{io, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 use crate::distance::{
-    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, QuantizedVectorDistance,
-    TrivialQuantizedDistance, VectorSimilarity,
+    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, VectorDistance, VectorSimilarity,
 };
 
 /// `Quantizer` is used to perform lossy quantization of input vectors.
@@ -42,8 +41,6 @@ pub enum VectorQuantizer {
     /// Reduces each dimension to an 8-bit integer.
     /// This implementation does not train on any input to decide how to quantize.
     I8Naive,
-    /// Encodes a float vector as a byte array in little-endian order.
-    Trivial,
 }
 
 impl VectorQuantizer {
@@ -53,20 +50,15 @@ impl VectorQuantizer {
             Self::Binary => Box::new(BinaryQuantizer),
             Self::AsymmetricBinary { n } => Box::new(AsymmetricBinaryQuantizer::new(*n)),
             Self::I8Naive => Box::new(I8NaiveQuantizer),
-            Self::Trivial => Box::new(TrivialQuantizer),
         }
     }
 
     /// Create a new distance function for this quantization method.
-    pub fn new_distance_function(
-        &self,
-        similarity: &VectorSimilarity,
-    ) -> Box<dyn QuantizedVectorDistance> {
+    pub fn new_distance_function(&self, similarity: &VectorSimilarity) -> Box<dyn VectorDistance> {
         match self {
             Self::Binary => Box::new(HammingDistance),
             Self::AsymmetricBinary { n: _ } => Box::new(AsymmetricHammingDistance),
             Self::I8Naive => Box::new(I8NaiveDistance(*similarity)),
-            Self::Trivial => Box::new(TrivialQuantizedDistance(*similarity)),
         }
     }
 }
@@ -98,7 +90,6 @@ impl FromStr for VectorQuantizer {
                     })
             }
             "i8naive" => Ok(Self::I8Naive),
-            "trivial" => Ok(Self::Trivial),
             _ => Err(input_err(format!("unknown quantizer function {}", s))),
         }
     }

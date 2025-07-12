@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
 
 use crate::{
-    distance::{F32VectorDistance, QuantizedVectorDistance, VectorSimilarity},
+    distance::{F32VectorDistance, VectorDistance, VectorSimilarity},
     quantization::{Quantizer, VectorQuantizer},
     Neighbor,
 };
@@ -75,7 +75,7 @@ impl GraphConfig {
     }
 
     /// Return a distance function for quantized navigational vectors in the index.
-    pub fn new_nav_distance_function(&self) -> Box<dyn QuantizedVectorDistance> {
+    pub fn new_nav_distance_function(&self) -> Box<dyn VectorDistance> {
         self.quantizer.new_distance_function(&self.similarity)
     }
 }
@@ -228,7 +228,7 @@ pub enum EdgeSetDistanceComputer {
         vectors: Vec<Vec<f32>>,
     },
     Nav {
-        distance_fn: Box<dyn QuantizedVectorDistance>,
+        distance_fn: Box<dyn VectorDistance>,
         // TODO: flat representation of the vectors instead of nesting.
         vectors: Vec<Vec<u8>>,
     },

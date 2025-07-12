@@ -107,8 +107,8 @@ impl From<NonZero<i32>> for Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::WiredTiger(w) => write!(f, "WT {}", w),
-            Self::Errno(p) => write!(f, "errno {}", p),
+            Self::WiredTiger(w) => write!(f, "WT {w}"),
+            Self::Errno(p) => write!(f, "errno {p}"),
         }
     }
 }

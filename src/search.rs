@@ -531,7 +531,7 @@ mod test {
         fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
             if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
                 Some(Ok(bytemuck::cast_slice(
-                    &*self.0.data[vertex_id as usize].vector,
+                    &self.0.data[vertex_id as usize].vector,
                 )
                 .into()))
             } else {

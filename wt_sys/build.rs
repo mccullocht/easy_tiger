@@ -12,7 +12,7 @@ fn build_wt() -> PathBuf {
         // We have quasi-vendored WT and won't change upstream source to handle errors from new compiler versions.
         .cflag("-Wno-everything")
         // CMake crate is not doing this correctly for whatever reason.
-        .build_arg(format!("-j{}", jobs))
+        .build_arg(format!("-j{jobs}"))
         .build_target("wiredtiger_static")
         .build();
     PathBuf::from_iter([build_path, PathBuf::from("build")])

@@ -338,8 +338,7 @@ where
                 self.insert_in_flight_edges(v, in_flight.iter().map(|e| *e), &mut edges);
                 assert!(
                     !edges.iter().any(|n| n.vertex() == v as i64),
-                    "Candidate edges for vertex {} contains self-edge.",
-                    v
+                    "Candidate edges for vertex {v} contains self-edge."
                 );
 
                 // TODO: consider using quantized scores here to avoid reading f32 vectors when

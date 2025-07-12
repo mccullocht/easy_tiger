@@ -223,9 +223,9 @@ impl TableGraphVectorIndex {
     /// Generate the names of the tables used for `index_name`.
     pub fn generate_table_names(index_name: &str) -> [String; 3] {
         [
-            format!("{}.graph", index_name),
-            format!("{}.raw_vectors", index_name),
-            format!("{}.nav_vectors", index_name),
+            format!("{index_name}.graph"),
+            format!("{index_name}.raw_vectors"),
+            format!("{index_name}.nav_vectors"),
         ]
     }
 

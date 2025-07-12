@@ -46,7 +46,7 @@ impl FromStr for GraphLayout {
             "split" => Ok(Self::Split),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("Unknown graph layout {}", s),
+                format!("Unknown graph layout {s}"),
             )),
         }
     }

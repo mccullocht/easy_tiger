@@ -50,8 +50,7 @@ where
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "input vector data not aligned to element width {}",
-                    elem_width
+                    "input vector data not aligned to element width {elem_width}"
                 ),
             ));
         }

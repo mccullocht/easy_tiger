@@ -55,9 +55,9 @@ struct TableNames {
 impl TableNames {
     fn from_index_name(index_name: &str) -> Self {
         TableNames {
-            postings: format!("{}.postings", index_name),
-            centroids: format!("{}.centroids", index_name),
-            raw_vectors: format!("{}.raw_vectors", index_name),
+            postings: format!("{index_name}.postings"),
+            centroids: format!("{index_name}.centroids"),
+            raw_vectors: format!("{index_name}.raw_vectors"),
         }
     }
 
@@ -187,7 +187,7 @@ impl TableIndex {
     }
 
     fn head_name(index_name: &str) -> String {
-        format!("{}.head", index_name)
+        format!("{index_name}.head")
     }
 }
 

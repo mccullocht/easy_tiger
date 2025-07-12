@@ -51,7 +51,7 @@ impl Deref for TableUri {
 
 impl From<&str> for TableUri {
     fn from(value: &str) -> Self {
-        Self(CString::new(format!("table:{}", value)).expect("no nulls in table name"))
+        Self(CString::new(format!("table:{value}")).expect("no nulls in table name"))
     }
 }
 
@@ -294,7 +294,7 @@ impl Session {
         table: Option<&str>,
     ) -> Result<StatCursor<'_>> {
         let table_stats_uri = table.map(|t| {
-            CString::new(format!("statistics:table:{}", t)).expect("no nulls in table name")
+            CString::new(format!("statistics:table:{t}")).expect("no nulls in table name")
         });
         let uri = table_stats_uri.as_deref().unwrap_or(c"statistics:");
         let options = level

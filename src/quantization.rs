@@ -86,11 +86,11 @@ impl FromStr for VectorQuantizer {
                     .and_then(|b| if (1..=8).contains(&b) { Some(b) } else { None })
                     .map(|n| Self::AsymmetricBinary { n })
                     .ok_or_else(|| {
-                        input_err(format!("invalid asymmetric_binary bits {}", bits_str))
+                        input_err(format!("invalid asymmetric_binary bits {bits_str}"))
                     })
             }
             "i8naive" => Ok(Self::I8Naive),
-            _ => Err(input_err(format!("unknown quantizer function {}", s))),
+            _ => Err(input_err(format!("unknown quantizer function {s}"))),
         }
     }
 }

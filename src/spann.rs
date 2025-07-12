@@ -346,7 +346,7 @@ impl SessionIndexWriter {
 
         let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
         let mut centroids = VecVectorStore::with_capacity(
-            self.head_reader.index().config().dimensions.get(),
+            self.head_reader.index().config().dimensions.get() * 4,
             replica_count,
         );
         for candidate in candidates {
@@ -359,7 +359,7 @@ impl SessionIndexWriter {
                 .expect("returned vector should exist")?;
             if !centroids
                 .iter()
-                .any(|c| self.distance_fn.distance_f32(c, &v) < candidate.distance())
+                .any(|c| self.distance_fn.distance(c, &v) < candidate.distance())
             {
                 centroid_ids.push(
                     candidate

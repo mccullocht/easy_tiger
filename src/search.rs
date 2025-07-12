@@ -117,7 +117,9 @@ impl GraphSearcher {
                 .raw_vectors()?
                 .get_raw_vector(vertex_id)
                 .unwrap_or(Err(Error::not_found_error()))?
-                .to_vec();
+                .chunks(4)
+                .map(|c| f32::from_le_bytes(c.try_into().expect("f32")))
+                .collect::<Vec<_>>();
             self.search_internal_raw(&query, |_| true, reader)
         } else {
             let nav_query = reader
@@ -156,7 +158,12 @@ impl GraphSearcher {
                 raw_vectors
                     .get_raw_vector(vertex)
                     .expect("row exists")
-                    .map(|rv| Neighbor::new(vertex, distance_fn.distance_f32(&query, &rv)))
+                    .map(|rv| {
+                        Neighbor::new(
+                            vertex,
+                            distance_fn.distance(bytemuck::cast_slice(&query), &rv),
+                        )
+                    })
             })
             .collect::<Result<Vec<_>>>();
         rescored.map(|mut r| {
@@ -349,7 +356,7 @@ mod test {
         distance::{F32DotProductDistance, F32VectorDistance, VectorSimilarity},
         graph::{
             Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
-            RawVector, RawVectorStore,
+            RawVectorStore,
         },
         quantization::{BinaryQuantizer, Quantizer, VectorQuantizer},
         Neighbor,
@@ -521,9 +528,12 @@ mod test {
     }
 
     impl RawVectorStore for TestGraphAccess<'_> {
-        fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<RawVector<'_>>> {
+        fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
             if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
-                Some(Ok((&*self.0.data[vertex_id as usize].vector).into()))
+                Some(Ok(bytemuck::cast_slice(
+                    &*self.0.data[vertex_id as usize].vector,
+                )
+                .into()))
             } else {
                 None
             }

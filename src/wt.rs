@@ -12,8 +12,7 @@ use wt_mdb::{
 };
 
 use crate::graph::{
-    Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVector,
-    RawVectorStore,
+    Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVectorStore,
 };
 
 /// Key in the graph table containing the entry point.
@@ -62,14 +61,14 @@ impl Iterator for Leb128EdgeIterator<'_> {
 }
 
 /// Implementation of `Graph` that reads from a WiredTiger `RecordCursor`.
+// XXX tuple struct
 pub struct CursorGraph<'a> {
-    config: GraphConfig,
     cursor: RecordCursorGuard<'a>,
 }
 
 impl<'a> CursorGraph<'a> {
-    pub fn new(config: GraphConfig, cursor: RecordCursorGuard<'a>) -> Self {
-        Self { config, cursor }
+    pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
+        Self { cursor }
     }
 
     pub(crate) fn set_entry_point(&mut self, entry_point: i64) -> Result<()> {
@@ -79,6 +78,7 @@ impl<'a> CursorGraph<'a> {
         ))
     }
 
+    // XXX this should accept the edge set instead.
     pub(crate) fn set(&mut self, vertex_id: i64, encoded_graph_node: &[u8]) -> Result<()> {
         self.cursor
             .set(&RecordView::new(vertex_id, encoded_graph_node))
@@ -114,14 +114,15 @@ impl Graph for CursorGraph<'_> {
 }
 
 impl RawVectorStore for CursorGraph<'_> {
-    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<RawVector<'_>>> {
+    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
         let r =
             unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
-        Some(r.map(|r| RawVector::from_cow_partial(r, self.config.dimensions.get())))
+        Some(r)
     }
 }
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
+// XXX tuple struct
 pub struct CursorNavVectorStore<'a> {
     cursor: RecordCursorGuard<'a>,
 }
@@ -131,6 +132,7 @@ impl<'a> CursorNavVectorStore<'a> {
         Self { cursor }
     }
 
+    // XXX impl AsRef instead of cow
     pub(crate) fn set(&mut self, vertex_id: i64, vector: Cow<'_, [u8]>) -> Result<()> {
         self.cursor.set(&RecordView::new(vertex_id, vector))
     }
@@ -301,7 +303,6 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
         Ok(CursorGraph::new(
-            self.index.config,
             self.session
                 .get_record_cursor(self.index.graph_table_name())?,
         ))
@@ -309,7 +310,6 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
 
     fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
         Ok(CursorGraph::new(
-            self.index.config,
             self.session
                 .get_record_cursor(self.index.raw_table_name())?,
         ))

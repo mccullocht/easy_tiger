@@ -21,10 +21,7 @@ pub struct LookupArgs {
 pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -> io::Result<()> {
     let index = TableGraphVectorIndex::from_db(&connection, index_name)?;
     let session = connection.open_session()?;
-    let mut graph = CursorGraph::new(
-        *index.config(),
-        session.get_record_cursor(index.graph_table_name())?,
-    );
+    let mut graph = CursorGraph::new(session.get_record_cursor(index.graph_table_name())?);
     match graph.get_vertex(args.id) {
         None => {
             println!("Not found!");

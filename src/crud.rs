@@ -147,7 +147,7 @@ impl IndexMutator {
                     raw_vectors
                         .get_raw_vector(*e)
                         .unwrap_or(Err(Error::not_found_error()))
-                        .map(|dst| Neighbor::new(*e, distance_fn.distance_f32(&src_vector, &dst)))
+                        .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, &dst)))
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
             neighbors.sort();
@@ -223,7 +223,7 @@ impl IndexMutator {
         if graph.entry_point().unwrap()? == vertex_id {
             let mut neighbors = vertex_data
                 .iter()
-                .map(|(id, vec, _)| Neighbor::new(*id, distance_fn.distance_f32(&vector, vec)))
+                .map(|(id, vec, _)| Neighbor::new(*id, distance_fn.distance(&vector, vec)))
                 .collect::<Vec<_>>();
             neighbors.sort();
             if let Some(ep_neighbor) = neighbors.first() {
@@ -241,9 +241,10 @@ impl IndexMutator {
         Ok(())
     }
 
+    // XXX relax distance fn constraint here.
     fn cross_link_peer_vertices(
         &self,
-        vertex_data: &mut [(i64, Vec<f32>, Vec<i64>)],
+        vertex_data: &mut [(i64, Vec<u8>, Vec<i64>)],
         distance_fn: &dyn F32VectorDistance,
     ) -> Result<()> {
         // Score all pairs of vectors among the passed vertices.
@@ -257,7 +258,7 @@ impl IndexMutator {
                     .skip(src + 1)
                     .filter_map(|(dst, (dst_vertex, dst_vector, _))| {
                         if !src_edges.contains(dst_vertex) {
-                            Some((src, dst, distance_fn.distance_f32(src_vector, dst_vector)))
+                            Some((src, dst, distance_fn.distance(src_vector, dst_vector)))
                         } else {
                             None
                         }

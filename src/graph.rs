@@ -3,7 +3,7 @@
 //! Graph access traits provided here are used during graph search, and allow us to
 //! build indices with both WiredTiger backing and in-memory backing for bulk loads.
 
-use std::{borrow::Cow, collections::BTreeSet, io, num::NonZero, ops::Deref, str::FromStr};
+use std::{borrow::Cow, collections::BTreeSet, io, num::NonZero, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
@@ -128,88 +128,11 @@ pub trait GraphVertex {
     fn edges(&self) -> Self::EdgeIterator<'_>;
 }
 
-/// A raw float vector.
-///
-/// This implementation may have Cow reference to backing bytes (if possible) or have a copy of
-/// the vector data.
-pub enum RawVector<'a> {
-    Bytes { bytes: Cow<'a, [u8]>, dim: usize },
-    Cow(Cow<'a, [f32]>),
-}
-
-impl<'a> RawVector<'a> {
-    pub fn from_cow_partial(bytes: Cow<'a, [u8]>, dim: usize) -> Self {
-        #[cfg(target_endian = "little")]
-        {
-            // WiredTiger does not guarantee that the returned memory will be aligned, a
-            // Try to align it and if that fails, copy the data.
-            let (prefix, _, _) = unsafe { bytes.align_to::<f32>() };
-            if prefix.is_empty() {
-                return Self::Bytes { bytes, dim };
-            }
-        }
-
-        Self::Cow(Self::bytes_to_vec(bytes, dim).into())
-    }
-
-    pub fn to_vec(self) -> Vec<f32> {
-        match self {
-            Self::Bytes { bytes, dim } => Self::bytes_to_vec(bytes, dim),
-            Self::Cow(v) => v.to_vec(),
-        }
-    }
-
-    pub fn bytes_len(&self) -> usize {
-        let dim = match self {
-            Self::Bytes { bytes: _, dim } => *dim,
-            Self::Cow(v) => v.len(),
-        };
-        dim * std::mem::size_of::<f32>()
-    }
-
-    fn bytes_to_vec(bytes: Cow<'_, [u8]>, dim: usize) -> Vec<f32> {
-        bytes
-            .chunks(std::mem::size_of::<f32>())
-            .take(dim)
-            .map(|b| f32::from_le_bytes(b.try_into().expect("array of 4 conversion")))
-            .collect::<Vec<_>>()
-    }
-}
-
-impl<'a> From<Cow<'a, [f32]>> for RawVector<'a> {
-    fn from(value: Cow<'a, [f32]>) -> Self {
-        Self::Cow(value)
-    }
-}
-
-impl From<Vec<f32>> for RawVector<'_> {
-    fn from(value: Vec<f32>) -> Self {
-        Self::Cow(value.into())
-    }
-}
-
-impl<'a> From<&'a [f32]> for RawVector<'a> {
-    fn from(value: &'a [f32]) -> Self {
-        Self::Cow(value.into())
-    }
-}
-
-impl Deref for RawVector<'_> {
-    type Target = [f32];
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            // Safety: From conversion ensures that bytes is aligned before producing Borrowed.
-            Self::Bytes { bytes, dim } => unsafe { &bytes.align_to::<f32>().1[..*dim] },
-            Self::Cow(v) => v,
-        }
-    }
-}
-
 /// Vector store for raw vectors used to produce the highest fidelity scores.
+// XXX collapse this and NavVectorStore
 pub trait RawVectorStore {
     /// Get the raw vector for the given vertex.
-    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<RawVector<'_>>>;
+    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }
 
 /// Vector store for vectors used to navigate the graph.
@@ -221,17 +144,10 @@ pub trait NavVectorStore {
 /// Computes the distance between two edges in a set to assist in pruning.
 ///
 /// This abstraction allows us to switch between raw (float) and nav (quantized) vectors.
-pub enum EdgeSetDistanceComputer {
-    Raw {
-        distance_fn: Box<dyn F32VectorDistance>,
-        // TODO: flat representation of the vectors instead of nesting.
-        vectors: Vec<Vec<f32>>,
-    },
-    Nav {
-        distance_fn: Box<dyn VectorDistance>,
-        // TODO: flat representation of the vectors instead of nesting.
-        vectors: Vec<Vec<u8>>,
-    },
+pub struct EdgeSetDistanceComputer {
+    distance_fn: Box<dyn VectorDistance>,
+    // TODO: flat representation of the vectors instead of nesting.
+    vectors: Vec<Vec<u8>>,
 }
 
 impl EdgeSetDistanceComputer {
@@ -247,7 +163,7 @@ impl EdgeSetDistanceComputer {
                         .map(|v| v.to_vec())
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Ok(Self::Raw {
+            Ok(Self {
                 distance_fn: reader.config().new_distance_function(),
                 vectors,
             })
@@ -262,7 +178,7 @@ impl EdgeSetDistanceComputer {
                         .map(|v| v.to_vec())
                 })
                 .collect::<Result<Vec<_>>>()?;
-            Ok(Self::Nav {
+            Ok(Self {
                 distance_fn: reader.config().new_nav_distance_function(),
                 vectors,
             })
@@ -270,16 +186,8 @@ impl EdgeSetDistanceComputer {
     }
 
     pub fn distance(&self, i: usize, j: usize) -> f64 {
-        match self {
-            Self::Raw {
-                distance_fn,
-                vectors,
-            } => distance_fn.distance_f32(&vectors[i], &vectors[j]),
-            Self::Nav {
-                distance_fn,
-                vectors,
-            } => distance_fn.distance(&vectors[i], &vectors[j]),
-        }
+        self.distance_fn
+            .distance(&self.vectors[i], &self.vectors[j])
     }
 }
 

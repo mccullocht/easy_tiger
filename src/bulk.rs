@@ -36,8 +36,8 @@ use crate::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
     wt::{
-        encode_graph_vertex, encode_raw_vector, CursorGraph, CursorNavVectorStore,
-        TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
+        encode_graph_vertex, encode_raw_vector, CursorVectorStore, TableGraphVectorIndex,
+        CONFIG_KEY, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -674,7 +674,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
 
     fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
         let cursor_graph = if self.0.options.wt_vector_store {
-            Some(CursorGraph::new(
+            Some(CursorVectorStore::new(
                 self.1.get_record_cursor(self.0.index.raw_table_name())?,
             ))
         } else {
@@ -687,14 +687,14 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
         if let Some(s) = self.0.quantized_vectors.as_ref() {
             Ok(BulkLoadNavVectorStore::Memory(s))
         } else {
-            Ok(BulkLoadNavVectorStore::Cursor(CursorNavVectorStore::new(
+            Ok(BulkLoadNavVectorStore::Cursor(CursorVectorStore::new(
                 self.1.get_record_cursor(self.0.index.nav_table_name())?,
             )))
         }
     }
 }
 
-struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>, Option<CursorGraph<'a>>);
+struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>, Option<CursorVectorStore<'a>>);
 
 impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     type Vertex<'c>
@@ -769,7 +769,7 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
 }
 
 enum BulkLoadNavVectorStore<'a> {
-    Cursor(CursorNavVectorStore<'a>),
+    Cursor(CursorVectorStore<'a>),
     Memory(&'a DerefVectorStore<u8, memmap2::Mmap>),
 }
 

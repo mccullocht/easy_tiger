@@ -129,7 +129,6 @@ pub trait GraphVertex {
 }
 
 /// Vector store for raw vectors used to produce the highest fidelity scores.
-// XXX collapse this and NavVectorStore
 pub trait RawVectorStore {
     /// Get the raw vector for the given vertex.
     fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;

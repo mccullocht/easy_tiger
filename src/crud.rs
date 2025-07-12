@@ -2,15 +2,14 @@
 use std::sync::Arc;
 
 use crate::{
-    distance::F32VectorDistance,
+    distance::{F32VectorDistance, VectorDistance},
     graph::{
         prune_edges, EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndexReader,
         GraphVertex, RawVectorStore,
     },
     search::GraphSearcher,
     wt::{
-        encode_graph_vertex, encode_raw_vector, SessionGraphVectorIndexReader,
-        TableGraphVectorIndex, ENTRY_POINT_KEY,
+        encode_raw_vector, SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -227,7 +226,7 @@ impl IndexMutator {
                 .collect::<Vec<_>>();
             neighbors.sort();
             if let Some(ep_neighbor) = neighbors.first() {
-                graph.set(ENTRY_POINT_KEY, &ep_neighbor.vertex().to_le_bytes())?
+                graph.set_entry_point(ep_neighbor.vertex())?
             } else {
                 graph.remove(ENTRY_POINT_KEY)?
             }
@@ -241,11 +240,10 @@ impl IndexMutator {
         Ok(())
     }
 
-    // XXX relax distance fn constraint here.
     fn cross_link_peer_vertices(
         &self,
         vertex_data: &mut [(i64, Vec<u8>, Vec<i64>)],
-        distance_fn: &dyn F32VectorDistance,
+        distance_fn: &dyn VectorDistance,
     ) -> Result<()> {
         // Score all pairs of vectors among the passed vertices.
         let mut candidate_links = vertex_data
@@ -304,23 +302,18 @@ impl IndexMutator {
     ) -> Result<()> {
         match self.reader.config().layout {
             GraphLayout::Split => {
-                self.reader
-                    .graph()?
-                    .set(vertex_id, &encode_graph_vertex(edges))?;
+                self.reader.graph()?.set(vertex_id, edges)?;
                 self.reader
                     .raw_vectors()?
-                    .set(vertex_id, &encode_raw_vector(raw_vector))?;
+                    .set(vertex_id, encode_raw_vector(raw_vector))?;
             }
         }
-        self.reader.nav_vectors()?.set(vertex_id, nav_vector.into())
+        self.reader.nav_vectors()?.set(vertex_id, nav_vector)
     }
 
     fn set_graph_edges(&self, vertex_id: i64, edges: Vec<i64>) -> Result<()> {
         match self.reader.config().layout {
-            GraphLayout::Split => self
-                .reader
-                .graph()?
-                .set(vertex_id, &encode_graph_vertex(edges)),
+            GraphLayout::Split => self.reader.graph()?.set(vertex_id, edges),
         }
     }
 }

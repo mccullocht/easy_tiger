@@ -188,9 +188,9 @@ unsafe fn load_f32x4_le(p: *const u8) -> core::arch::aarch64::float32x4_t {
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-fn f32_le_iter(b: &[u8]) -> impl ExactSizeIterator<Item = f32> {
+fn f32_le_iter<'b>(b: &'b [u8]) -> impl ExactSizeIterator<Item = f32> + 'b {
     b.chunks_exact(4)
-        .map(|f| f32::from_le_bytes(f.try_into.expect("4 bytes")))
+        .map(|f| f32::from_le_bytes(f.try_into().expect("4 bytes")))
 }
 
 // TODO: byte swapped load on big endian archs.
@@ -206,7 +206,7 @@ pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use core::arch::aarch64::{vaddvq_f32, vdupq_n_f32, vfmaq_f32, vsubq_f32};
-        let suffix_start = q.len() & !3;
+        let suffix_start = q.len() & !15;
         let mut l2sqv = vdupq_n_f32(0.0);
         for i in (0..suffix_start).step_by(16) {
             let dv = vsubq_f32(
@@ -227,13 +227,16 @@ pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
     {
         f32_le_iter(q)
             .zip(f32_le_iter(d))
-            .map(|(q, d)| q * d)
+            .map(|(q, d)| {
+                let delta = q - d;
+                delta * delta
+            })
             .sum::<f32>() as f64
     }
 }
 
 pub(crate) fn l2(q: &[f32], d: &[f32]) -> f64 {
-    (l2sq_f32(q, d) as f64).sqrt()
+    l2sq_f32(q, d).sqrt()
 }
 
 #[inline(always)]
@@ -247,7 +250,7 @@ pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use core::arch::aarch64::{vaddvq_f32, vdupq_n_f32, vfmaq_f32};
-        let suffix_start = q.len() & !3;
+        let suffix_start = q.len() & !15;
         let mut dotv = vdupq_n_f32(0.0);
         for i in (0..suffix_start).step_by(16) {
             dotv = vfmaq_f32(

@@ -325,8 +325,8 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
         bp_update_centroid(&left_vectors, &mut centroids[0]);
         bp_update_centroid(&right_vectors, &mut centroids[1]);
         distances.par_iter_mut().enumerate().for_each(|(i, d)| {
-            let ldist = crate::distance::l2sq(&dataset[i], &centroids[0]);
-            let rdist = crate::distance::l2sq(&dataset[i], &centroids[1]);
+            let ldist = crate::distance::l2sq_f32(&dataset[i], &centroids[0]);
+            let rdist = crate::distance::l2sq_f32(&dataset[i], &centroids[1]);
             *d = (i, ldist, rdist, ldist - rdist)
         });
         distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
@@ -366,10 +366,10 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
 
     let mut assignments = vec![(0, 0.0); dataset.len()];
     for i in left_vectors.into_subset().into_iter() {
-        assignments[i] = (0, crate::distance::l2sq(&centroids[0], &dataset[i]));
+        assignments[i] = (0, crate::distance::l2sq_f32(&centroids[0], &dataset[i]));
     }
     for i in right_vectors.into_subset().into_iter() {
-        assignments[i] = (1, crate::distance::l2sq(&centroids[1], &dataset[i]));
+        assignments[i] = (1, crate::distance::l2sq_f32(&centroids[1], &dataset[i]));
     }
 
     if converged {

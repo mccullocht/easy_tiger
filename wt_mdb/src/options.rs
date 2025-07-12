@@ -84,7 +84,7 @@ impl Statistics {
     pub(crate) fn to_config_string_clause(&self) -> Option<String> {
         match self {
             Self::None => None,
-            opt => Some(format!("statistics=({})", opt)),
+            opt => Some(format!("statistics=({opt})")),
         }
     }
 }
@@ -117,7 +117,7 @@ impl FromStr for Statistics {
             "none" => Ok(Self::None),
             "fast" => Ok(Self::Fast),
             "all" => Ok(Self::All),
-            _ => Err(format!("Unknown statistics type {}", s)),
+            _ => Err(format!("Unknown statistics type {s}")),
         }
     }
 }
@@ -288,7 +288,7 @@ impl From<BeginTransactionOptionsBuilder> for BeginTransactionOptions {
         Self(
             value
                 .name
-                .map(|n| CString::new(format!("name={}", n)).expect("name has no nulls")),
+                .map(|n| CString::new(format!("name={n}")).expect("name has no nulls")),
         )
     }
 }
@@ -324,7 +324,7 @@ impl From<CommitTransactionOptionsBuilder> for CommitTransactionOptions {
         Self(
             value
                 .operation_timeout_ms
-                .map(|t| CString::new(format!("operation_timeout_ms={}", t)).expect("no nulls")),
+                .map(|t| CString::new(format!("operation_timeout_ms={t}")).expect("no nulls")),
         )
     }
 }
@@ -360,7 +360,7 @@ impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
         Self(
             value
                 .operation_timeout_ms
-                .map(|t| CString::new(format!("operation_timeout_ms={}", t)).expect("no nulls")),
+                .map(|t| CString::new(format!("operation_timeout_ms={t}")).expect("no nulls")),
         )
     }
 }

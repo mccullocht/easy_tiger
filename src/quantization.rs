@@ -7,8 +7,7 @@ use std::{io, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 use crate::distance::{
-    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, QuantizedVectorDistance,
-    TrivialQuantizedDistance, VectorSimilarity,
+    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, VectorDistance, VectorSimilarity,
 };
 
 /// `Quantizer` is used to perform lossy quantization of input vectors.
@@ -42,8 +41,6 @@ pub enum VectorQuantizer {
     /// Reduces each dimension to an 8-bit integer.
     /// This implementation does not train on any input to decide how to quantize.
     I8Naive,
-    /// Encodes a float vector as a byte array in little-endian order.
-    Trivial,
 }
 
 impl VectorQuantizer {
@@ -53,20 +50,15 @@ impl VectorQuantizer {
             Self::Binary => Box::new(BinaryQuantizer),
             Self::AsymmetricBinary { n } => Box::new(AsymmetricBinaryQuantizer::new(*n)),
             Self::I8Naive => Box::new(I8NaiveQuantizer),
-            Self::Trivial => Box::new(TrivialQuantizer),
         }
     }
 
     /// Create a new distance function for this quantization method.
-    pub fn new_distance_function(
-        &self,
-        similarity: &VectorSimilarity,
-    ) -> Box<dyn QuantizedVectorDistance> {
+    pub fn new_distance_function(&self, similarity: &VectorSimilarity) -> Box<dyn VectorDistance> {
         match self {
             Self::Binary => Box::new(HammingDistance),
             Self::AsymmetricBinary { n: _ } => Box::new(AsymmetricHammingDistance),
             Self::I8Naive => Box::new(I8NaiveDistance(*similarity)),
-            Self::Trivial => Box::new(TrivialQuantizedDistance(*similarity)),
         }
     }
 }
@@ -94,12 +86,11 @@ impl FromStr for VectorQuantizer {
                     .and_then(|b| if (1..=8).contains(&b) { Some(b) } else { None })
                     .map(|n| Self::AsymmetricBinary { n })
                     .ok_or_else(|| {
-                        input_err(format!("invalid asymmetric_binary bits {}", bits_str))
+                        input_err(format!("invalid asymmetric_binary bits {bits_str}"))
                     })
             }
             "i8naive" => Ok(Self::I8Naive),
-            "trivial" => Ok(Self::Trivial),
-            _ => Err(input_err(format!("unknown quantizer function {}", s))),
+            _ => Err(input_err(format!("unknown quantizer function {s}"))),
         }
     }
 }
@@ -258,7 +249,7 @@ pub struct I8NaiveQuantizer;
 
 impl Quantizer for I8NaiveQuantizer {
     fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
-        let norm = crate::distance::dot(vector, vector).sqrt() as f32;
+        let norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
         let mut normalized_vector = vector.to_vec();
         for d in normalized_vector.iter_mut() {
             *d /= norm;

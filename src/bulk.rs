@@ -36,8 +36,8 @@ use crate::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
     wt::{
-        encode_graph_vertex, encode_raw_vector, CursorGraph, CursorNavVectorStore,
-        TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
+        encode_graph_vertex, encode_raw_vector, CursorVectorStore, TableGraphVectorIndex,
+        CONFIG_KEY, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -242,7 +242,7 @@ where
         });
         self.centroid = self
             .distance_fn
-            .normalize_vector(
+            .normalize(
                 sum.into_iter()
                     .map(|s| (s / self.limit as f64) as f32)
                     .collect::<Vec<_>>()
@@ -262,7 +262,7 @@ where
                 .enumerate()
                 .take(self.limit)
                 .map(|(i, v)| {
-                    let normalized = self.distance_fn.normalize_vector(v.into());
+                    let normalized = self.distance_fn.normalize(v.into());
                     let value = encode_raw_vector(&normalized);
                     progress(1);
                     Record::new(i as i64, value)
@@ -295,7 +295,7 @@ where
         let apply_mu = Mutex::new((
             0i64,
             self.distance_fn
-                .distance(&self.get_vector(0), &self.centroid),
+                .distance_f32(&self.get_vector_f32(0), &self.centroid),
         ));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
@@ -338,15 +338,14 @@ where
                 self.insert_in_flight_edges(v, in_flight.iter().map(|e| *e), &mut edges);
                 assert!(
                     !edges.iter().any(|n| n.vertex() == v as i64),
-                    "Candidate edges for vertex {} contains self-edge.",
-                    v
+                    "Candidate edges for vertex {v} contains self-edge."
                 );
 
                 // TODO: consider using quantized scores here to avoid reading f32 vectors when
                 // reranking is turned off.
                 let centroid_distance = self
                     .distance_fn
-                    .distance(&self.get_vector(v), &self.centroid);
+                    .distance_f32(&self.get_vector_f32(v), &self.centroid);
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
                 // undirected. If an edge does not fit on either vertex, save it for later.
@@ -593,9 +592,19 @@ where
         }
     }
 
-    fn get_vector(&self, index: usize) -> Cow<'_, [f32]> {
-        self.distance_fn
-            .normalize_vector(self.vectors[index].into())
+    fn get_vector_f32(&self, index: usize) -> Cow<'_, [f32]> {
+        self.distance_fn.normalize(self.vectors[index].into())
+    }
+
+    fn get_vector(&self, index: usize) -> Cow<'_, [u8]> {
+        match self.get_vector_f32(index) {
+            Cow::Borrowed(s) => bytemuck::cast_slice(s).into(),
+            Cow::Owned(v) => v
+                .into_iter()
+                .flat_map(|d| d.to_le_bytes())
+                .collect::<Vec<_>>()
+                .into(),
+        }
     }
 }
 
@@ -664,8 +673,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
 
     fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
         let cursor_graph = if self.0.options.wt_vector_store {
-            Some(CursorGraph::new(
-                *self.0.index.config(),
+            Some(CursorVectorStore::new(
                 self.1.get_record_cursor(self.0.index.raw_table_name())?,
             ))
         } else {
@@ -678,14 +686,14 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
         if let Some(s) = self.0.quantized_vectors.as_ref() {
             Ok(BulkLoadNavVectorStore::Memory(s))
         } else {
-            Ok(BulkLoadNavVectorStore::Cursor(CursorNavVectorStore::new(
+            Ok(BulkLoadNavVectorStore::Cursor(CursorVectorStore::new(
                 self.1.get_record_cursor(self.0.index.nav_table_name())?,
             )))
         }
     }
 }
 
-struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>, Option<CursorGraph<'a>>);
+struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>, Option<CursorVectorStore<'a>>);
 
 impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     type Vertex<'c>
@@ -711,11 +719,11 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
 }
 
 impl<D: VectorStore<Elem = f32> + Send + Sync> RawVectorStore for BulkLoadBuilderGraph<'_, D> {
-    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<crate::graph::RawVector<'_>>> {
+    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
         if let Some(cursor) = self.1.as_mut() {
             cursor.get_raw_vector(vertex_id)
         } else {
-            Some(Ok(self.0.get_vector(vertex_id as usize).into()))
+            Some(Ok(self.0.get_vector(vertex_id as usize)))
         }
     }
 }
@@ -760,7 +768,7 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
 }
 
 enum BulkLoadNavVectorStore<'a> {
-    Cursor(CursorNavVectorStore<'a>),
+    Cursor(CursorVectorStore<'a>),
     Memory(&'a DerefVectorStore<u8, memmap2::Mmap>),
 }
 

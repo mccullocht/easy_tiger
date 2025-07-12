@@ -12,8 +12,7 @@ use wt_mdb::{
 };
 
 use crate::graph::{
-    Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVector,
-    RawVectorStore,
+    Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVectorStore,
 };
 
 /// Key in the graph table containing the entry point.
@@ -62,30 +61,29 @@ impl Iterator for Leb128EdgeIterator<'_> {
 }
 
 /// Implementation of `Graph` that reads from a WiredTiger `RecordCursor`.
-pub struct CursorGraph<'a> {
-    config: GraphConfig,
-    cursor: RecordCursorGuard<'a>,
-}
+pub struct CursorGraph<'a>(RecordCursorGuard<'a>);
 
 impl<'a> CursorGraph<'a> {
-    pub fn new(config: GraphConfig, cursor: RecordCursorGuard<'a>) -> Self {
-        Self { config, cursor }
+    pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
+        Self(cursor)
     }
 
     pub(crate) fn set_entry_point(&mut self, entry_point: i64) -> Result<()> {
-        self.cursor.set(&RecordView::new(
+        self.0.set(&RecordView::new(
             ENTRY_POINT_KEY,
             &entry_point.to_le_bytes(),
         ))
     }
 
-    pub(crate) fn set(&mut self, vertex_id: i64, encoded_graph_node: &[u8]) -> Result<()> {
-        self.cursor
-            .set(&RecordView::new(vertex_id, encoded_graph_node))
+    pub(crate) fn set(&mut self, vertex_id: i64, edges: impl Into<Vec<i64>>) -> Result<()> {
+        self.0.set(&RecordView::new(
+            vertex_id,
+            encode_graph_vertex(edges.into()),
+        ))
     }
 
     pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
-        self.cursor.remove(vertex_id).or_else(|e| {
+        self.0.remove(vertex_id).or_else(|e| {
             if e == Error::not_found_error() {
                 Ok(())
             } else {
@@ -102,41 +100,30 @@ impl Graph for CursorGraph<'_> {
         Self: 'c;
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
-        let result = unsafe { self.cursor.seek_exact_unsafe(ENTRY_POINT_KEY)? };
+        let result = unsafe { self.0.seek_exact_unsafe(ENTRY_POINT_KEY)? };
         Some(result.map(|r| i64::from_le_bytes(r.value().try_into().unwrap())))
     }
 
     fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-        let r =
-            unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
+        let r = unsafe { self.0.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
         Some(r.map(CursorGraphVertex::new))
     }
 }
 
-impl RawVectorStore for CursorGraph<'_> {
-    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<RawVector<'_>>> {
-        let r =
-            unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
-        Some(r.map(|r| RawVector::from_cow_partial(r, self.config.dimensions.get())))
-    }
-}
-
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
-pub struct CursorNavVectorStore<'a> {
-    cursor: RecordCursorGuard<'a>,
-}
+pub struct CursorVectorStore<'a>(RecordCursorGuard<'a>);
 
-impl<'a> CursorNavVectorStore<'a> {
+impl<'a> CursorVectorStore<'a> {
     pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
-        Self { cursor }
+        Self(cursor)
     }
 
-    pub(crate) fn set(&mut self, vertex_id: i64, vector: Cow<'_, [u8]>) -> Result<()> {
-        self.cursor.set(&RecordView::new(vertex_id, vector))
+    pub(crate) fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()> {
+        self.0.set(&RecordView::new(vertex_id, vector.as_ref()))
     }
 
     pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
-        self.cursor.remove(vertex_id).or_else(|e| {
+        self.0.remove(vertex_id).or_else(|e| {
             if e == Error::not_found_error() {
                 Ok(())
             } else {
@@ -144,11 +131,21 @@ impl<'a> CursorNavVectorStore<'a> {
             }
         })
     }
+
+    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+        Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value))
+    }
 }
 
-impl NavVectorStore for CursorNavVectorStore<'_> {
+impl RawVectorStore for CursorVectorStore<'_> {
+    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+        self.get(vertex_id)
+    }
+}
+
+impl NavVectorStore for CursorVectorStore<'_> {
     fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        Some(unsafe { self.cursor.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value))
+        self.get(vertex_id)
     }
 }
 
@@ -226,9 +223,9 @@ impl TableGraphVectorIndex {
     /// Generate the names of the tables used for `index_name`.
     pub fn generate_table_names(index_name: &str) -> [String; 3] {
         [
-            format!("{}.graph", index_name),
-            format!("{}.raw_vectors", index_name),
-            format!("{}.nav_vectors", index_name),
+            format!("{index_name}.graph"),
+            format!("{index_name}.raw_vectors"),
+            format!("{index_name}.nav_vectors"),
         ]
     }
 
@@ -287,11 +284,11 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
     where
         Self: 'a;
     type RawVectorStore<'a>
-        = CursorGraph<'a>
+        = CursorVectorStore<'a>
     where
         Self: 'a;
     type NavVectorStore<'a>
-        = CursorNavVectorStore<'a>
+        = CursorVectorStore<'a>
     where
         Self: 'a;
 
@@ -301,22 +298,20 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
         Ok(CursorGraph::new(
-            self.index.config,
             self.session
                 .get_record_cursor(self.index.graph_table_name())?,
         ))
     }
 
     fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
-        Ok(CursorGraph::new(
-            self.index.config,
+        Ok(CursorVectorStore::new(
             self.session
                 .get_record_cursor(self.index.raw_table_name())?,
         ))
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-        Ok(CursorNavVectorStore::new(
+        Ok(CursorVectorStore::new(
             self.session
                 .get_record_cursor(self.index.nav_table_name())?,
         ))

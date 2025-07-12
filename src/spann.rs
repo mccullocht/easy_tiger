@@ -13,7 +13,6 @@ use std::{
     sync::Arc,
 };
 
-use bytemuck::try_cast_slice;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use wt_mdb::{
@@ -23,7 +22,7 @@ use wt_mdb::{
 };
 
 use crate::{
-    distance::{F32VectorDistance, QuantizedVectorDistance},
+    distance::{F32VectorDistance, VectorDistance},
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
     quantization::{Quantizer, VectorQuantizer},
@@ -56,9 +55,9 @@ struct TableNames {
 impl TableNames {
     fn from_index_name(index_name: &str) -> Self {
         TableNames {
-            postings: format!("{}.postings", index_name),
-            centroids: format!("{}.centroids", index_name),
-            raw_vectors: format!("{}.raw_vectors", index_name),
+            postings: format!("{index_name}.postings"),
+            centroids: format!("{index_name}.centroids"),
+            raw_vectors: format!("{index_name}.raw_vectors"),
         }
     }
 
@@ -188,7 +187,7 @@ impl TableIndex {
     }
 
     fn head_name(index_name: &str) -> String {
-        format!("{}.head", index_name)
+        format!("{index_name}.head")
     }
 }
 
@@ -262,7 +261,7 @@ impl SessionIndexWriter {
     }
 
     pub fn upsert(&mut self, record_id: i64, vector: &[f32]) -> Result<Vec<u32>> {
-        let vector = self.distance_fn.normalize_vector(vector.into());
+        let vector = self.distance_fn.normalize(vector.into());
         let candidates = self
             .head_searcher
             .search(vector.as_ref(), &mut self.head_reader)?;
@@ -275,7 +274,7 @@ impl SessionIndexWriter {
         }
 
         let mut raw_vector_cursor = self.raw_vector_cursor()?;
-        let vector = self.distance_fn.normalize_vector(vector);
+        let vector = self.distance_fn.normalize(vector);
         // TODO: factor out handling of high fidelity vector tables.
         raw_vector_cursor.set(&Record::new(
             record_id,
@@ -346,7 +345,7 @@ impl SessionIndexWriter {
 
         let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
         let mut centroids = VecVectorStore::with_capacity(
-            self.head_reader.index().config().dimensions.get(),
+            self.head_reader.index().config().dimensions.get() * 4,
             replica_count,
         );
         for candidate in candidates {
@@ -413,7 +412,7 @@ struct PostingIter<'a, 'b, 'c, 'd> {
     cursor: IndexCursorGuard<'a>,
     seen: &'b mut HashSet<i64>,
     query: &'c [u8],
-    distance_fn: &'d dyn QuantizedVectorDistance,
+    distance_fn: &'d dyn VectorDistance,
 
     read: usize,
 }
@@ -424,7 +423,7 @@ impl<'a, 'b, 'c, 'd> PostingIter<'a, 'b, 'c, 'd> {
         centroid_id: u32,
         seen: &'b mut HashSet<i64>,
         query: &'c [u8],
-        distance_fn: &'d dyn QuantizedVectorDistance,
+        distance_fn: &'d dyn VectorDistance,
     ) -> Result<Self> {
         // I _think_ wt copies bounds so we should be cool with temporaries here.
         let mut cursor = reader
@@ -634,24 +633,15 @@ impl SpannSearcher {
             .into_iter()
             .take(self.params.num_rerank)
             .map(|n| {
-                let raw_vector_bytes = unsafe {
+                let raw_vector = unsafe {
                     raw_cursor
                         .seek_exact_unsafe(n.vertex())
                         .expect("raw vector for candidate")
                 }?
                 .into_inner_value();
-                let raw_vector: Cow<'_, [f32]> = try_cast_slice(raw_vector_bytes.as_ref())
-                    .map(Cow::from)
-                    .unwrap_or_else(|_| {
-                        raw_vector_bytes
-                            .chunks(4)
-                            .map(|d| f32::from_le_bytes(d.try_into().expect("chunk size 4")))
-                            .collect::<Vec<_>>()
-                            .into()
-                    });
                 Ok(Neighbor::new(
                     n.vertex(),
-                    distance_fn.distance(query, &raw_vector),
+                    distance_fn.distance(bytemuck::cast_slice(query), &raw_vector),
                 ))
             })
             .collect::<Result<Vec<_>>>()?;

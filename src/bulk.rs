@@ -242,7 +242,7 @@ where
         });
         self.centroid = self
             .distance_fn
-            .normalize_vector(
+            .normalize(
                 sum.into_iter()
                     .map(|s| (s / self.limit as f64) as f32)
                     .collect::<Vec<_>>()
@@ -262,7 +262,7 @@ where
                 .enumerate()
                 .take(self.limit)
                 .map(|(i, v)| {
-                    let normalized = self.distance_fn.normalize_vector(v.into());
+                    let normalized = self.distance_fn.normalize(v.into());
                     let value = encode_raw_vector(&normalized);
                     progress(1);
                     Record::new(i as i64, value)
@@ -295,7 +295,7 @@ where
         let apply_mu = Mutex::new((
             0i64,
             self.distance_fn
-                .distance(&self.get_vector(0), &self.centroid),
+                .distance_f32(&self.get_vector(0), &self.centroid),
         ));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
@@ -346,7 +346,7 @@ where
                 // reranking is turned off.
                 let centroid_distance = self
                     .distance_fn
-                    .distance(&self.get_vector(v), &self.centroid);
+                    .distance_f32(&self.get_vector(v), &self.centroid);
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
                 // undirected. If an edge does not fit on either vertex, save it for later.
@@ -503,7 +503,7 @@ where
             let n = Neighbor::new(
                 in_flight_vertex as i64,
                 self.distance_fn
-                    .distance(&vertex_vector, &self.get_vector(in_flight_vertex)),
+                    .distance_f32(&vertex_vector, &self.get_vector(in_flight_vertex)),
             );
             // If the queue is full and n is worse than all other edges, skip.
             if edges.len() >= limit && n >= *edges.last().unwrap() {
@@ -594,8 +594,7 @@ where
     }
 
     fn get_vector(&self, index: usize) -> Cow<'_, [f32]> {
-        self.distance_fn
-            .normalize_vector(self.vectors[index].into())
+        self.distance_fn.normalize(self.vectors[index].into())
     }
 }
 

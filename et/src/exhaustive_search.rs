@@ -72,7 +72,7 @@ pub fn exhaustive_search(
         results.par_iter_mut().enumerate().for_each(|(i, r)| {
             let n = Neighbor::new(
                 record.key(),
-                distance_fn.distance(&index_vector, &query_vectors[i]),
+                distance_fn.distance_f32(&index_vector, &query_vectors[i]),
             );
             if r.len() <= k || n < r[k] {
                 r.push(n);

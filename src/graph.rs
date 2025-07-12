@@ -274,7 +274,7 @@ impl EdgeSetDistanceComputer {
             Self::Raw {
                 distance_fn,
                 vectors,
-            } => distance_fn.distance(&vectors[i], &vectors[j]),
+            } => distance_fn.distance_f32(&vectors[i], &vectors[j]),
             Self::Nav {
                 distance_fn,
                 vectors,

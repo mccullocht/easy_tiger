@@ -4,24 +4,6 @@ use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
-/// Distance function for `f32` vectors.
-///
-/// This trait is object-safe; it may be instantiated at runtime based on
-/// data that appears in a file or other backing store.
-pub trait F32VectorDistance: Send + Sync {
-    /// Score vectors `a` and `b` against one another. Returns a score
-    /// where larger values are better matches.
-    ///
-    /// Input vectors must be the same length or this function may panic.
-    fn distance(&self, a: &[f32], b: &[f32]) -> f64;
-
-    /// Normalize a vector for use with this scoring function.
-    /// By default, does nothing.
-    fn normalize_vector<'a>(&self, vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
-        vector
-    }
-}
-
 /// Distance function for quantized vectors.
 ///
 /// This trait is object-safe; it may be instantiated at runtime based on
@@ -33,6 +15,24 @@ pub trait VectorDistance: Send + Sync {
     /// This function is not required to be commutative and may panic if
     /// one of the inputs is misshapen.
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64;
+}
+
+/// Distance function for `f32` vectors.
+///
+/// This trait is object-safe; it may be instantiated at runtime based on
+/// data that appears in a file or other backing store.
+pub trait F32VectorDistance: VectorDistance {
+    /// Score vectors `a` and `b` against one another. Returns a score
+    /// where larger values are better matches.
+    ///
+    /// Input vectors must be the same length or this function may panic.
+    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
+
+    /// Normalize a vector for use with this scoring function.
+    /// By default, does nothing.
+    fn normalize<'a>(&self, vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
+        vector
+    }
 }
 
 /// Functions used for computing a similarity score for high fidelity vectors.
@@ -48,8 +48,8 @@ pub enum VectorSimilarity {
 impl VectorSimilarity {
     pub fn new_distance_function(self) -> Box<dyn F32VectorDistance> {
         match self {
-            Self::Euclidean => Box::new(EuclideanDistance),
-            Self::Dot => Box::new(DotProductDistance),
+            Self::Euclidean => Box::new(F32EuclideanDistance),
+            Self::Dot => Box::new(F32DotProductDistance),
         }
     }
 }
@@ -77,26 +77,38 @@ impl FromStr for VectorSimilarity {
 
 /// Computes a score based on l2 distance.
 #[derive(Debug, Copy, Clone)]
-pub struct EuclideanDistance;
+pub struct F32EuclideanDistance;
 
-impl F32VectorDistance for EuclideanDistance {
-    fn distance(&self, a: &[f32], b: &[f32]) -> f64 {
-        l2sq(a, b)
+impl VectorDistance for F32EuclideanDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        l2sq_f32_bytes(query, doc)
+    }
+}
+
+impl F32VectorDistance for F32EuclideanDistance {
+    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
+        l2sq_f32(a, b)
     }
 }
 
 /// Computes a score based on the dot product.
 #[derive(Debug, Copy, Clone)]
-pub struct DotProductDistance;
+pub struct F32DotProductDistance;
 
-impl F32VectorDistance for DotProductDistance {
-    fn distance(&self, a: &[f32], b: &[f32]) -> f64 {
+impl VectorDistance for F32DotProductDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        dot_f32_bytes(query, doc)
+    }
+}
+
+impl F32VectorDistance for F32DotProductDistance {
+    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
         // Assuming values are normalized, this will produce a distance in [0,1]
-        (-dot(a, b) + 1.0) / 2.0
+        (-dot_f32(a, b) + 1.0) / 2.0
     }
 
-    fn normalize_vector<'a>(&self, mut vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
-        let norm = dot(&vector, &vector).sqrt() as f32;
+    fn normalize<'a>(&self, mut vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
+        let norm = dot_f32(&vector, &vector).sqrt() as f32;
         for d in vector.to_mut().iter_mut() {
             *d /= norm;
         }
@@ -164,6 +176,7 @@ impl VectorDistance for I8NaiveDistance {
     }
 }
 
+// XXX remove simsimd feature
 #[cfg(feature = "simsimd")]
 pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
     use simsimd::BinarySimilarity;
@@ -179,24 +192,31 @@ pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
         .sum::<u32>() as f64
 }
 
-#[cfg(feature = "simsimd")]
-pub(crate) fn l2sq(q: &[f32], d: &[f32]) -> f64 {
-    use simsimd::SpatialSimilarity;
-    f32::l2sq(q, d).expect("same dimensionality")
+fn f32_le_iter<'a>(v: &'a [u8]) -> impl ExactSizeIterator<Item = f32> + 'a {
+    v.chunks(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("exact f32 chunk")))
 }
 
-#[cfg(not(feature = "simsimd"))]
-pub(crate) fn l2sq(q: &[f32], d: &[f32]) -> f64 {
+fn l2sq_f32_it(it: impl ExactSizeIterator<Item = (f32, f32)>) -> f64 {
+    it.map(|(q, d)| {
+        let delta = q - d;
+        delta * delta
+    })
+    .sum::<f32>() as f64
+}
+
+pub(crate) fn l2sq_f32(q: &[f32], d: &[f32]) -> f64 {
     assert_eq!(q.len(), d.len());
-    q.iter()
-        .zip(d.iter())
-        .map(|(a, b)| {
-            let d = a - b;
-            d * d
-        })
-        .sum::<f32>() as f64
+    l2sq_f32_it(q.iter().copied().zip(d.iter().copied()))
 }
 
+pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
+    assert_eq!(q.len(), d.len());
+    assert_eq!(q.len() % 4, 0);
+    l2sq_f32_it(f32_le_iter(q).zip(f32_le_iter(d)))
+}
+
+// XXX remove simsimd feature
 #[cfg(feature = "simsimd")]
 pub(crate) fn l2(q: &[f32], d: &[f32]) -> f64 {
     use simsimd::SpatialSimilarity;
@@ -208,14 +228,17 @@ pub(crate) fn l2(q: &[f32], d: &[f32]) -> f64 {
     l2sq(q, d).sqrt()
 }
 
-#[cfg(feature = "simsimd")]
-pub(crate) fn dot(q: &[f32], d: &[f32]) -> f64 {
-    use simsimd::SpatialSimilarity;
-    f32::dot(q, d).expect("same dimensionality")
+fn dot_f32_it(it: impl ExactSizeIterator<Item = (f32, f32)>) -> f64 {
+    it.map(|(q, d)| q * d).sum::<f32>() as f64
 }
 
-#[cfg(not(feature = "simsimd"))]
-pub(crate) fn dot(q: &[f32], d: &[f32]) -> f64 {
+pub(crate) fn dot_f32(q: &[f32], d: &[f32]) -> f64 {
     assert_eq!(q.len(), d.len());
-    q.iter().zip(d.iter()).map(|(a, b)| a * b).sum::<f32>() as f64
+    dot_f32_it(q.iter().copied().zip(d.iter().copied()))
+}
+
+pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
+    assert_eq!(q.len(), d.len());
+    assert_eq!(q.len() % 4, 0);
+    dot_f32_it(f32_le_iter(q).zip(f32_le_iter(d)))
 }

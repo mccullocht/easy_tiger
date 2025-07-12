@@ -67,7 +67,7 @@ impl IndexMutator {
         assert_eq!(self.reader.config().dimensions.get(), vector.len());
 
         let distance_fn = self.reader.config().new_distance_function();
-        let vector = distance_fn.normalize_vector(vector.into());
+        let vector = distance_fn.normalize(vector.into());
         let mut candidate_edges = self.searcher.search(&vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
         let mut raw_vectors = self.reader.raw_vectors()?;
@@ -147,7 +147,7 @@ impl IndexMutator {
                     raw_vectors
                         .get_raw_vector(*e)
                         .unwrap_or(Err(Error::not_found_error()))
-                        .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, &dst)))
+                        .map(|dst| Neighbor::new(*e, distance_fn.distance_f32(&src_vector, &dst)))
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
             neighbors.sort();
@@ -223,7 +223,7 @@ impl IndexMutator {
         if graph.entry_point().unwrap()? == vertex_id {
             let mut neighbors = vertex_data
                 .iter()
-                .map(|(id, vec, _)| Neighbor::new(*id, distance_fn.distance(&vector, vec)))
+                .map(|(id, vec, _)| Neighbor::new(*id, distance_fn.distance_f32(&vector, vec)))
                 .collect::<Vec<_>>();
             neighbors.sort();
             if let Some(ep_neighbor) = neighbors.first() {
@@ -257,7 +257,7 @@ impl IndexMutator {
                     .skip(src + 1)
                     .filter_map(|(dst, (dst_vertex, dst_vector, _))| {
                         if !src_edges.contains(dst_vertex) {
-                            Some((src, dst, distance_fn.distance(src_vector, dst_vector)))
+                            Some((src, dst, distance_fn.distance_f32(src_vector, dst_vector)))
                         } else {
                             None
                         }

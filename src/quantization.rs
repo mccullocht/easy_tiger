@@ -249,7 +249,7 @@ pub struct I8NaiveQuantizer;
 
 impl Quantizer for I8NaiveQuantizer {
     fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
-        let norm = crate::distance::dot(vector, vector).sqrt() as f32;
+        let norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
         let mut normalized_vector = vector.to_vec();
         for d in normalized_vector.iter_mut() {
             *d /= norm;

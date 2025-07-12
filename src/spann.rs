@@ -262,7 +262,7 @@ impl SessionIndexWriter {
     }
 
     pub fn upsert(&mut self, record_id: i64, vector: &[f32]) -> Result<Vec<u32>> {
-        let vector = self.distance_fn.normalize_vector(vector.into());
+        let vector = self.distance_fn.normalize(vector.into());
         let candidates = self
             .head_searcher
             .search(vector.as_ref(), &mut self.head_reader)?;
@@ -275,7 +275,7 @@ impl SessionIndexWriter {
         }
 
         let mut raw_vector_cursor = self.raw_vector_cursor()?;
-        let vector = self.distance_fn.normalize_vector(vector);
+        let vector = self.distance_fn.normalize(vector);
         // TODO: factor out handling of high fidelity vector tables.
         raw_vector_cursor.set(&Record::new(
             record_id,
@@ -359,7 +359,7 @@ impl SessionIndexWriter {
                 .expect("returned vector should exist")?;
             if !centroids
                 .iter()
-                .any(|c| self.distance_fn.distance(c, &v) < candidate.distance())
+                .any(|c| self.distance_fn.distance_f32(c, &v) < candidate.distance())
             {
                 centroid_ids.push(
                     candidate
@@ -651,7 +651,7 @@ impl SpannSearcher {
                     });
                 Ok(Neighbor::new(
                     n.vertex(),
-                    distance_fn.distance(query, &raw_vector),
+                    distance_fn.distance_f32(query, &raw_vector),
                 ))
             })
             .collect::<Result<Vec<_>>>()?;

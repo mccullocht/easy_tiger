@@ -145,7 +145,7 @@ impl GraphSearcher {
         }
 
         let distance_fn = reader.config().new_distance_function();
-        let query = distance_fn.normalize_vector(query.into());
+        let query = distance_fn.normalize(query.into());
         let mut raw_vectors = reader.raw_vectors()?;
         let rescored = self
             .candidates
@@ -156,7 +156,7 @@ impl GraphSearcher {
                 raw_vectors
                     .get_raw_vector(vertex)
                     .expect("row exists")
-                    .map(|rv| Neighbor::new(vertex, distance_fn.distance(&query, &rv)))
+                    .map(|rv| Neighbor::new(vertex, distance_fn.distance_f32(&query, &rv)))
             })
             .collect::<Result<Vec<_>>>();
         rescored.map(|mut r| {
@@ -346,7 +346,7 @@ mod test {
     use wt_mdb::Result;
 
     use crate::{
-        distance::{DotProductDistance, F32VectorDistance, VectorSimilarity},
+        distance::{F32DotProductDistance, F32VectorDistance, VectorSimilarity},
         graph::{
             Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
             RawVector, RawVectorStore,
@@ -426,7 +426,10 @@ mod test {
                 .enumerate()
                 .filter_map(|(i, n)| {
                     if i != index {
-                        Some(Neighbor::new(i as i64, distance_fn.distance(q, &n.vector)))
+                        Some(Neighbor::new(
+                            i as i64,
+                            distance_fn.distance_f32(q, &n.vector),
+                        ))
                     } else {
                         None
                     }
@@ -448,7 +451,7 @@ mod test {
 
                 let q = &graph[n.vertex() as usize].vector;
                 if !selected.iter().any(|p| {
-                    distance_fn.distance(q, &graph[p.vertex() as usize].vector) < n.distance()
+                    distance_fn.distance_f32(q, &graph[p.vertex() as usize].vector) < n.distance()
                 }) {
                     selected.push(*n);
                 }
@@ -580,7 +583,7 @@ mod test {
         let dim_values = [-0.25, -0.125, 0.125, 0.25];
         TestGraphVectorIndex::new(
             NonZero::new(max_edges).unwrap(),
-            DotProductDistance,
+            F32DotProductDistance,
             (0..256).map(|v| {
                 Vec::from([
                     dim_values[v & 0x3],

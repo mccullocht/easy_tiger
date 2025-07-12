@@ -176,69 +176,98 @@ impl VectorDistance for I8NaiveDistance {
     }
 }
 
-// XXX remove simsimd feature
-#[cfg(feature = "simsimd")]
+#[inline(always)]
 pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
     use simsimd::BinarySimilarity;
     u8::hamming(q, d).expect("same dimensionality")
 }
 
-#[cfg(not(feature = "simsimd"))]
-pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
-    assert_eq!(q.len(), d.len());
-    q.iter()
-        .zip(d.iter())
-        .map(|(a, b)| (a ^ b).count_ones())
-        .sum::<u32>() as f64
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+unsafe fn load_f32x4_le(p: *const u8) -> core::arch::aarch64::float32x4_t {
+    core::arch::aarch64::vld1q_f32(p as *const f32)
 }
 
-fn f32_le_iter<'a>(v: &'a [u8]) -> impl ExactSizeIterator<Item = f32> + 'a {
-    v.chunks(4)
-        .map(|c| f32::from_le_bytes(c.try_into().expect("exact f32 chunk")))
+#[cfg(not(target_arch = "aarch64"))]
+fn f32_le_iter(b: &[u8]) -> impl ExactSizeIterator<Item = f32> {
+    b.chunks_exact(4)
+        .map(|f| f32::from_le_bytes(f.try_into.expect("4 bytes")))
 }
 
-fn l2sq_f32_it(it: impl ExactSizeIterator<Item = (f32, f32)>) -> f64 {
-    it.map(|(q, d)| {
-        let delta = q - d;
-        delta * delta
-    })
-    .sum::<f32>() as f64
-}
+// TODO: byte swapped load on big endian archs.
 
+#[inline(always)]
 pub(crate) fn l2sq_f32(q: &[f32], d: &[f32]) -> f64 {
-    assert_eq!(q.len(), d.len());
-    l2sq_f32_it(q.iter().copied().zip(d.iter().copied()))
+    simsimd::SpatialSimilarity::l2sq(q, d).expect("same dimensions")
 }
 
 pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
     assert_eq!(q.len(), d.len());
     assert_eq!(q.len() % 4, 0);
-    l2sq_f32_it(f32_le_iter(q).zip(f32_le_iter(d)))
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use core::arch::aarch64::{vaddvq_f32, vdupq_n_f32, vfmaq_f32, vsubq_f32};
+        let suffix_start = q.len() & !3;
+        let mut l2sqv = vdupq_n_f32(0.0);
+        for i in (0..suffix_start).step_by(16) {
+            let dv = vsubq_f32(
+                load_f32x4_le(q.as_ptr().add(i)),
+                load_f32x4_le(d.as_ptr().add(i)),
+            );
+            l2sqv = vfmaq_f32(l2sqv, dv, dv);
+        }
+        let mut l2sq = vaddvq_f32(l2sqv);
+        for i in (suffix_start..q.len()).step_by(4) {
+            let delta = std::ptr::read_unaligned(q.as_ptr().add(i) as *const f32)
+                - std::ptr::read_unaligned(d.as_ptr().add(i) as *const f32);
+            l2sq += delta * delta;
+        }
+        l2sq as f64
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        f32_le_iter(q)
+            .zip(f32_le_iter(d))
+            .map(|(q, d)| q * d)
+            .sum::<f32>() as f64
+    }
 }
 
-// XXX remove simsimd feature
-#[cfg(feature = "simsimd")]
 pub(crate) fn l2(q: &[f32], d: &[f32]) -> f64 {
-    use simsimd::SpatialSimilarity;
-    f32::l2(q, d).expect("same dimensionality")
+    (l2sq_f32(q, d) as f64).sqrt()
 }
 
-#[cfg(not(feature = "simsimd"))]
-pub(crate) fn l2(q: &[f32], d: &[f32]) -> f64 {
-    l2sq(q, d).sqrt()
-}
-
-fn dot_f32_it(it: impl ExactSizeIterator<Item = (f32, f32)>) -> f64 {
-    it.map(|(q, d)| q * d).sum::<f32>() as f64
-}
-
+#[inline(always)]
 pub(crate) fn dot_f32(q: &[f32], d: &[f32]) -> f64 {
-    assert_eq!(q.len(), d.len());
-    dot_f32_it(q.iter().copied().zip(d.iter().copied()))
+    simsimd::SpatialSimilarity::dot(q, d).expect("same dimensions")
 }
 
 pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
     assert_eq!(q.len(), d.len());
     assert_eq!(q.len() % 4, 0);
-    dot_f32_it(f32_le_iter(q).zip(f32_le_iter(d)))
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use core::arch::aarch64::{vaddvq_f32, vdupq_n_f32, vfmaq_f32};
+        let suffix_start = q.len() & !3;
+        let mut dotv = vdupq_n_f32(0.0);
+        for i in (0..suffix_start).step_by(16) {
+            dotv = vfmaq_f32(
+                dotv,
+                load_f32x4_le(q.as_ptr().add(i)),
+                load_f32x4_le(d.as_ptr().add(i)),
+            );
+        }
+        let mut dot = vaddvq_f32(dotv);
+        for i in (suffix_start..q.len()).step_by(4) {
+            dot += std::ptr::read_unaligned(q.as_ptr().add(i) as *const f32)
+                * std::ptr::read_unaligned(d.as_ptr().add(i) as *const f32);
+        }
+        dot as f64
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        f32_le_iter(q)
+            .zip(f32_le_iter(d))
+            .map(|(q, d)| q * d)
+            .sum::<f32>() as f64
+    }
 }

@@ -23,7 +23,7 @@ use crate::{
     wt_call, Error, Result,
 };
 
-pub use format::{FormatString, Formatter};
+pub use format::{FormatString, Formatted};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
 const METADATA_URI: &CStr = c"metadata:";
@@ -219,7 +219,7 @@ impl Session {
             .map(TypedCursorGuard::new)
     }
 
-    fn get_typed_cursor<K: Formatter, V: Formatter>(
+    fn get_typed_cursor<K: Formatted, V: Formatted>(
         &self,
         table_name: &str,
     ) -> Result<TypedCursor<'_, K, V>> {
@@ -276,7 +276,7 @@ impl Session {
         StatCursor::new(inner, self)
     }
 
-    fn new_typed_cursor<K: Formatter, V: Formatter>(
+    fn new_typed_cursor<K: Formatted, V: Formatted>(
         &self,
         table_name: &str,
         options: Option<&CStr>,
@@ -355,8 +355,8 @@ impl Session {
         iter: I,
     ) -> Result<()>
     where
-        K: Formatter,
-        V: Formatter,
+        K: Formatted,
+        V: Formatted,
         I: Iterator<Item = (K, V)>,
     {
         let create_options: CreateOptions = create_options
@@ -367,7 +367,7 @@ impl Session {
         self.create_table(table_name, Some(create_options))?;
         let mut cursor = self.new_typed_cursor::<K, V>(table_name, Some(c"bulk"))?;
         for (k, v) in iter {
-            cursor.set(k.to_formatter_ref(), v.to_formatter_ref())?;
+            cursor.set(k.to_formatted_ref(), v.to_formatted_ref())?;
         }
         Ok(())
     }
@@ -424,12 +424,12 @@ impl<'a> From<StatValueRef<'a>> for StatValue {
     }
 }
 
-impl Formatter for StatValue {
+impl Formatted for StatValue {
     const FORMAT: FormatString = FormatString::new(c"SSq");
 
     type Ref<'a> = StatValueRef<'a>;
 
-    fn to_formatter_ref(&self) -> Self::Ref<'_> {
+    fn to_formatted_ref(&self) -> Self::Ref<'_> {
         StatValueRef {
             description: self.description,
             value_str: &self.value_str,

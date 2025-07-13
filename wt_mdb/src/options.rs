@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::{FormatString, Formatter};
+use crate::{FormatString, Formatted};
 
 pub(crate) trait ConfigurationString {
     fn as_config_string(&self) -> Option<&CStr>;
@@ -182,19 +182,18 @@ impl Default for CreateOptionsBuilder {
 
 impl CreateOptionsBuilder {
     /// Set the format for the key.
-    pub fn key_format<K: Formatter>(mut self) -> Self {
+    pub fn key_format<K: Formatted>(mut self) -> Self {
         self.key_format = K::FORMAT;
         self
     }
 
     /// Set the format for the value.
-    pub fn value_format<V: Formatter>(mut self) -> Self {
+    pub fn value_format<V: Formatted>(mut self) -> Self {
         self.value_format = V::FORMAT;
         self
     }
 
-    /// Attach metadata that can be read from the metadata table.
-    // XXX confirm this is right I can't remember how it's read.
+    /// Attach metadata that can be read from the metadata table as the value for this table.
     pub fn app_metadata(mut self, metadata: &str) -> Self {
         assert!(
             !metadata.as_bytes().contains(&0),

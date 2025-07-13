@@ -9,7 +9,7 @@ use rustix::io::Errno;
 use crate::{
     map_not_found,
     session::{
-        format::{Formatter, MaxLenFormatWriter, PackedFormatReader, PackedFormatWriter},
+        format::{Formatted, MaxLenFormatWriter, PackedFormatReader, PackedFormatWriter},
         InnerCursor, Item,
     },
     wt_call, Error, Result,
@@ -18,7 +18,7 @@ use crate::{
 use super::Session;
 
 /// Pack a value that needs non-trivial formatting into buf.
-fn pack_non_trivial<F: Formatter>(value: &F::Ref<'_>, buf: &mut Vec<u8>) -> Result<()> {
+fn pack_non_trivial<F: Formatted>(value: &F::Ref<'_>, buf: &mut Vec<u8>) -> Result<()> {
     let max_len = if let Some(n) = F::FORMAT.max_len() {
         n
     } else {
@@ -37,7 +37,7 @@ fn pack_non_trivial<F: Formatter>(value: &F::Ref<'_>, buf: &mut Vec<u8>) -> Resu
 
 /// Format a variable using the passed formatter into buf (if necessary).
 ///
-/// This is an end run around lifetime issues as Formatter::pack_trivial and the buffer will have
+/// This is an end run around lifetime issues as Formatted::pack_trivial and the buffer will have
 /// different lifetimes.
 macro_rules! format_to_buf {
     ($var:ident, $formatter:ident, $buf:expr) => {{
@@ -59,7 +59,7 @@ pub struct TypedCursor<'a, K, V> {
     _vm: PhantomData<&'a V>,
 }
 
-impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
+impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     pub(super) fn new(inner: InnerCursor, session: &'a Session) -> Result<Self> {
         if inner.key_format() == K::FORMAT && inner.value_format() == V::FORMAT {
             Ok(Self {
@@ -225,7 +225,7 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
         }
     }
 
-    fn unpack<'b, F: Formatter>(packed: &'b [u8]) -> Result<F::Ref<'b>> {
+    fn unpack<'b, F: Formatted>(packed: &'b [u8]) -> Result<F::Ref<'b>> {
         if let Some(unpacked) = F::unpack_trivial(packed) {
             return Ok(unpacked);
         }
@@ -235,7 +235,7 @@ impl<'a, K: Formatter, V: Formatter> TypedCursor<'a, K, V> {
     }
 }
 
-impl<'a, K: Formatter, V: Formatter> Iterator for TypedCursor<'a, K, V> {
+impl<'a, K: Formatted, V: Formatted> Iterator for TypedCursor<'a, K, V> {
     type Item = Result<(K, V)>;
 
     /// Advance and return the next record.

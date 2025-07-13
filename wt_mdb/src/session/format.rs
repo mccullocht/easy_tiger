@@ -62,7 +62,7 @@ impl FormatString {
         let mut i = 0usize;
         while i < bytes.len() {
             match bytes[i] {
-                // XXX figure out what is going on with 'U'. Is it for 'u' when there are multiple
+                // TODO figure out what is going on with 'U'. Is it for 'u' when there are multiple
                 // columns in the table?
                 b'b' | b'B' | b'h' | b'H' | b'i' | b'I' | b'l' | b'L' | b'q' | b'Q' | b'r'
                 | b'S' | b'u' => i += 1,
@@ -413,8 +413,7 @@ impl Drop for PackedFormatReader<'_> {
 }
 
 /// Something that can be formatted/packed into a key or value in WiredTiger.
-// XXX _Formatted_
-pub trait Formatter: Sized {
+pub trait Formatted: Sized {
     /// The format of this packed value.
     ///
     /// This is used to validate that a cursor key or value matches the expected format.
@@ -429,7 +428,7 @@ pub trait Formatter: Sized {
     // * Borrow doesn't work for formatted structs that contain some references.
     // * AsRef doesn't work for primitive integer types.
     // * From/Into doesn't work for CString or Vec<u8>
-    fn to_formatter_ref(&self) -> Self::Ref<'_>;
+    fn to_formatted_ref(&self) -> Self::Ref<'_>;
 
     /// Format the contents of this object into `writer`.
     fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()>;
@@ -463,12 +462,12 @@ macro_rules! define_primitive_formatter {
         );
     };
     ($owned:ty, $ref:ty, $as_ref:ident, $format:literal, $pack_trivial:ident, $unpack_trivial:ident) => {
-        impl Formatter for $owned {
+        impl Formatted for $owned {
             const FORMAT: FormatString = FormatString::new($format);
 
             type Ref<'a> = $ref;
 
-            fn to_formatter_ref(&self) -> Self::Ref<'_> {
+            fn to_formatted_ref(&self) -> Self::Ref<'_> {
                 (*self).$as_ref()
             }
 

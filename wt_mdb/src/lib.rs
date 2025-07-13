@@ -176,7 +176,7 @@ mod test {
         connection::Connection,
         options::{
             ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
-            Statistics, TableType,
+            Statistics,
         },
         Error, WiredTigerError,
     };
@@ -188,7 +188,8 @@ mod test {
     fn index_table_options() -> Option<CreateOptions> {
         Some(
             CreateOptionsBuilder::default()
-                .table_type(TableType::Index)
+                .key_format::<Vec<u8>>()
+                .value_format::<Vec<u8>>()
                 .into(),
         )
     }

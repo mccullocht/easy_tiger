@@ -148,7 +148,8 @@ impl TableIndex {
                 table_name,
                 Some(
                     CreateOptionsBuilder::default()
-                        .table_type(wt_mdb::options::TableType::Record)
+                        .key_format::<i64>()
+                        .value_format::<Vec<u8>>()
                         .into(),
                 ),
             )?;
@@ -158,7 +159,8 @@ impl TableIndex {
                 table_name,
                 Some(
                     CreateOptionsBuilder::default()
-                        .table_type(wt_mdb::options::TableType::Index)
+                        .key_format::<Vec<u8>>()
+                        .value_format::<Vec<u8>>()
                         .into(),
                 ),
             )?;

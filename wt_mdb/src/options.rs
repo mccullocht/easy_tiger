@@ -162,22 +162,6 @@ impl ConfigurationString for ConnectionOptions {
     }
 }
 
-/// Type of WiredTiger table.
-// XXX this must go away.
-#[derive(Debug, Hash, Eq, PartialEq, Clone)]
-pub enum TableType {
-    /// Record-type tables are `i64` keyed and byte-array valued.
-    Record,
-    /// Index-type tables are byte-array keyed and values.
-    Index,
-}
-
-impl Default for TableType {
-    fn default() -> Self {
-        Self::Record
-    }
-}
-
 /// An options builder for creating a table, column group, index, or file in WiredTiger.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub struct CreateOptionsBuilder {
@@ -197,26 +181,20 @@ impl Default for CreateOptionsBuilder {
 }
 
 impl CreateOptionsBuilder {
-    /// Set the table type for this table.
-    pub fn table_type(mut self, table_type: TableType) -> Self {
-        match table_type {
-            TableType::Record => self.key_format = FormatString::new(c"q"),
-            TableType::Index => self.key_format = FormatString::new(c"u"),
-        }
-        self.value_format = FormatString::new(c"u");
-        self
-    }
-
+    /// Set the format for the key.
     pub fn key_format<K: Formatter>(mut self) -> Self {
         self.key_format = K::FORMAT;
         self
     }
 
+    /// Set the format for the value.
     pub fn value_format<V: Formatter>(mut self) -> Self {
         self.value_format = V::FORMAT;
         self
     }
 
+    /// Attach metadata that can be read from the metadata table.
+    // XXX confirm this is right I can't remember how it's read.
     pub fn app_metadata(mut self, metadata: &str) -> Self {
         assert!(
             !metadata.as_bytes().contains(&0),

@@ -86,9 +86,9 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         // safety: the memory passed to set_{key,value} need only be valid until a modifying
         // call like insert().
         unsafe {
-            wt_call!(void self.inner.ptr, set_key, &Item::from(key).0)?;
-            wt_call!(void self.inner.ptr, set_value, &Item::from(value).0)?;
-            wt_call!(self.inner.ptr, insert)
+            wt_call!(void self.inner.0, set_key, &Item::from(key).0)?;
+            wt_call!(void self.inner.0, set_value, &Item::from(value).0)?;
+            wt_call!(self.inner.0, insert)
         }
     }
 
@@ -98,8 +98,8 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     pub fn remove(&mut self, key: K::Ref<'_>) -> Result<()> {
         let key = format_to_buf!(key, K, self.key_buf)?;
         unsafe {
-            wt_call!(void self.inner.ptr, set_key, &Item::from(key).0)?;
-            wt_call!(self.inner.ptr, remove)
+            wt_call!(void self.inner.0, set_key, &Item::from(key).0)?;
+            wt_call!(self.inner.0, remove)
         }
     }
 
@@ -116,7 +116,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     /// `Iterator.next()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn next_unsafe(&mut self) -> Option<Result<(K::Ref<'_>, V::Ref<'_>)>> {
         map_not_found(
-            unsafe { wt_call!(self.inner.ptr, next) }
+            unsafe { wt_call!(self.inner.0, next) }
                 .and_then(|()| self.key())
                 .and_then(|k| self.value().map(|v| (k, v))),
         )
@@ -135,8 +135,8 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         };
         map_not_found(
             unsafe {
-                wt_call!(void self.inner.ptr, set_key, &Item::from(key).0)
-                    .and_then(|()| wt_call!(self.inner.ptr, search))
+                wt_call!(void self.inner.0, set_key, &Item::from(key).0)
+                    .and_then(|()| wt_call!(self.inner.0, search))
             }
             .and_then(|()| self.value()),
         )
@@ -150,7 +150,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     /// Return the largest key in the collection or `None` if the collection is empty.
     pub fn largest_key(&mut self) -> Option<Result<K>> {
         map_not_found(
-            unsafe { wt_call!(self.inner.ptr, largest_key) }
+            unsafe { wt_call!(self.inner.0, largest_key) }
                 .and_then(|()| self.key().map(|k| k.into())),
         )
     }
@@ -197,14 +197,14 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
             ),
         };
         if let Some(k) = key.map(Item::from) {
-            unsafe { wt_call!(void self.inner.ptr, set_key, &k) }?;
+            unsafe { wt_call!(void self.inner.0, set_key, &k) }?;
         }
-        unsafe { wt_call!(self.inner.ptr, bound, config_str.as_ptr()) }
+        unsafe { wt_call!(self.inner.0, bound, config_str.as_ptr()) }
     }
 
     /// Reset the cursor to an unpositioned state.
     pub fn reset(&mut self) -> Result<()> {
-        unsafe { wt_call!(self.inner.ptr, reset) }
+        unsafe { wt_call!(self.inner.0, reset) }
     }
 
     /// Return the current key. This assumes that we have just positioned the cursor
@@ -212,7 +212,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     fn key(&self) -> Result<K::Ref<'_>> {
         let mut k = Item::default();
         unsafe {
-            wt_call!(self.inner.ptr, get_key, &mut k.0).and_then(|()| Self::unpack::<K>(k.into()))
+            wt_call!(self.inner.0, get_key, &mut k.0).and_then(|()| Self::unpack::<K>(k.into()))
         }
     }
 
@@ -221,7 +221,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     fn value(&self) -> Result<V::Ref<'_>> {
         let mut v = Item::default();
         unsafe {
-            wt_call!(self.inner.ptr, get_value, &mut v.0).and_then(|()| Self::unpack::<V>(v.into()))
+            wt_call!(self.inner.0, get_value, &mut v.0).and_then(|()| Self::unpack::<V>(v.into()))
         }
     }
 

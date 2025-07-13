@@ -65,22 +65,19 @@ impl From<Item> for &[u8] {
 /// Inner representation of a cursor.
 ///
 /// This inner representation is used by TypedCursor but also may be cached by Session.
-// XXX tuple struct
-struct InnerCursor {
-    pub ptr: NonNull<WT_CURSOR>,
-}
+struct InnerCursor(NonNull<WT_CURSOR>);
 
 impl InnerCursor {
     fn uri(&self) -> &CStr {
-        unsafe { CStr::from_ptr(self.ptr.as_ref().uri) }
+        unsafe { CStr::from_ptr(self.0.as_ref().uri) }
     }
 
     fn key_format(&self) -> &CStr {
-        self.format_or_default(unsafe { self.ptr.as_ref().key_format })
+        self.format_or_default(unsafe { self.0.as_ref().key_format })
     }
 
     fn value_format(&self) -> &CStr {
-        self.format_or_default(unsafe { self.ptr.as_ref().value_format })
+        self.format_or_default(unsafe { self.0.as_ref().value_format })
     }
 
     fn format_or_default(&self, format: *const c_char) -> &CStr {
@@ -93,13 +90,13 @@ impl InnerCursor {
 
     /// Reset the underlying [wt_sys::WT_CURSOR].
     fn reset(&mut self) -> Result<()> {
-        unsafe { wt_call!(self.ptr, reset) }
+        unsafe { wt_call!(self.0, reset) }
     }
 }
 
 impl Drop for InnerCursor {
     fn drop(&mut self) {
-        if let Err(e) = unsafe { wt_call!(self.ptr, close) } {
+        if let Err(e) = unsafe { wt_call!(self.0, close) } {
             error!("Failed to close WT_CURSOR: {}", e);
         }
     }
@@ -282,7 +279,7 @@ impl Session {
         }?;
         let inner = NonNull::new(cursorp)
             .ok_or(Error::generic_error())
-            .map(|ptr| InnerCursor { ptr })?;
+            .map(InnerCursor)?;
         TypedCursor::new(inner, self)
     }
 

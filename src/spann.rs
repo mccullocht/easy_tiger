@@ -303,8 +303,7 @@ impl SessionIndexWriter {
                 record_id,
             }
             .into();
-            // XXX this is pretty horrid for byte slices.
-            posting_cursor.set(&key.as_slice(), &quantized.as_slice())?;
+            posting_cursor.set(key.as_slice(), quantized.as_slice())?;
         }
 
         Ok(centroid_ids)
@@ -398,7 +397,7 @@ impl SessionIndexWriter {
                 record_id,
             }
             .into();
-            cursor.remove(&key.as_slice()).or_else(|e| {
+            cursor.remove(key.as_slice()).or_else(|e| {
                 if e == Error::not_found_error() {
                     Ok(())
                 } else {

@@ -18,6 +18,7 @@ use crate::{
 
 use super::Session;
 
+// XXX consider eliminating this entirely since I'm not sure it serves much purpose.
 /// Cursor over table data that expects raw byte strings for all keys and values.
 ///
 /// Note that the underlying format of the table may vary

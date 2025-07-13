@@ -3,6 +3,7 @@ mod record_cursor;
 mod typed_cursor;
 
 use std::{
+    borrow::Cow,
     cell::RefCell,
     ffi::{c_char, c_void, CStr, CString},
     ops::Deref,
@@ -18,7 +19,7 @@ use crate::{
     connection::Connection,
     options::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
-        DropOptions, RollbackTransactionOptions, Statistics, TableType,
+        CreateOptionsBuilder, DropOptions, RollbackTransactionOptions, Statistics, TableType,
     },
     session::format::{FormatWriter, PackedFormatReader},
     wt_call, Error, Result,
@@ -223,6 +224,7 @@ impl Session {
             .and_then(|c| IndexCursor::new(c, self))
     }
 
+    // XXX this must go away.
     fn open_typed_cursor(
         &self,
         table_name: &str,
@@ -264,6 +266,7 @@ impl Session {
             .map(IndexCursorGuard::new)
     }
 
+    // XXX this must go away.
     fn get_typed_cursor(
         &self,
         table_name: &str,
@@ -373,26 +376,52 @@ impl Session {
         unsafe { wt_call!(self.ptr, rollback_transaction, options.as_config_ptr()) }
     }
 
-    /// Create a new table called `table_name` and bulk load entries from `iter`.
+    /// Create a new table `table_name` and bulk load input from `iter` with key format `K` and
+    /// value format `V`.
     ///
-    /// Bulk load requires that `table_name` not exist or be empty and that `iter` yields records in
-    /// order by `key()`.
-    // XXX fix this to work with formatters.
-    pub fn bulk_load<'a, I>(
+    /// This requires that `table_name` not exist or be empty and that `iter` yields records in
+    /// order by `K` or an error may occur.
+    pub fn bulk_load<K, V, I>(
         &self,
         table_name: &str,
-        options: Option<CreateOptions>,
+        create_options: Option<CreateOptionsBuilder>,
         iter: I,
     ) -> Result<()>
     where
-        I: Iterator<Item = RecordView<'a>>,
+        K: Formatter,
+        V: Formatter,
+        I: Iterator<Item = (K, V)>,
     {
-        self.create_table(table_name, options)?;
-        let mut cursor = self.open_record_cursor_with_options(table_name, Some(c"bulk=true"))?;
-        for record in iter {
-            cursor.set(&record)?;
+        let create_options: CreateOptions = create_options
+            .unwrap_or_default()
+            .key_format::<K>()
+            .value_format::<V>()
+            .into();
+        self.create_table(table_name, Some(create_options))?;
+        let mut cursor = self.new_typed_cursor::<K, V>(table_name, Some(c"bulk"))?;
+        for (k, v) in iter {
+            cursor.set(k.to_formatter_ref(), v.to_formatter_ref())?;
         }
         Ok(())
+    }
+
+    fn new_typed_cursor<K: Formatter, V: Formatter>(
+        &self,
+        table_name: &str,
+        options: Option<&CStr>,
+    ) -> Result<TypedCursor<'_, K, V>> {
+        let uri = TableUri::from(table_name);
+        let options: Cow<'_, CStr> = if let Some(o) = options {
+            CString::new([o.to_bytes(), b",raw"].concat())
+                .expect("no nulls")
+                .into()
+        } else {
+            c"raw".into()
+        };
+        let inner = self
+            .new_cursor_pointer(&uri.0, Some(options.as_ref()))
+            .map(|ptr| InnerCursor { ptr, uri })?;
+        TypedCursor::new(inner, self)
     }
 
     /// Checkpoint the database.

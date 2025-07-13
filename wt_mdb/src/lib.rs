@@ -374,9 +374,9 @@ mod test {
 
         // Create Vec<Record>, bulk_load() into session, compare cursors.
         let records = vec![
-            Record::new(7, b"foo"),
-            Record::new(11, b"bar"),
-            Record::new(19, b"quux"),
+            (7, b"foo".to_vec()),
+            (11, b"bar".to_vec()),
+            (19, b"quux".to_vec()),
         ];
         assert_eq!(
             session.bulk_load("test", None, records.clone().into_iter()),
@@ -385,7 +385,10 @@ mod test {
 
         let cursor = session.open_record_cursor("test").unwrap();
         for (expected, actual) in records.iter().zip(cursor) {
-            assert_eq!(Ok(expected), actual.as_ref());
+            assert_eq!(
+                Ok(&RecordView::new(expected.0, &expected.1)),
+                actual.as_ref()
+            );
         }
     }
 
@@ -400,7 +403,7 @@ mod test {
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(&RecordView::new(1, b"bar")), Ok(()));
         assert_eq!(
-            session.bulk_load("test", None, [Record::new(7, b"foo")].into_iter()),
+            session.bulk_load("test", None, [(7, b"foo".to_vec())].into_iter()),
             Err(Error::Errno(Errno::BUSY))
         );
     }
@@ -415,7 +418,7 @@ mod test {
             session.bulk_load(
                 "test",
                 None,
-                [Record::new(11, b"bar"), Record::new(7, b"foo")].into_iter()
+                [(11, b"bar".to_vec()), (7, b"foo".to_vec())].into_iter()
             ),
             Err(Error::Errno(Errno::INVAL))
         );

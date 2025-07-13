@@ -24,7 +24,7 @@ use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{options::DropOptionsBuilder, Connection, Record, Result, Session};
+use wt_mdb::{options::DropOptionsBuilder, Connection, Result, Session};
 
 use crate::{
     distance::F32VectorDistance,
@@ -229,7 +229,7 @@ where
                         let start = i * quantized.len();
                         q[start..(start + quantized.len())].copy_from_slice(&quantized);
                     }
-                    Record::new(i as i64, quantized)
+                    (i as i64, quantized)
                 }),
         )?;
 
@@ -265,7 +265,7 @@ where
                     let normalized = self.distance_fn.normalize(v.into());
                     let value = encode_raw_vector(&normalized);
                     progress(1);
-                    Record::new(i as i64, value)
+                    (i as i64, value)
                 }),
         )
     }
@@ -425,11 +425,11 @@ where
             unconnected: 0,
         };
         let config_rows = vec![
-            Record::new(
+            (
                 CONFIG_KEY,
                 serde_json::to_vec(&self.index.config()).unwrap(),
             ),
-            Record::new(
+            (
                 ENTRY_POINT_KEY,
                 self.entry_vertex
                     .load(atomic::Ordering::Relaxed)
@@ -462,7 +462,7 @@ where
                             stats.unconnected += 1;
                         }
                         progress(1);
-                        Record::new(
+                        (
                             i as i64,
                             encode_graph_vertex(vertex.iter().map(|n| n.vertex()).collect()),
                         )

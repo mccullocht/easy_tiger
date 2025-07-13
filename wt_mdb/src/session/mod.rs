@@ -1,5 +1,4 @@
 mod format;
-mod record_cursor;
 mod typed_cursor;
 
 use std::{
@@ -26,7 +25,6 @@ use crate::{
 };
 
 pub use format::{FormatString, Formatter};
-pub use record_cursor::{Record, RecordCursor, RecordCursorGuard, RecordView};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
 const METADATA_URI: &CStr = c"metadata:";
@@ -204,16 +202,8 @@ impl Session {
     ///
     /// Returns [rustix::io::Errno::INVAL] if the underlying table is not a record table.
     pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
-        self.open_record_cursor_with_options(table_name, None)
-    }
-
-    fn open_record_cursor_with_options(
-        &self,
-        table_name: &str,
-        options: Option<&CStr>,
-    ) -> Result<RecordCursor> {
-        self.open_typed_cursor(table_name, options, TableType::Record)
-            .map(|c| RecordCursor::new(c, self))
+        self.open_typed_cursor(table_name, Some(c"raw"), TableType::Record)
+            .and_then(|c| RecordCursor::new(c, self))
     }
 
     /// Open an index cursor over the named table.
@@ -256,14 +246,15 @@ impl Session {
     /// Get a cached [RecordCursor] or create a new cursor over `table_name`.
     pub fn get_record_cursor(&self, table_name: &str) -> Result<RecordCursorGuard<'_>> {
         self.get_typed_cursor(table_name, TableType::Record)
-            .map(|c| RecordCursorGuard::new(self, RecordCursor::new(c, self)))
+            .and_then(|c| RecordCursor::new(c, self))
+            .map(TypedCursorGuard::new)
     }
 
     /// Get a cached [IndexCursor] or create a new cursor over `table_name`.
     pub fn get_index_cursor(&self, table_name: &str) -> Result<IndexCursorGuard<'_>> {
         self.get_typed_cursor(table_name, TableType::Index)
             .and_then(|c| IndexCursor::new(c, self))
-            .map(IndexCursorGuard::new)
+            .map(TypedCursorGuard::new)
     }
 
     // XXX this must go away.
@@ -280,7 +271,9 @@ impl Session {
                 let inner = cursor_cache.remove(i);
                 Ok(inner)
             })
-            .unwrap_or_else(|| self.open_typed_cursor(table_name, None, expected_table_type))
+            .unwrap_or_else(|| {
+                self.open_typed_cursor(table_name, Some(c"raw"), expected_table_type)
+            })
     }
 
     pub fn get_metadata_cursor(&self) -> Result<MetadataCursorGuard<'_>> {
@@ -511,6 +504,8 @@ impl Formatter for StatValue {
     }
 }
 
+pub type RecordCursor<'a> = TypedCursor<'a, i64, Vec<u8>>;
+pub type RecordCursorGuard<'a> = TypedCursorGuard<'a, i64, Vec<u8>>;
 pub type IndexCursor<'a> = TypedCursor<'a, Vec<u8>, Vec<u8>>;
 pub type IndexCursorGuard<'a> = TypedCursorGuard<'a, Vec<u8>, Vec<u8>>;
 pub type MetadataCursor<'a> = TypedCursor<'a, CString, CString>;

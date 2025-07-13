@@ -126,8 +126,8 @@ impl From<Error> for std::io::Error {
 
 pub use connection::Connection;
 pub use session::{
-    FormatString, Formatter, IndexCursor, IndexCursorGuard, Record, RecordCursor,
-    RecordCursorGuard, RecordView, Session, StatCursor, TypedCursor, TypedCursorGuard,
+    FormatString, Formatter, IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard,
+    Session, StatCursor, TypedCursor, TypedCursorGuard,
 };
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -178,7 +178,7 @@ mod test {
             ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
             Statistics, TableType,
         },
-        Error, Record, RecordView, WiredTigerError,
+        Error, WiredTigerError,
     };
 
     fn conn_options() -> Option<ConnectionOptions> {
@@ -200,10 +200,10 @@ mod test {
         let session = conn.open_session().unwrap();
         session.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
-        assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
-        assert_eq!(cursor.next(), Some(Ok(Record::new(7, b"foo"))));
-        assert_eq!(cursor.next(), Some(Ok(Record::new(11, b"bar"))));
+        assert_eq!(cursor.set(11, b"bar"), Ok(()));
+        assert_eq!(cursor.set(7, b"foo"), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok((7, b"foo".to_vec()))));
+        assert_eq!(cursor.next(), Some(Ok((11, b"bar".to_vec()))));
         assert_eq!(cursor.next(), None);
     }
 
@@ -229,10 +229,10 @@ mod test {
         session.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         let value: &[u8] = b"bar";
-        assert_eq!(cursor.set(&RecordView::new(7, value)), Ok(()));
-        assert_eq!(cursor.set(&Record::new(11, value)), Ok(()));
-        assert_eq!(cursor.seek_exact(7), Some(Ok(Record::new(7, value))));
-        assert_eq!(cursor.seek_exact(11), Some(Ok(Record::new(11, value))));
+        assert_eq!(cursor.set(7, value), Ok(()));
+        assert_eq!(cursor.set(11, value), Ok(()));
+        assert_eq!(cursor.seek_exact(7), Some(Ok(value.to_vec())));
+        assert_eq!(cursor.seek_exact(11), Some(Ok(value.to_vec())));
     }
 
     #[test]
@@ -243,8 +243,6 @@ mod test {
         session.create_table("test", index_table_options()).unwrap();
         let mut cursor = session.open_index_cursor("test").unwrap();
         let value = b"bar".to_vec();
-        // XXX we might want formatted types to be AsRef? this is very annoying.
-        // OTOH don't know how this will work for more compex types.
         assert_eq!(cursor.set(&b"a".as_slice(), &value.as_slice()), Ok(()));
         assert_eq!(cursor.set(&b"b".as_slice(), &value.as_slice()), Ok(()));
         assert_eq!(cursor.seek_exact(&b"a".as_slice()), Some(Ok(value.clone())));
@@ -258,10 +256,10 @@ mod test {
         let session = conn.open_session().unwrap();
         session.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
-        assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
+        assert_eq!(cursor.set(11, b"bar"), Ok(()));
+        assert_eq!(cursor.set(7, b"foo"), Ok(()));
         assert_eq!(cursor.remove(7), Ok(()));
-        assert_eq!(cursor.next(), Some(Ok(Record::new(11, b"bar"))));
+        assert_eq!(cursor.next(), Some(Ok((11, b"bar".to_vec()))));
         assert_eq!(cursor.next(), None);
         assert_eq!(
             cursor.remove(13),
@@ -276,7 +274,6 @@ mod test {
         let session = conn.open_session().unwrap();
         session.create_table("test", index_table_options()).unwrap();
         let mut cursor = session.open_index_cursor("test").unwrap();
-        // XXX or maybe it's just that we need to be able to Into?
         assert_eq!(cursor.set(&b"b".as_slice(), &b"bar".as_slice()), Ok(()));
         assert_eq!(cursor.set(&b"a".as_slice(), &b"foo".as_slice()), Ok(()));
         assert_eq!(cursor.remove(&b"a".as_slice()), Ok(()));
@@ -296,9 +293,9 @@ mod test {
         session.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.largest_key(), None);
-        assert_eq!(cursor.set(&RecordView::new(-1, b"bar")), Ok(()));
+        assert_eq!(cursor.set(-1, b"bar"), Ok(()));
         assert_eq!(cursor.largest_key(), Some(Ok(-1)));
-        assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
+        assert_eq!(cursor.set(7, b"foo"), Ok(()));
         assert_eq!(cursor.largest_key(), Some(Ok(7)));
     }
 
@@ -327,12 +324,12 @@ mod test {
 
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(session.begin_transaction(None), Ok(()));
-        assert_eq!(cursor.set(&RecordView::new(1, b"foo")), Ok(()));
-        assert_eq!(cursor.set(&RecordView::new(2, b"bar")), Ok(()));
-        assert_eq!(cursor.next(), Some(Ok(Record::new(1, b"foo"))));
+        assert_eq!(cursor.set(1, b"foo"), Ok(()));
+        assert_eq!(cursor.set(2, b"bar"), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
         assert_eq!(read_cursor.next(), None);
         assert_eq!(session.commit_transaction(None), Ok(()));
-        assert_eq!(read_cursor.next(), Some(Ok(Record::new(1, b"foo"))));
+        assert_eq!(read_cursor.next(), Some(Ok((1, b"foo".to_vec()))));
     }
 
     #[test]
@@ -344,8 +341,8 @@ mod test {
 
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(session.begin_transaction(None), Ok(()));
-        assert_eq!(cursor.set(&RecordView::new(1, b"foo")), Ok(()));
-        assert_eq!(cursor.next(), Some(Ok(Record::new(1, b"foo"))));
+        assert_eq!(cursor.set(1, b"foo"), Ok(()));
+        assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
         assert_eq!(session.rollback_transaction(None), Ok(()));
         assert_eq!(cursor.next(), None);
     }
@@ -358,11 +355,11 @@ mod test {
         session.create_table("test", None).unwrap();
 
         let mut cursor = session.get_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(&RecordView::new(1, b"foo")), Ok(()));
+        assert_eq!(cursor.set(1, b"foo"), Ok(()));
         drop(cursor);
 
         cursor = session.get_record_cursor("test").unwrap();
-        assert_eq!(cursor.next(), Some(Ok(Record::new(1, b"foo"))));
+        assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
         assert_eq!(cursor.next(), None);
     }
 
@@ -385,10 +382,7 @@ mod test {
 
         let cursor = session.open_record_cursor("test").unwrap();
         for (expected, actual) in records.iter().zip(cursor) {
-            assert_eq!(
-                Ok(&RecordView::new(expected.0, &expected.1)),
-                actual.as_ref()
-            );
+            assert_eq!(Ok((expected.0, expected.1.clone())), actual);
         }
     }
 
@@ -401,7 +395,7 @@ mod test {
         // Bulk load will happily load into an empty table, so to get it to fail we insert a record.
         assert_eq!(session.create_table("test", None), Ok(()));
         let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(&RecordView::new(1, b"bar")), Ok(()));
+        assert_eq!(cursor.set(1, b"bar"), Ok(()));
         assert_eq!(
             session.bulk_load("test", None, [(7, b"foo".to_vec())].into_iter()),
             Err(Error::Errno(Errno::BUSY))
@@ -449,8 +443,8 @@ mod test {
         let session = conn.open_session().unwrap();
         session.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(&RecordView::new(11, b"bar")), Ok(()));
-        assert_eq!(cursor.set(&RecordView::new(7, b"foo")), Ok(()));
+        assert_eq!(cursor.set(11, b"bar"), Ok(()));
+        assert_eq!(cursor.set(7, b"foo"), Ok(()));
 
         for stat in session
             .new_stats_cursor(Statistics::Fast, None)

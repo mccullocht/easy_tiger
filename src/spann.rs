@@ -4,7 +4,6 @@
 //! select centroids. This index is used to build and navigate a posting index.
 
 use std::{
-    borrow::Cow,
     collections::{BinaryHeap, HashSet},
     io,
     iter::FusedIterator,
@@ -17,8 +16,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
-    Connection, Error, IndexCursorGuard, Record, RecordCursorGuard, Result, Session,
-    WiredTigerError,
+    Connection, Error, IndexCursorGuard, RecordCursorGuard, Result, Session, WiredTigerError,
 };
 
 use crate::{
@@ -107,7 +105,7 @@ impl TableIndex {
         let mut cursor = session.open_record_cursor(&table_names.centroids)?;
         let config_json = unsafe { cursor.seek_exact_unsafe(-1) }
             .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-        let config: IndexConfig = serde_json::from_slice(config_json.value())?;
+        let config: IndexConfig = serde_json::from_slice(config_json)?;
 
         Ok(Self {
             head,
@@ -166,7 +164,7 @@ impl TableIndex {
             )?;
         }
         let mut cursor = session.open_record_cursor(&table_names.centroids)?;
-        cursor.set(&Record::new(-1, serde_json::to_vec(&spann_config)?))?;
+        cursor.set(-1, &serde_json::to_vec(&spann_config)?)?;
         Ok(Self {
             head,
             table_names,
@@ -277,22 +275,20 @@ impl SessionIndexWriter {
         let mut raw_vector_cursor = self.raw_vector_cursor()?;
         let vector = self.distance_fn.normalize(vector);
         // TODO: factor out handling of high fidelity vector tables.
-        raw_vector_cursor.set(&Record::new(
+        raw_vector_cursor.set(
             record_id,
-            vector
+            &vector
                 .iter()
                 .flat_map(|d| d.to_le_bytes())
                 .collect::<Vec<_>>(),
-        ))?;
-        centroid_cursor.set(&Record::new(
+        )?;
+        centroid_cursor.set(
             record_id,
-            Cow::from(
-                centroid_ids
-                    .iter()
-                    .flat_map(|i| i.to_le_bytes())
-                    .collect::<Vec<u8>>(),
-            ),
-        ))?;
+            &centroid_ids
+                .iter()
+                .flat_map(|i| i.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        )?;
         let quantized = self.posting_quantizer.for_doc(vector.as_ref());
         // TODO: try centering vector on each centroid before quantizing. This would likely reduce
         // error but would also require quantizing the vector for each centroid during search and
@@ -378,9 +374,7 @@ impl SessionIndexWriter {
         cursor: &mut RecordCursorGuard<'_>,
     ) -> Result<Option<Vec<u32>>> {
         Ok(cursor.seek_exact(record_id).transpose()?.map(|r| {
-            r.into_inner_value()
-                .as_ref()
-                .chunks(4)
+            r.chunks(4)
                 .map(|c| u32::from_be_bytes(c.try_into().expect("u32 centroid")))
                 .collect()
         }))
@@ -637,11 +631,10 @@ impl SpannSearcher {
                     raw_cursor
                         .seek_exact_unsafe(n.vertex())
                         .expect("raw vector for candidate")
-                }?
-                .into_inner_value();
+                }?;
                 Ok(Neighbor::new(
                     n.vertex(),
-                    distance_fn.distance(bytemuck::cast_slice(query), &raw_vector),
+                    distance_fn.distance(bytemuck::cast_slice(query), raw_vector),
                 ))
             })
             .collect::<Result<Vec<_>>>()?;

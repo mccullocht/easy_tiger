@@ -61,8 +61,8 @@ pub fn exhaustive_search(
         let record = record_result?;
         results.par_iter_mut().enumerate().for_each(|(i, r)| {
             let n = Neighbor::new(
-                record.key(),
-                distance_fn.distance(bytemuck::cast_slice(&query_vectors[i]), record.value()),
+                record.0,
+                distance_fn.distance(bytemuck::cast_slice(&query_vectors[i]), &record.1),
             );
             if r.len() <= k || n < r[k] {
                 r.push(n);

@@ -8,7 +8,7 @@ use std::{borrow::Cow, io, sync::Arc};
 
 use wt_mdb::{
     options::{CreateOptions, DropOptions},
-    Connection, Error, Record, RecordCursorGuard, RecordView, Result, Session, WiredTigerError,
+    Connection, Error, RecordCursorGuard, Result, Session, WiredTigerError,
 };
 
 use crate::graph::{
@@ -21,10 +21,11 @@ pub const ENTRY_POINT_KEY: i64 = -1;
 pub const CONFIG_KEY: i64 = -2;
 
 /// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
-pub struct CursorGraphVertex<'a>(Cow<'a, [u8]>);
+// XXX perhaps instead of returning this wrapper we should just return an iterator?
+pub struct CursorGraphVertex<'a>(&'a [u8]);
 
 impl<'a> CursorGraphVertex<'a> {
-    fn new(data: Cow<'a, [u8]>) -> Self {
+    fn new(data: &'a [u8]) -> Self {
         Self(data)
     }
 }
@@ -37,7 +38,7 @@ impl GraphVertex for CursorGraphVertex<'_> {
 
     fn edges(&self) -> Self::EdgeIterator<'_> {
         Leb128EdgeIterator {
-            data: self.0.as_ref(),
+            data: self.0,
             prev: 0,
         }
     }
@@ -69,17 +70,11 @@ impl<'a> CursorGraph<'a> {
     }
 
     pub(crate) fn set_entry_point(&mut self, entry_point: i64) -> Result<()> {
-        self.0.set(&RecordView::new(
-            ENTRY_POINT_KEY,
-            &entry_point.to_le_bytes(),
-        ))
+        self.0.set(ENTRY_POINT_KEY, &entry_point.to_le_bytes())
     }
 
     pub(crate) fn set(&mut self, vertex_id: i64, edges: impl Into<Vec<i64>>) -> Result<()> {
-        self.0.set(&RecordView::new(
-            vertex_id,
-            encode_graph_vertex(edges.into()),
-        ))
+        self.0.set(vertex_id, &encode_graph_vertex(edges.into()))
     }
 
     pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
@@ -101,11 +96,11 @@ impl Graph for CursorGraph<'_> {
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let result = unsafe { self.0.seek_exact_unsafe(ENTRY_POINT_KEY)? };
-        Some(result.map(|r| i64::from_le_bytes(r.value().try_into().unwrap())))
+        Some(result.map(|r| i64::from_le_bytes(r.try_into().expect("8 bytes"))))
     }
 
     fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-        let r = unsafe { self.0.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value);
+        let r = unsafe { self.0.seek_exact_unsafe(vertex_id)? };
         Some(r.map(CursorGraphVertex::new))
     }
 }
@@ -119,7 +114,7 @@ impl<'a> CursorVectorStore<'a> {
     }
 
     pub(crate) fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()> {
-        self.0.set(&RecordView::new(vertex_id, vector.as_ref()))
+        self.0.set(vertex_id, vector.as_ref())
     }
 
     pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
@@ -132,8 +127,10 @@ impl<'a> CursorVectorStore<'a> {
         })
     }
 
+    // XXX we can avoid returning Cow here
+    // XXX should this method be unsafe???
     fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? }.map(RecordView::into_inner_value))
+        Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? }.map(|v| v.into()))
     }
 }
 
@@ -169,7 +166,7 @@ impl TableGraphVectorIndex {
         let mut cursor = session.open_record_cursor(&graph_table_name)?;
         let config_json = unsafe { cursor.seek_exact_unsafe(CONFIG_KEY) }
             .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-        let config: GraphConfig = serde_json::from_slice(config_json.value())?;
+        let config: GraphConfig = serde_json::from_slice(config_json)?;
         Ok(Self {
             graph_table_name,
             raw_table_name,
@@ -204,7 +201,7 @@ impl TableGraphVectorIndex {
         session.create_table(&index.raw_table_name, table_options.clone())?;
         session.create_table(&index.nav_table_name, table_options)?;
         let mut cursor = session.open_record_cursor(&index.graph_table_name)?;
-        cursor.set(&Record::new(CONFIG_KEY, serde_json::to_vec(&index.config)?))?;
+        cursor.set(CONFIG_KEY, &serde_json::to_vec(&index.config)?)?;
         Ok(index)
     }
 

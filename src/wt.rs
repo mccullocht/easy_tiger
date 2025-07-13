@@ -21,7 +21,7 @@ pub const ENTRY_POINT_KEY: i64 = -1;
 pub const CONFIG_KEY: i64 = -2;
 
 /// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
-// XXX perhaps instead of returning this wrapper we should just return an iterator?
+// TODO: perhaps instead of returning this wrapper we should just return an iterator?
 pub struct CursorGraphVertex<'a>(&'a [u8]);
 
 impl<'a> CursorGraphVertex<'a> {
@@ -127,8 +127,6 @@ impl<'a> CursorVectorStore<'a> {
         })
     }
 
-    // XXX we can avoid returning Cow here
-    // XXX should this method be unsafe???
     fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
         Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? }.map(|v| v.into()))
     }

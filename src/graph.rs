@@ -131,12 +131,14 @@ pub trait GraphVertex {
 /// Vector store for raw vectors used to produce the highest fidelity scores.
 pub trait RawVectorStore {
     /// Get the raw vector for the given vertex.
+    // TODO: consider removing the Cow, it's no longer necessary
     fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }
 
 /// Vector store for vectors used to navigate the graph.
 pub trait NavVectorStore {
     /// Get the navigation vector for the given vertex.
+    // TODO: consider removing the Cow, it's no longer necessary
     fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }
 

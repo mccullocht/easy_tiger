@@ -157,6 +157,7 @@ impl TableIndex {
                 CreateOptionsBuilder::default()
                     .key_format::<PostingKey>()
                     .value_format::<Vec<u8>>()
+                    .app_metadata(&serde_json::to_string(&spann_config)?)
                     .into(),
             ),
         )?;

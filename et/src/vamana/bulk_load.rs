@@ -153,13 +153,16 @@ fn wired_tiger_stats(session: &Session) -> Result<WiredTigerStats> {
     let mut stat_cursor = session.new_stats_cursor(wt_mdb::options::Statistics::Fast, None)?;
     Ok(WiredTigerStats {
         search_calls: stat_cursor
-            .seek_exact(WT_STAT_CONN_CURSOR_SEARCH)
-            .expect("WT_STAT_CONN_CURSOR_SEARCH")?,
+            .seek_exact(WT_STAT_CONN_CURSOR_SEARCH as i32)
+            .expect("WT_STAT_CONN_CURSOR_SEARCH")?
+            .value,
         read_ios: stat_cursor
-            .seek_exact(WT_STAT_CONN_READ_IO)
-            .expect("WT_STAT_CONN_READ_IO")?,
+            .seek_exact(WT_STAT_CONN_READ_IO as i32)
+            .expect("WT_STAT_CONN_READ_IO")?
+            .value,
         read_bytes: stat_cursor
-            .seek_exact(WT_STAT_CONN_CACHE_BYTES_READ)
-            .expect("WT_STATE_CONN_CACHE_BYTES_READ")?,
+            .seek_exact(WT_STAT_CONN_CACHE_BYTES_READ as i32)
+            .expect("WT_STATE_CONN_CACHE_BYTES_READ")?
+            .value,
     })
 }

@@ -1,18 +1,14 @@
-mod index_cursor;
-mod metadata_cursor;
-mod record_cursor;
-mod stat_cursor;
+mod format;
+mod typed_cursor;
 
 use std::{
+    borrow::Cow,
     cell::RefCell,
-    ffi::{c_void, CStr, CString},
-    ops::Deref,
+    ffi::{c_char, c_void, CStr, CString},
     ptr::NonNull,
     sync::Arc,
 };
 
-use metadata_cursor::{MetadataCursor, MetadataCursorGuard};
-use rustix::io::Errno;
 use tracing::error;
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
 
@@ -20,39 +16,19 @@ use crate::{
     connection::Connection,
     options::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
-        DropOptions, RollbackTransactionOptions, Statistics, TableType,
+        CreateOptionsBuilder, DropOptions, RollbackTransactionOptions, Statistics,
     },
+    session::format::{FormatWriter, PackedFormatReader},
     wt_call, Error, Result,
 };
 
-pub use index_cursor::{IndexCursor, IndexCursorGuard, IndexRecord, IndexRecordView};
-pub use record_cursor::{Record, RecordCursor, RecordCursorGuard, RecordView};
-pub use stat_cursor::StatCursor;
+pub use format::{FormatString, Formatted};
+pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
 const METADATA_URI: &CStr = c"metadata:";
 
-/// URI of a WT table encoded as a CString.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct TableUri(CString);
-
-impl TableUri {
-    fn table_name(&self) -> &CStr {
-        // magic number 6 comes from length of string "table:"
-        &(self.0.as_c_str()[6usize..])
-    }
-}
-
-impl Deref for TableUri {
-    type Target = CStr;
-    fn deref(&self) -> &Self::Target {
-        self.0.as_c_str()
-    }
-}
-
-impl From<&str> for TableUri {
-    fn from(value: &str) -> Self {
-        Self(CString::new(format!("table:{value}")).expect("no nulls in table name"))
-    }
+fn table_uri(name: &str) -> CString {
+    CString::new([b"table:", name.as_bytes()].concat()).expect("no nulls")
 }
 
 /// Wrapper around [wt_sys::WT_ITEM].
@@ -88,38 +64,39 @@ impl From<Item> for &[u8] {
 
 /// Inner representation of a cursor.
 ///
-/// This inner representation is used by RecordCursor but also may be cached by Session.
-struct InnerCursor {
-    pub ptr: NonNull<WT_CURSOR>,
-    pub uri: TableUri,
-}
+/// This inner representation is used by TypedCursor but also may be cached by Session.
+struct InnerCursor(NonNull<WT_CURSOR>);
 
 impl InnerCursor {
-    /// Interrogate the underlying cursor for the [TableType].
-    ///
-    /// Returns `None` if the table type cannot be determined.
-    fn table_type(&self) -> Option<TableType> {
-        let key_format = unsafe {
-            NonNull::new(self.ptr.as_ref().key_format as *mut i8)
-                .map(|p| CStr::from_ptr(p.as_ptr() as *const i8))
-        }
-        .unwrap_or(c"u");
-        match key_format.to_bytes() {
-            b"q" => Some(TableType::Record),
-            b"u" => Some(TableType::Index),
-            _ => None,
+    fn uri(&self) -> &CStr {
+        unsafe { CStr::from_ptr(self.0.as_ref().uri) }
+    }
+
+    fn key_format(&self) -> &CStr {
+        self.format_or_default(unsafe { self.0.as_ref().key_format })
+    }
+
+    fn value_format(&self) -> &CStr {
+        self.format_or_default(unsafe { self.0.as_ref().value_format })
+    }
+
+    fn format_or_default(&self, format: *const c_char) -> &CStr {
+        if format.is_null() {
+            c"u"
+        } else {
+            unsafe { CStr::from_ptr(format) }
         }
     }
 
     /// Reset the underlying [wt_sys::WT_CURSOR].
     fn reset(&mut self) -> Result<()> {
-        unsafe { wt_call!(self.ptr, reset) }
+        unsafe { wt_call!(self.0, reset) }
     }
 }
 
 impl Drop for InnerCursor {
     fn drop(&mut self) {
-        if let Err(e) = unsafe { wt_call!(self.ptr, close) } {
+        if let Err(e) = unsafe { wt_call!(self.0, close) } {
             error!("Failed to close WT_CURSOR: {}", e);
         }
     }
@@ -157,7 +134,7 @@ impl Session {
 
     /// Create a new table.
     pub fn create_table(&self, table_name: &str, config: Option<CreateOptions>) -> Result<()> {
-        let uri = TableUri::from(table_name);
+        let uri = table_uri(table_name);
         unsafe {
             wt_call!(
                 self.ptr,
@@ -173,7 +150,7 @@ impl Session {
     /// This requires exclusive access -- if any cursors are open on the specified table the call will fail
     /// and return an EBUSY posix error.
     pub fn drop_table(&self, table_name: &str, config: Option<DropOptions>) -> Result<()> {
-        let uri = TableUri::from(table_name);
+        let uri = table_uri(table_name);
         unsafe {
             wt_call!(
                 self.ptr,
@@ -188,92 +165,82 @@ impl Session {
     ///
     /// Returns [rustix::io::Errno::INVAL] if the underlying table is not a record table.
     pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
-        self.open_record_cursor_with_options(table_name, None)
-    }
-
-    fn open_record_cursor_with_options(
-        &self,
-        table_name: &str,
-        options: Option<&CStr>,
-    ) -> Result<RecordCursor> {
-        self.open_typed_cursor(table_name, options, TableType::Record)
-            .map(|c| RecordCursor::new(c, self))
+        self.new_typed_cursor::<i64, Vec<u8>>(table_name, None)
     }
 
     /// Open an index cursor over the named table.
     ///
     /// Returns [rustix::io::Errno::INVAL] if the underlying table is not an index table.
-    pub fn open_index_cursor(&self, table_name: &str) -> Result<IndexCursor> {
-        self.open_typed_cursor(table_name, None, TableType::Index)
-            .map(|c| IndexCursor::new(c, self))
-    }
-
-    fn open_typed_cursor(
-        &self,
-        table_name: &str,
-        options: Option<&CStr>,
-        expected_table_type: TableType,
-    ) -> Result<InnerCursor> {
-        let uri = TableUri::from(table_name);
-        let inner = self
-            .new_cursor_pointer(&uri.0, options)
-            .map(|ptr| InnerCursor { ptr, uri })?;
-        if inner.table_type().is_some_and(|t| t == expected_table_type) {
-            Ok(inner)
-        } else {
-            Err(Error::Errno(Errno::INVAL))
-        }
+    pub fn open_index_cursor(&self, table_name: &str) -> Result<IndexCursor<'_>> {
+        self.new_typed_cursor::<Vec<u8>, Vec<u8>>(table_name, None)
     }
 
     /// Open a cursor over database metadata.
     pub fn open_metadata_cursor(&self) -> Result<MetadataCursor> {
-        self.new_cursor_pointer(METADATA_URI, None).map(|ptr| {
-            MetadataCursor::new(
-                InnerCursor {
-                    ptr,
-                    uri: TableUri(METADATA_URI.to_owned()),
-                },
-                self,
-            )
-        })
+        self.new_typed_cursor_uri::<CString, CString>(METADATA_URI, None)
+    }
+
+    /// Return a new cursor that provides statistics keyed by WT constants.
+    ///
+    /// Accepts a level which may be no higher than the connection level, and optionally a table
+    /// name to observe the stats of.
+    pub fn new_stats_cursor(
+        &self,
+        level: Statistics,
+        table: Option<&str>,
+    ) -> Result<StatCursor<'_>> {
+        let table_stats_uri = table.map(|t| {
+            CString::new(format!("statistics:table:{t}")).expect("no nulls in table name")
+        });
+        let uri = table_stats_uri.as_deref().unwrap_or(c"statistics:");
+        let options = level
+            .to_config_string_clause()
+            .map(|s| CString::new(s.into_bytes()).expect("no nulls"));
+        self.new_typed_cursor_uri::<i32, StatValue>(uri, options.as_deref())
+    }
+
+    /// Create a new cursor over `table_name` with the given `options` where `K` and `V` are formats
+    /// used for the key and value.
+    ///
+    /// May fail if the table does not exist or if the key or value formats do not match.
+    pub fn new_typed_cursor<K: Formatted, V: Formatted>(
+        &self,
+        table_name: &str,
+        options: Option<&CStr>,
+    ) -> Result<TypedCursor<'_, K, V>> {
+        let uri = table_uri(table_name);
+        self.new_typed_cursor_uri::<K, V>(&uri, options)
     }
 
     /// Get a cached [RecordCursor] or create a new cursor over `table_name`.
     pub fn get_record_cursor(&self, table_name: &str) -> Result<RecordCursorGuard<'_>> {
-        self.get_typed_cursor(table_name, TableType::Record)
-            .map(|c| RecordCursorGuard::new(self, RecordCursor::new(c, self)))
+        let table_uri = table_uri(table_name);
+        self.get_or_create_typed_cursor_uri::<i64, Vec<u8>>(&table_uri)
     }
 
     /// Get a cached [IndexCursor] or create a new cursor over `table_name`.
     pub fn get_index_cursor(&self, table_name: &str) -> Result<IndexCursorGuard<'_>> {
-        self.get_typed_cursor(table_name, TableType::Index)
-            .map(|c| IndexCursorGuard::new(self, IndexCursor::new(c, self)))
+        let table_uri = table_uri(table_name);
+        self.get_or_create_typed_cursor_uri::<Vec<u8>, Vec<u8>>(&table_uri)
     }
 
-    fn get_typed_cursor(
-        &self,
-        table_name: &str,
-        expected_table_type: TableType,
-    ) -> Result<InnerCursor> {
-        let mut cursor_cache = self.cached_cursors.borrow_mut();
-        cursor_cache
-            .iter()
-            .position(|c| c.uri.table_name().to_bytes() == table_name.as_bytes())
-            .map(|i| {
-                let inner = cursor_cache.remove(i);
-                Ok(inner)
-            })
-            .unwrap_or_else(|| self.open_typed_cursor(table_name, None, expected_table_type))
-    }
-
+    /// Get a cached [MetadataCursor] or create a new metadata cursor.
     pub fn get_metadata_cursor(&self) -> Result<MetadataCursorGuard<'_>> {
+        self.get_or_create_typed_cursor_uri(METADATA_URI)
+    }
+
+    // NB: this doesn't accept options because we don't check options when serving from the cache.
+    fn get_or_create_typed_cursor_uri<K: Formatted, V: Formatted>(
+        &self,
+        uri: &CStr,
+    ) -> Result<TypedCursorGuard<'_, K, V>> {
         let mut cursor_cache = self.cached_cursors.borrow_mut();
         cursor_cache
             .iter()
-            .position(|c| c.uri.table_name() == METADATA_URI)
-            .map(|i| Ok(MetadataCursor::new(cursor_cache.remove(i), self)))
-            .unwrap_or_else(|| self.open_metadata_cursor())
-            .map(MetadataCursorGuard::new)
+            .position(|c| c.uri() == uri)
+            .map(|i| TypedCursor::new(cursor_cache.remove(i), self))
+            .unwrap_or_else(|| self.new_typed_cursor_uri::<K, V>(uri, None))
+            .map(TypedCursorGuard::new)
     }
 
     /// Return an `InnerCursor` to the cache for future re-use.
@@ -287,27 +254,18 @@ impl Session {
         self.cached_cursors.borrow_mut().clear();
     }
 
-    /// Return a new cursor that provides statistics by name.
-    pub fn new_stats_cursor(
+    fn new_typed_cursor_uri<K: Formatted, V: Formatted>(
         &self,
-        level: Statistics,
-        table: Option<&str>,
-    ) -> Result<StatCursor<'_>> {
-        let table_stats_uri = table.map(|t| {
-            CString::new(format!("statistics:table:{t}")).expect("no nulls in table name")
-        });
-        let uri = table_stats_uri.as_deref().unwrap_or(c"statistics:");
-        let options = level
-            .to_config_string_clause()
-            .map(|s| CString::new(s).expect("no nulls in stats options"));
-        self.new_cursor_pointer(uri, options.as_deref())
-            .map(|ptr| StatCursor {
-                ptr,
-                _session: self,
-            })
-    }
-
-    fn new_cursor_pointer(&self, uri: &CStr, options: Option<&CStr>) -> Result<NonNull<WT_CURSOR>> {
+        uri: &CStr,
+        options: Option<&CStr>,
+    ) -> Result<TypedCursor<'_, K, V>> {
+        let options: Cow<'_, CStr> = if let Some(o) = options {
+            CString::new([o.to_bytes(), b",raw"].concat())
+                .expect("no nulls")
+                .into()
+        } else {
+            c"raw".into()
+        };
         let mut cursorp: *mut WT_CURSOR = std::ptr::null_mut();
         unsafe {
             wt_call!(
@@ -315,11 +273,14 @@ impl Session {
                 open_cursor,
                 uri.as_ptr(),
                 std::ptr::null_mut(),
-                options.map(CStr::as_ptr).unwrap_or(std::ptr::null()),
+                options.as_ptr(),
                 &mut cursorp
             )
         }?;
-        NonNull::new(cursorp).ok_or(Error::generic_error())
+        let inner = NonNull::new(cursorp)
+            .ok_or(Error::generic_error())
+            .map(InnerCursor)?;
+        TypedCursor::new(inner, self)
     }
 
     /// Starts a transaction in this session.
@@ -355,23 +316,31 @@ impl Session {
         unsafe { wt_call!(self.ptr, rollback_transaction, options.as_config_ptr()) }
     }
 
-    /// Create a new table called `table_name` and bulk load entries from `iter`.
+    /// Create a new table `table_name` and bulk load input from `iter` with key format `K` and
+    /// value format `V`.
     ///
-    /// Bulk load requires that `table_name` not exist or be empty and that `iter` yields records in
-    /// order by `key()`.
-    pub fn bulk_load<'a, I>(
+    /// This requires that `table_name` not exist or be empty and that `iter` yields records in
+    /// order by `K` or an error may occur.
+    pub fn bulk_load<K, V, I>(
         &self,
         table_name: &str,
-        options: Option<CreateOptions>,
+        create_options: Option<CreateOptionsBuilder>,
         iter: I,
     ) -> Result<()>
     where
-        I: Iterator<Item = RecordView<'a>>,
+        K: Formatted,
+        V: Formatted,
+        I: Iterator<Item = (K, V)>,
     {
-        self.create_table(table_name, options)?;
-        let mut cursor = self.open_record_cursor_with_options(table_name, Some(c"bulk=true"))?;
-        for record in iter {
-            cursor.set(&record)?;
+        let create_options: CreateOptions = create_options
+            .unwrap_or_default()
+            .key_format::<K>()
+            .value_format::<V>()
+            .into();
+        self.create_table(table_name, Some(create_options))?;
+        let mut cursor = self.new_typed_cursor::<K, V>(table_name, Some(c"bulk"))?;
+        for (k, v) in iter {
+            cursor.set(k.to_formatted_ref(), v.to_formatted_ref())?;
         }
         Ok(())
     }
@@ -398,3 +367,75 @@ impl Drop for Session {
 }
 
 unsafe impl Send for Session {}
+
+/// Owned value produced by a StatCursor.
+#[derive(Debug, Clone)]
+pub struct StatValue {
+    pub description: &'static CStr,
+    pub value_str: CString,
+    pub value: i64,
+}
+
+/// Ref value produced by a StatCursor.
+#[derive(Debug, Copy, Clone)]
+pub struct StatValueRef<'b> {
+    /// Description of this stat.
+    pub description: &'static CStr,
+    /// The value of the stat rendered as a string.
+    pub value_str: &'b CStr,
+    /// The value of the stat coerced to a number if possible.
+    pub value: i64,
+}
+
+impl<'a> From<StatValueRef<'a>> for StatValue {
+    fn from(value: StatValueRef<'a>) -> Self {
+        StatValue {
+            description: value.description,
+            value_str: value.value_str.into(),
+            value: value.value,
+        }
+    }
+}
+
+impl Formatted for StatValue {
+    const FORMAT: FormatString = FormatString::new(c"SSq");
+
+    type Ref<'a> = StatValueRef<'a>;
+
+    fn to_formatted_ref(&self) -> Self::Ref<'_> {
+        StatValueRef {
+            description: self.description,
+            value_str: &self.value_str,
+            value: self.value,
+        }
+    }
+
+    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
+        writer.pack(value.description)?;
+        writer.pack(value.value_str)?;
+        writer.pack(value.value)
+    }
+
+    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
+        let description = {
+            let d: &CStr = reader.unpack()?;
+            // Safety: description strings in wt metadata cursors are statically defined.
+            unsafe { CStr::from_ptr::<'static>(d.as_ptr()) }
+        };
+        let value_str = reader.unpack()?;
+        let value = reader.unpack()?;
+        Ok(StatValueRef {
+            description,
+            value_str,
+            value,
+        })
+    }
+}
+
+pub type RecordCursor<'a> = TypedCursor<'a, i64, Vec<u8>>;
+pub type RecordCursorGuard<'a> = TypedCursorGuard<'a, i64, Vec<u8>>;
+pub type IndexCursor<'a> = TypedCursor<'a, Vec<u8>, Vec<u8>>;
+pub type IndexCursorGuard<'a> = TypedCursorGuard<'a, Vec<u8>, Vec<u8>>;
+pub type MetadataCursor<'a> = TypedCursor<'a, CString, CString>;
+pub type MetadataCursorGuard<'a> = TypedCursorGuard<'a, CString, CString>;
+pub type StatCursor<'a> = TypedCursor<'a, i32, StatValue>;

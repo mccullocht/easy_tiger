@@ -597,6 +597,7 @@ where
     }
 
     fn get_vector(&self, index: usize) -> Cow<'_, [u8]> {
+        // TODO: check if this is correct for normalization
         match self.get_vector_f32(index) {
             Cow::Borrowed(s) => bytemuck::cast_slice(s).into(),
             Cow::Owned(v) => v

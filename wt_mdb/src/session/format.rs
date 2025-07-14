@@ -141,14 +141,14 @@ macro_rules! define_column_value_conversions {
 }
 
 macro_rules! define_column_value_primitive {
-    ($p:ty, $max_len:expr, $match:literal, $elemvar:ident) => {
+    ($p:ty, $max_len:expr, $format_match:literal, $elemvar:ident) => {
         impl<'b> ColumnValue<'b> for $p {
             fn max_len(&self) -> usize {
                 $max_len
             }
 
             fn format_match(format: u8) -> bool {
-                $match.to_bytes().contains(&format)
+                $format_match.to_bytes().contains(&format)
             }
         }
 

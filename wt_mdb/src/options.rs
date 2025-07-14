@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::{FormatString, Formatted};
+use crate::session::{FormatString, Formatted};
 
 pub(crate) trait ConfigurationString {
     fn as_config_string(&self) -> Option<&CStr>;

@@ -186,7 +186,6 @@ impl TableIndex {
 ///
 /// Serialized posting keys should result in entries ordered by centroid_id and then record_id,
 /// allowing each centroid to be read as a contiguous range.
-// TODO: PostingKey should have a Formatter.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PostingKey {
     centroid_id: u32,

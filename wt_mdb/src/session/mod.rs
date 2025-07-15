@@ -18,11 +18,10 @@ use crate::{
         BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
         CreateOptionsBuilder, DropOptions, RollbackTransactionOptions, Statistics,
     },
-    session::format::{FormatWriter, PackedFormatReader},
     wt_call, Error, Result,
 };
 
-pub use format::{FormatString, Formatted};
+pub use format::{ColumnValue, FormatString, FormatWriter, Formatted, PackedFormatReader};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
 const METADATA_URI: &CStr = c"metadata:";
@@ -227,6 +226,15 @@ impl Session {
     /// Get a cached [MetadataCursor] or create a new metadata cursor.
     pub fn get_metadata_cursor(&self) -> Result<MetadataCursorGuard<'_>> {
         self.get_or_create_typed_cursor_uri(METADATA_URI)
+    }
+
+    /// Get a cached typed cursor or create a new typed cursor.
+    pub fn get_or_create_typed_cursor<K: Formatted, V: Formatted>(
+        &self,
+        table_name: &str,
+    ) -> Result<TypedCursorGuard<'_, K, V>> {
+        let table_uri = table_uri(table_name);
+        self.get_or_create_typed_cursor_uri(&table_uri)
     }
 
     // NB: this doesn't accept options because we don't check options when serving from the cache.

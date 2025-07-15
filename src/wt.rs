@@ -4,9 +4,11 @@
 //! is recommeded that callers begin a transaction before performing their search or mutation
 //! and commit or rollback the transaction when they are done.
 
-use std::{borrow::Cow, io, sync::Arc};
+use std::{borrow::Cow, ffi::CString, io, sync::Arc};
 
+use rustix::io::Errno;
 use wt_mdb::{
+    config::{ConfigItem, ConfigParser},
     options::{CreateOptions, DropOptions},
     Connection, Error, RecordCursorGuard, Result, Session, WiredTigerError,
 };
@@ -19,6 +21,33 @@ use crate::graph::{
 pub const ENTRY_POINT_KEY: i64 = -1;
 /// Key in the graph table containing configuration.
 pub const CONFIG_KEY: i64 = -2;
+
+fn read_app_metadata_internal(session: &Session, table_name: &str) -> Result<String> {
+    let mut cursor = session.open_metadata_cursor()?;
+    let metadata = cursor
+        .seek_exact(&CString::new([b"table:", table_name.as_bytes()].concat()).expect("no nulls"))
+        .ok_or(Error::not_found_error())??;
+    let mut parser = ConfigParser::new(metadata.to_bytes())?;
+    if let ConfigItem::Struct(app_metadata) = parser
+        .get("app_metadata")
+        .ok_or(Error::not_found_error())??
+    {
+        Ok(app_metadata.to_owned())
+    } else {
+        Err(Error::Errno(Errno::INVAL))
+    }
+}
+
+/// Read the `app_metadata` config field associated with the named table.
+///
+/// Returns `None` if table or app_metadata config field could not be found.
+pub fn read_app_metadata(session: &Session, table_name: &str) -> Option<Result<String>> {
+    match read_app_metadata_internal(session, table_name) {
+        Ok(m) => Some(Ok(m)),
+        Err(e) if e == Error::not_found_error() => None,
+        Err(e) => Some(Err(e)),
+    }
+}
 
 /// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
 // TODO: perhaps instead of returning this wrapper we should just return an iterator?

@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
-    Connection, Error, IndexCursorGuard, RecordCursorGuard, Result, Session, WiredTigerError,
+    session::{FormatString, FormatWriter, Formatted, PackedFormatReader},
+    Connection, Error, RecordCursorGuard, Result, Session, TypedCursorGuard,
 };
 
 use crate::{
@@ -25,7 +26,7 @@ use crate::{
     input::{VecVectorStore, VectorStore},
     quantization::{Quantizer, VectorQuantizer},
     search::{GraphSearchStats, GraphSearcher},
-    wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
+    wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };
 
@@ -63,10 +64,6 @@ impl TableNames {
         [self.centroids.as_str(), self.raw_vectors.as_str()].into_iter()
     }
 
-    fn index_table_names(&self) -> impl Iterator<Item = &str> {
-        [self.postings.as_str()].into_iter()
-    }
-
     fn all_names(&self) -> impl Iterator<Item = &str> {
         [
             self.postings.as_str(),
@@ -102,15 +99,12 @@ impl TableIndex {
 
         let table_names = TableNames::from_index_name(index_name);
         let session = connection.open_session()?;
-        let mut cursor = session.open_record_cursor(&table_names.centroids)?;
-        let config_json = unsafe { cursor.seek_exact_unsafe(-1) }
-            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-        let config: IndexConfig = serde_json::from_slice(config_json)?;
-
+        let raw_config_json =
+            read_app_metadata(&session, &table_names.postings).ok_or(Error::not_found_error())??;
         Ok(Self {
             head,
             table_names,
-            config,
+            config: serde_json::from_str(&raw_config_json)?,
         })
     }
 
@@ -154,19 +148,16 @@ impl TableIndex {
                 ),
             )?;
         }
-        for table_name in table_names.index_table_names() {
-            session.create_table(
-                table_name,
-                Some(
-                    CreateOptionsBuilder::default()
-                        .key_format::<Vec<u8>>()
-                        .value_format::<Vec<u8>>()
-                        .into(),
-                ),
-            )?;
-        }
-        let mut cursor = session.open_record_cursor(&table_names.centroids)?;
-        cursor.set(-1, &serde_json::to_vec(&spann_config)?)?;
+        session.create_table(
+            &table_names.postings,
+            Some(
+                CreateOptionsBuilder::default()
+                    .key_format::<PostingKey>()
+                    .value_format::<Vec<u8>>()
+                    .app_metadata(&serde_json::to_string(&spann_config)?)
+                    .into(),
+            ),
+        )?;
         Ok(Self {
             head,
             table_names,
@@ -195,41 +186,49 @@ impl TableIndex {
 ///
 /// Serialized posting keys should result in entries ordered by centroid_id and then record_id,
 /// allowing each centroid to be read as a contiguous range.
-// TODO: PostingKey should have a Formatter.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PostingKey {
     centroid_id: u32,
     record_id: i64,
 }
 
 impl PostingKey {
+    fn new(centroid_id: u32, record_id: i64) -> Self {
+        Self {
+            centroid_id,
+            record_id,
+        }
+    }
+
     fn for_centroid(centroid_id: u32) -> Self {
         Self {
             centroid_id,
             record_id: 0,
         }
     }
-
-    fn into_key(self) -> [u8; 12] {
-        <[u8; 12]>::from(self)
-    }
 }
 
-impl From<[u8; 12]> for PostingKey {
-    fn from(value: [u8; 12]) -> Self {
-        let (c, r) = value.as_ref().split_at(std::mem::size_of::<u32>());
-        PostingKey {
-            centroid_id: u32::from_be_bytes(c.try_into().expect("centroid_id")),
-            record_id: i64::from_be_bytes(r.try_into().expect("record_id")),
-        }
-    }
-}
+impl Formatted for PostingKey {
+    const FORMAT: FormatString = FormatString::new(c"iq");
 
-impl From<PostingKey> for [u8; 12] {
-    fn from(value: PostingKey) -> Self {
-        let mut bytes = [0u8; 12];
-        bytes[..std::mem::size_of::<u32>()].copy_from_slice(&value.centroid_id.to_be_bytes());
-        bytes[std::mem::size_of::<u32>()..].copy_from_slice(&value.record_id.to_be_bytes());
-        bytes
+    type Ref<'a> = Self;
+
+    fn to_formatted_ref(&self) -> Self::Ref<'_> {
+        *self
+    }
+
+    fn pack(writer: &mut impl FormatWriter, value: &PostingKey) -> Result<()> {
+        writer.pack(value.centroid_id)?;
+        writer.pack(value.record_id)
+    }
+
+    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
+        let centroid_id = reader.unpack()?;
+        let record_id = reader.unpack()?;
+        Ok(Self {
+            centroid_id,
+            record_id,
+        })
     }
 }
 
@@ -296,12 +295,10 @@ impl SessionIndexWriter {
         // error but would also require quantizing the vector for each centroid during search and
         // would complicate de-duplication (would have to accept best score).
         for centroid_id in centroid_ids.iter().copied() {
-            let key: [u8; 12] = PostingKey {
-                centroid_id,
-                record_id,
-            }
-            .into();
-            posting_cursor.set(key.as_slice(), quantized.as_slice())?;
+            posting_cursor.set(
+                PostingKey::new(centroid_id, record_id),
+                quantized.as_slice(),
+            )?;
         }
 
         Ok(centroid_ids)
@@ -319,10 +316,10 @@ impl SessionIndexWriter {
         Ok(())
     }
 
-    fn posting_cursor(&self) -> Result<IndexCursorGuard<'_>> {
+    fn posting_cursor(&self) -> Result<TypedCursorGuard<'_, PostingKey, Vec<u8>>> {
         self.head_reader
             .session()
-            .get_index_cursor(&self.index.table_names.postings)
+            .get_or_create_typed_cursor(&self.index.table_names.postings)
     }
 
     fn centroid_cursor(&self) -> Result<RecordCursorGuard<'_>> {
@@ -385,28 +382,25 @@ impl SessionIndexWriter {
     fn remove_postings(
         centroid_ids: Vec<u32>,
         record_id: i64,
-        cursor: &mut IndexCursorGuard<'_>,
+        cursor: &mut TypedCursorGuard<'_, PostingKey, Vec<u8>>,
     ) -> Result<()> {
         for centroid_id in centroid_ids {
-            let key: [u8; 12] = PostingKey {
-                centroid_id,
-                record_id,
-            }
-            .into();
-            cursor.remove(key.as_slice()).or_else(|e| {
-                if e == Error::not_found_error() {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })?;
+            cursor
+                .remove(PostingKey::new(centroid_id, record_id))
+                .or_else(|e| {
+                    if e == Error::not_found_error() {
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                })?;
         }
-        todo!()
+        Ok(())
     }
 }
 
 struct PostingIter<'a, 'b, 'c, 'd> {
-    cursor: IndexCursorGuard<'a>,
+    cursor: TypedCursorGuard<'a, PostingKey, Vec<u8>>,
     seen: &'b mut HashSet<i64>,
     query: &'c [u8],
     distance_fn: &'d dyn VectorDistance,
@@ -425,12 +419,11 @@ impl<'a, 'b, 'c, 'd> PostingIter<'a, 'b, 'c, 'd> {
         // I _think_ wt copies bounds so we should be cool with temporaries here.
         let mut cursor = reader
             .session()
-            .get_index_cursor(&reader.index().table_names.postings)?;
+            .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
+                &reader.index().table_names.postings,
+            )?;
         cursor.set_bounds(
-            PostingKey::for_centroid(centroid_id).into_key().as_slice()
-                ..PostingKey::for_centroid(centroid_id + 1)
-                    .into_key()
-                    .as_slice(),
+            PostingKey::for_centroid(centroid_id)..PostingKey::for_centroid(centroid_id + 1),
         )?;
         Ok(Self {
             cursor,
@@ -452,13 +445,10 @@ impl Iterator for PostingIter<'_, '_, '_, '_> {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(record_result) = unsafe { self.cursor.next_unsafe() } {
             self.read += 1;
-            let (raw_key, vector) = match record_result {
-                Ok((k, v)) => (k, v),
+            let (record_id, vector) = match record_result {
+                Ok((k, v)) => (k.record_id, v),
                 Err(e) => return Some(Err(e)),
             };
-            let record_id =
-                PostingKey::from(<[u8; 12]>::try_from(raw_key).expect("12-byte posting key"))
-                    .record_id;
             if self.seen.insert(record_id) {
                 let dist = self.distance_fn.distance(self.query, vector);
                 return Some(Ok(Neighbor::new(record_id, dist)));

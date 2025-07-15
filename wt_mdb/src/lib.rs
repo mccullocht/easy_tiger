@@ -9,7 +9,7 @@
 pub mod config;
 mod connection;
 pub mod options;
-mod session;
+pub mod session;
 
 use rustix::io::Errno;
 use wt_sys::wiredtiger_strerror;
@@ -126,8 +126,8 @@ impl From<Error> for std::io::Error {
 
 pub use connection::Connection;
 pub use session::{
-    FormatString, Formatted, IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard,
-    Session, StatCursor, TypedCursor, TypedCursorGuard,
+    IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, Session, StatCursor,
+    TypedCursor, TypedCursorGuard,
 };
 pub type Result<T> = std::result::Result<T, Error>;
 

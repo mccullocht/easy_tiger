@@ -15,20 +15,21 @@ use crate::{make_result, map_not_found, wt_call, Error, Result};
 /// If random access is used, iteration behavior is not well defined.
 pub struct ConfigParser<'a> {
     ptr: NonNull<wt_sys::WT_CONFIG_PARSER>,
-    config: &'a str,
+    config: &'a [u8],
 }
 
 impl<'a> ConfigParser<'a> {
     /// Create a new config parser.
     ///
     /// Errors that occur will be logged to stderr.
-    pub fn new(config: &'a str) -> Result<Self> {
+    pub fn new<R: AsRef<[u8]> + ?Sized>(config: &'a R) -> Result<Self> {
+        let config = config.as_ref();
         let mut handle: *mut WT_CONFIG_PARSER = std::ptr::null_mut();
         make_result(
             unsafe {
                 wt_sys::wiredtiger_config_parser_open(
                     std::ptr::null_mut(),
-                    config.as_bytes().as_ptr() as *const c_char,
+                    config.as_ptr() as *const c_char,
                     config.len(),
                     &mut handle,
                 )
@@ -41,13 +42,13 @@ impl<'a> ConfigParser<'a> {
     }
 
     /// Return the config string being parsed.
-    pub fn config_str(&self) -> &'a str {
+    pub fn config_str(&self) -> &'a [u8] {
         self.config
     }
 
-    pub fn get(&mut self, key: &str) -> Option<Result<ConfigItem<'a>>> {
+    pub fn get(&mut self, key: impl Into<Vec<u8>>) -> Option<Result<ConfigItem<'a>>> {
         // NB: WT expects a null terminated string.
-        let key = CString::new(key.to_string()).expect("key doesn't contain nulls");
+        let key = CString::new(key.into()).expect("key doesn't contain nulls");
         let mut item = ConfigItem::default_wt_item();
         map_not_found(
             unsafe { wt_call!(self.ptr, get, key.as_ptr(), &mut item) }

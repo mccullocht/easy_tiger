@@ -5,7 +5,6 @@
 
 use std::{
     collections::{BinaryHeap, HashSet},
-    ffi::CString,
     io,
     iter::FusedIterator,
     num::NonZero,
@@ -16,7 +15,6 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use wt_mdb::{
-    config::{ConfigItem, ConfigParser},
     options::{CreateOptionsBuilder, DropOptions},
     session::{FormatString, FormatWriter, Formatted, PackedFormatReader},
     Connection, Error, RecordCursorGuard, Result, Session, TypedCursorGuard,
@@ -28,7 +26,7 @@ use crate::{
     input::{VecVectorStore, VectorStore},
     quantization::{Quantizer, VectorQuantizer},
     search::{GraphSearchStats, GraphSearcher},
-    wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
+    wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };
 
@@ -101,26 +99,13 @@ impl TableIndex {
 
         let table_names = TableNames::from_index_name(index_name);
         let session = connection.open_session()?;
-        let mut cursor = session.open_metadata_cursor()?;
-        let metadata = cursor
-            .seek_exact(
-                &CString::new([b"table:", table_names.postings.as_bytes()].concat())
-                    .expect("no nulls"),
-            )
-            .ok_or(Error::not_found_error())??;
-        let mut parser = ConfigParser::new(metadata.to_bytes())?;
-        if let ConfigItem::Struct(raw_config_json) = parser
-            .get("app_metadata")
-            .ok_or(Error::not_found_error())??
-        {
-            Ok(Self {
-                head,
-                table_names,
-                config: serde_json::from_str(raw_config_json)?,
-            })
-        } else {
-            Err(Error::not_found_error().into())
-        }
+        let raw_config_json =
+            read_app_metadata(&session, &table_names.postings).ok_or(Error::not_found_error())??;
+        Ok(Self {
+            head,
+            table_names,
+            config: serde_json::from_str(&raw_config_json)?,
+        })
     }
 
     pub fn from_init(

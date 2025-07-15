@@ -75,7 +75,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         }
     }
 
-    pub fn session(&self) -> &Session {
+    pub fn session(&self) -> &'a Session {
         self.session
     }
 

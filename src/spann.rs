@@ -5,6 +5,7 @@
 
 use std::{
     collections::{BinaryHeap, HashSet},
+    ffi::CString,
     io,
     iter::FusedIterator,
     num::NonZero,
@@ -15,9 +16,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use wt_mdb::{
+    config::{ConfigItem, ConfigParser},
     options::{CreateOptionsBuilder, DropOptions},
     session::{FormatString, FormatWriter, Formatted, PackedFormatReader},
-    Connection, Error, RecordCursorGuard, Result, Session, TypedCursorGuard, WiredTigerError,
+    Connection, Error, RecordCursorGuard, Result, Session, TypedCursorGuard,
 };
 
 use crate::{
@@ -99,16 +101,26 @@ impl TableIndex {
 
         let table_names = TableNames::from_index_name(index_name);
         let session = connection.open_session()?;
-        let mut cursor = session.open_record_cursor(&table_names.centroids)?;
-        let config_json = unsafe { cursor.seek_exact_unsafe(-1) }
-            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-        let config: IndexConfig = serde_json::from_slice(config_json)?;
-
-        Ok(Self {
-            head,
-            table_names,
-            config,
-        })
+        let mut cursor = session.open_metadata_cursor()?;
+        let metadata = cursor
+            .seek_exact(
+                &CString::new([b"table:", table_names.postings.as_bytes()].concat())
+                    .expect("no nulls"),
+            )
+            .ok_or(Error::not_found_error())??;
+        let mut parser = ConfigParser::new(metadata.to_bytes())?;
+        if let ConfigItem::Struct(raw_config_json) = parser
+            .get("app_metadata")
+            .ok_or(Error::not_found_error())??
+        {
+            Ok(Self {
+                head,
+                table_names,
+                config: serde_json::from_str(raw_config_json)?,
+            })
+        } else {
+            Err(Error::not_found_error().into())
+        }
     }
 
     pub fn from_init(
@@ -161,9 +173,6 @@ impl TableIndex {
                     .into(),
             ),
         )?;
-        // XXX write this into the postings table???
-        let mut cursor = session.open_record_cursor(&table_names.centroids)?;
-        cursor.set(-1, &serde_json::to_vec(&spann_config)?)?;
         Ok(Self {
             head,
             table_names,

@@ -221,7 +221,7 @@ impl From<CreateOptionsBuilder> for CreateOptions {
             format!("value_format={}", value.value_format.format_str()),
         ];
         if let Some(metadata) = value.app_metadata {
-            parts.push(metadata);
+            parts.push(format!("app_metadata={metadata}"));
         }
         Self(CString::new(parts.join(",")).expect("no nulls"))
     }

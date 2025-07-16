@@ -211,7 +211,7 @@ impl PostingKey {
 }
 
 impl Formatted for PostingKey {
-    const FORMAT: FormatString = FormatString::new(c"iq");
+    const FORMAT: FormatString = FormatString::new(c"Iq");
 
     type Ref<'a> = Self;
 

@@ -176,6 +176,64 @@ impl VectorDistance for I8NaiveDistance {
     }
 }
 
+struct I8NonUniformNaiveVector<'a> {
+    magnitude: f32,
+    vector: &'a [i8],
+}
+
+impl I8NonUniformNaiveVector<'_> {
+    fn dequantized(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
+        self.vector.iter().map(|d| *d as f32 * self.magnitude)
+    }
+}
+
+impl<'a> From<&'a [u8]> for I8NonUniformNaiveVector<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        let (magnitude, vector) = value.split_at(4);
+        Self {
+            magnitude: f32::from_le_bytes(magnitude.try_into().expect("4 bytes")),
+            vector: bytemuck::cast_slice(vector),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I8NonUniformNaiveDotProduct;
+
+impl VectorDistance for I8NonUniformNaiveDotProduct {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        // TODO: if we had a formal query distance abstraction we could use the original query
+        // vector or at least avoid dequantizing the query so many times.
+        let query = I8NonUniformNaiveVector::from(query);
+        let doc = I8NonUniformNaiveVector::from(doc);
+        query
+            .dequantized()
+            .zip(doc.dequantized())
+            .map(|(q, d)| q * d)
+            .sum::<f32>() as f64
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I8NonUniformNaiveEuclidean;
+
+impl VectorDistance for I8NonUniformNaiveEuclidean {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        // TODO: if we had a formal query distance abstraction we could use the original query
+        // vector or at least avoid dequantizing the query so many times.
+        let query = I8NonUniformNaiveVector::from(query);
+        let doc = I8NonUniformNaiveVector::from(doc);
+        query
+            .dequantized()
+            .zip(doc.dequantized())
+            .map(|(q, d)| {
+                let delta = q - d;
+                delta * delta
+            })
+            .sum::<f32>() as f64
+    }
+}
+
 #[inline(always)]
 pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
     use simsimd::BinarySimilarity;

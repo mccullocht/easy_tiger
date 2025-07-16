@@ -4,7 +4,7 @@ use crate::{
     input::VectorStore,
     search::GraphSearcher,
     spann::{select_centroids, PostingKey, TableIndex},
-    wt::SessionGraphVectorIndexReader,
+    wt::{encode_raw_vector, SessionGraphVectorIndexReader},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
@@ -107,6 +107,30 @@ pub fn bulk_load_postings(
     for pk in posting_keys {
         let quantized = quantizer.for_doc(&vectors[pk.record_id as usize]);
         bulk_cursor.insert(pk, &quantized)?;
+        progress(1);
+    }
+    Ok(())
+}
+
+/// Bulk load raw vector data into the raw vectors table for re-ranking.
+pub fn bulk_load_raw_vectors(
+    index: &TableIndex,
+    session: &Session,
+    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    limit: usize,
+    progress: (impl Fn(u64) + Send + Sync),
+) -> Result<()> {
+    let distance = index.head_config().config().new_distance_function();
+    let mut bulk_cursor = session.new_bulk_load_cursor::<i64, Vec<u8>>(
+        &index.table_names.raw_vectors,
+        Some(
+            CreateOptionsBuilder::default()
+                .app_metadata(&serde_json::to_string(&index.config).unwrap()),
+        ),
+    )?;
+    for (record_id, vector) in vectors.iter().enumerate().take(limit) {
+        let vector = distance.normalize(vector.into());
+        bulk_cursor.insert(record_id as i64, &encode_raw_vector(vector.as_ref()))?;
         progress(1);
     }
     Ok(())

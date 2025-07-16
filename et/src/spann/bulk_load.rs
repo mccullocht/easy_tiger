@@ -9,7 +9,9 @@ use easy_tiger::{
     kmeans::{iterative_balanced_kmeans, Params},
     quantization::VectorQuantizer,
     spann::{
-        bulk::{assign_to_centroids, bulk_load_centroids, bulk_load_postings},
+        bulk::{
+            assign_to_centroids, bulk_load_centroids, bulk_load_postings, bulk_load_raw_vectors,
+        },
         IndexConfig, TableIndex,
     },
 };
@@ -216,14 +218,20 @@ pub fn bulk_load(
         }
     }
 
+    let session = connection.open_session()?;
+    {
+        let progress = progress_bar(limit, "tail load raw vectors");
+        bulk_load_raw_vectors(index.as_ref(), &session, &f32_vectors, limit, |i| {
+            progress.inc(i)
+        })?
+    }
+
     let centroid_assignments = {
         let progress = progress_bar(limit, "tail assign centroids");
         assign_to_centroids(index.as_ref(), &connection, &f32_vectors, limit, |i| {
             progress.inc(i)
         })?
     };
-
-    let session = connection.open_session()?;
     {
         let progress = progress_bar(limit, "tail load centroids");
         bulk_load_centroids(index.as_ref(), &session, &centroid_assignments, |i| {
@@ -232,7 +240,8 @@ pub fn bulk_load(
     }
 
     {
-        let progress = progress_bar(limit, "tail load postings");
+        let posting_count = centroid_assignments.iter().map(|c| c.len()).sum::<usize>();
+        let progress = progress_bar(posting_count, "tail load postings");
         bulk_load_postings(
             index.as_ref(),
             &session,

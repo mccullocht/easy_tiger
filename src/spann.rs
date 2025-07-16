@@ -383,7 +383,7 @@ fn select_centroids(
 
     let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
     let mut centroids =
-        VecVectorStore::with_capacity(head_reader.config().dimensions.get(), replica_count);
+        VecVectorStore::with_capacity(head_reader.config().dimensions.get() * 4, replica_count);
     for candidate in candidates {
         if centroid_ids.len() >= replica_count {
             break;

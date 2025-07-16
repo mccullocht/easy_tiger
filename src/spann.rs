@@ -3,7 +3,7 @@
 //! This implemented by clustering the input dataset and building a graph-based index over the
 //! select centroids. This index is used to build and navigate a posting index.
 
-mod bulk;
+pub mod bulk;
 
 use std::{
     collections::{BinaryHeap, HashSet},

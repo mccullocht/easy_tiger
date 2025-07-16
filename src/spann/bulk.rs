@@ -8,7 +8,7 @@ use crate::{
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{Connection, Result, Session};
+use wt_mdb::{options::CreateOptionsBuilder, Connection, Result, Session};
 
 /// Assign all the vectors to one or more centroids in the head index. This performs the same search
 /// and pruning as [`super::SessionIndexWriter`] does.
@@ -16,13 +16,13 @@ pub fn assign_to_centroids(
     index: &TableIndex,
     connection: &Arc<Connection>,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
-    limit: Option<usize>,
-    progress: &(impl Fn(u64) + Send + Sync),
+    limit: usize,
+    progress: (impl Fn(u64) + Send + Sync),
 ) -> Result<Vec<Vec<u32>>> {
     let tl_head_reader = ThreadLocal::new();
     let tl_searcher = ThreadLocal::new();
     let distance_fn = index.head_config().config().new_distance_function();
-    (0..limit.unwrap_or(vectors.len()))
+    (0..limit)
         .into_par_iter()
         .map(|i| {
             let mut head_reader = tl_head_reader
@@ -49,25 +49,27 @@ pub fn assign_to_centroids(
         .collect::<Result<Vec<_>>>()
 }
 
-// XXX need to upload record -> centroid information
-
-/// Compute the sorted list of [`super::PostingKey`]s from centroid assignments.
-pub fn compute_posting_keys(assignments: Vec<Vec<u32>>) -> Vec<PostingKey> {
-    let mut keys: Vec<PostingKey> = assignments
-        .into_par_iter()
-        .enumerate()
-        .flat_map_iter(|(i, a)| {
-            a.into_iter().map(move |c| PostingKey {
-                centroid_id: c,
-                record_id: i as i64,
-            })
-        })
-        .collect();
-    keys.par_sort_unstable();
-    keys
+/// Load all centroid assignments into a record id keyed table.
+pub fn bulk_load_centroids(
+    index: &TableIndex,
+    session: &Session,
+    centroid_assignments: &[Vec<u32>],
+    progress: (impl Fn(u64) + Send + Sync),
+) -> Result<()> {
+    let mut bulk_cursor =
+        session.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.centroids, None)?;
+    let mut centroid_buf =
+        Vec::with_capacity(std::mem::size_of::<u32>() * index.config().replica_count);
+    for (record_id, centroids) in centroid_assignments.iter().enumerate() {
+        centroid_buf.clear();
+        for cid in centroids {
+            centroid_buf.extend_from_slice(&cid.to_le_bytes());
+        }
+        bulk_cursor.insert(record_id as i64, &centroid_buf)?;
+        progress(1);
+    }
+    Ok(())
 }
-
-// XXX move assignment stats computation here.
 
 /// Bulk load entries for each of the posting keys into the database.
 ///
@@ -75,16 +77,37 @@ pub fn compute_posting_keys(assignments: Vec<Vec<u32>>) -> Vec<PostingKey> {
 /// it into a table. Bulk upload ensures that all posting entries belonging to each centroid appear
 /// contiguously on disk, whereas iterative insertion may "split up" a centroid as it splits leaf
 /// pages. Bulk uploading also avoids checkpointing.
-///
-/// REQUIRES: `posting_keys.is_sorted()``
-pub fn bulk_load_postings<V: VectorStore<Elem = f32> + Send + Sync>(
+pub fn bulk_load_postings(
     index: &TableIndex,
     session: &Session,
-    posting_keys: Vec<PostingKey>,
-    vectors: &V,
-    limit: Option<usize>,
+    centroid_assignments: &[Vec<u32>],
+    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    progress: (impl Fn(u64) + Send + Sync),
 ) -> Result<()> {
+    let mut posting_keys: Vec<PostingKey> = centroid_assignments
+        .into_par_iter()
+        .enumerate()
+        .flat_map_iter(|(i, a)| {
+            a.iter().map(move |c| PostingKey {
+                centroid_id: *c,
+                record_id: i as i64,
+            })
+        })
+        .collect();
+    posting_keys.par_sort_unstable();
+
     let quantizer = index.config().quantizer.new_quantizer();
-    // XXX I can't bulk load an index table FML.
-    todo!()
+    let mut bulk_cursor = session.new_bulk_load_cursor::<PostingKey, Vec<u8>>(
+        &index.table_names.postings,
+        Some(
+            CreateOptionsBuilder::default()
+                .app_metadata(&serde_json::to_string(&index.config).unwrap()),
+        ),
+    )?;
+    for pk in posting_keys {
+        let quantized = quantizer.for_doc(&vectors[pk.record_id as usize]);
+        bulk_cursor.insert(pk, &quantized)?;
+        progress(1);
+    }
+    Ok(())
 }

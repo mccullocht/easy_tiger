@@ -1,4 +1,4 @@
-use std::{cell::RefCell, fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
+use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
@@ -8,12 +8,13 @@ use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     kmeans::{iterative_balanced_kmeans, Params},
     quantization::VectorQuantizer,
-    spann::{IndexConfig, SessionIndexWriter, TableIndex},
+    spann::{
+        bulk::{assign_to_centroids, bulk_load_centroids, bulk_load_postings},
+        IndexConfig, TableIndex,
+    },
 };
 use histogram::Histogram;
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
-use rayon::prelude::*;
-use thread_local::ThreadLocal;
 use wt_mdb::{options::DropOptionsBuilder, Connection};
 
 use crate::ui::{progress_bar, progress_spinner};
@@ -82,7 +83,7 @@ pub struct BulkLoadArgs {
     head_rerank_edges: Option<usize>,
 
     /// If set replace each head centroid with a representative mediod.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     head_use_mediods: bool,
 
     /// Maximum number of replica centroids to assign each vector to.
@@ -215,41 +216,36 @@ pub fn bulk_load(
         }
     }
 
-    // TODO: consider writing a dedicated bulk loader. The bulk loader should at least do the raw
-    // vectors to avoid writing to the checkpoint.
-    // XXX this also results in poor locality - splitting a centroid might result in data in two
-    // different locations. options are to either assign then bulk load in (centroid,record_id)
-    // order _or_ to write a collection for each centroid (too many files)
-    let (inserted, assignment_stats) = {
-        let tl_writer: ThreadLocal<RefCell<SessionIndexWriter>> = ThreadLocal::new();
-        let progress = progress_bar(limit, "postings index");
-        let assignment_stats = (0..limit)
-            .into_par_iter()
-            .map(|i| {
-                let mut writer = tl_writer
-                    .get_or_try(|| {
-                        connection
-                            .open_session()
-                            .map(|s| RefCell::new(SessionIndexWriter::new(index.clone(), s)))
-                    })?
-                    .borrow_mut();
-                writer.session().begin_transaction(None)?;
-                let inserted = writer.upsert(i as i64, &f32_vectors[i])?;
-                writer.session().commit_transaction(None)?;
-                progress.inc(1);
-                Ok::<_, wt_mdb::Error>(inserted)
-            })
-            .try_fold(
-                || CentroidAssignmentStats::new(centroids_len),
-                |stats, r| r.map(|c| stats.fold(&c)),
-            )
-            .try_reduce(
-                || CentroidAssignmentStats::new(centroids_len),
-                CentroidAssignmentStats::reduce,
-            )?;
-        let inserted = assignment_stats.total_assigned();
-        (inserted, assignment_stats)
+    let centroid_assignments = {
+        let progress = progress_bar(limit, "assign centroids");
+        assign_to_centroids(index.as_ref(), &connection, &f32_vectors, limit, |i| {
+            progress.inc(i)
+        })?
     };
+
+    let session = connection.open_session()?;
+    {
+        let progress = progress_bar(limit, "load centroids");
+        bulk_load_centroids(index.as_ref(), &session, &centroid_assignments, |i| {
+            progress.inc(i)
+        })?;
+    }
+
+    {
+        let progress = progress_bar(limit, "load postings");
+        bulk_load_postings(
+            index.as_ref(),
+            &session,
+            &centroid_assignments,
+            &f32_vectors,
+            |i| progress.inc(i),
+        )?;
+    }
+
+    let mut stats = CentroidAssignmentStats::new(centroids_len);
+    for assignments in centroid_assignments.iter() {
+        stats.add(&assignments);
+    }
 
     println!(
         "Head contains {} centroids ({:4.2}%)",
@@ -258,18 +254,16 @@ pub fn bulk_load(
     );
     println!(
         "Inserted {} tail posting entries (avg {:4.2})",
-        inserted,
-        inserted as f64 / limit as f64
+        stats.total_assigned(),
+        stats.total_assigned() as f64 / limit as f64
     );
     if args.print_tail_assignment_stats {
         println!("Primary assignments per centroid:");
-        CentroidAssignmentStats::print_histogram(assignment_stats.primary_assignment_histogram())?;
+        CentroidAssignmentStats::print_histogram(stats.primary_assignment_histogram())?;
         println!("Secondary assignments per centroid:");
-        CentroidAssignmentStats::print_histogram(
-            assignment_stats.secondary_assignment_histogram(),
-        )?;
+        CentroidAssignmentStats::print_histogram(stats.secondary_assignment_histogram())?;
         println!("Total assignments per centroid:");
-        CentroidAssignmentStats::print_histogram(assignment_stats.total_assignment_histogram())?;
+        CentroidAssignmentStats::print_histogram(stats.total_assignment_histogram())?;
     }
 
     Ok(())
@@ -288,24 +282,13 @@ impl CentroidAssignmentStats {
         }
     }
 
-    pub fn fold(mut self, centroids: &[u32]) -> Self {
+    pub fn add(&mut self, centroids: &[u32]) {
         if let Some((primary, secondaries)) = centroids.split_first() {
             self.primary[*primary as usize] += 1;
             for s in secondaries {
                 self.secondary[*s as usize] += 1;
             }
         }
-        self
-    }
-
-    pub fn reduce(mut a: Self, b: Self) -> wt_mdb::Result<Self> {
-        for (a, b) in a.primary.iter_mut().zip(b.primary.iter()) {
-            *a += *b;
-        }
-        for (a, b) in a.secondary.iter_mut().zip(b.secondary.iter()) {
-            *a += *b;
-        }
-        Ok(a)
     }
 
     pub fn total_assigned(&self) -> usize {

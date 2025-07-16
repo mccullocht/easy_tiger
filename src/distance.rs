@@ -4,7 +4,7 @@ use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
-/// Distance function for quantized vectors.
+/// Distance function for coded vectors.
 ///
 /// This trait is object-safe; it may be instantiated at runtime based on
 /// data that appears in a file or other backing store.
@@ -33,6 +33,12 @@ pub trait F32VectorDistance: VectorDistance {
     fn normalize<'a>(&self, vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
         vector
     }
+}
+
+/// Compute the distance between a fixed vector provided at creation time and other vectors.
+/// This is often useful in query flows where everything references a specific point.
+pub trait QueryVectorDistance: Send + Sync {
+    fn distance(&self, vector: &[u8]) -> f64;
 }
 
 /// Functions used for computing a similarity score for high fidelity vectors.
@@ -250,6 +256,7 @@ pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 unsafe fn load_f32x4_le(p: *const u8) -> core::arch::aarch64::float32x4_t {
+    // XXX use cfg!(target+endian = "big") and byte swap
     core::arch::aarch64::vld1q_f32(p as *const f32)
 }
 

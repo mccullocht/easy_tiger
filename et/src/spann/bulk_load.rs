@@ -217,7 +217,7 @@ pub fn bulk_load(
     }
 
     let centroid_assignments = {
-        let progress = progress_bar(limit, "assign centroids");
+        let progress = progress_bar(limit, "tail assign centroids");
         assign_to_centroids(index.as_ref(), &connection, &f32_vectors, limit, |i| {
             progress.inc(i)
         })?
@@ -225,14 +225,14 @@ pub fn bulk_load(
 
     let session = connection.open_session()?;
     {
-        let progress = progress_bar(limit, "load centroids");
+        let progress = progress_bar(limit, "tail load centroids");
         bulk_load_centroids(index.as_ref(), &session, &centroid_assignments, |i| {
             progress.inc(i)
         })?;
     }
 
     {
-        let progress = progress_bar(limit, "load postings");
+        let progress = progress_bar(limit, "tail load postings");
         bulk_load_postings(
             index.as_ref(),
             &session,

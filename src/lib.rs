@@ -16,6 +16,7 @@ pub mod quantization;
 pub mod query_distance;
 pub mod search;
 pub mod spann;
+pub mod vectors;
 pub mod wt;
 
 /// `Neighbor` is a node and a distance relative to some other node.

@@ -7,8 +7,8 @@ use std::{io, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 use crate::distance::{
-    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, I8NonUniformNaiveDotProduct,
-    I8NonUniformNaiveEuclidean, VectorDistance, VectorSimilarity,
+    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, I8ScaledUniformDotProduct,
+    I8ScaledUniformEuclidean, VectorDistance, VectorSimilarity,
 };
 
 /// `Quantizer` is used to perform lossy quantization of input vectors.
@@ -42,14 +42,16 @@ pub enum VectorQuantizer {
     /// Reduces each dimension to an 8-bit integer.
     /// This implementation does not train on any input to decide how to quantize.
     I8Naive,
-    /// Reduces each dimension to an 8-bit integer but shaped to the input vector.
+    /// Reduces each dimension to an 8-bit integer but shaped to the input vector with uniform
+    /// scaling across all dimensions.
     ///
-    /// Like i8naive this normalizes the input vector but it also uses the maximum magnitude across
-    /// all input dimensions to bound the quantization rather than [-1,1]. This representation still
-    /// allows computing distance on the quantized representation for both l2 and angular distance.
+    /// The maximum magnitude across all dimensions is used in scaling rather than l2 normalizing
+    /// the vector and bounding by [-1,1], which greatly reduces loss. This quantization scheme
+    /// works pretty well on transformer models where all values are in roughly the same range.
+    /// Scoring can be performed directly on the quantized representation.
     ///
     /// This implementation does _not_ train on a sample of the dataset to decide parameters.
-    I8NonUniformNaive,
+    I8ScaledUniform,
 }
 
 impl VectorQuantizer {
@@ -59,7 +61,7 @@ impl VectorQuantizer {
             Self::Binary => Box::new(BinaryQuantizer),
             Self::AsymmetricBinary { n } => Box::new(AsymmetricBinaryQuantizer::new(*n)),
             Self::I8Naive => Box::new(I8NaiveQuantizer),
-            Self::I8NonUniformNaive => Box::new(I8NonUniformNaiveQuantizer),
+            Self::I8ScaledUniform => Box::new(I8ScaledUniformQuantizer),
         }
     }
 
@@ -69,11 +71,9 @@ impl VectorQuantizer {
             (Self::Binary, _) => Box::new(HammingDistance),
             (Self::AsymmetricBinary { n: _ }, _) => Box::new(AsymmetricHammingDistance),
             (Self::I8Naive, _) => Box::new(I8NaiveDistance(*similarity)),
-            (Self::I8NonUniformNaive, VectorSimilarity::Dot) => {
-                Box::new(I8NonUniformNaiveDotProduct)
-            }
-            (Self::I8NonUniformNaive, VectorSimilarity::Euclidean) => {
-                Box::new(I8NonUniformNaiveEuclidean)
+            (Self::I8ScaledUniform, VectorSimilarity::Dot) => Box::new(I8ScaledUniformDotProduct),
+            (Self::I8ScaledUniform, VectorSimilarity::Euclidean) => {
+                Box::new(I8ScaledUniformEuclidean)
             }
         }
     }
@@ -104,7 +104,7 @@ impl FromStr for VectorQuantizer {
                     .ok_or_else(|| input_err(format!("invalid asymmetric_binary bits {bits_str}")))
             }
             "i8naive" => Ok(Self::I8Naive),
-            "i8nun" => Ok(Self::I8NonUniformNaive),
+            "i8scaled-uniform" => Ok(Self::I8ScaledUniform),
             _ => Err(input_err(format!("unknown quantizer function {s}"))),
         }
     }
@@ -281,15 +281,11 @@ impl Quantizer for I8NaiveQuantizer {
 ///
 /// This stores two additional float values:
 /// * A scale value that can be used to de-quantized into a normalized float vector.
-/// * The l1 norm, which is needed to
-// XXX the name sucks. it's not really non-uniform i can score it in the quantized space. even if
-// i did MRL splits i could score it piecewise in quantized space and combine the results.
-// score it piecewise pretty consistently!
-// XXX I8UniformScaled
+/// * The l2 norm.
 #[derive(Debug, Copy, Clone)]
-pub struct I8NonUniformNaiveQuantizer;
+pub struct I8ScaledUniformQuantizer;
 
-impl Quantizer for I8NonUniformNaiveQuantizer {
+impl Quantizer for I8ScaledUniformQuantizer {
     fn doc_bytes(&self, dimensions: usize) -> usize {
         dimensions + std::mem::size_of::<f32>() * 2
     }

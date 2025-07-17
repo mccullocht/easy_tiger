@@ -177,9 +177,9 @@ impl VectorDistance for I8NaiveDistance {
 }
 
 #[derive(Debug, Copy, Clone)]
-struct I8NonUniformNaiveVector<'a>(&'a [u8]);
+struct I8ScaledUniformVector<'a>(&'a [u8]);
 
-impl I8NonUniformNaiveVector<'_> {
+impl I8ScaledUniformVector<'_> {
     fn dot_unnormalized(&self, other: &Self) -> f64 {
         self.vector()
             .iter()
@@ -207,7 +207,7 @@ impl I8NonUniformNaiveVector<'_> {
     }
 }
 
-impl<'a> From<&'a [u8]> for I8NonUniformNaiveVector<'a> {
+impl<'a> From<&'a [u8]> for I8ScaledUniformVector<'a> {
     fn from(value: &'a [u8]) -> Self {
         assert!(value.len() >= 8);
         Self(value)
@@ -215,28 +215,28 @@ impl<'a> From<&'a [u8]> for I8NonUniformNaiveVector<'a> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I8NonUniformNaiveDotProduct;
+pub struct I8ScaledUniformDotProduct;
 
-impl VectorDistance for I8NonUniformNaiveDotProduct {
+impl VectorDistance for I8ScaledUniformDotProduct {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // TODO: if we had a formal query distance abstraction we could avoid quantizing the query
         // vector and improve accuracy at the cost of speed (f32 instead of i32).
-        let query = I8NonUniformNaiveVector::from(query);
-        let doc = I8NonUniformNaiveVector::from(doc);
+        let query = I8ScaledUniformVector::from(query);
+        let doc = I8ScaledUniformVector::from(doc);
         let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
         (-dot + 1.0) / 2.0
     }
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I8NonUniformNaiveEuclidean;
+pub struct I8ScaledUniformEuclidean;
 
-impl VectorDistance for I8NonUniformNaiveEuclidean {
+impl VectorDistance for I8ScaledUniformEuclidean {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // TODO: if we had a formal query distance abstraction we could use the original query
         // vector or at least avoid dequantizing the query so many times.
-        let query = I8NonUniformNaiveVector::from(query);
-        let doc = I8NonUniformNaiveVector::from(doc);
+        let query = I8ScaledUniformVector::from(query);
+        let doc = I8ScaledUniformVector::from(doc);
         let dot = query.dot_unnormalized(&doc);
         query.l1_norm() + doc.l1_norm() - (2.0 * dot)
     }
@@ -348,9 +348,9 @@ mod test {
     use crate::{
         distance::{
             F32DotProductDistance, F32EuclideanDistance, F32VectorDistance,
-            I8NonUniformNaiveDotProduct, I8NonUniformNaiveEuclidean, VectorDistance,
+            I8ScaledUniformDotProduct, I8ScaledUniformEuclidean, VectorDistance,
         },
-        quantization::{I8NonUniformNaiveQuantizer, Quantizer},
+        quantization::{I8ScaledUniformQuantizer, Quantizer},
     };
 
     fn epsilon_range(v: f64, epsilon: f64) -> RangeInclusive<f64> {
@@ -363,29 +363,29 @@ mod test {
         // XXX always normalize a and b.
         let a = vec![-1.0f32, 2.5, 0.7, -1.7];
         let an = F32DotProductDistance.normalize(a.clone().into());
-        let aq = I8NonUniformNaiveQuantizer.for_doc(&a);
+        let aq = I8ScaledUniformQuantizer.for_doc(&a);
 
         let b = vec![-0.6f32, -1.2, 0.4, 0.3];
         let bn = F32DotProductDistance.normalize(b.clone().into());
-        let bq = I8NonUniformNaiveQuantizer.for_doc(&b);
+        let bq = I8ScaledUniformQuantizer.for_doc(&b);
 
         let dot = F32DotProductDistance.distance_f32(&an, &bn);
         let epsilon = epsilon_range(dot, 0.001);
-        let dotq = I8NonUniformNaiveDotProduct.distance(&aq, &bq);
+        let dotq = I8ScaledUniformDotProduct.distance(&aq, &bq);
         assert!(epsilon.contains(&dotq), "{} not in {:?}", dotq, epsilon);
     }
 
     #[test]
     fn i8_shaped_l2() {
         let a = vec![-1.0f32, 2.5, 0.7, -1.7];
-        let aq = I8NonUniformNaiveQuantizer.for_doc(&a);
+        let aq = I8ScaledUniformQuantizer.for_doc(&a);
 
         let b = vec![-0.6f32, -1.2, 0.4, 0.3];
-        let bq = I8NonUniformNaiveQuantizer.for_doc(&b);
+        let bq = I8ScaledUniformQuantizer.for_doc(&b);
 
         let l2 = F32EuclideanDistance.distance_f32(&a, &b);
         let epsilon = epsilon_range(l2, 0.1);
-        let l2q = I8NonUniformNaiveEuclidean.distance(&aq, &bq);
+        let l2q = I8ScaledUniformEuclidean.distance(&aq, &bq);
 
         // XXX i should just have a macro for this.
         assert!(epsilon.contains(&l2q), "{} not in {:?}", l2q, epsilon);

@@ -1,6 +1,6 @@
 //! Dense vector scoring traits and implementations.
 
-use std::{borrow::Cow, io, str::FromStr};
+use std::{borrow::Cow, i8, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -176,22 +176,43 @@ impl VectorDistance for I8NaiveDistance {
     }
 }
 
+// XXX repr should be [u8] with methods to pull the data.
+#[derive(Debug)]
 struct I8NonUniformNaiveVector<'a> {
     magnitude: f32,
+    l1_norm: f32,
     vector: &'a [i8],
 }
 
 impl I8NonUniformNaiveVector<'_> {
-    fn dequantized(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
-        self.vector.iter().map(|d| *d as f32 * self.magnitude)
+    fn dot_unnormalized(&self, other: &Self) -> f64 {
+        // XXX i can store scale as magnitude / i8::MAX and avoid this div here.
+        self.vector
+            .iter()
+            .zip(other.vector.iter())
+            .map(|(s, o)| *s as i32 * *o as i32)
+            .sum::<i32>() as f64
+            * (self.magnitude as f64 / i8::MAX as f64)
+            * (other.magnitude as f64 / i8::MAX as f64)
+    }
+
+    // XXX remove this, it should exist only in the dot product impl
+    fn dot_normalized(&self, other: &Self) -> f64 {
+        // XXX i should be store l2 norm and avoid sqrt(), instead have to square
+        // XXX it's unfortunate that i have to divide twice here
+        self.dot_unnormalized(other)
+            * self.l1_norm.sqrt().recip() as f64
+            * other.l1_norm.sqrt().recip() as f64
     }
 }
 
 impl<'a> From<&'a [u8]> for I8NonUniformNaiveVector<'a> {
     fn from(value: &'a [u8]) -> Self {
-        let (magnitude, vector) = value.split_at(4);
+        let (magnitude, rem) = value.split_at(4);
+        let (l1_norm, vector) = rem.split_at(4);
         Self {
             magnitude: f32::from_le_bytes(magnitude.try_into().expect("4 bytes")),
+            l1_norm: f32::from_le_bytes(l1_norm.try_into().expect("4 bytes")),
             vector: bytemuck::cast_slice(vector),
         }
     }
@@ -206,14 +227,7 @@ impl VectorDistance for I8NonUniformNaiveDotProduct {
         // vector and improve accuracy at the cost of speed (f32 instead of i32).
         let query = I8NonUniformNaiveVector::from(query);
         let doc = I8NonUniformNaiveVector::from(doc);
-        query
-            .vector
-            .iter()
-            .zip(doc.vector.iter())
-            .map(|(q, d)| *q as i32 * *d as i32)
-            .sum::<i32>() as f64
-            * query.magnitude as f64
-            * doc.magnitude as f64
+        (-query.dot_normalized(&doc) + 1.0) / 2.0
     }
 }
 
@@ -227,15 +241,8 @@ impl VectorDistance for I8NonUniformNaiveEuclidean {
         // XXX I want to normalize and encode the l2 norm so i can dot the hell out of this.
         let query = I8NonUniformNaiveVector::from(query);
         let doc = I8NonUniformNaiveVector::from(doc);
-        // XXX ((qm * q0) - (dm * d0))^2 + ...
-        query
-            .dequantized()
-            .zip(doc.dequantized())
-            .map(|(q, d)| {
-                let delta = q - d;
-                delta * delta
-            })
-            .sum::<f32>() as f64
+        let dot = query.dot_unnormalized(&doc);
+        query.l1_norm as f64 + doc.l1_norm as f64 - (2.0 * dot)
     }
 }
 
@@ -335,5 +342,56 @@ pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
             .zip(f32_le_iter(d))
             .map(|(q, d)| q * d)
             .sum::<f32>() as f64
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::ops::RangeInclusive;
+
+    use crate::{
+        distance::{
+            F32DotProductDistance, F32EuclideanDistance, F32VectorDistance,
+            I8NonUniformNaiveDotProduct, I8NonUniformNaiveEuclidean, VectorDistance,
+        },
+        quantization::{I8NonUniformNaiveQuantizer, Quantizer},
+    };
+
+    fn epsilon_range(v: f64, epsilon: f64) -> RangeInclusive<f64> {
+        (v - epsilon)..=(v + epsilon)
+    }
+
+    #[test]
+    fn i8_shaped_dot() {
+        // TODO: randomly generate a bunch of vectors for this test.
+        // XXX always normalize a and b.
+        let a = vec![-1.0f32, 2.5, 0.7, -1.7];
+        let an = F32DotProductDistance.normalize(a.clone().into());
+        let aq = I8NonUniformNaiveQuantizer.for_doc(&a);
+
+        let b = vec![-0.6f32, -1.2, 0.4, 0.3];
+        let bn = F32DotProductDistance.normalize(b.clone().into());
+        let bq = I8NonUniformNaiveQuantizer.for_doc(&b);
+
+        let dot = F32DotProductDistance.distance_f32(&an, &bn);
+        let epsilon = epsilon_range(dot, 0.001);
+        let dotq = I8NonUniformNaiveDotProduct.distance(&aq, &bq);
+        assert!(epsilon.contains(&dotq), "{} not in {:?}", dotq, epsilon);
+    }
+
+    #[test]
+    fn i8_shaped_l2() {
+        let a = vec![-1.0f32, 2.5, 0.7, -1.7];
+        let aq = I8NonUniformNaiveQuantizer.for_doc(&a);
+
+        let b = vec![-0.6f32, -1.2, 0.4, 0.3];
+        let bq = I8NonUniformNaiveQuantizer.for_doc(&b);
+
+        let l2 = F32EuclideanDistance.distance_f32(&a, &b);
+        let epsilon = epsilon_range(l2, 0.1);
+        let l2q = I8NonUniformNaiveEuclidean.distance(&aq, &bq);
+
+        // XXX i should just have a macro for this.
+        assert!(epsilon.contains(&l2q), "{} not in {:?}", l2q, epsilon);
     }
 }

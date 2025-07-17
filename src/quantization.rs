@@ -42,10 +42,13 @@ pub enum VectorQuantizer {
     /// Reduces each dimension to an 8-bit integer.
     /// This implementation does not train on any input to decide how to quantize.
     I8Naive,
-    /// Reduces each dimension to an 8-bit integer.
+    /// Reduces each dimension to an 8-bit integer but shaped to the input vector.
     ///
-    /// This implementation does not train on any input to decide how to quantize but is
-    /// non-uniform in the sense that it must be de-quantized in order to compute distance.
+    /// Like i8naive this normalizes the input vector but it also uses the maximum magnitude across
+    /// all input dimensions to bound the quantization rather than [-1,1]. This representation still
+    /// allows computing distance on the quantized representation for both l2 and angular distance.
+    ///
+    /// This implementation does _not_ train on a sample of the dataset to decide parameters.
     I8NonUniformNaive,
 }
 
@@ -274,33 +277,38 @@ impl Quantizer for I8NaiveQuantizer {
     }
 }
 
-/// Quantize to an i8 value per dimension considering only the maximum magnitude of any dimension.
+/// Quantize to an i8 value per dimension but shaped to the input vector.
 ///
-/// The maximum magnitude of any dimension is used to set the range for quantization into an i8
-/// value and is recorded in the packed vector. While quantization is uniform within the vector it
-/// is non-uniform across vectors so we must de-quantize values in order to score them.
-// XXX the name sucks. it's not really non-uniform i can score it pretty consistently. i could also
+/// This stores two additional float values:
+/// * A scale value that can be used to de-quantized into a normalized float vector.
+/// * The l1 norm, which is needed to
+// XXX the name sucks. it's not really non-uniform i can score it in the quantized space. even if
+// i did MRL splits i could score it piecewise in quantized space and combine the results.
 // score it piecewise pretty consistently!
 #[derive(Debug, Copy, Clone)]
 pub struct I8NonUniformNaiveQuantizer;
 
 impl Quantizer for I8NonUniformNaiveQuantizer {
     fn doc_bytes(&self, dimensions: usize) -> usize {
-        dimensions + std::mem::size_of::<f32>()
+        dimensions + std::mem::size_of::<f32>() * 2
     }
 
     fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
-        let mut quantized = Vec::with_capacity(self.doc_bytes(vector.len()));
-        let magnitude = vector
+        let l1_norm = crate::distance::dot_f32(vector, vector) as f32;
+        let max = vector
             .iter()
             .map(|d| d.abs())
             .max_by(|a, b| a.total_cmp(b))
             .unwrap_or(0.0);
-        quantized.extend_from_slice(&magnitude.to_le_bytes());
+        let scale = i8::MAX as f32 / max;
+
+        let mut quantized = Vec::with_capacity(self.doc_bytes(vector.len()));
+        quantized.extend_from_slice(&max.to_le_bytes());
+        quantized.extend_from_slice(&l1_norm.to_le_bytes());
         quantized.extend(
             vector
                 .iter()
-                .map(|d| (((*d / magnitude) * i8::MAX as f32).round() as i8).to_le_bytes()[0]),
+                .map(|d| ((*d * scale).round() as i8).to_le_bytes()[0]),
         );
         quantized
     }
@@ -313,3 +321,5 @@ impl Quantizer for I8NonUniformNaiveQuantizer {
         self.for_doc(vector)
     }
 }
+
+// TODO: quantizer that is non-uniform for MRL vectors.

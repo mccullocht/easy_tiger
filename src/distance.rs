@@ -202,15 +202,18 @@ pub struct I8NonUniformNaiveDotProduct;
 
 impl VectorDistance for I8NonUniformNaiveDotProduct {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // TODO: if we had a formal query distance abstraction we could use the original query
-        // vector or at least avoid dequantizing the query so many times.
+        // TODO: if we had a formal query distance abstraction we could avoid quantizing the query
+        // vector and improve accuracy at the cost of speed (f32 instead of i32).
         let query = I8NonUniformNaiveVector::from(query);
         let doc = I8NonUniformNaiveVector::from(doc);
         query
-            .dequantized()
-            .zip(doc.dequantized())
-            .map(|(q, d)| q * d)
-            .sum::<f32>() as f64
+            .vector
+            .iter()
+            .zip(doc.vector.iter())
+            .map(|(q, d)| *q as i32 * *d as i32)
+            .sum::<i32>() as f64
+            * query.magnitude as f64
+            * doc.magnitude as f64
     }
 }
 
@@ -221,8 +224,10 @@ impl VectorDistance for I8NonUniformNaiveEuclidean {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // TODO: if we had a formal query distance abstraction we could use the original query
         // vector or at least avoid dequantizing the query so many times.
+        // XXX I want to normalize and encode the l2 norm so i can dot the hell out of this.
         let query = I8NonUniformNaiveVector::from(query);
         let doc = I8NonUniformNaiveVector::from(doc);
+        // XXX ((qm * q0) - (dm * d0))^2 + ...
         query
             .dequantized()
             .zip(doc.dequantized())

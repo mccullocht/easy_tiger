@@ -279,6 +279,8 @@ impl Quantizer for I8NaiveQuantizer {
 /// The maximum magnitude of any dimension is used to set the range for quantization into an i8
 /// value and is recorded in the packed vector. While quantization is uniform within the vector it
 /// is non-uniform across vectors so we must de-quantize values in order to score them.
+// XXX the name sucks. it's not really non-uniform i can score it pretty consistently. i could also
+// score it piecewise pretty consistently!
 #[derive(Debug, Copy, Clone)]
 pub struct I8NonUniformNaiveQuantizer;
 

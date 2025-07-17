@@ -39,7 +39,7 @@ pub struct BulkLoadArgs {
     layout: GraphLayout,
     /// If true, load all quantized vectors into a trivial memory store for bulk loading.
     /// This can be significantly faster than reading these values from WiredTiger.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     memory_quantized_vectors: bool,
     /// If true, load all the raw vectors into WiredTiger for bulk loading.
     /// This can be faster for dot similarity as the vectors are normalized just once.

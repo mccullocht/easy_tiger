@@ -1,6 +1,6 @@
 //! Dense vector scoring traits and implementations.
 
-use std::{borrow::Cow, i8, io, str::FromStr};
+use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -177,44 +177,43 @@ impl VectorDistance for I8NaiveDistance {
 }
 
 // XXX repr should be [u8] with methods to pull the data.
-#[derive(Debug)]
-struct I8NonUniformNaiveVector<'a> {
-    magnitude: f32,
-    l1_norm: f32,
-    vector: &'a [i8],
-}
+#[derive(Debug, Copy, Clone)]
+struct I8NonUniformNaiveVector<'a>(&'a [u8]);
 
 impl I8NonUniformNaiveVector<'_> {
     fn dot_unnormalized(&self, other: &Self) -> f64 {
-        // XXX i can store scale as magnitude / i8::MAX and avoid this div here.
-        self.vector
+        self.vector()
             .iter()
-            .zip(other.vector.iter())
+            .zip(other.vector().iter())
             .map(|(s, o)| *s as i32 * *o as i32)
             .sum::<i32>() as f64
-            * (self.magnitude as f64 / i8::MAX as f64)
-            * (other.magnitude as f64 / i8::MAX as f64)
+            * self.scale()
+            * other.scale()
     }
 
-    // XXX remove this, it should exist only in the dot product impl
-    fn dot_normalized(&self, other: &Self) -> f64 {
-        // XXX i should be store l2 norm and avoid sqrt(), instead have to square
-        // XXX it's unfortunate that i have to divide twice here
-        self.dot_unnormalized(other)
-            * self.l1_norm.sqrt().recip() as f64
-            * other.l1_norm.sqrt().recip() as f64
+    fn scale(&self) -> f64 {
+        // XXX scale should be stored precomputed this way
+        f32::from_le_bytes(self.0[0..4].try_into().unwrap()) as f64 / i8::MAX as f64
+    }
+
+    fn l1_norm(&self) -> f64 {
+        // XXX store l2 norm instead.
+        f32::from_le_bytes(self.0[4..8].try_into().unwrap()).into()
+    }
+
+    fn l2_norm(&self) -> f64 {
+        self.l1_norm().sqrt()
+    }
+
+    fn vector(&self) -> &[i8] {
+        bytemuck::cast_slice(&self.0[8..])
     }
 }
 
 impl<'a> From<&'a [u8]> for I8NonUniformNaiveVector<'a> {
     fn from(value: &'a [u8]) -> Self {
-        let (magnitude, rem) = value.split_at(4);
-        let (l1_norm, vector) = rem.split_at(4);
-        Self {
-            magnitude: f32::from_le_bytes(magnitude.try_into().expect("4 bytes")),
-            l1_norm: f32::from_le_bytes(l1_norm.try_into().expect("4 bytes")),
-            vector: bytemuck::cast_slice(vector),
-        }
+        assert!(value.len() >= 8);
+        Self(value)
     }
 }
 
@@ -227,7 +226,8 @@ impl VectorDistance for I8NonUniformNaiveDotProduct {
         // vector and improve accuracy at the cost of speed (f32 instead of i32).
         let query = I8NonUniformNaiveVector::from(query);
         let doc = I8NonUniformNaiveVector::from(doc);
-        (-query.dot_normalized(&doc) + 1.0) / 2.0
+        let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
+        (-dot + 1.0) / 2.0
     }
 }
 
@@ -238,11 +238,10 @@ impl VectorDistance for I8NonUniformNaiveEuclidean {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // TODO: if we had a formal query distance abstraction we could use the original query
         // vector or at least avoid dequantizing the query so many times.
-        // XXX I want to normalize and encode the l2 norm so i can dot the hell out of this.
         let query = I8NonUniformNaiveVector::from(query);
         let doc = I8NonUniformNaiveVector::from(doc);
         let dot = query.dot_unnormalized(&doc);
-        query.l1_norm as f64 + doc.l1_norm as f64 - (2.0 * dot)
+        query.l1_norm() + doc.l1_norm() - (2.0 * dot)
     }
 }
 

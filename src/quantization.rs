@@ -2,7 +2,7 @@
 //!
 //! Graph navigation during search uses these quantized vectors.
 
-use std::{i8, io, str::FromStr};
+use std::{io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -323,3 +323,4 @@ impl Quantizer for I8NonUniformNaiveQuantizer {
 }
 
 // TODO: quantizer that is non-uniform for MRL vectors.
+// Bonus points if it can still be scored on the quantized rep instead of de-quantizing.

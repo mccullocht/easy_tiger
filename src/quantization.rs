@@ -285,6 +285,7 @@ impl Quantizer for I8NaiveQuantizer {
 // XXX the name sucks. it's not really non-uniform i can score it in the quantized space. even if
 // i did MRL splits i could score it piecewise in quantized space and combine the results.
 // score it piecewise pretty consistently!
+// XXX I8UniformScaled
 #[derive(Debug, Copy, Clone)]
 pub struct I8NonUniformNaiveQuantizer;
 
@@ -294,17 +295,18 @@ impl Quantizer for I8NonUniformNaiveQuantizer {
     }
 
     fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
-        let l1_norm = crate::distance::dot_f32(vector, vector) as f32;
+        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
         let max = vector
             .iter()
             .map(|d| d.abs())
             .max_by(|a, b| a.total_cmp(b))
-            .unwrap_or(0.0);
-        let scale = i8::MAX as f32 / max;
+            .unwrap_or(0.0) as f64;
+        let scale = (f64::from(i8::MAX) / max) as f32;
+        let inv_scale = (max / f64::from(i8::MAX)) as f32;
 
         let mut quantized = Vec::with_capacity(self.doc_bytes(vector.len()));
-        quantized.extend_from_slice(&max.to_le_bytes());
-        quantized.extend_from_slice(&l1_norm.to_le_bytes());
+        quantized.extend_from_slice(&inv_scale.to_le_bytes());
+        quantized.extend_from_slice(&l2_norm.to_le_bytes());
         quantized.extend(
             vector
                 .iter()

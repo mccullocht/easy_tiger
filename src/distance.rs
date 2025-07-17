@@ -176,7 +176,6 @@ impl VectorDistance for I8NaiveDistance {
     }
 }
 
-// XXX repr should be [u8] with methods to pull the data.
 #[derive(Debug, Copy, Clone)]
 struct I8NonUniformNaiveVector<'a>(&'a [u8]);
 
@@ -192,17 +191,15 @@ impl I8NonUniformNaiveVector<'_> {
     }
 
     fn scale(&self) -> f64 {
-        // XXX scale should be stored precomputed this way
-        f32::from_le_bytes(self.0[0..4].try_into().unwrap()) as f64 / i8::MAX as f64
+        f32::from_le_bytes(self.0[0..4].try_into().unwrap()).into()
     }
 
     fn l1_norm(&self) -> f64 {
-        // XXX store l2 norm instead.
-        f32::from_le_bytes(self.0[4..8].try_into().unwrap()).into()
+        self.l2_norm() * self.l2_norm()
     }
 
     fn l2_norm(&self) -> f64 {
-        self.l1_norm().sqrt()
+        f32::from_le_bytes(self.0[4..8].try_into().unwrap()).into()
     }
 
     fn vector(&self) -> &[i8] {

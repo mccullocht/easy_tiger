@@ -253,11 +253,13 @@ impl<'a> I8ScaledUniformDotProductQueryDistance<'a> {
 impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I8ScaledUniformVector::from(vector);
-        self.0
+        let dot = self
+            .0
             .iter()
             .zip(vector.dequantized_normalized_iter())
             .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64
+            .sum::<f32>() as f64;
+        (-dot + 1.0) / 2.0
     }
 }
 
@@ -275,23 +277,26 @@ impl VectorDistance for I8ScaledUniformEuclidean {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct I8ScaledUniformEuclideanQueryDistance<'a>(&'a [f32]);
+#[derive(Debug, Clone)]
+pub struct I8ScaledUniformEuclideanQueryDistance<'a>(&'a [f32], f64);
 
 impl<'a> I8ScaledUniformEuclideanQueryDistance<'a> {
     pub fn new(query: &'a [f32]) -> Self {
-        Self(query)
+        let l1_norm = dot_f32(query, query);
+        Self(query, l1_norm)
     }
 }
 
 impl QueryVectorDistance for I8ScaledUniformEuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I8ScaledUniformVector::from(vector);
-        self.0
+        let dot = self
+            .0
             .iter()
             .zip(vector.dequantized_unnormalized_iter())
             .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64
+            .sum::<f32>() as f64;
+        self.1 + vector.l1_norm() - (2.0 * dot)
     }
 }
 
@@ -447,6 +452,8 @@ mod test {
             qdist,
         );
     }
+
+    // XXX i get recall of 0 when using the asymmetric functions so clearly i fucked up _something_.
 
     #[test]
     fn i8_shaped_dot() {

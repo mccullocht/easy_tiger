@@ -292,13 +292,15 @@ impl Quantizer for I8ScaledUniformQuantizer {
 
     fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
         let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
-        let max = vector
-            .iter()
-            .map(|d| d.abs())
-            .max_by(|a, b| a.total_cmp(b))
-            .unwrap_or(0.0) as f64;
-        let scale = (f64::from(i8::MAX) / max) as f32;
-        let inv_scale = (max / f64::from(i8::MAX)) as f32;
+        let (scale, inv_scale) =
+            if let Some(max) = vector.iter().map(|d| d.abs()).max_by(|a, b| a.total_cmp(b)) {
+                (
+                    (f64::from(i8::MAX) / max as f64) as f32,
+                    (max as f64 / f64::from(i8::MAX)) as f32,
+                )
+            } else {
+                (0.0, 0.0)
+            };
 
         let mut quantized = Vec::with_capacity(self.doc_bytes(vector.len()));
         quantized.extend_from_slice(&inv_scale.to_le_bytes());

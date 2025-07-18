@@ -176,6 +176,72 @@ impl VectorDistance for I8NaiveDistance {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+struct I8ScaledUniformVector<'a>(&'a [u8]);
+
+impl I8ScaledUniformVector<'_> {
+    fn dot_unnormalized(&self, other: &Self) -> f64 {
+        self.vector()
+            .iter()
+            .zip(other.vector().iter())
+            .map(|(s, o)| *s as i32 * *o as i32)
+            .sum::<i32>() as f64
+            * self.scale()
+            * other.scale()
+    }
+
+    fn scale(&self) -> f64 {
+        f32::from_le_bytes(self.0[0..4].try_into().unwrap()).into()
+    }
+
+    fn l1_norm(&self) -> f64 {
+        self.l2_norm() * self.l2_norm()
+    }
+
+    fn l2_norm(&self) -> f64 {
+        f32::from_le_bytes(self.0[4..8].try_into().unwrap()).into()
+    }
+
+    fn vector(&self) -> &[i8] {
+        bytemuck::cast_slice(&self.0[8..])
+    }
+}
+
+impl<'a> From<&'a [u8]> for I8ScaledUniformVector<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        assert!(value.len() >= 8);
+        Self(value)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I8ScaledUniformDotProduct;
+
+impl VectorDistance for I8ScaledUniformDotProduct {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        // TODO: if we had a formal query distance abstraction we could avoid quantizing the query
+        // vector and improve accuracy at the cost of speed (f32 instead of i32).
+        let query = I8ScaledUniformVector::from(query);
+        let doc = I8ScaledUniformVector::from(doc);
+        let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
+        (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I8ScaledUniformEuclidean;
+
+impl VectorDistance for I8ScaledUniformEuclidean {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        // TODO: if we had a formal query distance abstraction we could use the original query
+        // vector or at least avoid dequantizing the query so many times.
+        let query = I8ScaledUniformVector::from(query);
+        let doc = I8ScaledUniformVector::from(doc);
+        let dot = query.dot_unnormalized(&doc);
+        query.l1_norm() + doc.l1_norm() - (2.0 * dot)
+    }
+}
+
 #[inline(always)]
 pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
     use simsimd::BinarySimilarity;
@@ -272,5 +338,84 @@ pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
             .zip(f32_le_iter(d))
             .map(|(q, d)| q * d)
             .sum::<f32>() as f64
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        distance::{
+            F32DotProductDistance, F32EuclideanDistance, F32VectorDistance,
+            I8ScaledUniformDotProduct, I8ScaledUniformEuclidean, VectorDistance,
+        },
+        quantization::{I8ScaledUniformQuantizer, Quantizer},
+    };
+
+    struct TestVector {
+        rvec: Vec<f32>,
+        qvec: Vec<u8>,
+    }
+
+    impl TestVector {
+        pub fn new(
+            rvec: Vec<f32>,
+            f32_dist_fn: impl F32VectorDistance,
+            quantizer: impl Quantizer,
+        ) -> Self {
+            let qvec = quantizer.for_doc(&rvec);
+            Self {
+                rvec: f32_dist_fn.normalize(rvec.into()).to_vec(),
+                qvec,
+            }
+        }
+    }
+
+    fn distance_compare_threshold(
+        f32_dist_fn: impl F32VectorDistance + Copy,
+        quantizer: impl Quantizer + Copy,
+        dist_fn: impl VectorDistance + Copy,
+        a: Vec<f32>,
+        b: Vec<f32>,
+        threshold: f64,
+    ) {
+        let a = TestVector::new(a, f32_dist_fn, quantizer);
+        let b = TestVector::new(b, f32_dist_fn, quantizer);
+
+        let rdist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
+        let qdist = dist_fn.distance(&a.qvec, &b.qvec);
+
+        let range = (rdist * (1.0 - threshold))..=(rdist * (1.0 + threshold));
+        assert!(
+            range.contains(&qdist),
+            "expected {} (range={:?}) actual {}",
+            rdist,
+            range,
+            qdist,
+        );
+    }
+
+    #[test]
+    fn i8_shaped_dot() {
+        // TODO: randomly generate a bunch of vectors for this test.
+        distance_compare_threshold(
+            F32DotProductDistance,
+            I8ScaledUniformQuantizer,
+            I8ScaledUniformDotProduct,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+    }
+
+    #[test]
+    fn i8_shaped_l2() {
+        distance_compare_threshold(
+            F32EuclideanDistance,
+            I8ScaledUniformQuantizer,
+            I8ScaledUniformEuclidean,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
     }
 }

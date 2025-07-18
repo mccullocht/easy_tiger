@@ -7,7 +7,8 @@ use std::{io, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 use crate::distance::{
-    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, VectorDistance, VectorSimilarity,
+    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, I8ScaledUniformDotProduct,
+    I8ScaledUniformEuclidean, VectorDistance, VectorSimilarity,
 };
 
 /// `Quantizer` is used to perform lossy quantization of input vectors.
@@ -41,6 +42,16 @@ pub enum VectorQuantizer {
     /// Reduces each dimension to an 8-bit integer.
     /// This implementation does not train on any input to decide how to quantize.
     I8Naive,
+    /// Reduces each dimension to an 8-bit integer but shaped to the input vector with uniform
+    /// scaling across all dimensions.
+    ///
+    /// The maximum magnitude across all dimensions is used in scaling rather than l2 normalizing
+    /// the vector and bounding by [-1,1], which greatly reduces loss. This quantization scheme
+    /// works pretty well on transformer models where all values are in roughly the same range.
+    /// Scoring can be performed directly on the quantized representation.
+    ///
+    /// This implementation does _not_ train on a sample of the dataset to decide parameters.
+    I8ScaledUniform,
 }
 
 impl VectorQuantizer {
@@ -50,15 +61,20 @@ impl VectorQuantizer {
             Self::Binary => Box::new(BinaryQuantizer),
             Self::AsymmetricBinary { n } => Box::new(AsymmetricBinaryQuantizer::new(*n)),
             Self::I8Naive => Box::new(I8NaiveQuantizer),
+            Self::I8ScaledUniform => Box::new(I8ScaledUniformQuantizer),
         }
     }
 
     /// Create a new distance function for this quantization method.
     pub fn new_distance_function(&self, similarity: &VectorSimilarity) -> Box<dyn VectorDistance> {
-        match self {
-            Self::Binary => Box::new(HammingDistance),
-            Self::AsymmetricBinary { n: _ } => Box::new(AsymmetricHammingDistance),
-            Self::I8Naive => Box::new(I8NaiveDistance(*similarity)),
+        match (self, similarity) {
+            (Self::Binary, _) => Box::new(HammingDistance),
+            (Self::AsymmetricBinary { n: _ }, _) => Box::new(AsymmetricHammingDistance),
+            (Self::I8Naive, _) => Box::new(I8NaiveDistance(*similarity)),
+            (Self::I8ScaledUniform, VectorSimilarity::Dot) => Box::new(I8ScaledUniformDotProduct),
+            (Self::I8ScaledUniform, VectorSimilarity::Euclidean) => {
+                Box::new(I8ScaledUniformEuclidean)
+            }
         }
     }
 }
@@ -85,34 +101,12 @@ impl FromStr for VectorQuantizer {
                     .ok()
                     .and_then(|b| if (1..=8).contains(&b) { Some(b) } else { None })
                     .map(|n| Self::AsymmetricBinary { n })
-                    .ok_or_else(|| {
-                        input_err(format!("invalid asymmetric_binary bits {bits_str}"))
-                    })
+                    .ok_or_else(|| input_err(format!("invalid asymmetric_binary bits {bits_str}")))
             }
             "i8naive" => Ok(Self::I8Naive),
+            "i8scaled-uniform" => Ok(Self::I8ScaledUniform),
             _ => Err(input_err(format!("unknown quantizer function {s}"))),
         }
-    }
-}
-
-/// Trivial quantization just encodes a float vector as a little-endian byte vector.
-pub struct TrivialQuantizer;
-
-impl Quantizer for TrivialQuantizer {
-    fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
-        vector.iter().flat_map(|d| d.to_le_bytes()).collect()
-    }
-
-    fn doc_bytes(&self, dimensions: usize) -> usize {
-        dimensions * std::mem::size_of::<f32>()
-    }
-
-    fn for_query(&self, vector: &[f32]) -> Vec<u8> {
-        self.for_doc(vector)
-    }
-
-    fn query_bytes(&self, dimensions: usize) -> usize {
-        self.doc_bytes(dimensions)
     }
 }
 
@@ -282,3 +276,51 @@ impl Quantizer for I8NaiveQuantizer {
         self.doc_bytes(dimensions)
     }
 }
+
+/// Quantize to an i8 value per dimension but shaped to the input vector.
+///
+/// This stores two additional float values:
+/// * A scale value that can be used to de-quantized into a normalized float vector.
+/// * The l2 norm.
+#[derive(Debug, Copy, Clone)]
+pub struct I8ScaledUniformQuantizer;
+
+impl Quantizer for I8ScaledUniformQuantizer {
+    fn doc_bytes(&self, dimensions: usize) -> usize {
+        dimensions + std::mem::size_of::<f32>() * 2
+    }
+
+    fn for_doc(&self, vector: &[f32]) -> Vec<u8> {
+        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
+        let (scale, inv_scale) =
+            if let Some(max) = vector.iter().map(|d| d.abs()).max_by(|a, b| a.total_cmp(b)) {
+                (
+                    (f64::from(i8::MAX) / max as f64) as f32,
+                    (max as f64 / f64::from(i8::MAX)) as f32,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+
+        let mut quantized = Vec::with_capacity(self.doc_bytes(vector.len()));
+        quantized.extend_from_slice(&inv_scale.to_le_bytes());
+        quantized.extend_from_slice(&l2_norm.to_le_bytes());
+        quantized.extend(
+            vector
+                .iter()
+                .map(|d| ((*d * scale).round() as i8).to_le_bytes()[0]),
+        );
+        quantized
+    }
+
+    fn query_bytes(&self, dimensions: usize) -> usize {
+        self.doc_bytes(dimensions)
+    }
+
+    fn for_query(&self, vector: &[f32]) -> Vec<u8> {
+        self.for_doc(vector)
+    }
+}
+
+// TODO: quantizer that is non-uniform for MRL vectors.
+// Bonus points if it can still be scored on the quantized rep instead of de-quantizing.

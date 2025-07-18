@@ -4,6 +4,8 @@ use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
+use crate::query_distance::QueryVectorDistance;
+
 /// Distance function for coded vectors.
 ///
 /// This trait is object-safe; it may be instantiated at runtime based on
@@ -33,12 +35,6 @@ pub trait F32VectorDistance: VectorDistance {
     fn normalize<'a>(&self, vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
         vector
     }
-}
-
-/// Compute the distance between a fixed vector provided at creation time and other vectors.
-/// This is often useful in query flows where everything references a specific point.
-pub trait QueryVectorDistance: Send + Sync {
-    fn distance(&self, vector: &[u8]) -> f64;
 }
 
 /// Functions used for computing a similarity score for high fidelity vectors.
@@ -196,6 +192,17 @@ impl I8ScaledUniformVector<'_> {
             * other.scale()
     }
 
+    fn dequantized_unnormalized_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
+        self.vector()
+            .iter()
+            .map(|d| *d as f32 * self.scale() as f32)
+    }
+
+    fn dequantized_normalized_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
+        let scale = (self.scale() / self.l2_norm()) as f32;
+        self.vector().iter().map(move |d| *d as f32 * scale)
+    }
+
     fn scale(&self) -> f64 {
         f32::from_le_bytes(self.0[0..4].try_into().unwrap()).into()
     }
@@ -235,6 +242,26 @@ impl VectorDistance for I8ScaledUniformDotProduct {
 }
 
 #[derive(Debug, Copy, Clone)]
+pub struct I8ScaledUniformDotProductQueryDistance<'a>(&'a [f32]);
+
+impl<'a> I8ScaledUniformDotProductQueryDistance<'a> {
+    pub fn new(query: &'a [f32]) -> Self {
+        Self(query)
+    }
+}
+
+impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = I8ScaledUniformVector::from(vector);
+        self.0
+            .iter()
+            .zip(vector.dequantized_normalized_iter())
+            .map(|(q, d)| *q * d)
+            .sum::<f32>() as f64
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
 pub struct I8ScaledUniformEuclidean;
 
 impl VectorDistance for I8ScaledUniformEuclidean {
@@ -248,6 +275,26 @@ impl VectorDistance for I8ScaledUniformEuclidean {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct I8ScaledUniformEuclideanQueryDistance<'a>(&'a [f32]);
+
+impl<'a> I8ScaledUniformEuclideanQueryDistance<'a> {
+    pub fn new(query: &'a [f32]) -> Self {
+        Self(query)
+    }
+}
+
+impl QueryVectorDistance for I8ScaledUniformEuclideanQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = I8ScaledUniformVector::from(vector);
+        self.0
+            .iter()
+            .zip(vector.dequantized_unnormalized_iter())
+            .map(|(q, d)| *q * d)
+            .sum::<f32>() as f64
+    }
+}
+
 #[inline(always)]
 pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
     use simsimd::BinarySimilarity;
@@ -256,7 +303,7 @@ pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 unsafe fn load_f32x4_le(p: *const u8) -> core::arch::aarch64::float32x4_t {
-    // XXX use cfg!(target+endian = "big") and byte swap
+    // XXX use cfg!(target_endian = "big") and byte swap
     core::arch::aarch64::vld1q_f32(p as *const f32)
 }
 

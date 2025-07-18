@@ -10,6 +10,9 @@ use crate::{
         Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
         RawVectorStore,
     },
+    query_distance::{
+        new_query_vector_distance_f32, new_query_vector_distance_quantized, QueryVectorDistance,
+    },
     Neighbor,
 };
 
@@ -127,7 +130,12 @@ impl GraphSearcher {
                 .get_nav_vector(vertex_id)
                 .unwrap_or(Err(Error::not_found_error()))?
                 .to_vec();
-            self.search_internal_quantized(&nav_query, |_| true, reader)?;
+            let nav_query = new_query_vector_distance_quantized(
+                &nav_query,
+                reader.config().similarity,
+                Some(reader.config().quantizer),
+            );
+            self.search_internal_quantized(nav_query.as_ref(), |_| true, reader)?;
             Ok(self.candidates.iter().map(|c| c.neighbor).collect())
         }
     }
@@ -138,9 +146,12 @@ impl GraphSearcher {
         filter_predicate: impl FnMut(i64) -> bool,
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
-        let quantizer = reader.config().new_quantizer();
-        let nav_query = quantizer.for_query(query);
-        self.search_internal_quantized(&nav_query, filter_predicate, reader)?;
+        let nav_query = new_query_vector_distance_f32(
+            query,
+            reader.config().similarity,
+            Some(reader.config().quantizer),
+        );
+        self.search_internal_quantized(nav_query.as_ref(), filter_predicate, reader)?;
 
         if self.params.num_rerank == 0 {
             return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
@@ -174,7 +185,7 @@ impl GraphSearcher {
 
     fn search_internal_quantized(
         &mut self,
-        query: &[u8],
+        query: &dyn QueryVectorDistance,
         mut filter_predicate: impl FnMut(i64) -> bool,
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<()> {
@@ -184,16 +195,13 @@ impl GraphSearcher {
 
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
-        let nav_distance_fn = reader.config().new_nav_distance_function();
         if let Some(epr) = graph.entry_point() {
             let entry_point = epr?;
             let entry_vector = nav
                 .get_nav_vector(entry_point)
                 .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates.add_unvisited(Neighbor::new(
-                entry_point,
-                nav_distance_fn.distance(query, &entry_vector),
-            ));
+            self.candidates
+                .add_unvisited(Neighbor::new(entry_point, query.distance(&entry_vector)));
             self.seen.insert(entry_point);
         }
 
@@ -217,7 +225,7 @@ impl GraphSearcher {
                     .get_nav_vector(edge)
                     .unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
-                    .add_unvisited(Neighbor::new(edge, nav_distance_fn.distance(query, &vec)));
+                    .add_unvisited(Neighbor::new(edge, query.distance(&vec)));
             }
         }
 

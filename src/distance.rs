@@ -343,8 +343,6 @@ pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
 
 #[cfg(test)]
 mod test {
-    use std::ops::RangeInclusive;
-
     use crate::{
         distance::{
             F32DotProductDistance, F32EuclideanDistance, F32VectorDistance,
@@ -353,41 +351,71 @@ mod test {
         quantization::{I8ScaledUniformQuantizer, Quantizer},
     };
 
-    fn epsilon_range(v: f64, epsilon: f64) -> RangeInclusive<f64> {
-        (v - epsilon)..=(v + epsilon)
+    struct TestVector {
+        rvec: Vec<f32>,
+        qvec: Vec<u8>,
+    }
+
+    impl TestVector {
+        pub fn new(
+            rvec: Vec<f32>,
+            f32_dist_fn: impl F32VectorDistance,
+            quantizer: impl Quantizer,
+        ) -> Self {
+            let qvec = quantizer.for_doc(&rvec);
+            Self {
+                rvec: f32_dist_fn.normalize(rvec.into()).to_vec(),
+                qvec,
+            }
+        }
+    }
+
+    fn distance_compare_threshold(
+        f32_dist_fn: impl F32VectorDistance + Copy,
+        quantizer: impl Quantizer + Copy,
+        dist_fn: impl VectorDistance + Copy,
+        a: Vec<f32>,
+        b: Vec<f32>,
+        threshold: f64,
+    ) {
+        let a = TestVector::new(a, f32_dist_fn, quantizer);
+        let b = TestVector::new(b, f32_dist_fn, quantizer);
+
+        let rdist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
+        let qdist = dist_fn.distance(&a.qvec, &b.qvec);
+
+        let range = (rdist * (1.0 - threshold))..=(rdist * (1.0 + threshold));
+        assert!(
+            range.contains(&qdist),
+            "expected {} (range={:?}) actual {}",
+            rdist,
+            range,
+            qdist,
+        );
     }
 
     #[test]
     fn i8_shaped_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
-        // XXX always normalize a and b.
-        let a = vec![-1.0f32, 2.5, 0.7, -1.7];
-        let an = F32DotProductDistance.normalize(a.clone().into());
-        let aq = I8ScaledUniformQuantizer.for_doc(&a);
-
-        let b = vec![-0.6f32, -1.2, 0.4, 0.3];
-        let bn = F32DotProductDistance.normalize(b.clone().into());
-        let bq = I8ScaledUniformQuantizer.for_doc(&b);
-
-        let dot = F32DotProductDistance.distance_f32(&an, &bn);
-        let epsilon = epsilon_range(dot, 0.001);
-        let dotq = I8ScaledUniformDotProduct.distance(&aq, &bq);
-        assert!(epsilon.contains(&dotq), "{} not in {:?}", dotq, epsilon);
+        distance_compare_threshold(
+            F32DotProductDistance,
+            I8ScaledUniformQuantizer,
+            I8ScaledUniformDotProduct,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
     }
 
     #[test]
     fn i8_shaped_l2() {
-        let a = vec![-1.0f32, 2.5, 0.7, -1.7];
-        let aq = I8ScaledUniformQuantizer.for_doc(&a);
-
-        let b = vec![-0.6f32, -1.2, 0.4, 0.3];
-        let bq = I8ScaledUniformQuantizer.for_doc(&b);
-
-        let l2 = F32EuclideanDistance.distance_f32(&a, &b);
-        let epsilon = epsilon_range(l2, 0.1);
-        let l2q = I8ScaledUniformEuclidean.distance(&aq, &bq);
-
-        // XXX i should just have a macro for this.
-        assert!(epsilon.contains(&l2q), "{} not in {:?}", l2q, epsilon);
+        distance_compare_threshold(
+            F32EuclideanDistance,
+            I8ScaledUniformQuantizer,
+            I8ScaledUniformEuclidean,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
     }
 }

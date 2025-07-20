@@ -107,9 +107,9 @@ pub fn new_query_vector_distance_f32<'a>(
     }
 }
 
-/// Create a new [QueryVectorDistance] that accepts a pre-quantized query.
+/// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
 // TODO: ideally we would indicate the on-disk target format (today specified as Option<VectorQuantizer>)
-pub fn new_query_vector_distance_quantized<'a>(
+pub fn new_query_vector_distance_indexing<'a>(
     query: &'a [u8],
     similarity: VectorSimilarity,
     quantizer: Option<VectorQuantizer>,
@@ -127,10 +127,7 @@ pub fn new_query_vector_distance_quantized<'a>(
             query,
         )),
         (_, Some(VectorQuantizer::AsymmetricBinary { n: _ })) => Box::new(
-            // XXX this is probably all wrong if you use AsymmetricBinary during indexing.
-            // i may just delete this because i don't think it's all that useful.
-            // maybe it should just be named "for indexing" and use HammingDistance?
-            GenericQueryVectorDistance::from_quantized(AsymmetricHammingDistance, query),
+            GenericQueryVectorDistance::from_quantized(HammingDistance, query),
         ),
         (_, Some(VectorQuantizer::I8Naive)) => Box::new(
             GenericQueryVectorDistance::from_quantized(I8NaiveDistance(similarity), query),

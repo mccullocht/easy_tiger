@@ -306,10 +306,14 @@ pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
     u8::hamming(q, d).expect("same dimensionality")
 }
 
-#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[cfg(all(target_arch = "aarch64"))]
 unsafe fn load_f32x4_le(p: *const u8) -> core::arch::aarch64::float32x4_t {
-    // XXX use cfg!(target_endian = "big") and byte swap
-    core::arch::aarch64::vld1q_f32(p as *const f32)
+    use core::arch::aarch64;
+    if cfg!(target_endian = "big") {
+        aarch64::vreinterpretq_f32_u8(aarch64::vrev32q_u8(aarch64::vld1q_u8(p)))
+    } else {
+        aarch64::vld1q_f32(p as *const f32)
+    }
 }
 
 #[cfg(not(target_arch = "aarch64"))]

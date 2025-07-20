@@ -11,7 +11,7 @@ use crate::{
         RawVectorStore,
     },
     query_distance::{
-        new_query_vector_distance_f32, new_query_vector_distance_quantized, QueryVectorDistance,
+        new_query_vector_distance_f32, new_query_vector_distance_indexing, QueryVectorDistance,
     },
     Neighbor,
 };
@@ -130,7 +130,7 @@ impl GraphSearcher {
                 .get_nav_vector(vertex_id)
                 .unwrap_or(Err(Error::not_found_error()))?
                 .to_vec();
-            let nav_query = new_query_vector_distance_quantized(
+            let nav_query = new_query_vector_distance_indexing(
                 &nav_query,
                 reader.config().similarity,
                 Some(reader.config().quantizer),

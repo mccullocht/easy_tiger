@@ -8,10 +8,10 @@ use std::borrow::Cow;
 
 use crate::{
     distance::{
-        AsymmetricHammingDistance, F32DotProductDistance, F32EuclideanDistance, HammingDistance,
-        I8NaiveDistance, I8ScaledUniformDotProduct, I8ScaledUniformDotProductQueryDistance,
-        I8ScaledUniformEuclidean, I8ScaledUniformEuclideanQueryDistance, VectorDistance,
-        VectorSimilarity,
+        AsymmetricHammingDistance, F32DotProductDistance, F32EuclideanDistance, F32VectorDistance,
+        HammingDistance, I8NaiveDistance, I8ScaledUniformDotProduct,
+        I8ScaledUniformDotProductQueryDistance, I8ScaledUniformEuclidean,
+        I8ScaledUniformEuclideanQueryDistance, VectorDistance, VectorSimilarity,
     },
     quantization::{
         AsymmetricBinaryQuantizer, BinaryQuantizer, I8NaiveQuantizer, Quantizer, VectorQuantizer,
@@ -34,20 +34,33 @@ pub trait QueryVectorDistance: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-struct GenericQueryVectorDistance<'a, D> {
+struct F32QueryVectorDistance<'a, D> {
+    distance_fn: D,
+    query: Cow<'a, [f32]>,
+}
+
+impl<'a, D: F32VectorDistance> F32QueryVectorDistance<'a, D> {
+    fn new(distance_fn: D, query: &'a [f32]) -> Self {
+        let query = distance_fn.normalize(query.into());
+        Self { distance_fn, query }
+    }
+}
+
+impl<'a, D: F32VectorDistance> QueryVectorDistance for F32QueryVectorDistance<'a, D> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.distance_fn
+            .distance(bytemuck::cast_slice(self.query.as_ref()), vector)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct QuantizedQueryVectorDistance<'a, D> {
     distance_fn: D,
     query: Cow<'a, [u8]>,
 }
 
-impl<'a, D: VectorDistance> GenericQueryVectorDistance<'a, D> {
-    fn new(distance_fn: D, query: &'a [f32]) -> Self {
-        Self {
-            distance_fn,
-            query: bytemuck::cast_slice(query).into(),
-        }
-    }
-
-    fn new_quantized(distance_fn: D, query: &'a [f32], quantizer: impl Quantizer) -> Self {
+impl<'a, D: VectorDistance> QuantizedQueryVectorDistance<'a, D> {
+    fn from_f32(distance_fn: D, query: &'a [f32], quantizer: impl Quantizer) -> Self {
         let query = quantizer.for_query(query).into();
         Self { distance_fn, query }
     }
@@ -60,7 +73,7 @@ impl<'a, D: VectorDistance> GenericQueryVectorDistance<'a, D> {
     }
 }
 
-impl<'a, D: VectorDistance> QueryVectorDistance for GenericQueryVectorDistance<'a, D> {
+impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance<'a, D> {
     fn distance(&self, vector: &[u8]) -> f64 {
         self.distance_fn.distance(self.query.as_ref(), vector)
     }
@@ -74,26 +87,25 @@ pub fn new_query_vector_distance_f32<'a>(
     quantizer: Option<VectorQuantizer>,
 ) -> Box<dyn QueryVectorDistance + 'a> {
     match (similarity, quantizer) {
-        (VectorSimilarity::Dot, None) => Box::new(GenericQueryVectorDistance::new(
-            F32DotProductDistance,
-            query,
-        )),
-        (VectorSimilarity::Euclidean, None) => {
-            Box::new(GenericQueryVectorDistance::new(F32EuclideanDistance, query))
+        (VectorSimilarity::Dot, None) => {
+            Box::new(F32QueryVectorDistance::new(F32DotProductDistance, query))
         }
-        (_, Some(VectorQuantizer::Binary)) => Box::new(GenericQueryVectorDistance::new_quantized(
+        (VectorSimilarity::Euclidean, None) => {
+            Box::new(F32QueryVectorDistance::new(F32EuclideanDistance, query))
+        }
+        (_, Some(VectorQuantizer::Binary)) => Box::new(QuantizedQueryVectorDistance::from_f32(
             HammingDistance,
             query,
             BinaryQuantizer,
         )),
         (_, Some(VectorQuantizer::AsymmetricBinary { n })) => {
-            Box::new(GenericQueryVectorDistance::new_quantized(
+            Box::new(QuantizedQueryVectorDistance::from_f32(
                 AsymmetricHammingDistance,
                 query,
                 AsymmetricBinaryQuantizer::new(n),
             ))
         }
-        (_, Some(VectorQuantizer::I8Naive)) => Box::new(GenericQueryVectorDistance::new_quantized(
+        (_, Some(VectorQuantizer::I8Naive)) => Box::new(QuantizedQueryVectorDistance::from_f32(
             I8NaiveDistance(similarity),
             query,
             I8NaiveQuantizer,
@@ -115,28 +127,27 @@ pub fn new_query_vector_distance_indexing<'a>(
     quantizer: Option<VectorQuantizer>,
 ) -> Box<dyn QueryVectorDistance + 'a> {
     match (similarity, quantizer) {
-        (VectorSimilarity::Dot, None) => Box::new(GenericQueryVectorDistance::from_quantized(
+        (VectorSimilarity::Dot, None) => Box::new(QuantizedQueryVectorDistance::from_quantized(
             F32DotProductDistance,
             query,
         )),
         (VectorSimilarity::Euclidean, None) => Box::new(
-            GenericQueryVectorDistance::from_quantized(F32EuclideanDistance, query),
+            QuantizedQueryVectorDistance::from_quantized(F32EuclideanDistance, query),
         ),
-        (_, Some(VectorQuantizer::Binary)) => Box::new(GenericQueryVectorDistance::from_quantized(
-            HammingDistance,
-            query,
-        )),
+        (_, Some(VectorQuantizer::Binary)) => Box::new(
+            QuantizedQueryVectorDistance::from_quantized(HammingDistance, query),
+        ),
         (_, Some(VectorQuantizer::AsymmetricBinary { n: _ })) => Box::new(
-            GenericQueryVectorDistance::from_quantized(HammingDistance, query),
+            QuantizedQueryVectorDistance::from_quantized(HammingDistance, query),
         ),
         (_, Some(VectorQuantizer::I8Naive)) => Box::new(
-            GenericQueryVectorDistance::from_quantized(I8NaiveDistance(similarity), query),
+            QuantizedQueryVectorDistance::from_quantized(I8NaiveDistance(similarity), query),
         ),
         (VectorSimilarity::Dot, Some(VectorQuantizer::I8ScaledUniform)) => Box::new(
-            GenericQueryVectorDistance::from_quantized(I8ScaledUniformDotProduct, query),
+            QuantizedQueryVectorDistance::from_quantized(I8ScaledUniformDotProduct, query),
         ),
         (VectorSimilarity::Euclidean, Some(VectorQuantizer::I8ScaledUniform)) => Box::new(
-            GenericQueryVectorDistance::from_quantized(I8ScaledUniformEuclidean, query),
+            QuantizedQueryVectorDistance::from_quantized(I8ScaledUniformEuclidean, query),
         ),
     }
 }

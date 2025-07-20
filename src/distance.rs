@@ -232,8 +232,6 @@ pub struct I8ScaledUniformDotProduct;
 
 impl VectorDistance for I8ScaledUniformDotProduct {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // TODO: if we had a formal query distance abstraction we could avoid quantizing the query
-        // vector and improve accuracy at the cost of speed (f32 instead of i32).
         let query = I8ScaledUniformVector::from(query);
         let doc = I8ScaledUniformVector::from(doc);
         let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
@@ -241,17 +239,20 @@ impl VectorDistance for I8ScaledUniformDotProduct {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct I8ScaledUniformDotProductQueryDistance<'a>(&'a [f32]);
+#[derive(Debug, Clone)]
+pub struct I8ScaledUniformDotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
 impl<'a> I8ScaledUniformDotProductQueryDistance<'a> {
     pub fn new(query: &'a [f32]) -> Self {
-        Self(query)
+        Self(F32DotProductDistance.normalize(query.into()))
     }
 }
 
 impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
+        // TODO: benchmark performing dot product of query and doc without scaling, then scaling
+        // afterward. This would avoid a multiplication per dimension.
+        // XXX
         let vector = I8ScaledUniformVector::from(vector);
         let dot = self
             .0
@@ -268,8 +269,6 @@ pub struct I8ScaledUniformEuclidean;
 
 impl VectorDistance for I8ScaledUniformEuclidean {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // TODO: if we had a formal query distance abstraction we could use the original query
-        // vector or at least avoid dequantizing the query so many times.
         let query = I8ScaledUniformVector::from(query);
         let doc = I8ScaledUniformVector::from(doc);
         let dot = query.dot_unnormalized(&doc);

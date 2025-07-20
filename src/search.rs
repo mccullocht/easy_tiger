@@ -157,8 +157,7 @@ impl GraphSearcher {
             return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
         }
 
-        let distance_fn = reader.config().new_distance_function();
-        let query = distance_fn.normalize(query.into());
+        let query = new_query_vector_distance_f32(query, reader.config().similarity, None);
         let mut raw_vectors = reader.raw_vectors()?;
         let rescored = self
             .candidates
@@ -169,12 +168,7 @@ impl GraphSearcher {
                 raw_vectors
                     .get_raw_vector(vertex)
                     .expect("row exists")
-                    .map(|rv| {
-                        Neighbor::new(
-                            vertex,
-                            distance_fn.distance(bytemuck::cast_slice(&query), &rv),
-                        )
-                    })
+                    .map(|rv| Neighbor::new(vertex, query.distance(&rv)))
             })
             .collect::<Result<Vec<_>>>();
         rescored.map(|mut r| {

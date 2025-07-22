@@ -18,15 +18,6 @@ use crate::{
     },
 };
 
-// XXX I actually have two separate problems: one is that I have no mechanism for replacing the
-// format of the "raw" vectors, which overlaps with quantization (except the default is lossless),
-// the second is that implementing scoring in this kind of scheme is annoying. Should I focus on
-// the former? Seems moree productive.
-
-// XXX format/quantization and distance are closely interrelated and it probably doesn't make
-// sense for the formatting code to live in a different place from the distance code. i might need
-// both to get anything done.
-
 /// Compute the distance between a fixed vector provided at creation time and other vectors.
 /// This is often useful in query flows where everything references a specific point.
 pub trait QueryVectorDistance: Send + Sync {

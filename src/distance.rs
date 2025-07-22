@@ -252,7 +252,6 @@ impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         // TODO: benchmark performing dot product of query and doc without scaling, then scaling
         // afterward. This would avoid a multiplication per dimension.
-        // XXX
         let vector = I8ScaledUniformVector::from(vector);
         let dot = self
             .0
@@ -288,6 +287,8 @@ impl<'a> I8ScaledUniformEuclideanQueryDistance<'a> {
 
 impl QueryVectorDistance for I8ScaledUniformEuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
+        // TODO: benchmark performing dot product of query and doc without scaling, then scaling
+        // afterward. This would avoid a multiplication per dimension.
         let vector = I8ScaledUniformVector::from(vector);
         let dot = self
             .0
@@ -455,8 +456,6 @@ mod test {
             qdist,
         );
     }
-
-    // XXX i get recall of 0 when using the asymmetric functions so clearly i fucked up _something_.
 
     #[test]
     fn i8_shaped_dot() {

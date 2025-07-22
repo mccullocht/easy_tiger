@@ -23,10 +23,11 @@ use wt_mdb::{
 };
 
 use crate::{
-    distance::{F32VectorDistance, VectorDistance},
+    distance::F32VectorDistance,
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
     quantization::{Quantizer, VectorQuantizer},
+    query_distance::{new_query_vector_distance_f32, QueryVectorDistance},
     search::{GraphSearchStats, GraphSearcher},
     wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
@@ -408,22 +409,20 @@ fn select_centroids(
     Ok(centroid_ids)
 }
 
-struct PostingIter<'a, 'b, 'c, 'd> {
+struct PostingIter<'a, 'b, 'c> {
     cursor: TypedCursorGuard<'a, PostingKey, Vec<u8>>,
     seen: &'b mut HashSet<i64>,
-    query: &'c [u8],
-    distance_fn: &'d dyn VectorDistance,
+    tail_query: &'c dyn QueryVectorDistance,
 
     read: usize,
 }
 
-impl<'a, 'b, 'c, 'd> PostingIter<'a, 'b, 'c, 'd> {
+impl<'a, 'b, 'c> PostingIter<'a, 'b, 'c> {
     fn new(
         reader: &'a SessionIndexReader,
         centroid_id: u32,
         seen: &'b mut HashSet<i64>,
-        query: &'c [u8],
-        distance_fn: &'d dyn VectorDistance,
+        tail_query: &'c dyn QueryVectorDistance,
     ) -> Result<Self> {
         // I _think_ wt copies bounds so we should be cool with temporaries here.
         let mut cursor = reader
@@ -437,8 +436,7 @@ impl<'a, 'b, 'c, 'd> PostingIter<'a, 'b, 'c, 'd> {
         Ok(Self {
             cursor,
             seen,
-            query,
-            distance_fn,
+            tail_query,
             read: 0,
         })
     }
@@ -448,7 +446,7 @@ impl<'a, 'b, 'c, 'd> PostingIter<'a, 'b, 'c, 'd> {
     }
 }
 
-impl Iterator for PostingIter<'_, '_, '_, '_> {
+impl Iterator for PostingIter<'_, '_, '_> {
     type Item = Result<Neighbor>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -459,7 +457,7 @@ impl Iterator for PostingIter<'_, '_, '_, '_> {
                 Err(e) => return Some(Err(e)),
             };
             if self.seen.insert(record_id) {
-                let dist = self.distance_fn.distance(self.query, vector);
+                let dist = self.tail_query.distance(vector);
                 return Some(Ok(Neighbor::new(record_id, dist)));
             }
         }
@@ -467,7 +465,7 @@ impl Iterator for PostingIter<'_, '_, '_, '_> {
     }
 }
 
-impl FusedIterator for PostingIter<'_, '_, '_, '_> {}
+impl FusedIterator for PostingIter<'_, '_, '_> {}
 
 pub struct SessionIndexReader {
     index: Arc<TableIndex>,
@@ -576,26 +574,19 @@ impl SpannSearcher {
         }
 
         self.seen.clear();
-        let quantizer = reader.index().config().quantizer.new_quantizer();
-        let quantized_query = quantizer.for_query(query);
-        let distance_fn = reader
-            .index
-            .config()
-            .quantizer
-            .new_distance_function(&reader.index().head_config().config().similarity);
+        let tail_query = new_query_vector_distance_f32(
+            query,
+            reader.index().head_config().config().similarity,
+            Some(reader.index().config().quantizer),
+        );
         // TODO: replace the heap, try https://quickwit.io/blog/top-k-complexity
         let mut results = BinaryHeap::with_capacity(self.params.limit.get());
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
             // TODO: consider structuring as a single iterator over centroids to avoid cursor freelisting.
             // TODO: if I can't read a posting list then skip and warn rather than exiting early.
-            let mut it = PostingIter::new(
-                reader,
-                centroid_id,
-                &mut self.seen,
-                &quantized_query,
-                distance_fn.as_ref(),
-            )?;
+            let mut it =
+                PostingIter::new(reader, centroid_id, &mut self.seen, tail_query.as_ref())?;
             for candidate_result in &mut it {
                 match candidate_result {
                     Ok(candidate) => {
@@ -619,7 +610,8 @@ impl SpannSearcher {
             return Ok(results.into_sorted_vec());
         }
 
-        let distance_fn = reader.head_reader.config().new_distance_function();
+        let query =
+            new_query_vector_distance_f32(query, reader.head_reader.config().similarity, None);
         let mut raw_cursor = reader
             .session()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;
@@ -628,14 +620,13 @@ impl SpannSearcher {
             .into_iter()
             .take(self.params.num_rerank)
             .map(|n| {
-                let raw_vector = unsafe {
-                    raw_cursor
-                        .seek_exact_unsafe(n.vertex())
-                        .expect("raw vector for candidate")
-                }?;
                 Ok(Neighbor::new(
                     n.vertex(),
-                    distance_fn.distance(bytemuck::cast_slice(query), raw_vector),
+                    query.distance(unsafe {
+                        raw_cursor
+                            .seek_exact_unsafe(n.vertex())
+                            .expect("raw vector for candidate")?
+                    }),
                 ))
             })
             .collect::<Result<Vec<_>>>()?;

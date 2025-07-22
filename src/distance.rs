@@ -4,7 +4,9 @@ use std::{borrow::Cow, io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
-/// Distance function for quantized vectors.
+use crate::query_distance::QueryVectorDistance;
+
+/// Distance function for coded vectors.
 ///
 /// This trait is object-safe; it may be instantiated at runtime based on
 /// data that appears in a file or other backing store.
@@ -190,11 +192,22 @@ impl I8ScaledUniformVector<'_> {
             * other.scale()
     }
 
+    fn dequantized_unnormalized_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
+        self.vector()
+            .iter()
+            .map(|d| *d as f32 * self.scale() as f32)
+    }
+
+    fn dequantized_normalized_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
+        let scale = (self.scale() / self.l2_norm()) as f32;
+        self.vector().iter().map(move |d| *d as f32 * scale)
+    }
+
     fn scale(&self) -> f64 {
         f32::from_le_bytes(self.0[0..4].try_into().unwrap()).into()
     }
 
-    fn l1_norm(&self) -> f64 {
+    fn l2_norm_sq(&self) -> f64 {
         self.l2_norm() * self.l2_norm()
     }
 
@@ -219,11 +232,33 @@ pub struct I8ScaledUniformDotProduct;
 
 impl VectorDistance for I8ScaledUniformDotProduct {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // TODO: if we had a formal query distance abstraction we could avoid quantizing the query
-        // vector and improve accuracy at the cost of speed (f32 instead of i32).
         let query = I8ScaledUniformVector::from(query);
         let doc = I8ScaledUniformVector::from(doc);
         let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
+        (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct I8ScaledUniformDotProductQueryDistance<'a>(Cow<'a, [f32]>);
+
+impl<'a> I8ScaledUniformDotProductQueryDistance<'a> {
+    pub fn new(query: &'a [f32]) -> Self {
+        Self(F32DotProductDistance.normalize(query.into()))
+    }
+}
+
+impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        // TODO: benchmark performing dot product of query and doc without scaling, then scaling
+        // afterward. This would avoid a multiplication per dimension.
+        let vector = I8ScaledUniformVector::from(vector);
+        let dot = self
+            .0
+            .iter()
+            .zip(vector.dequantized_normalized_iter())
+            .map(|(q, d)| *q * d)
+            .sum::<f32>() as f64;
         (-dot + 1.0) / 2.0
     }
 }
@@ -233,12 +268,35 @@ pub struct I8ScaledUniformEuclidean;
 
 impl VectorDistance for I8ScaledUniformEuclidean {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // TODO: if we had a formal query distance abstraction we could use the original query
-        // vector or at least avoid dequantizing the query so many times.
         let query = I8ScaledUniformVector::from(query);
         let doc = I8ScaledUniformVector::from(doc);
         let dot = query.dot_unnormalized(&doc);
-        query.l1_norm() + doc.l1_norm() - (2.0 * dot)
+        query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct I8ScaledUniformEuclideanQueryDistance<'a>(&'a [f32], f64);
+
+impl<'a> I8ScaledUniformEuclideanQueryDistance<'a> {
+    pub fn new(query: &'a [f32]) -> Self {
+        let l2_norm_sq = dot_f32(query, query);
+        Self(query, l2_norm_sq)
+    }
+}
+
+impl QueryVectorDistance for I8ScaledUniformEuclideanQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        // TODO: benchmark performing dot product of query and doc without scaling, then scaling
+        // afterward. This would avoid a multiplication per dimension.
+        let vector = I8ScaledUniformVector::from(vector);
+        let dot = self
+            .0
+            .iter()
+            .zip(vector.dequantized_unnormalized_iter())
+            .map(|(q, d)| *q * d)
+            .sum::<f32>() as f64;
+        self.1 + vector.l2_norm_sq() - (2.0 * dot)
     }
 }
 
@@ -248,9 +306,14 @@ pub(crate) fn hamming(q: &[u8], d: &[u8]) -> f64 {
     u8::hamming(q, d).expect("same dimensionality")
 }
 
-#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[cfg(target_arch = "aarch64")]
 unsafe fn load_f32x4_le(p: *const u8) -> core::arch::aarch64::float32x4_t {
-    core::arch::aarch64::vld1q_f32(p as *const f32)
+    use core::arch::aarch64;
+    if cfg!(target_endian = "big") {
+        aarch64::vreinterpretq_f32_u8(aarch64::vrev32q_u8(aarch64::vld1q_u8(p)))
+    } else {
+        aarch64::vld1q_f32(p as *const f32)
+    }
 }
 
 #[cfg(not(target_arch = "aarch64"))]

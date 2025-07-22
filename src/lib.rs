@@ -13,6 +13,7 @@ pub mod graph_clustering;
 pub mod input;
 pub mod kmeans;
 pub mod quantization;
+pub mod query_distance;
 pub mod search;
 pub mod spann;
 pub mod wt;

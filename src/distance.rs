@@ -207,7 +207,7 @@ impl I8ScaledUniformVector<'_> {
         f32::from_le_bytes(self.0[0..4].try_into().unwrap()).into()
     }
 
-    fn l1_norm(&self) -> f64 {
+    fn l2_norm_sq(&self) -> f64 {
         self.l2_norm() * self.l2_norm()
     }
 
@@ -271,7 +271,7 @@ impl VectorDistance for I8ScaledUniformEuclidean {
         let query = I8ScaledUniformVector::from(query);
         let doc = I8ScaledUniformVector::from(doc);
         let dot = query.dot_unnormalized(&doc);
-        query.l1_norm() + doc.l1_norm() - (2.0 * dot)
+        query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
     }
 }
 
@@ -280,8 +280,8 @@ pub struct I8ScaledUniformEuclideanQueryDistance<'a>(&'a [f32], f64);
 
 impl<'a> I8ScaledUniformEuclideanQueryDistance<'a> {
     pub fn new(query: &'a [f32]) -> Self {
-        let l1_norm = dot_f32(query, query);
-        Self(query, l1_norm)
+        let l2_norm_sq = dot_f32(query, query);
+        Self(query, l2_norm_sq)
     }
 }
 
@@ -296,7 +296,7 @@ impl QueryVectorDistance for I8ScaledUniformEuclideanQueryDistance<'_> {
             .zip(vector.dequantized_unnormalized_iter())
             .map(|(q, d)| *q * d)
             .sum::<f32>() as f64;
-        self.1 + vector.l1_norm() - (2.0 * dot)
+        self.1 + vector.l2_norm_sq() - (2.0 * dot)
     }
 }
 

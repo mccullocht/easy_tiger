@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
 
 use crate::{
-    distance::{F32VectorDistance, VectorDistance, VectorSimilarity},
-    quantization::{Quantizer, VectorQuantizer},
+    vectors::{
+        F32VectorCoder, F32VectorCoding, F32VectorDistance, VectorDistance, VectorSimilarity,
+    },
     Neighbor,
 };
 
@@ -57,8 +58,7 @@ impl FromStr for GraphLayout {
 pub struct GraphConfig {
     pub dimensions: NonZero<usize>,
     pub similarity: VectorSimilarity,
-    pub quantizer: VectorQuantizer,
-    #[serde(default)]
+    pub nav_format: F32VectorCoding,
     pub layout: GraphLayout,
     pub max_edges: NonZero<usize>,
     pub index_search_params: GraphSearchParams,
@@ -70,13 +70,14 @@ impl GraphConfig {
         self.similarity.new_distance_function()
     }
 
-    pub fn new_quantizer(&self) -> Box<dyn Quantizer> {
-        self.quantizer.new_quantizer()
+    pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
+        self.nav_format.new_coder()
     }
 
     /// Return a distance function for quantized navigational vectors in the index.
-    pub fn new_nav_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.quantizer.new_distance_function(&self.similarity)
+    pub fn new_nav_distance_function(&self) -> Option<Box<dyn VectorDistance>> {
+        self.nav_format
+            .new_symmetric_vector_distance(self.similarity)
     }
 }
 
@@ -180,7 +181,10 @@ impl EdgeSetDistanceComputer {
                 })
                 .collect::<Result<Vec<_>>>()?;
             Ok(Self {
-                distance_fn: reader.config().new_nav_distance_function(),
+                distance_fn: reader
+                    .config()
+                    .new_nav_distance_function()
+                    .expect("symmetrical vector coding on disk"),
                 vectors,
             })
         }

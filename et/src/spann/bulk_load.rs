@@ -3,17 +3,16 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     bulk::{self, BulkLoadBuilder},
-    distance::VectorSimilarity,
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     kmeans::{iterative_balanced_kmeans, Params},
-    quantization::VectorQuantizer,
     spann::{
         bulk::{
             assign_to_centroids, bulk_load_centroids, bulk_load_postings, bulk_load_raw_vectors,
         },
         IndexConfig, TableIndex,
     },
+    vectors::{F32VectorCoding, VectorSimilarity},
 };
 use histogram::Histogram;
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
@@ -36,7 +35,7 @@ pub struct BulkLoadArgs {
     ///
     /// This will also dictate the quantized scoring function used.
     #[arg(short, long, value_enum)]
-    quantizer: VectorQuantizer,
+    head_quantizer: F32VectorCoding,
 
     /// Physical layout used for graph.
     ///
@@ -94,7 +93,7 @@ pub struct BulkLoadArgs {
 
     /// Quantizer to use for vectors written to centroid posting lists.
     #[arg(long)]
-    posting_quantizer: VectorQuantizer,
+    posting_coder: F32VectorCoding,
 
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
@@ -135,7 +134,7 @@ pub fn bulk_load(
     let head_config = GraphConfig {
         dimensions: args.dimensions,
         similarity: args.similarity,
-        quantizer: args.quantizer,
+        nav_format: args.head_quantizer,
         layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {
@@ -153,7 +152,7 @@ pub fn bulk_load(
                 .head_rerank_edges
                 .unwrap_or(args.head_edge_candidates.get()),
         },
-        quantizer: args.posting_quantizer,
+        posting_coder: args.posting_coder,
     };
     let index = Arc::new(TableIndex::init_index(
         &connection,
@@ -207,7 +206,6 @@ pub fn bulk_load(
             centroids,
             bulk::Options {
                 memory_quantized_vectors: false,
-                wt_vector_store: true,
                 cluster_ordered_insert: false,
             },
             centroids_len,

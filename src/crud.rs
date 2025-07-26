@@ -2,15 +2,13 @@
 use std::sync::Arc;
 
 use crate::{
-    distance::{F32VectorDistance, VectorDistance},
     graph::{
         prune_edges, EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndexReader,
         GraphVertex, RawVectorStore,
     },
     search::GraphSearcher,
-    wt::{
-        encode_raw_vector, SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY,
-    },
+    vectors::{F32VectorDistance, VectorDistance},
+    wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
 use wt_mdb::{Error, Result, Session};
@@ -88,11 +86,7 @@ impl IndexMutator {
             vertex_id,
             candidate_edges.iter().map(|n| n.vertex()).collect(),
             vector.as_ref(),
-            &self
-                .reader
-                .config()
-                .new_quantizer()
-                .for_doc(vector.as_ref()),
+            &self.reader.config().new_coder().encode(vector.as_ref()),
         )?;
 
         let mut pruned_edges = vec![];
@@ -300,14 +294,12 @@ impl IndexMutator {
         raw_vector: &[f32],
         nav_vector: &[u8],
     ) -> Result<()> {
-        match self.reader.config().layout {
-            GraphLayout::Split => {
-                self.reader.graph()?.set(vertex_id, edges)?;
-                self.reader
-                    .raw_vectors()?
-                    .set(vertex_id, encode_raw_vector(raw_vector))?;
-            }
-        }
+        self.reader.graph()?.set(vertex_id, edges)?;
+        // TODO: make this a struct member.
+        let coder = self.reader.config().similarity.vector_coding().new_coder();
+        self.reader
+            .raw_vectors()?
+            .set(vertex_id, coder.encode(raw_vector))?;
         self.reader.nav_vectors()?.set(vertex_id, nav_vector)
     }
 
@@ -325,12 +317,11 @@ mod tests {
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
     use crate::{
-        distance::VectorSimilarity,
         graph::{
             Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
         },
-        quantization::VectorQuantizer,
         search::GraphSearcher,
+        vectors::{F32VectorCoding, VectorSimilarity},
         wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     };
 
@@ -393,7 +384,7 @@ mod tests {
                     GraphConfig {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
-                        quantizer: VectorQuantizer::Binary,
+                        nav_format: F32VectorCoding::BinaryQuantized,
                         // TODO: each test should be run in both layouts.
                         layout: GraphLayout::Split,
                         max_edges: NonZero::new(4).unwrap(),

@@ -357,9 +357,3 @@ pub fn encode_graph_vertex(mut edges: Vec<i64>) -> Vec<u8> {
 
     out
 }
-
-/// Encode the contents of a raw vector to use as a WiredTiger table value.
-// TODO: replace this with a more comprehensive vector table offering.
-pub fn encode_raw_vector(vector: &[f32]) -> Vec<u8> {
-    vector.iter().flat_map(|d| d.to_le_bytes()).collect()
-}

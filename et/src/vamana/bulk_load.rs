@@ -3,10 +3,9 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     bulk::{BulkLoadBuilder, Options},
-    distance::VectorSimilarity,
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
-    quantization::VectorQuantizer,
+    vectors::{F32VectorCoding, VectorSimilarity},
     wt::TableGraphVectorIndex,
 };
 use wt_mdb::{Connection, Result, Session};
@@ -29,7 +28,7 @@ pub struct BulkLoadArgs {
     ///
     /// This will also dictate the quantized scoring function used.
     #[arg(short, long, value_enum)]
-    quantizer: VectorQuantizer,
+    nav_format: F32VectorCoding,
 
     /// Physical layout used for graph.
     ///
@@ -41,11 +40,6 @@ pub struct BulkLoadArgs {
     /// This can be significantly faster than reading these values from WiredTiger.
     #[arg(long, default_value_t = true)]
     memory_quantized_vectors: bool,
-    /// If true, load all the raw vectors into WiredTiger for bulk loading.
-    /// This can be faster for dot similarity as the vectors are normalized just once.
-    /// It also moves caching policy to WT rather than allowing the OS to manage it.
-    #[arg(long, default_value_t = false)]
-    wiredtiger_vector_store: bool,
     /// If true, cluster the input data set to choose insertion order. This improves locality
     /// during the insertion step, yielding higher cache hit rates and graph build times, at the
     /// expense of a compute intensive k-means clustering step.
@@ -91,7 +85,7 @@ pub fn bulk_load(
     let config = GraphConfig {
         dimensions: args.dimensions,
         similarity: args.similarity,
-        quantizer: args.quantizer,
+        nav_format: args.nav_format,
         layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {
@@ -114,7 +108,6 @@ pub fn bulk_load(
         f32_vectors,
         Options {
             memory_quantized_vectors: args.memory_quantized_vectors,
-            wt_vector_store: args.wiredtiger_vector_store,
             cluster_ordered_insert: args.cluster_ordered_insert,
         },
         limit,

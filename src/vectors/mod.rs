@@ -37,10 +37,19 @@ pub enum VectorSimilarity {
 }
 
 impl VectorSimilarity {
+    // XXX can this just return `dyn F32VectorDistance`???
     pub fn new_distance_function(self) -> Box<dyn F32VectorDistance> {
         match self {
             Self::Euclidean => Box::new(F32EuclideanDistance),
             Self::Dot => Box::new(F32DotProductDistance),
+        }
+    }
+
+    /// Returns the default [F32VectorCoding] to use for this similarity function.
+    pub fn vector_coding(&self) -> F32VectorCoding {
+        match self {
+            Self::Euclidean => F32VectorCoding::Raw,
+            Self::Dot => F32VectorCoding::RawL2Normalized,
         }
     }
 }

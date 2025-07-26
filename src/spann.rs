@@ -614,7 +614,7 @@ impl SpannSearcher {
         let query = new_query_vector_distance_f32(
             query,
             reader.head_reader.config().similarity,
-            F32VectorCoding::Raw,
+            reader.head_reader.config().similarity.vector_coding(),
         );
         let mut raw_cursor = reader
             .session()

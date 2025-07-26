@@ -11,8 +11,7 @@ use crate::{
         RawVectorStore,
     },
     vectors::{
-        new_query_vector_distance_f32, new_query_vector_distance_indexing, F32VectorCoding,
-        QueryVectorDistance,
+        new_query_vector_distance_f32, new_query_vector_distance_indexing, QueryVectorDistance,
     },
     Neighbor,
 };
@@ -87,7 +86,7 @@ impl GraphSearcher {
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal_raw(query, |_| true, reader)
+        self.search_internal(query, |_| true, reader)
     }
 
     /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
@@ -102,7 +101,7 @@ impl GraphSearcher {
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal_raw(query, filter_predicate, reader)
+        self.search_internal(query, filter_predicate, reader)
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -116,35 +115,49 @@ impl GraphSearcher {
         // Marking this vertex as seen ensures we don't traverse or score ourselves (should be identity score).
         self.seen.insert(vertex_id);
 
-        if self.params.num_rerank > 0 {
-            // XXX i might want to still search quantized but then pivot at re-ranking time.
-            // f32 x quantized scoring is usually hella slow.
-            // separate into graph search and rerank, don't allow f32 x quantized scoring.
-            let query = reader
-                .raw_vectors()?
-                .get_raw_vector(vertex_id)
-                .unwrap_or(Err(Error::not_found_error()))?
-                .chunks(4)
-                .map(|c| f32::from_le_bytes(c.try_into().expect("f32")))
-                .collect::<Vec<_>>();
-            self.search_internal_raw(&query, |_| true, reader)
+        // Always encode/quantize the nav query. There are some codings that support f32 x quantized
+        // and we do not want to enter that path here because it is so expensive.
+        let nav_query_rep = reader
+            .nav_vectors()?
+            .get_nav_vector(vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?
+            .to_vec();
+        let nav_query = new_query_vector_distance_indexing(
+            &nav_query_rep,
+            reader.config().similarity,
+            reader.config().nav_format,
+        );
+
+        let rerank_query_rep = if self.params.num_rerank > 0 {
+            Some(
+                reader
+                    .raw_vectors()?
+                    .get_raw_vector(vertex_id)
+                    .unwrap_or(Err(Error::not_found_error()))?
+                    .chunks(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().expect("f32")))
+                    .collect::<Vec<_>>(),
+            )
         } else {
-            let nav_query = reader
-                .nav_vectors()?
-                .get_nav_vector(vertex_id)
-                .unwrap_or(Err(Error::not_found_error()))?
-                .to_vec();
-            let nav_query = new_query_vector_distance_indexing(
-                &nav_query,
+            None
+        };
+        let rerank_query = rerank_query_rep.as_ref().map(|q| {
+            new_query_vector_distance_f32(
+                q,
                 reader.config().similarity,
-                reader.config().nav_format,
-            );
-            self.search_internal_quantized(nav_query.as_ref(), |_| true, reader)?;
-            Ok(self.candidates.iter().map(|c| c.neighbor).collect())
-        }
+                reader.config().similarity.vector_coding(),
+            )
+        });
+
+        self.search_graph_and_rerank(
+            nav_query.as_ref(),
+            |_| true,
+            rerank_query.as_ref().map(|q| q.as_ref()),
+            reader,
+        )
     }
 
-    fn search_internal_raw(
+    fn search_internal(
         &mut self,
         query: &[f32],
         filter_predicate: impl FnMut(i64) -> bool,
@@ -155,39 +168,31 @@ impl GraphSearcher {
             reader.config().similarity,
             reader.config().nav_format,
         );
-        self.search_internal_quantized(nav_query.as_ref(), filter_predicate, reader)?;
+        let rerank_query = if self.params.num_rerank > 0 {
+            Some(new_query_vector_distance_f32(
+                query,
+                reader.config().similarity,
+                reader.config().similarity.vector_coding(),
+            ))
+        } else {
+            None
+        };
 
-        if self.params.num_rerank == 0 {
-            return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
-        }
-
-        let query =
-            new_query_vector_distance_f32(query, reader.config().similarity, F32VectorCoding::Raw);
-        let mut raw_vectors = reader.raw_vectors()?;
-        let rescored = self
-            .candidates
-            .iter()
-            .take(self.params.num_rerank)
-            .map(|c| {
-                let vertex = c.neighbor.vertex();
-                raw_vectors
-                    .get_raw_vector(vertex)
-                    .expect("row exists")
-                    .map(|rv| Neighbor::new(vertex, query.distance(&rv)))
-            })
-            .collect::<Result<Vec<_>>>();
-        rescored.map(|mut r| {
-            r.sort();
-            r
-        })
+        self.search_graph_and_rerank(
+            nav_query.as_ref(),
+            filter_predicate,
+            rerank_query.as_ref().map(|q| q.as_ref()),
+            reader,
+        )
     }
 
-    fn search_internal_quantized(
+    fn search_graph_and_rerank(
         &mut self,
-        query: &dyn QueryVectorDistance,
+        nav_query: &dyn QueryVectorDistance,
         mut filter_predicate: impl FnMut(i64) -> bool,
+        rerank_query: Option<&dyn QueryVectorDistance>,
         reader: &mut impl GraphVectorIndexReader,
-    ) -> Result<()> {
+    ) -> Result<Vec<Neighbor>> {
         // TODO: come up with a better way of managing re-used state.
         self.candidates.clear();
         self.visited = 0;
@@ -199,8 +204,10 @@ impl GraphSearcher {
             let entry_vector = nav
                 .get_nav_vector(entry_point)
                 .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates
-                .add_unvisited(Neighbor::new(entry_point, query.distance(&entry_vector)));
+            self.candidates.add_unvisited(Neighbor::new(
+                entry_point,
+                nav_query.distance(&entry_vector),
+            ));
             self.seen.insert(entry_point);
         }
 
@@ -224,11 +231,32 @@ impl GraphSearcher {
                     .get_nav_vector(edge)
                     .unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
-                    .add_unvisited(Neighbor::new(edge, query.distance(&vec)));
+                    .add_unvisited(Neighbor::new(edge, nav_query.distance(&vec)));
             }
         }
 
-        Ok(())
+        if rerank_query.is_none() {
+            return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
+        }
+
+        let rerank_query = rerank_query.unwrap();
+        let mut raw_vectors = reader.raw_vectors()?;
+        let rescored = self
+            .candidates
+            .iter()
+            .take(self.params.num_rerank)
+            .map(|c| {
+                let vertex = c.neighbor.vertex();
+                raw_vectors
+                    .get_raw_vector(vertex)
+                    .expect("row exists")
+                    .map(|rv| Neighbor::new(vertex, rerank_query.distance(&rv)))
+            })
+            .collect::<Result<Vec<_>>>();
+        rescored.map(|mut r| {
+            r.sort();
+            r
+        })
     }
 }
 

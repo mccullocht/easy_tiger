@@ -104,7 +104,7 @@ pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
 ///
 /// May return the input vector if it is already normalized.
 pub fn l2_normalize<'a>(vector: &'a [f32]) -> Cow<'a, [f32]> {
-    let norm = dot_f32(&vector, &vector).sqrt() as f32;
+    let norm = dot_f32(vector, vector).sqrt() as f32;
     if norm == 1.0 {
         vector.into()
     } else {

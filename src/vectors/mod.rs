@@ -344,8 +344,10 @@ pub fn new_query_vector_distance_indexing<'a>(
 mod test {
     use super::raw::{F32DotProductDistance, F32EuclideanDistance};
     use super::scaled_uniform::{I8ScaledUniformDotProduct, I8ScaledUniformEuclidean};
+    use crate::vectors::i8naive::I8NaiveDistance;
     use crate::vectors::{
-        F32VectorCoder, F32VectorDistance, I8ScaledUniformVectorCoder, VectorDistance,
+        F32VectorCoder, F32VectorDistance, I8NaiveVectorCoder, I8ScaledUniformVectorCoder,
+        VectorDistance, VectorSimilarity,
     };
 
     struct TestVector {
@@ -388,6 +390,31 @@ mod test {
             rdist,
             range,
             qdist,
+        );
+    }
+
+    #[test]
+    fn i8_naive_dot() {
+        // TODO: randomly generate a bunch of vectors for this test.
+        distance_compare_threshold(
+            F32DotProductDistance,
+            I8NaiveVectorCoder,
+            I8NaiveDistance(VectorSimilarity::Dot),
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+    }
+
+    #[test]
+    fn i8_naive_l2() {
+        distance_compare_threshold(
+            F32EuclideanDistance,
+            I8NaiveVectorCoder,
+            I8NaiveDistance(VectorSimilarity::Euclidean),
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
         );
     }
 

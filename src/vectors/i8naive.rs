@@ -28,6 +28,8 @@ impl F32VectorCoder for I8NaiveVectorCoder {
 pub struct I8NaiveDistance(pub(crate) VectorSimilarity);
 
 impl I8NaiveDistance {
+    const SCALE: f64 = (i8::MAX as f64 * i8::MAX as f64).recip();
+
     fn unpack(raw: &[u8]) -> (&[i8], f32) {
         assert!(raw.len() >= std::mem::size_of::<f32>());
         let (vector_bytes, norm_bytes) = raw.split_at(raw.len() - std::mem::size_of::<f32>());
@@ -42,19 +44,19 @@ impl VectorDistance for I8NaiveDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let (qv, qnorm) = Self::unpack(query);
         let (dv, dnorm) = Self::unpack(doc);
-        let divisor = i8::MAX as f32 * i8::MAX as f32;
-        // XXX this might not be correct, IIRC I need to scale dot based on the norms like in the
-        // scaled uniform implementation.
-        // NB: we may be able to accelerate this further with manual SIMD implementations.
         let dot = qv
             .iter()
             .zip(dv.iter())
             .map(|(q, d)| *q as i32 * *d as i32)
             .sum::<i32>() as f64
-            / divisor as f64;
+            * Self::SCALE;
+        // TODO: store l2 norm instead of squared l2 norm to speed up euclidean distance.
         match self.0 {
             VectorSimilarity::Dot => (-dot + 1.0) / 2.0,
-            VectorSimilarity::Euclidean => qnorm as f64 + dnorm as f64 - (2.0 * dot),
+            VectorSimilarity::Euclidean => {
+                qnorm as f64 + dnorm as f64
+                    - (2.0 * dot * qnorm.sqrt() as f64 * dnorm.sqrt() as f64)
+            }
         }
     }
 }

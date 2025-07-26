@@ -10,7 +10,8 @@ use wt_mdb::{Error, Result};
 
 use crate::{
     distance::{F32VectorDistance, VectorDistance, VectorSimilarity},
-    quantization::{Quantizer, VectorQuantizer},
+    quantization::VectorQuantizer,
+    vectors::{F32VectorCoder, F32VectorCoding},
     Neighbor,
 };
 
@@ -70,8 +71,8 @@ impl GraphConfig {
         self.similarity.new_distance_function()
     }
 
-    pub fn new_quantizer(&self) -> Box<dyn Quantizer> {
-        self.quantizer.new_quantizer()
+    pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
+        F32VectorCoding::from(self.quantizer).new_coder()
     }
 
     /// Return a distance function for quantized navigational vectors in the index.

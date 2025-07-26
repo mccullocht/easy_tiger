@@ -205,10 +205,10 @@ where
     fn load_nav_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
-        let quantizer = self.index.config().new_quantizer();
+        let coder = self.index.config().new_coder();
         let mut sum = vec![0.0; dim];
         let mut quantized_vectors = if self.options.memory_quantized_vectors {
-            Some(MmapMut::map_anon(quantizer.doc_bytes(dim) * self.vectors.len()).unwrap())
+            Some(MmapMut::map_anon(coder.byte_len(dim) * self.vectors.len()).unwrap())
         } else {
             None
         };
@@ -224,7 +224,7 @@ where
                     for (i, o) in v.iter().zip(sum.iter_mut()) {
                         *o += *i as f64;
                     }
-                    let quantized = quantizer.for_doc(v);
+                    let quantized = coder.encode(v);
                     if let Some(q) = quantized_vectors.as_mut() {
                         let start = i * quantized.len();
                         q[start..(start + quantized.len())].copy_from_slice(&quantized);
@@ -236,7 +236,7 @@ where
         self.quantized_vectors = quantized_vectors.map(|m| {
             DerefVectorStore::new(
                 m.make_read_only().unwrap(),
-                NonZero::new(quantizer.doc_bytes(dim)).unwrap(),
+                NonZero::new(coder.byte_len(dim)).unwrap(),
             )
             .unwrap()
         });

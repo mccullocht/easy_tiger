@@ -88,11 +88,7 @@ impl IndexMutator {
             vertex_id,
             candidate_edges.iter().map(|n| n.vertex()).collect(),
             vector.as_ref(),
-            &self
-                .reader
-                .config()
-                .new_quantizer()
-                .for_doc(vector.as_ref()),
+            &self.reader.config().new_coder().encode(vector.as_ref()),
         )?;
 
         let mut pruned_edges = vec![];

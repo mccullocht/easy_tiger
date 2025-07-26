@@ -362,7 +362,8 @@ mod test {
             Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
             RawVectorStore,
         },
-        quantization::{BinaryQuantizer, Quantizer, VectorQuantizer},
+        quantization::VectorQuantizer,
+        vectors::F32VectorCoding,
         Neighbor,
     };
 
@@ -388,11 +389,12 @@ mod test {
             T: IntoIterator<Item = V>,
             V: Into<Vec<f32>>,
         {
+            let coder = F32VectorCoding::BinaryQuantized.new_coder();
             let mut rep = iter
                 .into_iter()
                 .map(|x| {
                     let v = x.into();
-                    let b = BinaryQuantizer.for_doc(&v);
+                    let b = coder.encode(&v);
                     TestVector {
                         vector: v,
                         nav_vector: b,

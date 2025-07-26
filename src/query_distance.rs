@@ -13,8 +13,10 @@ use crate::{
         I8ScaledUniformDotProductQueryDistance, I8ScaledUniformEuclidean,
         I8ScaledUniformEuclideanQueryDistance, VectorDistance, VectorSimilarity,
     },
-    quantization::{
-        AsymmetricBinaryQuantizer, BinaryQuantizer, I8NaiveQuantizer, Quantizer, VectorQuantizer,
+    quantization::VectorQuantizer,
+    vectors::{
+        AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder, F32VectorCoder,
+        I8NaiveVectorCoder,
     },
 };
 
@@ -51,8 +53,8 @@ struct QuantizedQueryVectorDistance<'a, D> {
 }
 
 impl<'a, D: VectorDistance> QuantizedQueryVectorDistance<'a, D> {
-    fn from_f32(distance_fn: D, query: &'a [f32], quantizer: impl Quantizer) -> Self {
-        let query = quantizer.for_query(query).into();
+    fn from_f32(distance_fn: D, query: &'a [f32], coder: impl F32VectorCoder) -> Self {
+        let query = coder.encode(query).into();
         Self { distance_fn, query }
     }
 
@@ -87,19 +89,19 @@ pub fn new_query_vector_distance_f32<'a>(
         (_, Some(VectorQuantizer::Binary)) => Box::new(QuantizedQueryVectorDistance::from_f32(
             HammingDistance,
             query,
-            BinaryQuantizer,
+            BinaryQuantizedVectorCoder,
         )),
         (_, Some(VectorQuantizer::AsymmetricBinary { n })) => {
             Box::new(QuantizedQueryVectorDistance::from_f32(
                 AsymmetricHammingDistance,
                 query,
-                AsymmetricBinaryQuantizer::new(n),
+                AsymmetricBinaryQuantizedVectorCoder::new(n),
             ))
         }
         (_, Some(VectorQuantizer::I8Naive)) => Box::new(QuantizedQueryVectorDistance::from_f32(
             I8NaiveDistance(similarity),
             query,
-            I8NaiveQuantizer,
+            I8NaiveVectorCoder,
         )),
         (VectorSimilarity::Dot, Some(VectorQuantizer::I8ScaledUniform)) => {
             Box::new(I8ScaledUniformDotProductQueryDistance::new(query))

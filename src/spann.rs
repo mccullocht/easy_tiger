@@ -26,9 +26,10 @@ use crate::{
     distance::F32VectorDistance,
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
-    quantization::{Quantizer, VectorQuantizer},
+    quantization::VectorQuantizer,
     query_distance::{new_query_vector_distance_f32, QueryVectorDistance},
     search::{GraphSearchStats, GraphSearcher},
+    vectors::{F32VectorCoder, F32VectorCoding},
     wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };
@@ -238,7 +239,7 @@ impl Formatted for PostingKey {
 pub struct SessionIndexWriter {
     index: Arc<TableIndex>,
     distance_fn: Box<dyn F32VectorDistance + 'static>,
-    posting_quantizer: Box<dyn Quantizer + 'static>,
+    posting_coder: Box<dyn F32VectorCoder + 'static>,
 
     head_reader: SessionGraphVectorIndexReader,
     head_searcher: GraphSearcher,
@@ -247,13 +248,13 @@ pub struct SessionIndexWriter {
 impl SessionIndexWriter {
     pub fn new(index: Arc<TableIndex>, session: Session) -> Self {
         let distance_fn = index.head.config().new_distance_function();
-        let posting_quantizer = index.config.quantizer.new_quantizer();
+        let posting_coder = F32VectorCoding::from(index.config.quantizer).new_coder();
         let head_reader = SessionGraphVectorIndexReader::new(index.head.clone(), session);
         let head_searcher = GraphSearcher::new(index.config.head_search_params);
         Self {
             index,
             distance_fn,
-            posting_quantizer,
+            posting_coder,
             head_reader,
             head_searcher,
         }
@@ -298,7 +299,7 @@ impl SessionIndexWriter {
                 .flat_map(|i| i.to_le_bytes())
                 .collect::<Vec<u8>>(),
         )?;
-        let quantized = self.posting_quantizer.for_doc(vector.as_ref());
+        let quantized = self.posting_coder.encode(vector.as_ref());
         // TODO: try centering vector on each centroid before quantizing. This would likely reduce
         // error but would also require quantizing the vector for each centroid during search and
         // would complicate de-duplication (would have to accept best score).

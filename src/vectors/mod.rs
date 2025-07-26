@@ -10,8 +10,6 @@ use crate::{
     },
     quantization::VectorQuantizer,
     vectors::{
-        binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder},
-        i8naive::I8NaiveVectorCoder,
         raw::{RawF32VectorCoder, RawL2NormalizedF32VectorCoder},
         scaled_uniform::I8ScaledUniformVectorCoder,
     },
@@ -21,6 +19,9 @@ mod binary;
 mod i8naive;
 mod raw;
 mod scaled_uniform;
+
+pub(crate) use binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder};
+pub(crate) use i8naive::I8NaiveVectorCoder;
 
 // XXX immediate TODOs
 // * invert relationship between Quantizer and F32VectorCoding.

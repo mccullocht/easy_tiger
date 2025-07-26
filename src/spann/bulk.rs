@@ -4,6 +4,7 @@ use crate::{
     input::VectorStore,
     search::GraphSearcher,
     spann::{select_centroids, PostingKey, TableIndex},
+    vectors::F32VectorCoding,
     wt::{encode_raw_vector, SessionGraphVectorIndexReader},
 };
 use rayon::prelude::*;
@@ -96,7 +97,7 @@ pub fn bulk_load_postings(
         .collect();
     posting_keys.par_sort_unstable();
 
-    let quantizer = index.config().quantizer.new_quantizer();
+    let coder = F32VectorCoding::from(index.config().quantizer).new_coder();
     let mut bulk_cursor = session.new_bulk_load_cursor::<PostingKey, Vec<u8>>(
         &index.table_names.postings,
         Some(
@@ -105,7 +106,7 @@ pub fn bulk_load_postings(
         ),
     )?;
     for pk in posting_keys {
-        let quantized = quantizer.for_doc(&vectors[pk.record_id as usize]);
+        let quantized = coder.encode(&vectors[pk.record_id as usize]);
         bulk_cursor.insert(pk, &quantized)?;
         progress(1);
     }

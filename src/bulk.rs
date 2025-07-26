@@ -254,7 +254,7 @@ where
                 .enumerate()
                 .take(self.limit)
                 .map(|(i, v)| {
-                    let value = coder.encode(v.into());
+                    let value = coder.encode(v);
                     progress(1);
                     (i as i64, value)
                 }),

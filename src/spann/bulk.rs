@@ -4,7 +4,7 @@ use crate::{
     input::VectorStore,
     search::GraphSearcher,
     spann::{select_centroids, PostingKey, TableIndex},
-    wt::{encode_raw_vector, SessionGraphVectorIndexReader},
+    wt::SessionGraphVectorIndexReader,
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
@@ -120,7 +120,6 @@ pub fn bulk_load_raw_vectors(
     limit: usize,
     progress: (impl Fn(u64) + Send + Sync),
 ) -> Result<()> {
-    let distance = index.head_config().config().new_distance_function();
     let mut bulk_cursor = session.new_bulk_load_cursor::<i64, Vec<u8>>(
         &index.table_names.raw_vectors,
         Some(
@@ -128,9 +127,17 @@ pub fn bulk_load_raw_vectors(
                 .app_metadata(&serde_json::to_string(&index.config).unwrap()),
         ),
     )?;
+    let coder = index
+        .head_config()
+        .config()
+        .similarity
+        .vector_coding()
+        .new_coder();
+    let mut encoded =
+        Vec::with_capacity(coder.byte_len(index.head_config().config().dimensions.get()));
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {
-        let vector = distance.normalize(vector.into());
-        bulk_cursor.insert(record_id as i64, &encode_raw_vector(vector.as_ref()))?;
+        coder.encode_to(vector, &mut encoded);
+        bulk_cursor.insert(record_id as i64, &encoded)?;
         progress(1);
     }
     Ok(())

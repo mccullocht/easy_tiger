@@ -36,8 +36,7 @@ use crate::{
     search::GraphSearcher,
     vectors::F32VectorDistance,
     wt::{
-        encode_graph_vertex, encode_raw_vector, CursorVectorStore, TableGraphVectorIndex,
-        CONFIG_KEY, ENTRY_POINT_KEY,
+        encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
     },
     Neighbor,
 };
@@ -246,6 +245,7 @@ where
 
     fn load_raw_vectors<P: Fn(u64) + Send + Sync>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
+        let coder = self.index.config().similarity.vector_coding().new_coder();
         session.bulk_load(
             self.index.raw_table_name(),
             None,
@@ -254,8 +254,7 @@ where
                 .enumerate()
                 .take(self.limit)
                 .map(|(i, v)| {
-                    let normalized = self.distance_fn.normalize(v.into());
-                    let value = encode_raw_vector(&normalized);
+                    let value = coder.encode(v.into());
                     progress(1);
                     (i as i64, value)
                 }),

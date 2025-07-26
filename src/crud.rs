@@ -8,9 +8,7 @@ use crate::{
     },
     search::GraphSearcher,
     vectors::{F32VectorDistance, VectorDistance},
-    wt::{
-        encode_raw_vector, SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY,
-    },
+    wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
 use wt_mdb::{Error, Result, Session};
@@ -296,14 +294,12 @@ impl IndexMutator {
         raw_vector: &[f32],
         nav_vector: &[u8],
     ) -> Result<()> {
-        match self.reader.config().layout {
-            GraphLayout::Split => {
-                self.reader.graph()?.set(vertex_id, edges)?;
-                self.reader
-                    .raw_vectors()?
-                    .set(vertex_id, encode_raw_vector(raw_vector))?;
-            }
-        }
+        self.reader.graph()?.set(vertex_id, edges)?;
+        // TODO: make this a struct member.
+        let coder = self.reader.config().similarity.vector_coding().new_coder();
+        self.reader
+            .raw_vectors()?
+            .set(vertex_id, coder.encode(raw_vector))?;
         self.reader.nav_vectors()?.set(vertex_id, nav_vector)
     }
 

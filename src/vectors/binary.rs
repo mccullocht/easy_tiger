@@ -56,6 +56,7 @@ impl F32VectorCoder for AsymmetricBinaryQuantizedVectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         if vector.is_empty() || self.0 == 1 {
             BinaryQuantizedVectorCoder.encode_to(vector, out);
+            return;
         }
 
         // Scale each dimension to be in [0, 2^n) and produce a trivially quantized vector.

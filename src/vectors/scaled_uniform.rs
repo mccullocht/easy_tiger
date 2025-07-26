@@ -19,7 +19,7 @@ pub struct I8ScaledUniformVectorCoder;
 
 impl F32VectorCoder for I8ScaledUniformVectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt();
+        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
         let (scale, inv_scale) =
             if let Some(max) = vector.iter().map(|d| d.abs()).max_by(|a, b| a.total_cmp(b)) {
                 (

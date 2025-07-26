@@ -4,7 +4,7 @@ use simsimd::SpatialSimilarity;
 
 use crate::{
     distance::{dot_f32, dot_f32_bytes, l2sq_f32, l2sq_f32_bytes},
-    vectors::{F32VectorCoder, F32VectorDistance, VectorDistance},
+    vectors::{F32VectorCoder, F32VectorDistance, QueryVectorDistance, VectorDistance},
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -103,5 +103,29 @@ impl F32VectorDistance for F32DotProductDistance {
             *d /= norm;
         }
         vector
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct F32QueryVectorDistance<'a, D> {
+    distance_fn: D,
+    query: Cow<'a, [f32]>,
+}
+
+impl<'a, D: F32VectorDistance> F32QueryVectorDistance<'a, D> {
+    pub fn new(distance_fn: D, query: &'a [f32], l2_normalize: bool) -> Self {
+        let query = if l2_normalize {
+            crate::distance::l2_normalize(query)
+        } else {
+            query.into()
+        };
+        Self { distance_fn, query }
+    }
+}
+
+impl<'a, D: F32VectorDistance> QueryVectorDistance for F32QueryVectorDistance<'a, D> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.distance_fn
+            .distance(bytemuck::cast_slice(self.query.as_ref()), vector)
     }
 }

@@ -6,7 +6,7 @@ use crate::vectors::{
     binary::{AsymmetricHammingDistance, HammingDistance},
     i8naive::I8NaiveDistance,
     raw::{
-        F32DotProductDistance, F32EuclideanDistance, RawF32VectorCoder,
+        F32DotProductDistance, F32EuclideanDistance, F32QueryVectorDistance, RawF32VectorCoder,
         RawL2NormalizedF32VectorCoder,
     },
     scaled_uniform::{
@@ -219,26 +219,6 @@ pub trait QueryVectorDistance: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-struct F32QueryVectorDistance<'a, D> {
-    distance_fn: D,
-    query: Cow<'a, [f32]>,
-}
-
-impl<'a, D: F32VectorDistance> F32QueryVectorDistance<'a, D> {
-    fn new(distance_fn: D, query: &'a [f32]) -> Self {
-        let query = distance_fn.normalize(query.into());
-        Self { distance_fn, query }
-    }
-}
-
-impl<'a, D: F32VectorDistance> QueryVectorDistance for F32QueryVectorDistance<'a, D> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        self.distance_fn
-            .distance(bytemuck::cast_slice(self.query.as_ref()), vector)
-    }
-}
-
-#[derive(Debug, Clone)]
 struct QuantizedQueryVectorDistance<'a, D> {
     distance_fn: D,
     query: Cow<'a, [u8]>,
@@ -271,15 +251,21 @@ pub fn new_query_vector_distance_f32<'a>(
     coding: F32VectorCoding,
 ) -> Box<dyn QueryVectorDistance + 'a> {
     match (similarity, coding) {
-        // XXX if the format is RawL2Normalized then we should normalize the input vector first.
-        // Right now we only normalize based on the target similarity function.
         (VectorSimilarity::Dot, F32VectorCoding::Raw)
         | (VectorSimilarity::Dot, F32VectorCoding::RawL2Normalized) => {
-            Box::new(F32QueryVectorDistance::new(F32DotProductDistance, query))
+            Box::new(F32QueryVectorDistance::new(
+                F32DotProductDistance,
+                query,
+                matches!(coding, F32VectorCoding::RawL2Normalized),
+            ))
         }
         (VectorSimilarity::Euclidean, F32VectorCoding::Raw)
         | (VectorSimilarity::Euclidean, F32VectorCoding::RawL2Normalized) => {
-            Box::new(F32QueryVectorDistance::new(F32EuclideanDistance, query))
+            Box::new(F32QueryVectorDistance::new(
+                F32EuclideanDistance,
+                query,
+                matches!(coding, F32VectorCoding::RawL2Normalized),
+            ))
         }
         (_, F32VectorCoding::BinaryQuantized) => Box::new(QuantizedQueryVectorDistance::from_f32(
             HammingDistance,

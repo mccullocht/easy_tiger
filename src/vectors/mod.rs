@@ -63,7 +63,7 @@ impl FromStr for VectorSimilarity {
             "dot" => Ok(VectorSimilarity::Dot),
             x => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("unknown similarity fuction {x}"),
+                format!("unknown similarity function {x}"),
             )),
         }
     }

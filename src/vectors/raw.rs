@@ -3,7 +3,7 @@ use simsimd::SpatialSimilarity;
 use crate::vectors::F32VectorCoder;
 
 #[derive(Debug, Copy, Clone)]
-pub(super) struct RawF32VectorCoder;
+pub struct RawF32VectorCoder;
 
 impl F32VectorCoder for RawF32VectorCoder {
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -11,7 +11,7 @@ impl F32VectorCoder for RawF32VectorCoder {
     }
 
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        assert!(out.len() >= vector.len() * std::mem::size_of::<f32>());
+        assert!(out.len() >= std::mem::size_of_val(vector));
         for (d, o) in vector
             .iter()
             .zip(out.chunks_mut(std::mem::size_of::<f32>()))
@@ -26,7 +26,7 @@ impl F32VectorCoder for RawF32VectorCoder {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub(super) struct RawL2NormalizedF32VectorCoder;
+pub struct RawL2NormalizedF32VectorCoder;
 
 impl RawL2NormalizedF32VectorCoder {
     fn scale(v: &[f32]) -> f32 {
@@ -41,7 +41,7 @@ impl F32VectorCoder for RawL2NormalizedF32VectorCoder {
     }
 
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        assert!(out.len() >= vector.len() * std::mem::size_of::<f32>());
+        assert!(out.len() >= std::mem::size_of_val(vector));
         let scale = Self::scale(vector);
         for (d, o) in vector
             .iter()

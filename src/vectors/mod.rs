@@ -3,13 +3,19 @@
 use std::fmt::Debug;
 
 use crate::{
-    quantization::{
-        AsymmetricBinaryQuantizer, BinaryQuantizer, I8NaiveQuantizer, I8ScaledUniformQuantizer,
-        Quantizer,
+    distance::{
+        AsymmetricHammingDistance, F32DotProductDistance, F32EuclideanDistance, HammingDistance,
+        I8NaiveDistance, I8ScaledUniformDotProduct, I8ScaledUniformEuclidean, VectorDistance,
+        VectorSimilarity,
     },
-    vectors::raw::{RawF32VectorCoder, RawL2NormalizedF32VectorCoder},
+    quantization::{I8NaiveQuantizer, I8ScaledUniformQuantizer, Quantizer, VectorQuantizer},
+    vectors::{
+        binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder},
+        raw::{RawF32VectorCoder, RawL2NormalizedF32VectorCoder},
+    },
 };
 
+mod binary;
 mod raw;
 
 // XXX immediate TODOs
@@ -20,22 +26,40 @@ mod raw;
 // * mod quantization goes away entirely, including factory functions.
 // * mod query_distance and mod distance also go away. factory functions move here.
 
-// XXX docos
+/// Supported coding schemes for input f32 vectors.
+///
+/// Raw vectors are stored little endian but the remaining formats are all lossy in some way with
+/// varying degrees of compression and fidelity in distance computation.
+#[derive(Debug, Copy, Clone, Default)]
 pub enum F32VectorCoding {
     /// Little-endian f32 values encoded as bytes.
+    #[default]
     Raw,
     /// Little-endian f32 values encoded as bytes, but l2 normalized first.
     /// The resulting unit vectors can be used to cheaply compute angular distance.
     RawL2Normalized,
     /// Single bit (sign bit) per dimension.
+    ///
+    /// This encoding is very compact and efficient for distance computation but also does not have
+    /// high fidelity with distances computed between raw vectors.
     BinaryQuantized,
-    /// Quantize to n-bits per dimension, but format to facilitate hamming distance calculations.
+    /// Quantize to N bits per dimension but transpose to create N bit vectors.
+    ///
+    /// This allows us to emulate dot product when comparing to a binary quantized vector, and
+    /// produces higher fidelity distance than binary quantization on its own.
     NBitBinaryQuantized(usize),
     /// Normalize and quantize into an i8 value.
+    ///
     /// This normalizes the input vector but otherwise does not shape quantization to the input.
+    ///
+    /// This uses 1 byte per dimension + 4 bytes for the l2 norm for euclidean distances.
     I8NaiveQuantized,
     /// Normalize and quantize into an i8 value, shaped to the input vector.
-    /// This uses the contents of the vector to try to reduce quantization error.
+    ///
+    /// This uses the contents of the vector to try to reduce quantization error but no data from
+    /// othr vectors in the data set.
+    ///
+    /// This uses 1 byte per dimension and 8 additional bytes for a scaling factor and l2 norm.
     I8ScaledUniform,
 }
 
@@ -45,17 +69,44 @@ impl F32VectorCoding {
         match self {
             Self::Raw => Box::new(RawF32VectorCoder),
             Self::RawL2Normalized => Box::new(RawL2NormalizedF32VectorCoder),
-            Self::BinaryQuantized => Box::new(QuantizedVectorCoding(BinaryQuantizer)),
-            Self::NBitBinaryQuantized(n) => {
-                Box::new(NBitBinaryQuantized(AsymmetricBinaryQuantizer::new(*n)))
-            }
+            Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
+            Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
             Self::I8NaiveQuantized => Box::new(QuantizedVectorCoding(I8NaiveQuantizer)),
             Self::I8ScaledUniform => Box::new(QuantizedVectorCoding(I8ScaledUniformQuantizer)),
         }
     }
 
-    // XXX we can do symmetrical distance by using the same F32VectorCoding on both sides.
-    // XXX we can also do asymmetrical for some combinations
+    // XXX I don't like this very much because it assumes the same format on both sides but abinary
+    // is obviously not symmetric. i'm just going it to make this easier to retrofit existing code
+    // using VectorQuantizer. This is pretty obviously wrong.
+    // XXX maybe just return Option<...> and add 'symmetric' to the name? or maybe i hide abinary
+    // in QueryVectorDistance once and for all, if that is even possible???
+    pub fn new_distance_fn(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
+        match (self, similarity) {
+            (Self::Raw, VectorSimilarity::Dot) => Box::new(F32DotProductDistance),
+            (Self::RawL2Normalized, VectorSimilarity::Dot) => Box::new(F32DotProductDistance),
+            (Self::Raw, VectorSimilarity::Euclidean) => Box::new(F32EuclideanDistance),
+            (Self::RawL2Normalized, VectorSimilarity::Euclidean) => Box::new(F32EuclideanDistance),
+            (Self::BinaryQuantized, _) => Box::new(HammingDistance),
+            (Self::NBitBinaryQuantized(_), _) => Box::new(AsymmetricHammingDistance),
+            (Self::I8NaiveQuantized, _) => Box::new(I8NaiveDistance(similarity)),
+            (Self::I8ScaledUniform, VectorSimilarity::Dot) => Box::new(I8ScaledUniformDotProduct),
+            (Self::I8ScaledUniform, VectorSimilarity::Euclidean) => {
+                Box::new(I8ScaledUniformEuclidean)
+            }
+        }
+    }
+}
+
+impl From<VectorQuantizer> for F32VectorCoding {
+    fn from(value: VectorQuantizer) -> Self {
+        match value {
+            VectorQuantizer::Binary => Self::BinaryQuantized,
+            VectorQuantizer::AsymmetricBinary { n } => Self::NBitBinaryQuantized(n),
+            VectorQuantizer::I8Naive => Self::I8NaiveQuantized,
+            VectorQuantizer::I8ScaledUniform => Self::I8ScaledUniform,
+        }
+    }
 }
 
 // XXX docos
@@ -91,23 +142,5 @@ impl<Q: Quantizer + Debug + Copy + Clone> F32VectorCoder for QuantizedVectorCodi
 
     fn byte_len(&self, dimensions: usize) -> usize {
         self.0.doc_bytes(dimensions)
-    }
-}
-
-// XXX remove this entirely, write a native coder for this format.
-#[derive(Debug, Copy, Clone)]
-struct NBitBinaryQuantized(AsymmetricBinaryQuantizer);
-
-impl F32VectorCoder for NBitBinaryQuantized {
-    fn encode(&self, vector: &[f32]) -> Vec<u8> {
-        self.0.for_query(vector)
-    }
-
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        out.copy_from_slice(&self.encode(vector));
-    }
-
-    fn byte_len(&self, dimensions: usize) -> usize {
-        self.0.query_bytes(dimensions)
     }
 }

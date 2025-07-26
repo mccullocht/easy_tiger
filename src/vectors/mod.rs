@@ -8,17 +8,19 @@ use crate::{
         I8NaiveDistance, I8ScaledUniformDotProduct, I8ScaledUniformEuclidean, VectorDistance,
         VectorSimilarity,
     },
-    quantization::{I8ScaledUniformQuantizer, Quantizer, VectorQuantizer},
+    quantization::VectorQuantizer,
     vectors::{
         binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder},
         i8naive::I8NaiveVectorCoder,
         raw::{RawF32VectorCoder, RawL2NormalizedF32VectorCoder},
+        scaled_uniform::I8ScaledUniformVectorCoder,
     },
 };
 
 mod binary;
 mod i8naive;
 mod raw;
+mod scaled_uniform;
 
 // XXX immediate TODOs
 // * invert relationship between Quantizer and F32VectorCoding.
@@ -74,7 +76,7 @@ impl F32VectorCoding {
             Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
             Self::I8NaiveQuantized => Box::new(I8NaiveVectorCoder),
-            Self::I8ScaledUniform => Box::new(QuantizedVectorCoding(I8ScaledUniformQuantizer)),
+            Self::I8ScaledUniform => Box::new(I8ScaledUniformVectorCoder),
         }
     }
 
@@ -127,22 +129,4 @@ pub trait F32VectorCoder: Send + Sync {
 
     /// Return the number of bytes required to encode a vector of length `dimensions`.
     fn byte_len(&self, dimensions: usize) -> usize;
-}
-
-// XXX remove this entirely, write native coders for each format.
-#[derive(Debug, Copy, Clone)]
-struct QuantizedVectorCoding<Q: Debug + Copy + Clone>(Q);
-
-impl<Q: Quantizer + Debug + Copy + Clone> F32VectorCoder for QuantizedVectorCoding<Q> {
-    fn encode(&self, vector: &[f32]) -> Vec<u8> {
-        self.0.for_doc(vector)
-    }
-
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        out.copy_from_slice(&self.encode(vector));
-    }
-
-    fn byte_len(&self, dimensions: usize) -> usize {
-        self.0.doc_bytes(dimensions)
-    }
 }

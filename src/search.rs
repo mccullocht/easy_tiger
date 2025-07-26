@@ -119,6 +119,7 @@ impl GraphSearcher {
         if self.params.num_rerank > 0 {
             // XXX i might want to still search quantized but then pivot at re-ranking time.
             // f32 x quantized scoring is usually hella slow.
+            // separate into graph search and rerank, don't allow f32 x quantized scoring.
             let query = reader
                 .raw_vectors()?
                 .get_raw_vector(vertex_id)

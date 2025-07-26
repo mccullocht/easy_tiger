@@ -141,29 +141,35 @@ impl F32VectorCoding {
         }
     }
 
-    // XXX I don't like this very much because it assumes the same format on both sides but abinary
-    // is obviously not symmetric. i'm just going it to make this easier to retrofit existing code
-    // using VectorQuantizer. This is pretty obviously wrong.
-    // XXX maybe just return Option<...> and add 'symmetric' to the name? or maybe i hide abinary
-    // in QueryVectorDistance once and for all, if that is even possible???
-    // XXX alternatively you can have a `query format` that is validated somehow attached to the
-    // index to allow this kind of asymmetry?
-    pub fn new_vector_distance(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
+    /// Returns a [VectorDistance] for symmetrical vector codings, or [None] if the encoding is not
+    /// symmetrical.
+    pub fn new_symmetric_vector_distance(
+        &self,
+        similarity: VectorSimilarity,
+    ) -> Option<Box<dyn VectorDistance>> {
         match (self, similarity) {
-            (Self::Raw, VectorSimilarity::Dot) => Box::new(F32DotProductDistance),
-            (Self::RawL2Normalized, VectorSimilarity::Dot) => Box::new(F32DotProductDistance),
-            (Self::Raw, VectorSimilarity::Euclidean) => Box::new(F32EuclideanDistance),
-            (Self::RawL2Normalized, VectorSimilarity::Euclidean) => Box::new(F32EuclideanDistance),
-            (Self::BinaryQuantized, _) => Box::new(HammingDistance),
-            (Self::NBitBinaryQuantized(_), _) => Box::new(AsymmetricHammingDistance),
-            (Self::I8NaiveQuantized, _) => Box::new(I8NaiveDistance(similarity)),
+            (Self::Raw, VectorSimilarity::Dot) => Some(Box::new(F32DotProductDistance)),
+            (Self::RawL2Normalized, VectorSimilarity::Dot) => Some(Box::new(F32DotProductDistance)),
+            (Self::Raw, VectorSimilarity::Euclidean) => Some(Box::new(F32EuclideanDistance)),
+            (Self::RawL2Normalized, VectorSimilarity::Euclidean) => {
+                Some(Box::new(F32EuclideanDistance))
+            }
+            (Self::BinaryQuantized, _) => Some(Box::new(HammingDistance)),
+            (Self::NBitBinaryQuantized(_), _) => None,
+            (Self::I8NaiveQuantized, _) => Some(Box::new(I8NaiveDistance(similarity))),
             (Self::I8ScaledUniformQuantized, VectorSimilarity::Dot) => {
-                Box::new(I8ScaledUniformDotProduct)
+                Some(Box::new(I8ScaledUniformDotProduct))
             }
             (Self::I8ScaledUniformQuantized, VectorSimilarity::Euclidean) => {
-                Box::new(I8ScaledUniformEuclidean)
+                Some(Box::new(I8ScaledUniformEuclidean))
             }
         }
+    }
+
+    /// Returns true if this coding can be scored symmetrically, where both vectors are using the
+    /// same coding. Only encodings that are symmetrical can be used for vectors stored on disk.
+    pub fn is_symmetric(&self) -> bool {
+        !matches!(self, Self::NBitBinaryQuantized(_))
     }
 }
 

@@ -5,7 +5,7 @@ pub struct I8NaiveVectorCoder;
 
 impl F32VectorCoder for I8NaiveVectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
+        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt();
 
         // Use the l2 norm to produce a value in [-1,1] then multiply by i8::MAX, round, and cast to
         // an i8 value to quantize. This is quite conservative in larger dimensions at it is

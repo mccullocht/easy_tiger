@@ -95,6 +95,7 @@ pub trait F32VectorDistance: VectorDistance {
 
     /// Normalize a vector for use with this scoring function.
     /// By default, does nothing.
+    // TODO: remove this in favor of F32VectorCoding.
     fn normalize<'a>(&self, vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
         vector
     }

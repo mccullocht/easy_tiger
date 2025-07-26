@@ -1,6 +1,11 @@
+use std::borrow::Cow;
+
 use simsimd::SpatialSimilarity;
 
-use crate::vectors::F32VectorCoder;
+use crate::{
+    distance::{dot_f32, dot_f32_bytes, l2sq_f32, l2sq_f32_bytes},
+    vectors::{F32VectorCoder, F32VectorDistance, VectorDistance},
+};
 
 #[derive(Debug, Copy, Clone)]
 pub struct RawF32VectorCoder;
@@ -57,5 +62,46 @@ impl F32VectorCoder for RawL2NormalizedF32VectorCoder {
             .iter()
             .flat_map(|d| (*d * scale).to_le_bytes())
             .collect()
+    }
+}
+
+/// Computes a score based on l2 distance.
+#[derive(Debug, Copy, Clone)]
+pub struct F32EuclideanDistance;
+
+impl VectorDistance for F32EuclideanDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        l2sq_f32_bytes(query, doc)
+    }
+}
+
+impl F32VectorDistance for F32EuclideanDistance {
+    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
+        l2sq_f32(a, b)
+    }
+}
+
+/// Computes a score based on the dot product.
+#[derive(Debug, Copy, Clone)]
+pub struct F32DotProductDistance;
+
+impl VectorDistance for F32DotProductDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        dot_f32_bytes(query, doc)
+    }
+}
+
+impl F32VectorDistance for F32DotProductDistance {
+    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
+        // Assuming values are normalized, this will produce a distance in [0,1]
+        (-dot_f32(a, b) + 1.0) / 2.0
+    }
+
+    fn normalize<'a>(&self, mut vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
+        let norm = dot_f32(&vector, &vector).sqrt() as f32;
+        for d in vector.to_mut().iter_mut() {
+            *d /= norm;
+        }
+        vector
     }
 }

@@ -1,14 +1,18 @@
 //! Vector handling: formatting/quantization and distance computation.
 
-use std::{fmt::Debug, io, str::FromStr};
+use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 
-use crate::{
-    distance::{
-        AsymmetricHammingDistance, F32DotProductDistance, F32EuclideanDistance, HammingDistance,
-        I8NaiveDistance, I8ScaledUniformDotProduct, I8ScaledUniformEuclidean, VectorDistance,
-        VectorSimilarity,
+use crate::vectors::{
+    binary::{AsymmetricHammingDistance, HammingDistance},
+    i8naive::I8NaiveDistance,
+    raw::{
+        F32DotProductDistance, F32EuclideanDistance, RawF32VectorCoder,
+        RawL2NormalizedF32VectorCoder,
     },
-    vectors::raw::{RawF32VectorCoder, RawL2NormalizedF32VectorCoder},
+    scaled_uniform::{
+        I8ScaledUniformDotProduct, I8ScaledUniformDotProductQueryDistance,
+        I8ScaledUniformEuclidean, I8ScaledUniformEuclideanQueryDistance,
+    },
 };
 
 mod binary;
@@ -23,8 +27,72 @@ use serde::{Deserialize, Serialize};
 
 // XXX some changes that need to happen:
 // * in bulk loading we should always use the WT table because it represent a transform.
-// * mod quantization goes away entirely, including factory functions.
-// * mod query_distance and mod distance also go away. factory functions move here.
+
+/// Functions used for to compute the distance between two vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VectorSimilarity {
+    /// Euclidean (l2) distance.
+    Euclidean,
+    /// Dot product scoring, an approximation of cosine scoring.
+    /// Vectors used for this distance function must be normalized.
+    #[default]
+    Dot,
+}
+
+impl VectorSimilarity {
+    pub fn new_distance_function(self) -> Box<dyn F32VectorDistance> {
+        match self {
+            Self::Euclidean => Box::new(F32EuclideanDistance),
+            Self::Dot => Box::new(F32DotProductDistance),
+        }
+    }
+}
+
+impl FromStr for VectorSimilarity {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "euclidean" => Ok(VectorSimilarity::Euclidean),
+            "dot" => Ok(VectorSimilarity::Dot),
+            x => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown similarity fuction {x}"),
+            )),
+        }
+    }
+}
+
+/// Distance function for coded vectors.
+///
+/// This trait is object-safe; it may be instantiated at runtime based on
+/// data that appears in a file or other backing store.
+pub trait VectorDistance: Send + Sync {
+    /// Score the `query` vector against the `doc` vector. Returns a score
+    /// where larger values are better matches.
+    ///
+    /// This function is not required to be commutative and may panic if
+    /// one of the inputs is misshapen.
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64;
+}
+
+/// Distance function for `f32` vectors.
+///
+/// This trait is object-safe; it may be instantiated at runtime based on
+/// data that appears in a file or other backing store.
+pub trait F32VectorDistance: VectorDistance {
+    /// Score vectors `a` and `b` against one another. Returns a score
+    /// where larger values are better matches.
+    ///
+    /// Input vectors must be the same length or this function may panic.
+    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
+
+    /// Normalize a vector for use with this scoring function.
+    /// By default, does nothing.
+    fn normalize<'a>(&self, vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
+        vector
+    }
+}
 
 /// Supported coding schemes for input f32 vectors.
 ///
@@ -81,7 +149,9 @@ impl F32VectorCoding {
     // using VectorQuantizer. This is pretty obviously wrong.
     // XXX maybe just return Option<...> and add 'symmetric' to the name? or maybe i hide abinary
     // in QueryVectorDistance once and for all, if that is even possible???
-    pub fn new_distance_fn(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
+    // XXX alternatively you can have a `query format` that is validated somehow attached to the
+    // index to allow this kind of asymmetry?
+    pub fn new_vector_distance(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
         match (self, similarity) {
             (Self::Raw, VectorSimilarity::Dot) => Box::new(F32DotProductDistance),
             (Self::RawL2Normalized, VectorSimilarity::Dot) => Box::new(F32DotProductDistance),
@@ -143,4 +213,209 @@ pub trait F32VectorCoder: Send + Sync {
 
     /// Return the number of bytes required to encode a vector of length `dimensions`.
     fn byte_len(&self, dimensions: usize) -> usize;
+}
+
+/// Compute the distance between a fixed vector provided at creation time and other vectors.
+/// This is often useful in query flows where everything references a specific point.
+pub trait QueryVectorDistance: Send + Sync {
+    fn distance(&self, vector: &[u8]) -> f64;
+}
+
+#[derive(Debug, Clone)]
+struct F32QueryVectorDistance<'a, D> {
+    distance_fn: D,
+    query: Cow<'a, [f32]>,
+}
+
+impl<'a, D: F32VectorDistance> F32QueryVectorDistance<'a, D> {
+    fn new(distance_fn: D, query: &'a [f32]) -> Self {
+        let query = distance_fn.normalize(query.into());
+        Self { distance_fn, query }
+    }
+}
+
+impl<'a, D: F32VectorDistance> QueryVectorDistance for F32QueryVectorDistance<'a, D> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.distance_fn
+            .distance(bytemuck::cast_slice(self.query.as_ref()), vector)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct QuantizedQueryVectorDistance<'a, D> {
+    distance_fn: D,
+    query: Cow<'a, [u8]>,
+}
+
+impl<'a, D: VectorDistance> QuantizedQueryVectorDistance<'a, D> {
+    fn from_f32(distance_fn: D, query: &'a [f32], coder: impl F32VectorCoder) -> Self {
+        let query = coder.encode(query).into();
+        Self { distance_fn, query }
+    }
+
+    fn from_quantized(distance_fn: D, query: &'a [u8]) -> Self {
+        Self {
+            distance_fn,
+            query: query.into(),
+        }
+    }
+}
+
+impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance<'a, D> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.distance_fn.distance(self.query.as_ref(), vector)
+    }
+}
+
+/// Create a new [QueryVectorDistance] given a query, similarity function, and vector coding.
+pub fn new_query_vector_distance_f32<'a>(
+    query: &'a [f32],
+    similarity: VectorSimilarity,
+    coding: F32VectorCoding,
+) -> Box<dyn QueryVectorDistance + 'a> {
+    match (similarity, coding) {
+        // XXX if the format is RawL2Normalized then we should normalize the input vector first.
+        // Right now we only normalize based on the target similarity function.
+        (VectorSimilarity::Dot, F32VectorCoding::Raw)
+        | (VectorSimilarity::Dot, F32VectorCoding::RawL2Normalized) => {
+            Box::new(F32QueryVectorDistance::new(F32DotProductDistance, query))
+        }
+        (VectorSimilarity::Euclidean, F32VectorCoding::Raw)
+        | (VectorSimilarity::Euclidean, F32VectorCoding::RawL2Normalized) => {
+            Box::new(F32QueryVectorDistance::new(F32EuclideanDistance, query))
+        }
+        (_, F32VectorCoding::BinaryQuantized) => Box::new(QuantizedQueryVectorDistance::from_f32(
+            HammingDistance,
+            query,
+            BinaryQuantizedVectorCoder,
+        )),
+        (_, F32VectorCoding::NBitBinaryQuantized(n)) => {
+            Box::new(QuantizedQueryVectorDistance::from_f32(
+                AsymmetricHammingDistance,
+                query,
+                AsymmetricBinaryQuantizedVectorCoder::new(n),
+            ))
+        }
+        (_, F32VectorCoding::I8NaiveQuantized) => Box::new(QuantizedQueryVectorDistance::from_f32(
+            I8NaiveDistance(similarity),
+            query,
+            I8NaiveVectorCoder,
+        )),
+        (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
+            Box::new(I8ScaledUniformDotProductQueryDistance::new(query))
+        }
+        (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
+            Box::new(I8ScaledUniformEuclideanQueryDistance::new(query))
+        }
+    }
+}
+
+/// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
+pub fn new_query_vector_distance_indexing<'a>(
+    query: &'a [u8],
+    similarity: VectorSimilarity,
+    coding: F32VectorCoding,
+) -> Box<dyn QueryVectorDistance + 'a> {
+    match (similarity, coding) {
+        (VectorSimilarity::Dot, F32VectorCoding::Raw)
+        | (VectorSimilarity::Dot, F32VectorCoding::RawL2Normalized) => Box::new(
+            QuantizedQueryVectorDistance::from_quantized(F32DotProductDistance, query),
+        ),
+        (VectorSimilarity::Euclidean, F32VectorCoding::Raw)
+        | (VectorSimilarity::Euclidean, F32VectorCoding::RawL2Normalized) => Box::new(
+            QuantizedQueryVectorDistance::from_quantized(F32EuclideanDistance, query),
+        ),
+        (_, F32VectorCoding::BinaryQuantized) => Box::new(
+            QuantizedQueryVectorDistance::from_quantized(HammingDistance, query),
+        ),
+        (_, F32VectorCoding::NBitBinaryQuantized(_)) => Box::new(
+            QuantizedQueryVectorDistance::from_quantized(HammingDistance, query),
+        ),
+        (_, F32VectorCoding::I8NaiveQuantized) => Box::new(
+            QuantizedQueryVectorDistance::from_quantized(I8NaiveDistance(similarity), query),
+        ),
+        (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
+            QuantizedQueryVectorDistance::from_quantized(I8ScaledUniformDotProduct, query),
+        ),
+        (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
+            QuantizedQueryVectorDistance::from_quantized(I8ScaledUniformEuclidean, query),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::raw::{F32DotProductDistance, F32EuclideanDistance};
+    use super::scaled_uniform::{I8ScaledUniformDotProduct, I8ScaledUniformEuclidean};
+    use crate::vectors::{
+        F32VectorCoder, F32VectorDistance, I8ScaledUniformVectorCoder, VectorDistance,
+    };
+
+    struct TestVector {
+        rvec: Vec<f32>,
+        qvec: Vec<u8>,
+    }
+
+    impl TestVector {
+        pub fn new(
+            rvec: Vec<f32>,
+            f32_dist_fn: impl F32VectorDistance,
+            coder: impl F32VectorCoder,
+        ) -> Self {
+            let qvec = coder.encode(&rvec);
+            Self {
+                rvec: f32_dist_fn.normalize(rvec.into()).to_vec(),
+                qvec,
+            }
+        }
+    }
+
+    fn distance_compare_threshold(
+        f32_dist_fn: impl F32VectorDistance + Copy,
+        coder: impl F32VectorCoder + Copy,
+        dist_fn: impl VectorDistance + Copy,
+        a: Vec<f32>,
+        b: Vec<f32>,
+        threshold: f64,
+    ) {
+        let a = TestVector::new(a, f32_dist_fn, coder);
+        let b = TestVector::new(b, f32_dist_fn, coder);
+
+        let rdist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
+        let qdist = dist_fn.distance(&a.qvec, &b.qvec);
+
+        let range = (rdist * (1.0 - threshold))..=(rdist * (1.0 + threshold));
+        assert!(
+            range.contains(&qdist),
+            "expected {} (range={:?}) actual {}",
+            rdist,
+            range,
+            qdist,
+        );
+    }
+
+    #[test]
+    fn i8_shaped_dot() {
+        // TODO: randomly generate a bunch of vectors for this test.
+        distance_compare_threshold(
+            F32DotProductDistance,
+            I8ScaledUniformVectorCoder,
+            I8ScaledUniformDotProduct,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+    }
+
+    #[test]
+    fn i8_shaped_l2() {
+        distance_compare_threshold(
+            F32EuclideanDistance,
+            I8ScaledUniformVectorCoder,
+            I8ScaledUniformEuclidean,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+    }
 }

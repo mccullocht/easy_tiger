@@ -23,12 +23,13 @@ use wt_mdb::{
 };
 
 use crate::{
-    distance::F32VectorDistance,
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
-    query_distance::{new_query_vector_distance_f32, QueryVectorDistance},
     search::{GraphSearchStats, GraphSearcher},
-    vectors::{F32VectorCoder, F32VectorCoding},
+    vectors::{
+        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, F32VectorDistance,
+        QueryVectorDistance,
+    },
     wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };

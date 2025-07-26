@@ -2,9 +2,8 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    distance::VectorSimilarity,
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
-    vectors::F32VectorCoding,
+    vectors::{F32VectorCoding, VectorSimilarity},
     wt::TableGraphVectorIndex,
 };
 use wt_mdb::Connection;

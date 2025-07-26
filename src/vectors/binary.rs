@@ -1,4 +1,6 @@
-use crate::vectors::F32VectorCoder;
+use simsimd::BinarySimilarity;
+
+use crate::vectors::{F32VectorCoder, VectorDistance};
 
 #[derive(Debug, Copy, Clone)]
 pub struct BinaryQuantizedVectorCoder;
@@ -19,7 +21,6 @@ impl F32VectorCoder for BinaryQuantizedVectorCoder {
     }
 }
 
-// XXX maybe remove this entirely and dump it into a QueryVectorDistance implementation.
 #[derive(Debug, Copy, Clone)]
 pub struct AsymmetricBinaryQuantizedVectorCoder(usize);
 
@@ -86,5 +87,33 @@ impl F32VectorCoder for AsymmetricBinaryQuantizedVectorCoder {
 
     fn byte_len(&self, dimensions: usize) -> usize {
         dimensions.div_ceil(8) * self.0
+    }
+}
+
+/// Computes a score from two bitmaps using hamming distance.
+#[derive(Debug, Copy, Clone)]
+pub struct HammingDistance;
+
+impl VectorDistance for HammingDistance {
+    fn distance(&self, a: &[u8], b: &[u8]) -> f64 {
+        BinarySimilarity::hamming(a, b).expect("same dimensionality")
+    }
+}
+
+/// Computes a score between a query and doc vectors produced by [crate::quantization::AsymmetricBinaryQuantizer]
+#[derive(Debug, Copy, Clone)]
+pub struct AsymmetricHammingDistance;
+
+impl VectorDistance for AsymmetricHammingDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        assert_eq!(query.len() % doc.len(), 0);
+        query
+            .chunks(doc.len())
+            .enumerate()
+            .map(|(i, v)| {
+                BinarySimilarity::hamming(doc, v).expect("same dimensionality") as usize
+                    * (1usize << i)
+            })
+            .sum::<usize>() as f64
     }
 }

@@ -27,7 +27,6 @@ use thread_local::ThreadLocal;
 use wt_mdb::{options::DropOptionsBuilder, Connection, Result, Session};
 
 use crate::{
-    distance::F32VectorDistance,
     graph::{
         prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig, GraphLayout,
         GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVectorStore,
@@ -35,6 +34,7 @@ use crate::{
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
+    vectors::F32VectorDistance,
     wt::{
         encode_graph_vertex, encode_raw_vector, CursorVectorStore, TableGraphVectorIndex,
         CONFIG_KEY, ENTRY_POINT_KEY,

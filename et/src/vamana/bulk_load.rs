@@ -3,10 +3,9 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     bulk::{BulkLoadBuilder, Options},
-    distance::VectorSimilarity,
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
-    vectors::F32VectorCoding,
+    vectors::{F32VectorCoding, VectorSimilarity},
     wt::TableGraphVectorIndex,
 };
 use wt_mdb::{Connection, Result, Session};

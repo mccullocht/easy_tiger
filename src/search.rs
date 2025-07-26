@@ -10,10 +10,10 @@ use crate::{
         Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
         RawVectorStore,
     },
-    query_distance::{
-        new_query_vector_distance_f32, new_query_vector_distance_indexing, QueryVectorDistance,
+    vectors::{
+        new_query_vector_distance_f32, new_query_vector_distance_indexing, F32VectorCoding,
+        QueryVectorDistance,
     },
-    vectors::F32VectorCoding,
     Neighbor,
 };
 
@@ -359,12 +359,11 @@ mod test {
     use wt_mdb::Result;
 
     use crate::{
-        distance::{F32DotProductDistance, F32VectorDistance, VectorSimilarity},
         graph::{
             Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
             RawVectorStore,
         },
-        vectors::F32VectorCoding,
+        vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity},
         Neighbor,
     };
 
@@ -384,9 +383,12 @@ mod test {
     }
 
     impl TestGraphVectorIndex {
-        pub fn new<S, T, V>(max_edges: NonZero<usize>, distance_fn: S, iter: T) -> Self
+        pub fn new<T, V>(
+            max_edges: NonZero<usize>,
+            distance_fn: Box<dyn F32VectorDistance>,
+            iter: T,
+        ) -> Self
         where
-            S: F32VectorDistance,
             T: IntoIterator<Item = V>,
             V: Into<Vec<f32>>,
         {
@@ -405,7 +407,7 @@ mod test {
                 .collect::<Vec<_>>();
 
             for i in 0..rep.len() {
-                rep[i].edges = Self::compute_edges(&rep, i, max_edges, &distance_fn);
+                rep[i].edges = Self::compute_edges(&rep, i, max_edges, distance_fn.as_ref());
             }
             let config = GraphConfig {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
@@ -425,15 +427,12 @@ mod test {
             TestGraphVectorIndexReader(self)
         }
 
-        fn compute_edges<S>(
+        fn compute_edges(
             graph: &[TestVector],
             index: usize,
             max_edges: NonZero<usize>,
-            distance_fn: &S,
-        ) -> Vec<i64>
-        where
-            S: F32VectorDistance,
-        {
+            distance_fn: &dyn F32VectorDistance,
+        ) -> Vec<i64> {
             let q = &graph[index].vector;
             let mut scored = graph
                 .iter()
@@ -600,7 +599,7 @@ mod test {
         let dim_values = [-0.25, -0.125, 0.125, 0.25];
         TestGraphVectorIndex::new(
             NonZero::new(max_edges).unwrap(),
-            F32DotProductDistance,
+            VectorSimilarity::Dot.new_distance_function(),
             (0..256).map(|v| {
                 Vec::from([
                     dim_values[v & 0x3],

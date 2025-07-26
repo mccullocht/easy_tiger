@@ -2,12 +2,12 @@
 use std::sync::Arc;
 
 use crate::{
-    distance::{F32VectorDistance, VectorDistance},
     graph::{
         prune_edges, EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndexReader,
         GraphVertex, RawVectorStore,
     },
     search::GraphSearcher,
+    vectors::{F32VectorDistance, VectorDistance},
     wt::{
         encode_raw_vector, SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY,
     },
@@ -321,12 +321,11 @@ mod tests {
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
     use crate::{
-        distance::VectorSimilarity,
         graph::{
             Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
         },
         search::GraphSearcher,
-        vectors::F32VectorCoding,
+        vectors::{F32VectorCoding, VectorSimilarity},
         wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     };
 

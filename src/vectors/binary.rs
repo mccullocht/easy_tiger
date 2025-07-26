@@ -1,3 +1,5 @@
+//! Binary vector coding and distance computation.
+
 use simsimd::BinarySimilarity;
 
 use crate::vectors::{F32VectorCoder, VectorDistance};

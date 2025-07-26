@@ -6,6 +6,7 @@
 //! of the data set -- no means or centroids, no quantiles. For transformer models which produce
 //! relatively well centered vectors this seems to be effective enough that we may discard the
 //! original f32 vectors.
+
 use std::borrow::Cow;
 
 use crate::{

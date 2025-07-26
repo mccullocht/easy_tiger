@@ -1,3 +1,9 @@
+//! Raw float 32 vector coding and distance computation.
+//!
+//! Vectors are stored as a sequence of raw little-endian f32 values without any additional metadata.
+//! The L2 Normalized coding performs l2 normalization before storing the vector, making it a better
+//! fit for angular distance computation.
+
 use std::borrow::Cow;
 
 use simsimd::SpatialSimilarity;

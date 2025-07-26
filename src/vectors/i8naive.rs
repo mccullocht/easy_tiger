@@ -1,3 +1,14 @@
+//! i8 naive vector coding and distance computation.
+//!
+//! This scheme l2 normalizes the input vector and then maps values into fixed size buckets in
+//! [-127,127]. The vector is emitted as an i8 sequence along with the l2 norm. This is naive in
+//! that we don't attempt to use a sample of the data set to improve quantization accuracy; we don't
+//! even really use any features in the input vector either. This is a lower bound for how accurate
+//! an i8 quantization scheme.
+//!
+//! Distance can be computed directly on the i8 vector for both dot product and l2 distance so it
+//! is generally much faster than raw vector encodings.
+
 use crate::vectors::{F32VectorCoder, VectorDistance, VectorSimilarity};
 
 #[derive(Debug, Copy, Clone)]

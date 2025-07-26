@@ -8,7 +8,6 @@ use crate::{
         I8NaiveDistance, I8ScaledUniformDotProduct, I8ScaledUniformEuclidean, VectorDistance,
         VectorSimilarity,
     },
-    quantization::VectorQuantizer,
     vectors::raw::{RawF32VectorCoder, RawL2NormalizedF32VectorCoder},
 };
 
@@ -20,9 +19,7 @@ mod scaled_uniform;
 pub(crate) use binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder};
 pub(crate) use i8naive::I8NaiveVectorCoder;
 pub(crate) use scaled_uniform::I8ScaledUniformVectorCoder;
-
-// XXX immediate TODOs
-// * invert relationship between Quantizer and F32VectorCoding.
+use serde::{Deserialize, Serialize};
 
 // XXX some changes that need to happen:
 // * in bulk loading we should always use the WT table because it represent a transform.
@@ -33,7 +30,7 @@ pub(crate) use scaled_uniform::I8ScaledUniformVectorCoder;
 ///
 /// Raw vectors are stored little endian but the remaining formats are all lossy in some way with
 /// varying degrees of compression and fidelity in distance computation.
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize)]
 pub enum F32VectorCoding {
     /// Little-endian f32 values encoded as bytes.
     #[default]
@@ -126,17 +123,6 @@ impl FromStr for F32VectorCoding {
             "i8-naive" => Ok(Self::I8NaiveQuantized),
             "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
             _ => Err(input_err(format!("unknown quantizer function {s}"))),
-        }
-    }
-}
-
-impl From<VectorQuantizer> for F32VectorCoding {
-    fn from(value: VectorQuantizer) -> Self {
-        match value {
-            VectorQuantizer::Binary => Self::BinaryQuantized,
-            VectorQuantizer::AsymmetricBinary { n } => Self::NBitBinaryQuantized(n),
-            VectorQuantizer::I8Naive => Self::I8NaiveQuantized,
-            VectorQuantizer::I8ScaledUniform => Self::I8ScaledUniformQuantized,
         }
     }
 }

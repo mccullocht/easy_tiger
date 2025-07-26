@@ -10,7 +10,6 @@ use wt_mdb::{Error, Result};
 
 use crate::{
     distance::{F32VectorDistance, VectorDistance, VectorSimilarity},
-    quantization::VectorQuantizer,
     vectors::{F32VectorCoder, F32VectorCoding},
     Neighbor,
 };
@@ -58,8 +57,7 @@ impl FromStr for GraphLayout {
 pub struct GraphConfig {
     pub dimensions: NonZero<usize>,
     pub similarity: VectorSimilarity,
-    pub quantizer: VectorQuantizer,
-    #[serde(default)]
+    pub nav_format: F32VectorCoding,
     pub layout: GraphLayout,
     pub max_edges: NonZero<usize>,
     pub index_search_params: GraphSearchParams,
@@ -72,12 +70,12 @@ impl GraphConfig {
     }
 
     pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
-        F32VectorCoding::from(self.quantizer).new_coder()
+        self.nav_format.new_coder()
     }
 
     /// Return a distance function for quantized navigational vectors in the index.
     pub fn new_nav_distance_function(&self) -> Box<dyn VectorDistance> {
-        F32VectorCoding::from(self.quantizer).new_distance_fn(self.similarity)
+        self.nav_format.new_distance_fn(self.similarity)
     }
 }
 

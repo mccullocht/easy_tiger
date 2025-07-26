@@ -26,7 +26,6 @@ use crate::{
     distance::F32VectorDistance,
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
     input::{VecVectorStore, VectorStore},
-    quantization::VectorQuantizer,
     query_distance::{new_query_vector_distance_f32, QueryVectorDistance},
     search::{GraphSearchStats, GraphSearcher},
     vectors::{F32VectorCoder, F32VectorCoding},
@@ -38,7 +37,7 @@ use crate::{
 pub struct IndexConfig {
     pub replica_count: usize,
     pub head_search_params: GraphSearchParams,
-    pub quantizer: VectorQuantizer,
+    pub posting_coder: F32VectorCoding,
 }
 
 #[derive(Clone)]
@@ -248,7 +247,7 @@ pub struct SessionIndexWriter {
 impl SessionIndexWriter {
     pub fn new(index: Arc<TableIndex>, session: Session) -> Self {
         let distance_fn = index.head.config().new_distance_function();
-        let posting_coder = F32VectorCoding::from(index.config.quantizer).new_coder();
+        let posting_coder = index.config.posting_coder.new_coder();
         let head_reader = SessionGraphVectorIndexReader::new(index.head.clone(), session);
         let head_searcher = GraphSearcher::new(index.config.head_search_params);
         Self {
@@ -578,7 +577,7 @@ impl SpannSearcher {
         let tail_query = new_query_vector_distance_f32(
             query,
             reader.index().head_config().config().similarity,
-            Some(reader.index().config().quantizer),
+            reader.index().config().posting_coder,
         );
         // TODO: replace the heap, try https://quickwit.io/blog/top-k-complexity
         let mut results = BinaryHeap::with_capacity(self.params.limit.get());
@@ -611,8 +610,11 @@ impl SpannSearcher {
             return Ok(results.into_sorted_vec());
         }
 
-        let query =
-            new_query_vector_distance_f32(query, reader.head_reader.config().similarity, None);
+        let query = new_query_vector_distance_f32(
+            query,
+            reader.head_reader.config().similarity,
+            F32VectorCoding::Raw,
+        );
         let mut raw_cursor = reader
             .session()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;

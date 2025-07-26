@@ -325,8 +325,8 @@ mod tests {
         graph::{
             Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
         },
-        quantization::VectorQuantizer,
         search::GraphSearcher,
+        vectors::F32VectorCoding,
         wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     };
 
@@ -389,7 +389,7 @@ mod tests {
                     GraphConfig {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
-                        quantizer: VectorQuantizer::Binary,
+                        nav_format: F32VectorCoding::BinaryQuantized,
                         // TODO: each test should be run in both layouts.
                         layout: GraphLayout::Split,
                         max_edges: NonZero::new(4).unwrap(),

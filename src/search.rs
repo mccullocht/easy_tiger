@@ -13,6 +13,7 @@ use crate::{
     query_distance::{
         new_query_vector_distance_f32, new_query_vector_distance_indexing, QueryVectorDistance,
     },
+    vectors::F32VectorCoding,
     Neighbor,
 };
 
@@ -135,7 +136,7 @@ impl GraphSearcher {
             let nav_query = new_query_vector_distance_indexing(
                 &nav_query,
                 reader.config().similarity,
-                Some(reader.config().quantizer),
+                reader.config().nav_format,
             );
             self.search_internal_quantized(nav_query.as_ref(), |_| true, reader)?;
             Ok(self.candidates.iter().map(|c| c.neighbor).collect())
@@ -151,7 +152,7 @@ impl GraphSearcher {
         let nav_query = new_query_vector_distance_f32(
             query,
             reader.config().similarity,
-            Some(reader.config().quantizer),
+            reader.config().nav_format,
         );
         self.search_internal_quantized(nav_query.as_ref(), filter_predicate, reader)?;
 
@@ -159,7 +160,8 @@ impl GraphSearcher {
             return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
         }
 
-        let query = new_query_vector_distance_f32(query, reader.config().similarity, None);
+        let query =
+            new_query_vector_distance_f32(query, reader.config().similarity, F32VectorCoding::Raw);
         let mut raw_vectors = reader.raw_vectors()?;
         let rescored = self
             .candidates
@@ -362,7 +364,6 @@ mod test {
             Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
             RawVectorStore,
         },
-        quantization::VectorQuantizer,
         vectors::F32VectorCoding,
         Neighbor,
     };
@@ -409,7 +410,7 @@ mod test {
             let config = GraphConfig {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
-                quantizer: VectorQuantizer::Binary,
+                nav_format: F32VectorCoding::BinaryQuantized,
                 layout: GraphLayout::Split,
                 max_edges,
                 index_search_params: GraphSearchParams {

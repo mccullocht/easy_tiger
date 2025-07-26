@@ -6,7 +6,7 @@ use easy_tiger::{
     distance::VectorSimilarity,
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
-    quantization::VectorQuantizer,
+    vectors::F32VectorCoding,
     wt::TableGraphVectorIndex,
 };
 use wt_mdb::{Connection, Result, Session};
@@ -29,7 +29,7 @@ pub struct BulkLoadArgs {
     ///
     /// This will also dictate the quantized scoring function used.
     #[arg(short, long, value_enum)]
-    quantizer: VectorQuantizer,
+    nav_format: F32VectorCoding,
 
     /// Physical layout used for graph.
     ///
@@ -91,7 +91,7 @@ pub fn bulk_load(
     let config = GraphConfig {
         dimensions: args.dimensions,
         similarity: args.similarity,
-        quantizer: args.quantizer,
+        nav_format: args.nav_format,
         layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {

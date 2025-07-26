@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     distance::VectorSimilarity,
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
-    quantization::VectorQuantizer,
+    vectors::F32VectorCoding,
     wt::TableGraphVectorIndex,
 };
 use wt_mdb::Connection;
@@ -23,7 +23,7 @@ pub struct InitIndexArgs {
     ///
     /// This will also dictate the quantized scoring function used.
     #[arg(short, long, value_enum)]
-    quantizer: VectorQuantizer,
+    nav_format: F32VectorCoding,
 
     /// Physical layout used for graph.
     ///
@@ -80,7 +80,7 @@ pub fn init_index(
         GraphConfig {
             dimensions: args.dimensions,
             similarity: args.similarity,
-            quantizer: args.quantizer,
+            nav_format: args.nav_format,
             layout: args.layout,
             max_edges: args.max_edges,
             index_search_params: GraphSearchParams {

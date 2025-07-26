@@ -8,14 +8,16 @@ use crate::{
         I8NaiveDistance, I8ScaledUniformDotProduct, I8ScaledUniformEuclidean, VectorDistance,
         VectorSimilarity,
     },
-    quantization::{I8NaiveQuantizer, I8ScaledUniformQuantizer, Quantizer, VectorQuantizer},
+    quantization::{I8ScaledUniformQuantizer, Quantizer, VectorQuantizer},
     vectors::{
         binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder},
+        i8naive::I8NaiveVectorCoder,
         raw::{RawF32VectorCoder, RawL2NormalizedF32VectorCoder},
     },
 };
 
 mod binary;
+mod i8naive;
 mod raw;
 
 // XXX immediate TODOs
@@ -71,7 +73,7 @@ impl F32VectorCoding {
             Self::RawL2Normalized => Box::new(RawL2NormalizedF32VectorCoder),
             Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
-            Self::I8NaiveQuantized => Box::new(QuantizedVectorCoding(I8NaiveQuantizer)),
+            Self::I8NaiveQuantized => Box::new(I8NaiveVectorCoder),
             Self::I8ScaledUniform => Box::new(QuantizedVectorCoding(I8ScaledUniformQuantizer)),
         }
     }
@@ -109,7 +111,7 @@ impl From<VectorQuantizer> for F32VectorCoding {
     }
 }
 
-// XXX docos
+/// Encode an f32 vector into byte stream, possibly quantizing the vector in the process.
 pub trait F32VectorCoder: Send + Sync {
     /// Encode the input vector and return the encoded byte buffer.
     fn encode(&self, vector: &[f32]) -> Vec<u8> {

@@ -1,6 +1,6 @@
 //! Vector handling: formatting/quantization and distance computation.
 
-use std::fmt::Debug;
+use std::{fmt::Debug, io, str::FromStr};
 
 use crate::{
     distance::{
@@ -9,10 +9,7 @@ use crate::{
         VectorSimilarity,
     },
     quantization::VectorQuantizer,
-    vectors::{
-        raw::{RawF32VectorCoder, RawL2NormalizedF32VectorCoder},
-        scaled_uniform::I8ScaledUniformVectorCoder,
-    },
+    vectors::raw::{RawF32VectorCoder, RawL2NormalizedF32VectorCoder},
 };
 
 mod binary;
@@ -22,6 +19,7 @@ mod scaled_uniform;
 
 pub(crate) use binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder};
 pub(crate) use i8naive::I8NaiveVectorCoder;
+pub(crate) use scaled_uniform::I8ScaledUniformVectorCoder;
 
 // XXX immediate TODOs
 // * invert relationship between Quantizer and F32VectorCoding.
@@ -65,7 +63,7 @@ pub enum F32VectorCoding {
     /// othr vectors in the data set.
     ///
     /// This uses 1 byte per dimension and 8 additional bytes for a scaling factor and l2 norm.
-    I8ScaledUniform,
+    I8ScaledUniformQuantized,
 }
 
 impl F32VectorCoding {
@@ -77,7 +75,7 @@ impl F32VectorCoding {
             Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
             Self::I8NaiveQuantized => Box::new(I8NaiveVectorCoder),
-            Self::I8ScaledUniform => Box::new(I8ScaledUniformVectorCoder),
+            Self::I8ScaledUniformQuantized => Box::new(I8ScaledUniformVectorCoder),
         }
     }
 
@@ -95,10 +93,39 @@ impl F32VectorCoding {
             (Self::BinaryQuantized, _) => Box::new(HammingDistance),
             (Self::NBitBinaryQuantized(_), _) => Box::new(AsymmetricHammingDistance),
             (Self::I8NaiveQuantized, _) => Box::new(I8NaiveDistance(similarity)),
-            (Self::I8ScaledUniform, VectorSimilarity::Dot) => Box::new(I8ScaledUniformDotProduct),
-            (Self::I8ScaledUniform, VectorSimilarity::Euclidean) => {
+            (Self::I8ScaledUniformQuantized, VectorSimilarity::Dot) => {
+                Box::new(I8ScaledUniformDotProduct)
+            }
+            (Self::I8ScaledUniformQuantized, VectorSimilarity::Euclidean) => {
                 Box::new(I8ScaledUniformEuclidean)
             }
+        }
+    }
+}
+
+impl FromStr for F32VectorCoding {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let input_err = |s| io::Error::new(io::ErrorKind::InvalidInput, s);
+        match s {
+            "raw" => Ok(Self::Raw),
+            "raw-l2-norm" => Ok(Self::RawL2Normalized),
+            "binary" => Ok(Self::BinaryQuantized),
+            ab if ab.starts_with("asymmetric_binary:") => {
+                let bits_str = ab
+                    .strip_prefix("asymmetric_binary:")
+                    .expect("prefix matched");
+                bits_str
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|b| if (1..=8).contains(&b) { Some(b) } else { None })
+                    .map(Self::NBitBinaryQuantized)
+                    .ok_or_else(|| input_err(format!("invalid asymmetric_binary bits {bits_str}")))
+            }
+            "i8-naive" => Ok(Self::I8NaiveQuantized),
+            "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
+            _ => Err(input_err(format!("unknown quantizer function {s}"))),
         }
     }
 }
@@ -109,7 +136,7 @@ impl From<VectorQuantizer> for F32VectorCoding {
             VectorQuantizer::Binary => Self::BinaryQuantized,
             VectorQuantizer::AsymmetricBinary { n } => Self::NBitBinaryQuantized(n),
             VectorQuantizer::I8Naive => Self::I8NaiveQuantized,
-            VectorQuantizer::I8ScaledUniform => Self::I8ScaledUniform,
+            VectorQuantizer::I8ScaledUniform => Self::I8ScaledUniformQuantized,
         }
     }
 }

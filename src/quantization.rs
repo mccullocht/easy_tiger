@@ -6,11 +6,6 @@ use std::{io, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::distance::{
-    AsymmetricHammingDistance, HammingDistance, I8NaiveDistance, I8ScaledUniformDotProduct,
-    I8ScaledUniformEuclidean, VectorDistance, VectorSimilarity,
-};
-
 /// Methods for quantizing vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VectorQuantizer {
@@ -32,21 +27,6 @@ pub enum VectorQuantizer {
     ///
     /// This implementation does _not_ train on a sample of the dataset to decide parameters.
     I8ScaledUniform,
-}
-
-impl VectorQuantizer {
-    /// Create a new distance function for this quantization method.
-    pub fn new_distance_function(&self, similarity: &VectorSimilarity) -> Box<dyn VectorDistance> {
-        match (self, similarity) {
-            (Self::Binary, _) => Box::new(HammingDistance),
-            (Self::AsymmetricBinary { n: _ }, _) => Box::new(AsymmetricHammingDistance),
-            (Self::I8Naive, _) => Box::new(I8NaiveDistance(*similarity)),
-            (Self::I8ScaledUniform, VectorSimilarity::Dot) => Box::new(I8ScaledUniformDotProduct),
-            (Self::I8ScaledUniform, VectorSimilarity::Euclidean) => {
-                Box::new(I8ScaledUniformEuclidean)
-            }
-        }
-    }
 }
 
 impl Default for VectorQuantizer {

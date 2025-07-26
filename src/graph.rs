@@ -77,7 +77,7 @@ impl GraphConfig {
 
     /// Return a distance function for quantized navigational vectors in the index.
     pub fn new_nav_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.quantizer.new_distance_function(&self.similarity)
+        F32VectorCoding::from(self.quantizer).new_distance_fn(self.similarity)
     }
 }
 

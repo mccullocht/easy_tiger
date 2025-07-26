@@ -411,7 +411,7 @@ mod test {
             F32DotProductDistance, F32EuclideanDistance, F32VectorDistance,
             I8ScaledUniformDotProduct, I8ScaledUniformEuclidean, VectorDistance,
         },
-        quantization::{I8ScaledUniformQuantizer, Quantizer},
+        vectors::{F32VectorCoder, I8ScaledUniformVectorCoder},
     };
 
     struct TestVector {
@@ -423,9 +423,9 @@ mod test {
         pub fn new(
             rvec: Vec<f32>,
             f32_dist_fn: impl F32VectorDistance,
-            quantizer: impl Quantizer,
+            coder: impl F32VectorCoder,
         ) -> Self {
-            let qvec = quantizer.for_doc(&rvec);
+            let qvec = coder.encode(&rvec);
             Self {
                 rvec: f32_dist_fn.normalize(rvec.into()).to_vec(),
                 qvec,
@@ -435,14 +435,14 @@ mod test {
 
     fn distance_compare_threshold(
         f32_dist_fn: impl F32VectorDistance + Copy,
-        quantizer: impl Quantizer + Copy,
+        coder: impl F32VectorCoder + Copy,
         dist_fn: impl VectorDistance + Copy,
         a: Vec<f32>,
         b: Vec<f32>,
         threshold: f64,
     ) {
-        let a = TestVector::new(a, f32_dist_fn, quantizer);
-        let b = TestVector::new(b, f32_dist_fn, quantizer);
+        let a = TestVector::new(a, f32_dist_fn, coder);
+        let b = TestVector::new(b, f32_dist_fn, coder);
 
         let rdist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);
@@ -462,7 +462,7 @@ mod test {
         // TODO: randomly generate a bunch of vectors for this test.
         distance_compare_threshold(
             F32DotProductDistance,
-            I8ScaledUniformQuantizer,
+            I8ScaledUniformVectorCoder,
             I8ScaledUniformDotProduct,
             vec![-1.0f32, 2.5, 0.7, -1.7],
             vec![-0.6f32, -1.2, 0.4, 0.3],
@@ -474,7 +474,7 @@ mod test {
     fn i8_shaped_l2() {
         distance_compare_threshold(
             F32EuclideanDistance,
-            I8ScaledUniformQuantizer,
+            I8ScaledUniformVectorCoder,
             I8ScaledUniformEuclidean,
             vec![-1.0f32, 2.5, 0.7, -1.7],
             vec![-0.6f32, -1.2, 0.4, 0.3],

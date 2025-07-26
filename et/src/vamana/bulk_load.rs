@@ -40,11 +40,6 @@ pub struct BulkLoadArgs {
     /// This can be significantly faster than reading these values from WiredTiger.
     #[arg(long, default_value_t = true)]
     memory_quantized_vectors: bool,
-    /// If true, load all the raw vectors into WiredTiger for bulk loading.
-    /// This can be faster for dot similarity as the vectors are normalized just once.
-    /// It also moves caching policy to WT rather than allowing the OS to manage it.
-    #[arg(long, default_value_t = false)]
-    wiredtiger_vector_store: bool,
     /// If true, cluster the input data set to choose insertion order. This improves locality
     /// during the insertion step, yielding higher cache hit rates and graph build times, at the
     /// expense of a compute intensive k-means clustering step.
@@ -113,7 +108,6 @@ pub fn bulk_load(
         f32_vectors,
         Options {
             memory_quantized_vectors: args.memory_quantized_vectors,
-            wt_vector_store: args.wiredtiger_vector_store,
             cluster_ordered_insert: args.cluster_ordered_insert,
         },
         limit,

@@ -206,7 +206,6 @@ pub fn bulk_load(
             centroids,
             bulk::Options {
                 memory_quantized_vectors: false,
-                wt_vector_store: true,
                 cluster_ordered_insert: false,
             },
             centroids_len,

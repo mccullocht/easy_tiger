@@ -25,9 +25,6 @@ pub(crate) use i8naive::I8NaiveVectorCoder;
 pub(crate) use scaled_uniform::I8ScaledUniformVectorCoder;
 use serde::{Deserialize, Serialize};
 
-// XXX some changes that need to happen:
-// * in bulk loading we should always use the WT table because it represent a transform.
-
 /// Functions used for to compute the distance between two vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum VectorSimilarity {

@@ -24,11 +24,11 @@ use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{options::DropOptionsBuilder, Connection, Result, Session};
+use wt_mdb::{Connection, Result, Session};
 
 use crate::{
     graph::{
-        prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig, GraphLayout,
+        prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
         GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVectorStore,
     },
     graph_clustering,
@@ -62,11 +62,6 @@ pub struct Options {
     /// This ensures that they will stay in memory (modulo swap) and also provides
     /// faster access than WT.
     pub memory_quantized_vectors: bool,
-    /// If true, load vectors into a WT table and use that backing store during build.
-    /// This may be faster for dot similarity as the vectors will only be normalized
-    /// once on input. This also allows measuring cache efficiency during build when
-    /// the data set is larger than available memory.
-    pub wt_vector_store: bool,
     /// If true, cluster the input data set to choose insertion order. This improves locality
     /// during the insertion step, yielding higher cache hit rates and graph build times, at the
     /// expense of a compute intensive k-means clustering step.
@@ -157,10 +152,7 @@ where
     /// Phases to be executed by the builder.
     /// This can vary depending on the options.
     pub fn phases(&self) -> Vec<BulkLoadPhase> {
-        let mut phases = vec![BulkLoadPhase::LoadNavVectors];
-        if self.options.wt_vector_store || self.index.config().layout == GraphLayout::Split {
-            phases.push(BulkLoadPhase::LoadRawVectors);
-        }
+        let mut phases = vec![BulkLoadPhase::LoadNavVectors, BulkLoadPhase::LoadRawVectors];
         if self.options.cluster_ordered_insert {
             phases.push(BulkLoadPhase::ClusterVectors);
         }
@@ -438,13 +430,6 @@ where
             ),
         ];
         let session = self.connection.open_session()?;
-        // TODO: maybe this isn't needed? was needed when vectors might be colocated with graph.
-        if self.options.wt_vector_store {
-            session.drop_table(
-                self.index.graph_table_name(),
-                Some(DropOptionsBuilder::default().set_force().into()),
-            )?;
-        }
         session.bulk_load(
             self.index.graph_table_name(),
             None,
@@ -656,7 +641,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
     where
         Self: 'b;
     type RawVectorStore<'b>
-        = BulkLoadBuilderGraph<'b, D>
+        = BulkLoadRawVectorStore<'b>
     where
         Self: 'b;
     type NavVectorStore<'b>
@@ -669,18 +654,13 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
     }
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
-        Ok(BulkLoadBuilderGraph(self.0, None))
+        Ok(BulkLoadBuilderGraph(self.0))
     }
 
     fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
-        let cursor_graph = if self.0.options.wt_vector_store {
-            Some(CursorVectorStore::new(
-                self.1.get_record_cursor(self.0.index.raw_table_name())?,
-            ))
-        } else {
-            None
-        };
-        Ok(BulkLoadBuilderGraph(self.0, cursor_graph))
+        Ok(BulkLoadRawVectorStore(CursorVectorStore::new(
+            self.1.get_record_cursor(self.0.index.raw_table_name())?,
+        )))
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
@@ -694,7 +674,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
     }
 }
 
-struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>, Option<CursorVectorStore<'a>>);
+struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>);
 
 impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     type Vertex<'c>
@@ -716,16 +696,6 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
             builder: self.0,
             vertex_id,
         }))
-    }
-}
-
-impl<D: VectorStore<Elem = f32> + Send + Sync> RawVectorStore for BulkLoadBuilderGraph<'_, D> {
-    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        if let Some(cursor) = self.1.as_mut() {
-            cursor.get_raw_vector(vertex_id)
-        } else {
-            Some(Ok(self.0.get_vector(vertex_id as usize)))
-        }
     }
 }
 
@@ -765,6 +735,14 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|i| self.guard[i].vertex())
+    }
+}
+
+struct BulkLoadRawVectorStore<'a>(CursorVectorStore<'a>);
+
+impl RawVectorStore for BulkLoadRawVectorStore<'_> {
+    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+        self.0.get_raw_vector(vertex_id)
     }
 }
 

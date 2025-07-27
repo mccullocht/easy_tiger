@@ -114,13 +114,20 @@ pub enum F32VectorCoding {
     ///
     /// This uses 1 byte per dimension + 4 bytes for the l2 norm for euclidean distances.
     I8NaiveQuantized,
-    /// Normalize and quantize into an i8 value, shaped to the input vector.
+    /// Quantize into an i8 value shaped to the input vector.
     ///
     /// This uses the contents of the vector to try to reduce quantization error but no data from
-    /// othr vectors in the data set.
+    /// other vectors in the data set.
     ///
     /// This uses 1 byte per dimension and 8 additional bytes for a scaling factor and l2 norm.
     I8ScaledUniformQuantized,
+    /// Quantize into an i4 value shaped to the input vector and pack 2 dimensions per byte.
+    ///
+    /// This uses the contents of the vector to try to reduce quantization error but no data from
+    /// other vectors in the data set.
+    ///
+    /// This uses 1 byte per 2 dimensions and 8 additional bytes for a scaling factor and l2 norm.
+    I4ScaledUniformQuantized,
 }
 
 impl F32VectorCoding {
@@ -133,6 +140,7 @@ impl F32VectorCoding {
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
             Self::I8NaiveQuantized => Box::new(I8NaiveVectorCoder),
             Self::I8ScaledUniformQuantized => Box::new(I8ScaledUniformVectorCoder),
+            Self::I4ScaledUniformQuantized => Box::new(scaled_uniform::I4PackedVectorCoder),
         }
     }
 
@@ -157,6 +165,12 @@ impl F32VectorCoding {
             }
             (Self::I8ScaledUniformQuantized, VectorSimilarity::Euclidean) => {
                 Some(Box::new(I8ScaledUniformEuclidean))
+            }
+            (Self::I4ScaledUniformQuantized, VectorSimilarity::Dot) => {
+                Some(Box::new(scaled_uniform::I4PackedDotProductDistance))
+            }
+            (Self::I4ScaledUniformQuantized, VectorSimilarity::Euclidean) => {
+                Some(Box::new(scaled_uniform::I4PackedEuclideanDistance))
             }
         }
     }
@@ -198,7 +212,9 @@ impl FromStr for F32VectorCoding {
             }
             "i8-naive" => Ok(Self::I8NaiveQuantized),
             "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
-            _ => Err(input_err(format!("unknown vector coding function {s}"))),
+            "i4-scaled-uniform" => Ok(Self::I4ScaledUniformQuantized),
+            _ => Err(input_err(format!("unknown quantizer function {s}"))),
+            _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
 }
@@ -212,6 +228,7 @@ impl std::fmt::Display for F32VectorCoding {
             Self::NBitBinaryQuantized(n) => write!(f, "asymmetric_binary:{}", *n),
             Self::I8NaiveQuantized => write!(f, "i8-naive"),
             Self::I8ScaledUniformQuantized => write!(f, "i8-scaled-uniform"),
+            Self::I4ScaledUniformQuantized => write!(f, "i4-scaled-uniform"),
         }
     }
 }
@@ -312,6 +329,12 @@ pub fn new_query_vector_distance_f32<'a>(
         (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
             Box::new(I8ScaledUniformEuclideanQueryDistance::new(query))
         }
+        (VectorSimilarity::Dot, F32VectorCoding::I4ScaledUniformQuantized) => {
+            Box::new(scaled_uniform::I4PackedDotProductQueryDistance::new(query))
+        }
+        (VectorSimilarity::Euclidean, F32VectorCoding::I4ScaledUniformQuantized) => {
+            Box::new(scaled_uniform::I4PackedEuclideanQueryDistance::new(query))
+        }
     }
 }
 
@@ -345,6 +368,18 @@ pub fn new_query_vector_distance_indexing<'a>(
         (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
             QuantizedQueryVectorDistance::from_quantized(I8ScaledUniformEuclidean, query),
         ),
+        (VectorSimilarity::Dot, F32VectorCoding::I4ScaledUniformQuantized) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                scaled_uniform::I4PackedDotProductDistance,
+                query,
+            ))
+        }
+        (VectorSimilarity::Euclidean, F32VectorCoding::I4ScaledUniformQuantized) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                scaled_uniform::I4PackedEuclideanDistance,
+                query,
+            ))
+        }
     }
 }
 
@@ -352,6 +387,9 @@ pub fn new_query_vector_distance_indexing<'a>(
 mod test {
     use super::scaled_uniform::{I8ScaledUniformDotProduct, I8ScaledUniformEuclidean};
     use crate::vectors::i8naive::I8NaiveDistance;
+    use crate::vectors::scaled_uniform::{
+        I4PackedDotProductDistance, I4PackedEuclideanDistance, I4PackedVectorCoder,
+    };
     use crate::vectors::{
         F32VectorCoder, F32VectorCoding, I8NaiveVectorCoder, I8ScaledUniformVectorCoder,
         VectorDistance, VectorSimilarity,
@@ -460,6 +498,31 @@ mod test {
             VectorSimilarity::Euclidean,
             I8ScaledUniformVectorCoder,
             I8ScaledUniformEuclidean,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+    }
+
+    #[test]
+    fn i4_scaled_dot() {
+        // TODO: randomly generate a bunch of vectors for this test.
+        distance_compare_threshold(
+            F32DotProductDistance,
+            I4PackedVectorCoder,
+            I4PackedDotProductDistance,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+    }
+
+    #[test]
+    fn i4_scaled_l2() {
+        distance_compare_threshold(
+            F32EuclideanDistance,
+            I4PackedVectorCoder,
+            I4PackedEuclideanDistance,
             vec![-1.0f32, 2.5, 0.7, -1.7],
             vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,

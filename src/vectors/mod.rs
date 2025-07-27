@@ -213,7 +213,6 @@ impl FromStr for F32VectorCoding {
             "i8-naive" => Ok(Self::I8NaiveQuantized),
             "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
             "i4-scaled-uniform" => Ok(Self::I4ScaledUniformQuantized),
-            _ => Err(input_err(format!("unknown quantizer function {s}"))),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }

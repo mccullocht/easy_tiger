@@ -103,6 +103,10 @@ impl VectorDistance for I8ScaledUniformDotProduct {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = I8ScaledUniformVector::from(query);
         let doc = I8ScaledUniformVector::from(doc);
+        // XXX _horrid_ recall. why???
+        // experiment: randomly generate a bunch of vectors and normalize them.
+        // pick 1 and compute both l2 distance and angular distance, then compare the order. they
+        // should be the same if both are normalized.
         let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
         (-dot + 1.0) / 2.0
     }
@@ -122,12 +126,15 @@ impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
         // TODO: benchmark performing dot product of query and doc without scaling, then scaling
         // afterward. This would avoid a multiplication per dimension.
         let vector = I8ScaledUniformVector::from(vector);
+        // XXX _horrid_ recall
         let dot = self
             .0
             .iter()
             .zip(vector.dequantized_normalized_iter())
             .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64;
+            .sum::<f32>() as f64
+            / vector.l2_norm();
+        assert!(-1.0 <= dot && dot <= 1.0, "dot={}", dot);
         (-dot + 1.0) / 2.0
     }
 }
@@ -265,6 +272,8 @@ impl VectorDistance for I4PackedDotProductDistance {
         let query = I4PackedVector::new(query).expect("valid format");
         let doc = I4PackedVector::new(doc).expect("valid format");
         let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
+        // XXX something about this is hella broken, because recall is _awful_.
+        assert!(-1.0 <= dot && dot <= 1.0, "dot={}", dot);
         (-dot + 1.0) / 2.0
     }
 }
@@ -311,6 +320,7 @@ impl QueryVectorDistance for I4PackedEuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I4PackedVector::new(vector).expect("valid format");
         let dot = vector.dot_unnormalized_f32(self.0.as_ref());
+        // XXX i need to add query l2 norm here.
         vector.l2_norm_sq() - (2.0 * dot)
     }
 }

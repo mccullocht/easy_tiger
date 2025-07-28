@@ -210,6 +210,19 @@ impl FromStr for F32VectorCoding {
     }
 }
 
+impl std::fmt::Display for F32VectorCoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Raw => write!(f, "raw"),
+            Self::RawL2Normalized => write!(f, "raw-l2-norm"),
+            Self::BinaryQuantized => write!(f, "binary"),
+            Self::NBitBinaryQuantized(n) => write!(f, "asymmetric_binary:{}", *n),
+            Self::I8NaiveQuantized => write!(f, "i8-naive"),
+            Self::I8ScaledUniformQuantized => write!(f, "i8-scaled-uniform"),
+        }
+    }
+}
+
 /// Encode an f32 vector into byte stream, possibly quantizing the vector in the process.
 pub trait F32VectorCoder: Send + Sync {
     /// Encode the input vector and return the encoded byte buffer.

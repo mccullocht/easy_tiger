@@ -282,16 +282,15 @@ where
     }
 
     fn insert_all<P: Fn(u64) + Send + Sync>(&self, progress: P) -> Result<()> {
-        // XXX this use of distance_fn would be better off as a QueryVectorDistance.
-        let raw_coder = self.index.config().similarity.vector_coding().new_coder();
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
-        let apply_mu = Mutex::new((
-            0i64,
-            self.distance_fn
-                .distance(&raw_coder.encode(&self.vectors[0]), &self.centroid),
-        ));
+        let apply_mu = {
+            let session = self.connection.open_session()?;
+            let mut cursor = session.open_record_cursor(&self.index.raw_table_name())?;
+            let vector0 = cursor.seek_exact(0).unwrap()?;
+            Mutex::new((0i64, self.distance_fn.distance(&self.centroid, &vector0)))
+        };
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
         // Use thread locals to avoid recreating Session and GraphSearcher per vector. Rayon
@@ -328,24 +327,28 @@ where
                 let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
                 in_flight.insert(v);
                 let mut edges = self.search_for_insert(v, &mut searcher, &mut reader)?;
-                // Insert any other in-flight edges into the candidate queue. These are vertices we may have missed because
-                // they are being inserted concurrently in another thread.
-                self.insert_in_flight_edges(
-                    v,
-                    in_flight.iter().map(|e| *e),
-                    reader.raw_vectors()?,
-                    &mut edges,
-                )?;
-                assert!(
-                    !edges.iter().any(|n| n.vertex() == v as i64),
-                    "Candidate edges for vertex {v} contains self-edge."
-                );
+                let centroid_distance = {
+                    let mut raw_vectors = reader.raw_vectors()?;
+                    // Insert any other in-flight edges into the candidate queue. These are vertices we may have missed because
+                    // they are being inserted concurrently in another thread.
+                    self.insert_in_flight_edges(
+                        v,
+                        in_flight.iter().map(|e| *e),
+                        &mut raw_vectors,
+                        &mut edges,
+                    )?;
+                    assert!(
+                        !edges.iter().any(|n| n.vertex() == v as i64),
+                        "Candidate edges for vertex {v} contains self-edge."
+                    );
 
-                // TODO: consider using quantized scores here to avoid reading f32 vectors when
-                // reranking is turned off.
-                let centroid_distance = self
-                    .distance_fn
-                    .distance(&raw_coder.encode(&self.vectors[v]), &self.centroid);
+                    // TODO: consider using quantized scores here to avoid reading f32 vectors when
+                    // reranking is turned off.
+                    self.distance_fn.distance(
+                        &self.centroid,
+                        &raw_vectors.get_raw_vector(v as i64).unwrap()?,
+                    )
+                };
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
                 // undirected. If an edge does not fit on either vertex, save it for later.
@@ -487,7 +490,7 @@ where
         &self,
         vertex_id: usize,
         in_flight: impl Iterator<Item = usize>,
-        mut vectors: impl RawVectorStore,
+        vectors: &mut impl RawVectorStore,
         edges: &mut Vec<Neighbor>,
     ) -> Result<()> {
         let vertex_vector = vectors.get_raw_vector(vertex_id as i64).unwrap()?.to_vec();

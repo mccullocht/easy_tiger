@@ -93,7 +93,8 @@ pub struct F32DotProductDistance;
 
 impl VectorDistance for F32DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        dot_f32_bytes(query, doc)
+        // Assuming values are normalized, this will produce a distance in [0,1]
+        (-dot_f32_bytes(query, doc) + 1.0) / 2.0
     }
 }
 

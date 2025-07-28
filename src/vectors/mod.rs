@@ -382,14 +382,17 @@ mod test {
         let a = TestVector::new(a, f32_dist_fn, coder);
         let b = TestVector::new(b, f32_dist_fn, coder);
 
-        let rdist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
+        let rf32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
+        let ru8_dist =
+            f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
+        assert_eq!(rf32_dist, ru8_dist);
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);
 
-        let range = (rdist * (1.0 - threshold))..=(rdist * (1.0 + threshold));
+        let range = (rf32_dist * (1.0 - threshold))..=(rf32_dist * (1.0 + threshold));
         assert!(
             range.contains(&qdist),
             "expected {} (range={:?}) actual {}",
-            rdist,
+            rf32_dist,
             range,
             qdist,
         );
@@ -421,7 +424,7 @@ mod test {
     }
 
     #[test]
-    fn i8_shaped_dot() {
+    fn i8_scaled_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
         distance_compare_threshold(
             F32DotProductDistance,
@@ -434,7 +437,7 @@ mod test {
     }
 
     #[test]
-    fn i8_shaped_l2() {
+    fn i8_scaled_l2() {
         distance_compare_threshold(
             F32EuclideanDistance,
             I8ScaledUniformVectorCoder,

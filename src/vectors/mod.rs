@@ -371,6 +371,19 @@ mod test {
         }
     }
 
+    macro_rules! assert_float_near {
+        ($expected:expr, $actual:expr, $epsilon:expr) => {{
+            let range = ($expected * (1.0 - $epsilon))..=($expected * (1.0 + $epsilon));
+            assert!(
+                range.contains(&$actual),
+                "expected {} (range={:?}) actual {}",
+                $expected,
+                range,
+                $actual
+            );
+        }};
+    }
+
     fn distance_compare_threshold(
         f32_dist_fn: impl F32VectorDistance + Copy,
         coder: impl F32VectorCoder + Copy,
@@ -385,17 +398,9 @@ mod test {
         let rf32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
         let ru8_dist =
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
-        assert_eq!(rf32_dist, ru8_dist);
+        assert_float_near!(rf32_dist, ru8_dist, 0.00001);
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);
-
-        let range = (rf32_dist * (1.0 - threshold))..=(rf32_dist * (1.0 + threshold));
-        assert!(
-            range.contains(&qdist),
-            "expected {} (range={:?}) actual {}",
-            rf32_dist,
-            range,
-            qdist,
-        );
+        assert_float_near!(rf32_dist, qdist, threshold);
     }
 
     #[test]

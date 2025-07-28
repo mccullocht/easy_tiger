@@ -301,11 +301,11 @@ impl VectorDistance for I4PackedEuclideanDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct I4PackedEuclideanQueryDistance<'a>(&'a [f32]);
+pub struct I4PackedEuclideanQueryDistance<'a>(&'a [f32], f64);
 
 impl<'a> I4PackedEuclideanQueryDistance<'a> {
     pub fn new(query: &'a [f32]) -> Self {
-        Self(query)
+        Self(query, dot_f32(query, query).sqrt())
     }
 }
 
@@ -313,7 +313,7 @@ impl QueryVectorDistance for I4PackedEuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I4PackedVector::new(vector).expect("valid format");
         let dot = vector.dot_unnormalized_f32(self.0.as_ref());
-        // XXX i need to add query l2 norm here.
-        vector.l2_norm_sq() - (2.0 * dot)
+        // XXX I need to write a test for this first.
+        self.1 + vector.l2_norm_sq() - (2.0 * dot)
     }
 }

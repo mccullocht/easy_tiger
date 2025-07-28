@@ -103,14 +103,6 @@ impl F32VectorDistance for F32DotProductDistance {
         // Assuming values are normalized, this will produce a distance in [0,1]
         (-dot_f32(a, b) + 1.0) / 2.0
     }
-
-    fn normalize<'a>(&self, mut vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
-        let norm = dot_f32(&vector, &vector).sqrt() as f32;
-        for d in vector.to_mut().iter_mut() {
-            *d /= norm;
-        }
-        vector
-    }
 }
 
 #[derive(Debug, Clone)]

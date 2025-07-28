@@ -34,7 +34,7 @@ use crate::{
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
-    vectors::F32VectorDistance,
+    vectors::{new_query_vector_distance_f32, F32VectorDistance},
     wt::{
         encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
     },
@@ -101,7 +101,7 @@ pub struct BulkLoadBuilder<D> {
     limit: usize,
 
     vectors: D,
-    centroid: Vec<f32>,
+    centroid: Vec<u8>,
 
     options: Options,
     quantized_vectors: Option<DerefVectorStore<u8, Mmap>>,
@@ -231,15 +231,17 @@ where
             )
             .unwrap()
         });
+        let centroid = sum
+            .into_iter()
+            .map(|s| (s / self.limit as f64) as f32)
+            .collect::<Vec<_>>();
         self.centroid = self
-            .distance_fn
-            .normalize(
-                sum.into_iter()
-                    .map(|s| (s / self.limit as f64) as f32)
-                    .collect::<Vec<_>>()
-                    .into(),
-            )
-            .into_owned();
+            .index
+            .config()
+            .similarity
+            .vector_coding()
+            .new_coder()
+            .encode(&centroid);
         Ok(())
     }
 
@@ -280,13 +282,15 @@ where
     }
 
     fn insert_all<P: Fn(u64) + Send + Sync>(&self, progress: P) -> Result<()> {
+        // XXX this use of distance_fn would be better off as a QueryVectorDistance.
+        let raw_coder = self.index.config().similarity.vector_coding().new_coder();
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
         let apply_mu = Mutex::new((
             0i64,
             self.distance_fn
-                .distance_f32(&self.get_vector_f32(0), &self.centroid),
+                .distance(&raw_coder.encode(&self.vectors[0]), &self.centroid),
         ));
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
@@ -336,7 +340,7 @@ where
                 // reranking is turned off.
                 let centroid_distance = self
                     .distance_fn
-                    .distance_f32(&self.get_vector_f32(v), &self.centroid);
+                    .distance(&raw_coder.encode(&self.vectors[v]), &self.centroid);
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
                 // undirected. If an edge does not fit on either vertex, save it for later.
@@ -480,13 +484,18 @@ where
         in_flight: impl Iterator<Item = usize>,
         edges: &mut Vec<Neighbor>,
     ) {
-        let vertex_vector = self.get_vector(vertex_id);
+        // XXX use the vectors store in the "raw" table instead of doing this.
+        let vertex_dist_fn = new_query_vector_distance_f32(
+            &self.vectors[vertex_id],
+            self.index.config().similarity,
+            self.index.config().similarity.vector_coding(),
+        );
+        let coder = self.index.config().similarity.vector_coding().new_coder();
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
             let n = Neighbor::new(
                 in_flight_vertex as i64,
-                self.distance_fn
-                    .distance(&vertex_vector, &self.get_vector(in_flight_vertex)),
+                vertex_dist_fn.distance(&coder.encode(&self.vectors[in_flight_vertex])),
             );
             // If the queue is full and n is worse than all other edges, skip.
             if edges.len() >= limit && n >= *edges.last().unwrap() {
@@ -573,22 +582,6 @@ where
         } else {
             let g1 = self.graph[vertex1].write().unwrap();
             (self.graph[vertex0].write().unwrap(), g1)
-        }
-    }
-
-    fn get_vector_f32(&self, index: usize) -> Cow<'_, [f32]> {
-        self.distance_fn.normalize(self.vectors[index].into())
-    }
-
-    fn get_vector(&self, index: usize) -> Cow<'_, [u8]> {
-        // TODO: check if this is correct for normalization
-        match self.get_vector_f32(index) {
-            Cow::Borrowed(s) => bytemuck::cast_slice(s).into(),
-            Cow::Owned(v) => v
-                .into_iter()
-                .flat_map(|d| d.to_le_bytes())
-                .collect::<Vec<_>>()
-                .into(),
         }
     }
 }

@@ -64,7 +64,6 @@ impl IndexMutator {
         assert_eq!(self.reader.config().dimensions.get(), vector.len());
 
         let distance_fn = self.reader.config().new_distance_function();
-        let vector = distance_fn.normalize(vector.into());
         let mut candidate_edges = self.searcher.search(&vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
         let mut raw_vectors = self.reader.raw_vectors()?;

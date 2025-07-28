@@ -92,13 +92,6 @@ pub trait F32VectorDistance: VectorDistance {
     ///
     /// Input vectors must be the same length or this function may panic.
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
-
-    /// Normalize a vector for use with this scoring function.
-    /// By default, does nothing.
-    // TODO: remove this in favor of F32VectorCoding.
-    fn normalize<'a>(&self, vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
-        vector
-    }
 }
 
 /// Supported coding schemes for input f32 vectors.
@@ -357,12 +350,11 @@ pub fn new_query_vector_distance_indexing<'a>(
 
 #[cfg(test)]
 mod test {
-    use super::raw::{F32DotProductDistance, F32EuclideanDistance};
     use super::scaled_uniform::{I8ScaledUniformDotProduct, I8ScaledUniformEuclidean};
     use crate::vectors::i8naive::I8NaiveDistance;
     use crate::vectors::{
-        F32VectorCoder, F32VectorDistance, I8NaiveVectorCoder, I8ScaledUniformVectorCoder,
-        VectorDistance, VectorSimilarity,
+        F32VectorCoder, I8NaiveVectorCoder, I8ScaledUniformVectorCoder, VectorDistance,
+        VectorSimilarity,
     };
 
     struct TestVector {
@@ -373,14 +365,17 @@ mod test {
     impl TestVector {
         pub fn new(
             rvec: Vec<f32>,
-            f32_dist_fn: impl F32VectorDistance,
+            similarity: VectorSimilarity,
             coder: impl F32VectorCoder,
         ) -> Self {
+            let f32_coder = similarity.vector_coding().new_coder();
+            let rvec = f32_coder
+                .encode(&rvec)
+                .chunks(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect::<Vec<_>>();
             let qvec = coder.encode(&rvec);
-            Self {
-                rvec: f32_dist_fn.normalize(rvec.into()).to_vec(),
-                qvec,
-            }
+            Self { rvec, qvec }
         }
     }
 
@@ -398,16 +393,17 @@ mod test {
     }
 
     fn distance_compare_threshold(
-        f32_dist_fn: impl F32VectorDistance + Copy,
+        similarity: VectorSimilarity,
         coder: impl F32VectorCoder + Copy,
         dist_fn: impl VectorDistance + Copy,
         a: Vec<f32>,
         b: Vec<f32>,
         threshold: f64,
     ) {
-        let a = TestVector::new(a, f32_dist_fn, coder);
-        let b = TestVector::new(b, f32_dist_fn, coder);
+        let a = TestVector::new(a, similarity, coder);
+        let b = TestVector::new(b, similarity, coder);
 
+        let f32_dist_fn = similarity.new_distance_function();
         let rf32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
         let ru8_dist =
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
@@ -420,7 +416,7 @@ mod test {
     fn i8_naive_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
         distance_compare_threshold(
-            F32DotProductDistance,
+            VectorSimilarity::Dot,
             I8NaiveVectorCoder,
             I8NaiveDistance(VectorSimilarity::Dot),
             vec![-1.0f32, 2.5, 0.7, -1.7],
@@ -432,7 +428,7 @@ mod test {
     #[test]
     fn i8_naive_l2() {
         distance_compare_threshold(
-            F32EuclideanDistance,
+            VectorSimilarity::Euclidean,
             I8NaiveVectorCoder,
             I8NaiveDistance(VectorSimilarity::Euclidean),
             vec![-1.0f32, 2.5, 0.7, -1.7],
@@ -445,7 +441,7 @@ mod test {
     fn i8_scaled_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
         distance_compare_threshold(
-            F32DotProductDistance,
+            VectorSimilarity::Dot,
             I8ScaledUniformVectorCoder,
             I8ScaledUniformDotProduct,
             vec![-1.0f32, 2.5, 0.7, -1.7],
@@ -457,7 +453,7 @@ mod test {
     #[test]
     fn i8_scaled_l2() {
         distance_compare_threshold(
-            F32EuclideanDistance,
+            VectorSimilarity::Euclidean,
             I8ScaledUniformVectorCoder,
             I8ScaledUniformEuclidean,
             vec![-1.0f32, 2.5, 0.7, -1.7],

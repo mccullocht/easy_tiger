@@ -34,7 +34,7 @@ use crate::{
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
-    vectors::{new_query_vector_distance_f32, F32VectorDistance},
+    vectors::{new_query_vector_distance_indexing, F32VectorDistance},
     wt::{
         encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
     },
@@ -330,7 +330,12 @@ where
                 let mut edges = self.search_for_insert(v, &mut searcher, &mut reader)?;
                 // Insert any other in-flight edges into the candidate queue. These are vertices we may have missed because
                 // they are being inserted concurrently in another thread.
-                self.insert_in_flight_edges(v, in_flight.iter().map(|e| *e), &mut edges);
+                self.insert_in_flight_edges(
+                    v,
+                    in_flight.iter().map(|e| *e),
+                    reader.raw_vectors()?,
+                    &mut edges,
+                )?;
                 assert!(
                     !edges.iter().any(|n| n.vertex() == v as i64),
                     "Candidate edges for vertex {v} contains self-edge."
@@ -482,20 +487,22 @@ where
         &self,
         vertex_id: usize,
         in_flight: impl Iterator<Item = usize>,
+        mut vectors: impl RawVectorStore,
         edges: &mut Vec<Neighbor>,
-    ) {
-        // XXX use the vectors store in the "raw" table instead of doing this.
-        let vertex_dist_fn = new_query_vector_distance_f32(
-            &self.vectors[vertex_id],
+    ) -> Result<()> {
+        let vertex_vector = vectors.get_raw_vector(vertex_id as i64).unwrap()?.to_vec();
+        let vertex_dist_fn = new_query_vector_distance_indexing(
+            &vertex_vector,
             self.index.config().similarity,
             self.index.config().similarity.vector_coding(),
         );
-        let coder = self.index.config().similarity.vector_coding().new_coder();
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
+            let in_flight_vertex_vector =
+                vectors.get_raw_vector(in_flight_vertex as i64).unwrap()?;
             let n = Neighbor::new(
                 in_flight_vertex as i64,
-                vertex_dist_fn.distance(&coder.encode(&self.vectors[in_flight_vertex])),
+                vertex_dist_fn.distance(&in_flight_vertex_vector),
             );
             // If the queue is full and n is worse than all other edges, skip.
             if edges.len() >= limit && n >= *edges.last().unwrap() {
@@ -509,6 +516,8 @@ where
                 edges.insert(index, n);
             }
         }
+
+        Ok(())
     }
 
     fn prune_and_apply<T>(

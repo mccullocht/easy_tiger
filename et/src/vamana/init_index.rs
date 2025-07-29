@@ -18,11 +18,12 @@ pub struct InitIndexArgs {
     /// Similarity function to use for vector scoring.
     #[arg(short, long, value_enum)]
     similarity: VectorSimilarity,
-    /// Quantizer to use for navigational vectors.
-    ///
-    /// This will also dictate the quantized scoring function used.
-    #[arg(short, long, value_enum)]
+    /// Vector coding to use for navigational vectors.
+    #[arg(long, value_enum)]
     nav_format: F32VectorCoding,
+    /// Vector coding to use for rerank vectors.
+    #[arg(long, value_enum, default_value = "raw")]
+    rerank_format: F32VectorCoding,
 
     /// Physical layout used for graph.
     #[arg(long, value_enum, default_value = "split")]
@@ -72,9 +73,8 @@ pub fn init_index(
         GraphConfig {
             dimensions: args.dimensions,
             similarity: args.similarity,
-            nav_format: args.nav_format,
-            // XXX expose via command line.
-            rerank_format: args.similarity.default_vector_coding(),
+            nav_format: args.nav_format.adjust_raw_format(args.similarity),
+            rerank_format: args.rerank_format.adjust_raw_format(args.similarity),
             layout: args.layout,
             max_edges: args.max_edges,
             index_search_params: GraphSearchParams {

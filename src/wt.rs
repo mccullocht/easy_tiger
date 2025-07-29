@@ -183,6 +183,8 @@ pub struct TableGraphVectorIndex {
     config: GraphConfig,
 }
 
+// TODO: collapse raw and nav tables if the formats are the same.
+// TODO: embed configuration in metadata.
 impl TableGraphVectorIndex {
     /// Create a new `TableGraphVectorIndex` from the relevant db tables, extracting
     /// immutable graph metadata that can be used across operations.

@@ -98,7 +98,7 @@ pub trait F32VectorDistance: VectorDistance {
 ///
 /// Raw vectors are stored little endian but the remaining formats are all lossy in some way with
 /// varying degrees of compression and fidelity in distance computation.
-#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum F32VectorCoding {
     /// Little-endian f32 values encoded as bytes.
     #[default]
@@ -173,6 +173,14 @@ impl F32VectorCoding {
     /// same coding. Only encodings that are symmetrical can be used for vectors stored on disk.
     pub fn is_symmetric(&self) -> bool {
         !matches!(self, Self::NBitBinaryQuantized(_))
+    }
+
+    /// Adjust raw format to normalize for angular ismilarity.
+    pub fn adjust_raw_format(&self, similarity: VectorSimilarity) -> Self {
+        match (self, similarity) {
+            (Self::Raw, VectorSimilarity::Dot) => Self::RawL2Normalized,
+            (_, _) => *self,
+        }
     }
 }
 

@@ -288,7 +288,7 @@ where
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
         let apply_mu = {
             let session = self.connection.open_session()?;
-            let mut cursor = session.open_record_cursor(&self.index.raw_table_name())?;
+            let mut cursor = session.open_record_cursor(self.index.raw_table_name())?;
             let vector0 = cursor.seek_exact(0).unwrap()?;
             Mutex::new((0i64, self.distance_fn.distance(&self.centroid, &vector0)))
         };

@@ -114,7 +114,7 @@ pub trait GraphVectorIndexReader {
     type RawVectorStore<'a>: RawVectorStore + 'a
     where
         Self: 'a;
-    type NavVectorStore<'a>: NavVectorStore + 'a
+    type NavVectorStore<'a>: GraphVectorStore + 'a
     where
         Self: 'a;
 
@@ -161,11 +161,19 @@ pub trait RawVectorStore {
     fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }
 
-/// Vector store for vectors used to navigate the graph.
-pub trait NavVectorStore {
-    /// Get the navigation vector for the given vertex.
-    // TODO: consider removing the Cow, it's no longer necessary
-    fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
+/// Vector store for known vector formats accessible by a record id.
+pub trait GraphVectorStore {
+    /// Return the format that vectors in the store are encoded in.
+    fn format(&self) -> F32VectorCoding;
+
+    /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.
+    // XXX this is actually unsafe for wt implementations! We use seek_exact_unsafe() and the
+    // pointer backing the slice is invalidated if the transaction is rolled back. Consider
+    // removing this method entirely?
+    fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>>;
+
+    // TODO: extract many vectors into VecVectorStore.
+    // TODO: method to turn self into a QueryVectorDistance.
 }
 
 /// Computes the distance between two edges in a set to assist in pruning.
@@ -200,7 +208,7 @@ impl EdgeSetDistanceComputer {
                 .iter()
                 .map(|n| {
                     vector_store
-                        .get_nav_vector(n.vertex())
+                        .get(n.vertex())
                         .unwrap_or(Err(Error::not_found_error()))
                         .map(|v| v.to_vec())
                 })

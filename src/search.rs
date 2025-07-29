@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     graph::{
-        Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
+        Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
         RawVectorStore,
     },
     vectors::{
@@ -119,7 +119,7 @@ impl GraphSearcher {
         // and we do not want to enter that path here because it is so expensive.
         let nav_query_rep = reader
             .nav_vectors()?
-            .get_nav_vector(vertex_id)
+            .get(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
             .to_vec();
         let nav_query = new_query_vector_distance_indexing(
@@ -200,7 +200,7 @@ impl GraphSearcher {
         if let Some(epr) = graph.entry_point() {
             let entry_point = epr?;
             let entry_vector = nav
-                .get_nav_vector(entry_point)
+                .get(entry_point)
                 .unwrap_or(Err(Error::not_found_error()))?;
             self.candidates.add_unvisited(Neighbor::new(
                 entry_point,
@@ -225,9 +225,7 @@ impl GraphSearcher {
                 if !self.seen.insert(edge) {
                     continue;
                 }
-                let vec = nav
-                    .get_nav_vector(edge)
-                    .unwrap_or(Err(Error::not_found_error()))?;
+                let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
                     .add_unvisited(Neighbor::new(edge, nav_query.distance(&vec)));
             }
@@ -387,7 +385,7 @@ mod test {
 
     use crate::{
         graph::{
-            Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
+            Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
             RawVectorStore,
         },
         vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity},
@@ -514,7 +512,7 @@ mod test {
         where
             Self: 'b;
         type NavVectorStore<'b>
-            = TestGraphAccess<'b>
+            = TestNavVectorStore<'b>
         where
             Self: 'b;
 
@@ -531,7 +529,7 @@ mod test {
         }
 
         fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-            Ok(TestGraphAccess(self.0))
+            Ok(TestNavVectorStore(self.0))
         }
     }
 
@@ -574,13 +572,18 @@ mod test {
         }
     }
 
-    impl NavVectorStore for TestGraphAccess<'_> {
-        fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
-                Some(Ok(Cow::from(&self.0.data[vertex_id as usize].nav_vector)))
-            } else {
-                None
-            }
+    pub struct TestNavVectorStore<'a>(&'a TestGraphVectorIndex);
+
+    impl GraphVectorStore for TestNavVectorStore<'_> {
+        fn format(&self) -> F32VectorCoding {
+            self.0.config.nav_format
+        }
+
+        fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
+            self.0
+                .data
+                .get(vertex_id as usize)
+                .map(|vertex| Ok(vertex.nav_vector.as_ref()))
         }
     }
 

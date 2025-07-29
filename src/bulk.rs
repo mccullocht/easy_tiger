@@ -29,12 +29,12 @@ use wt_mdb::{Connection, Result, Session};
 use crate::{
     graph::{
         prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
-        GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVectorStore,
+        GraphVectorIndexReader, GraphVectorStore, GraphVertex, RawVectorStore,
     },
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
-    vectors::{new_query_vector_distance_indexing, F32VectorDistance},
+    vectors::{new_query_vector_distance_indexing, F32VectorCoding, F32VectorDistance},
     wt::{
         encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
     },
@@ -496,14 +496,14 @@ where
     ) -> Result<()> {
         // TODO: this is very silly, find a better way to collapse behavior.
         enum Vectors<'v> {
-            Nav(BulkLoadNavVectorStore<'v>),
+            Nav(BulkLoadGraphVectorStore<'v>),
             Rerank(BulkLoadRawVectorStore<'v>),
         }
 
         impl<'v> Vectors<'v> {
             fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
                 match self {
-                    Self::Nav(v) => v.get_nav_vector(vertex_id),
+                    Self::Nav(v) => v.get(vertex_id).map(|r| r.map(|v| v.into())),
                     Self::Rerank(v) => v.get_raw_vector(vertex_id),
                 }
             }
@@ -674,7 +674,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
     where
         Self: 'b;
     type NavVectorStore<'b>
-        = BulkLoadNavVectorStore<'b>
+        = BulkLoadGraphVectorStore<'b>
     where
         Self: 'b;
 
@@ -689,15 +689,20 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
     fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
         Ok(BulkLoadRawVectorStore(CursorVectorStore::new(
             self.1.get_record_cursor(self.0.index.raw_table_name())?,
+            self.0.index.config().rerank_format,
         )))
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         if let Some(s) = self.0.quantized_vectors.as_ref() {
-            Ok(BulkLoadNavVectorStore::Memory(s))
+            Ok(BulkLoadGraphVectorStore::Memory(
+                s,
+                self.config().nav_format,
+            ))
         } else {
-            Ok(BulkLoadNavVectorStore::Cursor(CursorVectorStore::new(
+            Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
                 self.1.get_record_cursor(self.0.index.nav_table_name())?,
+                self.config().nav_format,
             )))
         }
     }
@@ -775,18 +780,25 @@ impl RawVectorStore for BulkLoadRawVectorStore<'_> {
     }
 }
 
-enum BulkLoadNavVectorStore<'a> {
+enum BulkLoadGraphVectorStore<'a> {
     Cursor(CursorVectorStore<'a>),
-    Memory(&'a DerefVectorStore<u8, memmap2::Mmap>),
+    Memory(&'a DerefVectorStore<u8, memmap2::Mmap>, F32VectorCoding),
 }
 
-impl NavVectorStore for BulkLoadNavVectorStore<'_> {
-    fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
+    fn format(&self) -> F32VectorCoding {
         match self {
-            Self::Cursor(c) => c.get_nav_vector(vertex_id),
-            Self::Memory(m) => {
+            Self::Cursor(c) => c.format(),
+            Self::Memory(_, f) => *f,
+        }
+    }
+
+    fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
+        match self {
+            Self::Cursor(c) => c.get(vertex_id),
+            Self::Memory(m, _) => {
                 if vertex_id >= 0 && (vertex_id as usize) < m.len() {
-                    Some(Ok(m[vertex_id as usize].into()))
+                    Some(Ok(&m[vertex_id as usize]))
                 } else {
                     None
                 }

@@ -13,8 +13,11 @@ use wt_mdb::{
     Connection, Error, RecordCursorGuard, Result, Session, WiredTigerError,
 };
 
-use crate::graph::{
-    Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVectorStore,
+use crate::{
+    graph::{
+        Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex, RawVectorStore,
+    },
+    vectors::F32VectorCoding,
 };
 
 /// Key in the graph table containing the entry point.
@@ -135,11 +138,11 @@ impl Graph for CursorGraph<'_> {
 }
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
-pub struct CursorVectorStore<'a>(RecordCursorGuard<'a>);
+pub struct CursorVectorStore<'a>(RecordCursorGuard<'a>, F32VectorCoding);
 
 impl<'a> CursorVectorStore<'a> {
-    pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
-        Self(cursor)
+    pub fn new(cursor: RecordCursorGuard<'a>, format: F32VectorCoding) -> Self {
+        Self(cursor, format)
     }
 
     pub(crate) fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()> {
@@ -155,21 +158,21 @@ impl<'a> CursorVectorStore<'a> {
             }
         })
     }
+}
 
-    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? }.map(|v| v.into()))
+impl GraphVectorStore for CursorVectorStore<'_> {
+    fn format(&self) -> F32VectorCoding {
+        self.1
+    }
+
+    fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
+        Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? })
     }
 }
 
 impl RawVectorStore for CursorVectorStore<'_> {
     fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        self.get(vertex_id)
-    }
-}
-
-impl NavVectorStore for CursorVectorStore<'_> {
-    fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        self.get(vertex_id)
+        self.get(vertex_id).map(|r| r.map(|v| v.into()))
     }
 }
 
@@ -333,6 +336,7 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         Ok(CursorVectorStore::new(
             self.session
                 .get_record_cursor(self.index.raw_table_name())?,
+            self.index.config().rerank_format,
         ))
     }
 
@@ -340,6 +344,7 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         Ok(CursorVectorStore::new(
             self.session
                 .get_record_cursor(self.index.nav_table_name())?,
+            self.index.config().nav_format,
         ))
     }
 }

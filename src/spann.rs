@@ -240,6 +240,7 @@ pub struct SessionIndexWriter {
     index: Arc<TableIndex>,
     distance_fn: Box<dyn F32VectorDistance + 'static>,
     posting_coder: Box<dyn F32VectorCoder + 'static>,
+    raw_coder: Box<dyn F32VectorCoder + 'static>,
 
     head_reader: SessionGraphVectorIndexReader,
     head_searcher: GraphSearcher,
@@ -249,12 +250,14 @@ impl SessionIndexWriter {
     pub fn new(index: Arc<TableIndex>, session: Session) -> Self {
         let distance_fn = index.head.config().new_distance_function();
         let posting_coder = index.config.posting_coder.new_coder();
+        let raw_coder = index.head.config().new_rerank_coder();
         let head_reader = SessionGraphVectorIndexReader::new(index.head.clone(), session);
         let head_searcher = GraphSearcher::new(index.config.head_search_params);
         Self {
             index,
             distance_fn,
             posting_coder,
+            raw_coder,
             head_reader,
             head_searcher,
         }
@@ -265,7 +268,6 @@ impl SessionIndexWriter {
     }
 
     pub fn upsert(&mut self, record_id: i64, vector: &[f32]) -> Result<Vec<u32>> {
-        let vector = self.distance_fn.normalize(vector.into());
         let candidates = self
             .head_searcher
             .search(vector.as_ref(), &mut self.head_reader)?;
@@ -283,15 +285,8 @@ impl SessionIndexWriter {
         }
 
         let mut raw_vector_cursor = self.raw_vector_cursor()?;
-        let vector = self.distance_fn.normalize(vector);
         // TODO: factor out handling of high fidelity vector tables.
-        raw_vector_cursor.set(
-            record_id,
-            &vector
-                .iter()
-                .flat_map(|d| d.to_le_bytes())
-                .collect::<Vec<_>>(),
-        )?;
+        raw_vector_cursor.set(record_id, &self.raw_coder.encode(vector))?;
         centroid_cursor.set(
             record_id,
             &centroid_ids
@@ -611,10 +606,11 @@ impl SpannSearcher {
             return Ok(results.into_sorted_vec());
         }
 
+        // TODO: separate head rerank format from tail rerank format.
         let query = new_query_vector_distance_f32(
             query,
             reader.head_reader.config().similarity,
-            reader.head_reader.config().similarity.vector_coding(),
+            reader.head_reader.config().rerank_format,
         );
         let mut raw_cursor = reader
             .session()

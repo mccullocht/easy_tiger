@@ -127,12 +127,7 @@ pub fn bulk_load_raw_vectors(
                 .app_metadata(&serde_json::to_string(&index.config).unwrap()),
         ),
     )?;
-    let coder = index
-        .head_config()
-        .config()
-        .similarity
-        .vector_coding()
-        .new_coder();
+    let coder = index.head_config().config().rerank_format.new_coder();
     let mut encoded =
         Vec::with_capacity(coder.byte_len(index.head_config().config().dimensions.get()));
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {

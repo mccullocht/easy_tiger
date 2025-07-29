@@ -22,18 +22,16 @@ pub struct BulkLoadArgs {
     #[arg(short, long)]
     dimensions: NonZero<usize>,
     /// Similarity function to use for vector scoring.
-    #[arg(short, long, value_enum)]
+    #[arg(long, value_enum)]
     similarity: VectorSimilarity,
-    /// Quantizer to use for navigational vectors.
-    ///
-    /// This will also dictate the quantized scoring function used.
-    #[arg(short, long, value_enum)]
+    /// Vector coding to use for navigational vectors.
+    #[arg(long, value_enum)]
     nav_format: F32VectorCoding,
+    /// Vector coding to use for rerank vectors.
+    #[arg(long, value_enum, default_value = "raw")]
+    rerank_format: F32VectorCoding,
 
     /// Physical layout used for graph.
-    ///
-    /// `split` puts raw vectors, nav vectors, and graph edges each in separate tables. If results
-    /// are being re-ranked this will require additional reads to complete.
     #[arg(long, value_enum, default_value = "split")]
     layout: GraphLayout,
     /// If true, load all quantized vectors into a trivial memory store for bulk loading.
@@ -85,7 +83,8 @@ pub fn bulk_load(
     let config = GraphConfig {
         dimensions: args.dimensions,
         similarity: args.similarity,
-        nav_format: args.nav_format,
+        nav_format: args.nav_format.adjust_raw_format(args.similarity),
+        rerank_format: args.rerank_format.adjust_raw_format(args.similarity),
         layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {

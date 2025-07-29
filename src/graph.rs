@@ -56,11 +56,30 @@ impl FromStr for GraphLayout {
 /// Configuration describing graph shape and construction. Used to read and mutate the graph.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct GraphConfig {
+    /// Number of vector dimensions.
     pub dimensions: NonZero<usize>,
+    /// Function to use for vector distance computations.
+    ///
+    /// If using [`VectorSimilarity::Dot`] along with [`F32VectorCoding::Raw`], consider using
+    /// [`F32VectorCoding::RawL2Normalized`] instead unless you are certain that all input vectors
+    /// in the read and write path are _already_ l2 normalized.
     pub similarity: VectorSimilarity,
+    /// Vector coding to use in the nav table.
+    ///
+    /// Nav vectors are used to compute edge distance during graph traversal, so we may examine
+    /// ~O(log(graph_size) * num_candidates) vectors for each query.
     pub nav_format: F32VectorCoding,
+    /// Vector coding to use in the rerank table.
+    ///
+    /// If re-ranking is turned on during graph construction or search this will be used to compute
+    /// ~O(num_candidates) query distances. If this format is quantized you should typically choose
+    /// a high fidelity quantization function.
+    // TODO: make this _optional_.
+    pub rerank_format: F32VectorCoding,
     pub layout: GraphLayout,
+    /// Maximum number of edges at each vertex.
     pub max_edges: NonZero<usize>,
+    /// Search parameters to use during graph construction.
     pub index_search_params: GraphSearchParams,
 }
 
@@ -70,7 +89,8 @@ impl GraphConfig {
         self.similarity.new_distance_function()
     }
 
-    pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
+    /// Return a new vector coder for the nav vector format.
+    pub fn new_nav_coder(&self) -> Box<dyn F32VectorCoder> {
         self.nav_format.new_coder()
     }
 
@@ -78,6 +98,11 @@ impl GraphConfig {
     pub fn new_nav_distance_function(&self) -> Option<Box<dyn VectorDistance>> {
         self.nav_format
             .new_symmetric_vector_distance(self.similarity)
+    }
+
+    /// Return a new vector coder for the rerank vector format.
+    pub fn new_rerank_coder(&self) -> Box<dyn F32VectorCoder> {
+        self.rerank_format.new_coder()
     }
 }
 

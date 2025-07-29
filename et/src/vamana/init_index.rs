@@ -18,21 +18,15 @@ pub struct InitIndexArgs {
     /// Similarity function to use for vector scoring.
     #[arg(short, long, value_enum)]
     similarity: VectorSimilarity,
-    /// Quantizer to use for navigational vectors.
-    ///
-    /// This will also dictate the quantized scoring function used.
-    #[arg(short, long, value_enum)]
+    /// Vector coding to use for navigational vectors.
+    #[arg(long, value_enum)]
     nav_format: F32VectorCoding,
+    /// Vector coding to use for rerank vectors.
+    #[arg(long, value_enum, default_value = "raw")]
+    rerank_format: F32VectorCoding,
 
     /// Physical layout used for graph.
-    ///
-    /// `split` puts raw vectors, nav vectors, and graph edges each in separate tables. If results
-    /// are being re-ranked this will require additional reads to complete.
-    ///
-    /// `raw_vector_in_graph` places raw vectors and graph edges in the same table. When a vertex
-    /// is visited the raw vector is read and saved for re-scoring. This minimizes the number of
-    /// reads performed and is likely better for indices with less traffic.
-    #[arg(long, value_enum, default_value = "raw_vector_in_graph")]
+    #[arg(long, value_enum, default_value = "split")]
     layout: GraphLayout,
 
     /// Maximum number of edges for any vertex.
@@ -79,7 +73,8 @@ pub fn init_index(
         GraphConfig {
             dimensions: args.dimensions,
             similarity: args.similarity,
-            nav_format: args.nav_format,
+            nav_format: args.nav_format.adjust_raw_format(args.similarity),
+            rerank_format: args.rerank_format.adjust_raw_format(args.similarity),
             layout: args.layout,
             max_edges: args.max_edges,
             index_search_params: GraphSearchParams {

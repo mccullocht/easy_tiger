@@ -134,18 +134,16 @@ impl GraphSearcher {
                     .raw_vectors()?
                     .get_raw_vector(vertex_id)
                     .unwrap_or(Err(Error::not_found_error()))?
-                    .chunks(4)
-                    .map(|c| f32::from_le_bytes(c.try_into().expect("f32")))
-                    .collect::<Vec<_>>(),
+                    .to_vec(),
             )
         } else {
             None
         };
         let rerank_query = rerank_query_rep.as_ref().map(|q| {
-            new_query_vector_distance_f32(
+            new_query_vector_distance_indexing(
                 q,
                 reader.config().similarity,
-                reader.config().similarity.vector_coding(),
+                reader.config().rerank_format,
             )
         });
 
@@ -172,7 +170,7 @@ impl GraphSearcher {
             Some(new_query_vector_distance_f32(
                 query,
                 reader.config().similarity,
-                reader.config().similarity.vector_coding(),
+                reader.config().rerank_format,
             ))
         } else {
             None
@@ -442,6 +440,7 @@ mod test {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
                 nav_format: F32VectorCoding::BinaryQuantized,
+                rerank_format: F32VectorCoding::Raw,
                 layout: GraphLayout::Split,
                 max_edges,
                 index_search_params: GraphSearchParams {

@@ -7,7 +7,7 @@ use crate::{
         GraphVertex, RawVectorStore,
     },
     search::GraphSearcher,
-    vectors::{F32VectorDistance, VectorDistance},
+    vectors::{F32VectorCoder, F32VectorDistance, VectorDistance},
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
@@ -21,6 +21,9 @@ use wt_mdb::{Error, Result, Session};
 pub struct IndexMutator {
     reader: SessionGraphVectorIndexReader,
     searcher: GraphSearcher,
+
+    nav_coder: Box<dyn F32VectorCoder>,
+    rerank_coder: Box<dyn F32VectorCoder>,
 }
 
 impl IndexMutator {
@@ -30,9 +33,13 @@ impl IndexMutator {
     /// then [Self::into_session()] this struct and commit the transaction when done.
     pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
         let searcher = GraphSearcher::new(index.config().index_search_params);
+        let nav_coder = index.config().new_nav_coder();
+        let rerank_coder = index.config().new_rerank_coder();
         Self {
             reader: SessionGraphVectorIndexReader::new(index, session),
             searcher,
+            nav_coder,
+            rerank_coder,
         }
     }
 
@@ -64,8 +71,7 @@ impl IndexMutator {
         assert_eq!(self.reader.config().dimensions.get(), vector.len());
 
         let distance_fn = self.reader.config().new_distance_function();
-        let vector = distance_fn.normalize(vector.into());
-        let mut candidate_edges = self.searcher.search(&vector, &mut self.reader)?;
+        let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
         let mut raw_vectors = self.reader.raw_vectors()?;
         if candidate_edges.is_empty() {
@@ -82,12 +88,19 @@ impl IndexMutator {
         );
         candidate_edges.truncate(selected_len);
 
-        self.set_vertex(
+        self.reader.graph()?.set(
             vertex_id,
-            candidate_edges.iter().map(|n| n.vertex()).collect(),
-            vector.as_ref(),
-            &self.reader.config().new_coder().encode(vector.as_ref()),
+            candidate_edges
+                .iter()
+                .map(|n| n.vertex())
+                .collect::<Vec<_>>(),
         )?;
+        self.reader
+            .nav_vectors()?
+            .set(vertex_id, self.nav_coder.encode(vector))?;
+        self.reader
+            .raw_vectors()?
+            .set(vertex_id, self.rerank_coder.encode(vector))?;
 
         let mut pruned_edges = vec![];
         for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
@@ -287,22 +300,6 @@ impl IndexMutator {
         self.insert_internal(vertex_id, vector)
     }
 
-    fn set_vertex(
-        &self,
-        vertex_id: i64,
-        edges: Vec<i64>,
-        raw_vector: &[f32],
-        nav_vector: &[u8],
-    ) -> Result<()> {
-        self.reader.graph()?.set(vertex_id, edges)?;
-        // TODO: make this a struct member.
-        let coder = self.reader.config().similarity.vector_coding().new_coder();
-        self.reader
-            .raw_vectors()?
-            .set(vertex_id, coder.encode(raw_vector))?;
-        self.reader.nav_vectors()?.set(vertex_id, nav_vector)
-    }
-
     fn set_graph_edges(&self, vertex_id: i64, edges: Vec<i64>) -> Result<()> {
         match self.reader.config().layout {
             GraphLayout::Split => self.reader.graph()?.set(vertex_id, edges),
@@ -385,7 +382,7 @@ mod tests {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
                         nav_format: F32VectorCoding::BinaryQuantized,
-                        // TODO: each test should be run in both layouts.
+                        rerank_format: F32VectorCoding::Raw,
                         layout: GraphLayout::Split,
                         max_edges: NonZero::new(4).unwrap(),
                         index_search_params: Self::search_params(),

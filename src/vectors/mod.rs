@@ -44,14 +44,6 @@ impl VectorSimilarity {
             Self::Dot => Box::new(F32DotProductDistance),
         }
     }
-
-    /// Returns the default [F32VectorCoding] to use for this similarity function.
-    pub fn vector_coding(&self) -> F32VectorCoding {
-        match self {
-            Self::Euclidean => F32VectorCoding::Raw,
-            Self::Dot => F32VectorCoding::RawL2Normalized,
-        }
-    }
 }
 
 impl FromStr for VectorSimilarity {
@@ -92,20 +84,13 @@ pub trait F32VectorDistance: VectorDistance {
     ///
     /// Input vectors must be the same length or this function may panic.
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
-
-    /// Normalize a vector for use with this scoring function.
-    /// By default, does nothing.
-    // TODO: remove this in favor of F32VectorCoding.
-    fn normalize<'a>(&self, vector: Cow<'a, [f32]>) -> Cow<'a, [f32]> {
-        vector
-    }
 }
 
 /// Supported coding schemes for input f32 vectors.
 ///
 /// Raw vectors are stored little endian but the remaining formats are all lossy in some way with
 /// varying degrees of compression and fidelity in distance computation.
-#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum F32VectorCoding {
     /// Little-endian f32 values encoded as bytes.
     #[default]
@@ -181,6 +166,14 @@ impl F32VectorCoding {
     pub fn is_symmetric(&self) -> bool {
         !matches!(self, Self::NBitBinaryQuantized(_))
     }
+
+    /// Adjust raw format to normalize for angular similarity.
+    pub fn adjust_raw_format(&self, similarity: VectorSimilarity) -> Self {
+        match (self, similarity) {
+            (Self::Raw, VectorSimilarity::Dot) => Self::RawL2Normalized,
+            (_, _) => *self,
+        }
+    }
 }
 
 impl FromStr for F32VectorCoding {
@@ -205,7 +198,20 @@ impl FromStr for F32VectorCoding {
             }
             "i8-naive" => Ok(Self::I8NaiveQuantized),
             "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
-            _ => Err(input_err(format!("unknown quantizer function {s}"))),
+            _ => Err(input_err(format!("unknown vector coding function {s}"))),
+        }
+    }
+}
+
+impl std::fmt::Display for F32VectorCoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Raw => write!(f, "raw"),
+            Self::RawL2Normalized => write!(f, "raw-l2-norm"),
+            Self::BinaryQuantized => write!(f, "binary"),
+            Self::NBitBinaryQuantized(n) => write!(f, "asymmetric_binary:{}", *n),
+            Self::I8NaiveQuantized => write!(f, "i8-naive"),
+            Self::I8ScaledUniformQuantized => write!(f, "i8-scaled-uniform"),
         }
     }
 }
@@ -344,11 +350,10 @@ pub fn new_query_vector_distance_indexing<'a>(
 
 #[cfg(test)]
 mod test {
-    use super::raw::{F32DotProductDistance, F32EuclideanDistance};
     use super::scaled_uniform::{I8ScaledUniformDotProduct, I8ScaledUniformEuclidean};
     use crate::vectors::i8naive::I8NaiveDistance;
     use crate::vectors::{
-        F32VectorCoder, F32VectorDistance, I8NaiveVectorCoder, I8ScaledUniformVectorCoder,
+        F32VectorCoder, F32VectorCoding, I8NaiveVectorCoder, I8ScaledUniformVectorCoder,
         VectorDistance, VectorSimilarity,
     };
 
@@ -360,14 +365,21 @@ mod test {
     impl TestVector {
         pub fn new(
             rvec: Vec<f32>,
-            f32_dist_fn: impl F32VectorDistance,
+            similarity: VectorSimilarity,
             coder: impl F32VectorCoder,
         ) -> Self {
-            let qvec = coder.encode(&rvec);
-            Self {
-                rvec: f32_dist_fn.normalize(rvec.into()).to_vec(),
-                qvec,
+            let f32_coder = match similarity {
+                VectorSimilarity::Dot => F32VectorCoding::RawL2Normalized,
+                VectorSimilarity::Euclidean => F32VectorCoding::Raw,
             }
+            .new_coder();
+            let rvec = f32_coder
+                .encode(&rvec)
+                .chunks(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            let qvec = coder.encode(&rvec);
+            Self { rvec, qvec }
         }
     }
 
@@ -385,16 +397,17 @@ mod test {
     }
 
     fn distance_compare_threshold(
-        f32_dist_fn: impl F32VectorDistance + Copy,
+        similarity: VectorSimilarity,
         coder: impl F32VectorCoder + Copy,
         dist_fn: impl VectorDistance + Copy,
         a: Vec<f32>,
         b: Vec<f32>,
         threshold: f64,
     ) {
-        let a = TestVector::new(a, f32_dist_fn, coder);
-        let b = TestVector::new(b, f32_dist_fn, coder);
+        let a = TestVector::new(a, similarity, coder);
+        let b = TestVector::new(b, similarity, coder);
 
+        let f32_dist_fn = similarity.new_distance_function();
         let rf32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
         let ru8_dist =
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
@@ -407,7 +420,7 @@ mod test {
     fn i8_naive_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
         distance_compare_threshold(
-            F32DotProductDistance,
+            VectorSimilarity::Dot,
             I8NaiveVectorCoder,
             I8NaiveDistance(VectorSimilarity::Dot),
             vec![-1.0f32, 2.5, 0.7, -1.7],
@@ -419,7 +432,7 @@ mod test {
     #[test]
     fn i8_naive_l2() {
         distance_compare_threshold(
-            F32EuclideanDistance,
+            VectorSimilarity::Euclidean,
             I8NaiveVectorCoder,
             I8NaiveDistance(VectorSimilarity::Euclidean),
             vec![-1.0f32, 2.5, 0.7, -1.7],
@@ -432,7 +445,7 @@ mod test {
     fn i8_scaled_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
         distance_compare_threshold(
-            F32DotProductDistance,
+            VectorSimilarity::Dot,
             I8ScaledUniformVectorCoder,
             I8ScaledUniformDotProduct,
             vec![-1.0f32, 2.5, 0.7, -1.7],
@@ -444,7 +457,7 @@ mod test {
     #[test]
     fn i8_scaled_l2() {
         distance_compare_threshold(
-            F32EuclideanDistance,
+            VectorSimilarity::Euclidean,
             I8ScaledUniformVectorCoder,
             I8ScaledUniformEuclidean,
             vec![-1.0f32, 2.5, 0.7, -1.7],

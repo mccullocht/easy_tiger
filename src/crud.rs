@@ -85,7 +85,7 @@ impl IndexMutator {
             vertex_id,
             candidate_edges.iter().map(|n| n.vertex()).collect(),
             vector.as_ref(),
-            &self.reader.config().new_coder().encode(vector.as_ref()),
+            &self.reader.config().new_nav_coder().encode(vector.as_ref()),
         )?;
 
         let mut pruned_edges = vec![];
@@ -294,8 +294,8 @@ impl IndexMutator {
         nav_vector: &[u8],
     ) -> Result<()> {
         self.reader.graph()?.set(vertex_id, edges)?;
-        // TODO: make this a struct member.
-        let coder = self.reader.config().similarity.vector_coding().new_coder();
+        // XXX make this a struct member.
+        let coder = self.reader.config().rerank_format.new_coder();
         self.reader
             .raw_vectors()?
             .set(vertex_id, coder.encode(raw_vector))?;
@@ -384,7 +384,7 @@ mod tests {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
                         nav_format: F32VectorCoding::BinaryQuantized,
-                        // TODO: each test should be run in both layouts.
+                        rerank_format: F32VectorCoding::Raw,
                         layout: GraphLayout::Split,
                         max_edges: NonZero::new(4).unwrap(),
                         index_search_params: Self::search_params(),

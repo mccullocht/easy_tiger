@@ -141,13 +141,9 @@ impl GraphSearcher {
         } else {
             None
         };
-        let rerank_query = rerank_query_rep.as_ref().map(|q| {
-            new_query_vector_distance_f32(
-                q,
-                reader.config().similarity,
-                reader.config().similarity.vector_coding(),
-            )
-        });
+        let rerank_query = rerank_query_rep
+            .as_ref()
+            .map(|q| reader.config().new_rerank_query_distance_function(q));
 
         self.search_graph_and_rerank(
             nav_query.as_ref(),
@@ -169,11 +165,7 @@ impl GraphSearcher {
             reader.config().nav_format,
         );
         let rerank_query = if self.params.num_rerank > 0 {
-            Some(new_query_vector_distance_f32(
-                query,
-                reader.config().similarity,
-                reader.config().similarity.vector_coding(),
-            ))
+            Some(reader.config().new_rerank_query_distance_function(query))
         } else {
             None
         };
@@ -442,6 +434,7 @@ mod test {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
                 nav_format: F32VectorCoding::BinaryQuantized,
+                rerank_format: F32VectorCoding::Raw,
                 layout: GraphLayout::Split,
                 max_edges,
                 index_search_params: GraphSearchParams {

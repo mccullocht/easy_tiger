@@ -196,7 +196,7 @@ where
     fn load_nav_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
-        let coder = self.index.config().new_coder();
+        let coder = self.index.config().new_nav_coder();
         let mut sum = vec![0.0; dim];
         let mut quantized_vectors = if self.options.memory_quantized_vectors {
             Some(MmapMut::map_anon(coder.byte_len(dim) * self.vectors.len()).unwrap())
@@ -238,8 +238,7 @@ where
         self.centroid = self
             .index
             .config()
-            .similarity
-            .vector_coding()
+            .rerank_format
             .new_coder()
             .encode(&centroid);
         Ok(())
@@ -247,7 +246,7 @@ where
 
     fn load_raw_vectors<P: Fn(u64) + Send + Sync>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
-        let coder = self.index.config().similarity.vector_coding().new_coder();
+        let coder = self.index.config().rerank_format.new_coder();
         session.bulk_load(
             self.index.raw_table_name(),
             None,
@@ -493,11 +492,13 @@ where
         vectors: &mut impl RawVectorStore,
         edges: &mut Vec<Neighbor>,
     ) -> Result<()> {
+        // XXX this should obey rerank_edges and use the same scorer. i wonder if this is making
+        // things better or worse when i force re-ranking.
         let vertex_vector = vectors.get_raw_vector(vertex_id as i64).unwrap()?.to_vec();
         let vertex_dist_fn = new_query_vector_distance_indexing(
             &vertex_vector,
             self.index.config().similarity,
-            self.index.config().similarity.vector_coding(),
+            self.index.config().rerank_format,
         );
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {

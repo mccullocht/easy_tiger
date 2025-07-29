@@ -250,7 +250,7 @@ impl SessionIndexWriter {
     pub fn new(index: Arc<TableIndex>, session: Session) -> Self {
         let distance_fn = index.head.config().new_distance_function();
         let posting_coder = index.config.posting_coder.new_coder();
-        let raw_coder = index.head.config().similarity.vector_coding().new_coder();
+        let raw_coder = index.head.config().new_rerank_coder();
         let head_reader = SessionGraphVectorIndexReader::new(index.head.clone(), session);
         let head_searcher = GraphSearcher::new(index.config.head_search_params);
         Self {
@@ -606,11 +606,10 @@ impl SpannSearcher {
             return Ok(results.into_sorted_vec());
         }
 
-        let query = new_query_vector_distance_f32(
-            query,
-            reader.head_reader.config().similarity,
-            reader.head_reader.config().similarity.vector_coding(),
-        );
+        let query = reader
+            .head_reader
+            .config()
+            .new_rerank_query_distance_function(query);
         let mut raw_cursor = reader
             .session()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;

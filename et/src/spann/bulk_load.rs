@@ -135,6 +135,8 @@ pub fn bulk_load(
         dimensions: args.dimensions,
         similarity: args.similarity,
         nav_format: args.head_quantizer,
+        // XXX expose via command line
+        rerank_format: args.similarity.default_vector_coding(),
         layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {

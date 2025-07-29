@@ -46,7 +46,7 @@ impl VectorSimilarity {
     }
 
     /// Returns the default [F32VectorCoding] to use for this similarity function.
-    pub fn vector_coding(&self) -> F32VectorCoding {
+    pub fn default_vector_coding(&self) -> F32VectorCoding {
         match self {
             Self::Euclidean => F32VectorCoding::Raw,
             Self::Dot => F32VectorCoding::RawL2Normalized,
@@ -368,7 +368,7 @@ mod test {
             similarity: VectorSimilarity,
             coder: impl F32VectorCoder,
         ) -> Self {
-            let f32_coder = similarity.vector_coding().new_coder();
+            let f32_coder = similarity.default_vector_coding().new_coder();
             let rvec = f32_coder
                 .encode(&rvec)
                 .chunks(4)

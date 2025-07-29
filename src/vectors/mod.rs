@@ -507,7 +507,7 @@ mod test {
     fn i4_scaled_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
         distance_compare_threshold(
-            F32DotProductDistance,
+            VectorSimilarity::Dot,
             I4PackedVectorCoder,
             I4PackedDotProductDistance,
             vec![-1.0f32, 2.5, 0.7, -1.7],
@@ -519,7 +519,7 @@ mod test {
     #[test]
     fn i4_scaled_l2() {
         distance_compare_threshold(
-            F32EuclideanDistance,
+            VectorSimilarity::Euclidean,
             I4PackedVectorCoder,
             I4PackedEuclideanDistance,
             vec![-1.0f32, 2.5, 0.7, -1.7],

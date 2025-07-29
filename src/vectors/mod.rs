@@ -44,14 +44,6 @@ impl VectorSimilarity {
             Self::Dot => Box::new(F32DotProductDistance),
         }
     }
-
-    /// Returns the default [F32VectorCoding] to use for this similarity function.
-    pub fn default_vector_coding(&self) -> F32VectorCoding {
-        match self {
-            Self::Euclidean => F32VectorCoding::Raw,
-            Self::Dot => F32VectorCoding::RawL2Normalized,
-        }
-    }
 }
 
 impl FromStr for VectorSimilarity {
@@ -361,8 +353,8 @@ mod test {
     use super::scaled_uniform::{I8ScaledUniformDotProduct, I8ScaledUniformEuclidean};
     use crate::vectors::i8naive::I8NaiveDistance;
     use crate::vectors::{
-        F32VectorCoder, I8NaiveVectorCoder, I8ScaledUniformVectorCoder, VectorDistance,
-        VectorSimilarity,
+        F32VectorCoder, F32VectorCoding, I8NaiveVectorCoder, I8ScaledUniformVectorCoder,
+        VectorDistance, VectorSimilarity,
     };
 
     struct TestVector {
@@ -376,7 +368,11 @@ mod test {
             similarity: VectorSimilarity,
             coder: impl F32VectorCoder,
         ) -> Self {
-            let f32_coder = similarity.default_vector_coding().new_coder();
+            let f32_coder = match similarity {
+                VectorSimilarity::Dot => F32VectorCoding::RawL2Normalized,
+                VectorSimilarity::Euclidean => F32VectorCoding::Raw,
+            }
+            .new_coder();
             let rvec = f32_coder
                 .encode(&rvec)
                 .chunks(4)

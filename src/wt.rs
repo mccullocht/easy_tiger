@@ -4,7 +4,7 @@
 //! is recommeded that callers begin a transaction before performing their search or mutation
 //! and commit or rollback the transaction when they are done.
 
-use std::{borrow::Cow, ffi::CString, io, sync::Arc};
+use std::{ffi::CString, io, sync::Arc};
 
 use rustix::io::Errno;
 use wt_mdb::{
@@ -14,9 +14,7 @@ use wt_mdb::{
 };
 
 use crate::{
-    graph::{
-        Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex, RawVectorStore,
-    },
+    graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex},
     vectors::F32VectorCoding,
 };
 
@@ -167,12 +165,6 @@ impl GraphVectorStore for CursorVectorStore<'_> {
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
         Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? })
-    }
-}
-
-impl RawVectorStore for CursorVectorStore<'_> {
-    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        self.get(vertex_id).map(|r| r.map(|v| v.into()))
     }
 }
 

@@ -23,7 +23,7 @@ use wt_mdb::{
 };
 
 use crate::{
-    graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
+    graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore},
     input::{VecVectorStore, VectorStore},
     search::{GraphSearchStats, GraphSearcher},
     vectors::{
@@ -387,7 +387,7 @@ fn select_centroids(
         }
 
         let v = raw_vectors
-            .get_raw_vector(candidate.vertex())
+            .get(candidate.vertex())
             .expect("returned vector should exist")?;
         if !centroids
             .iter()

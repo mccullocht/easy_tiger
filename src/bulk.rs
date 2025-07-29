@@ -29,7 +29,7 @@ use wt_mdb::{Connection, Result, Session};
 use crate::{
     graph::{
         prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
-        GraphVectorIndexReader, GraphVectorStore, GraphVertex, RawVectorStore,
+        GraphVectorIndexReader, GraphVectorStore, GraphVertex,
     },
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
@@ -345,10 +345,8 @@ where
                     // TODO: consider using quantized scores here to avoid reading f32 vectors when
                     // reranking is turned off.
                     let mut raw_vectors = reader.raw_vectors()?;
-                    self.distance_fn.distance(
-                        &self.centroid,
-                        &raw_vectors.get_raw_vector(v as i64).unwrap()?,
-                    )
+                    self.distance_fn
+                        .distance(&self.centroid, &raw_vectors.get(v as i64).unwrap()?)
                 };
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
@@ -495,16 +493,17 @@ where
         edges: &mut Vec<Neighbor>,
     ) -> Result<()> {
         // TODO: this is very silly, find a better way to collapse behavior.
+        // XXX I can actually fix this shit now?
         enum Vectors<'v> {
             Nav(BulkLoadGraphVectorStore<'v>),
-            Rerank(BulkLoadRawVectorStore<'v>),
+            Rerank(BulkLoadGraphVectorStore<'v>),
         }
 
         impl<'v> Vectors<'v> {
-            fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+            fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
                 match self {
-                    Self::Nav(v) => v.get(vertex_id).map(|r| r.map(|v| v.into())),
-                    Self::Rerank(v) => v.get_raw_vector(vertex_id),
+                    Self::Nav(v) => v.get(vertex_id),
+                    Self::Rerank(v) => v.get(vertex_id),
                 }
             }
         }
@@ -670,7 +669,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
     where
         Self: 'b;
     type RawVectorStore<'b>
-        = BulkLoadRawVectorStore<'b>
+        = BulkLoadGraphVectorStore<'b>
     where
         Self: 'b;
     type NavVectorStore<'b>
@@ -687,7 +686,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
     }
 
     fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
-        Ok(BulkLoadRawVectorStore(CursorVectorStore::new(
+        Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
             self.1.get_record_cursor(self.0.index.raw_table_name())?,
             self.0.index.config().rerank_format,
         )))
@@ -769,14 +768,6 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.range.next().map(|i| self.guard[i].vertex())
-    }
-}
-
-struct BulkLoadRawVectorStore<'a>(CursorVectorStore<'a>);
-
-impl RawVectorStore for BulkLoadRawVectorStore<'_> {
-    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        self.0.get_raw_vector(vertex_id)
     }
 }
 

@@ -3,7 +3,7 @@
 //! Graph access traits provided here are used during graph search, and allow us to
 //! build indices with both WiredTiger backing and in-memory backing for bulk loads.
 
-use std::{borrow::Cow, collections::BTreeSet, io, num::NonZero, str::FromStr};
+use std::{collections::BTreeSet, io, num::NonZero, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
@@ -111,7 +111,7 @@ pub trait GraphVectorIndexReader {
     type Graph<'a>: Graph + 'a
     where
         Self: 'a;
-    type RawVectorStore<'a>: RawVectorStore + 'a
+    type RawVectorStore<'a>: GraphVectorStore + 'a
     where
         Self: 'a;
     type NavVectorStore<'a>: GraphVectorStore + 'a
@@ -124,11 +124,12 @@ pub trait GraphVectorIndexReader {
     /// Return an object that can be used to navigate the graph.
     fn graph(&self) -> Result<Self::Graph<'_>>;
 
-    /// Return an object that can be used to read raw vectors.
-    fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>>;
-
     /// Return an object that can be used to read navigational vectors.
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>>;
+
+    /// Return an object that can be used to read raw vectors.
+    // XXX rerank_vectors
+    fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>>;
 }
 
 /// A Vamana graph.
@@ -152,13 +153,6 @@ pub trait GraphVertex {
 
     /// Access the edges of the graph. These may be returned in an arbitrary order.
     fn edges(&self) -> Self::EdgeIterator<'_>;
-}
-
-/// Vector store for raw vectors used to produce the highest fidelity scores.
-pub trait RawVectorStore {
-    /// Get the raw vector for the given vertex.
-    // TODO: consider removing the Cow, it's no longer necessary
-    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
 }
 
 /// Vector store for known vector formats accessible by a record id.
@@ -187,13 +181,14 @@ pub struct EdgeSetDistanceComputer {
 
 impl EdgeSetDistanceComputer {
     pub fn new<R: GraphVectorIndexReader>(reader: &R, edges: &[Neighbor]) -> Result<Self> {
+        // XXX I can fix this shit too, no need to have two totally separate paths.
         if reader.config().index_search_params.num_rerank > 0 {
             let mut vector_store = reader.raw_vectors()?;
             let vectors = edges
                 .iter()
                 .map(|n| {
                     vector_store
-                        .get_raw_vector(n.vertex())
+                        .get(n.vertex())
                         .unwrap_or(Err(Error::not_found_error()))
                         .map(|v| v.to_vec())
                 })

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::{
     graph::{
         prune_edges, EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndexReader,
-        GraphVertex, RawVectorStore,
+        GraphVectorStore, GraphVertex,
     },
     search::GraphSearcher,
     vectors::{F32VectorCoder, F32VectorDistance, VectorDistance},
@@ -129,7 +129,7 @@ impl IndexMutator {
     fn insert_edge(
         &self,
         graph: &mut impl Graph,
-        raw_vectors: &mut impl RawVectorStore,
+        raw_vectors: &mut impl GraphVectorStore,
         distance_fn: &dyn F32VectorDistance,
         src_vertex_id: i64,
         dst_vertex_id: i64,
@@ -143,7 +143,7 @@ impl IndexMutator {
             .collect::<Vec<_>>();
         // TODO: try to avoid copying the vector.
         let src_vector = raw_vectors
-            .get_raw_vector(src_vertex_id)
+            .get(src_vertex_id)
             .expect("row exists")
             .map(|v| v.to_vec())?;
         if edges.len() >= self.reader.config().max_edges.get() {
@@ -151,7 +151,7 @@ impl IndexMutator {
                 .iter()
                 .map(|e| {
                     raw_vectors
-                        .get_raw_vector(*e)
+                        .get(*e)
                         .unwrap_or(Err(Error::not_found_error()))
                         .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, &dst)))
                 })
@@ -185,7 +185,7 @@ impl IndexMutator {
             .unwrap_or(Err(Error::not_found_error()))
             .map(|v| {
                 let raw_vector = raw_vectors
-                    .get_raw_vector(vertex_id)
+                    .get(vertex_id)
                     .expect("row exists")
                     .map(|v| v.to_vec());
                 raw_vector.map(|rv| (rv, v.edges().collect::<Vec<_>>()))
@@ -206,7 +206,7 @@ impl IndexMutator {
                     .unwrap_or(Err(Error::not_found_error()))
                     .map(|v| {
                         let raw_vector = raw_vectors
-                            .get_raw_vector(e)
+                            .get(e)
                             .expect("row exists")
                             .map(|rv| rv.to_vec());
                         raw_vector.map(|rv| {

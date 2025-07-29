@@ -55,14 +55,15 @@ impl FromStr for GraphLayout {
 }
 
 /// Configuration describing graph shape and construction. Used to read and mutate the graph.
-// XXX I need to adjust nav_format and rerank_format depending on the similarity function -- if the
-// format is raw i should reformat it as rawl2normalized for dot/angular distance. this probably
-// requires wrapping graph config.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct GraphConfig {
     /// Number of vector dimensions.
     pub dimensions: NonZero<usize>,
     /// Function to use for vector distance computations.
+    ///
+    /// If using [`VectorSimilarity::Dot`] along with [`F32VectorCoding::Raw`], consider using
+    /// [`F32VectorCoding::RawL2Normalized`] instead unless you are certain that all input vectors
+    /// in the read and write path are _already_ l2 normalized.
     pub similarity: VectorSimilarity,
     /// Vector coding to use in the nav table.
     ///

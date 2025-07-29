@@ -167,7 +167,7 @@ impl F32VectorCoding {
         !matches!(self, Self::NBitBinaryQuantized(_))
     }
 
-    /// Adjust raw format to normalize for angular ismilarity.
+    /// Adjust raw format to normalize for angular similarity.
     pub fn adjust_raw_format(&self, similarity: VectorSimilarity) -> Self {
         match (self, similarity) {
             (Self::Raw, VectorSimilarity::Dot) => Self::RawL2Normalized,

@@ -10,8 +10,7 @@ use wt_mdb::{Error, Result};
 
 use crate::{
     vectors::{
-        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, F32VectorDistance,
-        QueryVectorDistance, VectorDistance, VectorSimilarity,
+        F32VectorCoder, F32VectorCoding, F32VectorDistance, VectorDistance, VectorSimilarity,
     },
     Neighbor,
 };
@@ -104,14 +103,6 @@ impl GraphConfig {
     /// Return a new vector coder for the rerank vector format.
     pub fn new_rerank_coder(&self) -> Box<dyn F32VectorCoder> {
         self.rerank_format.new_coder()
-    }
-
-    /// Return a new query vector distance function for the query against the rerank vector format.
-    pub fn new_rerank_query_distance_function<'a>(
-        &self,
-        query: &'a [f32],
-    ) -> Box<dyn QueryVectorDistance + 'a> {
-        new_query_vector_distance_f32(query, self.similarity, self.rerank_format)
     }
 }
 

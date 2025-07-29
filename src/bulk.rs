@@ -69,6 +69,8 @@ pub struct Options {
 
 #[derive(Debug, Copy, Clone)]
 pub enum BulkLoadPhase {
+    // TODO: combine vector loading phases now that bulk_load APIs have been refactored to allow
+    // this in a useful/meaningful way.
     LoadNavVectors,
     LoadRawVectors,
     ClusterVectors,

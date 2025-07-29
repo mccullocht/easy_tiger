@@ -606,10 +606,12 @@ impl SpannSearcher {
             return Ok(results.into_sorted_vec());
         }
 
-        let query = reader
-            .head_reader
-            .config()
-            .new_rerank_query_distance_function(query);
+        // TODO: separate head rerank format from tail rerank format.
+        let query = new_query_vector_distance_f32(
+            query,
+            reader.head_reader.config().similarity,
+            reader.head_reader.config().rerank_format,
+        );
         let mut raw_cursor = reader
             .session()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;

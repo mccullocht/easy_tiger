@@ -327,13 +327,12 @@ where
                 in_flight.insert(v);
                 let mut edges = self.search_for_insert(v, &mut searcher, &mut reader)?;
                 let centroid_distance = {
-                    let mut raw_vectors = reader.raw_vectors()?;
                     // Insert any other in-flight edges into the candidate queue. These are vertices we may have missed because
                     // they are being inserted concurrently in another thread.
                     self.insert_in_flight_edges(
                         v,
                         in_flight.iter().map(|e| *e),
-                        &mut raw_vectors,
+                        &mut reader,
                         &mut edges,
                     )?;
                     assert!(
@@ -343,6 +342,7 @@ where
 
                     // TODO: consider using quantized scores here to avoid reading f32 vectors when
                     // reranking is turned off.
+                    let mut raw_vectors = reader.raw_vectors()?;
                     self.distance_fn.distance(
                         &self.centroid,
                         &raw_vectors.get_raw_vector(v as i64).unwrap()?,
@@ -489,21 +489,43 @@ where
         &self,
         vertex_id: usize,
         in_flight: impl Iterator<Item = usize>,
-        vectors: &mut impl RawVectorStore,
+        reader: &mut BulkLoadGraphVectorIndexReader<'_, '_, D>,
         edges: &mut Vec<Neighbor>,
     ) -> Result<()> {
-        // XXX this should obey rerank_edges and use the same scorer. i wonder if this is making
-        // things better or worse when i force re-ranking.
-        let vertex_vector = vectors.get_raw_vector(vertex_id as i64).unwrap()?.to_vec();
+        // TODO: this is very silly, find a better way to collapse behavior.
+        enum Vectors<'v> {
+            Nav(BulkLoadNavVectorStore<'v>),
+            Rerank(BulkLoadRawVectorStore<'v>),
+        }
+
+        impl<'v> Vectors<'v> {
+            fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
+                match self {
+                    Self::Nav(v) => v.get_nav_vector(vertex_id),
+                    Self::Rerank(v) => v.get_raw_vector(vertex_id),
+                }
+            }
+        }
+
+        let mut vectors = if self.index.config().index_search_params.num_rerank > 0 {
+            Vectors::Rerank(reader.raw_vectors()?)
+        } else {
+            Vectors::Nav(reader.nav_vectors()?)
+        };
+
+        let vertex_vector = vectors.get(vertex_id as i64).unwrap()?.to_vec();
         let vertex_dist_fn = new_query_vector_distance_indexing(
             &vertex_vector,
             self.index.config().similarity,
-            self.index.config().rerank_format,
+            if self.index.config().index_search_params.num_rerank > 0 {
+                self.index.config().rerank_format
+            } else {
+                self.index.config().nav_format
+            },
         );
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
-            let in_flight_vertex_vector =
-                vectors.get_raw_vector(in_flight_vertex as i64).unwrap()?;
+            let in_flight_vertex_vector = vectors.get(in_flight_vertex as i64).unwrap()?;
             let n = Neighbor::new(
                 in_flight_vertex as i64,
                 vertex_dist_fn.distance(&in_flight_vertex_vector),

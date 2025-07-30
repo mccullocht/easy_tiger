@@ -99,9 +99,9 @@ impl Deref for NonUniformQuantizedDimensions {
     }
 }
 
-impl TryFrom<Vec<u16>> for NonUniformQuantizedDimensions {
+impl TryFrom<&[u16]> for NonUniformQuantizedDimensions {
     type Error = &'static str;
-    fn try_from(value: Vec<u16>) -> Result<Self, Self::Error> {
+    fn try_from(value: &[u16]) -> Result<Self, Self::Error> {
         if value.len() >= 8 {
             Err("no more than 7 dimensions allowed")
         } else if !value.is_sorted() {
@@ -259,7 +259,8 @@ impl FromStr for F32VectorCoding {
                     s.split(',')
                         .map(|n| n.parse::<u16>())
                         .collect::<Result<Vec<_>, ParseIntError>>()
-                        .map_err(|_| input_err("could not parse split values".into()))?,
+                        .map_err(|_| input_err("could not parse split values".into()))?
+                        .as_slice(),
                 )
                 .map_err(|e| input_err(e.into()))?;
                 Ok(Self::I8ScaledNonUniformQuantized(splits))
@@ -469,7 +470,7 @@ pub fn new_query_vector_distance_indexing<'a>(
 #[cfg(test)]
 mod test {
     use crate::vectors::{
-        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, VectorSimilarity,
+        F32VectorCoder, F32VectorCoding, VectorSimilarity, new_query_vector_distance_f32,
     };
 
     struct TestVector {
@@ -606,5 +607,46 @@ mod test {
             distance_compare(Euclidean, I4ScaledUniformQuantized, i, &a, &b, 0.10);
             query_distance_compare(Euclidean, I4ScaledUniformQuantized, i, &a, &b, 0.10);
         }
+    }
+
+    #[test]
+    fn i8_scaled_non_uniform_dot() {
+        let splits = NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap();
+        // TODO: randomly generate a bunch of vectors for this test.
+        distance_compare(
+            VectorSimilarity::Dot,
+            scaled_non_uniform::I8VectorCoder::new(splits),
+            scaled_non_uniform::I8DotProductDistance::new(splits),
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+        query_distance_compare(
+            VectorSimilarity::Dot,
+            F32VectorCoding::I8ScaledNonUniformQuantized(splits),
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+    }
+
+    #[test]
+    fn i8_scaled_non_uniform_l2() {
+        let splits = NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap();
+        distance_compare(
+            VectorSimilarity::Euclidean,
+            scaled_non_uniform::I8VectorCoder::new(splits),
+            scaled_non_uniform::I8EuclideanDistance::new(splits),
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+        query_distance_compare(
+            VectorSimilarity::Euclidean,
+            F32VectorCoding::I8ScaledNonUniformQuantized(splits),
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
     }
 }

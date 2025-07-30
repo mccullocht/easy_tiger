@@ -86,7 +86,7 @@ impl F32VectorCoder for I8VectorCoder {
 
     fn byte_len(&self, dimensions: usize) -> usize {
         // Store
-        dimensions + std::mem::size_of::<f32>() * (self.0.len() + 1)
+        dimensions + std::mem::size_of::<f32>() * (self.0.len() + 2)
     }
 }
 

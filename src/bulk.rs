@@ -461,7 +461,8 @@ where
         reader: &mut BulkLoadGraphVectorIndexReader<'_, '_, D>,
         edges: &mut Vec<Neighbor>,
     ) -> Result<()> {
-        // XXX should this move into search_for_insert???
+        // TODO: consider moving this to search_for_insert() where it makes more sense to consider
+        // the additional vectors and there's more control over how it is done.
         if self.index.config().index_search_params.num_rerank > 0 {
             self.insert_in_flight_edges_from(
                 vertex_id,

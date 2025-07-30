@@ -492,41 +492,43 @@ where
         reader: &mut BulkLoadGraphVectorIndexReader<'_, '_, D>,
         edges: &mut Vec<Neighbor>,
     ) -> Result<()> {
-        // TODO: this is very silly, find a better way to collapse behavior.
-        // XXX I can actually fix this shit now?
-        enum Vectors<'v> {
-            Nav(BulkLoadGraphVectorStore<'v>),
-            Rerank(BulkLoadGraphVectorStore<'v>),
-        }
-
-        impl<'v> Vectors<'v> {
-            fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
-                match self {
-                    Self::Nav(v) => v.get(vertex_id),
-                    Self::Rerank(v) => v.get(vertex_id),
-                }
-            }
-        }
-
-        let mut vectors = if self.index.config().index_search_params.num_rerank > 0 {
-            Vectors::Rerank(reader.raw_vectors()?)
+        // XXX should this move into search_for_insert???
+        if self.index.config().index_search_params.num_rerank > 0 {
+            self.insert_in_flight_edges_from(
+                vertex_id,
+                in_flight,
+                &mut reader.raw_vectors()?,
+                self.index.config().rerank_format,
+                edges,
+            )
         } else {
-            Vectors::Nav(reader.nav_vectors()?)
-        };
+            self.insert_in_flight_edges_from(
+                vertex_id,
+                in_flight,
+                &mut reader.nav_vectors()?,
+                self.index.config().nav_format,
+                edges,
+            )
+        }
+    }
 
-        let vertex_vector = vectors.get(vertex_id as i64).unwrap()?.to_vec();
+    fn insert_in_flight_edges_from(
+        &self,
+        vertex_id: usize,
+        in_flight: impl Iterator<Item = usize>,
+        vector_store: &mut impl GraphVectorStore,
+        vector_format: F32VectorCoding,
+        edges: &mut Vec<Neighbor>,
+    ) -> Result<()> {
+        let vertex_vector = vector_store.get(vertex_id as i64).unwrap()?.to_vec();
         let vertex_dist_fn = new_query_vector_distance_indexing(
             &vertex_vector,
             self.index.config().similarity,
-            if self.index.config().index_search_params.num_rerank > 0 {
-                self.index.config().rerank_format
-            } else {
-                self.index.config().nav_format
-            },
+            vector_format,
         );
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
-            let in_flight_vertex_vector = vectors.get(in_flight_vertex as i64).unwrap()?;
+            let in_flight_vertex_vector = vector_store.get(in_flight_vertex as i64).unwrap()?;
             let n = Neighbor::new(
                 in_flight_vertex as i64,
                 vertex_dist_fn.distance(&in_flight_vertex_vector),

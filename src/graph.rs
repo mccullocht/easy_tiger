@@ -159,9 +159,7 @@ pub trait GraphVectorStore {
     fn format(&self) -> F32VectorCoding;
 
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.
-    // XXX this is actually unsafe for wt implementations! We use seek_exact_unsafe() and the
-    // pointer backing the slice is invalidated if the transaction is rolled back. Consider
-    // removing this method entirely?
+    // TODO: consider removing this method as it is _unsafe_ in the event of a rollback.
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>>;
 
     // TODO: extract many vectors into VecVectorStore.

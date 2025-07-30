@@ -425,41 +425,32 @@ where
             edges: 0,
             unconnected: 0,
         };
-        let config_rows = vec![(
-            ENTRY_POINT_KEY,
-            self.entry_vertex
-                .load(atomic::Ordering::Relaxed)
-                .to_le_bytes()
-                .to_vec(),
-        )];
         let session = self.connection.open_session()?;
-        session.bulk_load(
+        let mut cursor = session.new_bulk_load_cursor::<i64, Vec<u8>>(
             self.index.graph_table_name(),
             Some(
                 CreateOptionsBuilder::default()
                     .app_metadata(&serde_json::to_string(&self.index.config()).unwrap()),
             ),
-            config_rows.into_iter().chain(
-                self.vectors
-                    .iter()
-                    .zip(self.graph.iter())
-                    .enumerate()
-                    .take(self.limit)
-                    .map(|(i, (_, n))| {
-                        let vertex = n.read().unwrap();
-                        stats.vertices += 1;
-                        stats.edges += vertex.len();
-                        if vertex.is_empty() {
-                            stats.unconnected += 1;
-                        }
-                        progress(1);
-                        (
-                            i as i64,
-                            encode_graph_vertex(vertex.iter().map(|n| n.vertex()).collect()),
-                        )
-                    }),
-            ),
         )?;
+        cursor.insert(
+            ENTRY_POINT_KEY,
+            &self
+                .entry_vertex
+                .load(atomic::Ordering::Relaxed)
+                .to_le_bytes(),
+        )?;
+        for (i, n) in self.graph.iter().enumerate() {
+            let vertex = n.read().unwrap();
+            stats.vertices += 1;
+            stats.edges += vertex.len();
+            if vertex.is_empty() {
+                stats.unconnected += 1;
+            }
+            let edges = encode_graph_vertex(vertex.iter().map(|n| n.vertex()).collect());
+            cursor.insert(i as i64, &edges)?;
+            progress(1);
+        }
         Ok(stats)
     }
 

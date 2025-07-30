@@ -129,7 +129,6 @@ impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
             .map(|(q, d)| *q * d)
             .sum::<f32>() as f64
             / vector.l2_norm();
-        assert!(-1.0 <= dot && dot <= 1.0, "dot={}", dot);
         (-dot + 1.0) / 2.0
     }
 }

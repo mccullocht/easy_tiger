@@ -251,7 +251,7 @@ impl<'a> I4PackedVector<'a> {
             .sum::<f32>();
         dot += dim_it
             .zip(other_it.remainder())
-            .map(|(d, o)| (*d - 15) as f32 * *o)
+            .map(|(d, o)| (*d - 7) as f32 * *o)
             .sum::<f32>();
         // NB: other.scale() is implicitly 1.
         dot as f64 * self.scale()

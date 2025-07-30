@@ -201,7 +201,7 @@ impl GraphSearcher {
                 .unwrap_or(Err(Error::not_found_error()))?;
             self.candidates.add_unvisited(Neighbor::new(
                 entry_point,
-                nav_query.distance(&entry_vector),
+                nav_query.distance(entry_vector),
             ));
             self.seen.insert(entry_point);
         }
@@ -224,7 +224,7 @@ impl GraphSearcher {
                 }
                 let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
-                    .add_unvisited(Neighbor::new(edge, nav_query.distance(&vec)));
+                    .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)));
             }
         }
 
@@ -243,7 +243,7 @@ impl GraphSearcher {
                 raw_vectors
                     .get(vertex)
                     .expect("row exists")
-                    .map(|rv| Neighbor::new(vertex, rerank_query.distance(&rv)))
+                    .map(|rv| Neighbor::new(vertex, rerank_query.distance(rv)))
             })
             .collect::<Result<Vec<_>>>();
         rescored.map(|mut r| {

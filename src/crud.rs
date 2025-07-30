@@ -153,7 +153,7 @@ impl IndexMutator {
                     raw_vectors
                         .get(*e)
                         .unwrap_or(Err(Error::not_found_error()))
-                        .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, &dst)))
+                        .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, dst)))
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
             neighbors.sort();

@@ -346,7 +346,7 @@ where
                     // reranking is turned off.
                     let mut raw_vectors = reader.raw_vectors()?;
                     self.distance_fn
-                        .distance(&self.centroid, &raw_vectors.get(v as i64).unwrap()?)
+                        .distance(&self.centroid, raw_vectors.get(v as i64).unwrap()?)
                 };
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
@@ -531,7 +531,7 @@ where
             let in_flight_vertex_vector = vector_store.get(in_flight_vertex as i64).unwrap()?;
             let n = Neighbor::new(
                 in_flight_vertex as i64,
-                vertex_dist_fn.distance(&in_flight_vertex_vector),
+                vertex_dist_fn.distance(in_flight_vertex_vector),
             );
             // If the queue is full and n is worse than all other edges, skip.
             if edges.len() >= limit && n >= *edges.last().unwrap() {

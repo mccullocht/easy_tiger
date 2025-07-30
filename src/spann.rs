@@ -391,7 +391,7 @@ fn select_centroids(
             .expect("returned vector should exist")?;
         if !centroids
             .iter()
-            .any(|c| distance_fn.distance(c, &v) < candidate.distance())
+            .any(|c| distance_fn.distance(c, v) < candidate.distance())
         {
             centroid_ids.push(
                 candidate
@@ -399,7 +399,7 @@ fn select_centroids(
                     .try_into()
                     .expect("centroid_ids <= u32::MAX"),
             );
-            centroids.push(&v);
+            centroids.push(v);
         }
     }
     Ok(centroid_ids)

@@ -194,6 +194,7 @@ where
         self.graph_stats.as_ref()
     }
 
+    // XXX collapse vector loading.
     /// Load binary quantized vector data into the nav vectors table.
     fn load_nav_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
@@ -250,7 +251,7 @@ where
         let session = self.connection.open_session()?;
         let coder = self.index.config().rerank_format.new_coder();
         session.bulk_load(
-            self.index.raw_table_name(),
+            self.index.rerank_table_name(),
             None,
             self.vectors
                 .iter()
@@ -288,7 +289,7 @@ where
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
         let apply_mu = {
             let session = self.connection.open_session()?;
-            let mut cursor = session.open_record_cursor(self.index.raw_table_name())?;
+            let mut cursor = session.open_record_cursor(self.index.rerank_table_name())?;
             let vector0 = cursor.seek_exact(0).unwrap()?;
             Mutex::new((0i64, self.distance_fn.distance(&self.centroid, &vector0)))
         };
@@ -703,7 +704,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
 
     fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
         Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
-            self.1.get_record_cursor(self.0.index.raw_table_name())?,
+            self.1.get_record_cursor(self.0.index.rerank_table_name())?,
             self.0.index.config().rerank_format,
         )))
     }

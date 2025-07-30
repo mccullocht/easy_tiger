@@ -174,9 +174,8 @@ impl GraphVectorStore for CursorVectorStore<'_> {
 #[derive(Clone)]
 pub struct TableGraphVectorIndex {
     graph_table_name: String,
-    // XXX rerank
-    raw_table_name: String,
     nav_table_name: String,
+    rerank_table_name: String,
     config: GraphConfig,
 }
 
@@ -187,7 +186,7 @@ impl TableGraphVectorIndex {
     /// immutable graph metadata that can be used across operations.
     pub fn from_db(connection: &Arc<Connection>, table_basename: &str) -> io::Result<Self> {
         let session = connection.open_session()?;
-        let [graph_table_name, raw_table_name, nav_table_name] =
+        let [graph_table_name, rerank_table_name, nav_table_name] =
             Self::generate_table_names(table_basename);
         let mut cursor = session.open_record_cursor(&graph_table_name)?;
         let config_json = unsafe { cursor.seek_exact_unsafe(CONFIG_KEY) }
@@ -195,8 +194,8 @@ impl TableGraphVectorIndex {
         let config: GraphConfig = serde_json::from_slice(config_json)?;
         Ok(Self {
             graph_table_name,
-            raw_table_name,
             nav_table_name,
+            rerank_table_name,
             config,
         })
     }
@@ -204,12 +203,12 @@ impl TableGraphVectorIndex {
     /// Create a new `TableGraphVectorIndex` for table initialization, providing
     /// graph metadata up front.
     pub fn from_init(config: GraphConfig, index_name: &str) -> io::Result<Self> {
-        let [graph_table_name, raw_table_name, nav_table_name] =
+        let [graph_table_name, rerank_table_name, nav_table_name] =
             Self::generate_table_names(index_name);
         Ok(Self {
             graph_table_name,
-            raw_table_name,
             nav_table_name,
+            rerank_table_name,
             config,
         })
     }
@@ -224,7 +223,7 @@ impl TableGraphVectorIndex {
         let index = Self::from_init(config, index_name)?;
         let session = connection.open_session()?;
         session.create_table(&index.graph_table_name, table_options.clone())?;
-        session.create_table(&index.raw_table_name, table_options.clone())?;
+        session.create_table(&index.rerank_table_name, table_options.clone())?;
         session.create_table(&index.nav_table_name, table_options)?;
         let mut cursor = session.open_record_cursor(&index.graph_table_name)?;
         cursor.set(CONFIG_KEY, &serde_json::to_vec(&index.config)?)?;
@@ -263,8 +262,8 @@ impl TableGraphVectorIndex {
     }
 
     /// Return the name of the table containing raw vectors.
-    pub fn raw_table_name(&self) -> &str {
-        &self.raw_table_name
+    pub fn rerank_table_name(&self) -> &str {
+        &self.rerank_table_name
     }
 
     /// Return the name of the table containing the navigational vectors.
@@ -337,7 +336,7 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
     fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
         Ok(CursorVectorStore::new(
             self.session
-                .get_record_cursor(self.index.raw_table_name())?,
+                .get_record_cursor(self.index.rerank_table_name())?,
             self.index.config().rerank_format,
         ))
     }

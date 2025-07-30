@@ -69,8 +69,7 @@ pub struct Options {
 pub enum BulkLoadPhase {
     // TODO: combine vector loading phases now that bulk_load APIs have been refactored to allow
     // this in a useful/meaningful way.
-    LoadNavVectors,
-    LoadRawVectors,
+    LoadVectors,
     ClusterVectors,
     BuildGraph,
     CleanupGraph,
@@ -80,8 +79,7 @@ pub enum BulkLoadPhase {
 impl BulkLoadPhase {
     pub fn display_name(&self) -> &'static str {
         match self {
-            Self::LoadNavVectors => "load nav vectors",
-            Self::LoadRawVectors => "load raw vectors",
+            Self::LoadVectors => "load vectors",
             Self::ClusterVectors => "cluster vectors",
             Self::BuildGraph => "build graph",
             Self::CleanupGraph => "cleanup graph",
@@ -151,7 +149,7 @@ where
     /// Phases to be executed by the builder.
     /// This can vary depending on the options.
     pub fn phases(&self) -> Vec<BulkLoadPhase> {
-        let mut phases = vec![BulkLoadPhase::LoadNavVectors, BulkLoadPhase::LoadRawVectors];
+        let mut phases = vec![BulkLoadPhase::LoadVectors];
         if self.options.cluster_ordered_insert {
             phases.push(BulkLoadPhase::ClusterVectors);
         }
@@ -175,8 +173,7 @@ where
         P: Fn(u64) + Send + Sync,
     {
         match phase {
-            BulkLoadPhase::LoadNavVectors => self.load_nav_vectors(progress),
-            BulkLoadPhase::LoadRawVectors => self.load_raw_vectors(progress),
+            BulkLoadPhase::LoadVectors => self.load_vectors(progress),
             BulkLoadPhase::ClusterVectors => self.cluster_vectors(progress),
             BulkLoadPhase::BuildGraph => self.insert_all(progress),
             BulkLoadPhase::CleanupGraph => self.cleanup(progress),
@@ -192,43 +189,46 @@ where
         self.graph_stats.as_ref()
     }
 
-    // XXX collapse vector loading.
-    /// Load binary quantized vector data into the nav vectors table.
-    fn load_nav_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
+    /// Load nav and rerank vectors into tables.
+    fn load_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
-        let coder = self.index.config().new_nav_coder();
+        let nav_coder = self.index.config().new_nav_coder();
+        let mut nav_vector = vec![0u8; nav_coder.byte_len(dim)];
         let mut sum = vec![0.0; dim];
         let mut quantized_vectors = if self.options.memory_quantized_vectors {
-            Some(MmapMut::map_anon(coder.byte_len(dim) * self.vectors.len()).unwrap())
+            Some(MmapMut::map_anon(nav_coder.byte_len(dim) * self.vectors.len()).unwrap())
         } else {
             None
         };
-        session.bulk_load(
-            self.index.nav_table_name(),
-            None,
-            self.vectors
-                .iter()
-                .enumerate()
-                .take(self.limit)
-                .map(|(i, v)| {
-                    progress(1);
-                    for (i, o) in v.iter().zip(sum.iter_mut()) {
-                        *o += *i as f64;
-                    }
-                    let quantized = coder.encode(v);
-                    if let Some(q) = quantized_vectors.as_mut() {
-                        let start = i * quantized.len();
-                        q[start..(start + quantized.len())].copy_from_slice(&quantized);
-                    }
-                    (i as i64, quantized)
-                }),
-        )?;
+        let mut nav_cursor =
+            session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table_name(), None)?;
+
+        let rerank_coder = self.index.config().rerank_format.new_coder();
+        let mut rerank_vector = vec![0u8; rerank_coder.byte_len(dim)];
+        let mut rerank_cursor =
+            session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.rerank_table_name(), None)?;
+
+        for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
+            for (i, o) in v.iter().zip(sum.iter_mut()) {
+                *o += *i as f64;
+            }
+            nav_coder.encode_to(v, &mut nav_vector);
+            if let Some(q) = quantized_vectors.as_mut() {
+                let start = i * nav_vector.len();
+                q[start..(start + nav_vector.len())].copy_from_slice(&nav_vector);
+            }
+            nav_cursor.insert(i as i64, &nav_vector)?;
+
+            rerank_coder.encode_to(v, &mut rerank_vector);
+            rerank_cursor.insert(i as i64, &rerank_vector)?;
+            progress(1);
+        }
 
         self.quantized_vectors = quantized_vectors.map(|m| {
             DerefVectorStore::new(
                 m.make_read_only().unwrap(),
-                NonZero::new(coder.byte_len(dim)).unwrap(),
+                NonZero::new(nav_coder.byte_len(dim)).unwrap(),
             )
             .unwrap()
         });
@@ -243,24 +243,6 @@ where
             .new_coder()
             .encode(&centroid);
         Ok(())
-    }
-
-    fn load_raw_vectors<P: Fn(u64) + Send + Sync>(&mut self, progress: P) -> Result<()> {
-        let session = self.connection.open_session()?;
-        let coder = self.index.config().rerank_format.new_coder();
-        session.bulk_load(
-            self.index.rerank_table_name(),
-            None,
-            self.vectors
-                .iter()
-                .enumerate()
-                .take(self.limit)
-                .map(|(i, v)| {
-                    let value = coder.encode(v);
-                    progress(1);
-                    (i as i64, value)
-                }),
-        )
     }
 
     fn cluster_vectors<P: Fn(u64) + Send + Sync>(&mut self, progress: P) -> Result<()> {
@@ -440,7 +422,7 @@ where
                 .load(atomic::Ordering::Relaxed)
                 .to_le_bytes(),
         )?;
-        for (i, n) in self.graph.iter().enumerate() {
+        for (i, n) in self.graph.iter().enumerate().take(self.limit) {
             let vertex = n.read().unwrap();
             stats.vertices += 1;
             stats.edges += vertex.len();

@@ -181,33 +181,14 @@ pub struct EdgeSetDistanceComputer {
 
 impl EdgeSetDistanceComputer {
     pub fn new<R: GraphVectorIndexReader>(reader: &R, edges: &[Neighbor]) -> Result<Self> {
-        // XXX I can fix this shit too, no need to have two totally separate paths.
         if reader.config().index_search_params.num_rerank > 0 {
-            let mut vector_store = reader.raw_vectors()?;
-            let vectors = edges
-                .iter()
-                .map(|n| {
-                    vector_store
-                        .get(n.vertex())
-                        .unwrap_or(Err(Error::not_found_error()))
-                        .map(|v| v.to_vec())
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let vectors = Self::extract_vectors(&mut reader.raw_vectors()?, edges)?;
             Ok(Self {
                 distance_fn: reader.config().new_distance_function(),
                 vectors,
             })
         } else {
-            let mut vector_store = reader.nav_vectors()?;
-            let vectors = edges
-                .iter()
-                .map(|n| {
-                    vector_store
-                        .get(n.vertex())
-                        .unwrap_or(Err(Error::not_found_error()))
-                        .map(|v| v.to_vec())
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let vectors = Self::extract_vectors(&mut reader.nav_vectors()?, edges)?;
             Ok(Self {
                 distance_fn: reader
                     .config()
@@ -216,6 +197,21 @@ impl EdgeSetDistanceComputer {
                 vectors,
             })
         }
+    }
+
+    fn extract_vectors(
+        store: &mut impl GraphVectorStore,
+        edges: &[Neighbor],
+    ) -> Result<Vec<Vec<u8>>> {
+        edges
+            .iter()
+            .map(|n| {
+                store
+                    .get(n.vertex())
+                    .unwrap_or(Err(Error::not_found_error()))
+                    .map(|v| v.to_vec())
+            })
+            .collect::<Result<Vec<_>>>()
     }
 
     pub fn distance(&self, i: usize, j: usize) -> f64 {

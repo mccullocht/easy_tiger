@@ -21,6 +21,7 @@ use crate::{
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
 /// Key in the graph table containing configuration.
+// XXX replace with app_metadata.
 pub const CONFIG_KEY: i64 = -2;
 
 fn read_app_metadata_internal(session: &Session, table_name: &str) -> Result<String> {

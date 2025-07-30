@@ -9,8 +9,8 @@ use std::{ffi::CString, io, sync::Arc};
 use rustix::io::Errno;
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
-    options::{CreateOptions, DropOptions},
-    Connection, Error, RecordCursorGuard, Result, Session, WiredTigerError,
+    options::{CreateOptionsBuilder, DropOptions},
+    Connection, Error, RecordCursorGuard, Result, Session,
 };
 
 use crate::{
@@ -20,9 +20,6 @@ use crate::{
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
-/// Key in the graph table containing configuration.
-// XXX replace with app_metadata.
-pub const CONFIG_KEY: i64 = -2;
 
 fn read_app_metadata_internal(session: &Session, table_name: &str) -> Result<String> {
     let mut cursor = session.open_metadata_cursor()?;
@@ -188,10 +185,9 @@ impl TableGraphVectorIndex {
         let session = connection.open_session()?;
         let [graph_table_name, rerank_table_name, nav_table_name] =
             Self::generate_table_names(table_basename);
-        let mut cursor = session.open_record_cursor(&graph_table_name)?;
-        let config_json = unsafe { cursor.seek_exact_unsafe(CONFIG_KEY) }
-            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-        let config: GraphConfig = serde_json::from_slice(config_json)?;
+        let config: GraphConfig = serde_json::from_str(
+            &read_app_metadata(&session, &graph_table_name).ok_or(Error::not_found_error())??,
+        )?;
         Ok(Self {
             graph_table_name,
             nav_table_name,
@@ -216,17 +212,21 @@ impl TableGraphVectorIndex {
     /// Create necessary tables for the index and write index metadata.
     pub fn init_index(
         connection: &Arc<Connection>,
-        table_options: Option<CreateOptions>,
         config: GraphConfig,
         index_name: &str,
     ) -> io::Result<Self> {
         let index = Self::from_init(config, index_name)?;
         let session = connection.open_session()?;
-        session.create_table(&index.graph_table_name, table_options.clone())?;
-        session.create_table(&index.rerank_table_name, table_options.clone())?;
-        session.create_table(&index.nav_table_name, table_options)?;
-        let mut cursor = session.open_record_cursor(&index.graph_table_name)?;
-        cursor.set(CONFIG_KEY, &serde_json::to_vec(&index.config)?)?;
+        session.create_table(
+            &index.graph_table_name,
+            Some(
+                CreateOptionsBuilder::default()
+                    .app_metadata(&serde_json::to_string(&index.config)?)
+                    .into(),
+            ),
+        )?;
+        session.create_table(&index.rerank_table_name, None)?;
+        session.create_table(&index.nav_table_name, None)?;
         Ok(index)
     }
 

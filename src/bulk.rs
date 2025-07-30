@@ -24,7 +24,7 @@ use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{Connection, Result, Session};
+use wt_mdb::{options::CreateOptionsBuilder, Connection, Result, Session};
 
 use crate::{
     graph::{
@@ -35,9 +35,7 @@ use crate::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
     vectors::{new_query_vector_distance_indexing, F32VectorCoding, F32VectorDistance},
-    wt::{
-        encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, CONFIG_KEY, ENTRY_POINT_KEY,
-    },
+    wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
 
@@ -427,23 +425,20 @@ where
             edges: 0,
             unconnected: 0,
         };
-        let config_rows = vec![
-            (
-                CONFIG_KEY,
-                serde_json::to_vec(&self.index.config()).unwrap(),
-            ),
-            (
-                ENTRY_POINT_KEY,
-                self.entry_vertex
-                    .load(atomic::Ordering::Relaxed)
-                    .to_le_bytes()
-                    .to_vec(),
-            ),
-        ];
+        let config_rows = vec![(
+            ENTRY_POINT_KEY,
+            self.entry_vertex
+                .load(atomic::Ordering::Relaxed)
+                .to_le_bytes()
+                .to_vec(),
+        )];
         let session = self.connection.open_session()?;
         session.bulk_load(
             self.index.graph_table_name(),
-            None,
+            Some(
+                CreateOptionsBuilder::default()
+                    .app_metadata(&serde_json::to_string(&self.index.config()).unwrap()),
+            ),
             config_rows.into_iter().chain(
                 self.vectors
                     .iter()

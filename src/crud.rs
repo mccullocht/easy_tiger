@@ -376,7 +376,6 @@ mod tests {
             let index = Arc::new(
                 TableGraphVectorIndex::init_index(
                     &conn,
-                    None,
                     GraphConfig {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,

@@ -135,7 +135,6 @@ impl TableIndex {
     ) -> io::Result<Self> {
         let head = Arc::new(TableGraphVectorIndex::init_index(
             connection,
-            None,
             head_config,
             &Self::head_name(index_name),
         )?);

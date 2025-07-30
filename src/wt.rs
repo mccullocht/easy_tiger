@@ -4,23 +4,22 @@
 //! is recommeded that callers begin a transaction before performing their search or mutation
 //! and commit or rollback the transaction when they are done.
 
-use std::{borrow::Cow, ffi::CString, io, sync::Arc};
+use std::{ffi::CString, io, sync::Arc};
 
 use rustix::io::Errno;
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
-    options::{CreateOptions, DropOptions},
-    Connection, Error, RecordCursorGuard, Result, Session, WiredTigerError,
+    options::{CreateOptionsBuilder, DropOptions},
+    Connection, Error, RecordCursorGuard, Result, Session,
 };
 
-use crate::graph::{
-    Graph, GraphConfig, GraphVectorIndexReader, GraphVertex, NavVectorStore, RawVectorStore,
+use crate::{
+    graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex},
+    vectors::F32VectorCoding,
 };
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
-/// Key in the graph table containing configuration.
-pub const CONFIG_KEY: i64 = -2;
 
 fn read_app_metadata_internal(session: &Session, table_name: &str) -> Result<String> {
     let mut cursor = session.open_metadata_cursor()?;
@@ -135,11 +134,11 @@ impl Graph for CursorGraph<'_> {
 }
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
-pub struct CursorVectorStore<'a>(RecordCursorGuard<'a>);
+pub struct CursorVectorStore<'a>(RecordCursorGuard<'a>, F32VectorCoding);
 
 impl<'a> CursorVectorStore<'a> {
-    pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
-        Self(cursor)
+    pub fn new(cursor: RecordCursorGuard<'a>, format: F32VectorCoding) -> Self {
+        Self(cursor, format)
     }
 
     pub(crate) fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()> {
@@ -155,21 +154,15 @@ impl<'a> CursorVectorStore<'a> {
             }
         })
     }
-
-    fn get(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? }.map(|v| v.into()))
-    }
 }
 
-impl RawVectorStore for CursorVectorStore<'_> {
-    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        self.get(vertex_id)
+impl GraphVectorStore for CursorVectorStore<'_> {
+    fn format(&self) -> F32VectorCoding {
+        self.1
     }
-}
 
-impl NavVectorStore for CursorVectorStore<'_> {
-    fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-        self.get(vertex_id)
+    fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
+        Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? })
     }
 }
 
@@ -178,8 +171,8 @@ impl NavVectorStore for CursorVectorStore<'_> {
 #[derive(Clone)]
 pub struct TableGraphVectorIndex {
     graph_table_name: String,
-    raw_table_name: String,
     nav_table_name: String,
+    rerank_table_name: String,
     config: GraphConfig,
 }
 
@@ -190,16 +183,15 @@ impl TableGraphVectorIndex {
     /// immutable graph metadata that can be used across operations.
     pub fn from_db(connection: &Arc<Connection>, table_basename: &str) -> io::Result<Self> {
         let session = connection.open_session()?;
-        let [graph_table_name, raw_table_name, nav_table_name] =
+        let [graph_table_name, rerank_table_name, nav_table_name] =
             Self::generate_table_names(table_basename);
-        let mut cursor = session.open_record_cursor(&graph_table_name)?;
-        let config_json = unsafe { cursor.seek_exact_unsafe(CONFIG_KEY) }
-            .unwrap_or(Err(Error::WiredTiger(WiredTigerError::NotFound)))?;
-        let config: GraphConfig = serde_json::from_slice(config_json)?;
+        let config: GraphConfig = serde_json::from_str(
+            &read_app_metadata(&session, &graph_table_name).ok_or(Error::not_found_error())??,
+        )?;
         Ok(Self {
             graph_table_name,
-            raw_table_name,
             nav_table_name,
+            rerank_table_name,
             config,
         })
     }
@@ -207,12 +199,12 @@ impl TableGraphVectorIndex {
     /// Create a new `TableGraphVectorIndex` for table initialization, providing
     /// graph metadata up front.
     pub fn from_init(config: GraphConfig, index_name: &str) -> io::Result<Self> {
-        let [graph_table_name, raw_table_name, nav_table_name] =
+        let [graph_table_name, rerank_table_name, nav_table_name] =
             Self::generate_table_names(index_name);
         Ok(Self {
             graph_table_name,
-            raw_table_name,
             nav_table_name,
+            rerank_table_name,
             config,
         })
     }
@@ -220,17 +212,21 @@ impl TableGraphVectorIndex {
     /// Create necessary tables for the index and write index metadata.
     pub fn init_index(
         connection: &Arc<Connection>,
-        table_options: Option<CreateOptions>,
         config: GraphConfig,
         index_name: &str,
     ) -> io::Result<Self> {
         let index = Self::from_init(config, index_name)?;
         let session = connection.open_session()?;
-        session.create_table(&index.graph_table_name, table_options.clone())?;
-        session.create_table(&index.raw_table_name, table_options.clone())?;
-        session.create_table(&index.nav_table_name, table_options)?;
-        let mut cursor = session.open_record_cursor(&index.graph_table_name)?;
-        cursor.set(CONFIG_KEY, &serde_json::to_vec(&index.config)?)?;
+        session.create_table(
+            &index.graph_table_name,
+            Some(
+                CreateOptionsBuilder::default()
+                    .app_metadata(&serde_json::to_string(&index.config)?)
+                    .into(),
+            ),
+        )?;
+        session.create_table(&index.rerank_table_name, None)?;
+        session.create_table(&index.nav_table_name, None)?;
         Ok(index)
     }
 
@@ -266,8 +262,8 @@ impl TableGraphVectorIndex {
     }
 
     /// Return the name of the table containing raw vectors.
-    pub fn raw_table_name(&self) -> &str {
-        &self.raw_table_name
+    pub fn rerank_table_name(&self) -> &str {
+        &self.rerank_table_name
     }
 
     /// Return the name of the table containing the navigational vectors.
@@ -309,11 +305,11 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         = CursorGraph<'a>
     where
         Self: 'a;
-    type RawVectorStore<'a>
+    type NavVectorStore<'a>
         = CursorVectorStore<'a>
     where
         Self: 'a;
-    type NavVectorStore<'a>
+    type RerankVectorStore<'a>
         = CursorVectorStore<'a>
     where
         Self: 'a;
@@ -329,17 +325,19 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         ))
     }
 
-    fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
-        Ok(CursorVectorStore::new(
-            self.session
-                .get_record_cursor(self.index.raw_table_name())?,
-        ))
-    }
-
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         Ok(CursorVectorStore::new(
             self.session
                 .get_record_cursor(self.index.nav_table_name())?,
+            self.index.config().nav_format,
+        ))
+    }
+
+    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
+        Ok(CursorVectorStore::new(
+            self.session
+                .get_record_cursor(self.index.rerank_table_name())?,
+            self.index.config().rerank_format,
         ))
     }
 }

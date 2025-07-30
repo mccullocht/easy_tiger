@@ -23,7 +23,7 @@ use wt_mdb::{
 };
 
 use crate::{
-    graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, RawVectorStore},
+    graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore},
     input::{VecVectorStore, VectorStore},
     search::{GraphSearchStats, GraphSearcher},
     vectors::{
@@ -135,7 +135,6 @@ impl TableIndex {
     ) -> io::Result<Self> {
         let head = Arc::new(TableGraphVectorIndex::init_index(
             connection,
-            None,
             head_config,
             &Self::head_name(index_name),
         )?);
@@ -376,7 +375,7 @@ fn select_centroids(
     replica_count: usize,
 ) -> Result<Vec<u32>> {
     assert!(!candidates.is_empty());
-    let mut raw_vectors = head_reader.raw_vectors()?;
+    let mut raw_vectors = head_reader.rerank_vectors()?;
 
     let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
     let mut centroids =
@@ -387,11 +386,11 @@ fn select_centroids(
         }
 
         let v = raw_vectors
-            .get_raw_vector(candidate.vertex())
+            .get(candidate.vertex())
             .expect("returned vector should exist")?;
         if !centroids
             .iter()
-            .any(|c| distance_fn.distance(c, &v) < candidate.distance())
+            .any(|c| distance_fn.distance(c, v) < candidate.distance())
         {
             centroid_ids.push(
                 candidate
@@ -399,7 +398,7 @@ fn select_centroids(
                     .try_into()
                     .expect("centroid_ids <= u32::MAX"),
             );
-            centroids.push(&v);
+            centroids.push(v);
         }
     }
     Ok(centroid_ids)

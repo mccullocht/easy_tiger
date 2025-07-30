@@ -69,7 +69,6 @@ pub fn init_index(
 
     TableGraphVectorIndex::init_index(
         &connection,
-        None,
         GraphConfig {
             dimensions: args.dimensions,
             similarity: args.similarity,

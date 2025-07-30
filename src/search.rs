@@ -6,10 +6,7 @@ use std::{
 };
 
 use crate::{
-    graph::{
-        Graph, GraphSearchParams, GraphVectorIndexReader, GraphVertex, NavVectorStore,
-        RawVectorStore,
-    },
+    graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex},
     vectors::{
         new_query_vector_distance_f32, new_query_vector_distance_indexing, QueryVectorDistance,
     },
@@ -119,7 +116,7 @@ impl GraphSearcher {
         // and we do not want to enter that path here because it is so expensive.
         let nav_query_rep = reader
             .nav_vectors()?
-            .get_nav_vector(vertex_id)
+            .get(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
             .to_vec();
         let nav_query = new_query_vector_distance_indexing(
@@ -131,8 +128,8 @@ impl GraphSearcher {
         let rerank_query_rep = if self.params.num_rerank > 0 {
             Some(
                 reader
-                    .raw_vectors()?
-                    .get_raw_vector(vertex_id)
+                    .rerank_vectors()?
+                    .get(vertex_id)
                     .unwrap_or(Err(Error::not_found_error()))?
                     .to_vec(),
             )
@@ -200,12 +197,10 @@ impl GraphSearcher {
         if let Some(epr) = graph.entry_point() {
             let entry_point = epr?;
             let entry_vector = nav
-                .get_nav_vector(entry_point)
+                .get(entry_point)
                 .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates.add_unvisited(Neighbor::new(
-                entry_point,
-                nav_query.distance(&entry_vector),
-            ));
+            self.candidates
+                .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)));
             self.seen.insert(entry_point);
         }
 
@@ -225,11 +220,9 @@ impl GraphSearcher {
                 if !self.seen.insert(edge) {
                     continue;
                 }
-                let vec = nav
-                    .get_nav_vector(edge)
-                    .unwrap_or(Err(Error::not_found_error()))?;
+                let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
                 self.candidates
-                    .add_unvisited(Neighbor::new(edge, nav_query.distance(&vec)));
+                    .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)));
             }
         }
 
@@ -238,17 +231,17 @@ impl GraphSearcher {
         }
 
         let rerank_query = rerank_query.unwrap();
-        let mut raw_vectors = reader.raw_vectors()?;
+        let mut rerank_vectors = reader.rerank_vectors()?;
         let rescored = self
             .candidates
             .iter()
             .take(self.params.num_rerank)
             .map(|c| {
                 let vertex = c.neighbor.vertex();
-                raw_vectors
-                    .get_raw_vector(vertex)
+                rerank_vectors
+                    .get(vertex)
                     .expect("row exists")
-                    .map(|rv| Neighbor::new(vertex, rerank_query.distance(&rv)))
+                    .map(|rv| Neighbor::new(vertex, rerank_query.distance(rv)))
             })
             .collect::<Result<Vec<_>>>();
         rescored.map(|mut r| {
@@ -381,14 +374,13 @@ impl<'a> VisitCandidateGuard<'a> {
 
 #[cfg(test)]
 mod test {
-    use std::{borrow::Cow, num::NonZero};
+    use std::num::NonZero;
 
     use wt_mdb::Result;
 
     use crate::{
         graph::{
-            Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVertex, NavVectorStore,
-            RawVectorStore,
+            Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
         },
         vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity},
         Neighbor,
@@ -509,12 +501,12 @@ mod test {
             = TestGraphAccess<'b>
         where
             Self: 'b;
-        type RawVectorStore<'b>
-            = TestGraphAccess<'b>
+        type NavVectorStore<'b>
+            = TestNavVectorStore<'b>
         where
             Self: 'b;
-        type NavVectorStore<'b>
-            = TestGraphAccess<'b>
+        type RerankVectorStore<'b>
+            = TestRerankVectorStore<'b>
         where
             Self: 'b;
 
@@ -526,12 +518,12 @@ mod test {
             Ok(TestGraphAccess(self.0))
         }
 
-        fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
-            Ok(TestGraphAccess(self.0))
+        fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
+            Ok(TestNavVectorStore(self.0))
         }
 
-        fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-            Ok(TestGraphAccess(self.0))
+        fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
+            Ok(TestRerankVectorStore(self.0))
         }
     }
 
@@ -561,26 +553,33 @@ mod test {
         }
     }
 
-    impl RawVectorStore for TestGraphAccess<'_> {
-        fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
-                Some(Ok(bytemuck::cast_slice(
-                    &self.0.data[vertex_id as usize].vector,
-                )
-                .into()))
-            } else {
-                None
-            }
+    pub struct TestRerankVectorStore<'a>(&'a TestGraphVectorIndex);
+
+    impl GraphVectorStore for TestRerankVectorStore<'_> {
+        fn format(&self) -> F32VectorCoding {
+            self.0.config.rerank_format
+        }
+
+        fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
+            self.0
+                .data
+                .get(vertex_id as usize)
+                .map(|vertex| Ok(bytemuck::cast_slice(vertex.vector.as_ref())))
         }
     }
 
-    impl NavVectorStore for TestGraphAccess<'_> {
-        fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>> {
-            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
-                Some(Ok(Cow::from(&self.0.data[vertex_id as usize].nav_vector)))
-            } else {
-                None
-            }
+    pub struct TestNavVectorStore<'a>(&'a TestGraphVectorIndex);
+
+    impl GraphVectorStore for TestNavVectorStore<'_> {
+        fn format(&self) -> F32VectorCoding {
+            self.0.config.nav_format
+        }
+
+        fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
+            self.0
+                .data
+                .get(vertex_id as usize)
+                .map(|vertex| Ok(vertex.nav_vector.as_ref()))
         }
     }
 

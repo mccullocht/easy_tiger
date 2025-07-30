@@ -3,7 +3,7 @@
 //! Graph access traits provided here are used during graph search, and allow us to
 //! build indices with both WiredTiger backing and in-memory backing for bulk loads.
 
-use std::{borrow::Cow, collections::BTreeSet, io, num::NonZero, str::FromStr};
+use std::{collections::BTreeSet, io, num::NonZero, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
@@ -74,7 +74,6 @@ pub struct GraphConfig {
     /// If re-ranking is turned on during graph construction or search this will be used to compute
     /// ~O(num_candidates) query distances. If this format is quantized you should typically choose
     /// a high fidelity quantization function.
-    // TODO: make this _optional_.
     pub rerank_format: F32VectorCoding,
     pub layout: GraphLayout,
     /// Maximum number of edges at each vertex.
@@ -111,10 +110,10 @@ pub trait GraphVectorIndexReader {
     type Graph<'a>: Graph + 'a
     where
         Self: 'a;
-    type RawVectorStore<'a>: RawVectorStore + 'a
+    type NavVectorStore<'a>: GraphVectorStore + 'a
     where
         Self: 'a;
-    type NavVectorStore<'a>: NavVectorStore + 'a
+    type RerankVectorStore<'a>: GraphVectorStore + 'a
     where
         Self: 'a;
 
@@ -124,11 +123,11 @@ pub trait GraphVectorIndexReader {
     /// Return an object that can be used to navigate the graph.
     fn graph(&self) -> Result<Self::Graph<'_>>;
 
-    /// Return an object that can be used to read raw vectors.
-    fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>>;
-
     /// Return an object that can be used to read navigational vectors.
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>>;
+
+    /// Return an object that can be used to read vectors for re-ranking.
+    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>>;
 }
 
 /// A Vamana graph.
@@ -154,18 +153,17 @@ pub trait GraphVertex {
     fn edges(&self) -> Self::EdgeIterator<'_>;
 }
 
-/// Vector store for raw vectors used to produce the highest fidelity scores.
-pub trait RawVectorStore {
-    /// Get the raw vector for the given vertex.
-    // TODO: consider removing the Cow, it's no longer necessary
-    fn get_raw_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
-}
+/// Vector store for known vector formats accessible by a record id.
+pub trait GraphVectorStore {
+    /// Return the format that vectors in the store are encoded in.
+    fn format(&self) -> F32VectorCoding;
 
-/// Vector store for vectors used to navigate the graph.
-pub trait NavVectorStore {
-    /// Get the navigation vector for the given vertex.
-    // TODO: consider removing the Cow, it's no longer necessary
-    fn get_nav_vector(&mut self, vertex_id: i64) -> Option<Result<Cow<'_, [u8]>>>;
+    /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.
+    // TODO: consider removing this method as it is _unsafe_ in the event of a rollback.
+    fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>>;
+
+    // TODO: extract many vectors into VecVectorStore.
+    // TODO: method to turn self into a QueryVectorDistance.
 }
 
 /// Computes the distance between two edges in a set to assist in pruning.
@@ -180,31 +178,13 @@ pub struct EdgeSetDistanceComputer {
 impl EdgeSetDistanceComputer {
     pub fn new<R: GraphVectorIndexReader>(reader: &R, edges: &[Neighbor]) -> Result<Self> {
         if reader.config().index_search_params.num_rerank > 0 {
-            let mut vector_store = reader.raw_vectors()?;
-            let vectors = edges
-                .iter()
-                .map(|n| {
-                    vector_store
-                        .get_raw_vector(n.vertex())
-                        .unwrap_or(Err(Error::not_found_error()))
-                        .map(|v| v.to_vec())
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let vectors = Self::extract_vectors(&mut reader.rerank_vectors()?, edges)?;
             Ok(Self {
                 distance_fn: reader.config().new_distance_function(),
                 vectors,
             })
         } else {
-            let mut vector_store = reader.nav_vectors()?;
-            let vectors = edges
-                .iter()
-                .map(|n| {
-                    vector_store
-                        .get_nav_vector(n.vertex())
-                        .unwrap_or(Err(Error::not_found_error()))
-                        .map(|v| v.to_vec())
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let vectors = Self::extract_vectors(&mut reader.nav_vectors()?, edges)?;
             Ok(Self {
                 distance_fn: reader
                     .config()
@@ -213,6 +193,21 @@ impl EdgeSetDistanceComputer {
                 vectors,
             })
         }
+    }
+
+    fn extract_vectors(
+        store: &mut impl GraphVectorStore,
+        edges: &[Neighbor],
+    ) -> Result<Vec<Vec<u8>>> {
+        edges
+            .iter()
+            .map(|n| {
+                store
+                    .get(n.vertex())
+                    .unwrap_or(Err(Error::not_found_error()))
+                    .map(|v| v.to_vec())
+            })
+            .collect::<Result<Vec<_>>>()
     }
 
     pub fn distance(&self, i: usize, j: usize) -> f64 {

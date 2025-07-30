@@ -52,7 +52,7 @@ pub fn exhaustive_search(
     let distance_fn = index.config().new_distance_function();
 
     let session = connection.open_session()?;
-    let mut cursor = session.open_record_cursor(index.raw_table_name())?;
+    let mut cursor = session.open_record_cursor(index.rerank_table_name())?;
     let mut limit = std::cmp::max(cursor.largest_key().unwrap().unwrap() + 1, 0) as usize;
     limit = limit.min(args.record_limit.unwrap_or(usize::MAX));
     cursor.set_bounds(0..)?;

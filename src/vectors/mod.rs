@@ -390,8 +390,8 @@ mod test {
         I4PackedDotProductDistance, I4PackedEuclideanDistance, I4PackedVectorCoder,
     };
     use crate::vectors::{
-        F32VectorCoder, F32VectorCoding, I8NaiveVectorCoder, I8ScaledUniformVectorCoder,
-        VectorDistance, VectorSimilarity,
+        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, I8NaiveVectorCoder,
+        I8ScaledUniformVectorCoder, VectorDistance, VectorSimilarity,
     };
 
     struct TestVector {
@@ -403,7 +403,7 @@ mod test {
         pub fn new(
             rvec: Vec<f32>,
             similarity: VectorSimilarity,
-            coder: impl F32VectorCoder,
+            coder: &(impl F32VectorCoder + ?Sized),
         ) -> Self {
             let f32_coder = match similarity {
                 VectorSimilarity::Dot => F32VectorCoding::RawL2Normalized,
@@ -433,7 +433,7 @@ mod test {
         }};
     }
 
-    fn distance_compare_threshold(
+    fn distance_compare(
         similarity: VectorSimilarity,
         coder: impl F32VectorCoder + Copy,
         dist_fn: impl VectorDistance + Copy,
@@ -441,8 +441,8 @@ mod test {
         b: Vec<f32>,
         threshold: f64,
     ) {
-        let a = TestVector::new(a, similarity, coder);
-        let b = TestVector::new(b, similarity, coder);
+        let a = TestVector::new(a, similarity, &coder);
+        let b = TestVector::new(b, similarity, &coder);
 
         let f32_dist_fn = similarity.new_distance_function();
         let rf32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
@@ -453,13 +453,40 @@ mod test {
         assert_float_near!(rf32_dist, qdist, threshold);
     }
 
+    fn query_distance_compare(
+        similarity: VectorSimilarity,
+        format: F32VectorCoding,
+        a: Vec<f32>,
+        b: Vec<f32>,
+        threshold: f64,
+    ) {
+        let coder = format.new_coder();
+        let a = TestVector::new(a, similarity, coder.as_ref());
+        let b = TestVector::new(b, similarity, coder.as_ref());
+
+        let f32_dist_fn = similarity.new_distance_function();
+        let f32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
+
+        let query_dist_fn = new_query_vector_distance_f32(&a.rvec, similarity, format);
+        let query_dist = query_dist_fn.distance(&b.qvec);
+
+        assert_float_near!(f32_dist, query_dist, threshold);
+    }
+
     #[test]
     fn i8_naive_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
-        distance_compare_threshold(
+        distance_compare(
             VectorSimilarity::Dot,
             I8NaiveVectorCoder,
             I8NaiveDistance(VectorSimilarity::Dot),
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+        query_distance_compare(
+            VectorSimilarity::Dot,
+            F32VectorCoding::I8NaiveQuantized,
             vec![-1.0f32, 2.5, 0.7, -1.7],
             vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
@@ -468,10 +495,17 @@ mod test {
 
     #[test]
     fn i8_naive_l2() {
-        distance_compare_threshold(
+        distance_compare(
             VectorSimilarity::Euclidean,
             I8NaiveVectorCoder,
             I8NaiveDistance(VectorSimilarity::Euclidean),
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+        query_distance_compare(
+            VectorSimilarity::Euclidean,
+            F32VectorCoding::I8NaiveQuantized,
             vec![-1.0f32, 2.5, 0.7, -1.7],
             vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
@@ -481,10 +515,17 @@ mod test {
     #[test]
     fn i8_scaled_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
-        distance_compare_threshold(
+        distance_compare(
             VectorSimilarity::Dot,
             I8ScaledUniformVectorCoder,
             I8ScaledUniformDotProduct,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+        query_distance_compare(
+            VectorSimilarity::Dot,
+            F32VectorCoding::I8ScaledUniformQuantized,
             vec![-1.0f32, 2.5, 0.7, -1.7],
             vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
@@ -493,10 +534,17 @@ mod test {
 
     #[test]
     fn i8_scaled_l2() {
-        distance_compare_threshold(
+        distance_compare(
             VectorSimilarity::Euclidean,
             I8ScaledUniformVectorCoder,
             I8ScaledUniformEuclidean,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+        query_distance_compare(
+            VectorSimilarity::Euclidean,
+            F32VectorCoding::I8ScaledUniformQuantized,
             vec![-1.0f32, 2.5, 0.7, -1.7],
             vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
@@ -506,10 +554,17 @@ mod test {
     #[test]
     fn i4_scaled_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
-        distance_compare_threshold(
+        distance_compare(
             VectorSimilarity::Dot,
             I4PackedVectorCoder,
             I4PackedDotProductDistance,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+        query_distance_compare(
+            VectorSimilarity::Dot,
+            F32VectorCoding::I4ScaledUniformQuantized,
             vec![-1.0f32, 2.5, 0.7, -1.7],
             vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
@@ -518,10 +573,17 @@ mod test {
 
     #[test]
     fn i4_scaled_l2() {
-        distance_compare_threshold(
+        distance_compare(
             VectorSimilarity::Euclidean,
             I4PackedVectorCoder,
             I4PackedEuclideanDistance,
+            vec![-1.0f32, 2.5, 0.7, -1.7],
+            vec![-0.6f32, -1.2, 0.4, 0.3],
+            0.01,
+        );
+        query_distance_compare(
+            VectorSimilarity::Euclidean,
+            F32VectorCoding::I4ScaledUniformQuantized,
             vec![-1.0f32, 2.5, 0.7, -1.7],
             vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,

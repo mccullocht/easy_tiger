@@ -128,7 +128,7 @@ impl GraphSearcher {
         let rerank_query_rep = if self.params.num_rerank > 0 {
             Some(
                 reader
-                    .raw_vectors()?
+                    .rerank_vectors()?
                     .get(vertex_id)
                     .unwrap_or(Err(Error::not_found_error()))?
                     .to_vec(),
@@ -199,10 +199,8 @@ impl GraphSearcher {
             let entry_vector = nav
                 .get(entry_point)
                 .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates.add_unvisited(Neighbor::new(
-                entry_point,
-                nav_query.distance(entry_vector),
-            ));
+            self.candidates
+                .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)));
             self.seen.insert(entry_point);
         }
 
@@ -233,14 +231,14 @@ impl GraphSearcher {
         }
 
         let rerank_query = rerank_query.unwrap();
-        let mut raw_vectors = reader.raw_vectors()?;
+        let mut rerank_vectors = reader.rerank_vectors()?;
         let rescored = self
             .candidates
             .iter()
             .take(self.params.num_rerank)
             .map(|c| {
                 let vertex = c.neighbor.vertex();
-                raw_vectors
+                rerank_vectors
                     .get(vertex)
                     .expect("row exists")
                     .map(|rv| Neighbor::new(vertex, rerank_query.distance(rv)))
@@ -503,12 +501,12 @@ mod test {
             = TestGraphAccess<'b>
         where
             Self: 'b;
-        type RawVectorStore<'b>
-            = TestRerankVectorStore<'b>
-        where
-            Self: 'b;
         type NavVectorStore<'b>
             = TestNavVectorStore<'b>
+        where
+            Self: 'b;
+        type RerankVectorStore<'b>
+            = TestRerankVectorStore<'b>
         where
             Self: 'b;
 
@@ -520,12 +518,12 @@ mod test {
             Ok(TestGraphAccess(self.0))
         }
 
-        fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
-            Ok(TestRerankVectorStore(self.0))
-        }
-
         fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
             Ok(TestNavVectorStore(self.0))
+        }
+
+        fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
+            Ok(TestRerankVectorStore(self.0))
         }
     }
 

@@ -73,7 +73,7 @@ impl IndexMutator {
         let distance_fn = self.reader.config().new_distance_function();
         let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
-        let mut raw_vectors = self.reader.raw_vectors()?;
+        let mut rerank_vectors = self.reader.rerank_vectors()?;
         if candidate_edges.is_empty() {
             // Proceed through the rest of the function so that the inserts happen.
             // This is mostly as a noop because there are no edges.
@@ -99,14 +99,14 @@ impl IndexMutator {
             .nav_vectors()?
             .set(vertex_id, self.nav_coder.encode(vector))?;
         self.reader
-            .raw_vectors()?
+            .rerank_vectors()?
             .set(vertex_id, self.rerank_coder.encode(vector))?;
 
         let mut pruned_edges = vec![];
         for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
             self.insert_edge(
                 &mut graph,
-                &mut raw_vectors,
+                &mut rerank_vectors,
                 distance_fn.as_ref(),
                 src_vertex_id,
                 vertex_id,
@@ -178,22 +178,21 @@ impl IndexMutator {
     pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
         let distance_fn = self.reader.config().new_distance_function();
         let mut graph = self.reader.graph()?;
-        let mut raw_vectors = self.reader.raw_vectors()?;
+        let mut rerank_vectors = self.reader.rerank_vectors()?;
 
         let (vector, edges) = graph
             .get_vertex(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))
             .map(|v| {
-                let raw_vector = raw_vectors
+                rerank_vectors
                     .get(vertex_id)
                     .expect("row exists")
-                    .map(|v| v.to_vec());
-                raw_vector.map(|rv| (rv, v.edges().collect::<Vec<_>>()))
+                    .map(|vec| (vec.to_vec(), v.edges().collect::<Vec<_>>()))
             })??;
 
         // TODO: unified graph index writer trait to handles removal and other mutations.
         graph.remove(vertex_id)?;
-        raw_vectors.remove(vertex_id)?;
+        rerank_vectors.remove(vertex_id)?;
         self.reader.nav_vectors()?.remove(vertex_id)?;
 
         // Cache information about each vertex linked to vertex_id.
@@ -205,11 +204,11 @@ impl IndexMutator {
                     .get_vertex(e)
                     .unwrap_or(Err(Error::not_found_error()))
                     .map(|v| {
-                        let raw_vector = raw_vectors
+                        let rerank_vector = rerank_vectors
                             .get(e)
                             .expect("row exists")
                             .map(|rv| rv.to_vec());
-                        raw_vector.map(|rv| {
+                        rerank_vector.map(|rv| {
                             (
                                 e,
                                 rv,

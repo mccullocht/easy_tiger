@@ -344,9 +344,9 @@ where
 
                     // TODO: consider using quantized scores here to avoid reading f32 vectors when
                     // reranking is turned off.
-                    let mut raw_vectors = reader.raw_vectors()?;
+                    let mut rerank_vectors = reader.rerank_vectors()?;
                     self.distance_fn
-                        .distance(&self.centroid, raw_vectors.get(v as i64).unwrap()?)
+                        .distance(&self.centroid, rerank_vectors.get(v as i64).unwrap()?)
                 };
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
@@ -497,7 +497,7 @@ where
             self.insert_in_flight_edges_from(
                 vertex_id,
                 in_flight,
-                &mut reader.raw_vectors()?,
+                &mut reader.rerank_vectors()?,
                 self.index.config().rerank_format,
                 edges,
             )
@@ -670,11 +670,11 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
         = BulkLoadBuilderGraph<'b, D>
     where
         Self: 'b;
-    type RawVectorStore<'b>
+    type NavVectorStore<'b>
         = BulkLoadGraphVectorStore<'b>
     where
         Self: 'b;
-    type NavVectorStore<'b>
+    type RerankVectorStore<'b>
         = BulkLoadGraphVectorStore<'b>
     where
         Self: 'b;
@@ -685,13 +685,6 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
         Ok(BulkLoadBuilderGraph(self.0))
-    }
-
-    fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
-        Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
-            self.1.get_record_cursor(self.0.index.raw_table_name())?,
-            self.0.index.config().rerank_format,
-        )))
     }
 
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
@@ -706,6 +699,13 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
                 self.config().nav_format,
             )))
         }
+    }
+
+    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
+        Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
+            self.1.get_record_cursor(self.0.index.raw_table_name())?,
+            self.0.index.config().rerank_format,
+        )))
     }
 }
 

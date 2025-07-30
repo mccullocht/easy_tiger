@@ -174,6 +174,7 @@ impl GraphVectorStore for CursorVectorStore<'_> {
 #[derive(Clone)]
 pub struct TableGraphVectorIndex {
     graph_table_name: String,
+    // XXX rerank
     raw_table_name: String,
     nav_table_name: String,
     config: GraphConfig,
@@ -305,11 +306,11 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         = CursorGraph<'a>
     where
         Self: 'a;
-    type RawVectorStore<'a>
+    type NavVectorStore<'a>
         = CursorVectorStore<'a>
     where
         Self: 'a;
-    type NavVectorStore<'a>
+    type RerankVectorStore<'a>
         = CursorVectorStore<'a>
     where
         Self: 'a;
@@ -325,19 +326,19 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         ))
     }
 
-    fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>> {
-        Ok(CursorVectorStore::new(
-            self.session
-                .get_record_cursor(self.index.raw_table_name())?,
-            self.index.config().rerank_format,
-        ))
-    }
-
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         Ok(CursorVectorStore::new(
             self.session
                 .get_record_cursor(self.index.nav_table_name())?,
             self.index.config().nav_format,
+        ))
+    }
+
+    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
+        Ok(CursorVectorStore::new(
+            self.session
+                .get_record_cursor(self.index.raw_table_name())?,
+            self.index.config().rerank_format,
         ))
     }
 }

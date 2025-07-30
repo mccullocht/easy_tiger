@@ -376,7 +376,7 @@ fn select_centroids(
     replica_count: usize,
 ) -> Result<Vec<u32>> {
     assert!(!candidates.is_empty());
-    let mut raw_vectors = head_reader.raw_vectors()?;
+    let mut raw_vectors = head_reader.rerank_vectors()?;
 
     let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
     let mut centroids =

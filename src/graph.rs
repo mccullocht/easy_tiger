@@ -74,7 +74,6 @@ pub struct GraphConfig {
     /// If re-ranking is turned on during graph construction or search this will be used to compute
     /// ~O(num_candidates) query distances. If this format is quantized you should typically choose
     /// a high fidelity quantization function.
-    // TODO: make this _optional_.
     pub rerank_format: F32VectorCoding,
     pub layout: GraphLayout,
     /// Maximum number of edges at each vertex.
@@ -111,10 +110,10 @@ pub trait GraphVectorIndexReader {
     type Graph<'a>: Graph + 'a
     where
         Self: 'a;
-    type RawVectorStore<'a>: GraphVectorStore + 'a
+    type NavVectorStore<'a>: GraphVectorStore + 'a
     where
         Self: 'a;
-    type NavVectorStore<'a>: GraphVectorStore + 'a
+    type RerankVectorStore<'a>: GraphVectorStore + 'a
     where
         Self: 'a;
 
@@ -127,9 +126,8 @@ pub trait GraphVectorIndexReader {
     /// Return an object that can be used to read navigational vectors.
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>>;
 
-    /// Return an object that can be used to read raw vectors.
-    // XXX rerank_vectors
-    fn raw_vectors(&self) -> Result<Self::RawVectorStore<'_>>;
+    /// Return an object that can be used to read vectors for re-ranking.
+    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>>;
 }
 
 /// A Vamana graph.
@@ -182,7 +180,7 @@ pub struct EdgeSetDistanceComputer {
 impl EdgeSetDistanceComputer {
     pub fn new<R: GraphVectorIndexReader>(reader: &R, edges: &[Neighbor]) -> Result<Self> {
         if reader.config().index_search_params.num_rerank > 0 {
-            let vectors = Self::extract_vectors(&mut reader.raw_vectors()?, edges)?;
+            let vectors = Self::extract_vectors(&mut reader.rerank_vectors()?, edges)?;
             Ok(Self {
                 distance_fn: reader.config().new_distance_function(),
                 vectors,

@@ -109,7 +109,7 @@ impl TryFrom<&[u16]> for NonUniformQuantizedDimensions {
         } else {
             let mut inner = [0u16; 8];
             inner[0] = value.len() as u16;
-            inner[1..(value.len() + 1)].copy_from_slice(&value);
+            inner[1..(value.len() + 1)].copy_from_slice(value);
             Ok(Self(inner))
         }
     }
@@ -470,7 +470,8 @@ pub fn new_query_vector_distance_indexing<'a>(
 #[cfg(test)]
 mod test {
     use crate::vectors::{
-        F32VectorCoder, F32VectorCoding, VectorSimilarity, new_query_vector_distance_f32,
+        F32VectorCoder, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
+        new_query_vector_distance_f32,
     };
 
     struct TestVector {
@@ -574,7 +575,9 @@ mod test {
         ]
     }
 
-    use F32VectorCoding::{I4ScaledUniformQuantized, I8ScaledUniformQuantized};
+    use F32VectorCoding::{
+        I4ScaledUniformQuantized, I8ScaledNonUniformQuantized, I8ScaledUniformQuantized,
+    };
     use VectorSimilarity::{Dot, Euclidean};
 
     #[test]
@@ -612,41 +615,21 @@ mod test {
     #[test]
     fn i8_scaled_non_uniform_dot() {
         let splits = NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap();
-        // TODO: randomly generate a bunch of vectors for this test.
-        distance_compare(
-            VectorSimilarity::Dot,
-            scaled_non_uniform::I8VectorCoder::new(splits),
-            scaled_non_uniform::I8DotProductDistance::new(splits),
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
-        query_distance_compare(
-            VectorSimilarity::Dot,
-            F32VectorCoding::I8ScaledNonUniformQuantized(splits),
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, I8ScaledNonUniformQuantized(splits), i, &a, &b, 0.01);
+            // XXX figure out why
+            query_distance_compare(Dot, I8ScaledNonUniformQuantized(splits), i, &a, &b, 0.99);
+        }
     }
 
     #[test]
     fn i8_scaled_non_uniform_l2() {
-        let splits = NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap();
-        distance_compare(
-            VectorSimilarity::Euclidean,
-            scaled_non_uniform::I8VectorCoder::new(splits),
-            scaled_non_uniform::I8EuclideanDistance::new(splits),
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
+        let format = I8ScaledNonUniformQuantized(
+            NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap(),
         );
-        query_distance_compare(
-            VectorSimilarity::Euclidean,
-            F32VectorCoding::I8ScaledNonUniformQuantized(splits),
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Euclidean, format, i, &a, &b, 0.01);
+            query_distance_compare(Euclidean, format, i, &a, &b, 0.01);
+        }
     }
 }

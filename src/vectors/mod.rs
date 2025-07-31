@@ -9,10 +9,6 @@ use crate::vectors::{
         F32DotProductDistance, F32EuclideanDistance, F32QueryVectorDistance, RawF32VectorCoder,
         RawL2NormalizedF32VectorCoder,
     },
-    scaled_uniform::{
-        I8ScaledUniformDotProduct, I8ScaledUniformDotProductQueryDistance,
-        I8ScaledUniformEuclidean, I8ScaledUniformEuclideanQueryDistance,
-    },
 };
 
 mod binary;
@@ -22,7 +18,6 @@ mod scaled_uniform;
 
 pub(crate) use binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder};
 pub(crate) use i8naive::I8NaiveVectorCoder;
-pub(crate) use scaled_uniform::I8ScaledUniformVectorCoder;
 use serde::{Deserialize, Serialize};
 
 /// Functions used for to compute the distance between two vectors.
@@ -139,7 +134,7 @@ impl F32VectorCoding {
             Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
             Self::I8NaiveQuantized => Box::new(I8NaiveVectorCoder),
-            Self::I8ScaledUniformQuantized => Box::new(I8ScaledUniformVectorCoder),
+            Self::I8ScaledUniformQuantized => Box::new(scaled_uniform::I8VectorCoder),
             Self::I4ScaledUniformQuantized => Box::new(scaled_uniform::I4PackedVectorCoder),
         }
     }
@@ -161,10 +156,10 @@ impl F32VectorCoding {
             (Self::NBitBinaryQuantized(_), _) => None,
             (Self::I8NaiveQuantized, _) => Some(Box::new(I8NaiveDistance(similarity))),
             (Self::I8ScaledUniformQuantized, VectorSimilarity::Dot) => {
-                Some(Box::new(I8ScaledUniformDotProduct))
+                Some(Box::new(scaled_uniform::I8DotProductDistance))
             }
             (Self::I8ScaledUniformQuantized, VectorSimilarity::Euclidean) => {
-                Some(Box::new(I8ScaledUniformEuclidean))
+                Some(Box::new(scaled_uniform::I8EuclideanDistance))
             }
             (Self::I4ScaledUniformQuantized, VectorSimilarity::Dot) => {
                 Some(Box::new(scaled_uniform::I4PackedDotProductDistance))
@@ -323,10 +318,10 @@ pub fn new_query_vector_distance_f32<'a>(
             I8NaiveVectorCoder,
         )),
         (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
-            Box::new(I8ScaledUniformDotProductQueryDistance::new(query))
+            Box::new(scaled_uniform::I8DotProductQueryDistance::new(query))
         }
         (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
-            Box::new(I8ScaledUniformEuclideanQueryDistance::new(query))
+            Box::new(scaled_uniform::I8EuclideanQueryDistance::new(query))
         }
         (VectorSimilarity::Dot, F32VectorCoding::I4ScaledUniformQuantized) => {
             Box::new(scaled_uniform::I4PackedDotProductQueryDistance::new(query))
@@ -361,12 +356,18 @@ pub fn new_query_vector_distance_indexing<'a>(
         (_, F32VectorCoding::I8NaiveQuantized) => Box::new(
             QuantizedQueryVectorDistance::from_quantized(I8NaiveDistance(similarity), query),
         ),
-        (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
-            QuantizedQueryVectorDistance::from_quantized(I8ScaledUniformDotProduct, query),
-        ),
-        (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
-            QuantizedQueryVectorDistance::from_quantized(I8ScaledUniformEuclidean, query),
-        ),
+        (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                scaled_uniform::I8DotProductDistance,
+                query,
+            ))
+        }
+        (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                scaled_uniform::I8EuclideanDistance,
+                query,
+            ))
+        }
         (VectorSimilarity::Dot, F32VectorCoding::I4ScaledUniformQuantized) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
                 scaled_uniform::I4PackedDotProductDistance,
@@ -384,14 +385,8 @@ pub fn new_query_vector_distance_indexing<'a>(
 
 #[cfg(test)]
 mod test {
-    use super::scaled_uniform::{I8ScaledUniformDotProduct, I8ScaledUniformEuclidean};
-    use crate::vectors::i8naive::I8NaiveDistance;
-    use crate::vectors::scaled_uniform::{
-        I4PackedDotProductDistance, I4PackedEuclideanDistance, I4PackedVectorCoder,
-    };
     use crate::vectors::{
-        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, I8NaiveVectorCoder,
-        I8ScaledUniformVectorCoder, VectorDistance, VectorSimilarity,
+        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, VectorSimilarity,
     };
 
     struct TestVector {
@@ -401,7 +396,7 @@ mod test {
 
     impl TestVector {
         pub fn new(
-            rvec: Vec<f32>,
+            vec: &[f32],
             similarity: VectorSimilarity,
             coder: &(impl F32VectorCoder + ?Sized),
         ) -> Self {
@@ -411,53 +406,58 @@ mod test {
             }
             .new_coder();
             let rvec = f32_coder
-                .encode(&rvec)
+                .encode(vec)
                 .chunks(4)
                 .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
                 .collect::<Vec<_>>();
-            let qvec = coder.encode(&rvec);
+            let qvec = coder.encode(&vec);
             Self { rvec, qvec }
         }
     }
 
     macro_rules! assert_float_near {
-        ($expected:expr, $actual:expr, $epsilon:expr) => {{
+        ($expected:expr, $actual:expr, $epsilon:expr, $index:expr) => {{
             let range = ($expected * (1.0 - $epsilon))..=($expected * (1.0 + $epsilon));
             assert!(
                 range.contains(&$actual),
-                "expected {} (range={:?}) actual {}",
+                "expected {} (range={:?}) actual {} index={}",
                 $expected,
                 range,
-                $actual
+                $actual,
+                $index
             );
         }};
     }
 
     fn distance_compare(
         similarity: VectorSimilarity,
-        coder: impl F32VectorCoder + Copy,
-        dist_fn: impl VectorDistance + Copy,
-        a: Vec<f32>,
-        b: Vec<f32>,
+        format: F32VectorCoding,
+        index: usize,
+        a: &[f32],
+        b: &[f32],
         threshold: f64,
     ) {
-        let a = TestVector::new(a, similarity, &coder);
-        let b = TestVector::new(b, similarity, &coder);
+        let coder = format.new_coder();
+        let a = TestVector::new(a, similarity, coder.as_ref());
+        let b = TestVector::new(b, similarity, coder.as_ref());
 
         let f32_dist_fn = similarity.new_distance_function();
         let rf32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
         let ru8_dist =
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
-        assert_float_near!(rf32_dist, ru8_dist, 0.00001);
+        assert_float_near!(rf32_dist, ru8_dist, 0.00001, index);
+
+        let dist_fn = format.new_symmetric_vector_distance(similarity).unwrap();
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);
-        assert_float_near!(rf32_dist, qdist, threshold);
+        assert_float_near!(rf32_dist, qdist, threshold, index);
     }
 
     fn query_distance_compare(
         similarity: VectorSimilarity,
         format: F32VectorCoding,
-        a: Vec<f32>,
-        b: Vec<f32>,
+        index: usize,
+        a: &[f32],
+        b: &[f32],
         threshold: f64,
     ) {
         let coder = format.new_coder();
@@ -470,123 +470,72 @@ mod test {
         let query_dist_fn = new_query_vector_distance_f32(&a.rvec, similarity, format);
         let query_dist = query_dist_fn.distance(&b.qvec);
 
-        assert_float_near!(f32_dist, query_dist, threshold);
+        assert_float_near!(f32_dist, query_dist, threshold, index);
     }
+
+    fn test_float_vectors() -> Vec<(Vec<f32>, Vec<f32>)> {
+        // TODO: randomly generate a bunch of vectors for this test.
+        vec![
+            (vec![-1.0f32, 2.5, 0.7, -1.7], vec![-0.6f32, -1.2, 0.4, 0.3]),
+            (
+                vec![
+                    1.22f32, 1.25, 2.37, -2.21, 2.28, -2.8, -0.61, 2.29, -2.56, -0.57, -2.62,
+                    -1.56, 1.92, -0.63, 0.77, -2.86,
+                ],
+                vec![
+                    3.19, 2.91, 0.23, -2.51, -0.76, 1.82, 1.97, 2.19, -0.15, -3.85, -3.14, -0.43,
+                    1.06, -0.05, 2.05, -2.51,
+                ],
+            ),
+        ]
+    }
+
+    use F32VectorCoding::{I4ScaledUniformQuantized, I8NaiveQuantized, I8ScaledUniformQuantized};
+    use VectorSimilarity::{Dot, Euclidean};
 
     #[test]
     fn i8_naive_dot() {
-        // TODO: randomly generate a bunch of vectors for this test.
-        distance_compare(
-            VectorSimilarity::Dot,
-            I8NaiveVectorCoder,
-            I8NaiveDistance(VectorSimilarity::Dot),
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
-        query_distance_compare(
-            VectorSimilarity::Dot,
-            F32VectorCoding::I8NaiveQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, I8NaiveQuantized, i, &a, &b, 0.01);
+        }
     }
 
     #[test]
     fn i8_naive_l2() {
-        distance_compare(
-            VectorSimilarity::Euclidean,
-            I8NaiveVectorCoder,
-            I8NaiveDistance(VectorSimilarity::Euclidean),
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
-        query_distance_compare(
-            VectorSimilarity::Euclidean,
-            F32VectorCoding::I8NaiveQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Euclidean, I8NaiveQuantized, i, &a, &b, 0.01);
+        }
     }
 
     #[test]
     fn i8_scaled_dot() {
-        // TODO: randomly generate a bunch of vectors for this test.
-        distance_compare(
-            VectorSimilarity::Dot,
-            I8ScaledUniformVectorCoder,
-            I8ScaledUniformDotProduct,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
-        query_distance_compare(
-            VectorSimilarity::Dot,
-            F32VectorCoding::I8ScaledUniformQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, I8ScaledUniformQuantized, i, &a, &b, 0.01);
+            query_distance_compare(Dot, I8ScaledUniformQuantized, i, &a, &b, 0.01);
+        }
     }
 
     #[test]
     fn i8_scaled_l2() {
-        distance_compare(
-            VectorSimilarity::Euclidean,
-            I8ScaledUniformVectorCoder,
-            I8ScaledUniformEuclidean,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
-        query_distance_compare(
-            VectorSimilarity::Euclidean,
-            F32VectorCoding::I8ScaledUniformQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Euclidean, I8ScaledUniformQuantized, i, &a, &b, 0.01);
+            query_distance_compare(Euclidean, I8ScaledUniformQuantized, i, &a, &b, 0.01);
+        }
     }
 
     #[test]
     fn i4_scaled_dot() {
-        // TODO: randomly generate a bunch of vectors for this test.
-        distance_compare(
-            VectorSimilarity::Dot,
-            I4PackedVectorCoder,
-            I4PackedDotProductDistance,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
-        query_distance_compare(
-            VectorSimilarity::Dot,
-            F32VectorCoding::I4ScaledUniformQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, I4ScaledUniformQuantized, i, &a, &b, 0.10);
+            query_distance_compare(Dot, I4ScaledUniformQuantized, i, &a, &b, 0.10);
+        }
     }
 
     #[test]
     fn i4_scaled_l2() {
-        distance_compare(
-            VectorSimilarity::Euclidean,
-            I4PackedVectorCoder,
-            I4PackedEuclideanDistance,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
-        query_distance_compare(
-            VectorSimilarity::Euclidean,
-            F32VectorCoding::I4ScaledUniformQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Euclidean, I4ScaledUniformQuantized, i, &a, &b, 0.10);
+            query_distance_compare(Euclidean, I4ScaledUniformQuantized, i, &a, &b, 0.10);
+        }
     }
 }

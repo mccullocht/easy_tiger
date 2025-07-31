@@ -26,9 +26,9 @@ fn compute_scale<const M: i8>(vector: &[f32]) -> (f32, f32) {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I8ScaledUniformVectorCoder;
+pub struct I8VectorCoder;
 
-impl F32VectorCoder for I8ScaledUniformVectorCoder {
+impl F32VectorCoder for I8VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
         let (scale, inv_scale) = compute_scale::<{ i8::MAX }>(vector);
@@ -48,9 +48,14 @@ impl F32VectorCoder for I8ScaledUniformVectorCoder {
 // Bonus points if it can still be scored on the quantized rep instead of de-quantizing.
 
 #[derive(Debug, Copy, Clone)]
-struct I8ScaledUniformVector<'a>(&'a [u8]);
+struct I8Vector<'a>(&'a [u8]);
 
-impl I8ScaledUniformVector<'_> {
+impl<'a> I8Vector<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        assert!(bytes.len() >= 8);
+        Self(bytes)
+    }
+
     fn dot_unnormalized(&self, other: &Self) -> f64 {
         self.vector()
             .iter()
@@ -61,15 +66,58 @@ impl I8ScaledUniformVector<'_> {
             * other.scale()
     }
 
-    fn dequantized_unnormalized_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
+    #[allow(dead_code)]
+    fn dot_unnormalized_f32_scalar(&self, other: &[f32]) -> f64 {
         self.vector()
             .iter()
-            .map(|d| *d as f32 * self.scale() as f32)
+            .zip(other.iter())
+            .map(|(s, o)| *s as f32 * *o)
+            .sum::<f32>() as f64
+            * self.scale()
     }
 
-    fn dequantized_normalized_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
-        let scale = (self.scale() / self.l2_norm()) as f32;
-        self.vector().iter().map(move |d| *d as f32 * scale)
+    #[cfg(not(target_arch = "aarch64"))]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        self.dot_unnormalized_f32_scalar(other)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        let doc = self.vector();
+        let split = doc.len() & !15;
+        let mut sum = unsafe {
+            use std::arch::aarch64::{
+                vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_low_s16, vget_low_s8,
+                vld1q_f32, vld1q_s8, vmovl_high_s16, vmovl_high_s8, vmovl_s16, vmovl_s8,
+            };
+
+            let mut dot = vdupq_n_f32(0.0);
+            for i in (0..split).step_by(16) {
+                let docv = vld1q_s8(doc.as_ptr().add(i));
+                let docv_h = [vmovl_s8(vget_low_s8(docv)), vmovl_high_s8(docv)];
+                let docv_q = [
+                    vmovl_s16(vget_low_s16(docv_h[0])),
+                    vmovl_high_s16(docv_h[0]),
+                    vmovl_s16(vget_low_s16(docv_h[1])),
+                    vmovl_high_s16(docv_h[1]),
+                ];
+                #[allow(clippy::needless_range_loop)]
+                for j in 0..4 {
+                    dot = vfmaq_f32(
+                        dot,
+                        vld1q_f32(other.as_ptr().add(i + j * 4)),
+                        vcvtq_f32_s32(docv_q[j]),
+                    );
+                }
+            }
+            vaddvq_f32(dot)
+        };
+        sum += doc[split..]
+            .iter()
+            .zip(other[split..].iter())
+            .map(|(s, o)| *s as f32 * *o)
+            .sum::<f32>();
+        sum as f64 * self.scale()
     }
 
     fn scale(&self) -> f64 {
@@ -89,83 +137,61 @@ impl I8ScaledUniformVector<'_> {
     }
 }
 
-impl<'a> From<&'a [u8]> for I8ScaledUniformVector<'a> {
-    fn from(value: &'a [u8]) -> Self {
-        assert!(value.len() >= 8);
-        Self(value)
-    }
-}
-
 #[derive(Debug, Copy, Clone)]
-pub struct I8ScaledUniformDotProduct;
+pub struct I8DotProductDistance;
 
-impl VectorDistance for I8ScaledUniformDotProduct {
+impl VectorDistance for I8DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = I8ScaledUniformVector::from(query);
-        let doc = I8ScaledUniformVector::from(doc);
+        let query = I8Vector::new(query);
+        let doc = I8Vector::new(doc);
         let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
         (-dot + 1.0) / 2.0
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct I8ScaledUniformDotProductQueryDistance<'a>(Cow<'a, [f32]>);
+pub struct I8DotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
-impl<'a> I8ScaledUniformDotProductQueryDistance<'a> {
+impl<'a> I8DotProductQueryDistance<'a> {
     pub fn new(query: &'a [f32]) -> Self {
         Self(l2_normalize(query))
     }
 }
 
-impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
+impl QueryVectorDistance for I8DotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        // TODO: benchmark performing dot product of query and doc without scaling, then scaling
-        // afterward. This would avoid a multiplication per dimension.
-        let vector = I8ScaledUniformVector::from(vector);
-        let dot = self
-            .0
-            .iter()
-            .zip(vector.dequantized_normalized_iter())
-            .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64
-            / vector.l2_norm();
+        let vector = I8Vector::new(vector);
+        let dot = vector.dot_unnormalized_f32(&self.0) / vector.l2_norm();
         (-dot + 1.0) / 2.0
     }
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I8ScaledUniformEuclidean;
+pub struct I8EuclideanDistance;
 
-impl VectorDistance for I8ScaledUniformEuclidean {
+impl VectorDistance for I8EuclideanDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = I8ScaledUniformVector::from(query);
-        let doc = I8ScaledUniformVector::from(doc);
+        let query = I8Vector::new(query);
+        let doc = I8Vector::new(doc);
         let dot = query.dot_unnormalized(&doc);
         query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct I8ScaledUniformEuclideanQueryDistance<'a>(&'a [f32], f64);
+pub struct I8EuclideanQueryDistance<'a>(&'a [f32], f64);
 
-impl<'a> I8ScaledUniformEuclideanQueryDistance<'a> {
+impl<'a> I8EuclideanQueryDistance<'a> {
     pub fn new(query: &'a [f32]) -> Self {
         let l2_norm_sq = dot_f32(query, query);
         Self(query, l2_norm_sq)
     }
 }
 
-impl QueryVectorDistance for I8ScaledUniformEuclideanQueryDistance<'_> {
+impl QueryVectorDistance for I8EuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        // TODO: benchmark performing dot product of query and doc without scaling, then scaling
-        // afterward. This would avoid a multiplication per dimension.
-        let vector = I8ScaledUniformVector::from(vector);
-        let dot = self
-            .0
-            .iter()
-            .zip(vector.dequantized_unnormalized_iter())
-            .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64;
+        let vector = I8Vector::new(vector);
+        let dot = vector.dot_unnormalized_f32(self.0);
         self.1 + vector.l2_norm_sq() - (2.0 * dot)
     }
 }
@@ -238,22 +264,73 @@ impl<'a> I4PackedVector<'a> {
             * other.scale()
     }
 
-    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
-        let mut dim_it = self.dimensions().iter();
-        let mut other_it = other.chunks_exact(2);
-        let mut dot = dim_it
-            .by_ref()
-            .zip(other_it.by_ref())
-            .map(|(d, c)| {
-                let d = Self::unpack(*d);
-                d[0] as f32 * c[0] + d[1] as f32 * c[1]
-            })
-            .sum::<f32>();
-        dot += dim_it
-            .zip(other_it.remainder())
-            .map(|(d, o)| (*d - 7) as f32 * *o)
+    #[allow(dead_code)]
+    fn dot_unnormalized_f32_scalar(&self, other: &[f32]) -> f64 {
+        let dot = self
+            .dimensions()
+            .iter()
+            .copied()
+            .flat_map(Self::unpack)
+            .zip(other.iter())
+            .map(|(s, o)| s as f32 * o)
             .sum::<f32>();
         // NB: other.scale() is implicitly 1.
+        dot as f64 * self.scale()
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        self.dot_unnormalized_f32_scalar(other)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        use std::arch::aarch64::{
+            vaddvq_f32, vand_s8, vcvtq_f32_s32, vdup_n_s8, vdupq_n_f32, vfmaq_f32, vget_low_s16,
+            vld1_u8, vld1q_f32, vmovl_high_s16, vmovl_s16, vmovl_s8, vreinterpret_s8_u8, vshr_n_u8,
+            vsub_s8, vzip1_s8, vzip2_s8,
+        };
+
+        let split = other.len() & !15;
+        let packed_vec = self.dimensions();
+        let mut dot = unsafe {
+            let mut dotv = vdupq_n_f32(0.0);
+            let qmask = vdup_n_s8(0xf);
+            let qoff = vdup_n_s8(7);
+            for i in (0..split).step_by(16) {
+                // Two values are packed per byte with consecutive dimensions packed together.
+                // Unpack these nibble dimensions to one per byte, then zip to interleave them back
+                // into the right order. Use signed subtract + offset binary to get sign extension.
+                let packed = vld1_u8(packed_vec.as_ptr().add(i / 2));
+                let evens = vsub_s8(vand_s8(vreinterpret_s8_u8(packed), qmask), qoff);
+                let odds = vsub_s8(vreinterpret_s8_u8(vshr_n_u8(packed, 4)), qoff);
+                let lo_i16 = vmovl_s8(vzip1_s8(evens, odds));
+                let hi_i16 = vmovl_s8(vzip2_s8(evens, odds));
+
+                let unpacked_i32 = [
+                    vmovl_s16(vget_low_s16(lo_i16)),
+                    vmovl_high_s16(lo_i16),
+                    vmovl_s16(vget_low_s16(hi_i16)),
+                    vmovl_high_s16(hi_i16),
+                ];
+                #[allow(clippy::needless_range_loop)]
+                for j in 0..4 {
+                    dotv = vfmaq_f32(
+                        dotv,
+                        vld1q_f32(other.as_ptr().add(i + j * 4)),
+                        vcvtq_f32_s32(unpacked_i32[j]),
+                    );
+                }
+            }
+            vaddvq_f32(dotv)
+        };
+        dot += packed_vec[(split / 2)..]
+            .iter()
+            .copied()
+            .flat_map(Self::unpack)
+            .zip(other[split..].iter())
+            .map(|(s, o)| s as f32 * o)
+            .sum::<f32>();
         dot as f64 * self.scale()
     }
 }
@@ -282,7 +359,7 @@ impl<'a> I4PackedDotProductQueryDistance<'a> {
 impl QueryVectorDistance for I4PackedDotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I4PackedVector::new(vector).expect("valid format");
-        let dot = vector.dot_unnormalized_f32(self.0.as_ref()) * vector.l2_norm().recip();
+        let dot = vector.dot_unnormalized_f32(self.0.as_ref()) / vector.l2_norm();
         (-dot + 1.0) / 2.0
     }
 }

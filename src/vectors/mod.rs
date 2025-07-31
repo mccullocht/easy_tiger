@@ -9,10 +9,6 @@ use crate::vectors::{
         F32DotProductDistance, F32EuclideanDistance, F32QueryVectorDistance, RawF32VectorCoder,
         RawL2NormalizedF32VectorCoder,
     },
-    scaled_uniform::{
-        I8ScaledUniformDotProduct, I8ScaledUniformDotProductQueryDistance,
-        I8ScaledUniformEuclidean, I8ScaledUniformEuclideanQueryDistance,
-    },
 };
 
 mod binary;
@@ -22,7 +18,6 @@ mod scaled_uniform;
 
 pub(crate) use binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder};
 pub(crate) use i8naive::I8NaiveVectorCoder;
-pub(crate) use scaled_uniform::I8ScaledUniformVectorCoder;
 use serde::{Deserialize, Serialize};
 
 /// Functions used for to compute the distance between two vectors.
@@ -139,7 +134,7 @@ impl F32VectorCoding {
             Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
             Self::I8NaiveQuantized => Box::new(I8NaiveVectorCoder),
-            Self::I8ScaledUniformQuantized => Box::new(I8ScaledUniformVectorCoder),
+            Self::I8ScaledUniformQuantized => Box::new(scaled_uniform::I8VectorCoder),
             Self::I4ScaledUniformQuantized => Box::new(scaled_uniform::I4PackedVectorCoder),
         }
     }
@@ -161,10 +156,10 @@ impl F32VectorCoding {
             (Self::NBitBinaryQuantized(_), _) => None,
             (Self::I8NaiveQuantized, _) => Some(Box::new(I8NaiveDistance(similarity))),
             (Self::I8ScaledUniformQuantized, VectorSimilarity::Dot) => {
-                Some(Box::new(I8ScaledUniformDotProduct))
+                Some(Box::new(scaled_uniform::I8DotProductDistance))
             }
             (Self::I8ScaledUniformQuantized, VectorSimilarity::Euclidean) => {
-                Some(Box::new(I8ScaledUniformEuclidean))
+                Some(Box::new(scaled_uniform::I8EuclideanDistance))
             }
             (Self::I4ScaledUniformQuantized, VectorSimilarity::Dot) => {
                 Some(Box::new(scaled_uniform::I4PackedDotProductDistance))
@@ -323,10 +318,10 @@ pub fn new_query_vector_distance_f32<'a>(
             I8NaiveVectorCoder,
         )),
         (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
-            Box::new(I8ScaledUniformDotProductQueryDistance::new(query))
+            Box::new(scaled_uniform::I8DotProductQueryDistance::new(query))
         }
         (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
-            Box::new(I8ScaledUniformEuclideanQueryDistance::new(query))
+            Box::new(scaled_uniform::I8EuclideanQueryDistance::new(query))
         }
         (VectorSimilarity::Dot, F32VectorCoding::I4ScaledUniformQuantized) => {
             Box::new(scaled_uniform::I4PackedDotProductQueryDistance::new(query))
@@ -361,12 +356,18 @@ pub fn new_query_vector_distance_indexing<'a>(
         (_, F32VectorCoding::I8NaiveQuantized) => Box::new(
             QuantizedQueryVectorDistance::from_quantized(I8NaiveDistance(similarity), query),
         ),
-        (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
-            QuantizedQueryVectorDistance::from_quantized(I8ScaledUniformDotProduct, query),
-        ),
-        (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
-            QuantizedQueryVectorDistance::from_quantized(I8ScaledUniformEuclidean, query),
-        ),
+        (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                scaled_uniform::I8DotProductDistance,
+                query,
+            ))
+        }
+        (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                scaled_uniform::I8EuclideanDistance,
+                query,
+            ))
+        }
         (VectorSimilarity::Dot, F32VectorCoding::I4ScaledUniformQuantized) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
                 scaled_uniform::I4PackedDotProductDistance,

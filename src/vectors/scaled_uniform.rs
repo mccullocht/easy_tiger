@@ -25,11 +25,10 @@ fn compute_scale<const M: i8>(vector: &[f32]) -> (f32, f32) {
     }
 }
 
-// XXX fix the names to match scaled_non_uniform
 #[derive(Debug, Copy, Clone)]
-pub struct I8ScaledUniformVectorCoder;
+pub struct I8VectorCoder;
 
-impl F32VectorCoder for I8ScaledUniformVectorCoder {
+impl F32VectorCoder for I8VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
         let (scale, inv_scale) = compute_scale::<{ i8::MAX }>(vector);
@@ -139,9 +138,9 @@ impl<'a> I8Vector<'a> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I8ScaledUniformDotProduct;
+pub struct I8DotProductDistance;
 
-impl VectorDistance for I8ScaledUniformDotProduct {
+impl VectorDistance for I8DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = I8Vector::new(query);
         let doc = I8Vector::new(doc);
@@ -151,15 +150,15 @@ impl VectorDistance for I8ScaledUniformDotProduct {
 }
 
 #[derive(Debug, Clone)]
-pub struct I8ScaledUniformDotProductQueryDistance<'a>(Cow<'a, [f32]>);
+pub struct I8DotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
-impl<'a> I8ScaledUniformDotProductQueryDistance<'a> {
+impl<'a> I8DotProductQueryDistance<'a> {
     pub fn new(query: &'a [f32]) -> Self {
         Self(l2_normalize(query))
     }
 }
 
-impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
+impl QueryVectorDistance for I8DotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I8Vector::new(vector);
         let dot = vector.dot_unnormalized_f32(&self.0) / vector.l2_norm();
@@ -168,9 +167,9 @@ impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I8ScaledUniformEuclidean;
+pub struct I8EuclideanDistance;
 
-impl VectorDistance for I8ScaledUniformEuclidean {
+impl VectorDistance for I8EuclideanDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = I8Vector::new(query);
         let doc = I8Vector::new(doc);
@@ -180,16 +179,16 @@ impl VectorDistance for I8ScaledUniformEuclidean {
 }
 
 #[derive(Debug, Clone)]
-pub struct I8ScaledUniformEuclideanQueryDistance<'a>(&'a [f32], f64);
+pub struct I8EuclideanQueryDistance<'a>(&'a [f32], f64);
 
-impl<'a> I8ScaledUniformEuclideanQueryDistance<'a> {
+impl<'a> I8EuclideanQueryDistance<'a> {
     pub fn new(query: &'a [f32]) -> Self {
         let l2_norm_sq = dot_f32(query, query);
         Self(query, l2_norm_sq)
     }
 }
 
-impl QueryVectorDistance for I8ScaledUniformEuclideanQueryDistance<'_> {
+impl QueryVectorDistance for I8EuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I8Vector::new(vector);
         let dot = vector.dot_unnormalized_f32(self.0);
@@ -252,8 +251,7 @@ impl<'a> I4PackedVector<'a> {
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
-        let dot = self
-            .dimensions()
+        self.dimensions()
             .iter()
             .zip(other.dimensions().iter())
             .map(|(q, d)| {
@@ -263,8 +261,7 @@ impl<'a> I4PackedVector<'a> {
             })
             .sum::<i32>() as f64
             * self.scale()
-            * other.scale();
-        dot
+            * other.scale()
     }
 
     #[allow(dead_code)]

@@ -25,6 +25,7 @@ fn compute_scale<const M: i8>(vector: &[f32]) -> (f32, f32) {
     }
 }
 
+// XXX fix the names to match scaled_non_uniform
 #[derive(Debug, Copy, Clone)]
 pub struct I8ScaledUniformVectorCoder;
 
@@ -258,6 +259,7 @@ impl<'a> I4PackedVector<'a> {
             * other.scale()
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
     fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
         let mut dim_it = self.dimensions().iter();
         let mut other_it = other.chunks_exact(2);
@@ -274,6 +276,57 @@ impl<'a> I4PackedVector<'a> {
             .map(|(d, o)| (*d - 7) as f32 * *o)
             .sum::<f32>();
         // NB: other.scale() is implicitly 1.
+        dot as f64 * self.scale()
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        use std::arch::aarch64::{
+            vaddvq_f32, vand_u8, vcombine_s8, vcvtq_f32_s32, vdup_n_u8, vdupq_n_f32, vdupq_n_s8,
+            vfmaq_f32, vget_low_s16, vget_low_s8, vld1_u8, vld1q_f32, vmovl_high_s16,
+            vmovl_high_s8, vmovl_s16, vmovl_s8, vreinterpret_s8_u8, vshr_n_u8, vsubq_s8,
+        };
+
+        let split = other.len() & !15;
+        let packed_vec = self.dimensions();
+        let mut dot = unsafe {
+            let mut dotv = vdupq_n_f32(0.0);
+            let qmask = vdup_n_u8(0xf);
+            let qoff = vdupq_n_s8(7);
+            for i in (0..split).step_by(16) {
+                // Two values are packed per byte. Unpack into unsigned nibbles and signed subtract
+                // for offset binary encoding to get proper sign extension.
+                let packed = vld1_u8(packed_vec.as_ptr().add(i / 2));
+                let lo = vreinterpret_s8_u8(vand_u8(packed, qmask));
+                let hi = vreinterpret_s8_u8(vand_u8(vshr_n_u8(packed, 4), qmask));
+                let unpacked = vsubq_s8(vcombine_s8(lo, hi), qoff);
+
+                let unpacked_i32 = {
+                    let unpacked_i16 = [vmovl_s8(vget_low_s8(unpacked)), vmovl_high_s8(unpacked)];
+                    [
+                        vmovl_s16(vget_low_s16(unpacked_i16[0])),
+                        vmovl_high_s16(unpacked_i16[0]),
+                        vmovl_s16(vget_low_s16(unpacked_i16[1])),
+                        vmovl_high_s16(unpacked_i16[1]),
+                    ]
+                };
+                for j in 0..4 {
+                    dotv = vfmaq_f32(
+                        dotv,
+                        vld1q_f32(other.as_ptr().add(i + j * 4)),
+                        vcvtq_f32_s32(unpacked_i32[j]),
+                    );
+                }
+            }
+            vaddvq_f32(dotv)
+        };
+        dot += packed_vec[(split / 2)..]
+            .iter()
+            .copied()
+            .flat_map(Self::unpack)
+            .zip(other[split..].iter())
+            .map(|(s, o)| s as f32 * o)
+            .sum::<f32>();
         dot as f64 * self.scale()
     }
 }
@@ -302,7 +355,7 @@ impl<'a> I4PackedDotProductQueryDistance<'a> {
 impl QueryVectorDistance for I4PackedDotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I4PackedVector::new(vector).expect("valid format");
-        let dot = vector.dot_unnormalized_f32(self.0.as_ref()) * vector.l2_norm().recip();
+        let dot = vector.dot_unnormalized_f32(self.0.as_ref()) / vector.l2_norm();
         (-dot + 1.0) / 2.0
     }
 }

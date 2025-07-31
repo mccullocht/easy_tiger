@@ -48,9 +48,14 @@ impl F32VectorCoder for I8ScaledUniformVectorCoder {
 // Bonus points if it can still be scored on the quantized rep instead of de-quantizing.
 
 #[derive(Debug, Copy, Clone)]
-struct I8ScaledUniformVector<'a>(&'a [u8]);
+struct I8Vector<'a>(&'a [u8]);
 
-impl I8ScaledUniformVector<'_> {
+impl<'a> I8Vector<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        assert!(bytes.len() >= 8);
+        Self(bytes)
+    }
+
     fn dot_unnormalized(&self, other: &Self) -> f64 {
         self.vector()
             .iter()
@@ -61,15 +66,52 @@ impl I8ScaledUniformVector<'_> {
             * other.scale()
     }
 
-    fn dequantized_unnormalized_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
+    #[cfg(not(target_arch = "aarch64"))]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
         self.vector()
             .iter()
-            .map(|d| *d as f32 * self.scale() as f32)
+            .zip(other.iter())
+            .map(|(s, o)| *s as f32 * *o)
+            .sum::<f32>() as f64
+            * self.scale()
     }
 
-    fn dequantized_normalized_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
-        let scale = (self.scale() / self.l2_norm()) as f32;
-        self.vector().iter().map(move |d| *d as f32 * scale)
+    #[cfg(target_arch = "aarch64")]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        let doc = self.vector();
+        let split = doc.len() & !15;
+        let mut sum = unsafe {
+            use std::arch::aarch64::{
+                vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_low_s16, vget_low_s8,
+                vld1q_f32, vld1q_s8, vmovl_high_s16, vmovl_high_s8, vmovl_s16, vmovl_s8,
+            };
+
+            let mut dot = vdupq_n_f32(0.0);
+            for i in (0..split).step_by(16) {
+                let docv = vld1q_s8(doc.as_ptr().add(i));
+                let docv_h = [vmovl_s8(vget_low_s8(docv)), vmovl_high_s8(docv)];
+                let docv_q = [
+                    vmovl_s16(vget_low_s16(docv_h[0])),
+                    vmovl_high_s16(docv_h[0]),
+                    vmovl_s16(vget_low_s16(docv_h[1])),
+                    vmovl_high_s16(docv_h[1]),
+                ];
+                for j in 0..4 {
+                    dot = vfmaq_f32(
+                        dot,
+                        vld1q_f32(other.as_ptr().add(i + j * 4)),
+                        vcvtq_f32_s32(docv_q[j]),
+                    );
+                }
+            }
+            vaddvq_f32(dot)
+        };
+        sum += doc[split..]
+            .iter()
+            .zip(other[split..].iter())
+            .map(|(s, o)| *s as f32 * *o)
+            .sum::<f32>();
+        sum as f64 * self.scale()
     }
 
     fn scale(&self) -> f64 {
@@ -89,20 +131,13 @@ impl I8ScaledUniformVector<'_> {
     }
 }
 
-impl<'a> From<&'a [u8]> for I8ScaledUniformVector<'a> {
-    fn from(value: &'a [u8]) -> Self {
-        assert!(value.len() >= 8);
-        Self(value)
-    }
-}
-
 #[derive(Debug, Copy, Clone)]
 pub struct I8ScaledUniformDotProduct;
 
 impl VectorDistance for I8ScaledUniformDotProduct {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = I8ScaledUniformVector::from(query);
-        let doc = I8ScaledUniformVector::from(doc);
+        let query = I8Vector::new(query);
+        let doc = I8Vector::new(doc);
         let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
         (-dot + 1.0) / 2.0
     }
@@ -119,16 +154,8 @@ impl<'a> I8ScaledUniformDotProductQueryDistance<'a> {
 
 impl QueryVectorDistance for I8ScaledUniformDotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        // TODO: benchmark performing dot product of query and doc without scaling, then scaling
-        // afterward. This would avoid a multiplication per dimension.
-        let vector = I8ScaledUniformVector::from(vector);
-        let dot = self
-            .0
-            .iter()
-            .zip(vector.dequantized_normalized_iter())
-            .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64
-            / vector.l2_norm();
+        let vector = I8Vector::new(vector);
+        let dot = vector.dot_unnormalized_f32(&self.0) / vector.l2_norm();
         (-dot + 1.0) / 2.0
     }
 }
@@ -138,8 +165,8 @@ pub struct I8ScaledUniformEuclidean;
 
 impl VectorDistance for I8ScaledUniformEuclidean {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = I8ScaledUniformVector::from(query);
-        let doc = I8ScaledUniformVector::from(doc);
+        let query = I8Vector::new(query);
+        let doc = I8Vector::new(doc);
         let dot = query.dot_unnormalized(&doc);
         query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
     }
@@ -157,15 +184,8 @@ impl<'a> I8ScaledUniformEuclideanQueryDistance<'a> {
 
 impl QueryVectorDistance for I8ScaledUniformEuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        // TODO: benchmark performing dot product of query and doc without scaling, then scaling
-        // afterward. This would avoid a multiplication per dimension.
-        let vector = I8ScaledUniformVector::from(vector);
-        let dot = self
-            .0
-            .iter()
-            .zip(vector.dequantized_unnormalized_iter())
-            .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64;
+        let vector = I8Vector::new(vector);
+        let dot = vector.dot_unnormalized_f32(self.0);
         self.1 + vector.l2_norm_sq() - (2.0 * dot)
     }
 }

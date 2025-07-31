@@ -401,7 +401,7 @@ mod test {
 
     impl TestVector {
         pub fn new(
-            rvec: Vec<f32>,
+            vec: &[f32],
             similarity: VectorSimilarity,
             coder: &(impl F32VectorCoder + ?Sized),
         ) -> Self {
@@ -411,11 +411,11 @@ mod test {
             }
             .new_coder();
             let rvec = f32_coder
-                .encode(&rvec)
+                .encode(vec)
                 .chunks(4)
                 .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
                 .collect::<Vec<_>>();
-            let qvec = coder.encode(&rvec);
+            let qvec = coder.encode(&vec);
             Self { rvec, qvec }
         }
     }
@@ -437,8 +437,8 @@ mod test {
         similarity: VectorSimilarity,
         coder: impl F32VectorCoder + Copy,
         dist_fn: impl VectorDistance + Copy,
-        a: Vec<f32>,
-        b: Vec<f32>,
+        a: &[f32],
+        b: &[f32],
         threshold: f64,
     ) {
         let a = TestVector::new(a, similarity, &coder);
@@ -456,8 +456,8 @@ mod test {
     fn query_distance_compare(
         similarity: VectorSimilarity,
         format: F32VectorCoding,
-        a: Vec<f32>,
-        b: Vec<f32>,
+        a: &[f32],
+        b: &[f32],
         threshold: f64,
     ) {
         let coder = format.new_coder();
@@ -480,15 +480,15 @@ mod test {
             VectorSimilarity::Dot,
             I8NaiveVectorCoder,
             I8NaiveDistance(VectorSimilarity::Dot),
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
+            &vec![-1.0f32, 2.5, 0.7, -1.7],
+            &vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
         );
         query_distance_compare(
             VectorSimilarity::Dot,
             F32VectorCoding::I8NaiveQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
+            &vec![-1.0f32, 2.5, 0.7, -1.7],
+            &vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
         );
     }
@@ -499,15 +499,15 @@ mod test {
             VectorSimilarity::Euclidean,
             I8NaiveVectorCoder,
             I8NaiveDistance(VectorSimilarity::Euclidean),
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
+            &vec![-1.0f32, 2.5, 0.7, -1.7],
+            &vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
         );
         query_distance_compare(
             VectorSimilarity::Euclidean,
             F32VectorCoding::I8NaiveQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
+            &vec![-1.0f32, 2.5, 0.7, -1.7],
+            &vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
         );
     }
@@ -515,40 +515,71 @@ mod test {
     #[test]
     fn i8_scaled_dot() {
         // TODO: randomly generate a bunch of vectors for this test.
-        distance_compare(
-            VectorSimilarity::Dot,
-            I8ScaledUniformVectorCoder,
-            I8ScaledUniformDotProduct,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
-        query_distance_compare(
-            VectorSimilarity::Dot,
-            F32VectorCoding::I8ScaledUniformQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
+        let test_pairs = vec![
+            (vec![-1.0f32, 2.5, 0.7, -1.7], vec![-0.6f32, -1.2, 0.4, 0.3]),
+            (
+                vec![
+                    1.22f32, 1.25, 2.37, -2.21, 2.28, -2.8, -0.61, 2.29, -2.56, -0.57, -2.62,
+                    -1.56, 1.92, -0.63, 0.77, -2.86,
+                ],
+                vec![
+                    3.19, 2.91, 0.23, -2.51, -0.76, 1.82, 1.97, 2.19, -0.15, -3.85, -3.14, -0.43,
+                    1.06, -0.05, 2.05, -2.51,
+                ],
+            ),
+        ];
+        // XXX does distance_compare really need to take these values?
+        for (a, b) in test_pairs {
+            distance_compare(
+                VectorSimilarity::Dot,
+                I8ScaledUniformVectorCoder,
+                I8ScaledUniformDotProduct,
+                &a,
+                &b,
+                0.01,
+            );
+            query_distance_compare(
+                VectorSimilarity::Dot,
+                F32VectorCoding::I8ScaledUniformQuantized,
+                &a,
+                &b,
+                0.01,
+            );
+        }
     }
 
     #[test]
     fn i8_scaled_l2() {
-        distance_compare(
-            VectorSimilarity::Euclidean,
-            I8ScaledUniformVectorCoder,
-            I8ScaledUniformEuclidean,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
-        query_distance_compare(
-            VectorSimilarity::Euclidean,
-            F32VectorCoding::I8ScaledUniformQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
-            0.01,
-        );
+        let test_pairs = vec![
+            (vec![-1.0f32, 2.5, 0.7, -1.7], vec![-0.6f32, -1.2, 0.4, 0.3]),
+            (
+                vec![
+                    1.22f32, 1.25, 2.37, -2.21, 2.28, -2.8, -0.61, 2.29, -2.56, -0.57, -2.62,
+                    -1.56, 1.92, -0.63, 0.77, -2.86,
+                ],
+                vec![
+                    3.19, 2.91, 0.23, -2.51, -0.76, 1.82, 1.97, 2.19, -0.15, -3.85, -3.14, -0.43,
+                    1.06, -0.05, 2.05, -2.51,
+                ],
+            ),
+        ];
+        for (a, b) in test_pairs {
+            distance_compare(
+                VectorSimilarity::Euclidean,
+                I8ScaledUniformVectorCoder,
+                I8ScaledUniformEuclidean,
+                &a,
+                &b,
+                0.01,
+            );
+            query_distance_compare(
+                VectorSimilarity::Euclidean,
+                F32VectorCoding::I8ScaledUniformQuantized,
+                &a,
+                &b,
+                0.01,
+            );
+        }
     }
 
     #[test]
@@ -558,15 +589,15 @@ mod test {
             VectorSimilarity::Dot,
             I4PackedVectorCoder,
             I4PackedDotProductDistance,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
+            &vec![-1.0f32, 2.5, 0.7, -1.7],
+            &vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
         );
         query_distance_compare(
             VectorSimilarity::Dot,
             F32VectorCoding::I4ScaledUniformQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
+            &vec![-1.0f32, 2.5, 0.7, -1.7],
+            &vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
         );
     }
@@ -577,15 +608,15 @@ mod test {
             VectorSimilarity::Euclidean,
             I4PackedVectorCoder,
             I4PackedEuclideanDistance,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
+            &vec![-1.0f32, 2.5, 0.7, -1.7],
+            &vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
         );
         query_distance_compare(
             VectorSimilarity::Euclidean,
             F32VectorCoding::I4ScaledUniformQuantized,
-            vec![-1.0f32, 2.5, 0.7, -1.7],
-            vec![-0.6f32, -1.2, 0.4, 0.3],
+            &vec![-1.0f32, 2.5, 0.7, -1.7],
+            &vec![-0.6f32, -1.2, 0.4, 0.3],
             0.01,
         );
     }

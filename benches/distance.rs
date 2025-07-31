@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use easy_tiger::vectors::{F32VectorCoding, VectorSimilarity};
+use easy_tiger::vectors::{new_query_vector_distance_f32, F32VectorCoding, VectorSimilarity};
 use rand::{Rng, SeedableRng};
 
 fn generate_test_vectors(dim: usize) -> (Vec<f32>, Vec<f32>) {
@@ -33,6 +33,19 @@ fn benchmark_distance(
     });
 }
 
+fn benchmark_query_distance(
+    name: &'static str,
+    x: &[f32],
+    y: &[f32],
+    coding: F32VectorCoding,
+    similarity: VectorSimilarity,
+    c: &mut Criterion,
+) {
+    let y = coding.new_coder().encode(y);
+    let dist = new_query_vector_distance_f32(x, similarity, coding);
+    c.bench_function(name, |b| b.iter(|| std::hint::black_box(dist.distance(&y))));
+}
+
 pub fn float32_benchmarks(c: &mut Criterion) {
     let (a, b) = generate_test_vectors(1024);
 
@@ -54,5 +67,43 @@ pub fn float32_benchmarks(c: &mut Criterion) {
     );
 }
 
-criterion_group!(benches, float32_benchmarks);
+pub fn i8_scaled_uniform_benchmarks(c: &mut Criterion) {
+    let (x, y) = generate_test_vectors(1024);
+
+    benchmark_distance(
+        "i8-scaled-uniform/doc/dot",
+        &x,
+        &y,
+        F32VectorCoding::I8ScaledUniformQuantized,
+        VectorSimilarity::Dot,
+        c,
+    );
+    benchmark_distance(
+        "i8-scaled-uniform/doc/l2",
+        &x,
+        &y,
+        F32VectorCoding::I8ScaledUniformQuantized,
+        VectorSimilarity::Euclidean,
+        c,
+    );
+
+    benchmark_query_distance(
+        "i8-scaled-uniform/query/dot",
+        &x,
+        &y,
+        F32VectorCoding::I8ScaledUniformQuantized,
+        VectorSimilarity::Dot,
+        c,
+    );
+    benchmark_query_distance(
+        "i8-scaled-uniform/query/l2",
+        &x,
+        &y,
+        F32VectorCoding::I8ScaledUniformQuantized,
+        VectorSimilarity::Euclidean,
+        c,
+    );
+}
+
+criterion_group!(benches, float32_benchmarks, i8_scaled_uniform_benchmarks);
 criterion_main!(benches);

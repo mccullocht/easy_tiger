@@ -105,5 +105,62 @@ pub fn i8_scaled_uniform_benchmarks(c: &mut Criterion) {
     );
 }
 
-criterion_group!(benches, float32_benchmarks, i8_scaled_uniform_benchmarks);
+pub fn i4_scaled_uniform_benchmarks(c: &mut Criterion) {
+    let (x, y) = generate_test_vectors(1024);
+
+    benchmark_distance(
+        "i4-scaled-uniform/doc/dot",
+        &x,
+        &y,
+        F32VectorCoding::I4ScaledUniformQuantized,
+        VectorSimilarity::Dot,
+        c,
+    );
+    benchmark_distance(
+        "i4-scaled-uniform/doc/l2",
+        &x,
+        &y,
+        F32VectorCoding::I4ScaledUniformQuantized,
+        VectorSimilarity::Euclidean,
+        c,
+    );
+
+    benchmark_query_distance(
+        "i4-scaled-uniform/query/dot",
+        &x,
+        &y,
+        F32VectorCoding::I4ScaledUniformQuantized,
+        VectorSimilarity::Dot,
+        c,
+    );
+    benchmark_query_distance(
+        "i4-scaled-uniform/query/l2",
+        &x,
+        &y,
+        F32VectorCoding::I4ScaledUniformQuantized,
+        VectorSimilarity::Euclidean,
+        c,
+    );
+}
+
+pub fn u1_benchmarks(c: &mut Criterion) {
+    let (x, y) = generate_test_vectors(1024);
+
+    benchmark_distance(
+        "u1/hamming",
+        &x,
+        &y,
+        F32VectorCoding::BinaryQuantized,
+        VectorSimilarity::Dot, // doesn't really matter here
+        c,
+    );
+}
+
+criterion_group!(
+    benches,
+    float32_benchmarks,
+    i8_scaled_uniform_benchmarks,
+    i4_scaled_uniform_benchmarks,
+    u1_benchmarks,
+);
 criterion_main!(benches);

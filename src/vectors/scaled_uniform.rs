@@ -97,6 +97,7 @@ impl<'a> I8Vector<'a> {
                     vmovl_s16(vget_low_s16(docv_h[1])),
                     vmovl_high_s16(docv_h[1]),
                 ];
+                #[allow(clippy::needless_range_loop)]
                 for j in 0..4 {
                     dot = vfmaq_f32(
                         dot,
@@ -246,7 +247,8 @@ impl<'a> I4PackedVector<'a> {
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
-        self.dimensions()
+        let dot = self
+            .dimensions()
             .iter()
             .zip(other.dimensions().iter())
             .map(|(q, d)| {
@@ -256,60 +258,60 @@ impl<'a> I4PackedVector<'a> {
             })
             .sum::<i32>() as f64
             * self.scale()
-            * other.scale()
+            * other.scale();
+        dot
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
-    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
-        let mut dim_it = self.dimensions().iter();
-        let mut other_it = other.chunks_exact(2);
-        let mut dot = dim_it
-            .by_ref()
-            .zip(other_it.by_ref())
-            .map(|(d, c)| {
-                let d = Self::unpack(*d);
-                d[0] as f32 * c[0] + d[1] as f32 * c[1]
-            })
-            .sum::<f32>();
-        dot += dim_it
-            .zip(other_it.remainder())
-            .map(|(d, o)| (*d - 7) as f32 * *o)
+    #[allow(dead_code)]
+    fn dot_unnormalized_f32_scalar(&self, other: &[f32]) -> f64 {
+        let dot = self
+            .dimensions()
+            .iter()
+            .copied()
+            .flat_map(Self::unpack)
+            .zip(other.iter())
+            .map(|(s, o)| s as f32 * o)
             .sum::<f32>();
         // NB: other.scale() is implicitly 1.
         dot as f64 * self.scale()
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        self.dot_unnormalized_f32_scalar(other)
+    }
+
     #[cfg(target_arch = "aarch64")]
     fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
         use std::arch::aarch64::{
-            vaddvq_f32, vand_u8, vcombine_s8, vcvtq_f32_s32, vdup_n_u8, vdupq_n_f32, vdupq_n_s8,
-            vfmaq_f32, vget_low_s16, vget_low_s8, vld1_u8, vld1q_f32, vmovl_high_s16,
-            vmovl_high_s8, vmovl_s16, vmovl_s8, vreinterpret_s8_u8, vshr_n_u8, vsubq_s8,
+            vaddvq_f32, vand_s8, vcvtq_f32_s32, vdup_n_s8, vdupq_n_f32, vfmaq_f32, vget_low_s16,
+            vld1_u8, vld1q_f32, vmovl_high_s16, vmovl_s16, vmovl_s8, vreinterpret_s8_u8, vshr_n_u8,
+            vsub_s8, vzip1_s8, vzip2_s8,
         };
 
         let split = other.len() & !15;
         let packed_vec = self.dimensions();
         let mut dot = unsafe {
             let mut dotv = vdupq_n_f32(0.0);
-            let qmask = vdup_n_u8(0xf);
-            let qoff = vdupq_n_s8(7);
+            let qmask = vdup_n_s8(0xf);
+            let qoff = vdup_n_s8(7);
             for i in (0..split).step_by(16) {
-                // Two values are packed per byte. Unpack into unsigned nibbles and signed subtract
-                // for offset binary encoding to get proper sign extension.
+                // Two values are packed per byte with consecutive dimensions packed together.
+                // Unpack these nibble dimensions to one per byte, then zip to interleave them back
+                // into the right order. Use signed subtract + offset binary to get sign extension.
                 let packed = vld1_u8(packed_vec.as_ptr().add(i / 2));
-                let lo = vreinterpret_s8_u8(vand_u8(packed, qmask));
-                let hi = vreinterpret_s8_u8(vand_u8(vshr_n_u8(packed, 4), qmask));
-                let unpacked = vsubq_s8(vcombine_s8(lo, hi), qoff);
+                let evens = vsub_s8(vand_s8(vreinterpret_s8_u8(packed), qmask), qoff);
+                let odds = vsub_s8(vreinterpret_s8_u8(vshr_n_u8(packed, 4)), qoff);
+                let lo_i16 = vmovl_s8(vzip1_s8(evens, odds));
+                let hi_i16 = vmovl_s8(vzip2_s8(evens, odds));
 
-                let unpacked_i32 = {
-                    let unpacked_i16 = [vmovl_s8(vget_low_s8(unpacked)), vmovl_high_s8(unpacked)];
-                    [
-                        vmovl_s16(vget_low_s16(unpacked_i16[0])),
-                        vmovl_high_s16(unpacked_i16[0]),
-                        vmovl_s16(vget_low_s16(unpacked_i16[1])),
-                        vmovl_high_s16(unpacked_i16[1]),
-                    ]
-                };
+                let unpacked_i32 = [
+                    vmovl_s16(vget_low_s16(lo_i16)),
+                    vmovl_high_s16(lo_i16),
+                    vmovl_s16(vget_low_s16(hi_i16)),
+                    vmovl_high_s16(hi_i16),
+                ];
+                #[allow(clippy::needless_range_loop)]
                 for j in 0..4 {
                     dotv = vfmaq_f32(
                         dotv,

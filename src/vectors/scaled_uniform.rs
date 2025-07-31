@@ -67,14 +67,19 @@ impl<'a> I8Vector<'a> {
             * other.scale()
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
-    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+    #[allow(dead_code)]
+    fn dot_unnormalized_f32_scalar(&self, other: &[f32]) -> f64 {
         self.vector()
             .iter()
             .zip(other.iter())
             .map(|(s, o)| *s as f32 * *o)
             .sum::<f32>() as f64
             * self.scale()
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        self.dot_unnormalized_f32_scalar(other)
     }
 
     #[cfg(target_arch = "aarch64")]

@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+#[inline(always)]
 #[cfg(target_arch = "aarch64")]
 unsafe fn load_f32x4_le(p: *const u8) -> core::arch::aarch64::float32x4_t {
     use core::arch::aarch64;

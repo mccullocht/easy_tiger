@@ -1,5 +1,7 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use easy_tiger::vectors::{new_query_vector_distance_f32, F32VectorCoding, VectorSimilarity};
+use criterion::{Criterion, criterion_group, criterion_main};
+use easy_tiger::vectors::{
+    F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity, new_query_vector_distance_f32,
+};
 use rand::{Rng, SeedableRng};
 
 fn generate_test_vectors(dim: usize) -> (Vec<f32>, Vec<f32>) {
@@ -17,7 +19,7 @@ fn generate_test_vectors(dim: usize) -> (Vec<f32>, Vec<f32>) {
 }
 
 fn benchmark_distance(
-    name: &'static str,
+    name: &str,
     x: &[f32],
     y: &[f32],
     coding: F32VectorCoding,
@@ -34,7 +36,7 @@ fn benchmark_distance(
 }
 
 fn benchmark_query_distance(
-    name: &'static str,
+    name: &str,
     x: &[f32],
     y: &[f32],
     coding: F32VectorCoding,
@@ -143,6 +145,31 @@ pub fn i4_scaled_uniform_benchmarks(c: &mut Criterion) {
     );
 }
 
+pub fn i8_scaled_non_uniform_benchmarks(c: &mut Criterion) {
+    let (x, y) = generate_test_vectors(1024);
+    let format = F32VectorCoding::I8ScaledNonUniformQuantized(
+        NonUniformQuantizedDimensions::try_from([256, 512].as_slice()).unwrap(),
+    );
+    for similarity in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
+        benchmark_distance(
+            &format!("{format}/doc/{similarity}"),
+            &x,
+            &y,
+            format,
+            similarity,
+            c,
+        );
+        benchmark_query_distance(
+            &format!("{format}/query/{similarity}"),
+            &x,
+            &y,
+            format,
+            similarity,
+            c,
+        );
+    }
+}
+
 pub fn u1_benchmarks(c: &mut Criterion) {
     let (x, y) = generate_test_vectors(1024);
 
@@ -161,6 +188,7 @@ criterion_group!(
     float32_benchmarks,
     i8_scaled_uniform_benchmarks,
     i4_scaled_uniform_benchmarks,
+    i8_scaled_non_uniform_benchmarks,
     u1_benchmarks,
 );
 criterion_main!(benches);

@@ -44,12 +44,21 @@ impl FromStr for VectorSimilarity {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "euclidean" => Ok(VectorSimilarity::Euclidean),
+            "euclidean" | "l2" => Ok(VectorSimilarity::Euclidean),
             "dot" => Ok(VectorSimilarity::Dot),
             x => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unknown similarity function {x}"),
             )),
+        }
+    }
+}
+
+impl std::fmt::Display for VectorSimilarity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dot => write!(f, "dot"),
+            Self::Euclidean => write!(f, "l2"),
         }
     }
 }
@@ -283,7 +292,6 @@ impl std::fmt::Display for F32VectorCoding {
                 f,
                 "i8-scaled-non-uniform:{}",
                 splits
-                    .0
                     .iter()
                     .map(|s| s.to_string())
                     .collect::<Vec<_>>()

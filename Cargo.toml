@@ -29,7 +29,7 @@ name = "distance"
 harness = false
 
 [workspace]
-members = ["et", "pt", "wt_mdb", "wt_sys"]
+members = ["et", "pt", "qt", "wt_mdb", "wt_sys"]
 
 [profile.profiling]
 inherits = "release"

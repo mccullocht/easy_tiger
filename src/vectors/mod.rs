@@ -625,8 +625,7 @@ mod test {
         let splits = NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap();
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
             distance_compare(Dot, I8ScaledNonUniformQuantized(splits), i, &a, &b, 0.01);
-            // XXX figure out why
-            query_distance_compare(Dot, I8ScaledNonUniformQuantized(splits), i, &a, &b, 0.99);
+            query_distance_compare(Dot, I8ScaledNonUniformQuantized(splits), i, &a, &b, 0.01);
         }
     }
 

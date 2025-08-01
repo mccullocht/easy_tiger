@@ -85,7 +85,7 @@ impl F32VectorCoder for I8VectorCoder {
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        // Store
+        // Store l2 norm and a scaling factor for each segment.
         dimensions + std::mem::size_of::<f32>() * (self.0.len() + 2)
     }
 
@@ -137,6 +137,7 @@ impl<'a, 'b> I8Vector<'a, 'b> {
             })
     }
 
+    // TODO: we could trivially vector accelerate this by sharing the implementation with scale-uniform.
     fn segment_dot_unnormalized(a: (f32, &[i8]), b: (f32, &[i8])) -> f64 {
         a.1.iter()
             .zip(b.1.iter())
@@ -146,6 +147,15 @@ impl<'a, 'b> I8Vector<'a, 'b> {
             * b.0 as f64
     }
 
+    // TODO: we could trivially vector accelerate this by sharing the implementation with scale-uniform.
+    fn segment_dot_unnormalized_f32(a: (f32, &[i8]), b: &[f32]) -> f64 {
+        a.1.iter()
+            .zip(b.iter())
+            .map(|(a, b)| *a as f32 * *b)
+            .sum::<f32>() as f64
+            * a.0 as f64
+    }
+
     fn dot_unnormalized(&self, other: &Self) -> f64 {
         self.segments()
             .zip(other.segments())
@@ -153,17 +163,11 @@ impl<'a, 'b> I8Vector<'a, 'b> {
             .sum::<f64>()
     }
 
-    fn dequantized_unnormalized_iter(&self) -> impl Iterator<Item = f32> + '_ {
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
         self.segments()
-            .flat_map(|(scale, v)| v.iter().map(move |d| *d as f32 * scale))
-    }
-
-    fn dequantized_normalized_iter(&self) -> impl Iterator<Item = f32> + '_ {
-        let inv_norm = self.l2_norm().recip() as f32;
-        self.segments().flat_map(move |(s, v)| {
-            let scale = s * inv_norm;
-            v.iter().map(move |d| *d as f32 * scale)
-        })
+            .zip(split_dim_iterator(&self.splits, other.len()).map(|r| &other[r]))
+            .map(|(q, f)| Self::segment_dot_unnormalized_f32(q, f))
+            .sum::<f64>()
     }
 }
 
@@ -202,16 +206,8 @@ impl<'a> I8DotProductQueryDistance<'a> {
 
 impl QueryVectorDistance for I8DotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        // TODO: benchmark performing dot product of query and doc without scaling, then scaling
-        // afterward. This would avoid a multiplication per dimension.
         let vector = I8Vector::new(&self.splits, vector);
-        let dot = self
-            .query
-            .iter()
-            .zip(vector.dequantized_normalized_iter())
-            .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64
-            / vector.l2_norm();
+        let dot = vector.dot_unnormalized_f32(&self.query) / vector.l2_norm();
         (-dot + 1.0) / 2.0
     }
 }
@@ -253,15 +249,8 @@ impl<'a> I8EuclideanQueryDistance<'a> {
 
 impl QueryVectorDistance for I8EuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        // TODO: benchmark performing dot product of query and doc without scaling, then scaling
-        // afterward. This would avoid a multiplication per dimension.
         let vector = I8Vector::new(&self.splits, vector);
-        let dot = self
-            .query
-            .iter()
-            .zip(vector.dequantized_unnormalized_iter())
-            .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64;
+        let dot = vector.dot_unnormalized_f32(self.query);
         self.l2_norm_sq + vector.l2_norm_sq() - (2.0 * dot)
     }
 }

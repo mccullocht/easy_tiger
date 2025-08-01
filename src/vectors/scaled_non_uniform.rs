@@ -88,6 +88,15 @@ impl F32VectorCoder for I8VectorCoder {
         // Store
         dimensions + std::mem::size_of::<f32>() * (self.0.len() + 2)
     }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let v = I8Vector::new(&self.0, encoded);
+        Some(
+            v.segments()
+                .flat_map(|(scale, bytes)| bytes.iter().map(move |d| *d as f32 * scale))
+                .collect(),
+        )
+    }
 }
 
 #[derive(Debug, Copy, Clone)]

@@ -627,10 +627,12 @@ mod test {
 
     #[test]
     fn i8_scaled_non_uniform_dot() {
-        let splits = NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap();
+        let format = I8ScaledNonUniformQuantized(
+            NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap(),
+        );
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, I8ScaledNonUniformQuantized(splits), i, &a, &b, 0.01);
-            query_distance_compare(Dot, I8ScaledNonUniformQuantized(splits), i, &a, &b, 0.01);
+            distance_compare(Dot, format, i, &a, &b, 0.01);
+            query_distance_compare(Dot, format, i, &a, &b, 0.01);
         }
     }
 

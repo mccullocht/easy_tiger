@@ -33,6 +33,12 @@ impl F32VectorCoder for I8NaiveVectorCoder {
     fn byte_len(&self, dimensions: usize) -> usize {
         dimensions + std::mem::size_of::<f32>()
     }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let (vector, l2_norm_sq) = I8NaiveDistance::unpack(encoded);
+        let scale = l2_norm_sq.sqrt().recip();
+        Some(vector.iter().map(|d| *d as f32 * scale).collect())
+    }
 }
 
 #[derive(Debug, Copy, Clone)]

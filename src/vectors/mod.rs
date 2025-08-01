@@ -243,6 +243,14 @@ pub trait F32VectorCoder: Send + Sync {
 
     /// Return the number of bytes required to encode a vector of length `dimensions`.
     fn byte_len(&self, dimensions: usize) -> usize;
+
+    /// Decode `encoded` to a float vector.
+    ///
+    /// This is not supported for all codecs, and in cases where the format is packed may
+    /// return more dimensions than originally specified.
+    fn decode(&self, _encoded: &[u8]) -> Option<Vec<f32>> {
+        None
+    }
 }
 
 /// Compute the distance between a fixed vector provided at creation time and other vectors.

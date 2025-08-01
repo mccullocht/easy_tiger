@@ -14,6 +14,7 @@ use crate::vectors::{
 };
 
 mod binary;
+pub mod lucene;
 mod raw;
 mod scaled_non_uniform;
 mod scaled_uniform;
@@ -483,8 +484,8 @@ pub fn new_query_vector_distance_indexing<'a>(
 #[cfg(test)]
 mod test {
     use crate::vectors::{
-        F32VectorCoder, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
-        new_query_vector_distance_f32,
+        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding,
+        NonUniformQuantizedDimensions, VectorSimilarity,
     };
 
     struct TestVector {

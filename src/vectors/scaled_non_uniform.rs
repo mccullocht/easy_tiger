@@ -156,7 +156,7 @@ impl<'a, 'b> I8Vector<'a, 'b> {
 
     fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
         self.segments()
-            .zip(split_dim_iterator(&self.splits, other.len()).map(|r| &other[r]))
+            .zip(split_dim_iterator(self.splits, other.len()).map(|r| &other[r]))
             .map(|(q, f)| dot_unnormalized_i8_f32(q.1, q.0 as f64, f))
             .sum::<f64>()
     }

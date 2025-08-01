@@ -3,7 +3,10 @@
 use std::{borrow::Cow, fmt::Debug, io, num::ParseIntError, ops::Deref, str::FromStr};
 
 use crate::vectors::{
-    binary::{AsymmetricHammingDistance, HammingDistance},
+    binary::{
+        AsymmetricBinaryQuantizedVectorCoder, AsymmetricHammingDistance,
+        BinaryQuantizedVectorCoder, HammingDistance,
+    },
     raw::{
         F32DotProductDistance, F32EuclideanDistance, F32QueryVectorDistance, RawF32VectorCoder,
         RawL2NormalizedF32VectorCoder,
@@ -15,8 +18,10 @@ mod raw;
 mod scaled_non_uniform;
 mod scaled_uniform;
 
-pub(crate) use binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder};
 use serde::{Deserialize, Serialize};
+
+// Re-export to scaled_non_uniform to vector accelerate f32 x quantized distance.
+use scaled_uniform::dot_unnormalized_i8_f32;
 
 /// Functions used for to compute the distance between two vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]

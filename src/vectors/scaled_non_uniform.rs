@@ -12,6 +12,7 @@
 
 use std::{borrow::Cow, ops::Range};
 
+use super::dot_unnormalized_i8_f32;
 use crate::{
     distance::{dot_f32, l2_normalize},
     vectors::{F32VectorCoder, NonUniformQuantizedDimensions, QueryVectorDistance, VectorDistance},
@@ -137,7 +138,6 @@ impl<'a, 'b> I8Vector<'a, 'b> {
             })
     }
 
-    // TODO: we could trivially vector accelerate this by sharing the implementation with scale-uniform.
     fn segment_dot_unnormalized(a: (f32, &[i8]), b: (f32, &[i8])) -> f64 {
         a.1.iter()
             .zip(b.1.iter())
@@ -145,15 +145,6 @@ impl<'a, 'b> I8Vector<'a, 'b> {
             .sum::<i32>() as f64
             * a.0 as f64
             * b.0 as f64
-    }
-
-    // TODO: we could trivially vector accelerate this by sharing the implementation with scale-uniform.
-    fn segment_dot_unnormalized_f32(a: (f32, &[i8]), b: &[f32]) -> f64 {
-        a.1.iter()
-            .zip(b.iter())
-            .map(|(a, b)| *a as f32 * *b)
-            .sum::<f32>() as f64
-            * a.0 as f64
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
@@ -166,7 +157,7 @@ impl<'a, 'b> I8Vector<'a, 'b> {
     fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
         self.segments()
             .zip(split_dim_iterator(&self.splits, other.len()).map(|r| &other[r]))
-            .map(|(q, f)| Self::segment_dot_unnormalized_f32(q, f))
+            .map(|(q, f)| dot_unnormalized_i8_f32(q.1, q.0 as f64, f))
             .sum::<f64>()
     }
 }

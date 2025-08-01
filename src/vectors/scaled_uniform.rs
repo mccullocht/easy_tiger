@@ -53,15 +53,7 @@ impl F32VectorCoder for I8VectorCoder {
     }
 }
 
-// Computes unnormalized dot between `quantized` + `scale` x `float` vectors.
-pub(super) fn dot_unnormalized_i8_f32(quantized: &[i8], scale: f64, float: &[f32]) -> f64 {
-    if cfg!(target_arch = "aarch64") {
-        dot_unnormalized_i8_f32_aarch64(quantized, scale, float)
-    } else {
-        dot_unnormalized_i8_f32_scalar(quantized, scale, float)
-    }
-}
-
+#[allow(dead_code)]
 fn dot_unnormalized_i8_f32_scalar(quantized: &[i8], scale: f64, float: &[f32]) -> f64 {
     quantized
         .iter()
@@ -109,6 +101,18 @@ fn dot_unnormalized_i8_f32_aarch64(quantized: &[i8], scale: f64, float: &[f32]) 
         .map(|(s, o)| *s as f32 * *o)
         .sum::<f32>();
     sum as f64 * scale
+}
+
+// Computes unnormalized dot between `quantized` + `scale` x `float` vectors.
+#[cfg(target_arch = "aarch64")]
+pub(super) fn dot_unnormalized_i8_f32(quantized: &[i8], scale: f64, float: &[f32]) -> f64 {
+    dot_unnormalized_i8_f32_aarch64(quantized, scale, float)
+}
+
+// Computes unnormalized dot between `quantized` + `scale` x `float` vectors.
+#[cfg(not(target_arch = "aarch64"))]
+pub(super) fn dot_unnormalized_i8_f32(quantized: &[i8], scale: f64, float: &[f32]) -> f64 {
+    dot_unnormalized_i8_f32_scalar(quantized, scale, float)
 }
 
 #[derive(Debug, Copy, Clone)]

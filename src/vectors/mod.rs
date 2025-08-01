@@ -4,7 +4,6 @@ use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 
 use crate::vectors::{
     binary::{AsymmetricHammingDistance, HammingDistance},
-    i8naive::I8NaiveDistance,
     raw::{
         F32DotProductDistance, F32EuclideanDistance, F32QueryVectorDistance, RawF32VectorCoder,
         RawL2NormalizedF32VectorCoder,
@@ -12,12 +11,10 @@ use crate::vectors::{
 };
 
 mod binary;
-mod i8naive;
 mod raw;
 mod scaled_uniform;
 
 pub(crate) use binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder};
-pub(crate) use i8naive::I8NaiveVectorCoder;
 use serde::{Deserialize, Serialize};
 
 /// Functions used for to compute the distance between two vectors.
@@ -103,12 +100,6 @@ pub enum F32VectorCoding {
     /// This allows us to emulate dot product when comparing to a binary quantized vector, and
     /// produces higher fidelity distance than binary quantization on its own.
     NBitBinaryQuantized(usize),
-    /// Normalize and quantize into an i8 value.
-    ///
-    /// This normalizes the input vector but otherwise does not shape quantization to the input.
-    ///
-    /// This uses 1 byte per dimension + 4 bytes for the l2 norm for euclidean distances.
-    I8NaiveQuantized,
     /// Quantize into an i8 value shaped to the input vector.
     ///
     /// This uses the contents of the vector to try to reduce quantization error but no data from
@@ -133,7 +124,6 @@ impl F32VectorCoding {
             Self::RawL2Normalized => Box::new(RawL2NormalizedF32VectorCoder),
             Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
-            Self::I8NaiveQuantized => Box::new(I8NaiveVectorCoder),
             Self::I8ScaledUniformQuantized => Box::new(scaled_uniform::I8VectorCoder),
             Self::I4ScaledUniformQuantized => Box::new(scaled_uniform::I4PackedVectorCoder),
         }
@@ -154,7 +144,6 @@ impl F32VectorCoding {
             }
             (Self::BinaryQuantized, _) => Some(Box::new(HammingDistance)),
             (Self::NBitBinaryQuantized(_), _) => None,
-            (Self::I8NaiveQuantized, _) => Some(Box::new(I8NaiveDistance(similarity))),
             (Self::I8ScaledUniformQuantized, VectorSimilarity::Dot) => {
                 Some(Box::new(scaled_uniform::I8DotProductDistance))
             }
@@ -205,7 +194,6 @@ impl FromStr for F32VectorCoding {
                     .map(Self::NBitBinaryQuantized)
                     .ok_or_else(|| input_err(format!("invalid asymmetric_binary bits {bits_str}")))
             }
-            "i8-naive" => Ok(Self::I8NaiveQuantized),
             "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
             "i4-scaled-uniform" => Ok(Self::I4ScaledUniformQuantized),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
@@ -220,7 +208,6 @@ impl std::fmt::Display for F32VectorCoding {
             Self::RawL2Normalized => write!(f, "raw-l2-norm"),
             Self::BinaryQuantized => write!(f, "binary"),
             Self::NBitBinaryQuantized(n) => write!(f, "asymmetric_binary:{}", *n),
-            Self::I8NaiveQuantized => write!(f, "i8-naive"),
             Self::I8ScaledUniformQuantized => write!(f, "i8-scaled-uniform"),
             Self::I4ScaledUniformQuantized => write!(f, "i4-scaled-uniform"),
         }
@@ -320,11 +307,6 @@ pub fn new_query_vector_distance_f32<'a>(
                 AsymmetricBinaryQuantizedVectorCoder::new(n),
             ))
         }
-        (_, F32VectorCoding::I8NaiveQuantized) => Box::new(QuantizedQueryVectorDistance::from_f32(
-            I8NaiveDistance(similarity),
-            query,
-            I8NaiveVectorCoder,
-        )),
         (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
             Box::new(scaled_uniform::I8DotProductQueryDistance::new(query))
         }
@@ -360,9 +342,6 @@ pub fn new_query_vector_distance_indexing<'a>(
         ),
         (_, F32VectorCoding::NBitBinaryQuantized(_)) => Box::new(
             QuantizedQueryVectorDistance::from_quantized(HammingDistance, query),
-        ),
-        (_, F32VectorCoding::I8NaiveQuantized) => Box::new(
-            QuantizedQueryVectorDistance::from_quantized(I8NaiveDistance(similarity), query),
         ),
         (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
@@ -498,22 +477,8 @@ mod test {
         ]
     }
 
-    use F32VectorCoding::{I4ScaledUniformQuantized, I8NaiveQuantized, I8ScaledUniformQuantized};
+    use F32VectorCoding::{I4ScaledUniformQuantized, I8ScaledUniformQuantized};
     use VectorSimilarity::{Dot, Euclidean};
-
-    #[test]
-    fn i8_naive_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, I8NaiveQuantized, i, &a, &b, 0.01);
-        }
-    }
-
-    #[test]
-    fn i8_naive_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, I8NaiveQuantized, i, &a, &b, 0.01);
-        }
-    }
 
     #[test]
     fn i8_scaled_dot() {

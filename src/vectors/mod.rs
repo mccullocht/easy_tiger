@@ -1,9 +1,12 @@
 //! Vector handling: formatting/quantization and distance computation.
 
-use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
+use std::{borrow::Cow, fmt::Debug, io, num::ParseIntError, ops::Deref, str::FromStr};
 
 use crate::vectors::{
-    binary::{AsymmetricHammingDistance, HammingDistance},
+    binary::{
+        AsymmetricBinaryQuantizedVectorCoder, AsymmetricHammingDistance,
+        BinaryQuantizedVectorCoder, HammingDistance,
+    },
     raw::{
         F32DotProductDistance, F32EuclideanDistance, F32QueryVectorDistance, RawF32VectorCoder,
         RawL2NormalizedF32VectorCoder,
@@ -12,10 +15,13 @@ use crate::vectors::{
 
 mod binary;
 mod raw;
+mod scaled_non_uniform;
 mod scaled_uniform;
 
-pub(crate) use binary::{AsymmetricBinaryQuantizedVectorCoder, BinaryQuantizedVectorCoder};
 use serde::{Deserialize, Serialize};
+
+// Re-export to scaled_non_uniform to vector accelerate f32 x quantized distance.
+use scaled_uniform::dot_unnormalized_i8_f32;
 
 /// Functions used for to compute the distance between two vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -43,12 +49,21 @@ impl FromStr for VectorSimilarity {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "euclidean" => Ok(VectorSimilarity::Euclidean),
+            "euclidean" | "l2" => Ok(VectorSimilarity::Euclidean),
             "dot" => Ok(VectorSimilarity::Dot),
             x => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unknown similarity function {x}"),
             )),
+        }
+    }
+}
+
+impl std::fmt::Display for VectorSimilarity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dot => write!(f, "dot"),
+            Self::Euclidean => write!(f, "l2"),
         }
     }
 }
@@ -76,6 +91,42 @@ pub trait F32VectorDistance: VectorDistance {
     ///
     /// Input vectors must be the same length or this function may panic.
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
+}
+
+/// List of dimension splits points for non-uniform quantization.
+///
+/// Only accepts a list of up to 7 dimensions.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NonUniformQuantizedDimensions([u16; 8]);
+
+impl NonUniformQuantizedDimensions {
+    fn len(&self) -> usize {
+        self.0[0] as usize
+    }
+}
+
+impl Deref for NonUniformQuantizedDimensions {
+    type Target = [u16];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0[1..(self.0[0] as usize + 1)]
+    }
+}
+
+impl TryFrom<&[u16]> for NonUniformQuantizedDimensions {
+    type Error = &'static str;
+    fn try_from(value: &[u16]) -> Result<Self, Self::Error> {
+        if value.len() >= 8 {
+            Err("no more than 7 dimensions allowed")
+        } else if !value.is_sorted() {
+            Err("dimensions must be sorted")
+        } else {
+            let mut inner = [0u16; 8];
+            inner[0] = value.len() as u16;
+            inner[1..(value.len() + 1)].copy_from_slice(value);
+            Ok(Self(inner))
+        }
+    }
 }
 
 /// Supported coding schemes for input f32 vectors.
@@ -114,6 +165,15 @@ pub enum F32VectorCoding {
     ///
     /// This uses 1 byte per 2 dimensions and 8 additional bytes for a scaling factor and l2 norm.
     I4ScaledUniformQuantized,
+    /// Quantize into an i4 value shaped to the input vector, where we choose different scaling
+    /// factors for different segments of the dimension space.
+    ///
+    /// The argument value contains split points as a list of sorted dimensions. The representation
+    /// is opaque to ensure the value is [Copy]. This also limits the number of split points to 7.
+    ///
+    /// This is aimed at MRL vectors that are designed to be truncated and may have different value
+    /// distributions in different segments.
+    I8ScaledNonUniformQuantized(NonUniformQuantizedDimensions),
 }
 
 impl F32VectorCoding {
@@ -126,6 +186,9 @@ impl F32VectorCoding {
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
             Self::I8ScaledUniformQuantized => Box::new(scaled_uniform::I8VectorCoder),
             Self::I4ScaledUniformQuantized => Box::new(scaled_uniform::I4PackedVectorCoder),
+            Self::I8ScaledNonUniformQuantized(s) => {
+                Box::new(scaled_non_uniform::I8VectorCoder::new(*s))
+            }
         }
     }
 
@@ -155,6 +218,12 @@ impl F32VectorCoding {
             }
             (Self::I4ScaledUniformQuantized, VectorSimilarity::Euclidean) => {
                 Some(Box::new(scaled_uniform::I4PackedEuclideanDistance))
+            }
+            (Self::I8ScaledNonUniformQuantized(s), VectorSimilarity::Dot) => {
+                Some(Box::new(scaled_non_uniform::I8DotProductDistance::new(*s)))
+            }
+            (Self::I8ScaledNonUniformQuantized(s), VectorSimilarity::Euclidean) => {
+                Some(Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s)))
             }
         }
     }
@@ -196,6 +265,20 @@ impl FromStr for F32VectorCoding {
             }
             "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
             "i4-scaled-uniform" => Ok(Self::I4ScaledUniformQuantized),
+            s if s.starts_with("i8-scaled-non-uniform:") => {
+                let s = s
+                    .strip_prefix("i8-scaled-non-uniform:")
+                    .expect("prefix matched");
+                let splits = NonUniformQuantizedDimensions::try_from(
+                    s.split(',')
+                        .map(|n| n.parse::<u16>())
+                        .collect::<Result<Vec<_>, ParseIntError>>()
+                        .map_err(|_| input_err("could not parse split values".into()))?
+                        .as_slice(),
+                )
+                .map_err(|e| input_err(e.into()))?;
+                Ok(Self::I8ScaledNonUniformQuantized(splits))
+            }
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -210,6 +293,15 @@ impl std::fmt::Display for F32VectorCoding {
             Self::NBitBinaryQuantized(n) => write!(f, "asymmetric_binary:{}", *n),
             Self::I8ScaledUniformQuantized => write!(f, "i8-scaled-uniform"),
             Self::I4ScaledUniformQuantized => write!(f, "i4-scaled-uniform"),
+            Self::I8ScaledNonUniformQuantized(splits) => write!(
+                f,
+                "i8-scaled-non-uniform:{}",
+                splits
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
         }
     }
 }
@@ -319,6 +411,12 @@ pub fn new_query_vector_distance_f32<'a>(
         (VectorSimilarity::Euclidean, F32VectorCoding::I4ScaledUniformQuantized) => {
             Box::new(scaled_uniform::I4PackedEuclideanQueryDistance::new(query))
         }
+        (VectorSimilarity::Dot, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
+            Box::new(scaled_non_uniform::I8DotProductQueryDistance::new(s, query))
+        }
+        (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
+            Box::new(scaled_non_uniform::I8EuclideanQueryDistance::new(s, query))
+        }
     }
 }
 
@@ -367,13 +465,26 @@ pub fn new_query_vector_distance_indexing<'a>(
                 query,
             ))
         }
+        (VectorSimilarity::Dot, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                scaled_non_uniform::I8DotProductDistance::new(s),
+                query,
+            ))
+        }
+        (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                scaled_non_uniform::I8EuclideanDistance::new(s),
+                query,
+            ))
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
     use crate::vectors::{
-        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, VectorSimilarity,
+        F32VectorCoder, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
+        new_query_vector_distance_f32,
     };
 
     struct TestVector {
@@ -477,7 +588,9 @@ mod test {
         ]
     }
 
-    use F32VectorCoding::{I4ScaledUniformQuantized, I8ScaledUniformQuantized};
+    use F32VectorCoding::{
+        I4ScaledUniformQuantized, I8ScaledNonUniformQuantized, I8ScaledUniformQuantized,
+    };
     use VectorSimilarity::{Dot, Euclidean};
 
     #[test]
@@ -509,6 +622,28 @@ mod test {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
             distance_compare(Euclidean, I4ScaledUniformQuantized, i, &a, &b, 0.10);
             query_distance_compare(Euclidean, I4ScaledUniformQuantized, i, &a, &b, 0.10);
+        }
+    }
+
+    #[test]
+    fn i8_scaled_non_uniform_dot() {
+        let format = I8ScaledNonUniformQuantized(
+            NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap(),
+        );
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, format, i, &a, &b, 0.01);
+            query_distance_compare(Dot, format, i, &a, &b, 0.01);
+        }
+    }
+
+    #[test]
+    fn i8_scaled_non_uniform_l2() {
+        let format = I8ScaledNonUniformQuantized(
+            NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap(),
+        );
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Euclidean, format, i, &a, &b, 0.01);
+            query_distance_compare(Euclidean, format, i, &a, &b, 0.01);
         }
     }
 }

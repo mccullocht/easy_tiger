@@ -1,0 +1,10 @@
+[package]
+name = "qt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+easy_tiger = { path = "../" }
+clap = { version = "4.5.42", features = ["derive"] }
+memmap2 = { version = "0.9.7", features = ["stable_deref_trait"] }
+rayon = "1.10.0"

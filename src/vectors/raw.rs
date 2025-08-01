@@ -34,6 +34,17 @@ impl F32VectorCoder for RawF32VectorCoder {
     fn encode(&self, vector: &[f32]) -> Vec<u8> {
         vector.iter().flat_map(|d| d.to_le_bytes()).collect()
     }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let f32_len = std::mem::size_of::<f32>();
+        assert!(encoded.len() % f32_len == 0);
+        Some(
+            encoded
+                .chunks(f32_len)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect(),
+        )
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -68,6 +79,17 @@ impl F32VectorCoder for RawL2NormalizedF32VectorCoder {
             .iter()
             .flat_map(|d| (*d * scale).to_le_bytes())
             .collect()
+    }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let f32_len = std::mem::size_of::<f32>();
+        assert!(encoded.len() % f32_len == 0);
+        Some(
+            encoded
+                .chunks(f32_len)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect(),
+        )
     }
 }
 

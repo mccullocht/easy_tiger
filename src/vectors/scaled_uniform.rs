@@ -42,6 +42,15 @@ impl F32VectorCoder for I8VectorCoder {
     fn byte_len(&self, dimensions: usize) -> usize {
         dimensions + std::mem::size_of::<f32>() * 2
     }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let v = I8Vector::new(encoded);
+        // Decode based on the scale. We could also produce l2 normalized output but there's no
+        // good way for the caller to express this distinction and this is inverting something that
+        // is inherently lossy.
+        let scale = v.scale() as f32;
+        Some(v.vector().iter().map(|d| *d as f32 * scale).collect())
+    }
 }
 
 // TODO: quantizer that is non-uniform for MRL vectors.
@@ -216,6 +225,22 @@ impl F32VectorCoder for I4PackedVectorCoder {
 
     fn byte_len(&self, dimensions: usize) -> usize {
         dimensions.div_ceil(2) + std::mem::size_of::<f32>() * 2
+    }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let v = I4PackedVector::new(encoded).unwrap();
+        // Decode based on the scale. We could also produce l2 normalized output but there's no
+        // good way for the caller to express this distinction and this is inverting something that
+        // is inherently lossy.
+        let scale = v.scale() as f32;
+        Some(
+            v.dimensions()
+                .iter()
+                .copied()
+                .flat_map(I4PackedVector::unpack)
+                .map(|d| d as f32 * scale)
+                .collect(),
+        )
     }
 }
 

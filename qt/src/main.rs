@@ -2,10 +2,11 @@ use std::{fs::File, io, num::NonZero, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use easy_tiger::{
-    input::{DerefVectorStore, VectorStore},
-    vectors::F32VectorCoding,
+    input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
+    vectors::{F32VectorCoding, lucene::ScalarQuantizerVectorCoder},
 };
 use memmap2::Mmap;
+use rand::SeedableRng;
 use rayon::prelude::*;
 
 #[derive(Parser)]
@@ -24,7 +25,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Compute vector quantization loss.
     QuantizationLoss(QuantizationLossArgs),
+    /// Train Lucene ScalarQuantizer parameters.
+    TrainLuceneScalarQuantizer(TrainLuceneScalarQuantizerArgs),
 }
 
 #[derive(Args)]
@@ -70,6 +74,37 @@ fn quantization_loss(
     Ok(())
 }
 
+#[derive(Args)]
+struct TrainLuceneScalarQuantizerArgs {
+    #[arg(long, default_value_t = NonZero::new(25_000).unwrap())]
+    sample_size: NonZero<usize>,
+}
+
+fn train_lucene_scalar_quantizer(
+    args: TrainLuceneScalarQuantizerArgs,
+    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+) -> io::Result<()> {
+    let sample_indexes = if vectors.len() > args.sample_size.get() {
+        let mut rng = rand_xoshiro::Xoroshiro128PlusPlus::seed_from_u64(0x455A_5469676572);
+        let mut indexes =
+            rand::seq::index::sample(&mut rng, vectors.len(), args.sample_size.get()).into_vec();
+        indexes.sort_unstable();
+        indexes
+    } else {
+        (0..vectors.len()).collect()
+    };
+    let sample = SubsetViewVectorStore::new(vectors, sample_indexes);
+    let (min_quantile, max_quantile) =
+        ScalarQuantizerVectorCoder::train(NonZero::new(vectors.len()).unwrap(), sample.iter());
+    println!(
+        "vectors: {}, min_quantile: {} max_quantile: {}",
+        sample.len(),
+        min_quantile,
+        max_quantile
+    );
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
@@ -79,5 +114,6 @@ fn main() -> io::Result<()> {
     )?;
     match cli.command {
         Command::QuantizationLoss(args) => quantization_loss(args, &vectors),
+        Command::TrainLuceneScalarQuantizer(args) => train_lucene_scalar_quantizer(args, &vectors),
     }
 }

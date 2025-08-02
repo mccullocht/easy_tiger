@@ -134,7 +134,7 @@ impl TryFrom<&[u16]> for NonUniformQuantizedDimensions {
 ///
 /// Raw vectors are stored little endian but the remaining formats are all lossy in some way with
 /// varying degrees of compression and fidelity in distance computation.
-#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub enum F32VectorCoding {
     /// Little-endian f32 values encoded as bytes.
     #[default]
@@ -175,6 +175,8 @@ pub enum F32VectorCoding {
     /// This is aimed at MRL vectors that are designed to be truncated and may have different value
     /// distributions in different segments.
     I8ScaledNonUniformQuantized(NonUniformQuantizedDimensions),
+    /// Quantize to a u7 value given a min and max quantile trained from the data set.
+    LuceneScalarQuantizer7(f32, f32),
 }
 
 impl F32VectorCoding {
@@ -190,6 +192,13 @@ impl F32VectorCoding {
             Self::I8ScaledNonUniformQuantized(s) => {
                 Box::new(scaled_non_uniform::I8VectorCoder::new(*s))
             }
+            Self::LuceneScalarQuantizer7(min_quantile, max_quantile) => Box::new(
+                lucene::ScalarQuantizerVectorCoder::new(lucene::ScalarQuantizerParams {
+                    bits: 7,
+                    min_quantile: *min_quantile,
+                    max_quantile: *max_quantile,
+                }),
+            ),
         }
     }
 
@@ -226,6 +235,7 @@ impl F32VectorCoding {
             (Self::I8ScaledNonUniformQuantized(s), VectorSimilarity::Euclidean) => {
                 Some(Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s)))
             }
+            (Self::LuceneScalarQuantizer7(_, _), _) => unimplemented!(),
         }
     }
 
@@ -280,6 +290,19 @@ impl FromStr for F32VectorCoding {
                 .map_err(|e| input_err(e.into()))?;
                 Ok(Self::I8ScaledNonUniformQuantized(splits))
             }
+            s if s.starts_with("lucene-sq-u7:") => {
+                let s = s.strip_prefix("lucene-sq-u7:").expect("prefix matched");
+                let quantiles = s
+                    .split(',')
+                    .map(|f| f.parse::<f32>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| input_err("could not parse quantiles".into()))?;
+                if quantiles.len() != 2 || quantiles[0].total_cmp(&quantiles[1]).is_ge() {
+                    Err(input_err("bad quantiles".into()))
+                } else {
+                    Ok(Self::LuceneScalarQuantizer7(quantiles[0], quantiles[1]))
+                }
+            }
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -303,6 +326,7 @@ impl std::fmt::Display for F32VectorCoding {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            Self::LuceneScalarQuantizer7(min, max) => write!(f, "lucene-sq-u7:{},{}", *min, *max),
         }
     }
 }
@@ -418,6 +442,7 @@ pub fn new_query_vector_distance_f32<'a>(
         (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             Box::new(scaled_non_uniform::I8EuclideanQueryDistance::new(s, query))
         }
+        (_, F32VectorCoding::LuceneScalarQuantizer7(_, _)) => unimplemented!(),
     }
 }
 
@@ -478,6 +503,7 @@ pub fn new_query_vector_distance_indexing<'a>(
                 query,
             ))
         }
+        (_, F32VectorCoding::LuceneScalarQuantizer7(_, _)) => unimplemented!(),
     }
 }
 

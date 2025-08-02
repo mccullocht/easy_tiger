@@ -21,6 +21,7 @@ pub struct ScalarQuantizerParams {
 pub struct ScalarQuantizerVectorCoder {
     params: ScalarQuantizerParams,
     scale: f32,
+    // This value squared is the so called "constant multiplier"
     alpha: f32,
 }
 

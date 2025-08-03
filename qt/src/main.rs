@@ -1,10 +1,20 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf};
+use std::{
+    fs::File,
+    io::{self},
+    num::NonZero,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use clap::{Args, Parser, Subcommand};
 use easy_tiger::{
-    input::{DerefVectorStore, VectorStore},
-    vectors::F32VectorCoding,
+    input::{DerefVectorStore, VecVectorStore, VectorStore},
+    vectors::{
+        F32VectorCoding, VectorSimilarity, new_query_vector_distance_f32,
+        new_query_vector_distance_indexing,
+    },
 };
+use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
 
@@ -24,7 +34,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Compute precision loss in vector quantization.
     QuantizationLoss(QuantizationLossArgs),
+    /// Compute precision loss in distance computation resulting from vector quantization.
+    DistanceLoss(DistanceLossArgs),
 }
 
 #[derive(Args)]
@@ -70,6 +83,104 @@ fn quantization_loss(
     Ok(())
 }
 
+#[derive(Args)]
+struct DistanceLossArgs {
+    /// Little-endian f32 vectors of some dimensionality as input vectors.
+    #[arg(long)]
+    query_vectors: PathBuf,
+    /// If true, quantize queries before computing loss, bypassing any f32 x quantized query
+    /// vector distance implementation.
+    #[arg(long)]
+    quantize_query: bool,
+
+    /// Limit on the number of documents. If unset, use all input vectors as docs.
+    #[arg(long)]
+    doc_limit: Option<usize>,
+
+    /// Similarity function to use.
+    #[arg(long)]
+    similarity: VectorSimilarity,
+    /// Format to compare against f32 distance.
+    #[arg(long)]
+    format: F32VectorCoding,
+}
+
+fn distance_loss(
+    args: DistanceLossArgs,
+    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+) -> io::Result<()> {
+    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
+        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
+        NonZero::new(vectors.elem_stride()).unwrap(),
+    )?;
+
+    let coder = args.format.new_coder();
+    let quantized_query_vectors = if args.quantize_query {
+        let mut qvecs = VecVectorStore::with_capacity(
+            coder.byte_len(query_vectors.elem_stride()),
+            query_vectors.len(),
+        );
+        for qvec in query_vectors.iter() {
+            qvecs.push(&coder.encode(qvec));
+        }
+        Some(qvecs)
+    } else {
+        None
+    };
+
+    let query_scorers = (0..query_vectors.len())
+        .into_par_iter()
+        .map(|i| {
+            (
+                new_query_vector_distance_f32(
+                    &query_vectors[i],
+                    args.similarity,
+                    F32VectorCoding::Raw.adjust_raw_format(args.similarity),
+                ),
+                new_query_vector_distance_f32(&query_vectors[i], args.similarity, args.format),
+                quantized_query_vectors.as_ref().map(|v| {
+                    new_query_vector_distance_indexing(&v[i], args.similarity, args.format)
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let doc_limit = args.doc_limit.unwrap_or(vectors.len());
+
+    let (count, error_sum, error_sq_sum) = (0..doc_limit)
+        .into_par_iter()
+        .flat_map(|d| {
+            let doc = Arc::new(coder.encode(&vectors[d]));
+            (0..query_vectors.len())
+                .into_par_iter()
+                .map(move |q| (q, d, Arc::clone(&doc)))
+        })
+        .progress_count((query_scorers.len() * doc_limit) as u64)
+        .map(|(q, d, doc)| {
+            let (f32_dist, f32xq_dist, qxq_dist) = &query_scorers[q];
+            let qdist = qxq_dist.as_ref().unwrap_or_else(|| f32xq_dist);
+
+            let diff = f32_dist
+                .as_ref()
+                .distance(bytemuck::cast_slice(&vectors[d]))
+                - qdist.as_ref().distance(doc.as_ref());
+            (1, diff.abs(), diff * diff)
+        })
+        .reduce(
+            || (0, 0.0f64, 0.0f64),
+            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
+        );
+
+    // XXX error seems like a lot over 10k, but it's actually over 10k * num_queries.
+    println!(
+        "Vectors: {} mean abs error: {} mean square error: {}",
+        count,
+        error_sum / count as f64,
+        error_sq_sum / count as f64
+    );
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
@@ -79,5 +190,6 @@ fn main() -> io::Result<()> {
     )?;
     match cli.command {
         Command::QuantizationLoss(args) => quantization_loss(args, &vectors),
+        Command::DistanceLoss(args) => distance_loss(args, &vectors),
     }
 }

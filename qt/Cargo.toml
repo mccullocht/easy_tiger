@@ -8,3 +8,5 @@ easy_tiger = { path = "../" }
 clap = { version = "4.5.42", features = ["derive"] }
 memmap2 = { version = "0.9.7", features = ["stable_deref_trait"] }
 rayon = "1.10.0"
+indicatif = { version = "0.18.0", features = ["rayon"] }
+bytemuck = "1.23.1"

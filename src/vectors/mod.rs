@@ -14,6 +14,7 @@ use crate::vectors::{
 };
 
 mod binary;
+mod float16;
 mod raw;
 mod scaled_non_uniform;
 mod scaled_uniform;
@@ -141,6 +142,8 @@ pub enum F32VectorCoding {
     /// Little-endian f32 values encoded as bytes, but l2 normalized first.
     /// The resulting unit vectors can be used to cheaply compute angular distance.
     RawL2Normalized,
+    /// Little-endian IEEE f16 encoding.
+    F16,
     /// Single bit (sign bit) per dimension.
     ///
     /// This encoding is very compact and efficient for distance computation but also does not have
@@ -189,6 +192,7 @@ impl F32VectorCoding {
             Self::I8ScaledNonUniformQuantized(s) => {
                 Box::new(scaled_non_uniform::I8VectorCoder::new(*s))
             }
+            Self::F16 => Box::new(float16::F16VectorCoder),
         }
     }
 
@@ -225,6 +229,7 @@ impl F32VectorCoding {
             (Self::I8ScaledNonUniformQuantized(s), VectorSimilarity::Euclidean) => {
                 Some(Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s)))
             }
+            (Self::F16, _) => unimplemented!(),
         }
     }
 
@@ -251,6 +256,7 @@ impl FromStr for F32VectorCoding {
         match s {
             "raw" => Ok(Self::Raw),
             "raw-l2-norm" => Ok(Self::RawL2Normalized),
+            "f16" => Ok(Self::F16),
             "binary" => Ok(Self::BinaryQuantized),
             ab if ab.starts_with("asymmetric_binary:") => {
                 let bits_str = ab
@@ -289,6 +295,7 @@ impl std::fmt::Display for F32VectorCoding {
         match self {
             Self::Raw => write!(f, "raw"),
             Self::RawL2Normalized => write!(f, "raw-l2-norm"),
+            Self::F16 => write!(f, "f16"),
             Self::BinaryQuantized => write!(f, "binary"),
             Self::NBitBinaryQuantized(n) => write!(f, "asymmetric_binary:{}", *n),
             Self::I8ScaledUniformQuantized => write!(f, "i8-scaled-uniform"),
@@ -417,6 +424,7 @@ pub fn new_query_vector_distance_f32<'a>(
         (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             Box::new(scaled_non_uniform::I8EuclideanQueryDistance::new(s, query))
         }
+        (_, F32VectorCoding::F16) => unimplemented!(),
     }
 }
 
@@ -477,14 +485,15 @@ pub fn new_query_vector_distance_indexing<'a>(
                 query,
             ))
         }
+        (_, F32VectorCoding::F16) => unimplemented!(),
     }
 }
 
 #[cfg(test)]
 mod test {
     use crate::vectors::{
-        F32VectorCoder, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
-        new_query_vector_distance_f32,
+        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding,
+        NonUniformQuantizedDimensions, VectorSimilarity,
     };
 
     struct TestVector {

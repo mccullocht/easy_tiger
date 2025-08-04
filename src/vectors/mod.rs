@@ -429,6 +429,13 @@ pub fn new_query_vector_distance_f32<'a>(
         (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             Box::new(scaled_non_uniform::I8EuclideanQueryDistance::new(s, query))
         }
+        (VectorSimilarity::Dot, F32VectorCoding::MixedRepQuantization(s)) => {
+            Box::new(QuantizedQueryVectorDistance::from_f32(
+                mixed_rep::MixedRepDotProductDistance::new(s),
+                query,
+                mixed_rep::MixedRepVectorCoder::new(s),
+            ))
+        }
         (_, F32VectorCoding::MixedRepQuantization(_)) => unimplemented!(),
     }
 }
@@ -487,6 +494,12 @@ pub fn new_query_vector_distance_indexing<'a>(
         (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
                 scaled_non_uniform::I8EuclideanDistance::new(s),
+                query,
+            ))
+        }
+        (VectorSimilarity::Dot, F32VectorCoding::MixedRepQuantization(s)) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                mixed_rep::MixedRepDotProductDistance::new(s),
                 query,
             ))
         }

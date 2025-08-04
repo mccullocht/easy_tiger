@@ -1,6 +1,6 @@
 use simsimd::SpatialSimilarity;
 
-use crate::vectors::F32VectorCoder;
+use crate::vectors::{F32VectorCoder, VectorDistance};
 
 /// Encodes a mixed representatio of the vector split at a particular dimensions.
 /// Format:
@@ -67,5 +67,70 @@ impl F32VectorCoder for MixedRepVectorCoder {
                 )
                 .collect(),
         )
+    }
+}
+
+struct MixedRepVector<'a> {
+    split: usize,
+    rep: &'a [u8],
+}
+
+impl<'a> MixedRepVector<'a> {
+    fn new(split: usize, rep: &'a [u8]) -> Self {
+        Self { split, rep }
+    }
+
+    fn l2_norm(&self) -> f64 {
+        f32::from_le_bytes(self.rep[0..4].try_into().unwrap()).into()
+    }
+
+    fn scale(&self) -> f64 {
+        f32::from_le_bytes(self.rep[4..8].try_into().unwrap()).into()
+    }
+
+    fn f32_vector(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
+        self.rep[8..(8 + std::mem::size_of::<f32>() * self.split)]
+            .chunks(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+    }
+
+    fn i8_vector(&self) -> impl ExactSizeIterator<Item = i8> + '_ {
+        bytemuck::cast_slice(&self.rep[(8 + std::mem::size_of::<f32>() * self.split)..])
+            .iter()
+            .copied()
+    }
+
+    fn dot_unnormalized(&self, other: &Self) -> f64 {
+        let f32_segment = self
+            .f32_vector()
+            .zip(other.f32_vector())
+            .map(|(q, d)| q * d)
+            .sum::<f32>() as f64;
+        let i8_segment = self
+            .i8_vector()
+            .zip(other.i8_vector())
+            .map(|(q, d)| q as i32 * d as i32)
+            .sum::<i32>() as f64
+            * self.scale()
+            * other.scale();
+        f32_segment + i8_segment
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct MixedRepDotProductDistance(usize);
+
+impl MixedRepDotProductDistance {
+    pub fn new(split: usize) -> Self {
+        Self(split)
+    }
+}
+
+impl VectorDistance for MixedRepDotProductDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = MixedRepVector::new(self.0, query);
+        let doc = MixedRepVector::new(self.0, doc);
+        let dot = query.dot_unnormalized(&doc) / (query.l2_norm() * doc.l2_norm());
+        (-dot + 1.0) / 2.0
     }
 }

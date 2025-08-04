@@ -14,6 +14,7 @@ use crate::vectors::{
 };
 
 mod binary;
+mod mixed_rep;
 mod raw;
 mod scaled_non_uniform;
 mod scaled_uniform;
@@ -174,6 +175,8 @@ pub enum F32VectorCoding {
     /// This is aimed at MRL vectors that are designed to be truncated and may have different value
     /// distributions in different segments.
     I8ScaledNonUniformQuantized(NonUniformQuantizedDimensions),
+    // XXX docos
+    MixedRepQuantization(usize),
 }
 
 impl F32VectorCoding {
@@ -189,6 +192,7 @@ impl F32VectorCoding {
             Self::I8ScaledNonUniformQuantized(s) => {
                 Box::new(scaled_non_uniform::I8VectorCoder::new(*s))
             }
+            Self::MixedRepQuantization(s) => Box::new(mixed_rep::MixedRepVectorCoder::new(*s)),
         }
     }
 
@@ -225,6 +229,7 @@ impl F32VectorCoding {
             (Self::I8ScaledNonUniformQuantized(s), VectorSimilarity::Euclidean) => {
                 Some(Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s)))
             }
+            (Self::MixedRepQuantization(_), _) => unimplemented!(),
         }
     }
 
@@ -279,6 +284,12 @@ impl FromStr for F32VectorCoding {
                 .map_err(|e| input_err(e.into()))?;
                 Ok(Self::I8ScaledNonUniformQuantized(splits))
             }
+            s if s.starts_with("mixed-rep:") => {
+                let s = s.strip_prefix("mixed-rep:").expect("prefix matched");
+                s.parse::<usize>()
+                    .map(Self::MixedRepQuantization)
+                    .map_err(|_| input_err("split point could not be parse as usize".into()))
+            }
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -302,6 +313,7 @@ impl std::fmt::Display for F32VectorCoding {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            Self::MixedRepQuantization(s) => write!(f, "mixed-rep:{s}"),
         }
     }
 }
@@ -417,6 +429,7 @@ pub fn new_query_vector_distance_f32<'a>(
         (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             Box::new(scaled_non_uniform::I8EuclideanQueryDistance::new(s, query))
         }
+        (_, F32VectorCoding::MixedRepQuantization(_)) => unimplemented!(),
     }
 }
 
@@ -477,14 +490,15 @@ pub fn new_query_vector_distance_indexing<'a>(
                 query,
             ))
         }
+        (_, F32VectorCoding::MixedRepQuantization(_)) => unimplemented!(),
     }
 }
 
 #[cfg(test)]
 mod test {
     use crate::vectors::{
-        F32VectorCoder, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
-        new_query_vector_distance_f32,
+        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding,
+        NonUniformQuantizedDimensions, VectorSimilarity,
     };
 
     struct TestVector {

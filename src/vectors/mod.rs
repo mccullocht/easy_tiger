@@ -377,11 +377,16 @@ pub fn new_query_vector_distance_f32<'a>(
         )),
         (Dot, F32VectorCoding::F16) => Box::new(float16::DotProductQueryDistance::new(query)),
         (Euclidean, F32VectorCoding::F16) => Box::new(float16::EuclideanQueryDistance::new(query)),
-        (_, F32VectorCoding::BinaryQuantized) => Box::new(QuantizedQueryVectorDistance::from_f32(
-            HammingDistance,
-            query,
-            BinaryQuantizedVectorCoder,
-        )),
+        (Dot, F32VectorCoding::BinaryQuantized) => {
+            Box::new(binary::DotProductQueryDistance::new(query))
+        }
+        (Euclidean, F32VectorCoding::BinaryQuantized) => {
+            Box::new(QuantizedQueryVectorDistance::from_f32(
+                HammingDistance,
+                query,
+                BinaryQuantizedVectorCoder,
+            ))
+        }
         (_, F32VectorCoding::NBitBinaryQuantized(n)) => {
             Box::new(QuantizedQueryVectorDistance::from_f32(
                 AsymmetricHammingDistance,

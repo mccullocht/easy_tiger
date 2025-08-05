@@ -1,6 +1,6 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use easy_tiger::vectors::{
-    F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity, new_query_vector_distance_f32,
+    new_query_vector_distance_f32, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
 };
 use rand::{Rng, SeedableRng};
 
@@ -69,87 +69,27 @@ pub fn float32_benchmarks(c: &mut Criterion) {
     );
 }
 
+pub fn float16_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(c, F32VectorCoding::F16);
+}
+
 pub fn i8_scaled_uniform_benchmarks(c: &mut Criterion) {
-    let (x, y) = generate_test_vectors(1024);
-
-    benchmark_distance(
-        "i8-scaled-uniform/doc/dot",
-        &x,
-        &y,
-        F32VectorCoding::I8ScaledUniformQuantized,
-        VectorSimilarity::Dot,
-        c,
-    );
-    benchmark_distance(
-        "i8-scaled-uniform/doc/l2",
-        &x,
-        &y,
-        F32VectorCoding::I8ScaledUniformQuantized,
-        VectorSimilarity::Euclidean,
-        c,
-    );
-
-    benchmark_query_distance(
-        "i8-scaled-uniform/query/dot",
-        &x,
-        &y,
-        F32VectorCoding::I8ScaledUniformQuantized,
-        VectorSimilarity::Dot,
-        c,
-    );
-    benchmark_query_distance(
-        "i8-scaled-uniform/query/l2",
-        &x,
-        &y,
-        F32VectorCoding::I8ScaledUniformQuantized,
-        VectorSimilarity::Euclidean,
-        c,
-    );
+    query_and_doc_benchmarks(c, F32VectorCoding::I8ScaledUniformQuantized);
 }
 
 pub fn i4_scaled_uniform_benchmarks(c: &mut Criterion) {
-    let (x, y) = generate_test_vectors(1024);
-
-    benchmark_distance(
-        "i4-scaled-uniform/doc/dot",
-        &x,
-        &y,
-        F32VectorCoding::I4ScaledUniformQuantized,
-        VectorSimilarity::Dot,
-        c,
-    );
-    benchmark_distance(
-        "i4-scaled-uniform/doc/l2",
-        &x,
-        &y,
-        F32VectorCoding::I4ScaledUniformQuantized,
-        VectorSimilarity::Euclidean,
-        c,
-    );
-
-    benchmark_query_distance(
-        "i4-scaled-uniform/query/dot",
-        &x,
-        &y,
-        F32VectorCoding::I4ScaledUniformQuantized,
-        VectorSimilarity::Dot,
-        c,
-    );
-    benchmark_query_distance(
-        "i4-scaled-uniform/query/l2",
-        &x,
-        &y,
-        F32VectorCoding::I4ScaledUniformQuantized,
-        VectorSimilarity::Euclidean,
-        c,
-    );
+    query_and_doc_benchmarks(c, F32VectorCoding::I4ScaledUniformQuantized);
 }
 
 pub fn i8_scaled_non_uniform_benchmarks(c: &mut Criterion) {
-    let (x, y) = generate_test_vectors(1024);
     let format = F32VectorCoding::I8ScaledNonUniformQuantized(
         NonUniformQuantizedDimensions::try_from([256, 512].as_slice()).unwrap(),
     );
+    query_and_doc_benchmarks(c, format);
+}
+
+fn query_and_doc_benchmarks(c: &mut Criterion, format: F32VectorCoding) {
+    let (x, y) = generate_test_vectors(1024);
     for similarity in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
         benchmark_distance(
             &format!("{format}/doc/{similarity}"),
@@ -186,6 +126,7 @@ pub fn u1_benchmarks(c: &mut Criterion) {
 criterion_group!(
     benches,
     float32_benchmarks,
+    float16_benchmarks,
     i8_scaled_uniform_benchmarks,
     i4_scaled_uniform_benchmarks,
     i8_scaled_non_uniform_benchmarks,

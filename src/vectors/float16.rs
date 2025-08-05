@@ -42,8 +42,7 @@ pub struct F16DotProductDistance;
 
 impl VectorDistance for F16DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // XXX lol this makes f32 dot product look _cheap_. 35x more accurate than i8-su qxq
-        // in all native f16 math it is less accurate than i8 _and_ 3x more expensive.
+        // TODO: vector accelerate this when necessary bits stabilize (or use C).
         let dot = f16_iter(query)
             .zip(f16_iter(doc))
             .map(|(q, d)| q.to_f32() * d.to_f32())
@@ -63,8 +62,7 @@ impl<'a> F16DotProductQueryDistance<'a> {
 
 impl QueryVectorDistance for F16DotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        // XXX just as stupidly expensive as f16xf16 dot product, but now 50x more accurate than
-        // i8-su qxq and 35x more accurate than f32xq
+        // TODO: vector accelerate this when necessary bits stabilize (or use C).
         let dot = self
             .0
             .iter()
@@ -80,6 +78,7 @@ pub struct F16EuclideanDistance;
 
 impl VectorDistance for F16EuclideanDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        // TODO: vector accelerate this when necessary bits stabilize (or use C).
         f16_iter(query)
             .zip(f16_iter(doc))
             .map(|(q, d)| {
@@ -101,15 +100,14 @@ impl<'a> F16EuclideanQueryDistance<'a> {
 
 impl QueryVectorDistance for F16EuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
+        // TODO: vector accelerate this when necessary bits stabilize (or use C).
         self.0
             .iter()
             .zip(vector.chunks_exact(2))
             .map(|(s, o)| {
-                let diff = *s * f16::from_le_bytes(o.try_into().unwrap()).to_f32();
+                let diff = *s - f16::from_le_bytes(o.try_into().unwrap()).to_f32();
                 diff * diff
             })
             .sum::<f32>() as f64
     }
 }
-
-// XXX direct f16 x f32 distance computation as QueryVectorDistance.

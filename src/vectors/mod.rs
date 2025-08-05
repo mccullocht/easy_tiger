@@ -611,9 +611,25 @@ mod test {
     }
 
     use F32VectorCoding::{
-        I4ScaledUniformQuantized, I8ScaledNonUniformQuantized, I8ScaledUniformQuantized,
+        I4ScaledUniformQuantized, I8ScaledNonUniformQuantized, I8ScaledUniformQuantized, F16,
     };
     use VectorSimilarity::{Dot, Euclidean};
+
+    #[test]
+    fn f16_dot() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, F16, i, &a, &b, 0.001);
+            query_distance_compare(Dot, F16, i, &a, &b, 0.001);
+        }
+    }
+
+    #[test]
+    fn f16_l2() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Euclidean, F16, i, &a, &b, 0.001);
+            query_distance_compare(Euclidean, F16, i, &a, &b, 0.001);
+        }
+    }
 
     #[test]
     fn i8_scaled_dot() {
@@ -668,6 +684,4 @@ mod test {
             query_distance_compare(Euclidean, format, i, &a, &b, 0.01);
         }
     }
-
-    // XXX add tests for f16.
 }

@@ -51,13 +51,16 @@ fn quantization_loss(
     args: QuantizationLossArgs,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
 ) -> io::Result<()> {
-    let coder = args.format.new_coder();
+    // Assume Euclidean. It might be best to make this configurable as some encodings might perform
+    // better when the inputs are l2 normalized.
+    let coder = args.format.new_coder(VectorSimilarity::Euclidean);
     assert!(
         coder.decode(&coder.encode(&vectors[0])).is_some(),
         "specified vector format doesn't support decoding"
     );
     let (abs_error, sq_error) = (0..vectors.len())
         .into_par_iter()
+        .progress_count(vectors.len() as u64)
         .map(|i| {
             let v = &vectors[i];
             let encoded = coder.encode(v);
@@ -114,7 +117,7 @@ fn distance_loss(
         NonZero::new(vectors.elem_stride()).unwrap(),
     )?;
 
-    let coder = args.format.new_coder();
+    let coder = args.format.new_coder(args.similarity);
     let quantized_query_vectors = if args.quantize_query {
         let mut qvecs = VecVectorStore::with_capacity(
             coder.byte_len(query_vectors.elem_stride()),
@@ -135,7 +138,7 @@ fn distance_loss(
                 new_query_vector_distance_f32(
                     &query_vectors[i],
                     args.similarity,
-                    F32VectorCoding::Raw.adjust_raw_format(args.similarity),
+                    F32VectorCoding::F32,
                 ),
                 new_query_vector_distance_f32(&query_vectors[i], args.similarity, args.format),
                 quantized_query_vectors.as_ref().map(|v| {
@@ -171,7 +174,6 @@ fn distance_loss(
             |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
         );
 
-    // XXX error seems like a lot over 10k, but it's actually over 10k * num_queries.
     println!(
         "Vectors: {} mean abs error: {} mean square error: {}",
         count,

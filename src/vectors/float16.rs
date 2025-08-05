@@ -9,15 +9,15 @@ use crate::{
 };
 
 #[derive(Debug, Copy, Clone)]
-pub struct F16VectorCoder(bool);
+pub struct VectorCoder(bool);
 
-impl F16VectorCoder {
+impl VectorCoder {
     pub fn new(similarity: VectorSimilarity) -> Self {
         Self(similarity.l2_normalize())
     }
 }
 
-impl F32VectorCoder for F16VectorCoder {
+impl F32VectorCoder for VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let encode_it = vector.iter().zip(out.chunks_mut(2));
         if self.0 {
@@ -55,9 +55,9 @@ fn f16_iter(raw: &[u8]) -> impl ExactSizeIterator<Item = f16> + '_ {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct F16DotProductDistance;
+pub struct DotProductDistance;
 
-impl VectorDistance for F16DotProductDistance {
+impl VectorDistance for DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // TODO: vector accelerate this when necessary bits stabilize (or use C).
         let dot = f16_iter(query)
@@ -69,15 +69,15 @@ impl VectorDistance for F16DotProductDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct F16DotProductQueryDistance<'a>(Cow<'a, [f32]>);
+pub struct DotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
-impl<'a> F16DotProductQueryDistance<'a> {
+impl<'a> DotProductQueryDistance<'a> {
     pub fn new(query: &'a [f32]) -> Self {
         Self(l2_normalize(query))
     }
 }
 
-impl QueryVectorDistance for F16DotProductQueryDistance<'_> {
+impl QueryVectorDistance for DotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         // TODO: vector accelerate this when necessary bits stabilize (or use C).
         let dot = self
@@ -91,9 +91,9 @@ impl QueryVectorDistance for F16DotProductQueryDistance<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct F16EuclideanDistance;
+pub struct EuclideanDistance;
 
-impl VectorDistance for F16EuclideanDistance {
+impl VectorDistance for EuclideanDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // TODO: vector accelerate this when necessary bits stabilize (or use C).
         f16_iter(query)
@@ -107,15 +107,15 @@ impl VectorDistance for F16EuclideanDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct F16EuclideanQueryDistance<'a>(&'a [f32]);
+pub struct EuclideanQueryDistance<'a>(&'a [f32]);
 
-impl<'a> F16EuclideanQueryDistance<'a> {
+impl<'a> EuclideanQueryDistance<'a> {
     pub fn new(query: &'a [f32]) -> Self {
         Self(query)
     }
 }
 
-impl QueryVectorDistance for F16EuclideanQueryDistance<'_> {
+impl QueryVectorDistance for EuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         // TODO: vector accelerate this when necessary bits stabilize (or use C).
         self.0

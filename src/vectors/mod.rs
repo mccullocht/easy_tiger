@@ -426,16 +426,10 @@ pub fn new_query_vector_distance_f32<'a>(
         (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             Box::new(scaled_non_uniform::I8EuclideanQueryDistance::new(s, query))
         }
-        (Dot, F32VectorCoding::F16) => Box::new(QuantizedQueryVectorDistance::from_f32(
-            float16::F16DotProductDistance,
-            query,
-            float16::F16VectorCoder,
-        )),
-        (Euclidean, F32VectorCoding::F16) => Box::new(QuantizedQueryVectorDistance::from_f32(
-            float16::F16EuclideanDistance,
-            query,
-            float16::F16VectorCoder,
-        )),
+        (Dot, F32VectorCoding::F16) => Box::new(float16::F16DotProductQueryDistance::new(query)),
+        (Euclidean, F32VectorCoding::F16) => {
+            Box::new(float16::F16EuclideanQueryDistance::new(query))
+        }
     }
 }
 
@@ -445,58 +439,66 @@ pub fn new_query_vector_distance_indexing<'a>(
     similarity: VectorSimilarity,
     coding: F32VectorCoding,
 ) -> Box<dyn QueryVectorDistance + 'a> {
+    use VectorSimilarity::{Dot, Euclidean};
     match (similarity, coding) {
-        (VectorSimilarity::Dot, F32VectorCoding::Raw)
-        | (VectorSimilarity::Dot, F32VectorCoding::RawL2Normalized) => Box::new(
+        (Dot, F32VectorCoding::Raw) | (Dot, F32VectorCoding::RawL2Normalized) => Box::new(
             QuantizedQueryVectorDistance::from_quantized(F32DotProductDistance, query),
         ),
-        (VectorSimilarity::Euclidean, F32VectorCoding::Raw)
-        | (VectorSimilarity::Euclidean, F32VectorCoding::RawL2Normalized) => Box::new(
-            QuantizedQueryVectorDistance::from_quantized(F32EuclideanDistance, query),
-        ),
+        (Euclidean, F32VectorCoding::Raw) | (Euclidean, F32VectorCoding::RawL2Normalized) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                F32EuclideanDistance,
+                query,
+            ))
+        }
         (_, F32VectorCoding::BinaryQuantized) => Box::new(
             QuantizedQueryVectorDistance::from_quantized(HammingDistance, query),
         ),
         (_, F32VectorCoding::NBitBinaryQuantized(_)) => Box::new(
             QuantizedQueryVectorDistance::from_quantized(HammingDistance, query),
         ),
-        (VectorSimilarity::Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
+        (Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
                 scaled_uniform::I8DotProductDistance,
                 query,
             ))
         }
-        (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
+        (Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
                 scaled_uniform::I8EuclideanDistance,
                 query,
             ))
         }
-        (VectorSimilarity::Dot, F32VectorCoding::I4ScaledUniformQuantized) => {
+        (Dot, F32VectorCoding::I4ScaledUniformQuantized) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
                 scaled_uniform::I4PackedDotProductDistance,
                 query,
             ))
         }
-        (VectorSimilarity::Euclidean, F32VectorCoding::I4ScaledUniformQuantized) => {
+        (Euclidean, F32VectorCoding::I4ScaledUniformQuantized) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
                 scaled_uniform::I4PackedEuclideanDistance,
                 query,
             ))
         }
-        (VectorSimilarity::Dot, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
+        (Dot, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
                 scaled_non_uniform::I8DotProductDistance::new(s),
                 query,
             ))
         }
-        (VectorSimilarity::Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
+        (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
                 scaled_non_uniform::I8EuclideanDistance::new(s),
                 query,
             ))
         }
-        (_, F32VectorCoding::F16) => unimplemented!(),
+        (Dot, F32VectorCoding::F16) => Box::new(QuantizedQueryVectorDistance::from_quantized(
+            float16::F16DotProductDistance,
+            query,
+        )),
+        (Euclidean, F32VectorCoding::F16) => Box::new(
+            QuantizedQueryVectorDistance::from_quantized(float16::F16EuclideanDistance, query),
+        ),
     }
 }
 
@@ -666,4 +668,6 @@ mod test {
             query_distance_compare(Euclidean, format, i, &a, &b, 0.01);
         }
     }
+
+    // XXX add tests for f16.
 }

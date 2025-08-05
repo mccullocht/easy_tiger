@@ -58,6 +58,7 @@ fn quantization_loss(
     );
     let (abs_error, sq_error) = (0..vectors.len())
         .into_par_iter()
+        .progress_count(vectors.len() as u64)
         .map(|i| {
             let v = &vectors[i];
             let encoded = coder.encode(v);

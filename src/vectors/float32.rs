@@ -10,21 +10,19 @@ use simsimd::SpatialSimilarity;
 
 use crate::{
     distance::{dot_f32, dot_f32_bytes, l2sq_f32, l2sq_f32_bytes},
-    vectors::{
-        F32VectorCoder, F32VectorDistance, QueryVectorDistance, VectorDistance, VectorSimilarity,
-    },
+    vectors::{F32VectorCoder, F32VectorDistance, VectorDistance, VectorSimilarity},
 };
 
 #[derive(Debug, Copy, Clone)]
-pub struct RawF32VectorCoder(bool);
+pub struct VectorCoder(bool);
 
-impl RawF32VectorCoder {
+impl VectorCoder {
     pub fn new(similarity: VectorSimilarity) -> Self {
         Self(similarity.l2_normalize())
     }
 }
 
-impl F32VectorCoder for RawF32VectorCoder {
+impl F32VectorCoder for VectorCoder {
     fn byte_len(&self, dimensions: usize) -> usize {
         dimensions * std::mem::size_of::<f32>()
     }
@@ -65,15 +63,15 @@ impl F32VectorCoder for RawF32VectorCoder {
 
 /// Computes a score based on l2 distance.
 #[derive(Debug, Copy, Clone)]
-pub struct F32EuclideanDistance;
+pub struct EuclideanDistance;
 
-impl VectorDistance for F32EuclideanDistance {
+impl VectorDistance for EuclideanDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         l2sq_f32_bytes(query, doc)
     }
 }
 
-impl F32VectorDistance for F32EuclideanDistance {
+impl F32VectorDistance for EuclideanDistance {
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
         l2sq_f32(a, b)
     }
@@ -81,16 +79,16 @@ impl F32VectorDistance for F32EuclideanDistance {
 
 /// Computes a score based on the dot product.
 #[derive(Debug, Copy, Clone)]
-pub struct F32DotProductDistance;
+pub struct DotProductDistance;
 
-impl VectorDistance for F32DotProductDistance {
+impl VectorDistance for DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // Assuming values are normalized, this will produce a distance in [0,1]
         (-dot_f32_bytes(query, doc) + 1.0) / 2.0
     }
 }
 
-impl F32VectorDistance for F32DotProductDistance {
+impl F32VectorDistance for DotProductDistance {
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
         // Assuming values are normalized, this will produce a distance in [0,1]
         (-dot_f32(a, b) + 1.0) / 2.0
@@ -98,12 +96,12 @@ impl F32VectorDistance for F32DotProductDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct F32QueryVectorDistance<'a, D> {
+pub struct QueryVectorDistance<'a, D> {
     distance_fn: D,
     query: Cow<'a, [f32]>,
 }
 
-impl<'a, D: F32VectorDistance> F32QueryVectorDistance<'a, D> {
+impl<'a, D: F32VectorDistance> QueryVectorDistance<'a, D> {
     pub fn new(distance_fn: D, query: &'a [f32], l2_normalize: bool) -> Self {
         let query = if l2_normalize {
             crate::distance::l2_normalize(query)
@@ -114,7 +112,7 @@ impl<'a, D: F32VectorDistance> F32QueryVectorDistance<'a, D> {
     }
 }
 
-impl<'a, D: F32VectorDistance> QueryVectorDistance for F32QueryVectorDistance<'a, D> {
+impl<'a, D: F32VectorDistance> super::QueryVectorDistance for QueryVectorDistance<'a, D> {
     fn distance(&self, vector: &[u8]) -> f64 {
         self.distance_fn
             .distance(bytemuck::cast_slice(self.query.as_ref()), vector)

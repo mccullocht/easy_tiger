@@ -432,7 +432,7 @@ mod test {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
                 nav_format: F32VectorCoding::BinaryQuantized,
-                rerank_format: F32VectorCoding::Raw,
+                rerank_format: F32VectorCoding::F32,
                 layout: GraphLayout::Split,
                 max_edges,
                 index_search_params: GraphSearchParams {

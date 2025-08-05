@@ -138,7 +138,7 @@ fn distance_loss(
                 new_query_vector_distance_f32(
                     &query_vectors[i],
                     args.similarity,
-                    F32VectorCoding::Raw,
+                    F32VectorCoding::F32,
                 ),
                 new_query_vector_distance_f32(&query_vectors[i], args.similarity, args.format),
                 quantized_query_vectors.as_ref().map(|v| {

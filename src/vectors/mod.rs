@@ -43,6 +43,11 @@ impl VectorSimilarity {
             Self::Dot => Box::new(F32DotProductDistance),
         }
     }
+
+    /// Return true if vectors must be l2 normalized during encoding.
+    pub fn l2_normalize(&self) -> bool {
+        matches!(self, Self::Dot)
+    }
 }
 
 impl FromStr for VectorSimilarity {
@@ -137,8 +142,11 @@ impl TryFrom<&[u16]> for NonUniformQuantizedDimensions {
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum F32VectorCoding {
     /// Little-endian f32 values encoded as bytes.
+    ///
+    /// Depending on the similarity function this may be normalied or transformed in some other way
+    /// so users should not rely on the value being identical.
     #[default]
-    Raw,
+    Raw, // XXX name should be F32
     /// Little-endian f32 values encoded as bytes, but l2 normalized first.
     /// The resulting unit vectors can be used to cheaply compute angular distance.
     RawL2Normalized,
@@ -181,11 +189,11 @@ pub enum F32VectorCoding {
 
 impl F32VectorCoding {
     /// Create a new coder for this format.
-    #[allow(unused_variables)] // XXX
     pub fn new_coder(&self, similarity: VectorSimilarity) -> Box<dyn F32VectorCoder> {
         match self {
-            Self::Raw => Box::new(RawF32VectorCoder),
+            Self::Raw => Box::new(RawF32VectorCoder::new(similarity)),
             Self::RawL2Normalized => Box::new(RawL2NormalizedF32VectorCoder),
+            Self::F16 => Box::new(float16::F16VectorCoder::new(similarity)),
             Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
             Self::I8ScaledUniformQuantized => Box::new(scaled_uniform::I8VectorCoder),
@@ -193,7 +201,6 @@ impl F32VectorCoding {
             Self::I8ScaledNonUniformQuantized(s) => {
                 Box::new(scaled_non_uniform::I8VectorCoder::new(*s))
             }
-            Self::F16 => Box::new(float16::F16VectorCoder),
         }
     }
 

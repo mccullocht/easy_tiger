@@ -10,11 +10,19 @@ use simsimd::SpatialSimilarity;
 
 use crate::{
     distance::{dot_f32, dot_f32_bytes, l2sq_f32, l2sq_f32_bytes},
-    vectors::{F32VectorCoder, F32VectorDistance, QueryVectorDistance, VectorDistance},
+    vectors::{
+        F32VectorCoder, F32VectorDistance, QueryVectorDistance, VectorDistance, VectorSimilarity,
+    },
 };
 
 #[derive(Debug, Copy, Clone)]
-pub struct RawF32VectorCoder;
+pub struct RawF32VectorCoder(bool);
+
+impl RawF32VectorCoder {
+    pub fn new(similarity: VectorSimilarity) -> Self {
+        Self(similarity.l2_normalize())
+    }
+}
 
 impl F32VectorCoder for RawF32VectorCoder {
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -23,11 +31,21 @@ impl F32VectorCoder for RawF32VectorCoder {
 
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         assert!(out.len() >= std::mem::size_of_val(vector));
-        for (d, o) in vector
+        let encode_it = vector
             .iter()
-            .zip(out.chunks_mut(std::mem::size_of::<f32>()))
-        {
-            o.copy_from_slice(&d.to_le_bytes());
+            .zip(out.chunks_mut(std::mem::size_of::<f32>()));
+        if self.0 {
+            let scale = (1.0
+                / SpatialSimilarity::dot(vector, vector)
+                    .expect("identical vectors")
+                    .sqrt()) as f32;
+            for (d, o) in encode_it {
+                o.copy_from_slice(&(*d * scale).to_le_bytes());
+            }
+        } else {
+            for (d, o) in encode_it {
+                o.copy_from_slice(&d.to_le_bytes());
+            }
         }
     }
 
@@ -36,6 +54,8 @@ impl F32VectorCoder for RawF32VectorCoder {
     }
 
     fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        // NB: if the input value was l2 normalized we can't recreate that value -- we've already
+        // discarded the norm.
         let f32_len = std::mem::size_of::<f32>();
         assert!(encoded.len() % f32_len == 0);
         Some(

@@ -1,20 +1,38 @@
 use std::borrow::Cow;
 
 use half::f16;
+use simsimd::SpatialSimilarity;
 
 use crate::{
     distance::l2_normalize,
-    vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance},
+    vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity},
 };
 
 // XXX creators should be forced to provide a similarity so I can normalize for dot.
 #[derive(Debug, Copy, Clone)]
-pub struct F16VectorCoder;
+pub struct F16VectorCoder(bool);
+
+impl F16VectorCoder {
+    pub fn new(similarity: VectorSimilarity) -> Self {
+        Self(similarity.l2_normalize())
+    }
+}
 
 impl F32VectorCoder for F16VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        for (d, o) in vector.iter().zip(out.chunks_mut(2)) {
-            o.copy_from_slice(&f16::from_f32(*d).to_le_bytes());
+        let encode_it = vector.iter().zip(out.chunks_mut(2));
+        if self.0 {
+            let scale = (1.0
+                / SpatialSimilarity::dot(vector, vector)
+                    .expect("identical vectors")
+                    .sqrt()) as f32;
+            for (d, o) in encode_it {
+                o.copy_from_slice(&f16::from_f32(*d * scale).to_le_bytes());
+            }
+        } else {
+            for (d, o) in encode_it {
+                o.copy_from_slice(&f16::from_f32(*d).to_le_bytes());
+            }
         }
     }
 

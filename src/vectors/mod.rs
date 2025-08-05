@@ -7,10 +7,7 @@ use crate::vectors::{
         AsymmetricBinaryQuantizedVectorCoder, AsymmetricHammingDistance,
         BinaryQuantizedVectorCoder, HammingDistance,
     },
-    raw::{
-        F32DotProductDistance, F32EuclideanDistance, F32QueryVectorDistance, RawF32VectorCoder,
-        RawL2NormalizedF32VectorCoder,
-    },
+    raw::{F32DotProductDistance, F32EuclideanDistance, F32QueryVectorDistance, RawF32VectorCoder},
 };
 
 mod binary;
@@ -141,15 +138,12 @@ impl TryFrom<&[u16]> for NonUniformQuantizedDimensions {
 /// varying degrees of compression and fidelity in distance computation.
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum F32VectorCoding {
-    /// Little-endian f32 values encoded as bytes.
+    /// Little-endian f32 values.
     ///
     /// Depending on the similarity function this may be normalied or transformed in some other way
     /// so users should not rely on the value being identical.
     #[default]
     Raw, // XXX name should be F32
-    /// Little-endian f32 values encoded as bytes, but l2 normalized first.
-    /// The resulting unit vectors can be used to cheaply compute angular distance.
-    RawL2Normalized,
     /// Little-endian IEEE f16 encoding.
     F16,
     /// Single bit (sign bit) per dimension.
@@ -192,7 +186,6 @@ impl F32VectorCoding {
     pub fn new_coder(&self, similarity: VectorSimilarity) -> Box<dyn F32VectorCoder> {
         match self {
             Self::Raw => Box::new(RawF32VectorCoder::new(similarity)),
-            Self::RawL2Normalized => Box::new(RawL2NormalizedF32VectorCoder),
             Self::F16 => Box::new(float16::F16VectorCoder::new(similarity)),
             Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
@@ -212,11 +205,7 @@ impl F32VectorCoding {
     ) -> Option<Box<dyn VectorDistance>> {
         match (self, similarity) {
             (Self::Raw, VectorSimilarity::Dot) => Some(Box::new(F32DotProductDistance)),
-            (Self::RawL2Normalized, VectorSimilarity::Dot) => Some(Box::new(F32DotProductDistance)),
             (Self::Raw, VectorSimilarity::Euclidean) => Some(Box::new(F32EuclideanDistance)),
-            (Self::RawL2Normalized, VectorSimilarity::Euclidean) => {
-                Some(Box::new(F32EuclideanDistance))
-            }
             (Self::BinaryQuantized, _) => Some(Box::new(HammingDistance)),
             (Self::NBitBinaryQuantized(_), _) => None,
             (Self::I8ScaledUniformQuantized, VectorSimilarity::Dot) => {
@@ -249,14 +238,6 @@ impl F32VectorCoding {
     pub fn is_symmetric(&self) -> bool {
         !matches!(self, Self::NBitBinaryQuantized(_))
     }
-
-    /// Adjust raw format to normalize for angular similarity.
-    pub fn adjust_raw_format(&self, similarity: VectorSimilarity) -> Self {
-        match (self, similarity) {
-            (Self::Raw, VectorSimilarity::Dot) => Self::RawL2Normalized,
-            (_, _) => *self,
-        }
-    }
 }
 
 impl FromStr for F32VectorCoding {
@@ -265,8 +246,7 @@ impl FromStr for F32VectorCoding {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let input_err = |s| io::Error::new(io::ErrorKind::InvalidInput, s);
         match s {
-            "raw" => Ok(Self::Raw),
-            "raw-l2-norm" => Ok(Self::RawL2Normalized),
+            "raw" | "raw-l2-norm" => Ok(Self::Raw),
             "f16" => Ok(Self::F16),
             "binary" => Ok(Self::BinaryQuantized),
             ab if ab.starts_with("asymmetric_binary:") => {
@@ -305,7 +285,6 @@ impl std::fmt::Display for F32VectorCoding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Raw => write!(f, "raw"),
-            Self::RawL2Normalized => write!(f, "raw-l2-norm"),
             Self::F16 => write!(f, "f16"),
             Self::BinaryQuantized => write!(f, "binary"),
             Self::NBitBinaryQuantized(n) => write!(f, "asymmetric_binary:{}", *n),
@@ -391,20 +370,16 @@ pub fn new_query_vector_distance_f32<'a>(
 ) -> Box<dyn QueryVectorDistance + 'a> {
     use VectorSimilarity::{Dot, Euclidean};
     match (similarity, coding) {
-        (Dot, F32VectorCoding::Raw) | (Dot, F32VectorCoding::RawL2Normalized) => {
-            Box::new(F32QueryVectorDistance::new(
-                F32DotProductDistance,
-                query,
-                matches!(coding, F32VectorCoding::RawL2Normalized),
-            ))
-        }
-        (Euclidean, F32VectorCoding::Raw) | (Euclidean, F32VectorCoding::RawL2Normalized) => {
-            Box::new(F32QueryVectorDistance::new(
-                F32EuclideanDistance,
-                query,
-                matches!(coding, F32VectorCoding::RawL2Normalized),
-            ))
-        }
+        (Dot, F32VectorCoding::Raw) => Box::new(F32QueryVectorDistance::new(
+            F32DotProductDistance,
+            query,
+            true,
+        )),
+        (Euclidean, F32VectorCoding::Raw) => Box::new(F32QueryVectorDistance::new(
+            F32EuclideanDistance,
+            query,
+            false,
+        )),
         (_, F32VectorCoding::BinaryQuantized) => Box::new(QuantizedQueryVectorDistance::from_f32(
             HammingDistance,
             query,
@@ -450,15 +425,13 @@ pub fn new_query_vector_distance_indexing<'a>(
 ) -> Box<dyn QueryVectorDistance + 'a> {
     use VectorSimilarity::{Dot, Euclidean};
     match (similarity, coding) {
-        (Dot, F32VectorCoding::Raw) | (Dot, F32VectorCoding::RawL2Normalized) => Box::new(
-            QuantizedQueryVectorDistance::from_quantized(F32DotProductDistance, query),
+        (Dot, F32VectorCoding::Raw) => Box::new(QuantizedQueryVectorDistance::from_quantized(
+            F32DotProductDistance,
+            query,
+        )),
+        (Euclidean, F32VectorCoding::Raw) => Box::new(
+            QuantizedQueryVectorDistance::from_quantized(F32EuclideanDistance, query),
         ),
-        (Euclidean, F32VectorCoding::Raw) | (Euclidean, F32VectorCoding::RawL2Normalized) => {
-            Box::new(QuantizedQueryVectorDistance::from_quantized(
-                F32EuclideanDistance,
-                query,
-            ))
-        }
         (_, F32VectorCoding::BinaryQuantized) => Box::new(
             QuantizedQueryVectorDistance::from_quantized(HammingDistance, query),
         ),
@@ -529,12 +502,7 @@ mod test {
             similarity: VectorSimilarity,
             coder: &(impl F32VectorCoder + ?Sized),
         ) -> Self {
-            // XXX remove me!
-            let f32_coder = match similarity {
-                VectorSimilarity::Dot => F32VectorCoding::RawL2Normalized,
-                VectorSimilarity::Euclidean => F32VectorCoding::Raw,
-            }
-            .new_coder(similarity);
+            let f32_coder = F32VectorCoding::Raw.new_coder(similarity);
             let rvec = f32_coder
                 .encode(vec)
                 .chunks(4)

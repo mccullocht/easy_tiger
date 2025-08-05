@@ -138,7 +138,7 @@ fn distance_loss(
                 new_query_vector_distance_f32(
                     &query_vectors[i],
                     args.similarity,
-                    F32VectorCoding::Raw.adjust_raw_format(args.similarity),
+                    F32VectorCoding::Raw,
                 ),
                 new_query_vector_distance_f32(&query_vectors[i], args.similarity, args.format),
                 quantized_query_vectors.as_ref().map(|v| {
@@ -174,7 +174,6 @@ fn distance_loss(
             |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
         );
 
-    // XXX error seems like a lot over 10k, but it's actually over 10k * num_queries.
     println!(
         "Vectors: {} mean abs error: {} mean square error: {}",
         count,

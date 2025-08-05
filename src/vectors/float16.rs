@@ -8,7 +8,6 @@ use crate::{
     vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity},
 };
 
-// XXX creators should be forced to provide a similarity so I can normalize for dot.
 #[derive(Debug, Copy, Clone)]
 pub struct F16VectorCoder(bool);
 

@@ -83,8 +83,8 @@ pub fn bulk_load(
     let config = GraphConfig {
         dimensions: args.dimensions,
         similarity: args.similarity,
-        nav_format: args.nav_format.adjust_raw_format(args.similarity),
-        rerank_format: args.rerank_format.adjust_raw_format(args.similarity),
+        nav_format: args.nav_format,
+        rerank_format: args.rerank_format,
         layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {

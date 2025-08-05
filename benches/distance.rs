@@ -55,7 +55,7 @@ pub fn float32_benchmarks(c: &mut Criterion) {
         "f32/dot",
         &a,
         &b,
-        F32VectorCoding::RawL2Normalized,
+        F32VectorCoding::Raw,
         VectorSimilarity::Dot,
         c,
     );

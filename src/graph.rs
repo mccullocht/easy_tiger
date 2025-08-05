@@ -90,7 +90,7 @@ impl GraphConfig {
 
     /// Return a new vector coder for the nav vector format.
     pub fn new_nav_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.nav_format.new_coder()
+        self.nav_format.new_coder(self.similarity)
     }
 
     /// Return a distance function for quantized navigational vectors in the index.
@@ -101,7 +101,7 @@ impl GraphConfig {
 
     /// Return a new vector coder for the rerank vector format.
     pub fn new_rerank_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.rerank_format.new_coder()
+        self.rerank_format.new_coder(self.similarity)
     }
 }
 

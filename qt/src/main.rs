@@ -51,7 +51,9 @@ fn quantization_loss(
     args: QuantizationLossArgs,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
 ) -> io::Result<()> {
-    let coder = args.format.new_coder();
+    // Assume Euclidean. It might be best to make this configurable as some encodings might perform
+    // better when the inputs are l2 normalized.
+    let coder = args.format.new_coder(VectorSimilarity::Euclidean);
     assert!(
         coder.decode(&coder.encode(&vectors[0])).is_some(),
         "specified vector format doesn't support decoding"
@@ -115,7 +117,7 @@ fn distance_loss(
         NonZero::new(vectors.elem_stride()).unwrap(),
     )?;
 
-    let coder = args.format.new_coder();
+    let coder = args.format.new_coder(args.similarity);
     let quantized_query_vectors = if args.quantize_query {
         let mut qvecs = VecVectorStore::with_capacity(
             coder.byte_len(query_vectors.elem_stride()),

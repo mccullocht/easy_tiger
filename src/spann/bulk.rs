@@ -96,7 +96,10 @@ pub fn bulk_load_postings(
         .collect();
     posting_keys.par_sort_unstable();
 
-    let coder = index.config().posting_coder.new_coder();
+    let coder = index
+        .config()
+        .posting_coder
+        .new_coder(index.head_config().config().similarity);
     let mut bulk_cursor = session.new_bulk_load_cursor::<PostingKey, Vec<u8>>(
         &index.table_names.postings,
         Some(
@@ -127,7 +130,7 @@ pub fn bulk_load_raw_vectors(
                 .app_metadata(&serde_json::to_string(&index.config).unwrap()),
         ),
     )?;
-    let coder = index.head_config().config().rerank_format.new_coder();
+    let coder = index.head_config().config().new_rerank_coder();
     let mut encoded =
         Vec::with_capacity(coder.byte_len(index.head_config().config().dimensions.get()));
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {

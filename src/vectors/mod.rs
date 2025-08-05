@@ -181,7 +181,8 @@ pub enum F32VectorCoding {
 
 impl F32VectorCoding {
     /// Create a new coder for this format.
-    pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
+    #[allow(unused_variables)] // XXX
+    pub fn new_coder(&self, similarity: VectorSimilarity) -> Box<dyn F32VectorCoder> {
         match self {
             Self::Raw => Box::new(RawF32VectorCoder),
             Self::RawL2Normalized => Box::new(RawL2NormalizedF32VectorCoder),
@@ -337,7 +338,8 @@ pub trait F32VectorCoder: Send + Sync {
     ///
     /// This is not supported for all codecs, and in cases where the format is packed may
     /// return more dimensions than originally specified.
-    fn decode(&self, _encoded: &[u8]) -> Option<Vec<f32>> {
+    #[allow(unused_variables)]
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
         None
     }
 }
@@ -520,11 +522,12 @@ mod test {
             similarity: VectorSimilarity,
             coder: &(impl F32VectorCoder + ?Sized),
         ) -> Self {
+            // XXX remove me!
             let f32_coder = match similarity {
                 VectorSimilarity::Dot => F32VectorCoding::RawL2Normalized,
                 VectorSimilarity::Euclidean => F32VectorCoding::Raw,
             }
-            .new_coder();
+            .new_coder(similarity);
             let rvec = f32_coder
                 .encode(vec)
                 .chunks(4)
@@ -557,7 +560,7 @@ mod test {
         b: &[f32],
         threshold: f64,
     ) {
-        let coder = format.new_coder();
+        let coder = format.new_coder(similarity);
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 
@@ -580,7 +583,7 @@ mod test {
         b: &[f32],
         threshold: f64,
     ) {
-        let coder = format.new_coder();
+        let coder = format.new_coder(similarity);
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 

@@ -26,7 +26,7 @@ fn benchmark_distance(
     similarity: VectorSimilarity,
     c: &mut Criterion,
 ) {
-    let coder = coding.new_coder();
+    let coder = coding.new_coder(similarity);
     let x = coder.encode(x);
     let y = coder.encode(y);
     let dist = coding.new_symmetric_vector_distance(similarity).unwrap();
@@ -43,7 +43,7 @@ fn benchmark_query_distance(
     similarity: VectorSimilarity,
     c: &mut Criterion,
 ) {
-    let y = coding.new_coder().encode(y);
+    let y = coding.new_coder(similarity).encode(y);
     let dist = new_query_vector_distance_f32(x, similarity, coding);
     c.bench_function(name, |b| b.iter(|| std::hint::black_box(dist.distance(&y))));
 }

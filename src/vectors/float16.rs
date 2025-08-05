@@ -46,9 +46,8 @@ impl VectorDistance for F16DotProductDistance {
         // in all native f16 math it is less accurate than i8 _and_ 3x more expensive.
         let dot = f16_iter(query)
             .zip(f16_iter(doc))
-            .map(|(q, d)| q * d)
-            .sum::<f16>()
-            .to_f64();
+            .map(|(q, d)| q.to_f32() * d.to_f32())
+            .sum::<f32>() as f64;
         (-dot + 1.0) / 2.0
     }
 }

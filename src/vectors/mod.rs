@@ -137,7 +137,7 @@ impl TryFrom<&[u16]> for NonUniformQuantizedDimensions {
 pub enum F32VectorCoding {
     /// Little-endian f32 values.
     ///
-    /// Depending on the similarity function this may be normalied or transformed in some other way
+    /// Depending on the similarity function this may be normalized or transformed in some other way
     /// so users should not rely on the value being identical.
     #[default]
     F32,

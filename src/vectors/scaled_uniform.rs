@@ -68,8 +68,8 @@ fn dot_unnormalized_i8_f32_aarch64(quantized: &[i8], scale: f64, float: &[f32]) 
     let split = quantized.len() & !15;
     let mut sum = unsafe {
         use std::arch::aarch64::{
-            vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_low_s8, vget_low_s16,
-            vld1q_f32, vld1q_s8, vmovl_high_s8, vmovl_high_s16, vmovl_s8, vmovl_s16,
+            vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_low_s16, vget_low_s8,
+            vld1q_f32, vld1q_s8, vmovl_high_s16, vmovl_high_s8, vmovl_s16, vmovl_s8,
         };
 
         let mut dot = vdupq_n_f32(0.0);
@@ -181,7 +181,7 @@ impl VectorDistance for I8DotProductDistance {
 pub struct I8DotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
 impl<'a> I8DotProductQueryDistance<'a> {
-    pub fn new(query: &'a [f32]) -> Self {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
         Self(l2_normalize(query))
     }
 }
@@ -207,11 +207,11 @@ impl VectorDistance for I8EuclideanDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct I8EuclideanQueryDistance<'a>(&'a [f32], f64);
+pub struct I8EuclideanQueryDistance<'a>(Cow<'a, [f32]>, f64);
 
 impl<'a> I8EuclideanQueryDistance<'a> {
-    pub fn new(query: &'a [f32]) -> Self {
-        let l2_norm_sq = dot_f32(query, query);
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
+        let l2_norm_sq = dot_f32(&query, &query);
         Self(query, l2_norm_sq)
     }
 }
@@ -219,7 +219,7 @@ impl<'a> I8EuclideanQueryDistance<'a> {
 impl QueryVectorDistance for I8EuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I8Vector::new(vector);
-        let dot = vector.dot_unnormalized_f32(self.0);
+        let dot = vector.dot_unnormalized_f32(&self.0);
         self.1 + vector.l2_norm_sq() - (2.0 * dot)
     }
 }
@@ -331,7 +331,7 @@ impl<'a> I4PackedVector<'a> {
     fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
         use std::arch::aarch64::{
             vaddvq_f32, vand_s8, vcvtq_f32_s32, vdup_n_s8, vdupq_n_f32, vfmaq_f32, vget_low_s16,
-            vld1_u8, vld1q_f32, vmovl_high_s16, vmovl_s8, vmovl_s16, vreinterpret_s8_u8, vshr_n_u8,
+            vld1_u8, vld1q_f32, vmovl_high_s16, vmovl_s16, vmovl_s8, vreinterpret_s8_u8, vshr_n_u8,
             vsub_s8, vzip1_s8, vzip2_s8,
         };
 
@@ -395,7 +395,7 @@ impl VectorDistance for I4PackedDotProductDistance {
 pub struct I4PackedDotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
 impl<'a> I4PackedDotProductQueryDistance<'a> {
-    pub fn new(query: &'a [f32]) -> Self {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
         Self(l2_normalize(query))
     }
 }
@@ -421,11 +421,12 @@ impl VectorDistance for I4PackedEuclideanDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct I4PackedEuclideanQueryDistance<'a>(&'a [f32], f64);
+pub struct I4PackedEuclideanQueryDistance<'a>(Cow<'a, [f32]>, f64);
 
 impl<'a> I4PackedEuclideanQueryDistance<'a> {
-    pub fn new(query: &'a [f32]) -> Self {
-        Self(query, dot_f32(query, query))
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
+        let l2_norm_sq = dot_f32(&query, &query);
+        Self(query, l2_norm_sq)
     }
 }
 

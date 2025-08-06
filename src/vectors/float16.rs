@@ -72,7 +72,7 @@ impl VectorDistance for DotProductDistance {
 pub struct DotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
 impl<'a> DotProductQueryDistance<'a> {
-    pub fn new(query: &'a [f32]) -> Self {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
         Self(l2_normalize(query))
     }
 }
@@ -107,10 +107,10 @@ impl VectorDistance for EuclideanDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct EuclideanQueryDistance<'a>(&'a [f32]);
+pub struct EuclideanQueryDistance<'a>(Cow<'a, [f32]>);
 
 impl<'a> EuclideanQueryDistance<'a> {
-    pub fn new(query: &'a [f32]) -> Self {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
         Self(query)
     }
 }

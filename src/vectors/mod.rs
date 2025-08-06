@@ -338,12 +338,11 @@ struct QuantizedQueryVectorDistance<'a, D> {
 }
 
 impl<'a, D: VectorDistance> QuantizedQueryVectorDistance<'a, D> {
-    fn from_f32(distance_fn: D, query: &'a [f32], coder: impl F32VectorCoder) -> Self {
-        let query = coder.encode(query).into();
-        Self { distance_fn, query }
+    fn from_f32(distance_fn: D, query: &[f32], coder: impl F32VectorCoder) -> Self {
+        Self::from_quantized(distance_fn, coder.encode(query))
     }
 
-    fn from_quantized(distance_fn: D, query: &'a [u8]) -> Self {
+    fn from_quantized(distance_fn: D, query: impl Into<Cow<'a, [u8]>>) -> Self {
         Self {
             distance_fn,
             query: query.into(),
@@ -359,60 +358,65 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
 
 /// Create a new [QueryVectorDistance] given a query, similarity function, and vector coding.
 pub fn new_query_vector_distance_f32<'a>(
-    query: &'a [f32],
+    query: impl Into<Cow<'a, [f32]>>,
     similarity: VectorSimilarity,
     coding: F32VectorCoding,
 ) -> Box<dyn QueryVectorDistance + 'a> {
     use VectorSimilarity::{Dot, Euclidean};
+
     match (similarity, coding) {
         (Dot, F32VectorCoding::F32) => Box::new(float32::QueryVectorDistance::new(
             float32::DotProductDistance,
-            query,
+            query.into(),
             true,
         )),
         (Euclidean, F32VectorCoding::F32) => Box::new(float32::QueryVectorDistance::new(
             float32::EuclideanDistance,
-            query,
+            query.into(),
             false,
         )),
-        (Dot, F32VectorCoding::F16) => Box::new(float16::DotProductQueryDistance::new(query)),
-        (Euclidean, F32VectorCoding::F16) => Box::new(float16::EuclideanQueryDistance::new(query)),
+        (Dot, F32VectorCoding::F16) => {
+            Box::new(float16::DotProductQueryDistance::new(query.into()))
+        }
+        (Euclidean, F32VectorCoding::F16) => {
+            Box::new(float16::EuclideanQueryDistance::new(query.into()))
+        }
         (_, F32VectorCoding::BinaryQuantized) => Box::new(QuantizedQueryVectorDistance::from_f32(
             HammingDistance,
-            query,
+            query.into().as_ref(),
             BinaryQuantizedVectorCoder,
         )),
         (_, F32VectorCoding::NBitBinaryQuantized(n)) => {
             Box::new(QuantizedQueryVectorDistance::from_f32(
                 AsymmetricHammingDistance,
-                query,
+                query.into().as_ref(),
                 AsymmetricBinaryQuantizedVectorCoder::new(n),
             ))
         }
         (Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
-            Box::new(scaled_uniform::I8DotProductQueryDistance::new(query))
+            Box::new(scaled_uniform::I8DotProductQueryDistance::new(query.into()))
         }
         (Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
-            Box::new(scaled_uniform::I8EuclideanQueryDistance::new(query))
+            Box::new(scaled_uniform::I8EuclideanQueryDistance::new(query.into()))
         }
-        (Dot, F32VectorCoding::I4ScaledUniformQuantized) => {
-            Box::new(scaled_uniform::I4PackedDotProductQueryDistance::new(query))
-        }
-        (Euclidean, F32VectorCoding::I4ScaledUniformQuantized) => {
-            Box::new(scaled_uniform::I4PackedEuclideanQueryDistance::new(query))
-        }
-        (Dot, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
-            Box::new(scaled_non_uniform::I8DotProductQueryDistance::new(s, query))
-        }
-        (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
-            Box::new(scaled_non_uniform::I8EuclideanQueryDistance::new(s, query))
-        }
+        (Dot, F32VectorCoding::I4ScaledUniformQuantized) => Box::new(
+            scaled_uniform::I4PackedDotProductQueryDistance::new(query.into()),
+        ),
+        (Euclidean, F32VectorCoding::I4ScaledUniformQuantized) => Box::new(
+            scaled_uniform::I4PackedEuclideanQueryDistance::new(query.into()),
+        ),
+        (Dot, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => Box::new(
+            scaled_non_uniform::I8DotProductQueryDistance::new(s, query.into()),
+        ),
+        (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => Box::new(
+            scaled_non_uniform::I8EuclideanQueryDistance::new(s, query.into()),
+        ),
     }
 }
 
 /// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
 pub fn new_query_vector_distance_indexing<'a>(
-    query: &'a [u8],
+    query: impl Into<Cow<'a, [u8]>>,
     similarity: VectorSimilarity,
     coding: F32VectorCoding,
 ) -> Box<dyn QueryVectorDistance + 'a> {

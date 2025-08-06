@@ -187,7 +187,7 @@ pub struct I8DotProductQueryDistance<'a> {
 }
 
 impl<'a> I8DotProductQueryDistance<'a> {
-    pub fn new(splits: NonUniformQuantizedDimensions, query: &'a [f32]) -> Self {
+    pub fn new(splits: NonUniformQuantizedDimensions, query: Cow<'a, [f32]>) -> Self {
         Self {
             splits,
             query: l2_normalize(query),
@@ -221,19 +221,20 @@ impl VectorDistance for I8EuclideanDistance {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct I8EuclideanQueryDistance<'a> {
     splits: NonUniformQuantizedDimensions,
-    query: &'a [f32],
+    query: Cow<'a, [f32]>,
     l2_norm_sq: f64,
 }
 
 impl<'a> I8EuclideanQueryDistance<'a> {
-    pub fn new(splits: NonUniformQuantizedDimensions, query: &'a [f32]) -> Self {
+    pub fn new(splits: NonUniformQuantizedDimensions, query: Cow<'a, [f32]>) -> Self {
+        let l2_norm_sq = dot_f32(&query, &query);
         Self {
             splits,
             query,
-            l2_norm_sq: dot_f32(query, query),
+            l2_norm_sq,
         }
     }
 }
@@ -241,7 +242,7 @@ impl<'a> I8EuclideanQueryDistance<'a> {
 impl QueryVectorDistance for I8EuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I8Vector::new(&self.splits, vector);
-        let dot = vector.dot_unnormalized_f32(self.query);
+        let dot = vector.dot_unnormalized_f32(&self.query);
         self.l2_norm_sq + vector.l2_norm_sq() - (2.0 * dot)
     }
 }

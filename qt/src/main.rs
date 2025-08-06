@@ -8,7 +8,7 @@ use std::{
 
 use clap::{Args, Parser, Subcommand};
 use easy_tiger::{
-    input::{DerefVectorStore, VecVectorStore, VectorStore},
+    input::{DerefVectorStore, VectorStore},
     vectors::{
         F32VectorCoding, VectorSimilarity, new_query_vector_distance_f32,
         new_query_vector_distance_indexing,
@@ -118,33 +118,28 @@ fn distance_loss(
     )?;
 
     let coder = args.format.new_coder(args.similarity);
-    let quantized_query_vectors = if args.quantize_query {
-        let mut qvecs = VecVectorStore::with_capacity(
-            coder.byte_len(query_vectors.elem_stride()),
-            query_vectors.len(),
-        );
-        for qvec in query_vectors.iter() {
-            qvecs.push(&coder.encode(qvec));
-        }
-        Some(qvecs)
-    } else {
-        None
-    };
-
     let query_scorers = (0..query_vectors.len())
         .into_par_iter()
         .map(|i| {
-            (
-                new_query_vector_distance_f32(
-                    &query_vectors[i],
+            let f32_dist = new_query_vector_distance_f32(
+                query_vectors[i].to_vec(),
+                args.similarity,
+                F32VectorCoding::F32,
+            );
+            let qdist = if args.quantize_query {
+                new_query_vector_distance_indexing(
+                    coder.encode(&query_vectors[i]),
                     args.similarity,
-                    F32VectorCoding::F32,
-                ),
-                new_query_vector_distance_f32(&query_vectors[i], args.similarity, args.format),
-                quantized_query_vectors.as_ref().map(|v| {
-                    new_query_vector_distance_indexing(&v[i], args.similarity, args.format)
-                }),
-            )
+                    args.format,
+                )
+            } else {
+                new_query_vector_distance_f32(
+                    query_vectors[i].to_vec(),
+                    args.similarity,
+                    args.format,
+                )
+            };
+            (f32_dist, qdist)
         })
         .collect::<Vec<_>>();
 
@@ -160,9 +155,7 @@ fn distance_loss(
         })
         .progress_count((query_scorers.len() * doc_limit) as u64)
         .map(|(q, d, doc)| {
-            let (f32_dist, f32xq_dist, qxq_dist) = &query_scorers[q];
-            let qdist = qxq_dist.as_ref().unwrap_or_else(|| f32xq_dist);
-
+            let (f32_dist, qdist) = &query_scorers[q];
             let diff = f32_dist
                 .as_ref()
                 .distance(bytemuck::cast_slice(&vectors[d]))

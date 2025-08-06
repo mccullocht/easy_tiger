@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs::File,
     io::{self},
     num::NonZero,
@@ -14,7 +15,7 @@ use easy_tiger::{
         new_query_vector_distance_indexing,
     },
 };
-use indicatif::ParallelProgressIterator;
+use indicatif::{ParallelProgressIterator, ProgressIterator};
 use memmap2::Mmap;
 use rayon::prelude::*;
 
@@ -45,12 +46,21 @@ struct QuantizationLossArgs {
     /// Target format to measure the quantization loss of.
     #[arg(short, long)]
     format: F32VectorCoding,
+
+    #[arg(long, default_value_t = false)]
+    center: bool,
 }
 
 fn quantization_loss(
     args: QuantizationLossArgs,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
 ) -> io::Result<()> {
+    let mean = if args.center {
+        Some(compute_center(vectors))
+    } else {
+        None
+    };
+
     // Assume Euclidean. It might be best to make this configurable as some encodings might perform
     // better when the inputs are l2 normalized.
     let coder = args.format.new_coder(VectorSimilarity::Euclidean);
@@ -62,8 +72,19 @@ fn quantization_loss(
         .into_par_iter()
         .progress_count(vectors.len() as u64)
         .map(|i| {
-            let v = &vectors[i];
-            let encoded = coder.encode(v);
+            let v = mean
+                .as_ref()
+                .map(|m| {
+                    Cow::from(
+                        vectors[i]
+                            .iter()
+                            .zip(m.iter())
+                            .map(|(d, m)| *d - *m)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap_or(Cow::from(&vectors[i]));
+            let encoded = coder.encode(&v);
             let q = coder.decode(&encoded).unwrap();
             let error = v
                 .iter()
@@ -84,6 +105,21 @@ fn quantization_loss(
         sq_error / vectors.len() as f64
     );
     Ok(())
+}
+
+fn compute_center(vectors: &impl VectorStore<Elem = f32>) -> Vec<f32> {
+    let mut mean = vec![0.0; vectors.elem_stride()];
+    for (i, v) in vectors
+        .iter()
+        .enumerate()
+        .progress_count(vectors.len() as u64)
+    {
+        for (d, m) in v.iter().zip(mean.iter_mut()) {
+            let delta = *d as f64 - *m;
+            *m += delta / (i + 1) as f64;
+        }
+    }
+    mean.into_iter().map(|m| m as f32).collect()
 }
 
 #[derive(Args)]

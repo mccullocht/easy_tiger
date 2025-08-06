@@ -106,7 +106,7 @@ impl<'a, D: F32VectorDistance> QueryVectorDistance<'a, D> {
         let query = if l2_normalize {
             crate::distance::l2_normalize(query)
         } else {
-            query.into()
+            query
         };
         Self { distance_fn, query }
     }

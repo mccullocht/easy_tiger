@@ -38,6 +38,8 @@ enum Command {
     QuantizationLoss(QuantizationLossArgs),
     /// Compute precision loss in distance computation resulting from vector quantization.
     DistanceLoss(DistanceLossArgs),
+    /// Compute scaling factor stats.
+    ScalingFactors,
 }
 
 #[derive(Args)]
@@ -183,6 +185,108 @@ fn distance_loss(
     Ok(())
 }
 
+fn scaling_factors(vectors: &(impl VectorStore<Elem = f32> + Send + Sync)) -> io::Result<()> {
+    let max_abs_per_vector = (0..vectors.len())
+        .into_par_iter()
+        .progress_count(vectors.len() as u64)
+        .map(|i| {
+            vectors[i]
+                .iter()
+                .copied()
+                .map(f32::abs)
+                .max_by(f32::total_cmp)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let max_abs_sum = max_abs_per_vector
+        .iter()
+        .copied()
+        .map(f64::from)
+        .sum::<f64>();
+    let actual_mean = (max_abs_sum / vectors.len() as f64) as f32;
+    let expected_mean = (1.0 / vectors.elem_stride() as f64).sqrt() as f32;
+    let (max_abs, actual_sum_diff_sq, expected_sum_diff_sq) = max_abs_per_vector
+        .iter()
+        .copied()
+        .map(|max_abs| {
+            let adiff = (max_abs - actual_mean) as f64;
+            let ediff = (max_abs - expected_mean) as f64;
+            (max_abs, adiff * adiff, ediff * ediff)
+        })
+        .reduce(|a, b| (a.0.max(b.0), (a.1 + b.1), (a.2 + b.2)))
+        .unwrap();
+
+    println!("max abs value {max_abs}");
+    println!("expected mean {expected_mean}");
+    let expected_variance = expected_sum_diff_sq / vectors.len() as f64;
+    println!("expected variance {expected_variance}");
+    println!("expected std dev {}", expected_variance.sqrt());
+    println!("actual mean {}", actual_mean);
+    let actual_variance = actual_sum_diff_sq / vectors.len() as f64;
+    println!("actual variance {actual_variance}");
+    let actual_stddev = actual_variance.sqrt();
+    println!("actual std dev {actual_stddev}");
+
+    let all_values_mean = (0..vectors.len())
+        .into_par_iter()
+        .progress_count(vectors.len() as u64)
+        .map(|i| vectors[i].iter().copied().map(f32::abs).sum::<f32>() as f64)
+        .sum::<f64>()
+        / (vectors.len() * vectors.elem_stride()) as f64;
+    println!("all values mean {all_values_mean}");
+
+    let stddev1 = actual_mean + actual_stddev as f32;
+    let above_stddev1 = max_abs_per_vector.iter().filter(|m| **m > stddev1).count();
+    let stddev2 = stddev1 + actual_stddev as f32;
+    let above_stddev2 = max_abs_per_vector.iter().filter(|m| **m > stddev2).count();
+    println!("vectors with max abs 1 stddev over mean: {above_stddev1}");
+    println!("vectors with max abs 2 stddev over mean: {above_stddev2}");
+    let (dim_above_stddev1, dim_above_stddev2) = (0..vectors.len())
+        .into_par_iter()
+        .progress_count(vectors.len() as u64)
+        .map(|i| {
+            let above1 = vectors[i]
+                .iter()
+                .copied()
+                .map(f32::abs)
+                .filter(|d| *d > stddev1)
+                .count();
+            let above2 = vectors[i]
+                .iter()
+                .copied()
+                .map(f32::abs)
+                .filter(|d| *d > stddev2)
+                .count();
+            (above1, above2)
+        })
+        .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+    println!("values 1 stddev over max abs mean: {dim_above_stddev1}");
+    println!("values 2 stddev over max abs mean: {dim_above_stddev2}");
+
+    // picked 5 because this gets us close the the number of values 2 stddev above max abs mean.
+    let values_above_stddev5_in_vector = (0..vectors.len())
+        .into_par_iter()
+        .progress_count(vectors.len() as u64)
+        .map(|i| {
+            let v = &vectors[i];
+            let abs_mean = v.iter().copied().map(f32::abs).sum::<f32>() / v.len() as f32;
+            let variance = v
+                .iter()
+                .map(|d| {
+                    let diff = d.abs() - abs_mean;
+                    diff * diff
+                })
+                .sum::<f32>()
+                / v.len() as f32;
+            let stddev = variance.sqrt();
+            let threshold = abs_mean + 5.0 * stddev;
+            v.iter().filter(|d| **d > threshold).count()
+        })
+        .sum::<usize>();
+    println!("values 5 stddev over vector abs mean: {values_above_stddev5_in_vector}");
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
@@ -193,5 +297,6 @@ fn main() -> io::Result<()> {
     match cli.command {
         Command::QuantizationLoss(args) => quantization_loss(args, &vectors),
         Command::DistanceLoss(args) => distance_loss(args, &vectors),
+        Command::ScalingFactors => scaling_factors(&vectors),
     }
 }

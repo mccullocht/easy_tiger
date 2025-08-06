@@ -102,7 +102,7 @@ pub struct QueryVectorDistance<'a, D> {
 }
 
 impl<'a, D: F32VectorDistance> QueryVectorDistance<'a, D> {
-    pub fn new(distance_fn: D, query: &'a [f32], l2_normalize: bool) -> Self {
+    pub fn new(distance_fn: D, query: Cow<'a, [f32]>, l2_normalize: bool) -> Self {
         let query = if l2_normalize {
             crate::distance::l2_normalize(query)
         } else {

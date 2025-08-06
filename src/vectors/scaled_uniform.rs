@@ -7,7 +7,7 @@
 //! relatively well centered vectors this seems to be effective enough that we may discard the
 //! original f32 vectors.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, num::NonZero};
 
 use crate::{
     distance::{dot_f32, l2_normalize},
@@ -68,8 +68,8 @@ fn dot_unnormalized_i8_f32_aarch64(quantized: &[i8], scale: f64, float: &[f32]) 
     let split = quantized.len() & !15;
     let mut sum = unsafe {
         use std::arch::aarch64::{
-            vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_low_s8, vget_low_s16,
-            vld1q_f32, vld1q_s8, vmovl_high_s8, vmovl_high_s16, vmovl_s8, vmovl_s16,
+            vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_low_s16, vget_low_s8,
+            vld1q_f32, vld1q_s8, vmovl_high_s16, vmovl_high_s8, vmovl_s16, vmovl_s8,
         };
 
         let mut dot = vdupq_n_f32(0.0);
@@ -331,7 +331,7 @@ impl<'a> I4PackedVector<'a> {
     fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
         use std::arch::aarch64::{
             vaddvq_f32, vand_s8, vcvtq_f32_s32, vdup_n_s8, vdupq_n_f32, vfmaq_f32, vget_low_s16,
-            vld1_u8, vld1q_f32, vmovl_high_s16, vmovl_s8, vmovl_s16, vreinterpret_s8_u8, vshr_n_u8,
+            vld1_u8, vld1q_f32, vmovl_high_s16, vmovl_s16, vmovl_s8, vreinterpret_s8_u8, vshr_n_u8,
             vsub_s8, vzip1_s8, vzip2_s8,
         };
 
@@ -434,5 +434,119 @@ impl QueryVectorDistance for I4PackedEuclideanQueryDistance<'_> {
         let vector = I4PackedVector::new(vector).expect("valid format");
         let dot = vector.dot_unnormalized_f32(self.0.as_ref());
         self.1 + vector.l2_norm_sq() - (2.0 * dot)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I8ScaledUniformExceptions(usize);
+
+impl I8ScaledUniformExceptions {
+    pub fn new(exceptions: NonZero<usize>) -> Self {
+        Self(exceptions.get())
+    }
+}
+
+impl F32VectorCoder for I8ScaledUniformExceptions {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let mut vc = vector
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (i as u32, *d))
+            .collect::<Vec<_>>();
+        vc.sort_unstable_by(|a, b| {
+            a.1.abs()
+                .total_cmp(&b.1.abs())
+                .reverse()
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        //let keep = self.0 + 1;
+        //let mut exceptions = vector.iter().enumerate().fold(
+        //    Vec::with_capacity(keep * 2),
+        //    |mut state: Vec<(usize, f32)>, (i, v)| {
+        //        let v = v.abs();
+        //        if state.len() < keep || v > state[keep - 1].1 {
+        //            state.push((i, v));
+        //            if state.len() == state.capacity() {
+        //                state.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).reverse());
+        //                state.truncate(keep);
+        //            }
+        //        }
+        //        state
+        //    },
+        //);
+        //exceptions.truncate(keep);
+
+        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
+        let scale_to = vc[self.0].1.abs();
+        let scale = f32::from(i8::MAX) / scale_to;
+        let inv_scale = scale_to / f32::from(i8::MAX);
+
+        // XXX I should really start using the bytes crate here this is getting ridiculous.
+        out[0..4].copy_from_slice(&l2_norm.to_le_bytes());
+        out[4..8].copy_from_slice(&inv_scale.to_le_bytes());
+        // XXX I will want to sort these by dimension to facilitate merging.
+        for (i, (d, v)) in vc.iter().take(self.0).enumerate() {
+            let base = 8 + i * 4;
+            out[base..(base + 2)].copy_from_slice(&(*d as u16).to_le_bytes());
+            let scaled = (*v * scale).round().clamp(-32767.0, 32767.0) as i16;
+            out[(base + 2)..(base + 4)].copy_from_slice(&scaled.to_le_bytes());
+        }
+        for (d, o) in vector.iter().zip(out[(8 + self.0 * 4)..].iter_mut()) {
+            *o = ((*d * scale).round().clamp(-127.0, 127.0) as i8).to_le_bytes()[0];
+        }
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        // f32 l2 norm, f32 scaling factor, N (dim,value) exception pairs, i8 per dimension
+        std::mem::size_of::<f32>() * 2 + std::mem::size_of::<u16>() * 2 * self.0 + dimensions
+    }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let scale = f32::from_le_bytes(encoded[4..8].try_into().unwrap());
+        let mut vector = bytemuck::cast_slice::<_, i8>(&encoded[(8 + self.0 * 4)..])
+            .iter()
+            .map(|d| *d as f32 * scale)
+            .collect::<Vec<_>>();
+        for e in encoded[8..(8 + self.0 * 4)].chunks_exact(4) {
+            let dim = u16::from_le_bytes(e[0..2].try_into().unwrap()) as usize;
+            let value = i16::from_le_bytes(e[2..4].try_into().unwrap());
+            vector[dim] = value as f32 * scale;
+        }
+        Some(vector)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I8ExceptionDotProductDistance(usize);
+
+impl I8ExceptionDotProductDistance {
+    pub fn new(e: usize) -> Self {
+        Self(e)
+    }
+}
+
+impl VectorDistance for I8ExceptionDotProductDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = I8ScaledUniformExceptions(self.0).decode(query).unwrap();
+        let doc = I8ScaledUniformExceptions(self.0).decode(doc).unwrap();
+        let dot = crate::distance::dot_f32(&query, &doc);
+        (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct I8ExceptionDotProductQueryDistance<'a>(usize, Cow<'a, [f32]>);
+
+impl<'a> I8ExceptionDotProductQueryDistance<'a> {
+    pub fn new(exceptions: usize, query: &'a [f32]) -> Self {
+        Self(exceptions, l2_normalize(query))
+    }
+}
+
+impl QueryVectorDistance for I8ExceptionDotProductQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = I8ScaledUniformExceptions(self.0).decode(vector).unwrap();
+        let dot = crate::distance::dot_f32(&self.1, &vector);
+        (-dot + 1.0) / 2.0
     }
 }

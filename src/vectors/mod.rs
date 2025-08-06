@@ -1,6 +1,13 @@
 //! Vector handling: formatting/quantization and distance computation.
 
-use std::{borrow::Cow, fmt::Debug, io, num::ParseIntError, ops::Deref, str::FromStr};
+use std::{
+    borrow::Cow,
+    fmt::Debug,
+    io,
+    num::{NonZero, ParseIntError},
+    ops::Deref,
+    str::FromStr,
+};
 
 use crate::vectors::binary::{
     AsymmetricBinaryQuantizedVectorCoder, AsymmetricHammingDistance, BinaryQuantizedVectorCoder,
@@ -176,6 +183,8 @@ pub enum F32VectorCoding {
     /// This is aimed at MRL vectors that are designed to be truncated and may have different value
     /// distributions in different segments.
     I8ScaledNonUniformQuantized(NonUniformQuantizedDimensions),
+    // XXX docos
+    I8ScaledUniformExceptions(NonZero<usize>),
 }
 
 impl F32VectorCoding {
@@ -190,6 +199,9 @@ impl F32VectorCoding {
             Self::I4ScaledUniformQuantized => Box::new(scaled_uniform::I4PackedVectorCoder),
             Self::I8ScaledNonUniformQuantized(s) => {
                 Box::new(scaled_non_uniform::I8VectorCoder::new(*s))
+            }
+            Self::I8ScaledUniformExceptions(e) => {
+                Box::new(scaled_uniform::I8ScaledUniformExceptions::new(*e))
             }
         }
     }
@@ -225,6 +237,7 @@ impl F32VectorCoding {
             (Self::I8ScaledNonUniformQuantized(s), VectorSimilarity::Euclidean) => {
                 Some(Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s)))
             }
+            (Self::I8ScaledUniformExceptions(_), _) => unimplemented!(),
         }
     }
 
@@ -271,6 +284,16 @@ impl FromStr for F32VectorCoding {
                 .map_err(|e| input_err(e.into()))?;
                 Ok(Self::I8ScaledNonUniformQuantized(splits))
             }
+            s if s.starts_with("i8-sux:") => {
+                let s = s.strip_prefix("i8-sux:").expect("prefix matched");
+                s.parse::<usize>()
+                    .ok()
+                    .and_then(NonZero::new)
+                    .map(Self::I8ScaledUniformExceptions)
+                    .ok_or_else(|| {
+                        input_err(format!("exception count must be a positive, got '{s}'"))
+                    })
+            }
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -294,6 +317,7 @@ impl std::fmt::Display for F32VectorCoding {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            Self::I8ScaledUniformExceptions(e) => write!(f, "i8-sux:{}", e.get()),
         }
     }
 }
@@ -407,6 +431,10 @@ pub fn new_query_vector_distance_f32<'a>(
         (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             Box::new(scaled_non_uniform::I8EuclideanQueryDistance::new(s, query))
         }
+        (Dot, F32VectorCoding::I8ScaledUniformExceptions(e)) => Box::new(
+            scaled_uniform::I8ExceptionDotProductQueryDistance::new(e.get(), query),
+        ),
+        (_, F32VectorCoding::I8ScaledUniformExceptions(_)) => unimplemented!(),
     }
 }
 
@@ -474,6 +502,13 @@ pub fn new_query_vector_distance_indexing<'a>(
                 query,
             ))
         }
+        (Dot, F32VectorCoding::I8ScaledUniformExceptions(e)) => {
+            Box::new(QuantizedQueryVectorDistance::from_quantized(
+                scaled_uniform::I8ExceptionDotProductDistance::new(e.get()),
+                query,
+            ))
+        }
+        (_, F32VectorCoding::I8ScaledUniformExceptions(_)) => unimplemented!(),
     }
 }
 

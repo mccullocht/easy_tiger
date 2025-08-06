@@ -14,7 +14,7 @@ use crate::{
     vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance},
 };
 
-fn compute_scale<const M: i8>(vector: &[f32]) -> (f32, f32) {
+fn compute_scale<const M: i16>(vector: &[f32]) -> (f32, f32) {
     if let Some(max) = vector.iter().map(|d| d.abs()).max_by(|a, b| a.total_cmp(b)) {
         (
             (f64::from(M) / max as f64) as f32,
@@ -31,7 +31,7 @@ pub struct I8VectorCoder;
 impl F32VectorCoder for I8VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
-        let (scale, inv_scale) = compute_scale::<{ i8::MAX }>(vector);
+        let (scale, inv_scale) = compute_scale::<{ i8::MAX as i16 }>(vector);
         out[0..4].copy_from_slice(&inv_scale.to_le_bytes());
         out[4..8].copy_from_slice(&l2_norm.to_le_bytes());
         for (d, o) in vector.iter().zip(out[8..].iter_mut()) {
@@ -435,5 +435,36 @@ impl QueryVectorDistance for I4PackedEuclideanQueryDistance<'_> {
         let vector = I4PackedVector::new(vector).expect("valid format");
         let dot = vector.dot_unnormalized_f32(self.0.as_ref());
         self.1 + vector.l2_norm_sq() - (2.0 * dot)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I16VectorCoder;
+
+impl F32VectorCoder for I16VectorCoder {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
+        let (scale, inv_scale) = compute_scale::<{ i16::MAX }>(vector);
+        out[0..4].copy_from_slice(&inv_scale.to_le_bytes());
+        out[4..8].copy_from_slice(&l2_norm.to_le_bytes());
+        for (d, o) in vector.iter().zip(out[8..].chunks_mut(2)) {
+            o.copy_from_slice(&((*d * scale).round() as i16).to_le_bytes());
+        }
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        dimensions * 2 + std::mem::size_of::<f32>() * 2
+    }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let scale = f32::from_le_bytes(encoded[0..4].try_into().unwrap());
+        Some(
+            encoded[8..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| i16::from_le_bytes(*c) as f32 * scale)
+                .collect(),
+        )
     }
 }

@@ -167,6 +167,8 @@ pub enum F32VectorCoding {
     ///
     /// This uses 1 byte per 2 dimensions and 8 additional bytes for a scaling factor and l2 norm.
     I4ScaledUniformQuantized,
+    // XXX docos
+    I16ScaledUniformQuantized,
     /// Quantize into an i4 value shaped to the input vector, where we choose different scaling
     /// factors for different segments of the dimension space.
     ///
@@ -188,6 +190,7 @@ impl F32VectorCoding {
             Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
             Self::I8ScaledUniformQuantized => Box::new(scaled_uniform::I8VectorCoder),
             Self::I4ScaledUniformQuantized => Box::new(scaled_uniform::I4PackedVectorCoder),
+            Self::I16ScaledUniformQuantized => Box::new(scaled_uniform::I16VectorCoder),
             Self::I8ScaledNonUniformQuantized(s) => {
                 Box::new(scaled_non_uniform::I8VectorCoder::new(*s))
             }
@@ -219,6 +222,7 @@ impl F32VectorCoding {
             (Self::I4ScaledUniformQuantized, VectorSimilarity::Euclidean) => {
                 Some(Box::new(scaled_uniform::I4PackedEuclideanDistance))
             }
+            (Self::I16ScaledUniformQuantized, _) => unimplemented!(),
             (Self::I8ScaledNonUniformQuantized(s), VectorSimilarity::Dot) => {
                 Some(Box::new(scaled_non_uniform::I8DotProductDistance::new(*s)))
             }
@@ -257,6 +261,7 @@ impl FromStr for F32VectorCoding {
             }
             "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
             "i4-scaled-uniform" => Ok(Self::I4ScaledUniformQuantized),
+            "i16-scaled-uniform" => Ok(Self::I16ScaledUniformQuantized),
             s if s.starts_with("i8-scaled-non-uniform:") => {
                 let s = s
                     .strip_prefix("i8-scaled-non-uniform:")
@@ -285,6 +290,7 @@ impl std::fmt::Display for F32VectorCoding {
             Self::NBitBinaryQuantized(n) => write!(f, "asymmetric_binary:{}", *n),
             Self::I8ScaledUniformQuantized => write!(f, "i8-scaled-uniform"),
             Self::I4ScaledUniformQuantized => write!(f, "i4-scaled-uniform"),
+            Self::I16ScaledUniformQuantized => write!(f, "i16-scaled-uniform"),
             Self::I8ScaledNonUniformQuantized(splits) => write!(
                 f,
                 "i8-scaled-non-uniform:{}",
@@ -399,6 +405,7 @@ pub fn new_query_vector_distance_f32<'a>(
         (Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
             Box::new(scaled_uniform::I8EuclideanQueryDistance::new(query.into()))
         }
+        (_, F32VectorCoding::I16ScaledUniformQuantized) => unimplemented!(),
         (Dot, F32VectorCoding::I4ScaledUniformQuantized) => Box::new(
             scaled_uniform::I4PackedDotProductQueryDistance::new(query.into()),
         ),
@@ -466,6 +473,7 @@ pub fn new_query_vector_distance_indexing<'a>(
                 query,
             ))
         }
+        (_, F32VectorCoding::I16ScaledUniformQuantized) => unimplemented!(),
         (Dot, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             Box::new(QuantizedQueryVectorDistance::from_quantized(
                 scaled_non_uniform::I8DotProductDistance::new(s),

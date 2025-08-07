@@ -14,8 +14,34 @@ use crate::{
     vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance},
 };
 
+#[cfg(not(target_arch = "aarch64"))]
+fn compute_max_abs(vector: &[f32]) -> Option<f32> {
+    vector.iter().copied().map(f32::abs).max_by(f32::total_cmp)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn compute_max_abs(vector: &[f32]) -> Option<f32> {
+    if vector.is_empty() {
+        return None;
+    }
+
+    let (head, tail) = vector.as_chunks::<4>();
+    let head_max = unsafe {
+        use std::arch::aarch64::{vabsq_f32, vdupq_n_f32, vld1q_f32, vmaxq_f32, vmaxvq_f32};
+
+        let mut max = vdupq_n_f32(0.0);
+        for chunk in head {
+            max = vmaxq_f32(max, vabsq_f32(vld1q_f32(chunk.as_ptr())));
+        }
+        vmaxvq_f32(max)
+    };
+    std::iter::once(head_max)
+        .chain(tail.iter().copied().map(f32::abs))
+        .max_by(f32::total_cmp)
+}
+
 fn compute_scale<const M: i16>(vector: &[f32]) -> (f32, f32) {
-    if let Some(max) = vector.iter().map(|d| d.abs()).max_by(|a, b| a.total_cmp(b)) {
+    if let Some(max) = compute_max_abs(vector) {
         (
             (f64::from(M) / max as f64) as f32,
             (max as f64 / f64::from(M)) as f32,

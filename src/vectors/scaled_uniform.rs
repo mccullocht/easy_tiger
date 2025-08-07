@@ -509,9 +509,46 @@ impl<'a> I16Vector<'a> {
             * other.scale()
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
     fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        self.dot_unnormalized_f32_scalar(other, 0)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        // Score 8 elements at a time, any tail will be handled with the scalar implementation.
+        let scalar_split = other.len() & !7;
+        let dot = unsafe {
+            use std::arch::aarch64::{
+                vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_high_s16, vget_low_s16,
+                vld1q_f32, vld1q_s16, vmovl_s16,
+            };
+
+            let mut dot = vdupq_n_f32(0.0);
+            let selfp = self.raw_vector().as_ptr() as *const i16;
+            for i in (0..scalar_split).step_by(8) {
+                let ivec = vld1q_s16(selfp.add(i));
+                let svec = [
+                    vcvtq_f32_s32(vmovl_s16(vget_low_s16(ivec))),
+                    vcvtq_f32_s32(vmovl_s16(vget_high_s16(ivec))),
+                ];
+                let ovec = [
+                    vld1q_f32(other.as_ptr().add(i)),
+                    vld1q_f32(other.as_ptr().add(i + 4)),
+                ];
+                dot = vfmaq_f32(dot, svec[0], ovec[0]);
+                dot = vfmaq_f32(dot, svec[1], ovec[1]);
+            }
+            vaddvq_f32(dot) as f64
+        };
+        (dot * self.scale()) + self.dot_unnormalized_f32_scalar(other, scalar_split)
+    }
+
+    #[allow(dead_code)]
+    fn dot_unnormalized_f32_scalar(&self, other: &[f32], start_dim: usize) -> f64 {
         self.dim_iter()
-            .zip(other.iter())
+            .skip(start_dim)
+            .zip(other.iter().skip(start_dim))
             .map(|(s, o)| s as f32 * *o)
             .sum::<f32>() as f64
             * self.scale()

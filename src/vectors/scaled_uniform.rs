@@ -500,13 +500,42 @@ impl<'a> I16Vector<'a> {
             .map(|d| i16::from_le_bytes(*d))
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
     fn dot_unnormalized(&self, other: &Self) -> f64 {
+        self.dot_unscaled_tail(other, 0) as f64 * self.scale() * other.scale()
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn dot_unnormalized(&self, other: &Self) -> f64 {
+        let scalar_split = self.dim_iter().len() & !7;
+        let dot = unsafe {
+            let mut dot = 0i64;
+            let selfp = self.raw_vector().as_ptr() as *const i16;
+            let otherp = other.raw_vector().as_ptr() as *const i16;
+            for i in (0..scalar_split).step_by(8) {
+                use std::arch::aarch64::{
+                    vaddlvq_s32, vaddq_s32, vget_low_s16, vld1q_s16, vmull_high_s16, vmull_s16,
+                };
+
+                let selfv = vld1q_s16(selfp.add(i));
+                let otherv = vld1q_s16(otherp.add(i));
+                // multiply and widen, then sum, then sum across. this will produce values _just_
+                // small enough to avoid overflowing before we widen to i64.
+                let lo = vmull_s16(vget_low_s16(selfv), vget_low_s16(otherv));
+                let hi = vmull_high_s16(selfv, otherv);
+                dot += vaddlvq_s32(vaddq_s32(lo, hi))
+            }
+            dot
+        };
+        (dot + self.dot_unscaled_tail(other, scalar_split)) as f64 * self.scale() * other.scale()
+    }
+
+    fn dot_unscaled_tail(&self, other: &Self, start_dim: usize) -> i64 {
         self.dim_iter()
-            .zip(other.dim_iter())
+            .skip(start_dim)
+            .zip(other.dim_iter().skip(start_dim))
             .map(|(s, o)| s as i64 * o as i64)
-            .sum::<i64>() as f64
-            * self.scale()
-            * other.scale()
+            .sum::<i64>()
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -544,7 +573,6 @@ impl<'a> I16Vector<'a> {
         (dot * self.scale()) + self.dot_unnormalized_f32_scalar(other, scalar_split)
     }
 
-    #[allow(dead_code)]
     fn dot_unnormalized_f32_scalar(&self, other: &[f32], start_dim: usize) -> f64 {
         self.dim_iter()
             .skip(start_dim)

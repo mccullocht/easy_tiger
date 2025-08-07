@@ -167,7 +167,12 @@ pub enum F32VectorCoding {
     ///
     /// This uses 1 byte per 2 dimensions and 8 additional bytes for a scaling factor and l2 norm.
     I4ScaledUniformQuantized,
-    // XXX docos
+    /// Quantize into an i16 value shaped to the input vector.
+    ///
+    /// This uses the contents of the vector to try to reduce quantization error but no data from
+    /// other vectors in the data set.
+    ///
+    /// This uses 2 bytes per dimension and 8 additional bytes for a scaling factor and l2 norm.
     I16ScaledUniformQuantized,
     /// Quantize into an i4 value shaped to the input vector, where we choose different scaling
     /// factors for different segments of the dimension space.

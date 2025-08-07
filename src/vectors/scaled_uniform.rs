@@ -14,7 +14,7 @@ use crate::{
     vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance},
 };
 
-fn compute_scale<const M: i8>(vector: &[f32]) -> (f32, f32) {
+fn compute_scale<const M: i16>(vector: &[f32]) -> (f32, f32) {
     if let Some(max) = vector.iter().map(|d| d.abs()).max_by(|a, b| a.total_cmp(b)) {
         (
             (f64::from(M) / max as f64) as f32,
@@ -31,7 +31,7 @@ pub struct I8VectorCoder;
 impl F32VectorCoder for I8VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
-        let (scale, inv_scale) = compute_scale::<{ i8::MAX }>(vector);
+        let (scale, inv_scale) = compute_scale::<{ i8::MAX as i16 }>(vector);
         out[0..4].copy_from_slice(&inv_scale.to_le_bytes());
         out[4..8].copy_from_slice(&l2_norm.to_le_bytes());
         for (d, o) in vector.iter().zip(out[8..].iter_mut()) {
@@ -434,6 +434,210 @@ impl QueryVectorDistance for I4PackedEuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I4PackedVector::new(vector).expect("valid format");
         let dot = vector.dot_unnormalized_f32(self.0.as_ref());
+        self.1 + vector.l2_norm_sq() - (2.0 * dot)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I16VectorCoder;
+
+impl F32VectorCoder for I16VectorCoder {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
+        let (scale, inv_scale) = compute_scale::<{ i16::MAX }>(vector);
+        out[0..4].copy_from_slice(&inv_scale.to_le_bytes());
+        out[4..8].copy_from_slice(&l2_norm.to_le_bytes());
+        for (d, o) in vector.iter().zip(out[8..].chunks_mut(2)) {
+            o.copy_from_slice(&((*d * scale).round() as i16).to_le_bytes());
+        }
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        dimensions * 2 + std::mem::size_of::<f32>() * 2
+    }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let scale = f32::from_le_bytes(encoded[0..4].try_into().unwrap());
+        Some(
+            encoded[8..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| i16::from_le_bytes(*c) as f32 * scale)
+                .collect(),
+        )
+    }
+}
+
+struct I16Vector<'a>(&'a [u8]);
+
+impl<'a> I16Vector<'a> {
+    fn new(rep: &'a [u8]) -> Self {
+        Self(rep)
+    }
+
+    fn scale(&self) -> f64 {
+        f32::from_le_bytes(self.0[0..4].try_into().unwrap()).into()
+    }
+
+    fn l2_norm(&self) -> f64 {
+        f32::from_le_bytes(self.0[4..8].try_into().unwrap()).into()
+    }
+
+    fn l2_norm_sq(&self) -> f64 {
+        self.l2_norm() * self.l2_norm()
+    }
+
+    fn raw_vector(&self) -> &[u8] {
+        &self.0[8..]
+    }
+
+    fn dim_iter(&self) -> impl ExactSizeIterator<Item = i16> + '_ {
+        self.raw_vector()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|d| i16::from_le_bytes(*d))
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn dot_unnormalized(&self, other: &Self) -> f64 {
+        self.dot_unscaled_tail(other, 0) as f64 * self.scale() * other.scale()
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn dot_unnormalized(&self, other: &Self) -> f64 {
+        let scalar_split = self.dim_iter().len() & !7;
+        let dot = unsafe {
+            let mut dot = 0i64;
+            let selfp = self.raw_vector().as_ptr() as *const i16;
+            let otherp = other.raw_vector().as_ptr() as *const i16;
+            for i in (0..scalar_split).step_by(8) {
+                use std::arch::aarch64::{
+                    vaddlvq_s32, vaddq_s32, vget_low_s16, vld1q_s16, vmull_high_s16, vmull_s16,
+                };
+
+                let selfv = vld1q_s16(selfp.add(i));
+                let otherv = vld1q_s16(otherp.add(i));
+                // multiply and widen, then sum, then sum across. this will produce values _just_
+                // small enough to avoid overflowing before we widen to i64.
+                let lo = vmull_s16(vget_low_s16(selfv), vget_low_s16(otherv));
+                let hi = vmull_high_s16(selfv, otherv);
+                dot += vaddlvq_s32(vaddq_s32(lo, hi))
+            }
+            dot
+        };
+        (dot + self.dot_unscaled_tail(other, scalar_split)) as f64 * self.scale() * other.scale()
+    }
+
+    fn dot_unscaled_tail(&self, other: &Self, start_dim: usize) -> i64 {
+        self.dim_iter()
+            .skip(start_dim)
+            .zip(other.dim_iter().skip(start_dim))
+            .map(|(s, o)| s as i64 * o as i64)
+            .sum::<i64>()
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        self.dot_unnormalized_f32_scalar(other, 0)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        // Score 8 elements at a time, any tail will be handled with the scalar implementation.
+        let scalar_split = other.len() & !7;
+        let dot = unsafe {
+            use std::arch::aarch64::{
+                vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_high_s16, vget_low_s16,
+                vld1q_f32, vld1q_s16, vmovl_s16,
+            };
+
+            let mut dot = vdupq_n_f32(0.0);
+            let selfp = self.raw_vector().as_ptr() as *const i16;
+            for i in (0..scalar_split).step_by(8) {
+                let ivec = vld1q_s16(selfp.add(i));
+                let svec = [
+                    vcvtq_f32_s32(vmovl_s16(vget_low_s16(ivec))),
+                    vcvtq_f32_s32(vmovl_s16(vget_high_s16(ivec))),
+                ];
+                let ovec = [
+                    vld1q_f32(other.as_ptr().add(i)),
+                    vld1q_f32(other.as_ptr().add(i + 4)),
+                ];
+                dot = vfmaq_f32(dot, svec[0], ovec[0]);
+                dot = vfmaq_f32(dot, svec[1], ovec[1]);
+            }
+            vaddvq_f32(dot) as f64
+        };
+        (dot * self.scale()) + self.dot_unnormalized_f32_scalar(other, scalar_split)
+    }
+
+    fn dot_unnormalized_f32_scalar(&self, other: &[f32], start_dim: usize) -> f64 {
+        self.dim_iter()
+            .skip(start_dim)
+            .zip(other.iter().skip(start_dim))
+            .map(|(s, o)| s as f32 * *o)
+            .sum::<f32>() as f64
+            * self.scale()
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I16DotProductDistance;
+
+impl VectorDistance for I16DotProductDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = I16Vector::new(query);
+        let doc = I16Vector::new(doc);
+        let dot = query.dot_unnormalized(&doc) / (query.l2_norm() * doc.l2_norm());
+        (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct I16DotProductQueryDistance<'a>(Cow<'a, [f32]>);
+
+impl<'a> I16DotProductQueryDistance<'a> {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
+        Self(l2_normalize(query))
+    }
+}
+
+impl QueryVectorDistance for I16DotProductQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = I16Vector::new(vector);
+        let dot = vector.dot_unnormalized_f32(&self.0) / vector.l2_norm();
+        (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I16EuclideanDistance;
+
+impl VectorDistance for I16EuclideanDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = I16Vector::new(query);
+        let doc = I16Vector::new(doc);
+        let dot = query.dot_unnormalized(&doc);
+        query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct I16EuclideanQueryDistance<'a>(Cow<'a, [f32]>, f64);
+
+impl<'a> I16EuclideanQueryDistance<'a> {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
+        let l2_norm_sq = dot_f32(&query, &query);
+        Self(query, l2_norm_sq)
+    }
+}
+
+impl QueryVectorDistance for I16EuclideanQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = I16Vector::new(vector);
+        let dot = vector.dot_unnormalized_f32(&self.0);
         self.1 + vector.l2_norm_sq() - (2.0 * dot)
     }
 }

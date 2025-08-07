@@ -54,15 +54,47 @@ fn compute_scale<const M: i16>(vector: &[f32]) -> (f32, f32) {
 #[derive(Debug, Copy, Clone)]
 pub struct I8VectorCoder;
 
+impl I8VectorCoder {
+    fn encode_vector_scalar(&self, vector: &[f32], scale: f32, out: &mut [u8]) {
+        for (d, o) in vector.iter().zip(out.iter_mut()) {
+            *o = ((*d * scale).round() as i8).to_le_bytes()[0];
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn encode_vector(&self, vector: &[f32], scale: f32, out: &mut [u8]) {
+        self.encode_vector_scalar(vector, scale, out);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn encode_vector(&self, vector: &[f32], scale: f32, out: &mut [u8]) {
+        let (vhead, vtail) = vector.as_chunks::<8>();
+        let (ohead, otail) = out.as_chunks_mut::<8>();
+        unsafe {
+            use std::arch::aarch64::{
+                vcombine_s16, vcvtaq_s32_f32, vdupq_n_f32, vld1q_f32, vmovn_s16, vmovn_s32,
+                vmulq_f32, vst1_s8,
+            };
+
+            let scale = vdupq_n_f32(scale);
+            for (vchunk, ochunk) in vhead.iter().zip(ohead.iter_mut()) {
+                let v0 = vcvtaq_s32_f32(vmulq_f32(vld1q_f32(vchunk.as_ptr()), scale));
+                let v1 = vcvtaq_s32_f32(vmulq_f32(vld1q_f32(vchunk.as_ptr().add(4)), scale));
+                let out = vmovn_s16(vcombine_s16(vmovn_s32(v0), vmovn_s32(v1)));
+                vst1_s8(ochunk.as_mut_ptr() as *mut i8, out);
+            }
+        }
+        self.encode_vector_scalar(vtail, scale, otail);
+    }
+}
+
 impl F32VectorCoder for I8VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
         let (scale, inv_scale) = compute_scale::<{ i8::MAX as i16 }>(vector);
         out[0..4].copy_from_slice(&inv_scale.to_le_bytes());
         out[4..8].copy_from_slice(&l2_norm.to_le_bytes());
-        for (d, o) in vector.iter().zip(out[8..].iter_mut()) {
-            *o = ((*d * scale).round() as i8).to_le_bytes()[0];
-        }
+        self.encode_vector(vector, scale, out);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {

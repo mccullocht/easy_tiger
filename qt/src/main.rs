@@ -46,7 +46,7 @@ struct QuantizationLossArgs {
     /// Target format to measure the quantization loss of.
     #[arg(short, long)]
     format: F32VectorCoding,
-
+    /// If set, compute the center of the dataset and apply before quantizing.
     #[arg(long, default_value_t = false)]
     center: bool,
 }
@@ -142,6 +142,10 @@ struct DistanceLossArgs {
     /// Format to compare against f32 distance.
     #[arg(long)]
     format: F32VectorCoding,
+
+    /// If set, compute the center of the dataset and apply before computing distances.
+    #[arg(long, default_value_t = false)]
+    center: bool,
 }
 
 fn distance_loss(
@@ -153,28 +157,36 @@ fn distance_loss(
         NonZero::new(vectors.elem_stride()).unwrap(),
     )?;
 
+    let center = if args.center {
+        Some(compute_center(vectors))
+    } else {
+        None
+    };
+
     let coder = args.format.new_coder(args.similarity);
     let query_scorers = (0..query_vectors.len())
         .into_par_iter()
         .map(|i| {
-            let f32_dist = new_query_vector_distance_f32(
-                query_vectors[i].to_vec(),
-                args.similarity,
-                F32VectorCoding::F32,
-            );
+            let mut query = Cow::from(&query_vectors[i]);
+            if let Some(center) = center.as_ref() {
+                for (q, c) in query.to_mut().iter_mut().zip(center.iter()) {
+                    *q -= *c;
+                }
+            }
             let qdist = if args.quantize_query {
                 new_query_vector_distance_indexing(
-                    coder.encode(&query_vectors[i]),
+                    coder.encode(&query),
                     args.similarity,
                     args.format,
                 )
             } else {
-                new_query_vector_distance_f32(
-                    query_vectors[i].to_vec(),
-                    args.similarity,
-                    args.format,
-                )
+                new_query_vector_distance_f32(query.to_vec(), args.similarity, args.format)
             };
+            let f32_dist = new_query_vector_distance_f32(
+                query.into_owned(),
+                args.similarity,
+                F32VectorCoding::F32,
+            );
             (f32_dist, qdist)
         })
         .collect::<Vec<_>>();
@@ -184,7 +196,13 @@ fn distance_loss(
     let (count, error_sum, error_sq_sum) = (0..doc_limit)
         .into_par_iter()
         .flat_map(|d| {
-            let doc = Arc::new(coder.encode(&vectors[d]));
+            let mut doc_f32 = Cow::from(&vectors[d]);
+            if let Some(center) = center.as_ref() {
+                for (d, c) in doc_f32.to_mut().iter_mut().zip(center.iter()) {
+                    *d -= *c;
+                }
+            }
+            let doc = Arc::new(coder.encode(&doc_f32));
             (0..query_vectors.len())
                 .into_par_iter()
                 .map(move |q| (q, d, Arc::clone(&doc)))

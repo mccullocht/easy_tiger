@@ -468,3 +468,111 @@ impl F32VectorCoder for I16VectorCoder {
         )
     }
 }
+
+struct I16Vector<'a>(&'a [u8]);
+
+impl<'a> I16Vector<'a> {
+    fn new(rep: &'a [u8]) -> Self {
+        Self(rep)
+    }
+
+    fn scale(&self) -> f64 {
+        f32::from_le_bytes(self.0[0..4].try_into().unwrap()).into()
+    }
+
+    fn l2_norm(&self) -> f64 {
+        f32::from_le_bytes(self.0[4..8].try_into().unwrap()).into()
+    }
+
+    fn l2_norm_sq(&self) -> f64 {
+        self.l2_norm() * self.l2_norm()
+    }
+
+    fn raw_vector(&self) -> &[u8] {
+        &self.0[8..]
+    }
+
+    fn dim_iter(&self) -> impl ExactSizeIterator<Item = i16> + '_ {
+        self.raw_vector()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|d| i16::from_le_bytes(*d))
+    }
+
+    fn dot_unnormalized(&self, other: &Self) -> f64 {
+        self.dim_iter()
+            .zip(other.dim_iter())
+            .map(|(s, o)| s as i64 * o as i64)
+            .sum::<i64>() as f64
+            * self.scale()
+            * other.scale()
+    }
+
+    fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
+        self.dim_iter()
+            .zip(other.iter())
+            .map(|(s, o)| s as f32 * *o)
+            .sum::<f32>() as f64
+            * self.scale()
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I16DotProductDistance;
+
+impl VectorDistance for I16DotProductDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = I16Vector::new(query);
+        let doc = I16Vector::new(doc);
+        let dot = query.dot_unnormalized(&doc) / (query.l2_norm() * doc.l2_norm());
+        (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct I16DotProductQueryDistance<'a>(Cow<'a, [f32]>);
+
+impl<'a> I16DotProductQueryDistance<'a> {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
+        Self(l2_normalize(query))
+    }
+}
+
+impl QueryVectorDistance for I16DotProductQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = I16Vector::new(vector);
+        let dot = vector.dot_unnormalized_f32(&self.0) / vector.l2_norm();
+        (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct I16EuclideanDistance;
+
+impl VectorDistance for I16EuclideanDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = I16Vector::new(query);
+        let doc = I16Vector::new(doc);
+        let dot = query.dot_unnormalized(&doc);
+        query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct I16EuclideanQueryDistance<'a>(Cow<'a, [f32]>, f64);
+
+impl<'a> I16EuclideanQueryDistance<'a> {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
+        let l2_norm_sq = dot_f32(&query, &query);
+        Self(query, l2_norm_sq)
+    }
+}
+
+impl QueryVectorDistance for I16EuclideanQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = I16Vector::new(vector);
+        let dot = vector.dot_unnormalized_f32(&self.0);
+        self.1 + vector.l2_norm_sq() - (2.0 * dot)
+    }
+}

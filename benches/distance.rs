@@ -73,6 +73,10 @@ pub fn float16_benchmarks(c: &mut Criterion) {
     query_and_doc_benchmarks(c, F32VectorCoding::F16);
 }
 
+pub fn i16_scaled_uniform_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(c, F32VectorCoding::I16ScaledUniformQuantized);
+}
+
 pub fn i8_scaled_uniform_benchmarks(c: &mut Criterion) {
     query_and_doc_benchmarks(c, F32VectorCoding::I8ScaledUniformQuantized);
 }
@@ -127,6 +131,7 @@ criterion_group!(
     benches,
     float32_benchmarks,
     float16_benchmarks,
+    i16_scaled_uniform_benchmarks,
     i8_scaled_uniform_benchmarks,
     i4_scaled_uniform_benchmarks,
     i8_scaled_non_uniform_benchmarks,

@@ -45,7 +45,7 @@ impl VectorCoder {
     fn convert_and_encode(&self, vector: &[f32], scale: Option<f32>, out: &mut [u8]) {
         let vector_it = vector.iter().copied();
         if let Some(scale) = scale {
-            self.convert_and_encode_scalar(vector_it.map(|d| d * s), out)
+            self.convert_and_encode_scalar(vector_it.map(|d| d * scale), out)
         } else {
             self.convert_and_encode_scalar(vector_it, out)
         }

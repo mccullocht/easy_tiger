@@ -94,7 +94,7 @@ impl F32VectorCoder for I8VectorCoder {
         let (scale, inv_scale) = compute_scale::<{ i8::MAX as i16 }>(vector);
         out[0..4].copy_from_slice(&inv_scale.to_le_bytes());
         out[4..8].copy_from_slice(&l2_norm.to_le_bytes());
-        self.encode_vector(vector, scale, out);
+        self.encode_vector(vector, scale, &mut out[8..]);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {

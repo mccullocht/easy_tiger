@@ -54,16 +54,43 @@ fn f16_iter(raw: &[u8]) -> impl ExactSizeIterator<Item = f16> + '_ {
         .map(|c| f16::from_le_bytes(c.try_into().unwrap()))
 }
 
+#[allow(dead_code)]
+unsafe extern "C" {
+    unsafe fn et_dot_f16(a: *const u16, b: *const u16, len: usize) -> f32;
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct DotProductDistance;
 
+impl DotProductDistance {
+    #[allow(dead_code)]
+    fn dot_scalar(&self, a: &[u8], b: &[u8]) -> f32 {
+        f16_iter(a)
+            .zip(f16_iter(b))
+            .map(|(a, b)| a.to_f32() * b.to_f32())
+            .sum::<f32>()
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn dot(&self, a: &[u8], b: &[u8]) -> f32 {
+        self.dot_scalar(a, b)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn dot(&self, a: &[u8], b: &[u8]) -> f32 {
+        unsafe {
+            et_dot_f16(
+                a.as_ptr() as *const u16,
+                b.as_ptr() as *const u16,
+                a.len() / 2,
+            )
+        }
+    }
+}
+
 impl VectorDistance for DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // TODO: vector accelerate this when necessary bits stabilize (or use C).
-        let dot = f16_iter(query)
-            .zip(f16_iter(doc))
-            .map(|(q, d)| q.to_f32() * d.to_f32())
-            .sum::<f32>() as f64;
+        let dot = self.dot(query, doc) as f64;
         (-dot + 1.0) / 2.0
     }
 }

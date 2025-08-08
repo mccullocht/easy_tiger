@@ -57,7 +57,10 @@ fn f16_iter(raw: &[u8]) -> impl ExactSizeIterator<Item = f16> + '_ {
 #[allow(dead_code)]
 unsafe extern "C" {
     unsafe fn et_dot_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
+    unsafe fn et_dot_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
+
     unsafe fn et_l2_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
+    unsafe fn et_l2_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -103,17 +106,30 @@ impl<'a> DotProductQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
         Self(l2_normalize(query))
     }
+
+    #[allow(dead_code)]
+    fn dot_scalar(&self, vector: &[u8]) -> f32 {
+        self.0
+            .iter()
+            .zip(vector.chunks_exact(2))
+            .map(|(s, o)| *s * f16::from_le_bytes(o.try_into().unwrap()).to_f32())
+            .sum::<f32>()
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn dot(&self, v: &[u8]) -> f32 {
+        self.dot_scalar(v)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn dot(&self, v: &[u8]) -> f32 {
+        unsafe { et_dot_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len()) }
+    }
 }
 
 impl QueryVectorDistance for DotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        // TODO: vector accelerate this when necessary bits stabilize (or use C).
-        let dot = self
-            .0
-            .iter()
-            .zip(vector.chunks_exact(2))
-            .map(|(s, o)| *s * f16::from_le_bytes(o.try_into().unwrap()).to_f32())
-            .sum::<f32>() as f64;
+        let dot = self.dot(vector) as f64;
         (-dot + 1.0) / 2.0
     }
 }
@@ -163,18 +179,32 @@ impl<'a> EuclideanQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
         Self(query)
     }
-}
 
-impl QueryVectorDistance for EuclideanQueryDistance<'_> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        // TODO: vector accelerate this when necessary bits stabilize (or use C).
+    #[allow(dead_code)]
+    fn l2_scalar(&self, v: &[u8]) -> f32 {
         self.0
             .iter()
-            .zip(vector.chunks_exact(2))
+            .zip(v.chunks_exact(2))
             .map(|(s, o)| {
                 let diff = *s - f16::from_le_bytes(o.try_into().unwrap()).to_f32();
                 diff * diff
             })
-            .sum::<f32>() as f64
+            .sum::<f32>()
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn l2(&self, v: &[u8]) -> f32 {
+        self.l2_scalar(v)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn l2(&self, v: &[u8]) -> f32 {
+        unsafe { et_l2_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len()) }
+    }
+}
+
+impl QueryVectorDistance for EuclideanQueryDistance<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.l2(vector).into()
     }
 }

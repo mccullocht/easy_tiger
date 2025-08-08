@@ -1,0 +1,66 @@
+use criterion::{criterion_group, criterion_main, Criterion};
+use easy_tiger::vectors::{F32VectorCoding, VectorSimilarity};
+use rand::{Rng, SeedableRng};
+
+fn generate_test_vector(dim: usize) -> Vec<f32> {
+    let rng = rand_xoshiro::Xoroshiro128PlusPlus::seed_from_u64(0x455A_5469676572);
+    rng.random_iter::<f32>()
+        .by_ref()
+        .take(dim)
+        .collect::<Vec<_>>()
+}
+
+fn benchmark_coding(
+    c: &mut Criterion,
+    format: F32VectorCoding,
+    similarity: Option<VectorSimilarity>,
+) {
+    let vector = generate_test_vector(1024);
+    let coder = format.new_coder(similarity.unwrap_or(VectorSimilarity::Dot));
+    let mut out = vec![0u8; coder.byte_len(vector.len())];
+    let id = if let Some(s) = similarity {
+        format!("{format}/coding/{s}")
+    } else {
+        format!("{format}/coding")
+    };
+    c.bench_function(&id, |b| {
+        b.iter(|| coder.encode_to(&vector, std::hint::black_box(&mut out)))
+    });
+}
+
+fn float32_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::F32, Some(VectorSimilarity::Dot));
+    benchmark_coding(c, F32VectorCoding::F32, Some(VectorSimilarity::Euclidean));
+}
+
+fn float16_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::F16, Some(VectorSimilarity::Dot));
+    benchmark_coding(c, F32VectorCoding::F16, Some(VectorSimilarity::Euclidean));
+}
+
+fn i4_scaled_uniform_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::I4ScaledUniformQuantized, None);
+}
+
+fn i8_scaled_uniform_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::I8ScaledUniformQuantized, None);
+}
+
+fn i16_scaled_uniform_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::I16ScaledUniformQuantized, None);
+}
+
+fn binary_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::BinaryQuantized, None);
+}
+
+criterion_group!(
+    benches,
+    float32_benchmarks,
+    float16_benchmarks,
+    i4_scaled_uniform_benchmarks,
+    i8_scaled_uniform_benchmarks,
+    i16_scaled_uniform_benchmarks,
+    binary_benchmarks
+);
+criterion_main!(benches);

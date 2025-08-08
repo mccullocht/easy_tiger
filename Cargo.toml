@@ -29,6 +29,10 @@ tempfile = "3.20.0"
 name = "distance"
 harness = false
 
+[[bench]]
+name = "coding"
+harness = false
+
 [workspace]
 members = ["et", "pt", "qt", "wt_mdb", "wt_sys"]
 

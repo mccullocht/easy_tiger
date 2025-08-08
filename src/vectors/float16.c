@@ -7,11 +7,37 @@
 #include <stddef.h>
 #include <string.h>
 
+EXPORT void et_serialize_f16(const float* v, size_t len, const float* scale,
+                             uint8_t* out) {
+  size_t tail_split = len & ~3;
+  for (size_t i = 0; i < tail_split; i += 4) {
+    float32x4_t in = vld1q_f32(v + i);
+    if (scale != NULL) {
+      in = vmulq_n_f32(in, *scale);
+    }
+    vst1_u8(out + i * 2, vreinterpret_u8_f16(vcvt_f16_f32(in)));
+  }
+
+  if (tail_split < len) {
+    float tail_in[4] = {0, 0, 0, 0};
+    for (size_t i = tail_split; i < len; i++) {
+      tail_in[i - tail_split] = v[i];
+    }
+    float32x4_t in = vld1q_f32(&tail_in[0]);
+    if (scale != NULL) {
+      in = vmulq_n_f32(in, *scale);
+    }
+    uint8_t tail_out[8];
+    vst1_u8(&tail_out[0], vreinterpret_u8_f16(vcvt_f16_f32(in)));
+    memcpy(out + tail_split * 2, &tail_out[0],
+           (len - tail_split) * sizeof(__fp16));
+  }
+}
+
 // It's faster to fill out a full 4 value tail entry than it is
 // to convert and compute one element at a time.
 HIDDEN float16x4_t load_tail_f16x4(const __fp16* v, size_t len) {
-  __fp16 tail[4];
-  memset(&tail, 0, sizeof(tail));
+  __fp16 tail[4] = {0, 0, 0, 0};
   for (size_t i = 0; i < len; i++) {
     tail[i] = v[i];
   }
@@ -21,8 +47,7 @@ HIDDEN float16x4_t load_tail_f16x4(const __fp16* v, size_t len) {
 // Load a partial value into a vector register to cover cases comparing to f16
 // where we will also have to a partial value into a vector register.
 HIDDEN float32x4_t load_tail_f32x4(const float* v, size_t len) {
-  float tail[4];
-  memset(&tail, 0, sizeof(tail));
+  float tail[4] = {0, 0, 0, 0};
   for (size_t i = 0; i < len; i++) {
     tail[i] = v[i];
   }

@@ -8,6 +8,19 @@ use crate::{
     vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity},
 };
 
+// While the `half` crate supports f16, SIMD features are limited to nightly and even the related
+// intrinsics are not stable on aarch64, so resort to C linkage.
+#[allow(dead_code)]
+unsafe extern "C" {
+    unsafe fn et_serialize_f16(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
+
+    unsafe fn et_dot_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
+    unsafe fn et_dot_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
+
+    unsafe fn et_l2_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
+    unsafe fn et_l2_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct VectorCoder(bool);
 
@@ -15,24 +28,57 @@ impl VectorCoder {
     pub fn new(similarity: VectorSimilarity) -> Self {
         Self(similarity.l2_normalize())
     }
+
+    #[allow(dead_code)]
+    fn convert_and_encode_scalar(
+        &self,
+        vector: impl ExactSizeIterator<Item = f32>,
+        out: &mut [u8],
+    ) {
+        let encode_it = vector.zip(out.chunks_mut(2));
+        for (d, o) in encode_it {
+            o.copy_from_slice(&f16::from_f32(d).to_le_bytes());
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn convert_and_encode(&self, vector: &[f32], scale: Option<f32>, out: &mut [u8]) {
+        let vector_it = vector.iter().copied();
+        if let Some(scale) = scale {
+            self.convert_and_encode_scalar(vector_it.map(|d| d * s), out)
+        } else {
+            self.convert_and_encode_scalar(vector_it, out)
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn convert_and_encode(&self, vector: &[f32], scale: Option<f32>, out: &mut [u8]) {
+        unsafe {
+            et_serialize_f16(
+                vector.as_ptr(),
+                vector.len(),
+                scale
+                    .as_ref()
+                    .map(std::ptr::from_ref)
+                    .unwrap_or(std::ptr::null()),
+                out.as_mut_ptr(),
+            )
+        }
+    }
 }
 
 impl F32VectorCoder for VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let encode_it = vector.iter().zip(out.chunks_mut(2));
-        if self.0 {
-            let scale = (1.0
-                / SpatialSimilarity::dot(vector, vector)
+        let scale = if self.0 {
+            Some(
+                (1.0 / SpatialSimilarity::dot(vector, vector)
                     .expect("identical vectors")
-                    .sqrt()) as f32;
-            for (d, o) in encode_it {
-                o.copy_from_slice(&f16::from_f32(*d * scale).to_le_bytes());
-            }
+                    .sqrt()) as f32,
+            )
         } else {
-            for (d, o) in encode_it {
-                o.copy_from_slice(&f16::from_f32(*d).to_le_bytes());
-            }
-        }
+            None
+        };
+        self.convert_and_encode(vector, scale, out);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -52,15 +98,6 @@ impl F32VectorCoder for VectorCoder {
 fn f16_iter(raw: &[u8]) -> impl ExactSizeIterator<Item = f16> + '_ {
     raw.chunks_exact(2)
         .map(|c| f16::from_le_bytes(c.try_into().unwrap()))
-}
-
-#[allow(dead_code)]
-unsafe extern "C" {
-    unsafe fn et_dot_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
-    unsafe fn et_dot_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
-
-    unsafe fn et_l2_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
-    unsafe fn et_l2_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
 }
 
 #[derive(Debug, Copy, Clone)]

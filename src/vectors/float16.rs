@@ -56,7 +56,8 @@ fn f16_iter(raw: &[u8]) -> impl ExactSizeIterator<Item = f16> + '_ {
 
 #[allow(dead_code)]
 unsafe extern "C" {
-    unsafe fn et_dot_f16(a: *const u16, b: *const u16, len: usize) -> f32;
+    unsafe fn et_dot_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
+    unsafe fn et_l2_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -79,7 +80,7 @@ impl DotProductDistance {
     #[cfg(target_arch = "aarch64")]
     fn dot(&self, a: &[u8], b: &[u8]) -> f32 {
         unsafe {
-            et_dot_f16(
+            et_dot_f16_f16(
                 a.as_ptr() as *const u16,
                 b.as_ptr() as *const u16,
                 a.len() / 2,
@@ -120,16 +121,38 @@ impl QueryVectorDistance for DotProductQueryDistance<'_> {
 #[derive(Debug, Copy, Clone)]
 pub struct EuclideanDistance;
 
-impl VectorDistance for EuclideanDistance {
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // TODO: vector accelerate this when necessary bits stabilize (or use C).
-        f16_iter(query)
-            .zip(f16_iter(doc))
-            .map(|(q, d)| {
-                let diff = q.to_f32() - d.to_f32();
+impl EuclideanDistance {
+    #[allow(dead_code)]
+    fn l2_scalar(&self, a: &[u8], b: &[u8]) -> f32 {
+        f16_iter(a)
+            .zip(f16_iter(b))
+            .map(|(a, b)| {
+                let diff = a.to_f32() - b.to_f32();
                 diff * diff
             })
-            .sum::<f32>() as f64
+            .sum::<f32>()
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn l2(&self, a: &[u8], b: &[u8]) -> f32 {
+        self.l2_scalar(a, b)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn l2(&self, a: &[u8], b: &[u8]) -> f32 {
+        unsafe {
+            et_l2_f16_f16(
+                a.as_ptr() as *const u16,
+                b.as_ptr() as *const u16,
+                a.len() / 2,
+            )
+        }
+    }
+}
+
+impl VectorDistance for EuclideanDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        self.l2(query, doc) as f64
     }
 }
 

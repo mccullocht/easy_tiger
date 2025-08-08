@@ -19,14 +19,24 @@ use serde::{Deserialize, Serialize};
 use scaled_uniform::dot_unnormalized_i8_f32;
 
 /// Functions used for to compute the distance between two vectors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VectorSimilarity {
     /// Euclidean (l2) distance.
     Euclidean,
-    /// Dot product scoring, an approximation of cosine scoring.
-    /// Vectors used for this distance function must be normalized.
-    #[default]
+    /// Dot product distance.
+    ///
+    /// Assuming all input vectors are normalized this produces the same distance as `Cosine`.
+    /// If your vectors are already l2 normalized this will be _much_ faster than `Cosine`.
     Dot,
+    /// Cosine (angular) distance.
+    ///
+    /// Vectors stored in an index will be l2 normalized to speed up distance computation so
+    /// egress vectors may not be identical to ingress vectors.
+    ///
+    /// If your vectors are already l2 normalized `Dot` will be _much_ faster.
+    ///
+    /// This function produces a distance in [0.0, 2.0]
+    Cosine,
 }
 
 impl VectorSimilarity {
@@ -35,12 +45,23 @@ impl VectorSimilarity {
         match self {
             Self::Euclidean => Box::new(float32::EuclideanDistance),
             Self::Dot => Box::new(float32::DotProductDistance),
+            // XXX figure out if we should normalize both vectors in a special distance function.
+            Self::Cosine => todo!(),
         }
     }
 
     /// Return true if vectors must be l2 normalized during encoding.
     pub fn l2_normalize(&self) -> bool {
         matches!(self, Self::Dot)
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = VectorSimilarity> {
+        [
+            VectorSimilarity::Euclidean,
+            VectorSimilarity::Dot,
+            VectorSimilarity::Cosine,
+        ]
+        .into_iter()
     }
 }
 
@@ -50,6 +71,7 @@ impl FromStr for VectorSimilarity {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "euclidean" | "l2" => Ok(VectorSimilarity::Euclidean),
+            "cosine" | "cos" => Ok(VectorSimilarity::Cosine),
             "dot" => Ok(VectorSimilarity::Dot),
             x => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -62,8 +84,9 @@ impl FromStr for VectorSimilarity {
 impl std::fmt::Display for VectorSimilarity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Dot => write!(f, "dot"),
             Self::Euclidean => write!(f, "l2"),
+            Self::Cosine => write!(f, "cos"),
+            Self::Dot => write!(f, "dot"),
         }
     }
 }
@@ -208,7 +231,7 @@ impl F32VectorCoding {
         &self,
         similarity: VectorSimilarity,
     ) -> Option<Box<dyn VectorDistance>> {
-        use VectorSimilarity::{Dot, Euclidean};
+        use VectorSimilarity::{Cosine, Dot, Euclidean};
 
         match (self, similarity) {
             (Self::F32, Dot) => Some(Box::new(float32::DotProductDistance)),
@@ -241,6 +264,7 @@ impl F32VectorCoding {
             (Self::I8ScaledNonUniformQuantized(s), Euclidean) => {
                 Some(Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s)))
             }
+            (_, Cosine) => todo!(),
         }
     }
 
@@ -380,7 +404,7 @@ pub fn new_query_vector_distance_f32<'a>(
     similarity: VectorSimilarity,
     coding: F32VectorCoding,
 ) -> Box<dyn QueryVectorDistance + 'a> {
-    use VectorSimilarity::{Dot, Euclidean};
+    use VectorSimilarity::{Cosine, Dot, Euclidean};
 
     match (similarity, coding) {
         (Dot, F32VectorCoding::F32) => Box::new(float32::QueryVectorDistance::new(
@@ -435,6 +459,7 @@ pub fn new_query_vector_distance_f32<'a>(
         (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => Box::new(
             scaled_non_uniform::I8EuclideanQueryDistance::new(s, query.into()),
         ),
+        (Cosine, _) => todo!(),
     }
 }
 
@@ -444,7 +469,7 @@ pub fn new_query_vector_distance_indexing<'a>(
     similarity: VectorSimilarity,
     coding: F32VectorCoding,
 ) -> Box<dyn QueryVectorDistance + 'a> {
-    use VectorSimilarity::{Dot, Euclidean};
+    use VectorSimilarity::{Cosine, Dot, Euclidean};
     match (similarity, coding) {
         (Dot, F32VectorCoding::F32) => Box::new(QuantizedQueryVectorDistance::from_quantized(
             float32::DotProductDistance,
@@ -514,6 +539,7 @@ pub fn new_query_vector_distance_indexing<'a>(
                 query,
             ))
         }
+        (Cosine, _) => todo!(),
     }
 }
 

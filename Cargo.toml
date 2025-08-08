@@ -25,6 +25,9 @@ criterion = "0.7.0"
 rand_xoshiro = "0.7.0"
 tempfile = "3.20.0"
 
+[build-dependencies]
+cc = "1.2.31"
+
 [[bench]]
 name = "distance"
 harness = false

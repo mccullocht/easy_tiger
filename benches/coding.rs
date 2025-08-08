@@ -29,8 +29,9 @@ fn benchmark_coding(
 }
 
 fn float32_benchmarks(c: &mut Criterion) {
-    benchmark_coding(c, F32VectorCoding::F32, Some(VectorSimilarity::Dot));
-    benchmark_coding(c, F32VectorCoding::F32, Some(VectorSimilarity::Euclidean));
+    for sim in VectorSimilarity::all() {
+        benchmark_coding(c, F32VectorCoding::F32, Some(sim));
+    }
 }
 
 fn float16_benchmarks(c: &mut Criterion) {

@@ -51,22 +51,9 @@ fn benchmark_query_distance(
 pub fn float32_benchmarks(c: &mut Criterion) {
     let (a, b) = generate_test_vectors(1024);
 
-    benchmark_distance(
-        "f32/dot",
-        &a,
-        &b,
-        F32VectorCoding::F32,
-        VectorSimilarity::Dot,
-        c,
-    );
-    benchmark_distance(
-        "f32/l2",
-        &a,
-        &b,
-        F32VectorCoding::F32,
-        VectorSimilarity::Euclidean,
-        c,
-    );
+    for sim in VectorSimilarity::all() {
+        benchmark_distance(&format!("f32/{sim}"), &a, &b, F32VectorCoding::F32, sim, c);
+    }
 }
 
 pub fn float16_benchmarks(c: &mut Criterion) {

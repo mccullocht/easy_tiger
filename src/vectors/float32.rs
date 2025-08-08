@@ -1,24 +1,34 @@
 //! Raw float 32 vector coding and distance computation.
 //!
-//! Vectors are stored as a sequence of raw little-endian f32 values without any additional metadata.
-//! The L2 Normalized coding performs l2 normalization before storing the vector, making it a better
-//! fit for angular distance computation.
+//! Vectors are stored as a sequence of raw little-endian coded f32 values.
+//!
+//! For Cosine similarity the vector will be normalized during encoding. When scoring float vectors
+//! we will assume the vectors are unnormalized.
 
 use std::borrow::Cow;
 
 use simsimd::SpatialSimilarity;
 
 use crate::{
-    distance::{dot_f32, dot_f32_bytes, l2sq_f32, l2sq_f32_bytes},
-    vectors::{F32VectorCoder, F32VectorDistance, VectorDistance, VectorSimilarity},
+    distance::{dot_f32, dot_f32_bytes, l2_normalize, l2sq_f32, l2sq_f32_bytes},
+    vectors::{
+        F32VectorCoder, F32VectorDistance, QueryVectorDistance as QueryVectorDistanceT,
+        VectorDistance, VectorSimilarity,
+    },
 };
 
 #[derive(Debug, Copy, Clone)]
-pub struct VectorCoder(bool);
+pub struct VectorCoder(VectorSimilarity);
 
 impl VectorCoder {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity.l2_normalize())
+        Self(similarity)
+    }
+
+    fn encode_it(vector: impl ExactSizeIterator<Item = f32>, out: &mut [u8]) {
+        for (d, o) in vector.zip(out.as_chunks_mut::<{ std::mem::size_of::<f32>() }>().0) {
+            *o = d.to_le_bytes();
+        }
     }
 }
 
@@ -29,21 +39,15 @@ impl F32VectorCoder for VectorCoder {
 
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         assert!(out.len() >= std::mem::size_of_val(vector));
-        let encode_it = vector
-            .iter()
-            .zip(out.chunks_mut(std::mem::size_of::<f32>()));
-        if self.0 {
+        let vector_it = vector.iter().copied();
+        if self.0.l2_normalize() {
             let scale = (1.0
                 / SpatialSimilarity::dot(vector, vector)
                     .expect("identical vectors")
                     .sqrt()) as f32;
-            for (d, o) in encode_it {
-                o.copy_from_slice(&(*d * scale).to_le_bytes());
-            }
+            Self::encode_it(vector_it.map(|d| d * scale), out);
         } else {
-            for (d, o) in encode_it {
-                o.copy_from_slice(&d.to_le_bytes());
-            }
+            Self::encode_it(vector_it, out);
         }
     }
 
@@ -95,6 +99,24 @@ impl F32VectorDistance for DotProductDistance {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct CosineDistance;
+
+impl VectorDistance for CosineDistance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        // Vectors are normalized during encoding so we can make this fast.
+        DotProductDistance.distance(query, doc)
+    }
+}
+
+impl F32VectorDistance for CosineDistance {
+    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
+        // We can't assume the vectors have been processed/normalized here so we have to perform
+        // full cosine similarity.
+        SpatialSimilarity::cos(a, b).unwrap()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct QueryVectorDistance<'a, D> {
     distance_fn: D,
@@ -102,19 +124,28 @@ pub struct QueryVectorDistance<'a, D> {
 }
 
 impl<'a, D: F32VectorDistance> QueryVectorDistance<'a, D> {
-    pub fn new(distance_fn: D, query: Cow<'a, [f32]>, l2_normalize: bool) -> Self {
-        let query = if l2_normalize {
-            crate::distance::l2_normalize(query)
-        } else {
-            query
-        };
+    pub fn new(distance_fn: D, query: Cow<'a, [f32]>) -> Self {
         Self { distance_fn, query }
     }
 }
 
-impl<'a, D: F32VectorDistance> super::QueryVectorDistance for QueryVectorDistance<'a, D> {
+impl<'a, D: F32VectorDistance> QueryVectorDistanceT for QueryVectorDistance<'a, D> {
     fn distance(&self, vector: &[u8]) -> f64 {
         self.distance_fn
             .distance(bytemuck::cast_slice(self.query.as_ref()), vector)
+    }
+}
+
+pub fn new_query_vector_distance<'a>(
+    similarity: VectorSimilarity,
+    query: Cow<'a, [f32]>,
+) -> Box<dyn QueryVectorDistanceT + 'a> {
+    match similarity {
+        VectorSimilarity::Cosine => Box::new(QueryVectorDistance::new(
+            CosineDistance,
+            l2_normalize(query),
+        )),
+        VectorSimilarity::Dot => Box::new(QueryVectorDistance::new(DotProductDistance, query)),
+        VectorSimilarity::Euclidean => Box::new(QueryVectorDistance::new(EuclideanDistance, query)),
     }
 }

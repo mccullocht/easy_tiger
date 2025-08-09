@@ -4,10 +4,7 @@ use std::{borrow::Cow, fmt::Debug, io, num::ParseIntError, ops::Deref, str::From
 
 use crate::{
     distance::l2_normalize,
-    vectors::binary::{
-        AsymmetricBinaryQuantizedVectorCoder, AsymmetricHammingDistance,
-        BinaryQuantizedVectorCoder, HammingDistance,
-    },
+    vectors::binary::{BinaryQuantizedVectorCoder, HammingDistance},
 };
 
 mod binary;
@@ -173,11 +170,6 @@ pub enum F32VectorCoding {
     /// This encoding is very compact and efficient for distance computation but also does not have
     /// high fidelity with distances computed between raw vectors.
     BinaryQuantized,
-    /// Quantize to N bits per dimension but transpose to create N bit vectors.
-    ///
-    /// This allows us to emulate dot product when comparing to a binary quantized vector, and
-    /// produces higher fidelity distance than binary quantization on its own.
-    NBitBinaryQuantized(usize),
     /// Quantize into an i8 value shaped to the input vector.
     ///
     /// This uses the contents of the vector to try to reduce quantization error but no data from
@@ -217,7 +209,6 @@ impl F32VectorCoding {
             Self::F32 => Box::new(float32::VectorCoder::new(similarity)),
             Self::F16 => Box::new(float16::VectorCoder::new(similarity)),
             Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
-            Self::NBitBinaryQuantized(n) => Box::new(AsymmetricBinaryQuantizedVectorCoder::new(*n)),
             Self::I8ScaledUniformQuantized => {
                 Box::new(scaled_uniform::I8VectorCoder::new(similarity))
             }
@@ -235,6 +226,7 @@ impl F32VectorCoding {
 
     /// Returns a [VectorDistance] for symmetrical vector codings, or [None] if the encoding is not
     /// symmetrical.
+    // XXX should maybe remove this???
     pub fn new_symmetric_vector_distance(
         &self,
         similarity: VectorSimilarity,
@@ -248,7 +240,6 @@ impl F32VectorCoding {
             (Self::F16, Dot) | (Self::F16, Cosine) => Some(Box::new(float16::DotProductDistance)),
             (Self::F16, Euclidean) => Some(Box::new(float16::EuclideanDistance)),
             (Self::BinaryQuantized, _) => Some(Box::new(HammingDistance)),
-            (Self::NBitBinaryQuantized(_), _) => None,
             (Self::I8ScaledUniformQuantized, Dot) | (Self::I8ScaledUniformQuantized, Cosine) => {
                 Some(Box::new(scaled_uniform::I8DotProductDistance))
             }
@@ -276,12 +267,6 @@ impl F32VectorCoding {
             }
         }
     }
-
-    /// Returns true if this coding can be scored symmetrically, where both vectors are using the
-    /// same coding. Only encodings that are symmetrical can be used for vectors stored on disk.
-    pub fn is_symmetric(&self) -> bool {
-        !matches!(self, Self::NBitBinaryQuantized(_))
-    }
 }
 
 impl FromStr for F32VectorCoding {
@@ -293,17 +278,6 @@ impl FromStr for F32VectorCoding {
             "raw" | "raw-l2-norm" | "f32" => Ok(Self::F32),
             "f16" => Ok(Self::F16),
             "binary" => Ok(Self::BinaryQuantized),
-            ab if ab.starts_with("asymmetric_binary:") => {
-                let bits_str = ab
-                    .strip_prefix("asymmetric_binary:")
-                    .expect("prefix matched");
-                bits_str
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|b| if (1..=8).contains(&b) { Some(b) } else { None })
-                    .map(Self::NBitBinaryQuantized)
-                    .ok_or_else(|| input_err(format!("invalid asymmetric_binary bits {bits_str}")))
-            }
             "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
             "i4-scaled-uniform" => Ok(Self::I4ScaledUniformQuantized),
             "i16-scaled-uniform" => Ok(Self::I16ScaledUniformQuantized),
@@ -332,7 +306,6 @@ impl std::fmt::Display for F32VectorCoding {
             Self::F32 => write!(f, "f32"),
             Self::F16 => write!(f, "f16"),
             Self::BinaryQuantized => write!(f, "binary"),
-            Self::NBitBinaryQuantized(n) => write!(f, "asymmetric_binary:{}", *n),
             Self::I8ScaledUniformQuantized => write!(f, "i8-scaled-uniform"),
             Self::I4ScaledUniformQuantized => write!(f, "i4-scaled-uniform"),
             Self::I16ScaledUniformQuantized => write!(f, "i16-scaled-uniform"),
@@ -428,13 +401,6 @@ pub fn new_query_vector_distance_f32<'a>(
             query.into().as_ref(),
             BinaryQuantizedVectorCoder,
         )),
-        (_, F32VectorCoding::NBitBinaryQuantized(n)) => {
-            Box::new(QuantizedQueryVectorDistance::from_f32(
-                AsymmetricHammingDistance,
-                query.into().as_ref(),
-                AsymmetricBinaryQuantizedVectorCoder::new(n),
-            ))
-        }
         (Cosine, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
             scaled_uniform::I8DotProductQueryDistance::new(l2_normalize(query.into())),
         ),
@@ -495,9 +461,6 @@ pub fn new_query_vector_distance_indexing<'a>(
         (Dot, F32VectorCoding::F16) => quantized_qvd!(float16::DotProductDistance, query),
         (Euclidean, F32VectorCoding::F16) => quantized_qvd!(float16::EuclideanDistance, query),
         (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(HammingDistance, query),
-        (_, F32VectorCoding::NBitBinaryQuantized(_)) => Box::new(
-            QuantizedQueryVectorDistance::from_quantized(HammingDistance, query),
-        ),
         (Dot, F32VectorCoding::I8ScaledUniformQuantized)
         | (Cosine, F32VectorCoding::I8ScaledUniformQuantized) => {
             quantized_qvd!(scaled_uniform::I8DotProductDistance, query)

@@ -29,7 +29,7 @@ fn benchmark_distance(
     let coder = coding.new_coder(similarity);
     let x = coder.encode(x);
     let y = coder.encode(y);
-    let dist = coding.new_symmetric_vector_distance(similarity).unwrap();
+    let dist = coding.new_vector_distance(similarity);
     c.bench_function(name, |b| {
         b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
     });
@@ -51,22 +51,9 @@ fn benchmark_query_distance(
 pub fn float32_benchmarks(c: &mut Criterion) {
     let (a, b) = generate_test_vectors(1024);
 
-    benchmark_distance(
-        "f32/dot",
-        &a,
-        &b,
-        F32VectorCoding::F32,
-        VectorSimilarity::Dot,
-        c,
-    );
-    benchmark_distance(
-        "f32/l2",
-        &a,
-        &b,
-        F32VectorCoding::F32,
-        VectorSimilarity::Euclidean,
-        c,
-    );
+    for sim in VectorSimilarity::all() {
+        benchmark_distance(&format!("f32/{sim}"), &a, &b, F32VectorCoding::F32, sim, c);
+    }
 }
 
 pub fn float16_benchmarks(c: &mut Criterion) {
@@ -94,7 +81,7 @@ pub fn i8_scaled_non_uniform_benchmarks(c: &mut Criterion) {
 
 fn query_and_doc_benchmarks(c: &mut Criterion, format: F32VectorCoding) {
     let (x, y) = generate_test_vectors(1024);
-    for similarity in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
+    for similarity in VectorSimilarity::all() {
         benchmark_distance(
             &format!("{format}/doc/{similarity}"),
             &x,

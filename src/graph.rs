@@ -94,9 +94,8 @@ impl GraphConfig {
     }
 
     /// Return a distance function for quantized navigational vectors in the index.
-    pub fn new_nav_distance_function(&self) -> Option<Box<dyn VectorDistance>> {
-        self.nav_format
-            .new_symmetric_vector_distance(self.similarity)
+    pub fn new_nav_distance_function(&self) -> Box<dyn VectorDistance> {
+        self.nav_format.new_vector_distance(self.similarity)
     }
 
     /// Return a new vector coder for the rerank vector format.
@@ -186,10 +185,7 @@ impl EdgeSetDistanceComputer {
         } else {
             let vectors = Self::extract_vectors(&mut reader.nav_vectors()?, edges)?;
             Ok(Self {
-                distance_fn: reader
-                    .config()
-                    .new_nav_distance_function()
-                    .expect("symmetrical vector coding on disk"),
+                distance_fn: reader.config().new_nav_distance_function(),
                 vectors,
             })
         }

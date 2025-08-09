@@ -10,8 +10,8 @@
 use std::borrow::Cow;
 
 use crate::{
-    distance::{dot_f32, l2_normalize},
-    vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance},
+    distance::dot_f32,
+    vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity},
 };
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -52,9 +52,13 @@ fn compute_scale<const M: i16>(vector: &[f32]) -> (f32, f32) {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I8VectorCoder;
+pub struct I8VectorCoder(VectorSimilarity);
 
 impl I8VectorCoder {
+    pub fn new(similarity: VectorSimilarity) -> Self {
+        Self(similarity)
+    }
+
     fn encode_vector_scalar(&self, vector: &[f32], scale: f32, out: &mut [u8]) {
         for (d, o) in vector.iter().zip(out.iter_mut()) {
             *o = ((*d * scale).round() as i8).to_le_bytes()[0];
@@ -90,7 +94,11 @@ impl I8VectorCoder {
 
 impl F32VectorCoder for I8VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
+        let l2_norm = if self.0 != VectorSimilarity::Dot {
+            crate::distance::dot_f32(vector, vector).sqrt() as f32
+        } else {
+            1.0
+        };
         let (scale, inv_scale) = compute_scale::<{ i8::MAX as i16 }>(vector);
         out[0..4].copy_from_slice(&inv_scale.to_le_bytes());
         out[4..8].copy_from_slice(&l2_norm.to_le_bytes());
@@ -240,7 +248,7 @@ pub struct I8DotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
 impl<'a> I8DotProductQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(l2_normalize(query))
+        Self(query)
     }
 }
 
@@ -283,11 +291,21 @@ impl QueryVectorDistance for I8EuclideanQueryDistance<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I4PackedVectorCoder;
+pub struct I4PackedVectorCoder(VectorSimilarity);
+
+impl I4PackedVectorCoder {
+    pub fn new(similarity: VectorSimilarity) -> Self {
+        Self(similarity)
+    }
+}
 
 impl F32VectorCoder for I4PackedVectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
+        let l2_norm = if self.0 != VectorSimilarity::Dot {
+            crate::distance::dot_f32(vector, vector).sqrt() as f32
+        } else {
+            1.0
+        };
         let (scale, inv_scale) = compute_scale::<7>(vector);
         out[0..4].copy_from_slice(&inv_scale.to_le_bytes());
         out[4..8].copy_from_slice(&l2_norm.to_le_bytes());
@@ -454,7 +472,7 @@ pub struct I4PackedDotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
 impl<'a> I4PackedDotProductQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(l2_normalize(query))
+        Self(query)
     }
 }
 
@@ -497,11 +515,21 @@ impl QueryVectorDistance for I4PackedEuclideanQueryDistance<'_> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I16VectorCoder;
+pub struct I16VectorCoder(VectorSimilarity);
+
+impl I16VectorCoder {
+    pub fn new(similarity: VectorSimilarity) -> Self {
+        Self(similarity)
+    }
+}
 
 impl F32VectorCoder for I16VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
+        let l2_norm = if self.0 != VectorSimilarity::Dot {
+            crate::distance::dot_f32(vector, vector).sqrt() as f32
+        } else {
+            1.0
+        };
         let (scale, inv_scale) = compute_scale::<{ i16::MAX }>(vector);
         out[0..4].copy_from_slice(&inv_scale.to_le_bytes());
         out[4..8].copy_from_slice(&l2_norm.to_le_bytes());
@@ -658,7 +686,7 @@ pub struct I16DotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
 impl<'a> I16DotProductQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(l2_normalize(query))
+        Self(query)
     }
 }
 

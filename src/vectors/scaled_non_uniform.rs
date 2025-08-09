@@ -15,7 +15,10 @@ use std::{borrow::Cow, ops::Range};
 use super::dot_unnormalized_i8_f32;
 use crate::{
     distance::{dot_f32, l2_normalize},
-    vectors::{F32VectorCoder, NonUniformQuantizedDimensions, QueryVectorDistance, VectorDistance},
+    vectors::{
+        F32VectorCoder, NonUniformQuantizedDimensions, QueryVectorDistance, VectorDistance,
+        VectorSimilarity,
+    },
 };
 
 fn compute_scale<const M: i8>(vector: &[f32]) -> (f32, f32) {
@@ -45,11 +48,11 @@ fn split_dim_iterator<'a>(
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I8VectorCoder(NonUniformQuantizedDimensions);
+pub struct I8VectorCoder(NonUniformQuantizedDimensions, VectorSimilarity);
 
 impl I8VectorCoder {
-    pub fn new(splits: NonUniformQuantizedDimensions) -> Self {
-        Self(splits)
+    pub fn new(similarity: VectorSimilarity, splits: NonUniformQuantizedDimensions) -> Self {
+        Self(splits, similarity)
     }
 
     fn split_iterator<'a, 'b>(
@@ -62,7 +65,11 @@ impl I8VectorCoder {
 
 impl F32VectorCoder for I8VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let l2_norm = crate::distance::dot_f32(vector, vector).sqrt() as f32;
+        let l2_norm = if self.1 != VectorSimilarity::Dot {
+            crate::distance::dot_f32(vector, vector).sqrt() as f32
+        } else {
+            1.0
+        };
         let scales = self
             .split_iterator(vector)
             .map(compute_scale::<{ i8::MAX }>)

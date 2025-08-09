@@ -81,7 +81,7 @@ pub fn i8_scaled_non_uniform_benchmarks(c: &mut Criterion) {
 
 fn query_and_doc_benchmarks(c: &mut Criterion, format: F32VectorCoding) {
     let (x, y) = generate_test_vectors(1024);
-    for similarity in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
+    for similarity in VectorSimilarity::all() {
         benchmark_distance(
             &format!("{format}/doc/{similarity}"),
             &x,

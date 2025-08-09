@@ -35,8 +35,9 @@ fn float32_benchmarks(c: &mut Criterion) {
 }
 
 fn float16_benchmarks(c: &mut Criterion) {
-    benchmark_coding(c, F32VectorCoding::F16, Some(VectorSimilarity::Dot));
-    benchmark_coding(c, F32VectorCoding::F16, Some(VectorSimilarity::Euclidean));
+    for sim in VectorSimilarity::all() {
+        benchmark_coding(c, F32VectorCoding::F16, Some(sim));
+    }
 }
 
 fn i4_scaled_uniform_benchmarks(c: &mut Criterion) {

@@ -226,44 +226,40 @@ impl F32VectorCoding {
 
     /// Returns a [VectorDistance] for symmetrical vector codings, or [None] if the encoding is not
     /// symmetrical.
-    // XXX should maybe remove this???
-    pub fn new_symmetric_vector_distance(
-        &self,
-        similarity: VectorSimilarity,
-    ) -> Option<Box<dyn VectorDistance>> {
+    pub fn new_vector_distance(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
 
         match (self, similarity) {
-            (Self::F32, Cosine) => Some(Box::new(float32::CosineDistance)),
-            (Self::F32, Dot) => Some(Box::new(float32::DotProductDistance)),
-            (Self::F32, Euclidean) => Some(Box::new(float32::EuclideanDistance)),
-            (Self::F16, Dot) | (Self::F16, Cosine) => Some(Box::new(float16::DotProductDistance)),
-            (Self::F16, Euclidean) => Some(Box::new(float16::EuclideanDistance)),
-            (Self::BinaryQuantized, _) => Some(Box::new(HammingDistance)),
+            (Self::F32, Cosine) => Box::new(float32::CosineDistance),
+            (Self::F32, Dot) => Box::new(float32::DotProductDistance),
+            (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance),
+            (Self::F16, Dot) | (Self::F16, Cosine) => Box::new(float16::DotProductDistance),
+            (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance),
+            (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
             (Self::I8ScaledUniformQuantized, Dot) | (Self::I8ScaledUniformQuantized, Cosine) => {
-                Some(Box::new(scaled_uniform::I8DotProductDistance))
+                Box::new(scaled_uniform::I8DotProductDistance)
             }
             (Self::I8ScaledUniformQuantized, Euclidean) => {
-                Some(Box::new(scaled_uniform::I8EuclideanDistance))
+                Box::new(scaled_uniform::I8EuclideanDistance)
             }
             (Self::I4ScaledUniformQuantized, Dot) | (Self::I4ScaledUniformQuantized, Cosine) => {
-                Some(Box::new(scaled_uniform::I4PackedDotProductDistance))
+                Box::new(scaled_uniform::I4PackedDotProductDistance)
             }
             (Self::I4ScaledUniformQuantized, Euclidean) => {
-                Some(Box::new(scaled_uniform::I4PackedEuclideanDistance))
+                Box::new(scaled_uniform::I4PackedEuclideanDistance)
             }
             (Self::I16ScaledUniformQuantized, Dot) | (Self::I16ScaledUniformQuantized, Cosine) => {
-                Some(Box::new(scaled_uniform::I16DotProductDistance))
+                Box::new(scaled_uniform::I16DotProductDistance)
             }
             (Self::I16ScaledUniformQuantized, Euclidean) => {
-                Some(Box::new(scaled_uniform::I16EuclideanDistance))
+                Box::new(scaled_uniform::I16EuclideanDistance)
             }
             (Self::I8ScaledNonUniformQuantized(s), Dot)
             | (Self::I8ScaledNonUniformQuantized(s), Cosine) => {
-                Some(Box::new(scaled_non_uniform::I8DotProductDistance::new(*s)))
+                Box::new(scaled_non_uniform::I8DotProductDistance::new(*s))
             }
             (Self::I8ScaledNonUniformQuantized(s), Euclidean) => {
-                Some(Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s)))
+                Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s))
             }
         }
     }
@@ -566,7 +562,7 @@ mod test {
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
         assert_float_near!(rf32_dist, ru8_dist, 0.00001, index);
 
-        let dist_fn = format.new_symmetric_vector_distance(similarity).unwrap();
+        let dist_fn = format.new_vector_distance(similarity);
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);
         assert_float_near!(rf32_dist, qdist, threshold, index);
     }

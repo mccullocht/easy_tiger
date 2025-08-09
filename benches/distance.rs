@@ -29,7 +29,7 @@ fn benchmark_distance(
     let coder = coding.new_coder(similarity);
     let x = coder.encode(x);
     let y = coder.encode(y);
-    let dist = coding.new_symmetric_vector_distance(similarity).unwrap();
+    let dist = coding.new_vector_distance(similarity);
     c.bench_function(name, |b| {
         b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
     });

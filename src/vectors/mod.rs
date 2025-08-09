@@ -390,7 +390,10 @@ pub fn new_query_vector_distance_f32<'a>(
 
     match (similarity, coding) {
         (_, F32VectorCoding::F32) => float32::new_query_vector_distance(similarity, query.into()),
-        (Dot, F32VectorCoding::F16) | (Cosine, F32VectorCoding::F16) => {
+        (Cosine, F32VectorCoding::F16) => Box::new(float16::DotProductQueryDistance::new(
+            l2_normalize(query.into()),
+        )),
+        (Dot, F32VectorCoding::F16) => {
             Box::new(float16::DotProductQueryDistance::new(query.into()))
         }
         (Euclidean, F32VectorCoding::F16) => {

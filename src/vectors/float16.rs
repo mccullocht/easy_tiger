@@ -3,10 +3,7 @@ use std::borrow::Cow;
 use half::f16;
 use simsimd::SpatialSimilarity;
 
-use crate::{
-    distance::l2_normalize,
-    vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity},
-};
+use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity};
 
 // While the `half` crate supports f16, SIMD features are limited to nightly and even the related
 // intrinsics are not stable on aarch64, so resort to C linkage.
@@ -141,8 +138,7 @@ pub struct DotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
 impl<'a> DotProductQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
-        // XXX may not need this anymore.
-        Self(l2_normalize(query))
+        Self(query)
     }
 
     #[allow(dead_code)]

@@ -113,7 +113,13 @@ impl F32VectorDistance for CosineDistance {
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
         // We can't assume the vectors have been processed/normalized here so we have to perform
         // full cosine similarity.
-        SpatialSimilarity::cos(a, b).unwrap()
+        let (ab, a2, b2) = a
+            .iter()
+            .zip(b.iter())
+            .map(|(a, b)| (*a * b, *a * *a, *b * *b))
+            .fold((0.0, 0.0, 0.0), |s, x| (s.0 + x.0, s.1 + x.1, s.2 + x.2));
+        let cos = ab / (a2.sqrt() * b2.sqrt());
+        (-cos as f64 + 1.0) / 2.0
     }
 }
 

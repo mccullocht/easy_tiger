@@ -22,17 +22,17 @@ unsafe extern "C" {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct VectorCoder(bool);
+pub struct VectorCoder(VectorSimilarity);
 
 impl VectorCoder {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity.l2_normalize())
+        Self(similarity)
     }
 
     #[allow(dead_code)]
     fn convert_and_encode_scalar(
         &self,
-        vector: impl ExactSizeIterator<Item = f32>,
+        vector: impl ExactSizeIterator<Item = f32> + Clone,
         out: &mut [u8],
     ) {
         let encode_it = vector.zip(out.chunks_mut(2));
@@ -69,7 +69,7 @@ impl VectorCoder {
 
 impl F32VectorCoder for VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let scale = if self.0 {
+        let scale = if self.0.l2_normalize() {
             Some(
                 (1.0 / SpatialSimilarity::dot(vector, vector)
                     .expect("identical vectors")
@@ -141,6 +141,7 @@ pub struct DotProductQueryDistance<'a>(Cow<'a, [f32]>);
 
 impl<'a> DotProductQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
+        // XXX may not need this anymore.
         Self(l2_normalize(query))
     }
 

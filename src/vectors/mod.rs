@@ -2,10 +2,7 @@
 
 use std::{borrow::Cow, fmt::Debug, io, num::ParseIntError, ops::Deref, str::FromStr};
 
-use crate::{
-    distance::l2_normalize,
-    vectors::binary::{BinaryQuantizedVectorCoder, HammingDistance},
-};
+use crate::distance::l2_normalize;
 
 mod binary;
 mod float16;
@@ -208,7 +205,7 @@ impl F32VectorCoding {
         match self {
             Self::F32 => Box::new(float32::VectorCoder::new(similarity)),
             Self::F16 => Box::new(float16::VectorCoder::new(similarity)),
-            Self::BinaryQuantized => Box::new(BinaryQuantizedVectorCoder),
+            Self::BinaryQuantized => Box::new(binary::BinaryQuantizedVectorCoder),
             Self::I8ScaledUniformQuantized => {
                 Box::new(scaled_uniform::I8VectorCoder::new(similarity))
             }
@@ -396,9 +393,9 @@ pub fn new_query_vector_distance_f32<'a>(
             Box::new(float16::EuclideanQueryDistance::new(query.into()))
         }
         (_, F32VectorCoding::BinaryQuantized) => Box::new(QuantizedQueryVectorDistance::from_f32(
-            HammingDistance,
+            binary::HammingDistance,
             query.into().as_ref(),
-            BinaryQuantizedVectorCoder,
+            binary::BinaryQuantizedVectorCoder,
         )),
         (Cosine, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
             scaled_uniform::I8DotProductQueryDistance::new(l2_normalize(query.into())),
@@ -459,7 +456,7 @@ pub fn new_query_vector_distance_indexing<'a>(
         (Euclidean, F32VectorCoding::F32) => quantized_qvd!(float32::EuclideanDistance, query),
         (Dot, F32VectorCoding::F16) => quantized_qvd!(float16::DotProductDistance, query),
         (Euclidean, F32VectorCoding::F16) => quantized_qvd!(float16::EuclideanDistance, query),
-        (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(HammingDistance, query),
+        (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
         (Dot, F32VectorCoding::I8ScaledUniformQuantized)
         | (Cosine, F32VectorCoding::I8ScaledUniformQuantized) => {
             quantized_qvd!(scaled_uniform::I8DotProductDistance, query)

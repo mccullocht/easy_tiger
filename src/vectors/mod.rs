@@ -371,10 +371,7 @@ struct QuantizedQueryVectorDistance<'a, D> {
 }
 
 impl<'a, D: VectorDistance> QuantizedQueryVectorDistance<'a, D> {
-    fn from_f32(distance_fn: D, query: &[f32], coder: impl F32VectorCoder) -> Self {
-        Self::from_quantized(distance_fn, coder.encode(query))
-    }
-
+    // XXX rename as 'new'
     fn from_quantized(distance_fn: D, query: impl Into<Cow<'a, [u8]>>) -> Self {
         Self {
             distance_fn,
@@ -417,10 +414,8 @@ pub fn new_query_vector_distance_f32<'a>(
         (Euclidean, F32VectorCoding::F16) => {
             Box::new(float16::EuclideanQueryDistance::new(query.into()))
         }
-        (_, F32VectorCoding::BinaryQuantized) => Box::new(QuantizedQueryVectorDistance::from_f32(
-            binary::HammingDistance,
+        (_, F32VectorCoding::BinaryQuantized) => Box::new(binary::I1DotProductQueryDistance::new(
             query.into().as_ref(),
-            binary::BinaryQuantizedVectorCoder,
         )),
         (Cosine, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
             scaled_uniform::I8DotProductQueryDistance::new(l2_normalize(query.into())),
@@ -482,8 +477,8 @@ pub fn new_query_vector_distance_indexing<'a>(
         (_, F32VectorCoding::TruncatedF32(_)) => {
             new_query_vector_distance_indexing(query, similarity, F32VectorCoding::F32)
         }
-        (Cosine, F32VectorCoding::F16) => unimplemented!(),
         (Dot, F32VectorCoding::F16) => quantized_qvd!(float16::DotProductDistance, query),
+        (Cosine, F32VectorCoding::F16) => unimplemented!(),
         (Euclidean, F32VectorCoding::F16) => quantized_qvd!(float16::EuclideanDistance, query),
         (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
         (Dot, F32VectorCoding::I8ScaledUniformQuantized)

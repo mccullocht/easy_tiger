@@ -109,23 +109,22 @@ impl I1DotProductQueryDistance {
     fn dot_unnormalized_i32(&self, vector: &[u8]) -> i32 {
         // XXX fix tail split
         unsafe {
-            use std::arch::aarch64::{vaddvq_s32, vdup_n_u8, vdupq_n_s32, vld1_s8};
+            use std::arch::aarch64::{vaddvq_s32, vdupq_n_s32, vld1_s8, vld1_u8, vmin_u8};
 
-            let dshift_mask = vld1_s8([0, -1, -2, -3, -4, -5, -6, -7].as_ptr());
-            let dmask = vdup_n_u8(0x1);
+            let doc_mask = vld1_u8([0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80].as_ptr());
             let dtbl_mask = vld1_s8([-self.i1_value, self.i1_value, 0, 0, 0, 0, 0, 0].as_ptr());
             let mut dot = vdupq_n_s32(0);
             for i in (0..self.quantized.len()).step_by(8) {
                 use std::arch::aarch64::{
                     vaddq_s32, vand_u8, vdup_n_u8, vmull_s8, vpaddlq_s16, vreinterpret_s8_u8,
-                    vreinterpret_u8_s8, vshl_u8, vtbl1_u8,
+                    vreinterpret_u8_s8, vtbl1_u8,
                 };
 
                 let qv = vld1_s8(self.quantized.as_ptr().add(i));
                 // Broadcast the current doc value, then shift and mask to isolate each bit.
                 // Table decode 0 into a negative value and 1 into a positive value.
                 let dv = vreinterpret_s8_u8(vtbl1_u8(
-                    vand_u8(vshl_u8(vdup_n_u8(vector[i / 8]), dshift_mask), dmask),
+                    vmin_u8(vand_u8(vdup_n_u8(vector[i / 8]), doc_mask), vdup_n_u8(1)),
                     vreinterpret_u8_s8(dtbl_mask),
                 ));
                 // XXX vdot_s32 would almost certainly be faster here (3 instr -> 1)

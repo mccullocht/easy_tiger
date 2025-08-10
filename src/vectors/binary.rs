@@ -102,38 +102,69 @@ impl I1DotProductQueryDistance {
         self.dot_unnormalized_i32_scalar(vector)
     }
 
-    // XXX this is ~12x slower than just doing hamming distance.
-    // XXX if I can get the number down to 8x it is competitive with replacing the transposed
-    // hamming distance method, if I can get it below that it is superior.
+    // XXX this is ~7x slower than raw hamming.
     #[cfg(target_arch = "aarch64")]
     fn dot_unnormalized_i32(&self, vector: &[u8]) -> i32 {
         // XXX fix tail split
         unsafe {
-            use std::arch::aarch64::{vaddvq_s32, vdupq_n_s32, vld1_s8, vld1_u8, vmin_u8};
+            use std::arch::aarch64::{
+                vaddq_s32, vaddvq_s32, vandq_u8, vcombine_u8, vdup_n_u8, vdupq_n_s16, vdupq_n_s32,
+                vdupq_n_u8, vget_low_s8, vld1q_s8, vld1q_u8, vminq_u8, vmlal_high_s8, vmlal_s8,
+                vpaddlq_s16, vqtbl1q_s8,
+            };
 
-            let doc_mask = vld1_u8([0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80].as_ptr());
-            let dtbl_mask = vld1_s8([-self.i1_value, self.i1_value, 0, 0, 0, 0, 0, 0].as_ptr());
+            let doc_mask = vld1q_u8(
+                [
+                    0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x01, 0x02, 0x04, 0x08, 0x10,
+                    0x20, 0x40, 0x80,
+                ]
+                .as_ptr(),
+            );
+            let doc_tbl_mask = vld1q_s8(
+                [
+                    -self.i1_value,
+                    self.i1_value,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]
+                .as_ptr(),
+            );
             let mut dot = vdupq_n_s32(0);
-            for i in (0..self.quantized.len()).step_by(8) {
-                use std::arch::aarch64::{
-                    vaddq_s32, vand_u8, vdup_n_u8, vmull_s8, vpaddlq_s16, vreinterpret_s8_u8,
-                    vreinterpret_u8_s8, vtbl1_u8,
-                };
+            for i in (0..self.quantized.len()).step_by(16) {
+                let qv = vld1q_s8(self.quantized.as_ptr().add(i));
+                // Broadcast the next two byte values from doc to two different 8 byte values, then
+                // mask and min to do an ~invert movemask operation. We wil then table decode zeros
+                // into a negative value and 1s into a positive value.
+                let dv = vqtbl1q_s8(
+                    doc_tbl_mask,
+                    vminq_u8(
+                        vandq_u8(
+                            vcombine_u8(vdup_n_u8(vector[i / 8]), vdup_n_u8(vector[(i / 8) + 1])),
+                            doc_mask,
+                        ),
+                        vdupq_n_u8(1),
+                    ),
+                );
 
-                let qv = vld1_s8(self.quantized.as_ptr().add(i));
-                // Broadcast the current doc value, then shift and mask to isolate each bit.
-                // Table decode 0 into a negative value and 1 into a positive value.
-                let dv = vreinterpret_s8_u8(vtbl1_u8(
-                    vmin_u8(vand_u8(vdup_n_u8(vector[i / 8]), doc_mask), vdup_n_u8(1)),
-                    vreinterpret_u8_s8(dtbl_mask),
-                ));
                 // XXX vdot_s32 would almost certainly be faster here (3 instr -> 1)
-                // XXX operating on 128 bits could eliminate many instructions:
-                // * -1 load (query)
-                // * -1 shl, -1 and, -1 vtbl, +1 vcombine (doc)
-                // * 1 mul, 1 addp, 1 addq (dot)
-                // 6 instructions in the middle of the loop.
-                dot = vaddq_s32(dot, vpaddlq_s16(vmull_s8(qv, dv)));
+                let dot_half = vmlal_high_s8(
+                    vmlal_s8(vdupq_n_s16(0), vget_low_s8(qv), vget_low_s8(dv)),
+                    qv,
+                    dv,
+                );
+                dot = vaddq_s32(dot, vpaddlq_s16(dot_half));
             }
 
             vaddvq_s32(dot)

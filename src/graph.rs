@@ -97,11 +97,6 @@ impl GraphConfig {
     pub fn new_nav_distance_function(&self) -> Box<dyn VectorDistance> {
         self.nav_format.new_vector_distance(self.similarity)
     }
-
-    /// Return a new vector coder for the rerank vector format.
-    pub fn new_rerank_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.rerank_format.new_coder(self.similarity)
-    }
 }
 
 /// `GraphVectorIndexReader` is used to generate objects for graph navigation.

@@ -204,7 +204,7 @@ where
         let mut nav_cursor =
             session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table_name(), None)?;
 
-        let rerank_coder = self.index.config().new_rerank_coder();
+        let rerank_coder = self.index.rerank_table().new_coder();
         let mut rerank_vector = vec![0u8; rerank_coder.byte_len(dim)];
         let mut rerank_cursor =
             session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.rerank_table_name(), None)?;
@@ -236,7 +236,7 @@ where
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect::<Vec<_>>();
-        self.centroid = self.index.config().new_rerank_coder().encode(&centroid);
+        self.centroid = self.index.rerank_table().new_coder().encode(&centroid);
         Ok(())
     }
 

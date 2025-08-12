@@ -252,7 +252,7 @@ impl SessionIndexWriter {
             .config
             .posting_coder
             .new_coder(index.head.config().similarity);
-        let raw_coder = index.head.config().new_rerank_coder();
+        let raw_coder = index.head.rerank_table().new_coder();
         let head_reader = SessionGraphVectorIndexReader::new(index.head.clone(), session);
         let head_searcher = GraphSearcher::new(index.config.head_search_params);
         Self {

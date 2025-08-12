@@ -34,7 +34,7 @@ impl IndexMutator {
     pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
         let searcher = GraphSearcher::new(index.config().index_search_params);
         let nav_coder = index.config().new_nav_coder();
-        let rerank_coder = index.config().new_rerank_coder();
+        let rerank_coder = index.rerank_table().new_coder();
         Self {
             reader: SessionGraphVectorIndexReader::new(index, session),
             searcher,

@@ -123,6 +123,10 @@ pub fn bulk_load_raw_vectors(
     limit: usize,
     progress: (impl Fn(u64) + Send + Sync),
 ) -> Result<()> {
+    if index.head_config().rerank_table().is_none() {
+        return Ok(());
+    }
+
     let mut bulk_cursor = session.new_bulk_load_cursor::<i64, Vec<u8>>(
         &index.table_names.raw_vectors,
         Some(
@@ -130,7 +134,7 @@ pub fn bulk_load_raw_vectors(
                 .app_metadata(&serde_json::to_string(&index.config).unwrap()),
         ),
     )?;
-    let coder = index.head_config().rerank_table().new_coder();
+    let coder = index.head_config().rerank_table().unwrap().new_coder();
     let mut encoded =
         Vec::with_capacity(coder.byte_len(index.head_config().config().dimensions.get()));
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {

@@ -174,6 +174,10 @@ pub struct GraphVectorTable {
 }
 
 impl GraphVectorTable {
+    pub fn name(&self) -> &str {
+        &self.table_name
+    }
+
     pub fn format(&self) -> F32VectorCoding {
         self.format
     }
@@ -294,9 +298,9 @@ impl TableGraphVectorIndex {
         &self.graph_table_name
     }
 
-    // XXX make this optional.
-    pub fn rerank_table(&self) -> &GraphVectorTable {
-        &self.rerank_table
+    pub fn rerank_table(&self) -> Option<&GraphVectorTable> {
+        // XXX allow this to actually be optional
+        Some(&self.rerank_table)
     }
 
     pub fn nav_table(&self) -> &GraphVectorTable {
@@ -304,11 +308,13 @@ impl TableGraphVectorIndex {
     }
 
     /// Return the name of the table containing raw vectors.
+    // XXX remove
     pub fn rerank_table_name(&self) -> &str {
         &self.rerank_table.table_name
     }
 
     /// Return the name of the table containing the navigational vectors.
+    // XXX remove
     pub fn nav_table_name(&self) -> &str {
         &self.nav_table.table_name
     }

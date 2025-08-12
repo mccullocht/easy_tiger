@@ -239,7 +239,7 @@ pub struct SessionIndexWriter {
     index: Arc<TableIndex>,
     distance_fn: Box<dyn F32VectorDistance + 'static>,
     posting_coder: Box<dyn F32VectorCoder + 'static>,
-    raw_coder: Box<dyn F32VectorCoder + 'static>,
+    raw_coder: Option<Box<dyn F32VectorCoder + 'static>>,
 
     head_reader: SessionGraphVectorIndexReader,
     head_searcher: GraphSearcher,
@@ -252,7 +252,7 @@ impl SessionIndexWriter {
             .config
             .posting_coder
             .new_coder(index.head.config().similarity);
-        let raw_coder = index.head.rerank_table().new_coder();
+        let raw_coder = index.head.rerank_table().map(|t| t.new_coder());
         let head_reader = SessionGraphVectorIndexReader::new(index.head.clone(), session);
         let head_searcher = GraphSearcher::new(index.config.head_search_params);
         Self {
@@ -286,9 +286,11 @@ impl SessionIndexWriter {
             Self::remove_postings(centroid_ids, record_id, &mut posting_cursor)?;
         }
 
-        let mut raw_vector_cursor = self.raw_vector_cursor()?;
-        // TODO: factor out handling of high fidelity vector tables.
-        raw_vector_cursor.set(record_id, &self.raw_coder.encode(vector))?;
+        if let Some(raw_coder) = self.raw_coder.as_ref() {
+            // TODO: separate head coder from tail coder for raw vectors.
+            let mut raw_vector_cursor = self.raw_vector_cursor()?;
+            raw_vector_cursor.set(record_id, &raw_coder.encode(vector))?;
+        }
         centroid_cursor.set(
             record_id,
             &centroid_ids
@@ -316,8 +318,10 @@ impl SessionIndexWriter {
             let mut posting_cursor = self.posting_cursor()?;
             Self::remove_postings(centroid_ids, record_id, &mut posting_cursor)?;
             centroid_cursor.remove(record_id)?;
-            let mut raw_vector_cursor = self.raw_vector_cursor()?;
-            raw_vector_cursor.remove(record_id)?;
+            if self.raw_coder.is_some() {
+                let mut raw_vector_cursor = self.raw_vector_cursor()?;
+                raw_vector_cursor.remove(record_id)?;
+            }
         }
         Ok(())
     }

@@ -23,7 +23,7 @@ pub struct IndexMutator {
     searcher: GraphSearcher,
 
     nav_coder: Box<dyn F32VectorCoder>,
-    rerank_coder: Box<dyn F32VectorCoder>,
+    rerank_coder: Option<Box<dyn F32VectorCoder>>,
 }
 
 impl IndexMutator {
@@ -34,7 +34,7 @@ impl IndexMutator {
     pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
         let searcher = GraphSearcher::new(index.config().index_search_params);
         let nav_coder = index.config().new_nav_coder();
-        let rerank_coder = index.rerank_table().new_coder();
+        let rerank_coder = index.rerank_table().map(|t| t.new_coder());
         Self {
             reader: SessionGraphVectorIndexReader::new(index, session),
             searcher,
@@ -98,9 +98,11 @@ impl IndexMutator {
         self.reader
             .nav_vectors()?
             .set(vertex_id, self.nav_coder.encode(vector))?;
-        self.reader
-            .rerank_vectors()?
-            .set(vertex_id, self.rerank_coder.encode(vector))?;
+        if let Some(rerank_coder) = self.rerank_coder.as_ref() {
+            self.reader
+                .rerank_vectors()?
+                .set(vertex_id, &rerank_coder.encode(vector))?;
+        }
 
         let mut pruned_edges = vec![];
         for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {

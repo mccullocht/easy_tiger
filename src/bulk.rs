@@ -204,10 +204,15 @@ where
         let mut nav_cursor =
             session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table_name(), None)?;
 
-        let rerank_coder = self.index.rerank_table().new_coder();
-        let mut rerank_vector = vec![0u8; rerank_coder.byte_len(dim)];
-        let mut rerank_cursor =
-            session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.rerank_table_name(), None)?;
+        let mut rerank = if let Some(rerank_table) = self.index.rerank_table() {
+            let rerank_coder = rerank_table.new_coder();
+            let rerank_vector = vec![0u8; rerank_coder.byte_len(dim)];
+            let rerank_cursor =
+                session.new_bulk_load_cursor::<i64, Vec<u8>>(rerank_table.name(), None)?;
+            Some((rerank_coder, rerank_vector, rerank_cursor))
+        } else {
+            None
+        };
 
         for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
             for (i, o) in v.iter().zip(sum.iter_mut()) {
@@ -220,8 +225,10 @@ where
             }
             nav_cursor.insert(i as i64, &nav_vector)?;
 
-            rerank_coder.encode_to(v, &mut rerank_vector);
-            rerank_cursor.insert(i as i64, &rerank_vector)?;
+            if let Some((coder, vector, cursor)) = rerank.as_mut() {
+                coder.encode_to(v, vector);
+                cursor.insert(i as i64, &vector)?;
+            }
             progress(1);
         }
 
@@ -236,7 +243,12 @@ where
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect::<Vec<_>>();
-        self.centroid = self.index.rerank_table().new_coder().encode(&centroid);
+        self.centroid = self
+            .index
+            .rerank_table()
+            .unwrap_or(self.index.nav_table())
+            .new_coder()
+            .encode(&centroid);
         Ok(())
     }
 

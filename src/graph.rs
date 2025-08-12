@@ -161,29 +161,14 @@ pub struct EdgeSetDistanceComputer {
 impl EdgeSetDistanceComputer {
     pub fn new<R: GraphVectorIndexReader>(reader: &R, edges: &[Neighbor]) -> Result<Self> {
         if reader.config().index_search_params.num_rerank > 0 {
-            let vectors = Self::extract_vectors(&mut reader.rerank_vectors()?, edges)?;
-            Ok(Self {
-                // XXX this needs to be different, as-is it doesn't allow altering the format.
-                distance_fn: reader.config().similarity.new_distance_function(),
-                vectors,
-            })
+            Self::from_store_and_edges(&mut reader.rerank_vectors()?, edges)
         } else {
-            let vectors = Self::extract_vectors(&mut reader.nav_vectors()?, edges)?;
-            Ok(Self {
-                distance_fn: reader
-                    .config()
-                    .nav_format
-                    .new_vector_distance(reader.config().similarity),
-                vectors,
-            })
+            Self::from_store_and_edges(&mut reader.nav_vectors()?, edges)
         }
     }
 
-    fn extract_vectors(
-        store: &mut impl GraphVectorStore,
-        edges: &[Neighbor],
-    ) -> Result<Vec<Vec<u8>>> {
-        edges
+    fn from_store_and_edges(store: &mut impl GraphVectorStore, edges: &[Neighbor]) -> Result<Self> {
+        let vectors = edges
             .iter()
             .map(|n| {
                 store
@@ -191,7 +176,12 @@ impl EdgeSetDistanceComputer {
                     .unwrap_or(Err(Error::not_found_error()))
                     .map(|v| v.to_vec())
             })
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()?;
+        let distance_fn = store.new_distance_function();
+        Ok(Self {
+            distance_fn,
+            vectors,
+        })
     }
 
     pub fn distance(&self, i: usize, j: usize) -> f64 {

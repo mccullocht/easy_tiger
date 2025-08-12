@@ -70,7 +70,7 @@ impl IndexMutator {
         // TODO: make this an error instead of panicking.
         assert_eq!(self.reader.config().dimensions.get(), vector.len());
 
-        let distance_fn = self.reader.config().new_distance_function();
+        let distance_fn = self.reader.config().similarity.new_distance_function();
         let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
         let mut rerank_vectors = self.reader.rerank_vectors()?;
@@ -101,7 +101,7 @@ impl IndexMutator {
         if let Some(rerank_coder) = self.rerank_coder.as_ref() {
             self.reader
                 .rerank_vectors()?
-                .set(vertex_id, &rerank_coder.encode(vector))?;
+                .set(vertex_id, rerank_coder.encode(vector))?;
         }
 
         let mut pruned_edges = vec![];
@@ -178,7 +178,7 @@ impl IndexMutator {
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
     pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
-        let distance_fn = self.reader.config().new_distance_function();
+        let distance_fn = self.reader.config().similarity.new_distance_function();
         let mut graph = self.reader.graph()?;
         let mut rerank_vectors = self.reader.rerank_vectors()?;
 

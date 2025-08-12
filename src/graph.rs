@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
 
 use crate::{
-    vectors::{F32VectorCoding, F32VectorDistance, VectorDistance, VectorSimilarity},
+    vectors::{F32VectorCoding, VectorDistance, VectorSimilarity},
     Neighbor,
 };
 
@@ -78,20 +78,6 @@ pub struct GraphConfig {
     pub max_edges: NonZero<usize>,
     /// Search parameters to use during graph construction.
     pub index_search_params: GraphSearchParams,
-}
-
-impl GraphConfig {
-    /// Return a distance function for high fidelity vectors in the index.
-    // XXX remove me
-    pub fn new_distance_function(&self) -> Box<dyn F32VectorDistance> {
-        self.similarity.new_distance_function()
-    }
-
-    /// Return a distance function for quantized navigational vectors in the index.
-    // XXX remove me
-    pub fn new_nav_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.nav_format.new_vector_distance(self.similarity)
-    }
 }
 
 /// `GraphVectorIndexReader` is used to generate objects for graph navigation.
@@ -169,13 +155,17 @@ impl EdgeSetDistanceComputer {
         if reader.config().index_search_params.num_rerank > 0 {
             let vectors = Self::extract_vectors(&mut reader.rerank_vectors()?, edges)?;
             Ok(Self {
-                distance_fn: reader.config().new_distance_function(),
+                // XXX this needs to be different, as-is it doesn't allow altering the format.
+                distance_fn: reader.config().similarity.new_distance_function(),
                 vectors,
             })
         } else {
             let vectors = Self::extract_vectors(&mut reader.nav_vectors()?, edges)?;
             Ok(Self {
-                distance_fn: reader.config().new_nav_distance_function(),
+                distance_fn: reader
+                    .config()
+                    .nav_format
+                    .new_vector_distance(reader.config().similarity),
                 vectors,
             })
         }

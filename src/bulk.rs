@@ -129,7 +129,7 @@ where
         graph_vec.resize_with(vectors.len(), || {
             RwLock::new(Vec::with_capacity(index.config().max_edges.get() * 2))
         });
-        let distance_fn = index.config().new_distance_function();
+        let distance_fn = index.config().similarity.new_distance_function();
         Self {
             connection,
             index,
@@ -227,7 +227,7 @@ where
 
             if let Some((coder, vector, cursor)) = rerank.as_mut() {
                 coder.encode_to(v, vector);
-                cursor.insert(i as i64, &vector)?;
+                cursor.insert(i as i64, vector)?;
             }
             progress(1);
         }

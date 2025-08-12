@@ -49,7 +49,8 @@ pub fn exhaustive_search(
     let mut results = Vec::with_capacity(query_vectors.len());
     let k = args.neighbors_len.get();
     results.resize_with(query_vectors.len(), || Vec::with_capacity(k * 2));
-    let distance_fn = index.config().new_distance_function();
+    // XXX this doesn't work if we vary the format, or collapse the two formats.
+    let distance_fn = index.config().similarity.new_distance_function();
 
     let session = connection.open_session()?;
     let mut cursor = session.open_record_cursor(index.rerank_table_name())?;

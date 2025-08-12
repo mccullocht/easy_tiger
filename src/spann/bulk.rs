@@ -21,7 +21,11 @@ pub fn assign_to_centroids(
 ) -> Result<Vec<Vec<u32>>> {
     let tl_head_reader = ThreadLocal::new();
     let tl_searcher = ThreadLocal::new();
-    let distance_fn = index.head_config().config().new_distance_function();
+    let distance_fn = index
+        .head_config()
+        .config()
+        .similarity
+        .new_distance_function();
     (0..limit)
         .into_par_iter()
         .map(|i| {

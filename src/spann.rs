@@ -247,7 +247,7 @@ pub struct SessionIndexWriter {
 
 impl SessionIndexWriter {
     pub fn new(index: Arc<TableIndex>, session: Session) -> Self {
-        let distance_fn = index.head.config().new_distance_function();
+        let distance_fn = index.head.config().similarity.new_distance_function();
         let posting_coder = index
             .config
             .posting_coder

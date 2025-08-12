@@ -15,7 +15,7 @@ use wt_mdb::{
 
 use crate::{
     graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex},
-    vectors::F32VectorCoding,
+    vectors::{F32VectorCoder, F32VectorCoding, VectorSimilarity},
 };
 
 /// Key in the graph table containing the entry point.
@@ -166,18 +166,34 @@ impl GraphVectorStore for CursorVectorStore<'_> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct GraphVectorTable {
+    table_name: String,
+    format: F32VectorCoding,
+    similarity: VectorSimilarity,
+}
+
+impl GraphVectorTable {
+    pub fn format(&self) -> F32VectorCoding {
+        self.format
+    }
+
+    pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
+        self.format.new_coder(self.similarity)
+    }
+}
+
 /// Immutable features of a WiredTiger graph vector index. These can be read from the db and
 /// stored in a catalog for convenient access at runtime.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TableGraphVectorIndex {
     graph_table_name: String,
-    nav_table_name: String,
-    rerank_table_name: String,
+    nav_table: GraphVectorTable,
+    rerank_table: GraphVectorTable,
     config: GraphConfig,
 }
 
 // TODO: collapse raw and nav tables if the formats are the same.
-// TODO: embed configuration in metadata.
 impl TableGraphVectorIndex {
     /// Create a new `TableGraphVectorIndex` from the relevant db tables, extracting
     /// immutable graph metadata that can be used across operations.
@@ -190,8 +206,17 @@ impl TableGraphVectorIndex {
         )?;
         Ok(Self {
             graph_table_name,
-            nav_table_name,
-            rerank_table_name,
+            // XXX fix the duplication between here and from_init
+            nav_table: GraphVectorTable {
+                table_name: nav_table_name,
+                format: config.nav_format,
+                similarity: config.similarity,
+            },
+            rerank_table: GraphVectorTable {
+                table_name: rerank_table_name,
+                format: config.rerank_format,
+                similarity: config.similarity,
+            },
             config,
         })
     }
@@ -203,8 +228,16 @@ impl TableGraphVectorIndex {
             Self::generate_table_names(index_name);
         Ok(Self {
             graph_table_name,
-            nav_table_name,
-            rerank_table_name,
+            nav_table: GraphVectorTable {
+                table_name: nav_table_name,
+                format: config.nav_format,
+                similarity: config.similarity,
+            },
+            rerank_table: GraphVectorTable {
+                table_name: rerank_table_name,
+                format: config.rerank_format,
+                similarity: config.similarity,
+            },
             config,
         })
     }
@@ -225,8 +258,8 @@ impl TableGraphVectorIndex {
                     .into(),
             ),
         )?;
-        session.create_table(&index.rerank_table_name, None)?;
-        session.create_table(&index.nav_table_name, None)?;
+        session.create_table(&index.rerank_table.table_name, None)?;
+        session.create_table(&index.nav_table.table_name, None)?;
         Ok(index)
     }
 
@@ -261,14 +294,23 @@ impl TableGraphVectorIndex {
         &self.graph_table_name
     }
 
+    // XXX make this optional.
+    pub fn rerank_table(&self) -> &GraphVectorTable {
+        &self.rerank_table
+    }
+
+    pub fn nav_table(&self) -> &GraphVectorTable {
+        &self.nav_table
+    }
+
     /// Return the name of the table containing raw vectors.
     pub fn rerank_table_name(&self) -> &str {
-        &self.rerank_table_name
+        &self.rerank_table.table_name
     }
 
     /// Return the name of the table containing the navigational vectors.
     pub fn nav_table_name(&self) -> &str {
-        &self.nav_table_name
+        &self.nav_table.table_name
     }
 }
 

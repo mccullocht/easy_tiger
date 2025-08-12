@@ -224,21 +224,12 @@ impl TableGraphVectorIndex {
         let config: GraphConfig = serde_json::from_str(
             &read_app_metadata(&session, &graph_table_name).ok_or(Error::not_found_error())??,
         )?;
-        Ok(Self {
-            graph_table_name,
-            // XXX fix the duplication between here and from_init
-            nav_table: GraphVectorTable {
-                table_name: nav_table_name,
-                format: config.nav_format,
-                similarity: config.similarity,
-            },
-            rerank_table: GraphVectorTable {
-                table_name: rerank_table_name,
-                format: config.rerank_format,
-                similarity: config.similarity,
-            },
+        Ok(Self::new(
             config,
-        })
+            graph_table_name,
+            nav_table_name,
+            Some(rerank_table_name),
+        ))
     }
 
     /// Create a new `TableGraphVectorIndex` for table initialization, providing
@@ -246,20 +237,36 @@ impl TableGraphVectorIndex {
     pub fn from_init(config: GraphConfig, index_name: &str) -> io::Result<Self> {
         let [graph_table_name, rerank_table_name, nav_table_name] =
             Self::generate_table_names(index_name);
-        Ok(Self {
+        Ok(Self::new(
+            config,
+            graph_table_name,
+            nav_table_name,
+            Some(rerank_table_name),
+        ))
+    }
+
+    fn new(
+        config: GraphConfig,
+        graph_table_name: String,
+        nav_table_name: String,
+        rerank_table_name: Option<String>,
+    ) -> Self {
+        Self {
             graph_table_name,
             nav_table: GraphVectorTable {
                 table_name: nav_table_name,
                 format: config.nav_format,
                 similarity: config.similarity,
             },
-            rerank_table: GraphVectorTable {
-                table_name: rerank_table_name,
-                format: config.rerank_format,
-                similarity: config.similarity,
-            },
+            rerank_table: rerank_table_name
+                .map(|n| GraphVectorTable {
+                    table_name: n,
+                    format: config.rerank_format,
+                    similarity: config.similarity,
+                })
+                .expect("XXX"),
             config,
-        })
+        }
     }
 
     /// Create necessary tables for the index and write index metadata.

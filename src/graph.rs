@@ -5,6 +5,7 @@
 
 use std::{collections::BTreeSet, io, num::NonZero, str::FromStr};
 
+use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
 
@@ -99,7 +100,16 @@ pub trait GraphVectorIndexReader {
     fn nav_vectors(&self) -> Result<Self::VectorStore<'_>>;
 
     /// Return an object that can be used to read vectors for re-ranking.
-    fn rerank_vectors(&self) -> Result<Self::VectorStore<'_>>;
+    ///
+    /// Not all graphs will have a set of rerank vectors; use high_fidelity_vectors()
+    /// to get most accurate set of vectors available.
+    fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>>;
+
+    /// Return an object that can be used to read the most accurate set of vectors stored
+    /// for this index.
+    fn high_fidelity_vectors(&self) -> Result<Self::VectorStore<'_>> {
+        self.rerank_vectors().unwrap_or_else(|| self.nav_vectors())
+    }
 }
 
 /// A Vamana graph.
@@ -164,7 +174,12 @@ pub struct EdgeSetDistanceComputer {
 impl EdgeSetDistanceComputer {
     pub fn new<R: GraphVectorIndexReader>(reader: &R, edges: &[Neighbor]) -> Result<Self> {
         if reader.config().index_search_params.num_rerank > 0 {
-            Self::from_store_and_edges(&mut reader.rerank_vectors()?, edges)
+            Self::from_store_and_edges(
+                &mut reader
+                    .rerank_vectors()
+                    .unwrap_or(Err(Error::Errno(Errno::NOTSUP)))?,
+                edges,
+            )
         } else {
             Self::from_store_and_edges(&mut reader.nav_vectors()?, edges)
         }

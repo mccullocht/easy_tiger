@@ -23,8 +23,7 @@ pub fn assign_to_centroids(
     let tl_searcher = ThreadLocal::new();
     let distance_fn = index
         .head_config()
-        .config()
-        .similarity
+        .high_fidelity_table()
         .new_distance_function();
     (0..limit)
         .into_par_iter()

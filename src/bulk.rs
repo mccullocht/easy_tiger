@@ -34,9 +34,7 @@ use crate::{
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
-    vectors::{
-        new_query_vector_distance_indexing, F32VectorCoding, F32VectorDistance, VectorSimilarity,
-    },
+    vectors::{new_query_vector_distance_indexing, F32VectorCoding, VectorSimilarity},
     wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
@@ -109,7 +107,6 @@ pub struct BulkLoadBuilder<D> {
 
     graph: Box<[RwLock<Vec<Neighbor>>]>,
     entry_vertex: AtomicI64,
-    distance_fn: Box<dyn F32VectorDistance>,
 
     graph_stats: Option<GraphStats>,
 }
@@ -131,7 +128,6 @@ where
         graph_vec.resize_with(vectors.len(), || {
             RwLock::new(Vec::with_capacity(index.config().max_edges.get() * 2))
         });
-        let distance_fn = index.config().similarity.new_distance_function();
         Self {
             connection,
             index,
@@ -143,7 +139,6 @@ where
             clustered_order: None,
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
-            distance_fn,
             graph_stats: None,
         }
     }
@@ -276,11 +271,15 @@ where
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
+        let distance_fn = self.index.high_fidelity_table().new_distance_function();
         let apply_mu = {
             let session = self.connection.open_session()?;
-            let mut cursor = session.open_record_cursor(self.index.rerank_table_name())?;
-            let vector0 = cursor.seek_exact(0).unwrap()?;
-            Mutex::new((0i64, self.distance_fn.distance(&self.centroid, &vector0)))
+            let reader = BulkLoadGraphVectorIndexReader(self, &session);
+            let mut vectors = reader.high_fidelity_vectors()?;
+            Mutex::new((
+                0i64,
+                distance_fn.distance(&self.centroid, &vectors.get(0).expect("vector 0 exists")?),
+            ))
         };
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
@@ -334,9 +333,8 @@ where
 
                     // TODO: consider using quantized scores here to avoid reading f32 vectors when
                     // reranking is turned off.
-                    let mut rerank_vectors = reader.rerank_vectors()?;
-                    self.distance_fn
-                        .distance(&self.centroid, rerank_vectors.get(v as i64).unwrap()?)
+                    let mut vectors = reader.high_fidelity_vectors()?;
+                    distance_fn.distance(&self.centroid, vectors.get(v as i64).unwrap()?)
                 };
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
@@ -476,7 +474,9 @@ where
             self.insert_in_flight_edges_from(
                 vertex_id,
                 in_flight,
-                &mut reader.rerank_vectors()?,
+                &mut reader
+                    .rerank_vectors()
+                    .expect("XXX fail early if rerank is on w/o rerank table")?,
                 self.index.config().rerank_format,
                 edges,
             )
@@ -678,12 +678,16 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
         }
     }
 
-    fn rerank_vectors(&self) -> Result<Self::VectorStore<'_>> {
-        Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
-            self.1.get_record_cursor(self.0.index.rerank_table_name())?,
-            self.0.index.config().similarity,
-            self.0.index.config().rerank_format,
-        )))
+    fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
+        self.0.index.rerank_table().map(|t| {
+            self.1.get_record_cursor(t.name()).map(|c| {
+                BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
+                    c,
+                    self.0.index.config().similarity,
+                    t.format(),
+                ))
+            })
+        })
     }
 }
 

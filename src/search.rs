@@ -13,6 +13,7 @@ use crate::{
     Neighbor,
 };
 
+use rustix::io::Errno;
 use wt_mdb::{Error, Result};
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -125,24 +126,22 @@ impl GraphSearcher {
             reader.config().nav_format,
         );
 
-        let rerank_query_rep = if self.params.num_rerank > 0 {
-            Some(
-                reader
-                    .rerank_vectors()?
-                    .get(vertex_id)
-                    .unwrap_or(Err(Error::not_found_error()))?
-                    .to_vec(),
-            )
+        let rerank_query = if self.params.num_rerank > 0 {
+            let mut vectors = reader
+                .rerank_vectors()
+                .unwrap_or(Err(Error::Errno(Errno::NOTSUP)))?;
+            let query = vectors
+                .get(vertex_id)
+                .unwrap_or(Err(Error::not_found_error()))?
+                .to_vec();
+            Some(new_query_vector_distance_indexing(
+                query,
+                vectors.similarity(),
+                vectors.format(),
+            ))
         } else {
             None
         };
-        let rerank_query = rerank_query_rep.as_ref().map(|q| {
-            new_query_vector_distance_indexing(
-                q,
-                reader.config().similarity,
-                reader.config().rerank_format,
-            )
-        });
 
         self.search_graph_and_rerank(
             nav_query.as_ref(),
@@ -163,6 +162,7 @@ impl GraphSearcher {
             reader.config().similarity,
             reader.config().nav_format,
         );
+        // XXX i might need to do something here to handle errors.
         let rerank_query = if self.params.num_rerank > 0 {
             Some(new_query_vector_distance_f32(
                 query,
@@ -226,28 +226,27 @@ impl GraphSearcher {
             }
         }
 
-        if rerank_query.is_none() {
-            return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
-        }
-
-        let rerank_query = rerank_query.unwrap();
-        let mut rerank_vectors = reader.rerank_vectors()?;
-        let rescored = self
-            .candidates
-            .iter()
-            .take(self.params.num_rerank)
-            .map(|c| {
-                let vertex = c.neighbor.vertex();
-                rerank_vectors
-                    .get(vertex)
-                    .expect("row exists")
-                    .map(|rv| Neighbor::new(vertex, rerank_query.distance(rv)))
+        if let Some(rerank_query) = rerank_query {
+            let mut rerank_vectors = reader.rerank_vectors().expect("rerank enabled")?;
+            let rescored = self
+                .candidates
+                .iter()
+                .take(self.params.num_rerank)
+                .map(|c| {
+                    let vertex = c.neighbor.vertex();
+                    rerank_vectors
+                        .get(vertex)
+                        .expect("row exists")
+                        .map(|rv| Neighbor::new(vertex, rerank_query.distance(rv)))
+                })
+                .collect::<Result<Vec<_>>>();
+            rescored.map(|mut r| {
+                r.sort();
+                r
             })
-            .collect::<Result<Vec<_>>>();
-        rescored.map(|mut r| {
-            r.sort();
-            r
-        })
+        } else {
+            Ok(self.candidates.iter().map(|c| c.neighbor).collect())
+        }
     }
 }
 
@@ -518,8 +517,8 @@ mod test {
             Ok(TestVectorStore(self.0, TestVectorStoreType::Nav))
         }
 
-        fn rerank_vectors(&self) -> Result<Self::VectorStore<'_>> {
-            Ok(TestVectorStore(self.0, TestVectorStoreType::Rerank))
+        fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
+            Some(Ok(TestVectorStore(self.0, TestVectorStoreType::Rerank)))
         }
     }
 

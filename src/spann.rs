@@ -27,8 +27,8 @@ use crate::{
     input::{VecVectorStore, VectorStore},
     search::{GraphSearchStats, GraphSearcher},
     vectors::{
-        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, F32VectorDistance,
-        QueryVectorDistance,
+        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, QueryVectorDistance,
+        VectorDistance,
     },
     wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
@@ -237,7 +237,7 @@ impl Formatted for PostingKey {
 
 pub struct SessionIndexWriter {
     index: Arc<TableIndex>,
-    distance_fn: Box<dyn F32VectorDistance + 'static>,
+    distance_fn: Box<dyn VectorDistance + 'static>,
     posting_coder: Box<dyn F32VectorCoder + 'static>,
     raw_coder: Option<Box<dyn F32VectorCoder + 'static>>,
 
@@ -247,7 +247,7 @@ pub struct SessionIndexWriter {
 
 impl SessionIndexWriter {
     pub fn new(index: Arc<TableIndex>, session: Session) -> Self {
-        let distance_fn = index.head.config().similarity.new_distance_function();
+        let distance_fn = index.head.high_fidelity_table().new_distance_function();
         let posting_coder = index
             .config
             .posting_coder
@@ -287,7 +287,7 @@ impl SessionIndexWriter {
         }
 
         if let Some(raw_coder) = self.raw_coder.as_ref() {
-            // TODO: separate head coder from tail coder for raw vectors.
+            // XXX separate head coder from tail coder for raw vectors.
             let mut raw_vector_cursor = self.raw_vector_cursor()?;
             raw_vector_cursor.set(record_id, &raw_coder.encode(vector))?;
         }
@@ -378,11 +378,11 @@ impl SessionIndexWriter {
 fn select_centroids(
     head_reader: &impl GraphVectorIndexReader,
     candidates: Vec<Neighbor>,
-    distance_fn: &dyn F32VectorDistance,
+    distance_fn: &dyn VectorDistance,
     replica_count: usize,
 ) -> Result<Vec<u32>> {
     assert!(!candidates.is_empty());
-    let mut raw_vectors = head_reader.rerank_vectors()?;
+    let mut vectors = head_reader.high_fidelity_vectors()?;
 
     let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
     let mut centroids =
@@ -392,7 +392,7 @@ fn select_centroids(
             break;
         }
 
-        let v = raw_vectors
+        let v = vectors
             .get(candidate.vertex())
             .expect("returned vector should exist")?;
         if !centroids

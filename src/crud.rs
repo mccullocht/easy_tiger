@@ -7,7 +7,7 @@ use crate::{
         GraphVectorStore, GraphVertex,
     },
     search::GraphSearcher,
-    vectors::{F32VectorCoder, F32VectorDistance, VectorDistance},
+    vectors::{F32VectorCoder, VectorDistance},
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
@@ -70,10 +70,8 @@ impl IndexMutator {
         // TODO: make this an error instead of panicking.
         assert_eq!(self.reader.config().dimensions.get(), vector.len());
 
-        let distance_fn = self.reader.config().similarity.new_distance_function();
         let mut candidate_edges = self.searcher.search(vector, &mut self.reader)?;
         let mut graph = self.reader.graph()?;
-        let mut rerank_vectors = self.reader.rerank_vectors()?;
         if candidate_edges.is_empty() {
             // Proceed through the rest of the function so that the inserts happen.
             // This is mostly as a noop because there are no edges.
@@ -98,17 +96,18 @@ impl IndexMutator {
         self.reader
             .nav_vectors()?
             .set(vertex_id, self.nav_coder.encode(vector))?;
-        if let Some(rerank_coder) = self.rerank_coder.as_ref() {
-            self.reader
-                .rerank_vectors()?
-                .set(vertex_id, rerank_coder.encode(vector))?;
+        if let Some((vectors, coder)) = self.reader.rerank_vectors().zip(self.rerank_coder.as_ref())
+        {
+            vectors?.set(vertex_id, coder.encode(vector))?;
         }
 
+        let mut vectors = self.reader.high_fidelity_vectors()?;
+        let distance_fn = vectors.new_distance_function();
         let mut pruned_edges = vec![];
         for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
             self.insert_edge(
                 &mut graph,
-                &mut rerank_vectors,
+                &mut vectors,
                 distance_fn.as_ref(),
                 src_vertex_id,
                 vertex_id,
@@ -131,8 +130,8 @@ impl IndexMutator {
     fn insert_edge(
         &self,
         graph: &mut impl Graph,
-        raw_vectors: &mut impl GraphVectorStore,
-        distance_fn: &dyn F32VectorDistance,
+        vectors: &mut impl GraphVectorStore,
+        distance_fn: &dyn VectorDistance,
         src_vertex_id: i64,
         dst_vertex_id: i64,
         pruned_edges: &mut Vec<(i64, i64)>,
@@ -144,7 +143,7 @@ impl IndexMutator {
             .chain(vertex.edges().filter(|v| *v != dst_vertex_id))
             .collect::<Vec<_>>();
         // TODO: try to avoid copying the vector.
-        let src_vector = raw_vectors
+        let src_vector = vectors
             .get(src_vertex_id)
             .expect("row exists")
             .map(|v| v.to_vec())?;
@@ -152,7 +151,7 @@ impl IndexMutator {
             let mut neighbors = edges
                 .iter()
                 .map(|e| {
-                    raw_vectors
+                    vectors
                         .get(*e)
                         .unwrap_or(Err(Error::not_found_error()))
                         .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, dst)))
@@ -178,15 +177,15 @@ impl IndexMutator {
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
     pub fn delete(&mut self, vertex_id: i64) -> Result<()> {
-        let distance_fn = self.reader.config().similarity.new_distance_function();
         let mut graph = self.reader.graph()?;
-        let mut rerank_vectors = self.reader.rerank_vectors()?;
+        let mut vectors = self.reader.high_fidelity_vectors()?;
+        let distance_fn = vectors.new_distance_function();
 
         let (vector, edges) = graph
             .get_vertex(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))
             .map(|v| {
-                rerank_vectors
+                vectors
                     .get(vertex_id)
                     .expect("row exists")
                     .map(|vec| (vec.to_vec(), v.edges().collect::<Vec<_>>()))
@@ -194,8 +193,10 @@ impl IndexMutator {
 
         // TODO: unified graph index writer trait to handles removal and other mutations.
         graph.remove(vertex_id)?;
-        rerank_vectors.remove(vertex_id)?;
         self.reader.nav_vectors()?.remove(vertex_id)?;
+        if let Some(vectors) = self.reader.rerank_vectors() {
+            vectors?.remove(vertex_id)?;
+        }
 
         // Cache information about each vertex linked to vertex_id.
         // Remove any links back to vertex_id.
@@ -206,11 +207,8 @@ impl IndexMutator {
                     .get_vertex(e)
                     .unwrap_or(Err(Error::not_found_error()))
                     .map(|v| {
-                        let rerank_vector = rerank_vectors
-                            .get(e)
-                            .expect("row exists")
-                            .map(|rv| rv.to_vec());
-                        rerank_vector.map(|rv| {
+                        let vector = vectors.get(e).expect("row exists").map(|rv| rv.to_vec());
+                        vector.map(|rv| {
                             (
                                 e,
                                 rv,

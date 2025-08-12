@@ -334,6 +334,10 @@ impl TableGraphVectorIndex {
         &self.nav_table
     }
 
+    pub fn high_fidelity_table(&self) -> &GraphVectorTable {
+        self.rerank_table().unwrap_or(&self.nav_table)
+    }
+
     /// Return the name of the table containing raw vectors.
     // XXX remove
     pub fn rerank_table_name(&self) -> &str {
@@ -399,13 +403,12 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         ))
     }
 
-    fn rerank_vectors(&self) -> Result<Self::VectorStore<'_>> {
-        Ok(CursorVectorStore::new(
+    fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
+        self.index.rerank_table().map(|t| {
             self.session
-                .get_record_cursor(self.index.rerank_table_name())?,
-            self.index.config().similarity,
-            self.index.config().rerank_format,
-        ))
+                .get_record_cursor(t.name())
+                .map(|c| CursorVectorStore::new(c, self.index.config().similarity, t.format()))
+        })
     }
 }
 

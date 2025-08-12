@@ -501,12 +501,8 @@ mod test {
             = TestGraphAccess<'b>
         where
             Self: 'b;
-        type NavVectorStore<'b>
-            = TestNavVectorStore<'b>
-        where
-            Self: 'b;
-        type RerankVectorStore<'b>
-            = TestRerankVectorStore<'b>
+        type VectorStore<'b>
+            = TestVectorStore<'b>
         where
             Self: 'b;
 
@@ -518,12 +514,12 @@ mod test {
             Ok(TestGraphAccess(self.0))
         }
 
-        fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-            Ok(TestNavVectorStore(self.0))
+        fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
+            Ok(TestVectorStore(self.0, TestVectorStoreType::Nav))
         }
 
-        fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
-            Ok(TestRerankVectorStore(self.0))
+        fn rerank_vectors(&self) -> Result<Self::VectorStore<'_>> {
+            Ok(TestVectorStore(self.0, TestVectorStoreType::Rerank))
         }
     }
 
@@ -550,6 +546,35 @@ mod test {
             } else {
                 None
             }
+        }
+    }
+
+    enum TestVectorStoreType {
+        Nav,
+        Rerank,
+    }
+
+    pub struct TestVectorStore<'a>(&'a TestGraphVectorIndex, TestVectorStoreType);
+
+    impl GraphVectorStore for TestVectorStore<'_> {
+        fn format(&self) -> F32VectorCoding {
+            match self.1 {
+                TestVectorStoreType::Nav => self.0.config.nav_format,
+                TestVectorStoreType::Rerank => self.0.config.rerank_format,
+            }
+        }
+
+        fn similarity(&self) -> VectorSimilarity {
+            self.0.config.similarity
+        }
+
+        fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
+            self.0.data.get(vertex_id as usize).map(|v| {
+                Ok(match self.1 {
+                    TestVectorStoreType::Nav => v.nav_vector.as_ref(),
+                    TestVectorStoreType::Rerank => bytemuck::cast_slice(v.vector.as_ref()),
+                })
+            })
         }
     }
 

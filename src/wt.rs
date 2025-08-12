@@ -370,11 +370,7 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         = CursorGraph<'a>
     where
         Self: 'a;
-    type NavVectorStore<'a>
-        = CursorVectorStore<'a>
-    where
-        Self: 'a;
-    type RerankVectorStore<'a>
+    type VectorStore<'a>
         = CursorVectorStore<'a>
     where
         Self: 'a;
@@ -390,7 +386,7 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         ))
     }
 
-    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
+    fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
         Ok(CursorVectorStore::new(
             self.session
                 .get_record_cursor(self.index.nav_table().name())?,
@@ -399,7 +395,7 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         ))
     }
 
-    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
+    fn rerank_vectors(&self) -> Result<Self::VectorStore<'_>> {
         Ok(CursorVectorStore::new(
             self.session
                 .get_record_cursor(self.index.rerank_table_name())?,

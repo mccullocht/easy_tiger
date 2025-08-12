@@ -649,11 +649,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
         = BulkLoadBuilderGraph<'b, D>
     where
         Self: 'b;
-    type NavVectorStore<'b>
-        = BulkLoadGraphVectorStore<'b>
-    where
-        Self: 'b;
-    type RerankVectorStore<'b>
+    type VectorStore<'b>
         = BulkLoadGraphVectorStore<'b>
     where
         Self: 'b;
@@ -666,7 +662,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
         Ok(BulkLoadBuilderGraph(self.0))
     }
 
-    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
+    fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
         if let Some(s) = self.0.quantized_vectors.as_ref() {
             Ok(BulkLoadGraphVectorStore::Memory(
                 s,
@@ -682,7 +678,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
         }
     }
 
-    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
+    fn rerank_vectors(&self) -> Result<Self::VectorStore<'_>> {
         Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
             self.1.get_record_cursor(self.0.index.rerank_table_name())?,
             self.0.index.config().similarity,

@@ -85,10 +85,7 @@ pub trait GraphVectorIndexReader {
     type Graph<'a>: Graph + 'a
     where
         Self: 'a;
-    type NavVectorStore<'a>: GraphVectorStore + 'a
-    where
-        Self: 'a;
-    type RerankVectorStore<'a>: GraphVectorStore + 'a
+    type VectorStore<'a>: GraphVectorStore + 'a
     where
         Self: 'a;
 
@@ -99,10 +96,10 @@ pub trait GraphVectorIndexReader {
     fn graph(&self) -> Result<Self::Graph<'_>>;
 
     /// Return an object that can be used to read navigational vectors.
-    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>>;
+    fn nav_vectors(&self) -> Result<Self::VectorStore<'_>>;
 
     /// Return an object that can be used to read vectors for re-ranking.
-    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>>;
+    fn rerank_vectors(&self) -> Result<Self::VectorStore<'_>>;
 }
 
 /// A Vamana graph.

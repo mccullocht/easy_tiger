@@ -33,7 +33,7 @@ impl IndexMutator {
     /// then [Self::into_session()] this struct and commit the transaction when done.
     pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
         let searcher = GraphSearcher::new(index.config().index_search_params);
-        let nav_coder = index.config().new_nav_coder();
+        let nav_coder = index.nav_table().new_coder();
         let rerank_coder = index.rerank_table().map(|t| t.new_coder());
         Self {
             reader: SessionGraphVectorIndexReader::new(index, session),

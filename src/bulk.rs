@@ -193,7 +193,7 @@ where
     fn load_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
-        let nav_coder = self.index.config().new_nav_coder();
+        let nav_coder = self.index.nav_table().new_coder();
         let mut nav_vector = vec![0u8; nav_coder.byte_len(dim)];
         let mut sum = vec![0.0; dim];
         let mut quantized_vectors = if self.options.memory_quantized_vectors {

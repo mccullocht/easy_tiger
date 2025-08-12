@@ -9,9 +9,7 @@ use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
 
 use crate::{
-    vectors::{
-        F32VectorCoder, F32VectorCoding, F32VectorDistance, VectorDistance, VectorSimilarity,
-    },
+    vectors::{F32VectorCoding, F32VectorDistance, VectorDistance, VectorSimilarity},
     Neighbor,
 };
 
@@ -84,16 +82,13 @@ pub struct GraphConfig {
 
 impl GraphConfig {
     /// Return a distance function for high fidelity vectors in the index.
+    // XXX remove me
     pub fn new_distance_function(&self) -> Box<dyn F32VectorDistance> {
         self.similarity.new_distance_function()
     }
 
-    /// Return a new vector coder for the nav vector format.
-    pub fn new_nav_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.nav_format.new_coder(self.similarity)
-    }
-
     /// Return a distance function for quantized navigational vectors in the index.
+    // XXX remove me
     pub fn new_nav_distance_function(&self) -> Box<dyn VectorDistance> {
         self.nav_format.new_vector_distance(self.similarity)
     }

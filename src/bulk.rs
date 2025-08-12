@@ -204,7 +204,7 @@ where
             None
         };
         let mut nav_cursor =
-            session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table_name(), None)?;
+            session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table().name(), None)?;
 
         let mut rerank = if let Some(rerank_table) = self.index.rerank_table() {
             let rerank_coder = rerank_table.new_coder();
@@ -675,7 +675,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
             ))
         } else {
             Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
-                self.1.get_record_cursor(self.0.index.nav_table_name())?,
+                self.1.get_record_cursor(self.0.index.nav_table().name())?,
                 self.config().similarity,
                 self.config().nav_format,
             )))

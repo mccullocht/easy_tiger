@@ -328,12 +328,6 @@ impl TableGraphVectorIndex {
     pub fn rerank_table_name(&self) -> &str {
         &self.rerank_table.table_name
     }
-
-    /// Return the name of the table containing the navigational vectors.
-    // XXX remove
-    pub fn nav_table_name(&self) -> &str {
-        &self.nav_table.table_name
-    }
 }
 
 /// A `GraphVectorIndexReader` implementation that operates entirely on a WiredTiger graph.
@@ -392,7 +386,7 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
     fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
         Ok(CursorVectorStore::new(
             self.session
-                .get_record_cursor(self.index.nav_table_name())?,
+                .get_record_cursor(self.index.nav_table().name())?,
             self.index.config.similarity,
             self.index.config().nav_format,
         ))

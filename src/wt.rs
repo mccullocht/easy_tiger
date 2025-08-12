@@ -15,7 +15,7 @@ use wt_mdb::{
 
 use crate::{
     graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex},
-    vectors::{F32VectorCoder, F32VectorCoding, VectorSimilarity},
+    vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity},
 };
 
 /// Key in the graph table containing the entry point.
@@ -200,6 +200,10 @@ impl GraphVectorTable {
 
     pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
         self.format.new_coder(self.similarity)
+    }
+
+    pub fn new_distance_function(&self) -> Box<dyn VectorDistance> {
+        self.format.new_vector_distance(self.similarity)
     }
 }
 

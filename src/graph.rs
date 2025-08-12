@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
 
 use crate::{
-    vectors::{F32VectorCoding, VectorDistance, VectorSimilarity},
+    vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity},
     Neighbor,
 };
 
@@ -116,6 +116,7 @@ pub trait Graph {
 }
 
 /// A node in the Vamana graph.
+// XXX consider eliminating this.
 pub trait GraphVertex {
     type EdgeIterator<'a>: Iterator<Item = i64>
     where
@@ -138,12 +139,17 @@ pub trait GraphVectorStore {
         self.format().new_vector_distance(self.similarity())
     }
 
+    /// Create a new coder for vectors of this type.
+    fn new_coder(&self) -> Box<dyn F32VectorCoder> {
+        self.format().new_coder(self.similarity())
+    }
+
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.
     // TODO: consider removing this method as it is _unsafe_ in the event of a rollback.
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>>;
 
     // TODO: extract many vectors into VecVectorStore.
-    // TODO: method to turn self into a QueryVectorDistance.
+    // TODO: method to turn self into a QueryVectorDistance wrapper.
 }
 
 /// Computes the distance between two edges in a set to assist in pruning.

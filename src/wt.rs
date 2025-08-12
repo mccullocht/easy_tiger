@@ -134,19 +134,31 @@ impl Graph for CursorGraph<'_> {
 }
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
-pub struct CursorVectorStore<'a>(RecordCursorGuard<'a>, F32VectorCoding);
+pub struct CursorVectorStore<'a> {
+    inner: RecordCursorGuard<'a>,
+    similarity: VectorSimilarity,
+    format: F32VectorCoding,
+}
 
 impl<'a> CursorVectorStore<'a> {
-    pub fn new(cursor: RecordCursorGuard<'a>, format: F32VectorCoding) -> Self {
-        Self(cursor, format)
+    pub fn new(
+        inner: RecordCursorGuard<'a>,
+        similarity: VectorSimilarity,
+        format: F32VectorCoding,
+    ) -> Self {
+        Self {
+            inner,
+            similarity,
+            format,
+        }
     }
 
     pub(crate) fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()> {
-        self.0.set(vertex_id, vector.as_ref())
+        self.inner.set(vertex_id, vector.as_ref())
     }
 
     pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
-        self.0.remove(vertex_id).or_else(|e| {
+        self.inner.remove(vertex_id).or_else(|e| {
             if e == Error::not_found_error() {
                 Ok(())
             } else {
@@ -157,12 +169,16 @@ impl<'a> CursorVectorStore<'a> {
 }
 
 impl GraphVectorStore for CursorVectorStore<'_> {
+    fn similarity(&self) -> VectorSimilarity {
+        self.similarity
+    }
+
     fn format(&self) -> F32VectorCoding {
-        self.1
+        self.format
     }
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
-        Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? })
+        Some(unsafe { self.inner.seek_exact_unsafe(vertex_id)? })
     }
 }
 
@@ -377,6 +393,7 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         Ok(CursorVectorStore::new(
             self.session
                 .get_record_cursor(self.index.nav_table_name())?,
+            self.index.config.similarity,
             self.index.config().nav_format,
         ))
     }
@@ -385,6 +402,7 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         Ok(CursorVectorStore::new(
             self.session
                 .get_record_cursor(self.index.rerank_table_name())?,
+            self.index.config().similarity,
             self.index.config().rerank_format,
         ))
     }

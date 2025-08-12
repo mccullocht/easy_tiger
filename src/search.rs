@@ -560,6 +560,10 @@ mod test {
             self.0.config.rerank_format
         }
 
+        fn similarity(&self) -> VectorSimilarity {
+            self.0.config.similarity
+        }
+
         fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
             self.0
                 .data
@@ -573,6 +577,10 @@ mod test {
     impl GraphVectorStore for TestNavVectorStore<'_> {
         fn format(&self) -> F32VectorCoding {
             self.0.config.nav_format
+        }
+
+        fn similarity(&self) -> VectorSimilarity {
+            self.0.config.similarity
         }
 
         fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {

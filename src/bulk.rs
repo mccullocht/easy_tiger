@@ -34,7 +34,9 @@ use crate::{
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
-    vectors::{new_query_vector_distance_indexing, F32VectorCoding, F32VectorDistance},
+    vectors::{
+        new_query_vector_distance_indexing, F32VectorCoding, F32VectorDistance, VectorSimilarity,
+    },
     wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
@@ -668,11 +670,13 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
         if let Some(s) = self.0.quantized_vectors.as_ref() {
             Ok(BulkLoadGraphVectorStore::Memory(
                 s,
+                self.config().similarity,
                 self.config().nav_format,
             ))
         } else {
             Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
                 self.1.get_record_cursor(self.0.index.nav_table_name())?,
+                self.config().similarity,
                 self.config().nav_format,
             )))
         }
@@ -681,6 +685,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
     fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
         Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
             self.1.get_record_cursor(self.0.index.rerank_table_name())?,
+            self.0.index.config().similarity,
             self.0.index.config().rerank_format,
         )))
     }
@@ -752,21 +757,32 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
 
 enum BulkLoadGraphVectorStore<'a> {
     Cursor(CursorVectorStore<'a>),
-    Memory(&'a DerefVectorStore<u8, memmap2::Mmap>, F32VectorCoding),
+    Memory(
+        &'a DerefVectorStore<u8, memmap2::Mmap>,
+        VectorSimilarity,
+        F32VectorCoding,
+    ),
 }
 
 impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
     fn format(&self) -> F32VectorCoding {
         match self {
             Self::Cursor(c) => c.format(),
-            Self::Memory(_, f) => *f,
+            Self::Memory(_, _, f) => *f,
+        }
+    }
+
+    fn similarity(&self) -> crate::vectors::VectorSimilarity {
+        match self {
+            Self::Cursor(c) => c.similarity(),
+            Self::Memory(_, s, _) => *s,
         }
     }
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
         match self {
             Self::Cursor(c) => c.get(vertex_id),
-            Self::Memory(m, _) => {
+            Self::Memory(m, _, _) => {
                 if vertex_id >= 0 && (vertex_id as usize) < m.len() {
                     Some(Ok(&m[vertex_id as usize]))
                 } else {

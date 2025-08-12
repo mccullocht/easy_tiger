@@ -130,8 +130,16 @@ pub trait GraphVertex {
 
 /// Vector store for known vector formats accessible by a record id.
 pub trait GraphVectorStore {
+    /// Similarity function used for vectors in this store.
+    fn similarity(&self) -> VectorSimilarity;
+
     /// Return the format that vectors in the store are encoded in.
     fn format(&self) -> F32VectorCoding;
+
+    /// Create a new distance function that operates over vectors on this table.
+    fn new_distance_function(&self) -> Box<dyn VectorDistance> {
+        self.format().new_vector_distance(self.similarity())
+    }
 
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.
     // TODO: consider removing this method as it is _unsafe_ in the event of a rollback.

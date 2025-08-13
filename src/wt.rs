@@ -227,12 +227,7 @@ impl TableGraphVectorIndex {
         let config: GraphConfig = serde_json::from_str(
             &read_app_metadata(&session, &graph_table_name).ok_or(Error::not_found_error())??,
         )?;
-        Ok(Self::new(
-            config,
-            graph_table_name,
-            nav_table_name,
-            rerank_table_name,
-        ))
+        Self::new(config, graph_table_name, nav_table_name, rerank_table_name)
     }
 
     /// Create a new `TableGraphVectorIndex` for table initialization, providing
@@ -240,12 +235,7 @@ impl TableGraphVectorIndex {
     pub fn from_init(config: GraphConfig, index_name: &str) -> io::Result<Self> {
         let [graph_table_name, rerank_table_name, nav_table_name] =
             Self::generate_table_names(index_name);
-        Ok(Self::new(
-            config,
-            graph_table_name,
-            nav_table_name,
-            rerank_table_name,
-        ))
+        Self::new(config, graph_table_name, nav_table_name, rerank_table_name)
     }
 
     fn new(
@@ -253,8 +243,11 @@ impl TableGraphVectorIndex {
         graph_table_name: String,
         nav_table_name: String,
         rerank_table_name: String,
-    ) -> Self {
-        Self {
+    ) -> io::Result<Self> {
+        if config.index_search_params.num_rerank > 0 && config.rerank_format.is_none() {
+            return Err(Error::Errno(Errno::NOTSUP).into());
+        }
+        Ok(Self {
             graph_table_name,
             nav_table: GraphVectorTable {
                 table_name: nav_table_name,
@@ -267,7 +260,7 @@ impl TableGraphVectorIndex {
                 similarity: config.similarity,
             }),
             config,
-        }
+        })
     }
 
     /// Create necessary tables for the index and write index metadata.

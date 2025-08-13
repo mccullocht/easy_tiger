@@ -476,7 +476,7 @@ where
                 in_flight,
                 &mut reader
                     .rerank_vectors()
-                    .expect("XXX fail early if rerank is on w/o rerank table")?,
+                    .expect("must have rerank table if rerank is configured")?,
                 self.index
                     .config()
                     .rerank_format

@@ -217,7 +217,6 @@ pub struct TableGraphVectorIndex {
     config: GraphConfig,
 }
 
-// TODO: collapse raw and nav tables if the formats are the same.
 impl TableGraphVectorIndex {
     /// Create a new `TableGraphVectorIndex` from the relevant db tables, extracting
     /// immutable graph metadata that can be used across operations.
@@ -232,7 +231,7 @@ impl TableGraphVectorIndex {
             config,
             graph_table_name,
             nav_table_name,
-            Some(rerank_table_name),
+            rerank_table_name,
         ))
     }
 
@@ -245,7 +244,7 @@ impl TableGraphVectorIndex {
             config,
             graph_table_name,
             nav_table_name,
-            Some(rerank_table_name),
+            rerank_table_name,
         ))
     }
 
@@ -253,7 +252,7 @@ impl TableGraphVectorIndex {
         config: GraphConfig,
         graph_table_name: String,
         nav_table_name: String,
-        rerank_table_name: Option<String>,
+        rerank_table_name: String,
     ) -> Self {
         Self {
             graph_table_name,
@@ -262,10 +261,11 @@ impl TableGraphVectorIndex {
                 format: config.nav_format,
                 similarity: config.similarity,
             },
-            rerank_table: rerank_table_name
-                .map(|n| GraphVectorTable {
-                    table_name: n,
-                    format: config.rerank_format,
+            rerank_table: config
+                .rerank_format
+                .map(|f| GraphVectorTable {
+                    table_name: rerank_table_name,
+                    format: f,
                     similarity: config.similarity,
                 })
                 .expect("XXX"),
@@ -336,12 +336,6 @@ impl TableGraphVectorIndex {
 
     pub fn high_fidelity_table(&self) -> &GraphVectorTable {
         self.rerank_table().unwrap_or(&self.nav_table)
-    }
-
-    /// Return the name of the table containing raw vectors.
-    // XXX remove
-    pub fn rerank_table_name(&self) -> &str {
-        &self.rerank_table.table_name
     }
 }
 

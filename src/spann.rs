@@ -612,11 +612,15 @@ impl SpannSearcher {
             return Ok(results.into_sorted_vec());
         }
 
-        // TODO: separate head rerank format from tail rerank format.
+        // XXX separate head rerank format from tail rerank format.
         let query = new_query_vector_distance_f32(
             query,
             reader.head_reader.config().similarity,
-            reader.head_reader.config().rerank_format,
+            reader
+                .head_reader
+                .config()
+                .rerank_format
+                .expect("using head format for no reason :)"),
         );
         let mut raw_cursor = reader
             .session()

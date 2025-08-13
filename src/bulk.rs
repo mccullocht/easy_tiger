@@ -477,7 +477,10 @@ where
                 &mut reader
                     .rerank_vectors()
                     .expect("XXX fail early if rerank is on w/o rerank table")?,
-                self.index.config().rerank_format,
+                self.index
+                    .config()
+                    .rerank_format
+                    .expect("must have rerank table if rerank is configured"),
                 edges,
             )
         } else {

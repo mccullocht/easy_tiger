@@ -380,7 +380,7 @@ mod tests {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
                         nav_format: F32VectorCoding::BinaryQuantized,
-                        rerank_format: F32VectorCoding::F32,
+                        rerank_format: Some(F32VectorCoding::F32),
                         layout: GraphLayout::Split,
                         max_edges: NonZero::new(4).unwrap(),
                         index_search_params: Self::search_params(),

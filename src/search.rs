@@ -162,12 +162,14 @@ impl GraphSearcher {
             reader.config().similarity,
             reader.config().nav_format,
         );
-        // XXX i might need to do something here to handle errors.
         let rerank_query = if self.params.num_rerank > 0 {
             Some(new_query_vector_distance_f32(
                 query,
                 reader.config().similarity,
-                reader.config().rerank_format,
+                reader
+                    .config()
+                    .rerank_format
+                    .ok_or(Error::Errno(Errno::NOTSUP))?,
             ))
         } else {
             None
@@ -431,7 +433,7 @@ mod test {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
                 nav_format: F32VectorCoding::BinaryQuantized,
-                rerank_format: F32VectorCoding::F32,
+                rerank_format: Some(F32VectorCoding::F32),
                 layout: GraphLayout::Split,
                 max_edges,
                 index_search_params: GraphSearchParams {
@@ -559,7 +561,7 @@ mod test {
         fn format(&self) -> F32VectorCoding {
             match self.1 {
                 TestVectorStoreType::Nav => self.0.config.nav_format,
-                TestVectorStoreType::Rerank => self.0.config.rerank_format,
+                TestVectorStoreType::Rerank => self.0.config.rerank_format.unwrap(),
             }
         }
 
@@ -574,44 +576,6 @@ mod test {
                     TestVectorStoreType::Rerank => bytemuck::cast_slice(v.vector.as_ref()),
                 })
             })
-        }
-    }
-
-    pub struct TestRerankVectorStore<'a>(&'a TestGraphVectorIndex);
-
-    impl GraphVectorStore for TestRerankVectorStore<'_> {
-        fn format(&self) -> F32VectorCoding {
-            self.0.config.rerank_format
-        }
-
-        fn similarity(&self) -> VectorSimilarity {
-            self.0.config.similarity
-        }
-
-        fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
-            self.0
-                .data
-                .get(vertex_id as usize)
-                .map(|vertex| Ok(bytemuck::cast_slice(vertex.vector.as_ref())))
-        }
-    }
-
-    pub struct TestNavVectorStore<'a>(&'a TestGraphVectorIndex);
-
-    impl GraphVectorStore for TestNavVectorStore<'_> {
-        fn format(&self) -> F32VectorCoding {
-            self.0.config.nav_format
-        }
-
-        fn similarity(&self) -> VectorSimilarity {
-            self.0.config.similarity
-        }
-
-        fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
-            self.0
-                .data
-                .get(vertex_id as usize)
-                .map(|vertex| Ok(vertex.nav_vector.as_ref()))
         }
     }
 

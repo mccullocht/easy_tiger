@@ -73,7 +73,7 @@ pub struct GraphConfig {
     /// If re-ranking is turned on during graph construction or search this will be used to compute
     /// ~O(num_candidates) query distances. If this format is quantized you should typically choose
     /// a high fidelity quantization function.
-    pub rerank_format: F32VectorCoding,
+    pub rerank_format: Option<F32VectorCoding>,
     pub layout: GraphLayout,
     /// Maximum number of edges at each vertex.
     pub max_edges: NonZero<usize>,

@@ -129,7 +129,8 @@ pub fn bulk_load(
         dimensions: args.dimensions,
         similarity: args.similarity,
         nav_format: args.head_nav_format,
-        rerank_format: args.head_rerank_format,
+        // XXX allow leaving this unset.
+        rerank_format: Some(args.head_rerank_format),
         layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {

@@ -73,7 +73,8 @@ pub fn init_index(
             dimensions: args.dimensions,
             similarity: args.similarity,
             nav_format: args.nav_format,
-            rerank_format: args.rerank_format,
+            // XXX allow leaving this unset.
+            rerank_format: Some(args.rerank_format),
             layout: args.layout,
             max_edges: args.max_edges,
             index_search_params: GraphSearchParams {

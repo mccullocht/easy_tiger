@@ -126,7 +126,7 @@ pub trait Graph {
 }
 
 /// A node in the Vamana graph.
-// XXX consider eliminating this.
+// TODO: consider eliminating this trait
 pub trait GraphVertex {
     type EdgeIterator<'a>: Iterator<Item = i64>
     where

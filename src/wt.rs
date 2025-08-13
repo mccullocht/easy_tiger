@@ -213,7 +213,7 @@ impl GraphVectorTable {
 pub struct TableGraphVectorIndex {
     graph_table_name: String,
     nav_table: GraphVectorTable,
-    rerank_table: GraphVectorTable,
+    rerank_table: Option<GraphVectorTable>,
     config: GraphConfig,
 }
 
@@ -261,14 +261,11 @@ impl TableGraphVectorIndex {
                 format: config.nav_format,
                 similarity: config.similarity,
             },
-            rerank_table: config
-                .rerank_format
-                .map(|f| GraphVectorTable {
-                    table_name: rerank_table_name,
-                    format: f,
-                    similarity: config.similarity,
-                })
-                .expect("XXX"),
+            rerank_table: config.rerank_format.map(|f| GraphVectorTable {
+                table_name: rerank_table_name,
+                format: f,
+                similarity: config.similarity,
+            }),
             config,
         }
     }
@@ -289,7 +286,9 @@ impl TableGraphVectorIndex {
                     .into(),
             ),
         )?;
-        session.create_table(&index.rerank_table.table_name, None)?;
+        if let Some(rerank_table) = index.rerank_table() {
+            session.create_table(&rerank_table.name(), None)?;
+        }
         session.create_table(&index.nav_table.table_name, None)?;
         Ok(index)
     }
@@ -326,8 +325,7 @@ impl TableGraphVectorIndex {
     }
 
     pub fn rerank_table(&self) -> Option<&GraphVectorTable> {
-        // XXX allow this to actually be optional
-        Some(&self.rerank_table)
+        self.rerank_table.as_ref()
     }
 
     pub fn nav_table(&self) -> &GraphVectorTable {

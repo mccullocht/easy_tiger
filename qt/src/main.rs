@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     fs::File,
-    io::{self},
+    io::{self, BufWriter, Write},
     num::NonZero,
     path::PathBuf,
     sync::{Arc, Mutex, atomic::AtomicU64},
@@ -43,6 +43,8 @@ enum Command {
     DistanceLoss(DistanceLossArgs),
     /// Compute recall against a ground truth set using quantized vectors.
     QuantizationRecall(QuantizationRecallArgs),
+    /// Compute ground truth set for float32 vectors.
+    ExhaustiveSearch(ExhaustiveSearchArgs),
 }
 
 #[derive(Args)]
@@ -381,6 +383,75 @@ fn quantization_recall(
     Ok(())
 }
 
+#[derive(Args)]
+pub struct ExhaustiveSearchArgs {
+    /// Path to numpy formatted little-endian float vectors.
+    #[arg(short, long)]
+    query_vectors: PathBuf,
+    /// Path buf to numpy u32 formatted neighbors file to write.
+    /// This should include one row of length neighbors_len for each vector in query_vectors.
+    #[arg(long)]
+    neighbors: PathBuf,
+    /// Number of neighbors for each query in the neighbors file.
+    #[arg(long, default_value_t = NonZero::new(100).unwrap())]
+    neighbors_len: NonZero<usize>,
+
+    /// Maximum number of records to search for query vectors.
+    #[arg(long)]
+    record_limit: Option<usize>,
+
+    /// Similarity function to use.
+    #[arg(long)]
+    similarity: VectorSimilarity,
+}
+
+pub fn exhaustive_search(
+    args: ExhaustiveSearchArgs,
+    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+) -> io::Result<()> {
+    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
+        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
+        NonZero::new(vectors.elem_stride()).unwrap(),
+    )?;
+
+    let mut results = Vec::with_capacity(query_vectors.len());
+    let k = args.neighbors_len.get();
+    results.resize_with(query_vectors.len(), || Vec::with_capacity(k * 2));
+    let distance_fn = args.similarity.new_distance_function();
+
+    let limit = args
+        .record_limit
+        .unwrap_or(vectors.len())
+        .min(vectors.len());
+    for (i, doc) in vectors
+        .iter()
+        .enumerate()
+        .take(limit)
+        .progress_count(limit as u64)
+    {
+        results.par_iter_mut().enumerate().for_each(|(q, r)| {
+            let n = Neighbor::new(i as i64, distance_fn.distance_f32(&query_vectors[q], doc));
+            if r.len() <= k || n < r[k] {
+                r.push(n);
+                if r.len() == r.capacity() {
+                    r.select_nth_unstable(k);
+                    r.truncate(k);
+                }
+            }
+        });
+    }
+
+    let mut writer = BufWriter::new(File::create(args.neighbors)?);
+    for mut neighbors in results.into_iter() {
+        neighbors.sort_unstable();
+        for n in neighbors.into_iter().take(k) {
+            writer.write_all(&(n.vertex() as u32).to_le_bytes())?;
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
@@ -392,5 +463,6 @@ fn main() -> io::Result<()> {
         Command::QuantizationLoss(args) => quantization_loss(args, &vectors),
         Command::DistanceLoss(args) => distance_loss(args, &vectors),
         Command::QuantizationRecall(args) => quantization_recall(args, &vectors),
+        Command::ExhaustiveSearch(args) => exhaustive_search(args, &vectors),
     }
 }

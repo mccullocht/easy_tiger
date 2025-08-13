@@ -1,4 +1,3 @@
-mod exhaustive_search;
 mod recall;
 mod spann;
 mod ui;
@@ -11,7 +10,6 @@ use std::{
 };
 
 use clap::{command, Parser, Subcommand};
-use exhaustive_search::{exhaustive_search, ExhaustiveSearchArgs};
 use spann::{spann_command, SpannArgs};
 use vamana::{vamana_command, VamanaArgs};
 use wt_mdb::{
@@ -46,8 +44,6 @@ enum Commands {
     Spann(SpannArgs),
     /// Perform Vamana/DiskANN index operations.
     Vamana(VamanaArgs),
-    /// Exhaustively search an index and create new Neighbors files.
-    ExhaustiveSearch(ExhaustiveSearchArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -68,9 +64,6 @@ fn main() -> io::Result<()> {
     match cli.command {
         Commands::Spann(args) => spann_command(connection, &cli.index_name, args),
         Commands::Vamana(args) => vamana_command(connection, &cli.index_name, args),
-        Commands::ExhaustiveSearch(args) => {
-            exhaustive_search(connection.clone(), &cli.index_name, args)
-        }
     }?;
 
     session.checkpoint()?;

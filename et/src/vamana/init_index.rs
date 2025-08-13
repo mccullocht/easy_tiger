@@ -22,8 +22,8 @@ pub struct InitIndexArgs {
     #[arg(long, value_enum)]
     nav_format: F32VectorCoding,
     /// Vector coding to use for rerank vectors.
-    #[arg(long, value_enum, default_value = "raw")]
-    rerank_format: F32VectorCoding,
+    #[arg(long, value_enum, default_value = "f32")]
+    rerank_format: Option<F32VectorCoding>,
 
     /// Physical layout used for graph.
     #[arg(long, value_enum, default_value = "split")]
@@ -38,7 +38,9 @@ pub struct InitIndexArgs {
     /// saturated graph that has higher recall.
     #[arg(long, default_value = "256")]
     edge_candidates: NonZero<usize>,
-    /// Number of edge candidates to rerank. Defaults to edge_candidates.
+    /// Number of edge candidates to rerank.
+    ///
+    /// Defaults to edge_candidates if --rerank-format is set.
     ///
     /// When > 0 re-rank candidate edges using the highest fidelity vectors available.
     /// The candidate list is then truncated to this size, so this may effectively reduce
@@ -78,7 +80,10 @@ pub fn init_index(
             max_edges: args.max_edges,
             index_search_params: GraphSearchParams {
                 beam_width: args.edge_candidates,
-                num_rerank: args.rerank_edges.unwrap_or(args.edge_candidates.get()),
+                num_rerank: args
+                    .rerank_format
+                    .map(|_| args.rerank_edges.unwrap_or(args.edge_candidates.get()))
+                    .unwrap_or(0),
             },
         },
         index_name,

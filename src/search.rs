@@ -13,6 +13,7 @@ use crate::{
     Neighbor,
 };
 
+use rustix::io::Errno;
 use wt_mdb::{Error, Result};
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -125,24 +126,22 @@ impl GraphSearcher {
             reader.config().nav_format,
         );
 
-        let rerank_query_rep = if self.params.num_rerank > 0 {
-            Some(
-                reader
-                    .rerank_vectors()?
-                    .get(vertex_id)
-                    .unwrap_or(Err(Error::not_found_error()))?
-                    .to_vec(),
-            )
+        let rerank_query = if self.params.num_rerank > 0 {
+            let mut vectors = reader
+                .rerank_vectors()
+                .unwrap_or(Err(Error::Errno(Errno::NOTSUP)))?;
+            let query = vectors
+                .get(vertex_id)
+                .unwrap_or(Err(Error::not_found_error()))?
+                .to_vec();
+            Some(new_query_vector_distance_indexing(
+                query,
+                vectors.similarity(),
+                vectors.format(),
+            ))
         } else {
             None
         };
-        let rerank_query = rerank_query_rep.as_ref().map(|q| {
-            new_query_vector_distance_indexing(
-                q,
-                reader.config().similarity,
-                reader.config().rerank_format,
-            )
-        });
 
         self.search_graph_and_rerank(
             nav_query.as_ref(),
@@ -167,7 +166,10 @@ impl GraphSearcher {
             Some(new_query_vector_distance_f32(
                 query,
                 reader.config().similarity,
-                reader.config().rerank_format,
+                reader
+                    .config()
+                    .rerank_format
+                    .ok_or(Error::Errno(Errno::NOTSUP))?,
             ))
         } else {
             None
@@ -226,28 +228,27 @@ impl GraphSearcher {
             }
         }
 
-        if rerank_query.is_none() {
-            return Ok(self.candidates.iter().map(|c| c.neighbor).collect());
-        }
-
-        let rerank_query = rerank_query.unwrap();
-        let mut rerank_vectors = reader.rerank_vectors()?;
-        let rescored = self
-            .candidates
-            .iter()
-            .take(self.params.num_rerank)
-            .map(|c| {
-                let vertex = c.neighbor.vertex();
-                rerank_vectors
-                    .get(vertex)
-                    .expect("row exists")
-                    .map(|rv| Neighbor::new(vertex, rerank_query.distance(rv)))
+        if let Some(rerank_query) = rerank_query {
+            let mut rerank_vectors = reader.rerank_vectors().expect("rerank enabled")?;
+            let rescored = self
+                .candidates
+                .iter()
+                .take(self.params.num_rerank)
+                .map(|c| {
+                    let vertex = c.neighbor.vertex();
+                    rerank_vectors
+                        .get(vertex)
+                        .expect("row exists")
+                        .map(|rv| Neighbor::new(vertex, rerank_query.distance(rv)))
+                })
+                .collect::<Result<Vec<_>>>();
+            rescored.map(|mut r| {
+                r.sort();
+                r
             })
-            .collect::<Result<Vec<_>>>();
-        rescored.map(|mut r| {
-            r.sort();
-            r
-        })
+        } else {
+            Ok(self.candidates.iter().map(|c| c.neighbor).collect())
+        }
     }
 }
 
@@ -432,7 +433,7 @@ mod test {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
                 nav_format: F32VectorCoding::BinaryQuantized,
-                rerank_format: F32VectorCoding::F32,
+                rerank_format: Some(F32VectorCoding::F32),
                 layout: GraphLayout::Split,
                 max_edges,
                 index_search_params: GraphSearchParams {
@@ -501,12 +502,8 @@ mod test {
             = TestGraphAccess<'b>
         where
             Self: 'b;
-        type NavVectorStore<'b>
-            = TestNavVectorStore<'b>
-        where
-            Self: 'b;
-        type RerankVectorStore<'b>
-            = TestRerankVectorStore<'b>
+        type VectorStore<'b>
+            = TestVectorStore<'b>
         where
             Self: 'b;
 
@@ -518,12 +515,12 @@ mod test {
             Ok(TestGraphAccess(self.0))
         }
 
-        fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
-            Ok(TestNavVectorStore(self.0))
+        fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
+            Ok(TestVectorStore(self.0, TestVectorStoreType::Nav))
         }
 
-        fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
-            Ok(TestRerankVectorStore(self.0))
+        fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
+            Some(Ok(TestVectorStore(self.0, TestVectorStoreType::Rerank)))
         }
     }
 
@@ -553,33 +550,32 @@ mod test {
         }
     }
 
-    pub struct TestRerankVectorStore<'a>(&'a TestGraphVectorIndex);
-
-    impl GraphVectorStore for TestRerankVectorStore<'_> {
-        fn format(&self) -> F32VectorCoding {
-            self.0.config.rerank_format
-        }
-
-        fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
-            self.0
-                .data
-                .get(vertex_id as usize)
-                .map(|vertex| Ok(bytemuck::cast_slice(vertex.vector.as_ref())))
-        }
+    enum TestVectorStoreType {
+        Nav,
+        Rerank,
     }
 
-    pub struct TestNavVectorStore<'a>(&'a TestGraphVectorIndex);
+    pub struct TestVectorStore<'a>(&'a TestGraphVectorIndex, TestVectorStoreType);
 
-    impl GraphVectorStore for TestNavVectorStore<'_> {
+    impl GraphVectorStore for TestVectorStore<'_> {
         fn format(&self) -> F32VectorCoding {
-            self.0.config.nav_format
+            match self.1 {
+                TestVectorStoreType::Nav => self.0.config.nav_format,
+                TestVectorStoreType::Rerank => self.0.config.rerank_format.unwrap(),
+            }
+        }
+
+        fn similarity(&self) -> VectorSimilarity {
+            self.0.config.similarity
         }
 
         fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
-            self.0
-                .data
-                .get(vertex_id as usize)
-                .map(|vertex| Ok(vertex.nav_vector.as_ref()))
+            self.0.data.get(vertex_id as usize).map(|v| {
+                Ok(match self.1 {
+                    TestVectorStoreType::Nav => v.nav_vector.as_ref(),
+                    TestVectorStoreType::Rerank => bytemuck::cast_slice(v.vector.as_ref()),
+                })
+            })
         }
     }
 

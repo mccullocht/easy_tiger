@@ -21,7 +21,10 @@ pub fn assign_to_centroids(
 ) -> Result<Vec<Vec<u32>>> {
     let tl_head_reader = ThreadLocal::new();
     let tl_searcher = ThreadLocal::new();
-    let distance_fn = index.head_config().config().new_distance_function();
+    let distance_fn = index
+        .head_config()
+        .high_fidelity_table()
+        .new_distance_function();
     (0..limit)
         .into_par_iter()
         .map(|i| {
@@ -123,16 +126,14 @@ pub fn bulk_load_raw_vectors(
     limit: usize,
     progress: (impl Fn(u64) + Send + Sync),
 ) -> Result<()> {
-    let mut bulk_cursor = session.new_bulk_load_cursor::<i64, Vec<u8>>(
-        &index.table_names.raw_vectors,
-        Some(
-            CreateOptionsBuilder::default()
-                .app_metadata(&serde_json::to_string(&index.config).unwrap()),
-        ),
-    )?;
-    let coder = index.head_config().config().new_rerank_coder();
-    let mut encoded =
-        Vec::with_capacity(coder.byte_len(index.head_config().config().dimensions.get()));
+    let mut bulk_cursor =
+        session.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
+    let coder = index
+        .config()
+        .rerank_format
+        .unwrap()
+        .new_coder(index.head_config().config().similarity);
+    let mut encoded = vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())];
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {
         coder.encode_to(vector, &mut encoded);
         bulk_cursor.insert(record_id as i64, &encoded)?;

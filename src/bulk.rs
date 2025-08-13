@@ -34,7 +34,7 @@ use crate::{
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     search::GraphSearcher,
-    vectors::{new_query_vector_distance_indexing, F32VectorCoding, F32VectorDistance},
+    vectors::{new_query_vector_distance_indexing, F32VectorCoding, VectorSimilarity},
     wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
@@ -107,7 +107,6 @@ pub struct BulkLoadBuilder<D> {
 
     graph: Box<[RwLock<Vec<Neighbor>>]>,
     entry_vertex: AtomicI64,
-    distance_fn: Box<dyn F32VectorDistance>,
 
     graph_stats: Option<GraphStats>,
 }
@@ -129,7 +128,6 @@ where
         graph_vec.resize_with(vectors.len(), || {
             RwLock::new(Vec::with_capacity(index.config().max_edges.get() * 2))
         });
-        let distance_fn = index.config().new_distance_function();
         Self {
             connection,
             index,
@@ -141,7 +139,6 @@ where
             clustered_order: None,
             graph: graph_vec.into_boxed_slice(),
             entry_vertex: AtomicI64::new(-1),
-            distance_fn,
             graph_stats: None,
         }
     }
@@ -193,7 +190,7 @@ where
     fn load_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
-        let nav_coder = self.index.config().new_nav_coder();
+        let nav_coder = self.index.nav_table().new_coder();
         let mut nav_vector = vec![0u8; nav_coder.byte_len(dim)];
         let mut sum = vec![0.0; dim];
         let mut quantized_vectors = if self.options.memory_quantized_vectors {
@@ -202,12 +199,17 @@ where
             None
         };
         let mut nav_cursor =
-            session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table_name(), None)?;
+            session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table().name(), None)?;
 
-        let rerank_coder = self.index.config().new_rerank_coder();
-        let mut rerank_vector = vec![0u8; rerank_coder.byte_len(dim)];
-        let mut rerank_cursor =
-            session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.rerank_table_name(), None)?;
+        let mut rerank = if let Some(rerank_table) = self.index.rerank_table() {
+            let rerank_coder = rerank_table.new_coder();
+            let rerank_vector = vec![0u8; rerank_coder.byte_len(dim)];
+            let rerank_cursor =
+                session.new_bulk_load_cursor::<i64, Vec<u8>>(rerank_table.name(), None)?;
+            Some((rerank_coder, rerank_vector, rerank_cursor))
+        } else {
+            None
+        };
 
         for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
             for (i, o) in v.iter().zip(sum.iter_mut()) {
@@ -220,8 +222,10 @@ where
             }
             nav_cursor.insert(i as i64, &nav_vector)?;
 
-            rerank_coder.encode_to(v, &mut rerank_vector);
-            rerank_cursor.insert(i as i64, &rerank_vector)?;
+            if let Some((coder, vector, cursor)) = rerank.as_mut() {
+                coder.encode_to(v, vector);
+                cursor.insert(i as i64, vector)?;
+            }
             progress(1);
         }
 
@@ -236,7 +240,12 @@ where
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect::<Vec<_>>();
-        self.centroid = self.index.config().new_rerank_coder().encode(&centroid);
+        self.centroid = self
+            .index
+            .rerank_table()
+            .unwrap_or(self.index.nav_table())
+            .new_coder()
+            .encode(&centroid);
         Ok(())
     }
 
@@ -262,11 +271,15 @@ where
         // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
         // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
+        let distance_fn = self.index.high_fidelity_table().new_distance_function();
         let apply_mu = {
             let session = self.connection.open_session()?;
-            let mut cursor = session.open_record_cursor(self.index.rerank_table_name())?;
-            let vector0 = cursor.seek_exact(0).unwrap()?;
-            Mutex::new((0i64, self.distance_fn.distance(&self.centroid, &vector0)))
+            let reader = BulkLoadGraphVectorIndexReader(self, &session);
+            let mut vectors = reader.high_fidelity_vectors()?;
+            Mutex::new((
+                0i64,
+                distance_fn.distance(&self.centroid, vectors.get(0).expect("vector 0 exists")?),
+            ))
         };
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
@@ -320,9 +333,8 @@ where
 
                     // TODO: consider using quantized scores here to avoid reading f32 vectors when
                     // reranking is turned off.
-                    let mut rerank_vectors = reader.rerank_vectors()?;
-                    self.distance_fn
-                        .distance(&self.centroid, rerank_vectors.get(v as i64).unwrap()?)
+                    let mut vectors = reader.high_fidelity_vectors()?;
+                    distance_fn.distance(&self.centroid, vectors.get(v as i64).unwrap()?)
                 };
 
                 // Add each edge to this vertex and a reciprocal edge to make the graph
@@ -462,8 +474,13 @@ where
             self.insert_in_flight_edges_from(
                 vertex_id,
                 in_flight,
-                &mut reader.rerank_vectors()?,
-                self.index.config().rerank_format,
+                &mut reader
+                    .rerank_vectors()
+                    .expect("must have rerank table if rerank is configured")?,
+                self.index
+                    .config()
+                    .rerank_format
+                    .expect("must have rerank table if rerank is configured"),
                 edges,
             )
         } else {
@@ -635,11 +652,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
         = BulkLoadBuilderGraph<'b, D>
     where
         Self: 'b;
-    type NavVectorStore<'b>
-        = BulkLoadGraphVectorStore<'b>
-    where
-        Self: 'b;
-    type RerankVectorStore<'b>
+    type VectorStore<'b>
         = BulkLoadGraphVectorStore<'b>
     where
         Self: 'b;
@@ -652,25 +665,32 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
         Ok(BulkLoadBuilderGraph(self.0))
     }
 
-    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
+    fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
         if let Some(s) = self.0.quantized_vectors.as_ref() {
             Ok(BulkLoadGraphVectorStore::Memory(
                 s,
+                self.config().similarity,
                 self.config().nav_format,
             ))
         } else {
             Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
-                self.1.get_record_cursor(self.0.index.nav_table_name())?,
+                self.1.get_record_cursor(self.0.index.nav_table().name())?,
+                self.config().similarity,
                 self.config().nav_format,
             )))
         }
     }
 
-    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
-        Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
-            self.1.get_record_cursor(self.0.index.rerank_table_name())?,
-            self.0.index.config().rerank_format,
-        )))
+    fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
+        self.0.index.rerank_table().map(|t| {
+            self.1.get_record_cursor(t.name()).map(|c| {
+                BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
+                    c,
+                    self.0.index.config().similarity,
+                    t.format(),
+                ))
+            })
+        })
     }
 }
 
@@ -740,21 +760,32 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
 
 enum BulkLoadGraphVectorStore<'a> {
     Cursor(CursorVectorStore<'a>),
-    Memory(&'a DerefVectorStore<u8, memmap2::Mmap>, F32VectorCoding),
+    Memory(
+        &'a DerefVectorStore<u8, memmap2::Mmap>,
+        VectorSimilarity,
+        F32VectorCoding,
+    ),
 }
 
 impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
     fn format(&self) -> F32VectorCoding {
         match self {
             Self::Cursor(c) => c.format(),
-            Self::Memory(_, f) => *f,
+            Self::Memory(_, _, f) => *f,
+        }
+    }
+
+    fn similarity(&self) -> crate::vectors::VectorSimilarity {
+        match self {
+            Self::Cursor(c) => c.similarity(),
+            Self::Memory(_, s, _) => *s,
         }
     }
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
         match self {
             Self::Cursor(c) => c.get(vertex_id),
-            Self::Memory(m, _) => {
+            Self::Memory(m, _, _) => {
                 if vertex_id >= 0 && (vertex_id as usize) < m.len() {
                     Some(Ok(&m[vertex_id as usize]))
                 } else {

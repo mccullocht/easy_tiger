@@ -57,12 +57,12 @@ pub fn delete(connection: Arc<Connection>, index_name: &str, args: DeleteArgs) -
     session.begin_transaction(None)?;
 
     // Use the nav table to find the ids in range to delete. This is probably cheaper than iterating over the graph table.
-    let mut id_cursor = session.open_record_cursor(index.nav_table_name())?;
+    let mut id_cursor = session.open_record_cursor(index.nav_table().name())?;
     id_cursor.set_bounds(args.keys.0.clone())?;
     match delete_all(
         id_cursor,
         session.open_record_cursor(index.graph_table_name())?,
-        session.open_record_cursor(index.nav_table_name())?,
+        session.open_record_cursor(index.nav_table().name())?,
     ) {
         Ok(_) => {
             println!("Deleted {:?}", args.keys.0);

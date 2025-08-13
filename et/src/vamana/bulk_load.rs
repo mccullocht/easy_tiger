@@ -22,14 +22,14 @@ pub struct BulkLoadArgs {
     #[arg(short, long)]
     dimensions: NonZero<usize>,
     /// Similarity function to use for vector scoring.
-    #[arg(long, value_enum)]
+    #[arg(long)]
     similarity: VectorSimilarity,
     /// Vector coding to use for navigational vectors.
-    #[arg(long, value_enum)]
+    #[arg(long)]
     nav_format: F32VectorCoding,
     /// Vector coding to use for rerank vectors.
-    #[arg(long, value_enum, default_value = "raw")]
-    rerank_format: F32VectorCoding,
+    #[arg(long)]
+    rerank_format: Option<F32VectorCoding>,
 
     /// Physical layout used for graph.
     #[arg(long, value_enum, default_value = "split")]
@@ -53,7 +53,9 @@ pub struct BulkLoadArgs {
     /// saturated graph that has higher recall.
     #[arg(short, long, default_value = "128")]
     edge_candidates: NonZero<usize>,
-    /// Number of edge candidates to rerank. Defaults to edge_candidates.
+    /// Number of edge candidates to rerank.
+    ///
+    /// Defaults to edge_candidates if --rerank-format is set.
     ///
     /// When > 0 re-rank candidate edges using the highest fidelity vectors available.
     /// The candidate list is then truncated to this size, so this may effectively reduce
@@ -90,8 +92,9 @@ pub fn bulk_load(
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,
             num_rerank: args
-                .rerank_edges
-                .unwrap_or_else(|| args.edge_candidates.get()),
+                .rerank_format
+                .map(|_| args.rerank_edges.unwrap_or(args.edge_candidates.get()))
+                .unwrap_or(0),
         },
     };
     if args.drop_tables {

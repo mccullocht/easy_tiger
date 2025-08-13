@@ -14,6 +14,7 @@ use std::{
     sync::Arc,
 };
 
+use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use wt_mdb::{
@@ -27,8 +28,8 @@ use crate::{
     input::{VecVectorStore, VectorStore},
     search::{GraphSearchStats, GraphSearcher},
     vectors::{
-        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, F32VectorDistance,
-        QueryVectorDistance,
+        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, QueryVectorDistance,
+        VectorDistance,
     },
     wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
@@ -39,6 +40,7 @@ pub struct IndexConfig {
     pub replica_count: usize,
     pub head_search_params: GraphSearchParams,
     pub posting_coder: F32VectorCoding,
+    pub rerank_format: Option<F32VectorCoding>,
 }
 
 #[derive(Clone)]
@@ -103,12 +105,14 @@ impl TableIndex {
 
         let table_names = TableNames::from_index_name(index_name);
         let session = connection.open_session()?;
-        let raw_config_json =
-            read_app_metadata(&session, &table_names.postings).ok_or(Error::not_found_error())??;
+        let config: IndexConfig = serde_json::from_str(
+            &read_app_metadata(&session, &table_names.postings)
+                .ok_or(Error::not_found_error())??,
+        )?;
         Ok(Self {
             head,
             table_names,
-            config: serde_json::from_str(&raw_config_json)?,
+            config,
         })
     }
 
@@ -237,9 +241,9 @@ impl Formatted for PostingKey {
 
 pub struct SessionIndexWriter {
     index: Arc<TableIndex>,
-    distance_fn: Box<dyn F32VectorDistance + 'static>,
-    posting_coder: Box<dyn F32VectorCoder + 'static>,
-    raw_coder: Box<dyn F32VectorCoder + 'static>,
+    distance_fn: Box<dyn VectorDistance>,
+    posting_coder: Box<dyn F32VectorCoder>,
+    raw_coder: Option<Box<dyn F32VectorCoder>>,
 
     head_reader: SessionGraphVectorIndexReader,
     head_searcher: GraphSearcher,
@@ -247,12 +251,15 @@ pub struct SessionIndexWriter {
 
 impl SessionIndexWriter {
     pub fn new(index: Arc<TableIndex>, session: Session) -> Self {
-        let distance_fn = index.head.config().new_distance_function();
+        let distance_fn = index.head.high_fidelity_table().new_distance_function();
         let posting_coder = index
             .config
             .posting_coder
             .new_coder(index.head.config().similarity);
-        let raw_coder = index.head.config().new_rerank_coder();
+        let raw_coder = index
+            .config()
+            .rerank_format
+            .map(|t| t.new_coder(index.head_config().config().similarity));
         let head_reader = SessionGraphVectorIndexReader::new(index.head.clone(), session);
         let head_searcher = GraphSearcher::new(index.config.head_search_params);
         Self {
@@ -286,9 +293,9 @@ impl SessionIndexWriter {
             Self::remove_postings(centroid_ids, record_id, &mut posting_cursor)?;
         }
 
-        let mut raw_vector_cursor = self.raw_vector_cursor()?;
-        // TODO: factor out handling of high fidelity vector tables.
-        raw_vector_cursor.set(record_id, &self.raw_coder.encode(vector))?;
+        if let Some((vectors, coder)) = self.raw_vector_cursor().zip(self.raw_coder.as_ref()) {
+            vectors?.set(record_id, &coder.encode(vector))?;
+        }
         centroid_cursor.set(
             record_id,
             &centroid_ids
@@ -316,8 +323,9 @@ impl SessionIndexWriter {
             let mut posting_cursor = self.posting_cursor()?;
             Self::remove_postings(centroid_ids, record_id, &mut posting_cursor)?;
             centroid_cursor.remove(record_id)?;
-            let mut raw_vector_cursor = self.raw_vector_cursor()?;
-            raw_vector_cursor.remove(record_id)?;
+            if let Some(cursor) = self.raw_vector_cursor() {
+                cursor?.remove(record_id)?;
+            }
         }
         Ok(())
     }
@@ -334,10 +342,12 @@ impl SessionIndexWriter {
             .get_record_cursor(&self.index.table_names.centroids)
     }
 
-    fn raw_vector_cursor(&self) -> Result<RecordCursorGuard<'_>> {
-        self.head_reader
-            .session()
-            .get_record_cursor(&self.index.table_names.raw_vectors)
+    fn raw_vector_cursor(&self) -> Option<Result<RecordCursorGuard<'_>>> {
+        self.index.config().rerank_format.map(|_| {
+            self.head_reader
+                .session()
+                .get_record_cursor(&self.index.table_names.raw_vectors)
+        })
     }
 
     fn read_centroid_ids(
@@ -374,21 +384,24 @@ impl SessionIndexWriter {
 fn select_centroids(
     head_reader: &impl GraphVectorIndexReader,
     candidates: Vec<Neighbor>,
-    distance_fn: &dyn F32VectorDistance,
+    distance_fn: &dyn VectorDistance,
     replica_count: usize,
 ) -> Result<Vec<u32>> {
     assert!(!candidates.is_empty());
-    let mut raw_vectors = head_reader.rerank_vectors()?;
+    let mut vectors = head_reader.high_fidelity_vectors()?;
+    let coder = vectors.new_coder();
 
     let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
-    let mut centroids =
-        VecVectorStore::with_capacity(head_reader.config().dimensions.get() * 4, replica_count);
+    let mut centroids = VecVectorStore::with_capacity(
+        coder.byte_len(head_reader.config().dimensions.get()),
+        replica_count,
+    );
     for candidate in candidates {
         if centroid_ids.len() >= replica_count {
             break;
         }
 
-        let v = raw_vectors
+        let v = vectors
             .get(candidate.vertex())
             .expect("returned vector should exist")?;
         if !centroids
@@ -604,36 +617,39 @@ impl SpannSearcher {
             self.stats.posting_entries_read += it.read();
         }
 
-        if self.params.num_rerank == 0 {
-            return Ok(results.into_sorted_vec());
+        if self.params.num_rerank > 0 {
+            let query = new_query_vector_distance_f32(
+                query,
+                reader.head_reader.config().similarity,
+                reader
+                    .head_reader
+                    .config()
+                    .rerank_format
+                    .ok_or(Error::Errno(Errno::NOTSUP))?,
+            );
+            let mut raw_cursor = reader
+                .session()
+                .open_record_cursor(&reader.index().table_names.raw_vectors)?;
+            let mut reranked = results
+                .into_sorted_vec()
+                .into_iter()
+                .take(self.params.num_rerank)
+                .map(|n| {
+                    Ok(Neighbor::new(
+                        n.vertex(),
+                        query.distance(unsafe {
+                            raw_cursor
+                                .seek_exact_unsafe(n.vertex())
+                                .expect("raw vector for candidate")?
+                        }),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            reranked.sort_unstable();
+
+            Ok(reranked)
+        } else {
+            Ok(results.into_sorted_vec())
         }
-
-        // TODO: separate head rerank format from tail rerank format.
-        let query = new_query_vector_distance_f32(
-            query,
-            reader.head_reader.config().similarity,
-            reader.head_reader.config().rerank_format,
-        );
-        let mut raw_cursor = reader
-            .session()
-            .open_record_cursor(&reader.index().table_names.raw_vectors)?;
-        let mut reranked = results
-            .into_sorted_vec()
-            .into_iter()
-            .take(self.params.num_rerank)
-            .map(|n| {
-                Ok(Neighbor::new(
-                    n.vertex(),
-                    query.distance(unsafe {
-                        raw_cursor
-                            .seek_exact_unsafe(n.vertex())
-                            .expect("raw vector for candidate")?
-                    }),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        reranked.sort_unstable();
-
-        Ok(reranked)
     }
 }

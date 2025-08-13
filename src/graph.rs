@@ -5,13 +5,12 @@
 
 use std::{collections::BTreeSet, io, num::NonZero, str::FromStr};
 
+use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use wt_mdb::{Error, Result};
 
 use crate::{
-    vectors::{
-        F32VectorCoder, F32VectorCoding, F32VectorDistance, VectorDistance, VectorSimilarity,
-    },
+    vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity},
     Neighbor,
 };
 
@@ -74,7 +73,7 @@ pub struct GraphConfig {
     /// If re-ranking is turned on during graph construction or search this will be used to compute
     /// ~O(num_candidates) query distances. If this format is quantized you should typically choose
     /// a high fidelity quantization function.
-    pub rerank_format: F32VectorCoding,
+    pub rerank_format: Option<F32VectorCoding>,
     pub layout: GraphLayout,
     /// Maximum number of edges at each vertex.
     pub max_edges: NonZero<usize>,
@@ -82,37 +81,12 @@ pub struct GraphConfig {
     pub index_search_params: GraphSearchParams,
 }
 
-impl GraphConfig {
-    /// Return a distance function for high fidelity vectors in the index.
-    pub fn new_distance_function(&self) -> Box<dyn F32VectorDistance> {
-        self.similarity.new_distance_function()
-    }
-
-    /// Return a new vector coder for the nav vector format.
-    pub fn new_nav_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.nav_format.new_coder(self.similarity)
-    }
-
-    /// Return a distance function for quantized navigational vectors in the index.
-    pub fn new_nav_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.nav_format.new_vector_distance(self.similarity)
-    }
-
-    /// Return a new vector coder for the rerank vector format.
-    pub fn new_rerank_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.rerank_format.new_coder(self.similarity)
-    }
-}
-
 /// `GraphVectorIndexReader` is used to generate objects for graph navigation.
 pub trait GraphVectorIndexReader {
     type Graph<'a>: Graph + 'a
     where
         Self: 'a;
-    type NavVectorStore<'a>: GraphVectorStore + 'a
-    where
-        Self: 'a;
-    type RerankVectorStore<'a>: GraphVectorStore + 'a
+    type VectorStore<'a>: GraphVectorStore + 'a
     where
         Self: 'a;
 
@@ -123,10 +97,19 @@ pub trait GraphVectorIndexReader {
     fn graph(&self) -> Result<Self::Graph<'_>>;
 
     /// Return an object that can be used to read navigational vectors.
-    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>>;
+    fn nav_vectors(&self) -> Result<Self::VectorStore<'_>>;
 
     /// Return an object that can be used to read vectors for re-ranking.
-    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>>;
+    ///
+    /// Not all graphs will have a set of rerank vectors; use high_fidelity_vectors()
+    /// to get most accurate set of vectors available.
+    fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>>;
+
+    /// Return an object that can be used to read the most accurate set of vectors stored
+    /// for this index.
+    fn high_fidelity_vectors(&self) -> Result<Self::VectorStore<'_>> {
+        self.rerank_vectors().unwrap_or_else(|| self.nav_vectors())
+    }
 }
 
 /// A Vamana graph.
@@ -143,6 +126,7 @@ pub trait Graph {
 }
 
 /// A node in the Vamana graph.
+// TODO: consider eliminating this trait
 pub trait GraphVertex {
     type EdgeIterator<'a>: Iterator<Item = i64>
     where
@@ -154,15 +138,28 @@ pub trait GraphVertex {
 
 /// Vector store for known vector formats accessible by a record id.
 pub trait GraphVectorStore {
+    /// Similarity function used for vectors in this store.
+    fn similarity(&self) -> VectorSimilarity;
+
     /// Return the format that vectors in the store are encoded in.
     fn format(&self) -> F32VectorCoding;
+
+    /// Create a new distance function that operates over vectors on this table.
+    fn new_distance_function(&self) -> Box<dyn VectorDistance> {
+        self.format().new_vector_distance(self.similarity())
+    }
+
+    /// Create a new coder for vectors of this type.
+    fn new_coder(&self) -> Box<dyn F32VectorCoder> {
+        self.format().new_coder(self.similarity())
+    }
 
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.
     // TODO: consider removing this method as it is _unsafe_ in the event of a rollback.
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>>;
 
     // TODO: extract many vectors into VecVectorStore.
-    // TODO: method to turn self into a QueryVectorDistance.
+    // TODO: method to turn self into a QueryVectorDistance wrapper.
 }
 
 /// Computes the distance between two edges in a set to assist in pruning.
@@ -177,25 +174,19 @@ pub struct EdgeSetDistanceComputer {
 impl EdgeSetDistanceComputer {
     pub fn new<R: GraphVectorIndexReader>(reader: &R, edges: &[Neighbor]) -> Result<Self> {
         if reader.config().index_search_params.num_rerank > 0 {
-            let vectors = Self::extract_vectors(&mut reader.rerank_vectors()?, edges)?;
-            Ok(Self {
-                distance_fn: reader.config().new_distance_function(),
-                vectors,
-            })
+            Self::from_store_and_edges(
+                &mut reader
+                    .rerank_vectors()
+                    .unwrap_or(Err(Error::Errno(Errno::NOTSUP)))?,
+                edges,
+            )
         } else {
-            let vectors = Self::extract_vectors(&mut reader.nav_vectors()?, edges)?;
-            Ok(Self {
-                distance_fn: reader.config().new_nav_distance_function(),
-                vectors,
-            })
+            Self::from_store_and_edges(&mut reader.nav_vectors()?, edges)
         }
     }
 
-    fn extract_vectors(
-        store: &mut impl GraphVectorStore,
-        edges: &[Neighbor],
-    ) -> Result<Vec<Vec<u8>>> {
-        edges
+    fn from_store_and_edges(store: &mut impl GraphVectorStore, edges: &[Neighbor]) -> Result<Self> {
+        let vectors = edges
             .iter()
             .map(|n| {
                 store
@@ -203,7 +194,12 @@ impl EdgeSetDistanceComputer {
                     .unwrap_or(Err(Error::not_found_error()))
                     .map(|v| v.to_vec())
             })
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>>>()?;
+        let distance_fn = store.new_distance_function();
+        Ok(Self {
+            distance_fn,
+            vectors,
+        })
     }
 
     pub fn distance(&self, i: usize, j: usize) -> f64 {

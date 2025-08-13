@@ -15,7 +15,7 @@ use wt_mdb::{
 
 use crate::{
     graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex},
-    vectors::F32VectorCoding,
+    vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity},
 };
 
 /// Key in the graph table containing the entry point.
@@ -134,19 +134,31 @@ impl Graph for CursorGraph<'_> {
 }
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
-pub struct CursorVectorStore<'a>(RecordCursorGuard<'a>, F32VectorCoding);
+pub struct CursorVectorStore<'a> {
+    inner: RecordCursorGuard<'a>,
+    similarity: VectorSimilarity,
+    format: F32VectorCoding,
+}
 
 impl<'a> CursorVectorStore<'a> {
-    pub fn new(cursor: RecordCursorGuard<'a>, format: F32VectorCoding) -> Self {
-        Self(cursor, format)
+    pub fn new(
+        inner: RecordCursorGuard<'a>,
+        similarity: VectorSimilarity,
+        format: F32VectorCoding,
+    ) -> Self {
+        Self {
+            inner,
+            similarity,
+            format,
+        }
     }
 
     pub(crate) fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()> {
-        self.0.set(vertex_id, vector.as_ref())
+        self.inner.set(vertex_id, vector.as_ref())
     }
 
     pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
-        self.0.remove(vertex_id).or_else(|e| {
+        self.inner.remove(vertex_id).or_else(|e| {
             if e == Error::not_found_error() {
                 Ok(())
             } else {
@@ -157,27 +169,54 @@ impl<'a> CursorVectorStore<'a> {
 }
 
 impl GraphVectorStore for CursorVectorStore<'_> {
+    fn similarity(&self) -> VectorSimilarity {
+        self.similarity
+    }
+
     fn format(&self) -> F32VectorCoding {
-        self.1
+        self.format
     }
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
-        Some(unsafe { self.0.seek_exact_unsafe(vertex_id)? })
+        Some(unsafe { self.inner.seek_exact_unsafe(vertex_id)? })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphVectorTable {
+    table_name: String,
+    format: F32VectorCoding,
+    similarity: VectorSimilarity,
+}
+
+impl GraphVectorTable {
+    pub fn name(&self) -> &str {
+        &self.table_name
+    }
+
+    pub fn format(&self) -> F32VectorCoding {
+        self.format
+    }
+
+    pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
+        self.format.new_coder(self.similarity)
+    }
+
+    pub fn new_distance_function(&self) -> Box<dyn VectorDistance> {
+        self.format.new_vector_distance(self.similarity)
     }
 }
 
 /// Immutable features of a WiredTiger graph vector index. These can be read from the db and
 /// stored in a catalog for convenient access at runtime.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TableGraphVectorIndex {
     graph_table_name: String,
-    nav_table_name: String,
-    rerank_table_name: String,
+    nav_table: GraphVectorTable,
+    rerank_table: Option<GraphVectorTable>,
     config: GraphConfig,
 }
 
-// TODO: collapse raw and nav tables if the formats are the same.
-// TODO: embed configuration in metadata.
 impl TableGraphVectorIndex {
     /// Create a new `TableGraphVectorIndex` from the relevant db tables, extracting
     /// immutable graph metadata that can be used across operations.
@@ -188,12 +227,7 @@ impl TableGraphVectorIndex {
         let config: GraphConfig = serde_json::from_str(
             &read_app_metadata(&session, &graph_table_name).ok_or(Error::not_found_error())??,
         )?;
-        Ok(Self {
-            graph_table_name,
-            nav_table_name,
-            rerank_table_name,
-            config,
-        })
+        Self::new(config, graph_table_name, nav_table_name, rerank_table_name)
     }
 
     /// Create a new `TableGraphVectorIndex` for table initialization, providing
@@ -201,10 +235,30 @@ impl TableGraphVectorIndex {
     pub fn from_init(config: GraphConfig, index_name: &str) -> io::Result<Self> {
         let [graph_table_name, rerank_table_name, nav_table_name] =
             Self::generate_table_names(index_name);
+        Self::new(config, graph_table_name, nav_table_name, rerank_table_name)
+    }
+
+    fn new(
+        config: GraphConfig,
+        graph_table_name: String,
+        nav_table_name: String,
+        rerank_table_name: String,
+    ) -> io::Result<Self> {
+        if config.index_search_params.num_rerank > 0 && config.rerank_format.is_none() {
+            return Err(Error::Errno(Errno::NOTSUP).into());
+        }
         Ok(Self {
             graph_table_name,
-            nav_table_name,
-            rerank_table_name,
+            nav_table: GraphVectorTable {
+                table_name: nav_table_name,
+                format: config.nav_format,
+                similarity: config.similarity,
+            },
+            rerank_table: config.rerank_format.map(|f| GraphVectorTable {
+                table_name: rerank_table_name,
+                format: f,
+                similarity: config.similarity,
+            }),
             config,
         })
     }
@@ -225,8 +279,10 @@ impl TableGraphVectorIndex {
                     .into(),
             ),
         )?;
-        session.create_table(&index.rerank_table_name, None)?;
-        session.create_table(&index.nav_table_name, None)?;
+        if let Some(rerank_table) = index.rerank_table() {
+            session.create_table(rerank_table.name(), None)?;
+        }
+        session.create_table(&index.nav_table.table_name, None)?;
         Ok(index)
     }
 
@@ -261,14 +317,16 @@ impl TableGraphVectorIndex {
         &self.graph_table_name
     }
 
-    /// Return the name of the table containing raw vectors.
-    pub fn rerank_table_name(&self) -> &str {
-        &self.rerank_table_name
+    pub fn rerank_table(&self) -> Option<&GraphVectorTable> {
+        self.rerank_table.as_ref()
     }
 
-    /// Return the name of the table containing the navigational vectors.
-    pub fn nav_table_name(&self) -> &str {
-        &self.nav_table_name
+    pub fn nav_table(&self) -> &GraphVectorTable {
+        &self.nav_table
+    }
+
+    pub fn high_fidelity_table(&self) -> &GraphVectorTable {
+        self.rerank_table().unwrap_or(&self.nav_table)
     }
 }
 
@@ -305,11 +363,7 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         = CursorGraph<'a>
     where
         Self: 'a;
-    type NavVectorStore<'a>
-        = CursorVectorStore<'a>
-    where
-        Self: 'a;
-    type RerankVectorStore<'a>
+    type VectorStore<'a>
         = CursorVectorStore<'a>
     where
         Self: 'a;
@@ -325,20 +379,21 @@ impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
         ))
     }
 
-    fn nav_vectors(&self) -> Result<Self::NavVectorStore<'_>> {
+    fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
         Ok(CursorVectorStore::new(
             self.session
-                .get_record_cursor(self.index.nav_table_name())?,
+                .get_record_cursor(self.index.nav_table().name())?,
+            self.index.config.similarity,
             self.index.config().nav_format,
         ))
     }
 
-    fn rerank_vectors(&self) -> Result<Self::RerankVectorStore<'_>> {
-        Ok(CursorVectorStore::new(
+    fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
+        self.index.rerank_table().map(|t| {
             self.session
-                .get_record_cursor(self.index.rerank_table_name())?,
-            self.index.config().rerank_format,
-        ))
+                .get_record_cursor(t.name())
+                .map(|c| CursorVectorStore::new(c, self.index.config().similarity, t.format()))
+        })
     }
 }
 

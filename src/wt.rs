@@ -287,7 +287,7 @@ impl TableGraphVectorIndex {
             ),
         )?;
         if let Some(rerank_table) = index.rerank_table() {
-            session.create_table(&rerank_table.name(), None)?;
+            session.create_table(rerank_table.name(), None)?;
         }
         session.create_table(&index.nav_table.table_name, None)?;
         Ok(index)

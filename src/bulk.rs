@@ -278,7 +278,7 @@ where
             let mut vectors = reader.high_fidelity_vectors()?;
             Mutex::new((
                 0i64,
-                distance_fn.distance(&self.centroid, &vectors.get(0).expect("vector 0 exists")?),
+                distance_fn.distance(&self.centroid, vectors.get(0).expect("vector 0 exists")?),
             ))
         };
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);

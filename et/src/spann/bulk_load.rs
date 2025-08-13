@@ -35,8 +35,8 @@ pub struct BulkLoadArgs {
     #[arg(long, value_enum)]
     head_nav_format: F32VectorCoding,
     /// Encoding used for rerank vectors in the head index.
-    #[arg(long, value_enum, default_value = "raw")]
-    head_rerank_format: F32VectorCoding,
+    #[arg(long, value_enum, default_value = "f32")]
+    head_rerank_format: Option<F32VectorCoding>,
 
     /// Physical layout used for the head graph.
     #[arg(long, value_enum, default_value = "split")]
@@ -89,6 +89,10 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     posting_coder: F32VectorCoding,
 
+    /// Format to use for a rerank table. May be omitted.
+    #[arg(long)]
+    rerank_format: Option<F32VectorCoding>,
+
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
     limit: Option<usize>,
@@ -129,15 +133,18 @@ pub fn bulk_load(
         dimensions: args.dimensions,
         similarity: args.similarity,
         nav_format: args.head_nav_format,
-        // XXX allow leaving this unset.
-        rerank_format: Some(args.head_rerank_format),
+        rerank_format: args.head_rerank_format,
         layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,
             num_rerank: args
-                .rerank_edges
-                .unwrap_or_else(|| args.edge_candidates.get()),
+                .head_rerank_format
+                .map(|_| {
+                    args.rerank_edges
+                        .unwrap_or_else(|| args.edge_candidates.get())
+                })
+                .unwrap_or(0),
         },
     };
     let spann_config = IndexConfig {
@@ -145,10 +152,15 @@ pub fn bulk_load(
         head_search_params: GraphSearchParams {
             beam_width: args.head_edge_candidates,
             num_rerank: args
-                .head_rerank_edges
-                .unwrap_or(args.head_edge_candidates.get()),
+                .head_rerank_format
+                .map(|_| {
+                    args.head_rerank_edges
+                        .unwrap_or(args.head_edge_candidates.get())
+                })
+                .unwrap_or(0),
         },
         posting_coder: args.posting_coder,
+        rerank_format: args.rerank_format,
     };
     let index = Arc::new(TableIndex::init_index(
         &connection,
@@ -213,7 +225,7 @@ pub fn bulk_load(
     }
 
     let session = connection.open_session()?;
-    {
+    if index.config().rerank_format.is_some() {
         let progress = progress_bar(limit, "tail load raw vectors");
         bulk_load_raw_vectors(index.as_ref(), &session, &f32_vectors, limit, |i| {
             progress.inc(i)

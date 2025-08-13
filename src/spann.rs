@@ -389,10 +389,13 @@ fn select_centroids(
 ) -> Result<Vec<u32>> {
     assert!(!candidates.is_empty());
     let mut vectors = head_reader.high_fidelity_vectors()?;
+    let coder = vectors.new_coder();
 
     let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
-    let mut centroids =
-        VecVectorStore::with_capacity(head_reader.config().dimensions.get() * 4, replica_count);
+    let mut centroids = VecVectorStore::with_capacity(
+        coder.byte_len(head_reader.config().dimensions.get()),
+        replica_count,
+    );
     for candidate in candidates {
         if centroid_ids.len() >= replica_count {
             break;

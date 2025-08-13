@@ -35,7 +35,7 @@ pub struct BulkLoadArgs {
     #[arg(long, value_enum)]
     head_nav_format: F32VectorCoding,
     /// Encoding used for rerank vectors in the head index.
-    #[arg(long, value_enum, default_value = "f32")]
+    #[arg(long)]
     head_rerank_format: Option<F32VectorCoding>,
 
     /// Physical layout used for the head graph.

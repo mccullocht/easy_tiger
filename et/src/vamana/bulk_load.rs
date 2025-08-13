@@ -22,13 +22,13 @@ pub struct BulkLoadArgs {
     #[arg(short, long)]
     dimensions: NonZero<usize>,
     /// Similarity function to use for vector scoring.
-    #[arg(long, value_enum)]
+    #[arg(long)]
     similarity: VectorSimilarity,
     /// Vector coding to use for navigational vectors.
-    #[arg(long, value_enum)]
+    #[arg(long)]
     nav_format: F32VectorCoding,
     /// Vector coding to use for rerank vectors.
-    #[arg(long, value_enum, default_value = "f32")]
+    #[arg(long)]
     rerank_format: Option<F32VectorCoding>,
 
     /// Physical layout used for graph.

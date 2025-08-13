@@ -133,8 +133,7 @@ pub fn bulk_load_raw_vectors(
         .rerank_format
         .unwrap()
         .new_coder(index.head_config().config().similarity);
-    let mut encoded =
-        Vec::with_capacity(coder.byte_len(index.head_config().config().dimensions.get()));
+    let mut encoded = vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())];
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {
         coder.encode_to(vector, &mut encoded);
         bulk_cursor.insert(record_id as i64, &encoded)?;

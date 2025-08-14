@@ -202,6 +202,7 @@ pub enum F32VectorCoding {
     ///
     /// Note that for dot product similarity the truncated value will be l2 normalized before it is
     /// encoded.
+    // XXX name TruncatedF32
     Truncated(usize),
 }
 

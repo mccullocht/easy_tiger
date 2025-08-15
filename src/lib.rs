@@ -12,6 +12,7 @@ pub mod graph;
 pub mod graph_clustering;
 pub mod input;
 pub mod kmeans;
+pub mod recall;
 pub mod search;
 pub mod spann;
 pub mod vectors;

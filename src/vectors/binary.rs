@@ -125,6 +125,8 @@ impl I1DotProductQueryDistance {
                 // Broadcast the next two byte values from doc to two different 8 byte values, then
                 // mask for each bit and take min(1) to get 0 or 1 in a lane for each bit. This is
                 // fed to a table decoder to get a representative positive or negative value.
+                // TODO: if we can cheaply produce a vector of [-1,1] we can multiply by i8_value
+                // and skip the table decode which requires an additional mask and is slow.
                 let dv = vqtbl1q_s8(
                     doc_tbl_mask,
                     vminq_u8(

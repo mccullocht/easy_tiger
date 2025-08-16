@@ -371,8 +371,7 @@ struct QuantizedQueryVectorDistance<'a, D> {
 }
 
 impl<'a, D: VectorDistance> QuantizedQueryVectorDistance<'a, D> {
-    // XXX rename as 'new'
-    fn from_quantized(distance_fn: D, query: impl Into<Cow<'a, [u8]>>) -> Self {
+    fn new(distance_fn: D, query: impl Into<Cow<'a, [u8]>>) -> Self {
         Self {
             distance_fn,
             query: query.into(),
@@ -465,9 +464,7 @@ pub fn new_query_vector_distance_indexing<'a>(
     use VectorSimilarity::{Cosine, Dot, Euclidean};
     macro_rules! quantized_qvd {
         ($dist_fn:expr, $query:ident) => {
-            Box::new(QuantizedQueryVectorDistance::from_quantized(
-                $dist_fn, $query,
-            ))
+            Box::new(QuantizedQueryVectorDistance::new($dist_fn, $query))
         };
     }
     match (similarity, coding) {

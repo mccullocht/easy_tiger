@@ -1,3 +1,4 @@
+mod compute_neighbors;
 mod recall;
 mod spann;
 mod ui;
@@ -8,6 +9,7 @@ mod wt_stats;
 use std::io::{self};
 
 use clap::{command, Parser, Subcommand};
+use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
 use spann::{spann_command, SpannArgs};
 use vamana::{vamana_command, VamanaArgs};
 
@@ -24,6 +26,8 @@ enum Commands {
     Spann(SpannArgs),
     /// Perform Vamana/DiskANN index operations.
     Vamana(VamanaArgs),
+    /// Compute the top k neighbors for a set of queries against a set of document vectors.
+    ComputeNeighbors(ComputeNeighborsArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -33,5 +37,6 @@ fn main() -> io::Result<()> {
     match cli.command {
         Commands::Spann(args) => spann_command(args),
         Commands::Vamana(args) => vamana_command(args),
+        Commands::ComputeNeighbors(args) => compute_neighbors(args),
     }
 }

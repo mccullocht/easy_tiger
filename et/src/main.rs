@@ -1,4 +1,5 @@
 mod compute_neighbors;
+mod neighbor_util;
 mod quantization_recall;
 mod recall;
 mod spann;

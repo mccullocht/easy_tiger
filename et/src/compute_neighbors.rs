@@ -11,9 +11,11 @@ use easy_tiger::{
     vectors::VectorSimilarity,
     Neighbor,
 };
-use indicatif::ProgressIterator;
+use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
+
+use crate::neighbor_util::TopNeighbors;
 
 #[derive(Args)]
 pub struct ComputeNeighborsArgs {
@@ -53,43 +55,34 @@ pub fn compute_neighbors(args: ComputeNeighborsArgs) -> io::Result<()> {
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         args.dimensions,
     )?;
+    let query_limit = args.query_limit.unwrap_or(query_vectors.len());
     let doc_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.doc_vectors)?)? },
         args.dimensions,
     )?;
-
-    let query_limit = args.query_limit.unwrap_or(query_vectors.len());
-    let mut results = Vec::with_capacity(query_limit);
-    let k = args.neighbors_len.get();
-    results.resize_with(query_limit, || Vec::with_capacity(k * 2));
-    let distance_fn = args.similarity.new_distance_function();
-
-    let limit = args
+    let doc_limit = args
         .doc_limit
         .unwrap_or(doc_vectors.len())
         .min(doc_vectors.len());
-    for (i, doc) in doc_vectors
-        .iter()
-        .enumerate()
-        .take(limit)
-        .progress_count(limit as u64)
-    {
-        // XXX this is slow as fuck and it is also somehow wrong. so much system time!
-        results.par_iter_mut().enumerate().for_each(|(q, r)| {
-            let n = Neighbor::new(i as i64, distance_fn.distance_f32(&query_vectors[q], doc));
-            if r.len() < k || n < r[k - 1] {
-                r.push(n);
-                if r.len() == k * 2 {
-                    r.select_nth_unstable(k - 1);
-                    r.truncate(k);
-                }
+
+    let distance_fn = args.similarity.new_distance_function();
+    let k = args.neighbors_len.get();
+    let mut results = Vec::with_capacity(query_limit);
+    results.resize_with(query_limit, || TopNeighbors::new(args.neighbors_len.get()));
+    (0..doc_limit)
+        .into_par_iter()
+        .progress_count(doc_limit as u64)
+        .for_each(|d| {
+            for q in 0..query_limit {
+                results[q].add(Neighbor::new(
+                    d as i64,
+                    distance_fn.distance_f32(&query_vectors[q], &doc_vectors[d]),
+                ));
             }
         });
-    }
 
     let mut writer = BufWriter::new(File::create(args.neighbors)?);
-    for mut neighbors in results.into_iter() {
-        neighbors.sort_unstable();
+    for neighbors in results.into_iter().map(|r| r.into_neighbors()) {
         for n in neighbors.into_iter().take(k) {
             writer.write_all(&<[u8; 16]>::from(n))?;
         }

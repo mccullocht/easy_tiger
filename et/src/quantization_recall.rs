@@ -1,14 +1,10 @@
-use std::{
-    fs::File,
-    io,
-    num::NonZero,
-    path::PathBuf,
-    sync::{atomic::AtomicU64, Mutex},
-};
+use std::{fs::File, io, num::NonZero, path::PathBuf};
 
-use crate::recall::{RecallArgs, RecallComputer};
+use crate::{
+    neighbor_util::TopNeighbors,
+    recall::{RecallArgs, RecallComputer},
+};
 use clap::Args;
-use crossbeam_utils::CachePadded;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vectors::{
@@ -101,39 +97,6 @@ pub fn quantization_recall(args: QuantizationRecallArgs) -> io::Result<()> {
         })
         .collect::<Vec<_>>();
 
-    // Keep the top neighbors, along with a maximum distance. The distance is read atomically as
-    // to filter non-competitive results; competitive results are added to the neighbor list and
-    // periodically pruned to update the competitive value.
-    struct TopNeighbors {
-        rep: CachePadded<Mutex<Vec<Neighbor>>>,
-        threshold: CachePadded<AtomicU64>,
-    }
-    impl TopNeighbors {
-        fn new(n: usize) -> Self {
-            Self {
-                rep: CachePadded::new(Mutex::new(Vec::with_capacity(n * 2))),
-                threshold: CachePadded::new(AtomicU64::new(f64::MAX.to_bits())),
-            }
-        }
-
-        fn push(&self, neighbor: Neighbor, n: usize) {
-            use std::sync::atomic::Ordering;
-
-            if f64::from_bits(self.threshold.load(Ordering::Relaxed)) < neighbor.distance() {
-                return; // neighbor is not competitive.
-            }
-
-            let mut neighbors = self.rep.lock().unwrap();
-            neighbors.push(neighbor);
-            if neighbors.len() == n * 2 {
-                let (_, t, _) = neighbors.select_nth_unstable(n - 1);
-                self.threshold
-                    .store(t.distance().to_bits(), Ordering::Relaxed);
-                neighbors.truncate(n);
-            }
-        }
-    }
-
     let k = recall_computer.k();
     let mut query_k = Vec::with_capacity(query_limit);
     query_k.resize_with(query_limit, || TopNeighbors::new(k));
@@ -143,7 +106,7 @@ pub fn quantization_recall(args: QuantizationRecallArgs) -> io::Result<()> {
         .for_each(|d| {
             let doc = coder.encode(&doc_vectors[d]);
             for (q, s) in query_scorers.iter().enumerate() {
-                query_k[q].push(Neighbor::new(d as i64, s.distance(&doc)), k);
+                query_k[q].add(Neighbor::new(d as i64, s.distance(&doc)));
             }
         });
 
@@ -151,13 +114,8 @@ pub fn quantization_recall(args: QuantizationRecallArgs) -> io::Result<()> {
     // not useful for ndcg but good for measuring the upside of depth in re-scoring.
     let sum_recall = query_k
         .into_iter()
-        .map(|r| r.rep.into_inner().into_inner().unwrap())
         .enumerate()
-        .map(|(i, mut r)| {
-            // XXX this should happen somewhere else, maybe a finish method?
-            r.sort_unstable();
-            recall_computer.compute_recall(i, &r)
-        })
+        .map(|(i, r)| recall_computer.compute_recall(i, &r.into_neighbors()))
         .sum::<f64>();
     println!(
         "{}: {:.6}",

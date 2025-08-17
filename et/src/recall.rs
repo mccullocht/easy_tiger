@@ -1,4 +1,10 @@
-use std::{collections::HashSet, fs::File, io, num::NonZero, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io,
+    num::NonZero,
+    path::PathBuf,
+};
 
 use clap::{Args, ValueEnum};
 use easy_tiger::{
@@ -115,10 +121,15 @@ impl RecallComputer {
         expected: impl Iterator<Item = Neighbor> + Clone,
         actual: impl Iterator<Item = Neighbor> + Clone,
     ) -> f64 {
-        // TODO: consider zeroing out the contribution of any actual result that doesn't appear in
-        // the expected set.
+        let ideal_scores = expected
+            .clone()
+            .map(|n| (n.vertex(), self.distance_to_score(n.distance())))
+            .collect::<HashMap<_, _>>();
         let idcg = Self::dcg(expected.map(|n| self.distance_to_score(n.distance())));
-        let dcg = Self::dcg(actual.map(|n| self.distance_to_score(n.distance())));
+        // Replace actual scores with ideal/expected scores, substituting zero when not found.
+        // Quantization error may yield scores that are higher than the actual scores and may result
+        // in a misleading recall figure (> 1.0).
+        let dcg = Self::dcg(actual.map(|n| *ideal_scores.get(&n.vertex()).unwrap_or(&0.0)));
         dcg / idcg
     }
 

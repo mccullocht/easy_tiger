@@ -20,6 +20,9 @@ pub struct ComputeNeighborsArgs {
     /// Path to numpy formatted little-endian float vectors.
     #[arg(long)]
     query_vectors: PathBuf,
+    /// Maximum number of query vectors to search for query vectors.
+    #[arg(long)]
+    query_limit: Option<usize>,
     /// Path to numpy formatted little-endian float vectors.
     #[arg(long)]
     doc_vectors: PathBuf,
@@ -55,9 +58,10 @@ pub fn compute_neighbors(args: ComputeNeighborsArgs) -> io::Result<()> {
         args.dimensions,
     )?;
 
-    let mut results = Vec::with_capacity(query_vectors.len());
+    let query_limit = args.query_limit.unwrap_or(query_vectors.len());
+    let mut results = Vec::with_capacity(query_limit);
     let k = args.neighbors_len.get();
-    results.resize_with(query_vectors.len(), || Vec::with_capacity(k * 2));
+    results.resize_with(query_limit, || Vec::with_capacity(k * 2));
     let distance_fn = args.similarity.new_distance_function();
 
     let limit = args
@@ -70,6 +74,7 @@ pub fn compute_neighbors(args: ComputeNeighborsArgs) -> io::Result<()> {
         .take(limit)
         .progress_count(limit as u64)
     {
+        // XXX this is slow as fuck and it is also somehow wrong. so much system time!
         results.par_iter_mut().enumerate().for_each(|(q, r)| {
             let n = Neighbor::new(i as i64, distance_fn.distance_f32(&query_vectors[q], doc));
             if r.len() < k || n < r[k - 1] {

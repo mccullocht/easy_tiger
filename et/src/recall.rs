@@ -112,8 +112,8 @@ impl RecallComputer {
 
     fn ndcg_recall(
         &self,
-        expected: impl Iterator<Item = Neighbor>,
-        actual: impl Iterator<Item = Neighbor>,
+        expected: impl Iterator<Item = Neighbor> + Clone,
+        actual: impl Iterator<Item = Neighbor> + Clone,
     ) -> f64 {
         // TODO: consider zeroing out the contribution of any actual result that doesn't appear in
         // the expected set.
@@ -125,7 +125,7 @@ impl RecallComputer {
     fn dcg(scores: impl Iterator<Item = f64>) -> f64 {
         scores
             .enumerate()
-            .map(|(i, s)| s / (i as f64 + 1.0).log2())
+            .map(|(i, s)| s / (i as f64 + 2.0).log2())
             .sum()
     }
 

@@ -147,11 +147,17 @@ pub fn quantization_recall(args: QuantizationRecallArgs) -> io::Result<()> {
             }
         });
 
+    // XXX add back the ability to compare a deeper query set to a smaller truth set.
+    // not useful for ndcg but good for measuring the upside of depth in re-scoring.
     let sum_recall = query_k
         .into_iter()
         .map(|r| r.rep.into_inner().into_inner().unwrap())
         .enumerate()
-        .map(|(i, r)| recall_computer.compute_recall(i, &r))
+        .map(|(i, mut r)| {
+            // XXX this should happen somewhere else, maybe a finish method?
+            r.sort_unstable();
+            recall_computer.compute_recall(i, &r)
+        })
         .sum::<f64>();
     // XXX print the metric type!
     println!(

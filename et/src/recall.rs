@@ -17,7 +17,7 @@ pub enum RecallMetric {
     Simple,
     /// Normalized Discounted Cumulative Gain recall. This metric takes into account ranks and
     /// scores (~inverted distance) within each result set then normalizes into a [0,1] value.
-    NDCG,
+    Ndcg,
 }
 
 #[derive(Args)]
@@ -96,7 +96,7 @@ impl RecallComputer {
         let actual = query_results.iter().take(self.k).copied();
         match self.metric {
             RecallMetric::Simple => self.simple_recall(expected, actual),
-            RecallMetric::NDCG => self.ndcg_recall(expected, actual),
+            RecallMetric::Ndcg => self.ndcg_recall(expected, actual),
         }
     }
 

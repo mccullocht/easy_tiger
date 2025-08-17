@@ -1,4 +1,5 @@
 mod compute_neighbors;
+mod quantization_recall;
 mod recall;
 mod spann;
 mod ui;
@@ -12,6 +13,8 @@ use clap::{command, Parser, Subcommand};
 use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
 use spann::{spann_command, SpannArgs};
 use vamana::{vamana_command, VamanaArgs};
+
+use crate::quantization_recall::{quantization_recall, QuantizationRecallArgs};
 
 #[derive(Parser)]
 #[command(version, about = "EasyTiger vector indexing tool", long_about = None)]
@@ -28,6 +31,8 @@ enum Commands {
     Vamana(VamanaArgs),
     /// Compute the top k neighbors for a set of queries against a set of document vectors.
     ComputeNeighbors(ComputeNeighborsArgs),
+    /// Quantize a vector set and compute exact recall against a ground truth.
+    QuantizationRecall(QuantizationRecallArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -38,5 +43,6 @@ fn main() -> io::Result<()> {
         Commands::Spann(args) => spann_command(args),
         Commands::Vamana(args) => vamana_command(args),
         Commands::ComputeNeighbors(args) => compute_neighbors(args),
+        Commands::QuantizationRecall(args) => quantization_recall(args),
     }
 }

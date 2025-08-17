@@ -65,7 +65,7 @@ pub fn init_index(
     } else if !TableGraphVectorIndex::from_db(&connection, index_name)
         .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
     {
-        println!("Index {} already exists!", index_name);
+        println!("Index {index_name} already exists!");
         return Ok(());
     }
 

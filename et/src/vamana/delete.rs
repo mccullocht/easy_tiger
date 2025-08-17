@@ -69,7 +69,7 @@ pub fn delete(connection: Arc<Connection>, index_name: &str, args: DeleteArgs) -
             session.commit_transaction(None)?;
         }
         Err(e) => {
-            println!("Delete failed {}", e);
+            println!("Delete failed {e}");
             session.rollback_transaction(None)?;
         }
     }

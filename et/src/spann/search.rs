@@ -155,6 +155,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_phase<Q: Send + Sync>(
     name: &'static str,
     iters: usize,
@@ -165,11 +166,7 @@ fn search_phase<Q: Send + Sync>(
     search_params: SpannSearchParams,
     recall_computer: Option<&RecallComputer>,
 ) -> io::Result<AggregateSearchStats> {
-    let query_indices = (0..limit)
-        .into_iter()
-        .cycle()
-        .take(iters * limit)
-        .collect::<Vec<_>>();
+    let query_indices = (0..limit).cycle().take(iters * limit).collect::<Vec<_>>();
     let progress = progress_bar(query_indices.len(), name);
     #[cfg(feature = "serial_search")]
     let stats: AggregateSearchStats = {
@@ -192,14 +189,14 @@ fn search_phase<Q: Send + Sync>(
         query_indices
             .into_par_iter()
             .map_init(
-                || SearcherState::new(&index, &connection, search_params).unwrap(),
+                || SearcherState::new(index, connection, search_params).unwrap(),
                 |searcher, index| {
                     let stats = searcher.query(index, &query_vectors[index], recall_computer);
                     progress.inc(1);
                     stats
                 },
             )
-            .try_reduce(|| AggregateSearchStats::default(), |a, b| Ok(a + b))?
+            .try_reduce(AggregateSearchStats::default, |a, b| Ok(a + b))?
     };
     // TODO: collect and return wt stats with search stats, reseting after collection.
     progress.finish_using_style();
@@ -218,7 +215,7 @@ impl SearcherState {
         search_params: SpannSearchParams,
     ) -> io::Result<Self> {
         Ok(Self {
-            reader: SessionIndexReader::new(&index, connection.open_session()?),
+            reader: SessionIndexReader::new(index, connection.open_session()?),
             searcher: SpannSearcher::new(search_params),
         })
     }

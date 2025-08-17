@@ -159,10 +159,9 @@ pub fn quantization_recall(args: QuantizationRecallArgs) -> io::Result<()> {
             recall_computer.compute_recall(i, &r)
         })
         .sum::<f64>();
-    // XXX print the metric type!
     println!(
-        "Recall@{}: {:.6}",
-        recall_computer.k(),
+        "{}: {:.6}",
+        recall_computer.label(),
         sum_recall / query_limit as f64
     );
 

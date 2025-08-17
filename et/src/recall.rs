@@ -23,6 +23,9 @@ pub enum RecallMetric {
     Simple,
     /// Normalized Discounted Cumulative Gain recall. This metric takes into account ranks and
     /// scores (~inverted distance) within each result set then normalizes into a [0,1] value.
+    ///
+    /// When computing DCG for the actual result set, distances are replaced with values from the
+    /// expected result set (or 0) to account for quantization error.
     Ndcg,
 }
 
@@ -83,6 +86,13 @@ impl RecallComputer {
 
     pub fn k(&self) -> usize {
         self.k
+    }
+
+    pub fn label(&self) -> String {
+        match self.metric {
+            RecallMetric::Simple => format!("Recall@{}", self.k),
+            RecallMetric::Ndcg => format!("NDCG@{}", self.k),
+        }
     }
 
     pub fn neighbors_len(&self) -> usize {

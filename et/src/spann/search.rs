@@ -148,7 +148,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         );
 
         if let Some((computer, mean_recall)) = recall_computer.zip(stats.mean_recall()) {
-            println!("recall@{} {:0.6}", computer.k(), mean_recall);
+            println!("{}: {:0.6}", computer.label(), mean_recall);
         }
     }
 

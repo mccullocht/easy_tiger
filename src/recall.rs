@@ -4,6 +4,8 @@ use rayon::prelude::*;
 
 use crate::{input::VectorStore, vectors::VectorSimilarity, Neighbor};
 
+// XXX delete me
+
 /// An object that can compute recall metrics.
 pub trait RecallComputer {
     /// Compute recall for the given query and actual result set.

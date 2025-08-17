@@ -88,21 +88,18 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             .unwrap_or(args.posting_candidates.get()),
     };
     let recall_computer = if let Some((neighbors, recall_k)) = args.neighbors.zip(args.recall_k) {
-        let neighbors = DerefVectorStore::<u32, _>::new(
-            unsafe { Mmap::map(&File::open(neighbors)?)? },
-            args.neighbors_len,
-        )?;
-        if neighbors.len() != query_vectors.len() {
+        let computer = RecallComputer::new(recall_k, &neighbors, args.neighbors_len)?;
+        if computer.neighbors_len() != query_vectors.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "neighbors must have the same number of rows as query_vectors ({} vs {})",
-                    neighbors.len(),
+                    computer.neighbors_len(),
                     query_vectors.len()
                 ),
             ));
         }
-        Some(RecallComputer::new(recall_k, neighbors)?)
+        Some(computer)
     } else {
         None
     };
@@ -164,7 +161,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     Ok(())
 }
 
-fn search_phase<Q: Send + Sync, N: Send + Sync>(
+fn search_phase<Q: Send + Sync>(
     name: &'static str,
     iters: usize,
     limit: usize,
@@ -172,7 +169,7 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
     search_params: SpannSearchParams,
-    recall_computer: Option<&RecallComputer<DerefVectorStore<u32, N>>>,
+    recall_computer: Option<&RecallComputer>,
 ) -> io::Result<AggregateSearchStats> {
     let query_indices = (0..limit)
         .into_iter()
@@ -232,11 +229,11 @@ impl SearcherState {
         })
     }
 
-    fn query<N: VectorStore<Elem = u32>>(
+    fn query(
         &mut self,
         index: usize,
         query: &[f32],
-        recall_computer: Option<&RecallComputer<N>>,
+        recall_computer: Option<&RecallComputer>,
     ) -> io::Result<AggregateSearchStats> {
         self.reader.session().begin_transaction(None)?;
         let start = Instant::now();

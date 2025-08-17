@@ -1,5 +1,12 @@
-use std::{collections::HashSet, fs::File, io, num::NonZero, path::Path};
+use std::{
+    collections::HashSet,
+    fs::File,
+    io,
+    num::NonZero,
+    path::{Path, PathBuf},
+};
 
+use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     Neighbor,
@@ -10,6 +17,20 @@ use memmap2::Mmap;
 // XXX only need the one struct.
 // XXX neighbors can be loaded from a path to make life easier.
 
+#[derive(Args)]
+pub struct RecallArgs {
+    /// Compute recall@k. Must be <= neighbors_len.
+    #[arg(long)]
+    recall_k: Option<NonZero<usize>>,
+    /// Path buf to formatted [`Neighbor`] vectors.
+    /// This should include one row of length neighbors_len for each vector in the query set.
+    #[arg(long)]
+    neighbors: Option<PathBuf>,
+    /// Number of neighbors for each query in the neighbors file.
+    #[arg(long, default_value_t = NonZero::new(100).unwrap())]
+    neighbors_len: NonZero<usize>,
+}
+
 /// Computes the recall for a query from a golden file.
 // TODO: add an option for NDGC recall computation.
 pub struct RecallComputer {
@@ -19,6 +40,18 @@ pub struct RecallComputer {
 
 impl RecallComputer {
     const NEIGHBOR_LEN: usize = 16;
+
+    pub fn from_args(args: RecallArgs) -> io::Result<Option<Self>> {
+        if let Some((neighbors, k)) = args.neighbors.zip(args.recall_k) {
+            Ok(Some(RecallComputer::new(
+                k,
+                &neighbors,
+                args.neighbors_len,
+            )?))
+        } else {
+            Ok(None)
+        }
+    }
 
     /// Create a new RecallComputer that examines the first `k` results of `neighbors`.
     pub fn new(

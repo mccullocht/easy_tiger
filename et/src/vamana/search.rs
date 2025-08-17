@@ -18,7 +18,11 @@ use easy_tiger::{
 use memmap2::Mmap;
 use wt_mdb::Connection;
 
-use crate::{recall::RecallComputer, ui::progress_bar, wt_stats::WiredTigerConnectionStats};
+use crate::{
+    recall::{RecallArgs, RecallComputer},
+    ui::progress_bar,
+    wt_stats::WiredTigerConnectionStats,
+};
 
 #[derive(Args)]
 pub struct SearchArgs {
@@ -39,16 +43,8 @@ pub struct SearchArgs {
     #[arg(long)]
     record_limit: Option<usize>,
 
-    /// Path buf to numpy u32 formatted neighbors file.
-    /// This should include one row of length neighbors_len for each vector in query_vectors.
-    #[arg(long)]
-    neighbors: Option<PathBuf>,
-    /// Number of neighbors for each query in the neighbors file.
-    #[arg(long, default_value = "100")]
-    neighbors_len: NonZero<usize>,
-    /// Compute recall@k. Must be <= neighbors_len.
-    #[arg(long)]
-    recall_k: Option<NonZero<usize>>,
+    #[command(flatten)]
+    recall: RecallArgs,
 
     #[arg(long, default_value = "1")]
     warmup_iters: usize,
@@ -71,8 +67,8 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         beam_width: args.candidates,
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
     };
-    let recall_computer = if let Some((neighbors, recall_k)) = args.neighbors.zip(args.recall_k) {
-        let computer = RecallComputer::new(recall_k, &neighbors, args.neighbors_len)?;
+    let recall_computer = RecallComputer::from_args(args.recall)?;
+    if let Some(computer) = recall_computer.as_ref() {
         if computer.neighbors_len() != query_vectors.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -83,10 +79,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
                 ),
             ));
         }
-        Some(computer)
-    } else {
-        None
-    };
+    }
 
     if args.warmup_iters > 0 {
         search_phase(

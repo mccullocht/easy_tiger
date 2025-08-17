@@ -1,27 +1,33 @@
-use std::{
-    collections::HashSet,
-    fs::File,
-    io,
-    num::NonZero,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, fs::File, io, num::NonZero, path::PathBuf};
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
+    vectors::VectorSimilarity,
     Neighbor,
 };
 use memmap2::Mmap;
 
-// XXX the computation method/type will be an enum
-// XXX only need the one struct.
-// XXX neighbors can be loaded from a path to make life easier.
+/// Supported recall metrics.
+#[derive(Default, Debug, Copy, Clone, ValueEnum)]
+pub enum RecallMetric {
+    /// Simple recall counts the number of common results between the expected and actual sets and
+    /// returns a match ratio in [0,1]. This metric does not consider rank or distance values.
+    #[default]
+    Simple,
+    /// Normalized Discounted Cumulative Gain recall. This metric takes into account ranks and
+    /// scores (~inverted distance) within each result set then normalizes into a [0,1] value.
+    NDCG,
+}
 
 #[derive(Args)]
 pub struct RecallArgs {
     /// Compute recall@k. Must be <= neighbors_len.
     #[arg(long)]
     recall_k: Option<NonZero<usize>>,
+    /// Recall metric to compute.
+    #[arg(long, value_enum, default_value_t = RecallMetric::Simple)]
+    recall_metric: RecallMetric,
     /// Path buf to formatted [`Neighbor`] vectors.
     /// This should include one row of length neighbors_len for each vector in the query set.
     #[arg(long)]
@@ -34,6 +40,8 @@ pub struct RecallArgs {
 /// Computes the recall for a query from a golden file.
 // TODO: add an option for NDGC recall computation.
 pub struct RecallComputer {
+    metric: RecallMetric,
+    similarity: VectorSimilarity,
     k: usize,
     neighbors: DerefVectorStore<u8, Mmap>,
 }
@@ -41,40 +49,29 @@ pub struct RecallComputer {
 impl RecallComputer {
     const NEIGHBOR_LEN: usize = 16;
 
-    pub fn from_args(args: RecallArgs) -> io::Result<Option<Self>> {
+    pub fn from_args(args: RecallArgs, similarity: VectorSimilarity) -> io::Result<Option<Self>> {
         if let Some((neighbors, k)) = args.neighbors.zip(args.recall_k) {
-            Ok(Some(RecallComputer::new(
-                k,
-                &neighbors,
-                args.neighbors_len,
-            )?))
+            let elem_stride = Self::NEIGHBOR_LEN * args.neighbors_len.get();
+            let neighbors: DerefVectorStore<u8, Mmap> = DerefVectorStore::<u8, _>::new(
+                unsafe { Mmap::map(&File::open(neighbors)?)? },
+                NonZero::new(elem_stride).unwrap(),
+            )?;
+
+            if k.get() <= args.neighbors_len.get() {
+                Ok(Some(Self {
+                    metric: args.recall_metric,
+                    similarity,
+                    k: k.get(),
+                    neighbors,
+                }))
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "recall k must be <= neighbors_len",
+                ))
+            }
         } else {
             Ok(None)
-        }
-    }
-
-    /// Create a new RecallComputer that examines the first `k` results of `neighbors`.
-    pub fn new(
-        k: NonZero<usize>,
-        neighbors: &Path,
-        neighbors_len: NonZero<usize>,
-    ) -> io::Result<Self> {
-        let elem_stride = Self::NEIGHBOR_LEN * neighbors_len.get();
-        let neighbors: DerefVectorStore<u8, Mmap> = DerefVectorStore::<u8, _>::new(
-            unsafe { Mmap::map(&File::open(neighbors)?)? },
-            NonZero::new(elem_stride).unwrap(),
-        )?;
-
-        if k.get() <= neighbors_len.get() {
-            Ok(Self {
-                k: k.get(),
-                neighbors,
-            })
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "recall k must be <= neighbors_len",
-            ))
         }
     }
 
@@ -90,24 +87,55 @@ impl RecallComputer {
     ///
     /// *Panics* if `query_index` is out of bounds in the golden file.
     pub fn compute_recall(&self, query_index: usize, query_results: &[Neighbor]) -> f64 {
-        let expected = self
-            .query_neighbors(query_index)
-            .take(self.k)
-            .map(|n| n.vertex())
-            .collect::<HashSet<_>>();
-        let count = query_results
-            .iter()
-            .take(self.k)
-            .filter(|n| expected.contains(&n.vertex()))
-            .count();
-        count as f64 / self.k as f64
-    }
-
-    fn query_neighbors(&self, query_index: usize) -> impl Iterator<Item = Neighbor> + use<'_> {
-        self.neighbors[query_index]
+        let expected = self.neighbors[query_index]
             .as_chunks::<{ Self::NEIGHBOR_LEN }>()
             .0
             .iter()
-            .map(|n| Neighbor::from(*n))
+            .take(self.k)
+            .map(|n| Neighbor::from(*n));
+        let actual = query_results.iter().take(self.k).copied();
+        match self.metric {
+            RecallMetric::Simple => self.simple_recall(expected, actual),
+            RecallMetric::NDCG => self.ndcg_recall(expected, actual),
+        }
+    }
+
+    fn simple_recall(
+        &self,
+        expected: impl Iterator<Item = Neighbor>,
+        actual: impl Iterator<Item = Neighbor>,
+    ) -> f64 {
+        let expected = expected.map(|n| n.vertex()).collect::<HashSet<_>>();
+        let count = actual.filter(|n| expected.contains(&n.vertex())).count();
+        count as f64 / self.k as f64
+    }
+
+    fn ndcg_recall(
+        &self,
+        expected: impl Iterator<Item = Neighbor>,
+        actual: impl Iterator<Item = Neighbor>,
+    ) -> f64 {
+        // TODO: consider zeroing out the contribution of any actual result that doesn't appear in
+        // the expected set.
+        let idcg = Self::dcg(expected.map(|n| self.distance_to_score(n.distance())));
+        let dcg = Self::dcg(actual.map(|n| self.distance_to_score(n.distance())));
+        dcg / idcg
+    }
+
+    fn dcg(scores: impl Iterator<Item = f64>) -> f64 {
+        scores
+            .enumerate()
+            .map(|(i, s)| s / (i as f64 + 1.0).log2())
+            .sum()
+    }
+
+    fn distance_to_score(&self, distance: f64) -> f64 {
+        match self.similarity {
+            // Map distance to score the same way as Lucene. This normalizes perfect match to 0 but
+            // otherwise creates a pretty strange looking curve.
+            VectorSimilarity::Euclidean => 1.0 / (1.0 + distance.max(0.0)),
+            // Angular distances are already in [0,1] so take the additive inverse
+            VectorSimilarity::Cosine | VectorSimilarity::Dot => (1.0 - distance).clamp(0.0, 1.0),
+        }
     }
 }

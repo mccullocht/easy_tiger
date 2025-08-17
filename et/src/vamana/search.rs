@@ -67,7 +67,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         beam_width: args.candidates,
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
     };
-    let recall_computer = RecallComputer::from_args(args.recall)?;
+    let recall_computer = RecallComputer::from_args(args.recall, index.config().similarity)?;
     if let Some(computer) = recall_computer.as_ref() {
         if computer.neighbors_len() != query_vectors.len() {
             return Err(io::Error::new(

@@ -110,8 +110,8 @@ pub fn quantization_recall(args: QuantizationRecallArgs) -> io::Result<()> {
             }
         });
 
-    // XXX add back the ability to compare a deeper query set to a smaller truth set.
-    // not useful for ndcg but good for measuring the upside of depth in re-scoring.
+    // TODO: add analysis for re-scoring depth. For simple recall this amount to using a larger set
+    // on the "actual" side, but may be more complicated for NDCG.
     let sum_recall = query_k
         .into_iter()
         .enumerate()

@@ -1,16 +1,14 @@
 use std::{
     borrow::Cow,
     fs::File,
-    io::{self, BufWriter, Write},
+    io::{self},
     num::NonZero,
     path::PathBuf,
-    sync::{Arc, Mutex, atomic::AtomicU64},
+    sync::Arc,
 };
 
 use clap::{Args, Parser, Subcommand};
-use crossbeam_utils::CachePadded;
 use easy_tiger::{
-    Neighbor,
     input::{DerefVectorStore, VectorStore},
     vectors::{
         F32VectorCoding, VectorSimilarity, new_query_vector_distance_f32,
@@ -41,10 +39,6 @@ enum Command {
     QuantizationLoss(QuantizationLossArgs),
     /// Compute precision loss in distance computation resulting from vector quantization.
     DistanceLoss(DistanceLossArgs),
-    /// Compute recall against a ground truth set using quantized vectors.
-    QuantizationRecall(QuantizationRecallArgs),
-    /// Compute ground truth set for float32 vectors.
-    ExhaustiveSearch(ExhaustiveSearchArgs),
 }
 
 #[derive(Args)]
@@ -236,222 +230,6 @@ fn distance_loss(
     Ok(())
 }
 
-#[derive(Args)]
-pub struct QuantizationRecallArgs {
-    /// List of little-endian float32 queries.
-    #[arg(long)]
-    query_vectors: PathBuf,
-    /// Neighbors list to use as ground truth for each query.
-    #[arg(long)]
-    neighbors: PathBuf,
-    /// Number of neighbors per-query.
-    #[arg(long, default_value_t = NonZero::new(100).unwrap())]
-    neighbors_len: NonZero<usize>,
-    /// If true, quantize the query before scoring.
-    ///
-    /// Some format implement f32 x quantized scoring which is more accurate but slower.
-    #[arg(long, default_value_t = false)]
-    quantize_query: bool,
-    /// If set, only process this many input queries.
-    #[arg(long)]
-    query_limit: Option<usize>,
-
-    /// Vector coding to test.
-    #[arg(long)]
-    format: F32VectorCoding,
-    /// Similarity function to use.
-    #[arg(long)]
-    similarity: VectorSimilarity,
-
-    /// Number of results to compare.
-    #[arg(long)]
-    recall_k: NonZero<usize>,
-    /// If specified, consider any in the top rerank_budget as matches.
-    ///
-    /// This mimics the behavior of re-ranking with exact vectors.
-    #[arg(long)]
-    rerank_budget: Option<NonZero<usize>>,
-
-    #[arg(long)]
-    doc_limit: Option<usize>,
-}
-
-fn quantization_recall(
-    args: QuantizationRecallArgs,
-    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
-) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
-        NonZero::new(vectors.elem_stride()).unwrap(),
-    )?;
-    let neighbors: DerefVectorStore<u32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.neighbors)?)? },
-        args.neighbors_len,
-    )?;
-    let query_limit = args
-        .query_limit
-        .unwrap_or(query_vectors.len())
-        .min(query_vectors.len());
-
-    let coder = args.format.new_coder(args.similarity);
-    let query_scorers = (0..query_limit)
-        .into_par_iter()
-        .map(|i| {
-            let qdist = if args.quantize_query {
-                new_query_vector_distance_indexing(
-                    coder.encode(&query_vectors[i]),
-                    args.similarity,
-                    args.format,
-                )
-            } else {
-                new_query_vector_distance_f32(
-                    query_vectors[i].to_vec(),
-                    args.similarity,
-                    args.format,
-                )
-            };
-            qdist
-        })
-        .collect::<Vec<_>>();
-
-    // Keep the top neighbors, along with a maximum distance. The distance is read atomically as
-    // to filter non-competitive results; competitive results are added to the neighbor list and
-    // periodically pruned to update the competitive value.
-    struct TopNeighbors {
-        rep: CachePadded<Mutex<Vec<Neighbor>>>,
-        threshold: CachePadded<AtomicU64>,
-    }
-    impl TopNeighbors {
-        fn new(n: usize) -> Self {
-            Self {
-                rep: CachePadded::new(Mutex::new(Vec::with_capacity(n * 2))),
-                threshold: CachePadded::new(AtomicU64::new(f64::MAX.to_bits())),
-            }
-        }
-
-        fn push(&self, neighbor: Neighbor, n: usize) {
-            use std::sync::atomic::Ordering;
-
-            if f64::from_bits(self.threshold.load(Ordering::Relaxed)) < neighbor.distance() {
-                return; // neighbor is not competitive.
-            }
-
-            let mut neighbors = self.rep.lock().unwrap();
-            neighbors.push(neighbor);
-            if neighbors.len() == n * 2 {
-                let (_, t, _) = neighbors.select_nth_unstable(n - 1);
-                self.threshold
-                    .store(t.distance().to_bits(), Ordering::Relaxed);
-                neighbors.truncate(n);
-            }
-        }
-    }
-
-    let topn = args.rerank_budget.unwrap_or(args.recall_k).get();
-    let mut query_topn = Vec::with_capacity(query_limit);
-    query_topn.resize_with(query_limit, || TopNeighbors::new(topn));
-    (0..vectors.len())
-        .into_par_iter()
-        .progress_count((vectors.len()) as u64)
-        .for_each(|d| {
-            let doc = coder.encode(&vectors[d]);
-            for (q, s) in query_scorers.iter().enumerate() {
-                query_topn[q].push(Neighbor::new(d as i64, s.distance(&doc)), topn);
-            }
-        });
-
-    let matching = neighbors
-        .iter()
-        .zip(
-            query_topn
-                .into_iter()
-                .map(|r| r.rep.into_inner().into_inner().unwrap()),
-        )
-        .map(|(neighbors, results)| {
-            results
-                .iter()
-                .filter(|n| neighbors[..args.recall_k.get()].contains(&(n.vertex() as u32)))
-                .count()
-        })
-        .sum::<usize>();
-    println!(
-        "Recall@{}: {:.6}",
-        args.recall_k.get(),
-        matching as f64 / (args.recall_k.get() * query_scorers.len()) as f64
-    );
-
-    Ok(())
-}
-
-#[derive(Args)]
-pub struct ExhaustiveSearchArgs {
-    /// Path to numpy formatted little-endian float vectors.
-    #[arg(short, long)]
-    query_vectors: PathBuf,
-    /// Path buf to numpy u32 formatted neighbors file to write.
-    /// This should include one row of length neighbors_len for each vector in query_vectors.
-    #[arg(long)]
-    neighbors: PathBuf,
-    /// Number of neighbors for each query in the neighbors file.
-    #[arg(long, default_value_t = NonZero::new(100).unwrap())]
-    neighbors_len: NonZero<usize>,
-
-    /// Maximum number of records to search for query vectors.
-    #[arg(long)]
-    record_limit: Option<usize>,
-
-    /// Similarity function to use.
-    #[arg(long)]
-    similarity: VectorSimilarity,
-}
-
-pub fn exhaustive_search(
-    args: ExhaustiveSearchArgs,
-    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
-) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
-        NonZero::new(vectors.elem_stride()).unwrap(),
-    )?;
-
-    let mut results = Vec::with_capacity(query_vectors.len());
-    let k = args.neighbors_len.get();
-    results.resize_with(query_vectors.len(), || Vec::with_capacity(k * 2));
-    let distance_fn = args.similarity.new_distance_function();
-
-    let limit = args
-        .record_limit
-        .unwrap_or(vectors.len())
-        .min(vectors.len());
-    for (i, doc) in vectors
-        .iter()
-        .enumerate()
-        .take(limit)
-        .progress_count(limit as u64)
-    {
-        results.par_iter_mut().enumerate().for_each(|(q, r)| {
-            let n = Neighbor::new(i as i64, distance_fn.distance_f32(&query_vectors[q], doc));
-            if r.len() <= k || n < r[k] {
-                r.push(n);
-                if r.len() == r.capacity() {
-                    r.select_nth_unstable(k);
-                    r.truncate(k);
-                }
-            }
-        });
-    }
-
-    let mut writer = BufWriter::new(File::create(args.neighbors)?);
-    for mut neighbors in results.into_iter() {
-        neighbors.sort_unstable();
-        for n in neighbors.into_iter().take(k) {
-            writer.write_all(&(n.vertex() as u32).to_le_bytes())?;
-        }
-    }
-
-    Ok(())
-}
-
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
@@ -462,7 +240,5 @@ fn main() -> io::Result<()> {
     match cli.command {
         Command::QuantizationLoss(args) => quantization_loss(args, &vectors),
         Command::DistanceLoss(args) => distance_loss(args, &vectors),
-        Command::QuantizationRecall(args) => quantization_recall(args, &vectors),
-        Command::ExhaustiveSearch(args) => exhaustive_search(args, &vectors),
     }
 }

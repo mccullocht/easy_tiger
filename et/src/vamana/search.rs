@@ -18,7 +18,11 @@ use easy_tiger::{
 use memmap2::Mmap;
 use wt_mdb::Connection;
 
-use crate::{recall::RecallComputer, ui::progress_bar, wt_stats::WiredTigerConnectionStats};
+use crate::{
+    recall::{RecallArgs, RecallComputer},
+    ui::progress_bar,
+    wt_stats::WiredTigerConnectionStats,
+};
 
 #[derive(Args)]
 pub struct SearchArgs {
@@ -39,16 +43,8 @@ pub struct SearchArgs {
     #[arg(long)]
     record_limit: Option<usize>,
 
-    /// Path buf to numpy u32 formatted neighbors file.
-    /// This should include one row of length neighbors_len for each vector in query_vectors.
-    #[arg(long)]
-    neighbors: Option<PathBuf>,
-    /// Number of neighbors for each query in the neighbors file.
-    #[arg(long, default_value = "100")]
-    neighbors_len: NonZero<usize>,
-    /// Compute recall@k. Must be <= neighbors_len.
-    #[arg(long)]
-    recall_k: Option<NonZero<usize>>,
+    #[command(flatten)]
+    recall: RecallArgs,
 
     #[arg(long, default_value = "1")]
     warmup_iters: usize,
@@ -71,25 +67,19 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         beam_width: args.candidates,
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
     };
-    let recall_computer = if let Some((neighbors, recall_k)) = args.neighbors.zip(args.recall_k) {
-        let neighbors = DerefVectorStore::<u32, _>::new(
-            unsafe { Mmap::map(&File::open(neighbors)?)? },
-            args.neighbors_len,
-        )?;
-        if neighbors.len() != query_vectors.len() {
+    let recall_computer = RecallComputer::from_args(args.recall, index.config().similarity)?;
+    if let Some(computer) = recall_computer.as_ref() {
+        if computer.neighbors_len() != query_vectors.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "neighbors must have the same number of rows as query_vectors ({} vs {})",
-                    neighbors.len(),
+                    computer.neighbors_len(),
                     query_vectors.len()
                 ),
             ));
         }
-        Some(RecallComputer::new(recall_k, neighbors)?)
-    } else {
-        None
-    };
+    }
 
     if args.warmup_iters > 0 {
         search_phase(
@@ -138,14 +128,15 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         );
 
         if let Some((computer, mean_recall)) = recall_computer.zip(stats.mean_recall()) {
-            println!("recall@{} {:0.6}", computer.k(), mean_recall);
+            println!("{}: {:0.6}", computer.label(), mean_recall);
         }
     }
 
     Ok(())
 }
 
-fn search_phase<Q: Send + Sync, N: Send + Sync>(
+#[allow(clippy::too_many_arguments)]
+fn search_phase<Q: Send + Sync>(
     name: &'static str,
     iters: usize,
     limit: usize,
@@ -154,13 +145,9 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
     index: &Arc<TableGraphVectorIndex>,
     connection: &Arc<Connection>,
     search_params: GraphSearchParams,
-    recall_computer: Option<&RecallComputer<DerefVectorStore<u32, N>>>,
+    recall_computer: Option<&RecallComputer>,
 ) -> io::Result<AggregateSearchStats> {
-    let query_indices = (0..limit)
-        .into_iter()
-        .cycle()
-        .take(iters * limit)
-        .collect::<Vec<_>>();
+    let query_indices = (0..limit).cycle().take(iters * limit).collect::<Vec<_>>();
     let progress = progress_bar(query_indices.len(), name);
     #[cfg(feature = "serial_search")]
     let stats: AggregateSearchStats = {
@@ -185,7 +172,7 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
         query_indices
             .into_par_iter()
             .map_init(
-                || SearcherState::new(&index, &connection, search_params).unwrap(),
+                || SearcherState::new(index, connection, search_params).unwrap(),
                 |searcher, index| {
                     let stats =
                         searcher.query(index, &query_vectors[index], record_limit, recall_computer);
@@ -193,7 +180,7 @@ fn search_phase<Q: Send + Sync, N: Send + Sync>(
                     stats
                 },
             )
-            .try_reduce(|| AggregateSearchStats::default(), |a, b| Ok(a + b))?
+            .try_reduce(AggregateSearchStats::default, |a, b| Ok(a + b))?
     };
     // TODO: collect and return wt stats with search stats, reseting after collection.
     progress.finish_using_style();
@@ -217,12 +204,12 @@ impl SearcherState {
         })
     }
 
-    fn query<N: VectorStore<Elem = u32>>(
+    fn query(
         &mut self,
         index: usize,
         query: &[f32],
         record_limit: i64,
-        recall_computer: Option<&RecallComputer<N>>,
+        recall_computer: Option<&RecallComputer>,
     ) -> io::Result<AggregateSearchStats> {
         self.reader.session().begin_transaction(None)?;
         let start = Instant::now();

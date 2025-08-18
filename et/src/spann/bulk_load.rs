@@ -171,7 +171,7 @@ pub fn bulk_load(
     let mut rng = Xoshiro128PlusPlus::seed_from_u64(args.seed);
 
     let limit = args.limit.unwrap_or(f32_vectors.len());
-    let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).into_iter().collect());
+    let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).collect());
     let centroids = {
         let progress = progress_spinner("clustering head");
         let (mut centroids, assignments) = iterative_balanced_kmeans(
@@ -259,7 +259,7 @@ pub fn bulk_load(
 
     let mut stats = CentroidAssignmentStats::new(centroids_len);
     for assignments in centroid_assignments.iter() {
-        stats.add(&assignments);
+        stats.add(assignments);
     }
 
     println!(

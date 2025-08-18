@@ -1,41 +1,27 @@
+mod compute_neighbors;
+mod neighbor_util;
+mod quantization_recall;
 mod recall;
 mod spann;
 mod ui;
 mod vamana;
+mod wt_args;
 mod wt_stats;
 
-use std::{
-    io::{self},
-    num::NonZero,
-};
+use std::io::{self};
 
 use clap::{command, Parser, Subcommand};
+use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
 use spann::{spann_command, SpannArgs};
 use vamana::{vamana_command, VamanaArgs};
-use wt_mdb::{
-    options::{ConnectionOptionsBuilder, Statistics},
-    Connection,
-};
+
+use crate::quantization_recall::{quantization_recall, QuantizationRecallArgs};
 
 #[derive(Parser)]
 #[command(version, about = "EasyTiger vector indexing tool", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-
-    /// Path to the WiredTiger database.
-    #[arg(long)]
-    wiredtiger_db_path: String,
-    /// Size of the WiredTiger disk cache, in MB.
-    #[arg(long, default_value = "1024")]
-    wiredtiger_cache_size_mb: NonZero<usize>,
-    /// If true, create the WiredTiger database if it does not exist.
-    #[arg(long, default_value = "false")]
-    wiredtiger_create_db: bool,
-
-    /// Name of the index, used to derive table names in WiredTiger.
-    #[arg(short, long)]
-    index_name: String,
 }
 
 #[derive(Subcommand)]
@@ -44,28 +30,20 @@ enum Commands {
     Spann(SpannArgs),
     /// Perform Vamana/DiskANN index operations.
     Vamana(VamanaArgs),
+    /// Compute the top k neighbors for a set of queries against a set of document vectors.
+    ComputeNeighbors(ComputeNeighborsArgs),
+    /// Quantize a vector set and compute exact recall against a ground truth.
+    QuantizationRecall(QuantizationRecallArgs),
 }
 
 fn main() -> io::Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-    // TODO: Connection.filename should accept &Path. This will likely be very annoying to plumb to CString.
-    let mut connection_options = ConnectionOptionsBuilder::default()
-        .cache_size_mb(cli.wiredtiger_cache_size_mb)
-        .statistics(Statistics::Fast)
-        .checkpoint_log_size(128 << 20);
-    if cli.wiredtiger_create_db {
-        connection_options = connection_options.create();
-    }
-    let connection = Connection::open(&cli.wiredtiger_db_path, Some(connection_options.into()))?;
-    let session = connection.open_session()?;
-
     match cli.command {
-        Commands::Spann(args) => spann_command(connection, &cli.index_name, args),
-        Commands::Vamana(args) => vamana_command(connection, &cli.index_name, args),
-    }?;
-
-    session.checkpoint()?;
-    Ok(())
+        Commands::Spann(args) => spann_command(args),
+        Commands::Vamana(args) => vamana_command(args),
+        Commands::ComputeNeighbors(args) => compute_neighbors(args),
+        Commands::QuantizationRecall(args) => quantization_recall(args),
+    }
 }

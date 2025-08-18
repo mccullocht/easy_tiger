@@ -27,7 +27,7 @@ pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -
             println!("Not found!");
         }
         Some(result) => match result {
-            Err(e) => println!("Error: {}", e),
+            Err(e) => println!("Error: {e}"),
             Ok(v) => {
                 if args.edges {
                     println!("{:?}", v.edges().collect::<Vec<_>>());

@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc, usize};
+use std::{fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
@@ -28,7 +28,7 @@ pub struct InsertArgs {
 
 fn insert_all<'a>(
     mutator: &mut IndexMutator,
-    vectors: impl Iterator<Item = &'a [f32]> + ExactSizeIterator,
+    vectors: impl ExactSizeIterator<Item = &'a [f32]>,
 ) -> Result<Vec<Range<i64>>> {
     let mut keys: Vec<Range<i64>> = vec![];
     // I could probably write this as a fold but it seems annoying.
@@ -67,11 +67,11 @@ pub fn insert(connection: Arc<Connection>, index_name: &str, args: InsertArgs) -
             .take(args.limit.map(NonZero::get).unwrap_or(usize::MAX)),
     ) {
         Ok(keys) => {
-            println!("Inserted {:?}", keys);
+            println!("Inserted {keys:?}");
         }
         Err(e) => {
             // TODO: custom error that tells you how far we got.
-            println!("Insert failed with error {}", e);
+            println!("Insert failed with error {e}");
         }
     }
 

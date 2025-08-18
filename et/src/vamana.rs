@@ -6,10 +6,9 @@ mod insert;
 mod lookup;
 mod search;
 
-use std::{io, sync::Arc};
+use std::io;
 
 use clap::{Args, Subcommand};
-use wt_mdb::Connection;
 
 use bulk_load::{bulk_load, BulkLoadArgs};
 use delete::{delete, DeleteArgs};
@@ -19,8 +18,13 @@ use insert::{insert, InsertArgs};
 use lookup::{lookup, LookupArgs};
 use search::{search, SearchArgs};
 
+use crate::wt_args::WiredTigerArgs;
+
 #[derive(Args)]
 pub struct VamanaArgs {
+    #[command(flatten)]
+    wt: WiredTigerArgs,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -44,11 +48,10 @@ pub enum Command {
     Delete(DeleteArgs),
 }
 
-pub fn vamana_command(
-    connection: Arc<Connection>,
-    index_name: &str,
-    args: VamanaArgs,
-) -> io::Result<()> {
+pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
+    let connection = args.wt.open_connection()?;
+    let session = connection.open_session()?;
+    let index_name = args.wt.index_name();
     match args.command {
         Command::BulkLoad(args) => bulk_load(connection, index_name, args),
         Command::Search(args) => search(connection, index_name, args),
@@ -57,5 +60,7 @@ pub fn vamana_command(
         Command::Lookup(args) => lookup(connection, index_name, args),
         Command::Insert(args) => insert(connection, index_name, args),
         Command::Delete(args) => delete(connection, index_name, args),
-    }
+    }?;
+    session.checkpoint()?;
+    Ok(())
 }

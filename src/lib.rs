@@ -66,6 +66,22 @@ impl Ord for Neighbor {
     }
 }
 
+impl From<[u8; 16]> for Neighbor {
+    fn from(value: [u8; 16]) -> Self {
+        let c = value.as_chunks::<8>().0;
+        Self::new(i64::from_le_bytes(c[0]), f64::from_le_bytes(c[1]))
+    }
+}
+
+impl From<Neighbor> for [u8; 16] {
+    fn from(value: Neighbor) -> Self {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&value.vertex().to_le_bytes());
+        bytes[8..].copy_from_slice(&value.distance().to_le_bytes());
+        bytes
+    }
+}
+
 #[cfg(test)]
 mod test_lib {
     use std::cmp::Ordering;

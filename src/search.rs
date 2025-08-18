@@ -653,10 +653,10 @@ mod test {
                 .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
                 .unwrap(),
             vec![
-                Neighbor::new(0, 0.0),
-                Neighbor::new(1, 0.0),
-                Neighbor::new(4, 0.0),
-                Neighbor::new(16, 0.0)
+                Neighbor::new(0, 0.47999999940395355),
+                Neighbor::new(1, 0.47999999940395355),
+                Neighbor::new(4, 0.47999999940395355),
+                Neighbor::new(16, 0.47999999940395355),
             ]
         );
     }

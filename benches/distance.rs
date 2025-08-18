@@ -101,15 +101,23 @@ fn query_and_doc_benchmarks(c: &mut Criterion, format: F32VectorCoding) {
     }
 }
 
-pub fn u1_benchmarks(c: &mut Criterion) {
+pub fn i1_benchmarks(c: &mut Criterion) {
     let (x, y) = generate_test_vectors(1024);
 
     benchmark_distance(
-        "u1/hamming",
+        "i1/hamming",
         &x,
         &y,
         F32VectorCoding::BinaryQuantized,
         VectorSimilarity::Dot, // doesn't really matter here
+        c,
+    );
+    benchmark_query_distance(
+        "i1/queryi8",
+        &x,
+        &y,
+        F32VectorCoding::BinaryQuantized,
+        VectorSimilarity::Dot,
         c,
     );
 }
@@ -122,6 +130,6 @@ criterion_group!(
     i8_scaled_uniform_benchmarks,
     i4_scaled_uniform_benchmarks,
     i8_scaled_non_uniform_benchmarks,
-    u1_benchmarks,
+    i1_benchmarks,
 );
 criterion_main!(benches);

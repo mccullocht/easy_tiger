@@ -3,8 +3,6 @@
 //! This is built on top of WiredTiger APIs and designed to be used in parallel to
 //! another table as a projection of vector data from that source. Underneath a
 //! graph-based DiskANN index is used to serve vector similarity queries.
-use std::cmp::Ordering;
-
 pub mod bulk;
 pub mod crud;
 pub mod distance;
@@ -16,6 +14,8 @@ pub mod search;
 pub mod spann;
 pub mod vectors;
 pub mod wt;
+
+use std::cmp::Ordering;
 
 /// `Neighbor` is a node and a distance relative to some other node.
 ///

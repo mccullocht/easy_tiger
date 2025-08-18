@@ -29,7 +29,7 @@ pub struct HammingDistance;
 
 impl VectorDistance for HammingDistance {
     fn distance(&self, a: &[u8], b: &[u8]) -> f64 {
-        BinarySimilarity::hamming(a, b).expect("same dimensionality")
+        BinarySimilarity::hamming(a, b).expect("same dimensionality") / (a.len() * 8) as f64
     }
 }
 
@@ -48,7 +48,8 @@ pub struct I1DotProductQueryDistance {
 
 impl I1DotProductQueryDistance {
     pub fn new(query: &[f32]) -> Self {
-        // XXX share the scaled-uniform implementation of this
+        // TODO: this heavily overlaps with i8-scaled-uniform quantization. Figure out how to share
+        // most of the implementation.
         let max_abs = query
             .iter()
             .copied()
@@ -57,7 +58,6 @@ impl I1DotProductQueryDistance {
             .unwrap() as f64;
         let scale = (f64::from(i8::MAX) / max_abs) as f32;
         let inv_scale = max_abs / f64::from(i8::MAX);
-        // XXX share the scaled-uniform implementation of this too.
         let quantized = query
             .iter()
             .copied()

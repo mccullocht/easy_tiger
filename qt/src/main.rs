@@ -18,6 +18,7 @@ use easy_tiger::{
 use indicatif::{ParallelProgressIterator, ProgressIterator};
 use memmap2::Mmap;
 use rayon::prelude::*;
+use simsimd::SpatialSimilarity;
 
 #[derive(Parser)]
 #[command(version, about = "Tool for instrumenting vector quantization techniques", long_about = None)]
@@ -39,6 +40,7 @@ enum Command {
     QuantizationLoss(QuantizationLossArgs),
     /// Compute precision loss in distance computation resulting from vector quantization.
     DistanceLoss(DistanceLossArgs),
+    MRLNorms,
 }
 
 #[derive(Args)]
@@ -230,6 +232,42 @@ fn distance_loss(
     Ok(())
 }
 
+pub fn mrl_norms(vectors: &(impl VectorStore<Elem = f32> + Send + Sync)) -> io::Result<()> {
+    let intervals = vec![0usize..256, 256..512, 512..1024, 1024..2048];
+    let norms = (0..vectors.len())
+        .into_par_iter()
+        .progress_count(vectors.len() as u64)
+        .map(|i| {
+            let v = &vectors[i];
+            let partial_dots = intervals
+                .iter()
+                .map(|r| SpatialSimilarity::dot(&v[r.clone()], &v[r.clone()]).unwrap())
+                .collect::<Vec<_>>();
+            let mut sum = 0.0;
+            partial_dots
+                .into_iter()
+                .map(|p| {
+                    sum += p;
+                    sum.sqrt()
+                })
+                .collect::<Vec<_>>()
+        })
+        .reduce(
+            || vec![0.0; intervals.len()],
+            |mut a, b| {
+                for (a, b) in a.iter_mut().zip(b.iter()) {
+                    *a += *b;
+                }
+                a
+            },
+        );
+
+    for (i, n) in intervals.iter().zip(norms.iter()) {
+        println!("{:?} {}", 0..i.end, *n / vectors.len() as f64);
+    }
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
@@ -240,5 +278,6 @@ fn main() -> io::Result<()> {
     match cli.command {
         Command::QuantizationLoss(args) => quantization_loss(args, &vectors),
         Command::DistanceLoss(args) => distance_loss(args, &vectors),
+        Command::MRLNorms => mrl_norms(&vectors),
     }
 }

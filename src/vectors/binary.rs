@@ -21,6 +21,17 @@ impl F32VectorCoder for BinaryQuantizedVectorCoder {
     fn byte_len(&self, dimensions: usize) -> usize {
         dimensions.div_ceil(8)
     }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let v = (1.0 / (encoded.len() * 8) as f64).sqrt() as f32;
+        let decode_table = [-v, v];
+        Some(
+            encoded
+                .iter()
+                .flat_map(|b| (0..8).map(|i| decode_table[(*b >> i) as usize & 0x1]))
+                .collect(),
+        )
+    }
 }
 
 /// Computes a score from two bitmaps using hamming distance.
@@ -29,7 +40,7 @@ pub struct HammingDistance;
 
 impl VectorDistance for HammingDistance {
     fn distance(&self, a: &[u8], b: &[u8]) -> f64 {
-        BinarySimilarity::hamming(a, b).expect("same dimensionality") / (a.len() * 8) as f64
+        BinarySimilarity::hamming(a, b).expect("same dimensionality")
     }
 }
 

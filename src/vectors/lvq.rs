@@ -1,12 +1,6 @@
 //! Locally adaptive Vector Quantization (LVQ): https://arxiv.org/pdf/2304.04759
 
-// OneLevel:
-// Q(x; B, l, u) = d ((x -l) / d + 0.5) + l; where delta = (u - l) / (2^B - 1)
-// u = max xj; l = min xj
-//
-// TwoLevel
-// r = x - Q(x)
-// Qres(r; B') = Q(x; B', -d/2, d/2)
+use crate::vectors::F32VectorCoder;
 
 /// Compute single-level LVQ, with `B` as the number of quantized bits.
 ///
@@ -72,6 +66,71 @@ fn unlvq2<'q, const B1: usize, const B2: usize>(
         uq + ur
     })
 }
+
+#[derive(Debug, Copy, Clone, Default)]
+pub struct LVQ1VectorCoder<const B: usize>;
+
+impl<const B: usize> F32VectorCoder for LVQ1VectorCoder<B> {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let (l, u, it) = lvq1::<B>(vector);
+        out[0..4].copy_from_slice(&l.to_le_bytes());
+        out[4..8].copy_from_slice(&u.to_le_bytes());
+        for (i, o) in it.zip(out[8..].iter_mut()) {
+            *o = i;
+        }
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        std::mem::size_of::<f32>() * 2 + dimensions
+    }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let (meta_bytes, vec) = encoded.split_at(std::mem::size_of::<f32>() * 2);
+        let meta = meta_bytes.as_chunks::<{ std::mem::size_of::<f32>() }>().0;
+        let l = f32::from_le_bytes(meta[0]);
+        let u = f32::from_le_bytes(meta[1]);
+        Some(unlvq1::<B>(l, u, vec.iter().copied()).collect())
+    }
+}
+
+pub type LVQ14VectorCoder = LVQ1VectorCoder<4>;
+pub type LVQ18VectorCoder = LVQ1VectorCoder<8>;
+
+#[derive(Debug, Copy, Clone, Default)]
+pub struct LVQ2VectorCoder<const B1: usize, const B2: usize>;
+
+impl<const B1: usize, const B2: usize> F32VectorCoder for LVQ2VectorCoder<B1, B2> {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let (l, u, it) = lvq2::<B1, B2>(vector);
+        let (meta_bytes, vec_bytes) = out.split_at_mut(std::mem::size_of::<f32>() * 2);
+        let meta = meta_bytes
+            .as_chunks_mut::<{ std::mem::size_of::<f32>() }>()
+            .0;
+        meta[0] = l.to_le_bytes();
+        meta[1] = u.to_le_bytes();
+        let (o1_vec, o2_vec) = vec_bytes.split_at_mut(vector.len());
+        for ((i1, i2), (o1, o2)) in it.zip(o1_vec.iter_mut().zip(o2_vec.iter_mut())) {
+            *o1 = i1;
+            *o2 = i2;
+        }
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        (std::mem::size_of::<f32>() * 2) + (dimensions * 2)
+    }
+
+    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+        let (meta_bytes, vec_bytes) = encoded.split_at(std::mem::size_of::<f32>() * 2);
+        let meta = meta_bytes.as_chunks::<{ std::mem::size_of::<f32>() }>().0;
+        let l = f32::from_le_bytes(meta[0]);
+        let u = f32::from_le_bytes(meta[1]);
+        let (b1_vec, b2_vec) = vec_bytes.split_at(vec_bytes.len() / 2);
+        Some(unlvq2::<B1, B2>(l, u, b1_vec.iter().copied().zip(b2_vec.iter().copied())).collect())
+    }
+}
+
+pub type LVQ248VectorCoder = LVQ2VectorCoder<4, 8>;
+pub type LVQ288VectorCoder = LVQ2VectorCoder<8, 8>;
 
 #[cfg(test)]
 mod test {

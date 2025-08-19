@@ -60,9 +60,6 @@ impl F32VectorCoder for I8I1VectorCoder {
     }
 
     fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
-        // XXX quantization loss goes up as more dimensions use i8. this does not make sense to me.
-        // mixedrepi8i1:0 gives same error as i1.
-        // mixedrepi8i1:2048 gives much higher error and like 3 orders worse than i8-scaled-uniform.
         let (meta, in_rem) = encoded.split_at(std::mem::size_of::<f32>() * 3);
         let (i8_vec, i1_vec) = in_rem.split_at(self.0);
 
@@ -70,7 +67,9 @@ impl F32VectorCoder for I8I1VectorCoder {
         let scale = f32::from_le_bytes(meta[1]);
         let i1_avg_dim = f32::from_le_bytes(meta[2]);
         let i1_decode_table = [-i1_avg_dim, i1_avg_dim];
-        let i8_vec_iter = i8_vec.iter().map(|d| *d as f32 * scale);
+        let i8_vec_iter = bytemuck::cast_slice::<_, i8>(i8_vec)
+            .iter()
+            .map(|d| *d as f32 * scale);
         let i1_vec_iter = i1_vec
             .iter()
             .flat_map(|b| (0..8).map(|i| i1_decode_table[(*b >> i) as usize & 0x1]));

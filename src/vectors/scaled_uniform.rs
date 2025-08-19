@@ -40,7 +40,7 @@ fn compute_max_abs(vector: &[f32]) -> Option<f32> {
         .max_by(f32::total_cmp)
 }
 
-fn compute_scale<const M: i16>(vector: &[f32]) -> (f32, f32) {
+pub(super) fn compute_scale<const M: i16>(vector: &[f32]) -> (f32, f32) {
     if let Some(max) = compute_max_abs(vector) {
         (
             (f64::from(M) / max as f64) as f32,

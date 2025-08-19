@@ -7,6 +7,7 @@ use crate::distance::l2_normalize;
 mod binary;
 mod float16;
 mod float32;
+mod mixed;
 mod scaled_non_uniform;
 mod scaled_uniform;
 mod truncated;
@@ -205,6 +206,8 @@ pub enum F32VectorCoding {
     /// This is aimed at MRL vectors that are designed to be truncated and may have different value
     /// distributions in different segments.
     I8ScaledNonUniformQuantized(NonUniformQuantizedDimensions),
+    // XXX docos
+    MixedI8I1(usize),
 }
 
 impl F32VectorCoding {
@@ -227,6 +230,7 @@ impl F32VectorCoding {
             Self::I8ScaledNonUniformQuantized(s) => {
                 Box::new(scaled_non_uniform::I8VectorCoder::new(similarity, *s))
             }
+            Self::MixedI8I1(s) => Box::new(mixed::I8I1VectorCoder::new(*s)),
         }
     }
 
@@ -267,6 +271,7 @@ impl F32VectorCoding {
             (Self::I8ScaledNonUniformQuantized(s), Euclidean) => {
                 Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s))
             }
+            (Self::MixedI8I1(_), _) => unimplemented!(),
         }
     }
 }
@@ -303,6 +308,12 @@ impl FromStr for F32VectorCoding {
                 .map_err(|e| input_err(e.into()))?;
                 Ok(Self::I8ScaledNonUniformQuantized(splits))
             }
+            s if s.starts_with("mixedi8i1:") => {
+                let s = s.strip_prefix("mixedi8i1:").expect("prefix matched");
+                s.parse::<usize>()
+                    .map(Self::MixedI8I1)
+                    .map_err(|_| input_err("could not parse dimension".into()))
+            }
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -327,6 +338,7 @@ impl std::fmt::Display for F32VectorCoding {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            Self::MixedI8I1(d) => write!(f, "mixedi8i1:{}", *d),
         }
     }
 }
@@ -452,6 +464,7 @@ pub fn new_query_vector_distance_f32<'a>(
         (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => Box::new(
             scaled_non_uniform::I8EuclideanQueryDistance::new(s, query.into()),
         ),
+        (_, F32VectorCoding::MixedI8I1(_)) => unimplemented!(),
     }
 }
 
@@ -506,6 +519,7 @@ pub fn new_query_vector_distance_indexing<'a>(
         (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             quantized_qvd!(scaled_non_uniform::I8EuclideanDistance::new(s), query)
         }
+        (_, F32VectorCoding::MixedI8I1(_)) => unimplemented!(),
     }
 }
 

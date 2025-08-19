@@ -105,6 +105,34 @@ impl I1DotProductQueryDistance {
         self.dot_unnormalized_i32_scalar(vector, 0)
     }
 
+    // XXX if I re-arranged the encoded binary format how much faster could i make this? Rather than
+    // a custom mask it could be a single mask and shift. maybe 2-3 instructions out of the core
+    // loop here. if it were 2x as fast it would be good value.
+    // XXX if i do a 4-bit transposition i might capture 90% of the value but I think I have to do
+    // even more:
+    // * 5 loads
+    // * (xor + popcnt) x 4
+    // * 3 add across vector
+    // * 3 shl
+    // * 1 addvq
+    // ~ 20 per 128 dim actually pretty good
+    //
+    // XXX if I go to 8 bits it's like 4 but
+    // * 4x (xor + pocnt)
+    // * 4x (add across + shl)
+    // ~36 per 128d. it just requires a lot more to transpose things when creating QVD. this is
+    // emulating dot product so the math should be the same in the end. I might be able to keep it
+    // vectorized using horizontal pair adds, eventually widening
+    //
+    // XXX this is
+    // * 1x load
+    // * 2x dupq
+    // * 1x vcombine
+    // * 1x andq
+    // * 1x minq
+    // * 1x vqtbl
+    // * 6x dot product
+    // ~13x per 16d yikes.
     #[cfg(target_arch = "aarch64")]
     fn dot_unnormalized_i32(&self, vector: &[u8]) -> i32 {
         let tail_split = self.quantized.len() & !15;

@@ -93,8 +93,8 @@ impl<const B: usize> F32VectorCoder for LVQ1VectorCoder<B> {
     }
 }
 
-pub type LVQ14VectorCoder = LVQ1VectorCoder<4>;
-pub type LVQ18VectorCoder = LVQ1VectorCoder<8>;
+pub type LVQ1x4VectorCoder = LVQ1VectorCoder<4>;
+pub type LVQ1x8VectorCoder = LVQ1VectorCoder<8>;
 
 #[derive(Debug, Copy, Clone, Default)]
 pub struct LVQ2VectorCoder<const B1: usize, const B2: usize>;
@@ -129,8 +129,9 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for LVQ2VectorCoder<B1, B2
     }
 }
 
-pub type LVQ248VectorCoder = LVQ2VectorCoder<4, 8>;
-pub type LVQ288VectorCoder = LVQ2VectorCoder<8, 8>;
+pub type LVQ2x4x4VectorCoder = LVQ2VectorCoder<4, 4>;
+pub type LVQ2x4x8VectorCoder = LVQ2VectorCoder<4, 8>;
+pub type LVQ2x8x8VectorCoder = LVQ2VectorCoder<8, 8>;
 
 #[cfg(test)]
 mod test {

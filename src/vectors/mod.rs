@@ -7,6 +7,7 @@ use crate::distance::l2_normalize;
 mod binary;
 mod float16;
 mod float32;
+mod lvq;
 mod scaled_non_uniform;
 mod scaled_uniform;
 mod truncated;

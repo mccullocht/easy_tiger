@@ -31,7 +31,6 @@ impl F32VectorCoder for I8I1VectorCoder {
         // record i1_avg_dim. this value is the sqrt of the avg value based on i1_norm_sq.
         // the bitstream will be mapped into [-i1_avg_dim,+i1_avg_dim].
         let i1_avg_dim = (i1_norm_sq / i1_vec.len() as f64).sqrt() as f32;
-        println!("i8_norm_sq {i8_norm_sq} i1_norm_sq {i1_norm_sq} i1_avg_dim {i1_avg_dim}");
 
         let (meta_out, out_rem) = out.split_at_mut(std::mem::size_of::<f32>() * 3);
         let (i8_out, i1_out) = out_rem.split_at_mut(i8_vec.len());

@@ -248,7 +248,7 @@ pub fn mrl_norms(vectors: &(impl VectorStore<Elem = f32> + Send + Sync)) -> io::
                 .into_iter()
                 .map(|p| {
                     sum += p;
-                    sum.sqrt()
+                    sum
                 })
                 .collect::<Vec<_>>()
         })

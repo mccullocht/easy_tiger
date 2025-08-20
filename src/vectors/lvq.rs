@@ -15,40 +15,6 @@ use std::iter::FusedIterator;
 
 use crate::vectors::F32VectorCoder;
 
-/// Quantization metadata derived from the raw vector content.
-/// XXX remove this
-#[derive(Debug, Copy, Clone)]
-struct QuantizerMeta {
-    lower: f32,
-    upper: f32,
-    l2_norm: f32,
-}
-
-impl From<&[f32]> for QuantizerMeta {
-    fn from(value: &[f32]) -> Self {
-        if value.is_empty() {
-            return QuantizerMeta {
-                l2_norm: 1.0,
-                lower: 0.0,
-                upper: 0.0,
-            };
-        }
-        value.iter().fold(
-            QuantizerMeta {
-                l2_norm: 0.0,
-                lower: f32::MAX,
-                upper: f32::MIN,
-            },
-            |mut m, x| {
-                m.l2_norm += *x * *x;
-                m.lower = x.min(m.lower);
-                m.upper = x.max(m.upper);
-                m
-            },
-        )
-    }
-}
-
 /// Header for an LVQ vector.
 ///
 /// Along with the bit configuration this carries enough metadata to transform a quantized vector
@@ -118,23 +84,13 @@ impl LVQHeader {
     }
 }
 
-impl From<QuantizerMeta> for LVQHeader {
-    fn from(value: QuantizerMeta) -> Self {
-        Self {
-            l2_norm: value.l2_norm,
-            lower: value.lower,
-            upper: value.upper,
-            component_sum: 0,
-        }
-    }
-}
-
 /// Iterator over a float slice that produces a stream of quantized (primary, residual) vectors.
 /// The header may be extracted once all of the quantized values have been consumed.
 ///
 /// `B1` is the dimension bit width in the primary vectors and must be in 1..=8.
 /// `B2` is the dimension bit width in the residual vectors and must bin in 0..=8. If set to zero
 /// the residual values will always be 0.
+// XXX replace with composed approach used for the vector implementation.
 struct LVQuantizingIter<'a, const B1: usize, const B2: usize> {
     it: std::slice::Iter<'a, f32>,
     header: LVQHeader,
@@ -196,22 +152,28 @@ impl<const B1: usize, const B2: usize> ExactSizeIterator for LVQuantizingIter<'_
 
 impl<const B1: usize, const B2: usize> FusedIterator for LVQuantizingIter<'_, B1, B2> {}
 
-/// An LVQ1 coded vector.
-struct LVQ1Vector<'a> {
+/// An LVQ1 coded primary vector.
+///
+/// There may be a parallel residual vector that can be composed with this one to increase accuracy.
+struct LVQPrimaryVector<'a> {
     header: LVQHeader,
     delta: f32,
     vector: &'a [u8],
 }
 
-impl<'a> LVQ1Vector<'a> {
+impl<'a> LVQPrimaryVector<'a> {
     fn new(encoded: &'a [u8], bits: usize) -> Option<Self> {
         let (header, vector) = LVQHeader::deserialize(encoded)?;
+        Some(Self::with_header(header, bits, vector))
+    }
+
+    fn with_header(header: LVQHeader, bits: usize, vector: &'a [u8]) -> Self {
         let delta = (header.upper - header.lower) / ((1 << bits) - 1) as f32;
-        Some(Self {
+        Self {
             header,
             delta,
             vector,
-        })
+        }
     }
 
     fn l2_norm(&self) -> f32 {
@@ -225,45 +187,41 @@ impl<'a> LVQ1Vector<'a> {
     }
 }
 
-/// Compute two-level LVQ, with `B1` primary vector bits and `B2` residual bits.
-///
-/// Returns min, max, and an iterator over (primary, residual) quantized values
-fn lvq2<const B1: usize, const B2: usize>(
-    v: &[f32],
-) -> (QuantizerMeta, impl ExactSizeIterator<Item = (u8, u8)> + '_) {
-    let meta = QuantizerMeta::from(v);
-    let delta = (meta.upper - meta.lower) / ((1 << B1) - 1) as f32;
-
-    let res_l = -delta / 2.0;
-    let res_delta = delta / ((1 << B2) - 1) as f32;
-
-    let it = v.iter().map(move |x| {
-        let q = ((x - meta.lower) / delta).round();
-        let res = *x - ((q * delta) + meta.lower);
-        let res_q = ((res - res_l) / res_delta).round();
-        (q as u8, res_q as u8)
-    });
-    (meta, it)
+struct LVQResidualVector<'a> {
+    primary: LVQPrimaryVector<'a>,
+    vector: &'a [u8],
+    delta: f32,
+    lower: f32,
 }
 
-/// Invert two-level LVQ to produce an f32 vector.
-///
-/// The `B1` and `B2` values must be the same as was used in the original [lvq2] call.
-fn unlvq2<'q, const B1: usize, const B2: usize>(
-    l: f32,
-    u: f32,
-    quantized: impl ExactSizeIterator<Item = (u8, u8)> + 'q,
-) -> impl ExactSizeIterator<Item = f32> + 'q {
-    let delta = (u - l) / ((1 << B1) - 1) as f32;
-    let res_l = -delta / 2.0;
-    let res_delta = delta / ((1 << B2) - 1) as f32;
-    quantized.map(move |(q, r)| {
-        let uq = q as f32 * delta + l;
-        let ur = r as f32 * res_delta + res_l;
-        uq + ur
-    })
+impl<'a> LVQResidualVector<'a> {
+    fn new(encoded: &'a [u8], bits1: usize, bits2: usize) -> Option<Self> {
+        let (header, vector) = LVQHeader::deserialize(encoded)?;
+        let (primary_vector, residual_vector) = vector.split_at(vector.len() / 2);
+        let primary = LVQPrimaryVector::with_header(header, bits1, primary_vector);
+        let delta = primary.delta / ((1 << bits2) - 1) as f32;
+        let lower = -primary.delta / 2.0;
+        Some(Self {
+            primary,
+            vector: residual_vector,
+            delta,
+            lower,
+        })
+    }
+
+    fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
+        self.primary
+            .f32_iter()
+            .zip(
+                self.vector
+                    .iter()
+                    .map(|r| *r as f32 * self.delta + self.lower),
+            )
+            .map(|(q, r)| q + r)
+    }
 }
 
+// XXX we still want both of these coders but I don't need to template on the bit width.
 #[derive(Debug, Copy, Clone, Default)]
 pub struct LVQ1VectorCoder<const B: usize>;
 
@@ -282,7 +240,7 @@ impl<const B: usize> F32VectorCoder for LVQ1VectorCoder<B> {
     }
 
     fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
-        Some(LVQ1Vector::new(encoded, B)?.f32_iter().collect())
+        Some(LVQPrimaryVector::new(encoded, B)?.f32_iter().collect())
     }
 }
 
@@ -294,31 +252,26 @@ pub struct LVQ2VectorCoder<const B1: usize, const B2: usize>;
 
 impl<const B1: usize, const B2: usize> F32VectorCoder for LVQ2VectorCoder<B1, B2> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let (meta, it) = lvq2::<B1, B2>(vector);
-        let (header_bytes, vec_bytes) = out.split_at_mut(std::mem::size_of::<f32>() * 2);
-        let header = header_bytes
-            .as_chunks_mut::<{ std::mem::size_of::<f32>() }>()
-            .0;
-        header[0] = meta.lower.to_le_bytes();
-        header[1] = meta.upper.to_le_bytes();
-        let (o1_vec, o2_vec) = vec_bytes.split_at_mut(vector.len());
-        for ((i1, i2), (o1, o2)) in it.zip(o1_vec.iter_mut().zip(o2_vec.iter_mut())) {
-            *o1 = i1;
-            *o2 = i2;
+        let mut it = LVQuantizingIter::<B1, B2>::new(vector);
+        let (header_bytes, vector_bytes) = LVQHeader::split_output_buf(out).unwrap();
+        let (primary, residual) = vector_bytes.split_at_mut(vector.len());
+        for (i, o) in it.by_ref().zip(primary.iter_mut().zip(residual.iter_mut())) {
+            *o.0 = i.0;
+            *o.1 = i.1;
         }
+        it.into_header().serialize(header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        (std::mem::size_of::<f32>() * 2) + (dimensions * 2)
+        LVQHeader::LEN + (dimensions * 2)
     }
 
     fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
-        let (meta_bytes, vec_bytes) = encoded.split_at(std::mem::size_of::<f32>() * 2);
-        let meta = meta_bytes.as_chunks::<{ std::mem::size_of::<f32>() }>().0;
-        let l = f32::from_le_bytes(meta[0]);
-        let u = f32::from_le_bytes(meta[1]);
-        let (b1_vec, b2_vec) = vec_bytes.split_at(vec_bytes.len() / 2);
-        Some(unlvq2::<B1, B2>(l, u, b1_vec.iter().copied().zip(b2_vec.iter().copied())).collect())
+        Some(
+            LVQResidualVector::new(encoded, B1, B2)?
+                .f32_iter()
+                .collect(),
+        )
     }
 }
 
@@ -329,14 +282,15 @@ pub type LVQ2x8x8VectorCoder = LVQ2VectorCoder<8, 8>;
 #[cfg(test)]
 mod test {
     use crate::vectors::lvq::{
-        F32VectorCoder, LVQ1Vector, LVQ1x4VectorCoder, LVQ1x8VectorCoder, LVQHeader, lvq2, unlvq2,
+        F32VectorCoder, LVQ1x4VectorCoder, LVQ1x8VectorCoder, LVQ2x4x4VectorCoder,
+        LVQ2x4x8VectorCoder, LVQ2x8x8VectorCoder, LVQHeader, LVQPrimaryVector, LVQResidualVector,
     };
 
     #[test]
     fn lvq1_4() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
         let encoded = LVQ1x4VectorCoder::default().encode(&vec);
-        let lvq = LVQ1Vector::new(&encoded, 4).expect("readable");
+        let lvq = LVQPrimaryVector::new(&encoded, 4).expect("readable");
         assert_eq!(lvq.vector, &[0, 2, 3, 5, 7, 8, 10, 12, 13, 15]);
         let component_sum = lvq.vector.iter().copied().map(u32::from).sum::<u32>();
         assert_eq!(
@@ -369,7 +323,7 @@ mod test {
     fn lvq1_8() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
         let encoded = LVQ1x8VectorCoder::default().encode(&vec);
-        let lvq = LVQ1Vector::new(&encoded, 8).expect("readable");
+        let lvq = LVQPrimaryVector::new(&encoded, 8).expect("readable");
         assert_eq!(lvq.vector, &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]);
         let component_sum = lvq.vector.iter().copied().map(u32::from).sum::<u32>();
         assert_eq!(
@@ -399,29 +353,70 @@ mod test {
     }
 
     #[test]
-    fn lvq2_4_8() {
+    fn lvq2_4_4() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let (meta, it) = lvq2::<4, 8>(&vec);
-        assert_eq!(meta.lower, -0.5f32);
-        assert_eq!(meta.upper, 0.4f32);
-        let q = it.collect::<Vec<_>>();
+        let encoded = LVQ2x4x4VectorCoder::default().encode(&vec);
+        let lvq = LVQResidualVector::new(&encoded, 4, 4).expect("readable");
+        assert_eq!(lvq.primary.vector, &[0, 2, 3, 5, 7, 8, 10, 12, 13, 15]);
+        assert_eq!(lvq.vector, &[8, 2, 12, 8, 3, 13, 8, 3, 13, 8]);
+        let component_sum = lvq
+            .primary
+            .vector
+            .iter()
+            .copied()
+            .map(u32::from)
+            .sum::<u32>();
         assert_eq!(
-            q,
-            &[
-                (0, 128),
-                (2, 42),
-                (3, 212),
-                (5, 128),
-                (7, 43),
-                (8, 213),
-                (10, 128),
-                (12, 43),
-                (13, 213),
-                (15, 128)
-            ]
+            lvq.primary.header,
+            LVQHeader {
+                l2_norm: 0.8500001,
+                lower: -0.5,
+                upper: 0.4,
+                component_sum,
+            }
         );
         assert_eq!(
-            unlvq2::<4, 8>(meta.lower, meta.upper, q.into_iter()).collect::<Vec<_>>(),
+            lvq.f32_iter().collect::<Vec<_>>(),
+            &[
+                -0.498,
+                -0.402,
+                -0.302,
+                -0.19800001,
+                -0.09800001,
+                0.0019999873,
+                0.10199996,
+                0.20199996,
+                0.30199996,
+                0.40199998
+            ]
+        );
+    }
+
+    #[test]
+    fn lvq2_4_8() {
+        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
+        let encoded = LVQ2x4x8VectorCoder::default().encode(&vec);
+        let lvq = LVQResidualVector::new(&encoded, 4, 8).expect("readable");
+        assert_eq!(lvq.primary.vector, &[0, 2, 3, 5, 7, 8, 10, 12, 13, 15]);
+        assert_eq!(lvq.vector, &[128, 42, 212, 128, 43, 213, 128, 43, 213, 128]);
+        let component_sum = lvq
+            .primary
+            .vector
+            .iter()
+            .copied()
+            .map(u32::from)
+            .sum::<u32>();
+        assert_eq!(
+            lvq.primary.header,
+            LVQHeader {
+                l2_norm: 0.8500001,
+                lower: -0.5,
+                upper: 0.4,
+                component_sum,
+            }
+        );
+        assert_eq!(
+            lvq.f32_iter().collect::<Vec<_>>(),
             &[
                 -0.49988234,
                 -0.40011764,
@@ -440,27 +435,31 @@ mod test {
     #[test]
     fn lvq2_8_8() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let (meta, it) = lvq2::<8, 8>(&vec);
-        assert_eq!(meta.lower, -0.5f32);
-        assert_eq!(meta.upper, 0.4f32);
-        let q = it.collect::<Vec<_>>();
+        let encoded = LVQ2x8x8VectorCoder::default().encode(&vec);
+        let lvq = LVQResidualVector::new(&encoded, 8, 8).expect("readable");
         assert_eq!(
-            q,
-            &[
-                (0, 128),
-                (28, 212),
-                (57, 42),
-                (85, 127),
-                (113, 212),
-                (142, 42),
-                (170, 127),
-                (198, 213),
-                (227, 42),
-                (255, 128),
-            ]
+            lvq.primary.vector,
+            &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]
+        );
+        assert_eq!(lvq.vector, &[128, 212, 42, 127, 212, 42, 127, 213, 42, 128]);
+        let component_sum = lvq
+            .primary
+            .vector
+            .iter()
+            .copied()
+            .map(u32::from)
+            .sum::<u32>();
+        assert_eq!(
+            lvq.primary.header,
+            LVQHeader {
+                l2_norm: 0.8500001,
+                lower: -0.5,
+                upper: 0.4,
+                component_sum,
+            }
         );
         assert_eq!(
-            unlvq2::<8, 8>(meta.lower, meta.upper, q.into_iter()).collect::<Vec<_>>(),
+            lvq.f32_iter().collect::<Vec<_>>(),
             &[
                 -0.4999931,
                 -0.4000069,

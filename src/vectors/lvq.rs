@@ -2,6 +2,17 @@
 //!
 //! This is Optimized Scalar Quantization without anisotropic loss compensation.
 
+// XXX quantized rep dot product for lvq1 (lvq2 would be more complicated).
+// XXX a0 * b0 + a1 * b1 + ...
+// XXX let X = (1 << B) - 1
+// XXX (a0q * (au - al) / X + al) * (b0q * (bu - bl) / X + bl) + ...
+// XXX (a0q * (au - al) / X * b0q * (bu - bl) / X) + (a0q * (au - al) / X * bl) + (b0q * (bu - bl) / X * al) + (al * bl)
+// XXX (a0q * b0q * adelta * bdelta) + (a0q * adelta * bl) + (b0q * bdelta * al) + (al * bl)
+// XXX (a dot b * adelta * bdelta) + (sum(a) * adelta * bl) + (sum(b) * bdelta * al) + (al * bl * dim)
+// XXX this derivation works for lvq1 but not lvq2
+
+use std::iter::FusedIterator;
+
 use crate::vectors::F32VectorCoder;
 
 struct QuantizerMeta {
@@ -35,15 +46,26 @@ impl From<&[f32]> for QuantizerMeta {
     }
 }
 
-/*
-struct LVQVectorHeader {
+struct LVQHeader {
     l2_norm: f32,
     lower: f32,
     upper: f32,
     component_sum: u32,
 }
 
-impl LVQVectorHeader {
+impl LVQHeader {
+    fn split_output_buf(buf: &mut [u8]) -> Option<(&mut [u8], &mut [u8])> {
+        buf.split_at_mut_checked(16)
+    }
+
+    fn serialize(&self, header_bytes: &mut [u8]) {
+        let header = header_bytes.as_chunks_mut::<4>().0;
+        header[0] = self.l2_norm.to_le_bytes();
+        header[1] = self.lower.to_le_bytes();
+        header[2] = self.upper.to_le_bytes();
+        header[3] = self.component_sum.to_le_bytes();
+    }
+
     fn deserialize<'a>(raw: &'a [u8]) -> Option<(Self, &'a [u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(16)?;
         let header_entries = header_bytes.as_chunks::<4>().0;
@@ -58,16 +80,50 @@ impl LVQVectorHeader {
         ))
     }
 }
-    */
 
-// XXX quantized rep dot product for lvq1 (lvq2 would be more complicated).
-// XXX a0 * b0 + a1 * b1 + ...
-// XXX let X = (1 << B) - 1
-// XXX (a0q * (au - al) / X + al) * (b0q * (bu - bl) / X + bl) + ...
-// XXX (a0q * (au - al) / X * b0q * (bu - bl) / X) + (a0q * (au - al) / X * bl) + (b0q * (bu - bl) / X * al) + (al * bl)
-// XXX (a0q * b0q * adelta * bdelta) + (a0q * adelta * bl) + (b0q * bdelta * al) + (al * bl)
-// XXX (a dot b * adelta * bdelta) + (sum(a) * adelta * bl) + (sum(b) * bdelta * al) + (al * bl * dim)
-// XXX this derivation works for lvq1 but not lvq2
+struct LVQ1Iter<'a> {
+    it: std::slice::Iter<'a, f32>,
+    header: LVQHeader,
+    delta: f32,
+}
+
+impl<'a> LVQ1Iter<'a> {
+    fn new<const B: usize>(v: &'a [f32]) -> Self {
+        let meta = QuantizerMeta::from(v);
+        let header = LVQHeader {
+            l2_norm: meta.l2_norm,
+            lower: meta.lower,
+            upper: meta.upper,
+            component_sum: 0,
+        };
+        let delta = (meta.upper - meta.lower) / ((1 << B) - 1) as f32;
+        Self {
+            it: v.iter(),
+            header,
+            delta,
+        }
+    }
+}
+
+impl Iterator for LVQ1Iter<'_> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.it.next().map(|x| {
+            let q = ((*x - self.header.lower) / self.delta).round() as u8;
+            self.header.component_sum += u32::from(q);
+            q
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.it.size_hint()
+    }
+}
+
+impl ExactSizeIterator for LVQ1Iter<'_> {}
+
+impl FusedIterator for LVQ1Iter<'_> {}
 
 /// Compute single-level LVQ, with `B` as the number of quantized bits.
 ///
@@ -137,13 +193,12 @@ pub struct LVQ1VectorCoder<const B: usize>;
 
 impl<const B: usize> F32VectorCoder for LVQ1VectorCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let (meta, it) = lvq1::<B>(vector);
-        let meta_bytes = out[..8].as_chunks_mut::<{ std::mem::size_of::<f32>() }>().0;
-        meta_bytes[0] = meta.lower.to_le_bytes();
-        meta_bytes[1] = meta.upper.to_le_bytes();
-        for (i, o) in it.zip(out[8..].iter_mut()) {
+        let mut it = LVQ1Iter::new::<B>(vector);
+        let (header_bytes, vector_bytes) = LVQHeader::split_output_buf(out).unwrap();
+        for (i, o) in it.by_ref().zip(vector_bytes.iter_mut()) {
             *o = i;
         }
+        it.header.serialize(header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -151,11 +206,8 @@ impl<const B: usize> F32VectorCoder for LVQ1VectorCoder<B> {
     }
 
     fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
-        let (meta_bytes, vec) = encoded.split_at(std::mem::size_of::<f32>() * 2);
-        let meta = meta_bytes.as_chunks::<{ std::mem::size_of::<f32>() }>().0;
-        let l = f32::from_le_bytes(meta[0]);
-        let u = f32::from_le_bytes(meta[1]);
-        Some(unlvq1::<B>(l, u, vec.iter().copied()).collect())
+        let (header, vector) = LVQHeader::deserialize(encoded)?;
+        Some(unlvq1::<B>(header.lower, header.upper, vector.iter().copied()).collect())
     }
 }
 

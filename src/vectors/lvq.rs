@@ -1,17 +1,84 @@
 //! Locally adaptive Vector Quantization (LVQ): https://arxiv.org/pdf/2304.04759
+//!
+//! This is Optimized Scalar Quantization without anisotropic loss compensation.
 
 use crate::vectors::F32VectorCoder;
+
+struct QuantizerMeta {
+    lower: f32,
+    upper: f32,
+    l2_norm: f32,
+}
+
+impl From<&[f32]> for QuantizerMeta {
+    fn from(value: &[f32]) -> Self {
+        if value.is_empty() {
+            return QuantizerMeta {
+                l2_norm: 1.0,
+                lower: 0.0,
+                upper: 0.0,
+            };
+        }
+        value.iter().fold(
+            QuantizerMeta {
+                l2_norm: 0.0,
+                lower: f32::MAX,
+                upper: f32::MIN,
+            },
+            |mut m, x| {
+                m.l2_norm += *x * *x;
+                m.lower = x.min(m.lower);
+                m.upper = x.max(m.upper);
+                m
+            },
+        )
+    }
+}
+
+/*
+struct LVQVectorHeader {
+    l2_norm: f32,
+    lower: f32,
+    upper: f32,
+    component_sum: u32,
+}
+
+impl LVQVectorHeader {
+    fn deserialize<'a>(raw: &'a [u8]) -> Option<(Self, &'a [u8])> {
+        let (header_bytes, vector_bytes) = raw.split_at_checked(16)?;
+        let header_entries = header_bytes.as_chunks::<4>().0;
+        Some((
+            Self {
+                l2_norm: f32::from_le_bytes(header_entries[0]),
+                lower: f32::from_le_bytes(header_entries[1]),
+                upper: f32::from_le_bytes(header_entries[2]),
+                component_sum: u32::from_le_bytes(header_entries[3]),
+            },
+            vector_bytes,
+        ))
+    }
+}
+    */
+
+// XXX quantized rep dot product for lvq1 (lvq2 would be more complicated).
+// XXX a0 * b0 + a1 * b1 + ...
+// XXX let X = (1 << B) - 1
+// XXX (a0q * (au - al) / X + al) * (b0q * (bu - bl) / X + bl) + ...
+// XXX (a0q * (au - al) / X * b0q * (bu - bl) / X) + (a0q * (au - al) / X * bl) + (b0q * (bu - bl) / X * al) + (al * bl)
+// XXX (a0q * b0q * adelta * bdelta) + (a0q * adelta * bl) + (b0q * bdelta * al) + (al * bl)
+// XXX (a dot b * adelta * bdelta) + (sum(a) * adelta * bl) + (sum(b) * bdelta * al) + (al * bl * dim)
+// XXX this derivation works for lvq1 but not lvq2
 
 /// Compute single-level LVQ, with `B` as the number of quantized bits.
 ///
 /// Returns min, max, and an iterator over quantizatized values with a single entry per byte.
-fn lvq1<const B: usize>(v: &[f32]) -> (f32, f32, impl ExactSizeIterator<Item = u8> + '_) {
-    let (l, u) = v
+fn lvq1<const B: usize>(v: &[f32]) -> (QuantizerMeta, impl ExactSizeIterator<Item = u8> + '_) {
+    let meta = QuantizerMeta::from(v);
+    let delta = (meta.upper - meta.lower) / ((1 << B) - 1) as f32;
+    let it = v
         .iter()
-        .fold((f32::MAX, f32::MIN), |(l, u), d| (d.min(l), d.max(u)));
-    let delta = (u - l) / ((1 << B) - 1) as f32;
-    let it = v.iter().map(move |x| ((x - l) / delta).round() as u8);
-    (l, u, it)
+        .map(move |x| ((x - meta.lower) / delta).round() as u8);
+    (meta, it)
 }
 
 /// Invert one-level LVQ to produce an f32 vector.
@@ -31,22 +98,20 @@ fn unlvq1<'q, const B: usize>(
 /// Returns min, max, and an iterator over (primary, residual) quantized values
 fn lvq2<const B1: usize, const B2: usize>(
     v: &[f32],
-) -> (f32, f32, impl ExactSizeIterator<Item = (u8, u8)> + '_) {
-    let (l, u) = v
-        .iter()
-        .fold((f32::MAX, f32::MIN), |(l, u), d| (d.min(l), d.max(u)));
-    let delta = (u - l) / ((1 << B1) - 1) as f32;
+) -> (QuantizerMeta, impl ExactSizeIterator<Item = (u8, u8)> + '_) {
+    let meta = QuantizerMeta::from(v);
+    let delta = (meta.upper - meta.lower) / ((1 << B1) - 1) as f32;
 
     let res_l = -delta / 2.0;
     let res_delta = delta / ((1 << B2) - 1) as f32;
 
     let it = v.iter().map(move |x| {
-        let q = ((x - l) / delta).round();
-        let res = *x - ((q * delta) + l);
+        let q = ((x - meta.lower) / delta).round();
+        let res = *x - ((q * delta) + meta.lower);
         let res_q = ((res - res_l) / res_delta).round();
         (q as u8, res_q as u8)
     });
-    (l, u, it)
+    (meta, it)
 }
 
 /// Invert two-level LVQ to produce an f32 vector.
@@ -72,9 +137,10 @@ pub struct LVQ1VectorCoder<const B: usize>;
 
 impl<const B: usize> F32VectorCoder for LVQ1VectorCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let (l, u, it) = lvq1::<B>(vector);
-        out[0..4].copy_from_slice(&l.to_le_bytes());
-        out[4..8].copy_from_slice(&u.to_le_bytes());
+        let (meta, it) = lvq1::<B>(vector);
+        let meta_bytes = out[..8].as_chunks_mut::<{ std::mem::size_of::<f32>() }>().0;
+        meta_bytes[0] = meta.lower.to_le_bytes();
+        meta_bytes[1] = meta.upper.to_le_bytes();
         for (i, o) in it.zip(out[8..].iter_mut()) {
             *o = i;
         }
@@ -101,13 +167,13 @@ pub struct LVQ2VectorCoder<const B1: usize, const B2: usize>;
 
 impl<const B1: usize, const B2: usize> F32VectorCoder for LVQ2VectorCoder<B1, B2> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let (l, u, it) = lvq2::<B1, B2>(vector);
-        let (meta_bytes, vec_bytes) = out.split_at_mut(std::mem::size_of::<f32>() * 2);
-        let meta = meta_bytes
+        let (meta, it) = lvq2::<B1, B2>(vector);
+        let (header_bytes, vec_bytes) = out.split_at_mut(std::mem::size_of::<f32>() * 2);
+        let header = header_bytes
             .as_chunks_mut::<{ std::mem::size_of::<f32>() }>()
             .0;
-        meta[0] = l.to_le_bytes();
-        meta[1] = u.to_le_bytes();
+        header[0] = meta.lower.to_le_bytes();
+        header[1] = meta.upper.to_le_bytes();
         let (o1_vec, o2_vec) = vec_bytes.split_at_mut(vector.len());
         for ((i1, i2), (o1, o2)) in it.zip(o1_vec.iter_mut().zip(o2_vec.iter_mut())) {
             *o1 = i1;
@@ -140,13 +206,13 @@ mod test {
     #[test]
     fn lvq1_4() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let (l, u, it) = lvq1::<4>(&vec);
-        assert_eq!(l, -0.5f32);
-        assert_eq!(u, 0.4f32);
+        let (meta, it) = lvq1::<4>(&vec);
+        assert_eq!(meta.lower, -0.5f32);
+        assert_eq!(meta.upper, 0.4f32);
         let q = it.collect::<Vec<_>>();
         assert_eq!(&q, &[0, 2, 3, 5, 7, 8, 10, 12, 13, 15]);
         assert_eq!(
-            unlvq1::<4>(l, u, q.into_iter()).collect::<Vec<_>>(),
+            unlvq1::<4>(meta.lower, meta.upper, q.into_iter()).collect::<Vec<_>>(),
             &[
                 -0.5f32,
                 -0.38,
@@ -165,13 +231,13 @@ mod test {
     #[test]
     fn lvq1_8() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let (l, u, it) = lvq1::<8>(&vec);
-        assert_eq!(l, -0.5f32);
-        assert_eq!(u, 0.4f32);
+        let (meta, it) = lvq1::<8>(&vec);
+        assert_eq!(meta.lower, -0.5f32);
+        assert_eq!(meta.upper, 0.4f32);
         let q = it.collect::<Vec<_>>();
         assert_eq!(q, &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]);
         assert_eq!(
-            unlvq1::<8>(l, u, q.into_iter()).collect::<Vec<_>>(),
+            unlvq1::<8>(meta.lower, meta.upper, q.into_iter()).collect::<Vec<_>>(),
             &[
                 -0.5f32,
                 -0.40117645,
@@ -190,9 +256,9 @@ mod test {
     #[test]
     fn lvq2_4_8() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let (l, u, it) = lvq2::<4, 8>(&vec);
-        assert_eq!(l, -0.5f32);
-        assert_eq!(u, 0.4f32);
+        let (meta, it) = lvq2::<4, 8>(&vec);
+        assert_eq!(meta.lower, -0.5f32);
+        assert_eq!(meta.upper, 0.4f32);
         let q = it.collect::<Vec<_>>();
         assert_eq!(
             q,
@@ -211,7 +277,7 @@ mod test {
         );
         // TODO: very specific rounding error in dequantization; investigate.
         assert_eq!(
-            unlvq2::<4, 8>(l, u, q.into_iter()).collect::<Vec<_>>(),
+            unlvq2::<4, 8>(meta.lower, meta.upper, q.into_iter()).collect::<Vec<_>>(),
             &[
                 -0.49988234,
                 -0.40011764,
@@ -230,9 +296,9 @@ mod test {
     #[test]
     fn lvq2_8_8() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let (l, u, it) = lvq2::<8, 8>(&vec);
-        assert_eq!(l, -0.5f32);
-        assert_eq!(u, 0.4f32);
+        let (meta, it) = lvq2::<8, 8>(&vec);
+        assert_eq!(meta.lower, -0.5f32);
+        assert_eq!(meta.upper, 0.4f32);
         let q = it.collect::<Vec<_>>();
         assert_eq!(
             q,
@@ -250,7 +316,7 @@ mod test {
             ]
         );
         assert_eq!(
-            unlvq2::<8, 8>(l, u, q.into_iter()).collect::<Vec<_>>(),
+            unlvq2::<8, 8>(meta.lower, meta.upper, q.into_iter()).collect::<Vec<_>>(),
             &[
                 -0.4999931,
                 -0.4000069,

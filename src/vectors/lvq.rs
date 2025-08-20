@@ -129,38 +129,61 @@ impl From<QuantizerMeta> for LVQHeader {
     }
 }
 
-/// Iterator over a float slice that produces a u8 quantized stream and a vector header.
-struct LVQ1Iter<'a> {
+/// Iterator over a float slice that produces a stream of quantized (primary, residual) vectors.
+/// The header may be extracted once all of the quantized values have been consumed.
+///
+/// `B1` is the dimension bit width in the primary vectors and must be in 1..=8.
+/// `B2` is the dimension bit width in the residual vectors and must bin in 0..=8. If set to zero
+/// the residual values will always be 0.
+struct LVQuantizingIter<'a, const B1: usize, const B2: usize> {
     it: std::slice::Iter<'a, f32>,
     header: LVQHeader,
     delta: f32,
+    res_delta: f32,
+    res_lower: f32,
 }
 
-impl<'a> LVQ1Iter<'a> {
-    // XXX just pass the bits inline, it's not worth eliding ~3 instructions for this.
-    fn new(v: &'a [f32], bits: usize) -> Self {
+impl<'a, const B1: usize, const B2: usize> LVQuantizingIter<'a, B1, B2> {
+    fn new(v: &'a [f32]) -> Self {
         let header = LVQHeader::partial_init_from_vector(v);
-        let delta = (header.upper - header.lower) / ((1 << bits) - 1) as f32;
+        let delta = (header.upper - header.lower) / ((1 << B1) - 1) as f32;
+        let (res_delta, res_lower) = if B2 > 0 {
+            (delta / ((1 << B2) - 1) as f32, -delta / 2.0)
+        } else {
+            (0.0, 0.0)
+        };
         Self {
             it: v.iter(),
             header,
             delta,
+            res_delta,
+            res_lower,
         }
     }
 
     fn into_header(self) -> LVQHeader {
+        assert_eq!(self.it.len(), 0);
         self.header
     }
 }
 
-impl Iterator for LVQ1Iter<'_> {
-    type Item = u8;
+impl<const B1: usize, const B2: usize> Iterator for LVQuantizingIter<'_, B1, B2> {
+    type Item = (u8, u8);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.it.next().map(|x| {
             let q = ((*x - self.header.lower) / self.delta).round() as u8;
+            let r = if B2 > 0 {
+                let res = *x - ((q as f32 * self.delta) + self.header.lower);
+                ((res - self.res_lower) / self.res_delta).round() as u8
+            } else {
+                0
+            };
+            // Component sum is only ever computed against the primary vector.
+            // The algebraic expansion for scoring with residuals is probably more effort than
+            // converting back to floats, and
             self.header.component_sum += u32::from(q);
-            q
+            (q, r)
         })
     }
 
@@ -169,9 +192,9 @@ impl Iterator for LVQ1Iter<'_> {
     }
 }
 
-impl ExactSizeIterator for LVQ1Iter<'_> {}
+impl<const B1: usize, const B2: usize> ExactSizeIterator for LVQuantizingIter<'_, B1, B2> {}
 
-impl FusedIterator for LVQ1Iter<'_> {}
+impl<const B1: usize, const B2: usize> FusedIterator for LVQuantizingIter<'_, B1, B2> {}
 
 /// An LVQ1 coded vector.
 struct LVQ1Vector<'a> {
@@ -246,9 +269,9 @@ pub struct LVQ1VectorCoder<const B: usize>;
 
 impl<const B: usize> F32VectorCoder for LVQ1VectorCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let mut it = LVQ1Iter::new(vector, B);
+        let mut it = LVQuantizingIter::<B, 0>::new(vector);
         let (header_bytes, vector_bytes) = LVQHeader::split_output_buf(out).unwrap();
-        for (i, o) in it.by_ref().zip(vector_bytes.iter_mut()) {
+        for (i, o) in it.by_ref().map(|i| i.0).zip(vector_bytes.iter_mut()) {
             *o = i;
         }
         it.into_header().serialize(header_bytes);

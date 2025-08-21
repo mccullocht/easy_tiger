@@ -245,10 +245,10 @@ impl F32VectorCoding {
             Self::LVQ1x1 => Box::new(lvq::PrimaryVectorCoder::new(1)),
             Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::new(4)),
             Self::LVQ1x8 => Box::new(lvq::PrimaryVectorCoder::new(8)),
-            Self::LVQ2x1x8 => Box::new(lvq::TwoLevelVectorCoder::new(1, 8)),
-            Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::new(4, 4)),
-            Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::new(4, 8)),
-            Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::new(8, 8)),
+            Self::LVQ2x1x8 => Box::new(lvq::TwoLevelVectorCoder::<1, 8>::default()),
+            Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::<4, 4>::default()),
+            Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::<4, 8>::default()),
+            Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::<8, 8>::default()),
         }
     }
 
@@ -571,8 +571,8 @@ mod test {
     use crate::{
         distance::l2_normalize,
         vectors::{
-            new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding,
-            NonUniformQuantizedDimensions, VectorSimilarity,
+            F32VectorCoder, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
+            new_query_vector_distance_f32,
         },
     };
 
@@ -680,8 +680,8 @@ mod test {
     }
 
     use F32VectorCoding::{
-        I16ScaledUniformQuantized, I4ScaledUniformQuantized, I8ScaledNonUniformQuantized,
-        I8ScaledUniformQuantized, F16,
+        F16, I4ScaledUniformQuantized, I8ScaledNonUniformQuantized, I8ScaledUniformQuantized,
+        I16ScaledUniformQuantized,
     };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
 

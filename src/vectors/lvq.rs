@@ -176,20 +176,20 @@ impl FusedIterator for TwoLevelQuantizer<'_> {}
 /// An LVQ1 coded primary vector.
 ///
 /// There may be a parallel residual vector that can be composed with this one to increase accuracy.
-struct PrimaryVector<'a> {
+struct PrimaryVector<'a, const B: usize> {
     header: VectorHeader,
     delta: f32,
     vector: &'a [u8],
 }
 
-impl<'a> PrimaryVector<'a> {
-    fn new(encoded: &'a [u8], bits: usize) -> Option<Self> {
+impl<'a, const B: usize> PrimaryVector<'a, B> {
+    fn new(encoded: &'a [u8]) -> Option<Self> {
         let (header, vector) = VectorHeader::deserialize(encoded)?;
-        Some(Self::with_header(header, bits, vector))
+        Some(Self::with_header(header, vector))
     }
 
-    fn with_header(header: VectorHeader, bits: usize, vector: &'a [u8]) -> Self {
-        let delta = (header.upper - header.lower) / ((1 << bits) - 1) as f32;
+    fn with_header(header: VectorHeader, vector: &'a [u8]) -> Self {
+        let delta = (header.upper - header.lower) / ((1 << B) - 1) as f32;
         Self {
             header,
             delta,
@@ -203,15 +203,13 @@ impl<'a> PrimaryVector<'a> {
         self.header.l2_norm
     }
 
-    fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
-        self.vector
-            .iter()
-            .map(|q| *q as f32 * self.delta + self.header.lower)
+    fn f32_iter(&self) -> impl Iterator<Item = f32> + '_ {
+        packing::unpack_iter::<B>(self.vector).map(|q| q as f32 * self.delta + self.header.lower)
     }
 }
 
 struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
-    primary: PrimaryVector<'a>,
+    primary: PrimaryVector<'a, B1>,
     vector: &'a [u8],
     delta: f32,
     lower: f32,
@@ -220,10 +218,9 @@ struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
 impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
     fn new(encoded: &'a [u8]) -> Option<Self> {
         let (header, vector) = VectorHeader::deserialize(encoded)?;
-        // XXX this wrong
-        let split = packing::two_vector_split(vector.len(), 8, B2);
+        let split = packing::two_vector_split(vector.len(), B1, B2);
         let (primary_vector, residual_vector) = vector.split_at(split);
-        let primary = PrimaryVector::with_header(header, B1, primary_vector);
+        let primary = PrimaryVector::<'_, B1>::with_header(header, primary_vector);
         let delta = primary.delta / ((1 << B2) - 1) as f32;
         let lower = -primary.delta / 2.0;
         Some(Self {
@@ -237,43 +234,30 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
     fn f32_iter(&self) -> impl Iterator<Item = f32> + '_ {
         self.primary
             .f32_iter()
-            .zip(packing::unpack_iter::<B2>(self.vector).map(|r| self.dequantize_residual(r)))
+            .zip(
+                packing::unpack_iter::<B2>(self.vector).map(|r| r as f32 * self.delta + self.lower),
+            )
             .map(|(q, r)| q + r)
     }
-
-    #[inline]
-    fn dequantize_residual(&self, r: u8) -> f32 {
-        r as f32 * self.delta + self.lower
-    }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct PrimaryVectorCoder(usize);
+#[derive(Debug, Copy, Clone, Default)]
+pub struct PrimaryVectorCoder<const B: usize>;
 
-impl PrimaryVectorCoder {
-    pub fn new(bits: usize) -> Self {
-        let bits = bits.next_power_of_two();
-        assert!((1..=8).contains(&bits));
-        Self(bits)
-    }
-}
-
-impl F32VectorCoder for PrimaryVectorCoder {
+impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let mut it = PrimaryQuantizer::new(vector, self.0);
+        let mut it = PrimaryQuantizer::new(vector, B);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
-        for (i, o) in it.by_ref().zip(vector_bytes.iter_mut()) {
-            *o = i;
-        }
+        packing::pack_iter::<B>(it.by_ref(), vector_bytes);
         it.into_header().serialize(header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        VectorHeader::LEN + dimensions
+        VectorHeader::LEN + packing::byte_len(dimensions, B)
     }
 
     fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
-        Some(PrimaryVector::new(encoded, self.0)?.f32_iter().collect())
+        Some(PrimaryVector::<B>::new(encoded)?.f32_iter().collect())
     }
 }
 
@@ -284,15 +268,14 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let mut it = TwoLevelQuantizer::new(vector, B1, B2);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
-        // XXX this wrong once I vary packing of primary
-        let split = packing::two_vector_split(vector_bytes.len(), 8, B2);
+        let split = packing::two_vector_split(vector_bytes.len(), B1, B2);
         let (primary, residual) = vector_bytes.split_at_mut(split);
-        packing::pack_iter2::<8, B2>(it.by_ref(), primary, residual);
+        packing::pack_iter2::<B1, B2>(it.by_ref(), primary, residual);
         it.into_header().serialize(header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        VectorHeader::LEN + dimensions + packing::byte_len(dimensions, B2)
+        VectorHeader::LEN + packing::byte_len(dimensions, B1) + packing::byte_len(dimensions, B2)
     }
 
     fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
@@ -306,15 +289,17 @@ mod packing {
     use std::iter::FusedIterator;
 
     /// The number of bytes required to pack `dimensions` with `bits` per entry.
-    pub fn byte_len(dimensions: usize, bits: usize) -> usize {
+    pub const fn byte_len(dimensions: usize, bits: usize) -> usize {
         dimensions.div_ceil(8 / bits)
     }
 
-    pub fn two_vector_split(vector_bytes: usize, bits1: usize, bits2: usize) -> usize {
+    pub const fn two_vector_split(vector_bytes: usize, bits1: usize, bits2: usize) -> usize {
         match (bits1, bits2) {
             (1, 1) | (2, 2) | (4, 4) | (8, 8) => vector_bytes / 2,
+            (1, 8) => vector_bytes.div_ceil(9),
+            (4, 8) => vector_bytes / 3,
             (8, 4) => vector_bytes * 2 / 3,
-            _ => unimplemented!(),
+            _ => panic!("XXX fill this out completely"),
         }
     }
 
@@ -363,21 +348,21 @@ mod test {
     #[test]
     fn lvq1_1() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let encoded = PrimaryVectorCoder::new(1).encode(&vec);
-        let lvq = PrimaryVector::new(&encoded, 1).expect("readable");
-        assert_eq!(lvq.vector, &[0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
-        let component_sum = lvq.vector.iter().copied().map(u32::from).sum::<u32>();
+        let encoded = PrimaryVectorCoder::<1>::default().encode(&vec);
+        let lvq = PrimaryVector::<1>::new(&encoded).expect("readable");
+        assert_eq!(lvq.vector, &[0b11100000, 0b11]);
         assert_eq!(
             lvq.header,
             VectorHeader {
                 l2_norm: 0.8500001,
                 lower: -0.5,
                 upper: 0.4,
-                component_sum,
+                component_sum: 5,
             }
         );
+        // NB: vector dimensionality is not a multiple of 8 so we're producting extra dimensions.
         assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
+            lvq.f32_iter().take(10).collect::<Vec<_>>(),
             // yikes bikes, interpreting everything as min/max feels bad. i guess that's why you
             // should use anisotropic loss.
             &[
@@ -390,17 +375,16 @@ mod test {
     #[test]
     fn lvq1_4() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let encoded = PrimaryVectorCoder::new(4).encode(&vec);
-        let lvq = PrimaryVector::new(&encoded, 4).expect("readable");
-        assert_eq!(lvq.vector, &[0, 2, 3, 5, 7, 8, 10, 12, 13, 15]);
-        let component_sum = lvq.vector.iter().copied().map(u32::from).sum::<u32>();
+        let encoded = PrimaryVectorCoder::<4>::default().encode(&vec);
+        let lvq = PrimaryVector::<4>::new(&encoded).expect("readable");
+        assert_eq!(lvq.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
         assert_eq!(
             lvq.header,
             VectorHeader {
                 l2_norm: 0.8500001,
                 lower: -0.5,
                 upper: 0.4,
-                component_sum,
+                component_sum: 75,
             }
         );
         assert_eq!(
@@ -423,8 +407,8 @@ mod test {
     #[test]
     fn lvq1_8() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let encoded = PrimaryVectorCoder::new(8).encode(&vec);
-        let lvq = PrimaryVector::new(&encoded, 8).expect("readable");
+        let encoded = PrimaryVectorCoder::<8>::default().encode(&vec);
+        let lvq = PrimaryVector::<8>::new(&encoded).expect("readable");
         assert_eq!(lvq.vector, &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]);
         let component_sum = lvq.vector.iter().copied().map(u32::from).sum::<u32>();
         assert_eq!(
@@ -458,23 +442,16 @@ mod test {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
         let encoded = TwoLevelVectorCoder::<1, 8>::default().encode(&vec);
         let lvq = TwoLevelVector::<1, 8>::new(&encoded).expect("readable");
-        assert_eq!(lvq.primary.vector, &[0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
+        assert_eq!(lvq.primary.vector, &[0b11100000, 0b11]);
         // notably, this is only using 7 bits of residual.
         assert_eq!(lvq.vector, &[128, 156, 184, 213, 241, 14, 43, 71, 99, 128]);
-        let component_sum = lvq
-            .primary
-            .vector
-            .iter()
-            .copied()
-            .map(u32::from)
-            .sum::<u32>();
         assert_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.8500001,
                 lower: -0.5,
                 upper: 0.4,
-                component_sum,
+                component_sum: 5,
             }
         );
         assert_eq!(
@@ -499,22 +476,15 @@ mod test {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
         let encoded = TwoLevelVectorCoder::<4, 4>::default().encode(&vec);
         let lvq = TwoLevelVector::<4, 4>::new(&encoded).expect("readable");
-        assert_eq!(lvq.primary.vector, &[0, 2, 3, 5, 7, 8, 10, 12, 13, 15]);
+        assert_eq!(lvq.primary.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
         assert_eq!(lvq.vector, &[0x28, 0x8c, 0xd3, 0x38, 0x8d]);
-        let component_sum = lvq
-            .primary
-            .vector
-            .iter()
-            .copied()
-            .map(u32::from)
-            .sum::<u32>();
         assert_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.8500001,
                 lower: -0.5,
                 upper: 0.4,
-                component_sum,
+                component_sum: 75,
             }
         );
         assert_eq!(
@@ -539,22 +509,15 @@ mod test {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
         let encoded = TwoLevelVectorCoder::<4, 8>::default().encode(&vec);
         let lvq = TwoLevelVector::<4, 8>::new(&encoded).expect("readable");
-        assert_eq!(lvq.primary.vector, &[0, 2, 3, 5, 7, 8, 10, 12, 13, 15]);
+        assert_eq!(lvq.primary.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
         assert_eq!(lvq.vector, &[128, 42, 212, 128, 43, 213, 128, 43, 213, 128]);
-        let component_sum = lvq
-            .primary
-            .vector
-            .iter()
-            .copied()
-            .map(u32::from)
-            .sum::<u32>();
         assert_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.8500001,
                 lower: -0.5,
                 upper: 0.4,
-                component_sum,
+                component_sum: 75,
             }
         );
         assert_eq!(

@@ -315,6 +315,33 @@ mod test {
     };
 
     #[test]
+    fn lvq1_1() {
+        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
+        let encoded = PrimaryVectorCoder::new(1).encode(&vec);
+        let lvq = PrimaryVector::new(&encoded, 1).expect("readable");
+        assert_eq!(lvq.vector, &[0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
+        let component_sum = lvq.vector.iter().copied().map(u32::from).sum::<u32>();
+        assert_eq!(
+            lvq.header,
+            VectorHeader {
+                l2_norm: 0.8500001,
+                lower: -0.5,
+                upper: 0.4,
+                component_sum,
+            }
+        );
+        assert_eq!(
+            lvq.f32_iter().collect::<Vec<_>>(),
+            // yikes bikes, interpreting everything as min/max feels bad. i guess that's why you
+            // should use anisotropic loss.
+            &[
+                -0.5, -0.5, -0.5, -0.5, -0.5, 0.39999998, 0.39999998, 0.39999998, 0.39999998,
+                0.39999998
+            ]
+        );
+    }
+
+    #[test]
     fn lvq1_4() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
         let encoded = PrimaryVectorCoder::new(4).encode(&vec);
@@ -376,6 +403,47 @@ mod test {
                 0.19882351,
                 0.3011765,
                 0.39999998
+            ]
+        );
+    }
+
+    #[test]
+    fn lvq2_1_8() {
+        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
+        let encoded = TwoLevelVectorCoder::new(1, 8).encode(&vec);
+        let lvq = TwoLevelVector::new(&encoded, 1, 8).expect("readable");
+        assert_eq!(lvq.primary.vector, &[0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
+        // notably, this is only using 7 bits of residual.
+        assert_eq!(lvq.vector, &[128, 156, 184, 213, 241, 14, 43, 71, 99, 128]);
+        let component_sum = lvq
+            .primary
+            .vector
+            .iter()
+            .copied()
+            .map(u32::from)
+            .sum::<u32>();
+        assert_eq!(
+            lvq.primary.header,
+            VectorHeader {
+                l2_norm: 0.8500001,
+                lower: -0.5,
+                upper: 0.4,
+                component_sum,
+            }
+        );
+        assert_eq!(
+            lvq.f32_iter().collect::<Vec<_>>(),
+            &[
+                -0.4982353,
+                -0.39941174,
+                -0.30058825,
+                -0.19823527,
+                -0.099411786,
+                -0.00058823824,
+                0.10176468,
+                0.20058823,
+                0.29941174,
+                0.4017647
             ]
         );
     }

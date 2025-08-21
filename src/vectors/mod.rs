@@ -206,10 +206,14 @@ pub enum F32VectorCoding {
     /// This is aimed at MRL vectors that are designed to be truncated and may have different value
     /// distributions in different segments.
     I8ScaledNonUniformQuantized(NonUniformQuantizedDimensions),
+    /// LVQ one-level; 1 bit
+    LVQ1x1,
     /// LVQ one-level; 4 bits
     LVQ1x4,
     /// LVQ one-level; 8 bits
     LVQ1x8,
+    /// LVQ two-level; 1 bit primary 8 bits residual
+    LVQ2x1x8,
     /// LVQ two-level; 4 bits primary 4 bits residual
     LVQ2x4x4,
     /// LVQ two-level; 4 bits primary 8 bits residual
@@ -238,8 +242,10 @@ impl F32VectorCoding {
             Self::I8ScaledNonUniformQuantized(s) => {
                 Box::new(scaled_non_uniform::I8VectorCoder::new(similarity, *s))
             }
+            Self::LVQ1x1 => Box::new(lvq::PrimaryVectorCoder::new(1)),
             Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::new(4)),
             Self::LVQ1x8 => Box::new(lvq::PrimaryVectorCoder::new(8)),
+            Self::LVQ2x1x8 => Box::new(lvq::TwoLevelVectorCoder::new(1, 8)),
             Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::new(4, 4)),
             Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::new(4, 8)),
             Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::new(8, 8)),
@@ -283,8 +289,10 @@ impl F32VectorCoding {
             (Self::I8ScaledNonUniformQuantized(s), Euclidean) => {
                 Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s))
             }
-            (Self::LVQ1x4, _)
+            (Self::LVQ1x1, _)
+            | (Self::LVQ1x4, _)
             | (Self::LVQ1x8, _)
+            | (Self::LVQ2x1x8, _)
             | (Self::LVQ2x4x4, _)
             | (Self::LVQ2x4x8, _)
             | (Self::LVQ2x8x8, _) => unimplemented!(),
@@ -324,8 +332,10 @@ impl FromStr for F32VectorCoding {
                 .map_err(|e| input_err(e.into()))?;
                 Ok(Self::I8ScaledNonUniformQuantized(splits))
             }
+            "lvq1x1" => Ok(Self::LVQ1x1),
             "lvq1x4" => Ok(Self::LVQ1x4),
             "lvq1x8" => Ok(Self::LVQ1x8),
+            "lvq2x1x8" => Ok(Self::LVQ2x1x8),
             "lvq2x4x4" => Ok(Self::LVQ2x4x4),
             "lvq2x4x8" => Ok(Self::LVQ2x4x8),
             "lvq2x8x8" => Ok(Self::LVQ2x8x8),
@@ -353,8 +363,10 @@ impl std::fmt::Display for F32VectorCoding {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
-            Self::LVQ1x4 => write!(f, "lvq1-4"),
-            Self::LVQ1x8 => write!(f, "lvq1-8"),
+            Self::LVQ1x1 => write!(f, "lvq1x1"),
+            Self::LVQ1x4 => write!(f, "lvq1x4"),
+            Self::LVQ1x8 => write!(f, "lvq1x8"),
+            Self::LVQ2x1x8 => write!(f, "lvq2x1x8"),
             Self::LVQ2x4x4 => write!(f, "lvq2x4x4"),
             Self::LVQ2x4x8 => write!(f, "lvq2x4x8"),
             Self::LVQ2x8x8 => write!(f, "lvq2x8x8"),
@@ -483,8 +495,10 @@ pub fn new_query_vector_distance_f32<'a>(
         (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => Box::new(
             scaled_non_uniform::I8EuclideanQueryDistance::new(s, query.into()),
         ),
-        (_, F32VectorCoding::LVQ1x4)
+        (_, F32VectorCoding::LVQ1x1)
+        | (_, F32VectorCoding::LVQ1x4)
         | (_, F32VectorCoding::LVQ1x8)
+        | (_, F32VectorCoding::LVQ2x1x8)
         | (_, F32VectorCoding::LVQ2x4x4)
         | (_, F32VectorCoding::LVQ2x4x8)
         | (_, F32VectorCoding::LVQ2x8x8) => unimplemented!(),
@@ -542,8 +556,10 @@ pub fn new_query_vector_distance_indexing<'a>(
         (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             quantized_qvd!(scaled_non_uniform::I8EuclideanDistance::new(s), query)
         }
-        (_, F32VectorCoding::LVQ1x4)
+        (_, F32VectorCoding::LVQ1x1)
+        | (_, F32VectorCoding::LVQ1x4)
         | (_, F32VectorCoding::LVQ1x8)
+        | (_, F32VectorCoding::LVQ2x1x8)
         | (_, F32VectorCoding::LVQ2x4x4)
         | (_, F32VectorCoding::LVQ2x4x8)
         | (_, F32VectorCoding::LVQ2x8x8) => unimplemented!(),

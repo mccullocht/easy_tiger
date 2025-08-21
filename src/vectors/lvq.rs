@@ -69,7 +69,7 @@ impl VectorHeader {
         header[3] = self.component_sum.to_le_bytes();
     }
 
-    fn deserialize<'a>(raw: &'a [u8]) -> Option<(Self, &'a [u8])> {
+    fn deserialize(raw: &[u8]) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
         let header_entries = header_bytes.as_chunks::<4>().0;
         Some((
@@ -197,6 +197,8 @@ impl<'a> PrimaryVector<'a> {
         }
     }
 
+    // XXX
+    #[allow(dead_code)]
     fn l2_norm(&self) -> f32 {
         self.header.l2_norm
     }
@@ -247,6 +249,7 @@ pub struct PrimaryVectorCoder(usize);
 
 impl PrimaryVectorCoder {
     pub fn new(bits: usize) -> Self {
+        let bits = bits.next_power_of_two();
         assert!((1..=8).contains(&bits));
         Self(bits)
     }
@@ -276,8 +279,10 @@ pub struct TwoLevelVectorCoder(usize, usize);
 
 impl TwoLevelVectorCoder {
     pub fn new(bits1: usize, bits2: usize) -> Self {
+        let bits1 = bits1.next_power_of_two();
         assert!((1..=8).contains(&bits1));
-        assert!((1..=8).contains(&bits2));
+        let bits2 = bits2.next_power_of_two();
+        assert!((4..=8).contains(&bits2));
         Self(bits1, bits2)
     }
 }
@@ -304,6 +309,28 @@ impl F32VectorCoder for TwoLevelVectorCoder {
                 .f32_iter()
                 .collect(),
         )
+    }
+}
+
+// XXX
+#[allow(dead_code)]
+mod packing {
+    use std::iter::FusedIterator;
+
+    fn byte_len(dimensions: usize, bits: usize) -> usize {
+        dimensions.div_ceil(8 / bits)
+    }
+
+    fn pack_iter<const B: usize>(it: impl ExactSizeIterator<Item = u8>, out: &mut [u8]) {
+        let dims_per_byte = 8 / B;
+        todo!()
+    }
+
+    fn unpack_iter<const B: usize>(packed: &[u8]) -> impl FusedIterator<Item = u8> + '_ {
+        let mask = ((1 << B) - 1) as u8;
+        packed
+            .iter()
+            .flat_map(move |b| (0..8).step_by(B).map(move |i| (*b >> i) & mask))
     }
 }
 

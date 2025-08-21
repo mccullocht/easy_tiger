@@ -238,11 +238,11 @@ impl F32VectorCoding {
             Self::I8ScaledNonUniformQuantized(s) => {
                 Box::new(scaled_non_uniform::I8VectorCoder::new(similarity, *s))
             }
-            Self::LVQ1x4 => Box::new(lvq::LVQ1x4VectorCoder::default()),
-            Self::LVQ1x8 => Box::new(lvq::LVQ1x8VectorCoder::default()),
-            Self::LVQ2x4x4 => Box::new(lvq::LVQ2x4x4VectorCoder::default()),
-            Self::LVQ2x4x8 => Box::new(lvq::LVQ2x4x8VectorCoder::default()),
-            Self::LVQ2x8x8 => Box::new(lvq::LVQ2x8x8VectorCoder::default()),
+            Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::new(4)),
+            Self::LVQ1x8 => Box::new(lvq::PrimaryVectorCoder::new(8)),
+            Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::new(4, 4)),
+            Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::new(4, 8)),
+            Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::new(8, 8)),
         }
     }
 

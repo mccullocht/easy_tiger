@@ -174,16 +174,6 @@ struct PrimaryVector<'a, const B: usize> {
     vector: &'a [u8],
 }
 
-// XXX quantized rep dot product for lvq1 (lvq2 would be more complicated).
-// XXX a0 * b0 + a1 * b1 + ...
-// XXX let X = (1 << B) - 1
-// XXX (a0q * (au - al) / X + al) * (b0q * (bu - bl) / X + bl) + ...
-// XXX (a0q * (au - al) / X * b0q * (bu - bl) / X) + (a0q * (au - al) / X * bl) + (b0q * (bu - bl) / X * al) + (al * bl)
-// XXX (a0q * b0q * adelta * bdelta) + (a0q * adelta * bl) + (b0q * bdelta * al) + (al * bl)
-// XXX (a dot b * adelta * bdelta) + (sum(a) * adelta * bl) + (sum(b) * bdelta * al) + (al * bl * dim)
-// XXX this derivation works for lvq1 but not lvq2
-// XXX this derivation can probably be simplified for f32xlvq1
-
 impl<'a, const B: usize> PrimaryVector<'a, B> {
     fn new(encoded: &'a [u8]) -> Option<Self> {
         let (header, vector) = VectorHeader::deserialize(encoded)?;
@@ -326,8 +316,6 @@ impl<'a, const B: usize> PrimaryQueryDotProductDistance<'a, B> {
 impl<const B: usize> QueryVectorDistance for PrimaryQueryDotProductDistance<'_, B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = PrimaryVector::<B>::new(vector).unwrap();
-        // XXX this can likely be made to work more efficiently by adopting a simpler version of
-        // the factorization from lvq1xlvq1
         let dot = self
             .0
             .iter()
@@ -388,13 +376,15 @@ mod packing {
         dimensions.div_ceil(8 / bits)
     }
 
+    /// Pick where to split between primary and residual vector representation based on the number
+    /// of payload bits, and bits per section.
     pub const fn two_vector_split(vector_bytes: usize, bits1: usize, bits2: usize) -> usize {
-        match (bits1, bits2) {
-            (1, 1) | (2, 2) | (4, 4) | (8, 8) => vector_bytes / 2,
-            (1, 8) => vector_bytes.div_ceil(9),
-            (4, 8) => vector_bytes / 3,
-            (8, 4) => vector_bytes * 2 / 3,
-            _ => panic!("XXX fill this out completely"),
+        if bits1 < bits2 {
+            (vector_bytes * bits1).div_ceil(bits1 + bits2)
+        } else if bits1 == bits2 {
+            vector_bytes / 2
+        } else {
+            (vector_bytes * bits2).div_ceil(bits1 + bits2)
         }
     }
 

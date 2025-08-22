@@ -569,7 +569,6 @@ pub fn new_query_vector_distance_f32<'a>(
 }
 
 /// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
-// XXX I wonder if I could extend VectorDistance to support into_query_distance(Cow<'a, [u8])
 pub fn new_query_vector_distance_indexing<'a>(
     query: impl Into<Cow<'a, [u8]>>,
     similarity: VectorSimilarity,
@@ -656,8 +655,8 @@ mod test {
     use crate::{
         distance::l2_normalize,
         vectors::{
-            new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding,
-            NonUniformQuantizedDimensions, VectorSimilarity,
+            F32VectorCoder, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
+            new_query_vector_distance_f32,
         },
     };
 
@@ -765,8 +764,8 @@ mod test {
     }
 
     use F32VectorCoding::{
-        I16ScaledUniformQuantized, I4ScaledUniformQuantized, I8ScaledNonUniformQuantized,
-        I8ScaledUniformQuantized, F16,
+        F16, I4ScaledUniformQuantized, I8ScaledNonUniformQuantized, I8ScaledUniformQuantized,
+        I16ScaledUniformQuantized,
     };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
 

@@ -1,19 +1,11 @@
 //! Locally adaptive Vector Quantization (LVQ): https://arxiv.org/pdf/2304.04759
 //!
-//! This is Optimized Scalar Quantization without anisotropic loss compensation.
+//! This is Optimized Scalar Quantization without anisotropic loss compensation. Without loss
+//! compensation it still does fine at 4+ bits per level but is quite poor at 1 or 2 bits.
 
-// XXX quantized rep dot product for lvq1 (lvq2 would be more complicated).
-// XXX a0 * b0 + a1 * b1 + ...
-// XXX let X = (1 << B) - 1
-// XXX (a0q * (au - al) / X + al) * (b0q * (bu - bl) / X + bl) + ...
-// XXX (a0q * (au - al) / X * b0q * (bu - bl) / X) + (a0q * (au - al) / X * bl) + (b0q * (bu - bl) / X * al) + (al * bl)
-// XXX (a0q * b0q * adelta * bdelta) + (a0q * adelta * bl) + (b0q * bdelta * al) + (al * bl)
-// XXX (a dot b * adelta * bdelta) + (sum(a) * adelta * bl) + (sum(b) * bdelta * al) + (al * bl * dim)
-// XXX this derivation works for lvq1 but not lvq2
+use std::{borrow::Cow, iter::FusedIterator};
 
-use std::iter::FusedIterator;
-
-use crate::vectors::F32VectorCoder;
+use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 
 /// Header for an LVQ vector.
 ///
@@ -182,6 +174,16 @@ struct PrimaryVector<'a, const B: usize> {
     vector: &'a [u8],
 }
 
+// XXX quantized rep dot product for lvq1 (lvq2 would be more complicated).
+// XXX a0 * b0 + a1 * b1 + ...
+// XXX let X = (1 << B) - 1
+// XXX (a0q * (au - al) / X + al) * (b0q * (bu - bl) / X + bl) + ...
+// XXX (a0q * (au - al) / X * b0q * (bu - bl) / X) + (a0q * (au - al) / X * bl) + (b0q * (bu - bl) / X * al) + (al * bl)
+// XXX (a0q * b0q * adelta * bdelta) + (a0q * adelta * bl) + (b0q * bdelta * al) + (al * bl)
+// XXX (a dot b * adelta * bdelta) + (sum(a) * adelta * bl) + (sum(b) * bdelta * al) + (al * bl * dim)
+// XXX this derivation works for lvq1 but not lvq2
+// XXX this derivation can probably be simplified for f32xlvq1
+
 impl<'a, const B: usize> PrimaryVector<'a, B> {
     fn new(encoded: &'a [u8]) -> Option<Self> {
         let (header, vector) = VectorHeader::deserialize(encoded)?;
@@ -197,14 +199,27 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         }
     }
 
-    // XXX
-    #[allow(dead_code)]
-    fn l2_norm(&self) -> f32 {
-        self.header.l2_norm
+    fn l2_norm(&self) -> f64 {
+        self.header.l2_norm.into()
     }
 
     fn f32_iter(&self) -> impl Iterator<Item = f32> + '_ {
         packing::unpack_iter::<B>(self.vector).map(|q| q as f32 * self.delta + self.header.lower)
+    }
+
+    fn dot_unnormalized(&self, other: &Self) -> f64 {
+        let dot_quantized = packing::unpack_iter::<B>(self.vector)
+            .zip(packing::unpack_iter::<B>(other.vector))
+            .map(|(s, o)| s as u32 * o as u32)
+            .sum::<u32>();
+        let sdelta = f64::from(self.delta);
+        let slower = f64::from(self.header.lower);
+        let odelta = f64::from(other.delta);
+        let olower = f64::from(other.header.lower);
+        dot_quantized as f64 * sdelta * odelta
+            + self.header.component_sum as f64 * sdelta * olower
+            + other.header.component_sum as f64 * odelta * slower
+            + slower * olower * self.vector.len().div_ceil(B) as f64
     }
 }
 
@@ -229,6 +244,10 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
             delta,
             lower,
         })
+    }
+
+    pub fn l2_norm(&self) -> f64 {
+        self.primary.l2_norm()
     }
 
     fn f32_iter(&self) -> impl Iterator<Item = f32> + '_ {
@@ -283,8 +302,84 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
     }
 }
 
-// XXX
-#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct PrimaryDotProductDistance<const B: usize>;
+
+impl<const B: usize> VectorDistance for PrimaryDotProductDistance<B> {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = PrimaryVector::<B>::new(query).unwrap();
+        let doc = PrimaryVector::<B>::new(doc).unwrap();
+        let dot = query.dot_unnormalized(&doc) / (query.l2_norm() * doc.l2_norm());
+        (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PrimaryQueryDotProductDistance<'a, const B: usize>(Cow<'a, [f32]>);
+
+impl<'a, const B: usize> PrimaryQueryDotProductDistance<'a, B> {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
+        Self(query)
+    }
+}
+
+impl<const B: usize> QueryVectorDistance for PrimaryQueryDotProductDistance<'_, B> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = PrimaryVector::<B>::new(vector).unwrap();
+        // XXX this can likely be made to work more efficiently by adopting a simpler version of
+        // the factorization from lvq1xlvq1
+        let dot = self
+            .0
+            .iter()
+            .zip(vector.f32_iter())
+            .map(|(q, d)| *q * d)
+            .sum::<f32>() as f64;
+        (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TwoLevelDotProductDistance<const B1: usize, const B2: usize>;
+
+impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelDotProductDistance<B1, B2> {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = TwoLevelVector::<B1, B2>::new(query).unwrap();
+        let doc = TwoLevelVector::<B1, B2>::new(doc).unwrap();
+        let dot = query
+            .f32_iter()
+            .zip(doc.f32_iter())
+            .map(|(q, d)| q * d)
+            .sum::<f32>() as f64
+            / (query.l2_norm() * doc.l2_norm());
+        (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TwoLevelQueryDotProductDistance<'a, const B1: usize, const B2: usize>(Cow<'a, [f32]>);
+
+impl<'a, const B1: usize, const B2: usize> TwoLevelQueryDotProductDistance<'a, B1, B2> {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
+        Self(query)
+    }
+}
+
+impl<const B1: usize, const B2: usize> QueryVectorDistance
+    for TwoLevelQueryDotProductDistance<'_, B1, B2>
+{
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = TwoLevelVector::<B1, B2>::new(vector).unwrap();
+        let dot = self
+            .0
+            .iter()
+            .zip(vector.f32_iter())
+            .map(|(s, o)| *s * o)
+            .sum::<f32>() as f64
+            / vector.l2_norm();
+        (-dot + 1.0) / 2.0
+    }
+}
+
 mod packing {
     use std::iter::FusedIterator;
 

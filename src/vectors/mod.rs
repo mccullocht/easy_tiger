@@ -289,6 +289,27 @@ impl F32VectorCoding {
             (Self::I8ScaledNonUniformQuantized(s), Euclidean) => {
                 Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s))
             }
+            (Self::LVQ1x1, Dot) | (Self::LVQ1x1, Cosine) => {
+                Box::new(lvq::PrimaryDotProductDistance::<1>)
+            }
+            (Self::LVQ1x4, Dot) | (Self::LVQ1x4, Cosine) => {
+                Box::new(lvq::PrimaryDotProductDistance::<4>)
+            }
+            (Self::LVQ1x8, Dot) | (Self::LVQ1x8, Cosine) => {
+                Box::new(lvq::PrimaryDotProductDistance::<8>)
+            }
+            (Self::LVQ2x1x8, Dot) | (Self::LVQ2x1x8, Cosine) => {
+                Box::new(lvq::TwoLevelDotProductDistance::<1, 8>)
+            }
+            (Self::LVQ2x4x4, Dot) | (Self::LVQ2x4x4, Cosine) => {
+                Box::new(lvq::TwoLevelDotProductDistance::<4, 4>)
+            }
+            (Self::LVQ2x4x8, Dot) | (Self::LVQ2x4x8, Cosine) => {
+                Box::new(lvq::TwoLevelDotProductDistance::<4, 8>)
+            }
+            (Self::LVQ2x8x8, Dot) | (Self::LVQ2x8x8, Cosine) => {
+                Box::new(lvq::TwoLevelDotProductDistance::<8, 8>)
+            }
             (Self::LVQ1x1, _)
             | (Self::LVQ1x4, _)
             | (Self::LVQ1x8, _)
@@ -495,6 +516,48 @@ pub fn new_query_vector_distance_f32<'a>(
         (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => Box::new(
             scaled_non_uniform::I8EuclideanQueryDistance::new(s, query.into()),
         ),
+        (Cosine, F32VectorCoding::LVQ1x1) => Box::new(
+            lvq::PrimaryQueryDotProductDistance::<1>::new(l2_normalize(query.into())),
+        ),
+        (Dot, F32VectorCoding::LVQ1x1) => {
+            Box::new(lvq::PrimaryQueryDotProductDistance::<1>::new(query.into()))
+        }
+        (Cosine, F32VectorCoding::LVQ1x4) => Box::new(
+            lvq::PrimaryQueryDotProductDistance::<4>::new(l2_normalize(query.into())),
+        ),
+        (Dot, F32VectorCoding::LVQ1x4) => {
+            Box::new(lvq::PrimaryQueryDotProductDistance::<4>::new(query.into()))
+        }
+        (Cosine, F32VectorCoding::LVQ1x8) => Box::new(
+            lvq::PrimaryQueryDotProductDistance::<8>::new(l2_normalize(query.into())),
+        ),
+        (Dot, F32VectorCoding::LVQ1x8) => {
+            Box::new(lvq::PrimaryQueryDotProductDistance::<8>::new(query.into()))
+        }
+        (Cosine, F32VectorCoding::LVQ2x1x8) => Box::new(
+            lvq::TwoLevelQueryDotProductDistance::<1, 8>::new(l2_normalize(query.into())),
+        ),
+        (Dot, F32VectorCoding::LVQ2x1x8) => Box::new(
+            lvq::TwoLevelQueryDotProductDistance::<1, 8>::new(query.into()),
+        ),
+        (Cosine, F32VectorCoding::LVQ2x4x4) => Box::new(
+            lvq::TwoLevelQueryDotProductDistance::<4, 4>::new(l2_normalize(query.into())),
+        ),
+        (Dot, F32VectorCoding::LVQ2x4x4) => Box::new(
+            lvq::TwoLevelQueryDotProductDistance::<4, 4>::new(query.into()),
+        ),
+        (Cosine, F32VectorCoding::LVQ2x4x8) => Box::new(
+            lvq::TwoLevelQueryDotProductDistance::<4, 8>::new(l2_normalize(query.into())),
+        ),
+        (Dot, F32VectorCoding::LVQ2x4x8) => Box::new(
+            lvq::TwoLevelQueryDotProductDistance::<4, 8>::new(query.into()),
+        ),
+        (Cosine, F32VectorCoding::LVQ2x8x8) => Box::new(
+            lvq::TwoLevelQueryDotProductDistance::<8, 8>::new(l2_normalize(query.into())),
+        ),
+        (Dot, F32VectorCoding::LVQ2x8x8) => Box::new(
+            lvq::TwoLevelQueryDotProductDistance::<8, 8>::new(query.into()),
+        ),
         (_, F32VectorCoding::LVQ1x1)
         | (_, F32VectorCoding::LVQ1x4)
         | (_, F32VectorCoding::LVQ1x8)
@@ -506,6 +569,7 @@ pub fn new_query_vector_distance_f32<'a>(
 }
 
 /// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
+// XXX I wonder if I could extend VectorDistance to support into_query_distance(Cow<'a, [u8])
 pub fn new_query_vector_distance_indexing<'a>(
     query: impl Into<Cow<'a, [u8]>>,
     similarity: VectorSimilarity,
@@ -556,6 +620,27 @@ pub fn new_query_vector_distance_indexing<'a>(
         (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
             quantized_qvd!(scaled_non_uniform::I8EuclideanDistance::new(s), query)
         }
+        (Dot, F32VectorCoding::LVQ1x1) | (Cosine, F32VectorCoding::LVQ1x1) => {
+            quantized_qvd!(lvq::PrimaryDotProductDistance::<1>, query)
+        }
+        (Dot, F32VectorCoding::LVQ1x4) | (Cosine, F32VectorCoding::LVQ1x4) => {
+            quantized_qvd!(lvq::PrimaryDotProductDistance::<4>, query)
+        }
+        (Dot, F32VectorCoding::LVQ1x8) | (Cosine, F32VectorCoding::LVQ1x8) => {
+            quantized_qvd!(lvq::PrimaryDotProductDistance::<8>, query)
+        }
+        (Dot, F32VectorCoding::LVQ2x1x8) | (Cosine, F32VectorCoding::LVQ2x1x8) => {
+            quantized_qvd!(lvq::TwoLevelDotProductDistance::<1, 8>, query)
+        }
+        (Dot, F32VectorCoding::LVQ2x4x4) | (Cosine, F32VectorCoding::LVQ2x4x4) => {
+            quantized_qvd!(lvq::TwoLevelDotProductDistance::<4, 4>, query)
+        }
+        (Dot, F32VectorCoding::LVQ2x4x8) | (Cosine, F32VectorCoding::LVQ2x4x8) => {
+            quantized_qvd!(lvq::TwoLevelDotProductDistance::<4, 8>, query)
+        }
+        (Dot, F32VectorCoding::LVQ2x8x8) | (Cosine, F32VectorCoding::LVQ2x8x8) => {
+            quantized_qvd!(lvq::TwoLevelDotProductDistance::<8, 8>, query)
+        }
         (_, F32VectorCoding::LVQ1x1)
         | (_, F32VectorCoding::LVQ1x4)
         | (_, F32VectorCoding::LVQ1x8)
@@ -571,8 +656,8 @@ mod test {
     use crate::{
         distance::l2_normalize,
         vectors::{
-            F32VectorCoder, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
-            new_query_vector_distance_f32,
+            new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding,
+            NonUniformQuantizedDimensions, VectorSimilarity,
         },
     };
 
@@ -680,8 +765,8 @@ mod test {
     }
 
     use F32VectorCoding::{
-        F16, I4ScaledUniformQuantized, I8ScaledNonUniformQuantized, I8ScaledUniformQuantized,
-        I16ScaledUniformQuantized,
+        I16ScaledUniformQuantized, I4ScaledUniformQuantized, I8ScaledNonUniformQuantized,
+        I8ScaledUniformQuantized, F16,
     };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
 

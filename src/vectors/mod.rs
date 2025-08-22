@@ -862,4 +862,6 @@ mod test {
             query_distance_compare(Euclidean, format, i, &a, &b, 0.01);
         }
     }
+
+    // XXX add lvq tests
 }

@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use easy_tiger::vectors::{F32VectorCoding, VectorSimilarity};
 use rand::{Rng, SeedableRng};
 
@@ -55,6 +55,8 @@ fn i16_scaled_uniform_benchmarks(c: &mut Criterion) {
 fn binary_benchmarks(c: &mut Criterion) {
     benchmark_coding(c, F32VectorCoding::BinaryQuantized, None);
 }
+
+// XXX add lvq benchmarks
 
 criterion_group!(
     benches,

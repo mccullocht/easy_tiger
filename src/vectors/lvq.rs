@@ -1,7 +1,12 @@
 //! Locally adaptive Vector Quantization (LVQ): https://arxiv.org/pdf/2304.04759
 //!
-//! This is Optimized Scalar Quantization without anisotropic loss compensation. Without loss
-//! compensation it still does fine at 4+ bits per level but is quite poor at 1 or 2 bits.
+//! This supports both primary quantization and two level quantization, which allows splitting the
+//! representation for initial scoring and re-ranking.
+//!
+//! This has been modified in the same way as Optimized Scalar Quantization in Lucene where the
+//! lower and upper bounds are selected by a grid search over the vector taking into account
+//! anisotropic loss instead of simply taking min/max values. This grid search is more important
+//! at lower bit rates.
 
 use std::{borrow::Cow, iter::FusedIterator};
 
@@ -76,6 +81,100 @@ impl VectorHeader {
     }
 }
 
+const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
+    (-0.798, 0.798),
+    (-1.493, 1.493),
+    (-2.051, 2.051),
+    (-2.514, 2.514),
+    (-2.916, 2.916),
+    (-3.278, 3.278),
+    (-3.611, 3.611),
+    (-3.922, 3.922),
+];
+
+const LAMBDA: f64 = 0.1;
+
+fn optimize_interval(vector: &[f32], initial: (f32, f32), l2_norm: f32, bits: usize) -> (f32, f32) {
+    let norm_sq: f64 = (l2_norm * l2_norm).into();
+    let mut loss = compute_loss(vector, initial, norm_sq, bits);
+
+    let (sum, squared_sum) = vector
+        .iter()
+        .fold((0.0, 0.0), |s, x| (s.0 + *x, s.1 + (*x * *x)));
+    let mean = sum / vector.len() as f32;
+    let std_dev = (squared_sum / vector.len() as f32).sqrt();
+    let scale = (1.0 - LAMBDA) / norm_sq;
+    let mut lower: f64 = (MINIMUM_MSE_GRID[bits - 1].0 * std_dev + mean)
+        .clamp(initial.0, initial.1)
+        .into();
+    let mut upper: f64 = (MINIMUM_MSE_GRID[bits - 1].1 * std_dev + mean)
+        .clamp(initial.0, initial.1)
+        .into();
+
+    let points_incl = ((1 << bits) - 1) as f64;
+    for _ in 0..5 {
+        let step_inv = points_incl / (upper - lower);
+        // calculate the grid points for coordinate descent.
+        let mut daa = 0.0;
+        let mut dab = 0.0;
+        let mut dbb = 0.0;
+        let mut dax = 0.0;
+        let mut dbx = 0.0;
+        for xi in vector.iter().copied().map(f64::from) {
+            let k = ((xi.clamp(lower, upper) - lower) * step_inv).round();
+            let s = k / points_incl;
+            daa += (1.0 - s) * (1.0 - s);
+            dab += (1.0 - s) * s;
+            dbb += s * s;
+            dax += xi * (1.0 - s);
+            dbx += xi * s;
+        }
+        let m0 = scale * dax * dax + LAMBDA * daa;
+        let m1 = scale * dax * dbx + LAMBDA * dab;
+        let m2 = scale * dbx * dbx + LAMBDA * dbb;
+        let det = m0 * m2 - m1 * m1;
+        // if the determinant is zero we can't update the interval
+        if det == 0.0 {
+            break;
+        }
+
+        let lower_candidate = (m2 * dax - m1 * dbx) / det;
+        let upper_candidate = (m0 * dbx - m1 * dax) / det;
+        if (lower - lower_candidate).abs() < 1e-8 && (upper - upper_candidate).abs() < 1e-8 {
+            break;
+        }
+        let loss_candidate = compute_loss(
+            vector,
+            (lower_candidate as f32, upper_candidate as f32),
+            norm_sq,
+            bits,
+        );
+        if loss_candidate > loss {
+            break;
+        }
+        lower = lower_candidate;
+        upper = upper_candidate;
+        loss = loss_candidate;
+    }
+    (lower as f32, upper as f32)
+}
+
+fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {
+    let a: f64 = interval.0.into();
+    let b: f64 = interval.1.into();
+    let step = (b - a) / ((1 << bits) - 1) as f64;
+    let step_inv = step.recip();
+    let mut xe = 0.0;
+    let mut e = 0.0;
+    for xi in vector.iter().copied().map(f64::from) {
+        let xiq = a + step * ((xi.clamp(a, b) - a) * step_inv).round();
+        let diff = xi - xiq;
+        xe += xi * diff;
+        e += diff * diff;
+    }
+    (1.0 - LAMBDA) * xe * xe / norm_sq + LAMBDA * e
+}
+
 struct PrimaryQuantizer<'a> {
     it: std::slice::Iter<'a, f32>,
     header: VectorHeader,
@@ -84,7 +183,9 @@ struct PrimaryQuantizer<'a> {
 
 impl<'a> PrimaryQuantizer<'a> {
     fn new(v: &'a [f32], bits: usize) -> Self {
-        let header = VectorHeader::partial_init_from_vector(v);
+        let mut header = VectorHeader::partial_init_from_vector(v);
+        (header.lower, header.upper) =
+            optimize_interval(v, (header.lower, header.upper), header.l2_norm, bits);
         let delta = (header.upper - header.lower) / ((1 << bits) - 1) as f32;
         Self {
             it: v.iter(),
@@ -104,7 +205,9 @@ impl Iterator for PrimaryQuantizer<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.it.next().map(|x| {
-            let q = ((*x - self.header.lower) / self.delta).round() as u8;
+            let q = ((x.clamp(self.header.lower, self.header.upper) - self.header.lower)
+                / self.delta)
+                .round() as u8;
             self.header.component_sum += u32::from(q);
             q
         })
@@ -151,7 +254,8 @@ impl Iterator for TwoLevelQuantizer<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         let x = self.f32_it.next()?;
         let q = self.primary_it.next()?;
-        let res = *x - ((q as f32 * self.primary_it.delta) + self.primary_it.header.lower);
+        let res = x.clamp(self.primary_it.header.lower, self.primary_it.header.upper)
+            - ((q as f32 * self.primary_it.delta) + self.primary_it.header.lower);
         let r = ((res - self.lower) / self.delta).round() as u8;
         Some((q, r))
     }
@@ -197,6 +301,8 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         packing::unpack_iter::<B>(self.vector).map(|q| q as f32 * self.delta + self.header.lower)
     }
 
+    // XXX figure out what's going on here. it's fucking awful
+    #[allow(dead_code)]
     fn dot_unnormalized(&self, other: &Self) -> f64 {
         let dot_quantized = packing::unpack_iter::<B>(self.vector)
             .zip(packing::unpack_iter::<B>(other.vector))
@@ -299,7 +405,14 @@ impl<const B: usize> VectorDistance for PrimaryDotProductDistance<B> {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = PrimaryVector::<B>::new(query).unwrap();
         let doc = PrimaryVector::<B>::new(doc).unwrap();
-        let dot = query.dot_unnormalized(&doc) / (query.l2_norm() * doc.l2_norm());
+        // XXX the scalar implementation is crazy awful, much much worse.
+        //let dot = query.dot_unnormalized(&doc) / (query.l2_norm() * doc.l2_norm());
+        let dot = query
+            .f32_iter()
+            .zip(doc.f32_iter())
+            .map(|(q, d)| q * d)
+            .sum::<f32>() as f64
+            / (query.l2_norm() * doc.l2_norm());
         (-dot + 1.0) / 2.0
     }
 }

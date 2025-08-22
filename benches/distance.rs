@@ -1,6 +1,6 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use easy_tiger::vectors::{
-    new_query_vector_distance_f32, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
+    F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity, new_query_vector_distance_f32,
 };
 use rand::{Rng, SeedableRng};
 
@@ -121,6 +121,8 @@ pub fn i1_benchmarks(c: &mut Criterion) {
         c,
     );
 }
+
+// XXX add lvq benchmarks
 
 criterion_group!(
     benches,

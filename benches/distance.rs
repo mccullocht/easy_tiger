@@ -1,6 +1,6 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use easy_tiger::vectors::{
-    F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity, new_query_vector_distance_f32,
+    new_query_vector_distance_f32, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
 };
 use rand::{Rng, SeedableRng};
 
@@ -56,32 +56,13 @@ pub fn float32_benchmarks(c: &mut Criterion) {
     }
 }
 
-pub fn float16_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::F16);
-}
-
-pub fn i16_scaled_uniform_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::I16ScaledUniformQuantized);
-}
-
-pub fn i8_scaled_uniform_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::I8ScaledUniformQuantized);
-}
-
-pub fn i4_scaled_uniform_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::I4ScaledUniformQuantized);
-}
-
-pub fn i8_scaled_non_uniform_benchmarks(c: &mut Criterion) {
-    let format = F32VectorCoding::I8ScaledNonUniformQuantized(
-        NonUniformQuantizedDimensions::try_from([256, 512].as_slice()).unwrap(),
-    );
-    query_and_doc_benchmarks(c, format);
-}
-
-fn query_and_doc_benchmarks(c: &mut Criterion, format: F32VectorCoding) {
+fn query_and_doc_benchmarks(
+    c: &mut Criterion,
+    format: F32VectorCoding,
+    similarities: impl ExactSizeIterator<Item = VectorSimilarity>,
+) {
     let (x, y) = generate_test_vectors(1024);
-    for similarity in VectorSimilarity::all() {
+    for similarity in similarities {
         benchmark_distance(
             &format!("{format}/doc/{similarity}"),
             &x,
@@ -99,6 +80,41 @@ fn query_and_doc_benchmarks(c: &mut Criterion, format: F32VectorCoding) {
             c,
         );
     }
+}
+
+pub fn float16_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(c, F32VectorCoding::F16, VectorSimilarity::all());
+}
+
+pub fn i16_scaled_uniform_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(
+        c,
+        F32VectorCoding::I16ScaledUniformQuantized,
+        VectorSimilarity::all(),
+    );
+}
+
+pub fn i8_scaled_uniform_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(
+        c,
+        F32VectorCoding::I8ScaledUniformQuantized,
+        VectorSimilarity::all(),
+    );
+}
+
+pub fn i4_scaled_uniform_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(
+        c,
+        F32VectorCoding::I4ScaledUniformQuantized,
+        VectorSimilarity::all(),
+    );
+}
+
+pub fn i8_scaled_non_uniform_benchmarks(c: &mut Criterion) {
+    let format = F32VectorCoding::I8ScaledNonUniformQuantized(
+        NonUniformQuantizedDimensions::try_from([256, 512].as_slice()).unwrap(),
+    );
+    query_and_doc_benchmarks(c, format, VectorSimilarity::all());
 }
 
 pub fn i1_benchmarks(c: &mut Criterion) {
@@ -122,7 +138,37 @@ pub fn i1_benchmarks(c: &mut Criterion) {
     );
 }
 
-// XXX add lvq benchmarks
+fn angular_similarities() -> impl ExactSizeIterator<Item = VectorSimilarity> {
+    [VectorSimilarity::Dot, VectorSimilarity::Cosine].into_iter()
+}
+
+fn lvq2x8x8_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x8x8, angular_similarities());
+}
+
+fn lvq2x4x8_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x4x8, angular_similarities());
+}
+
+fn lvq2x4x4_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x4x4, angular_similarities());
+}
+
+fn lvq2x1x8_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x1x8, angular_similarities());
+}
+
+fn lvq1x8_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ1x8, angular_similarities());
+}
+
+fn lvq1x4_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ1x4, angular_similarities());
+}
+
+fn lvq1x1_benchmarks(c: &mut Criterion) {
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ1x1, angular_similarities());
+}
 
 criterion_group!(
     benches,
@@ -133,5 +179,12 @@ criterion_group!(
     i4_scaled_uniform_benchmarks,
     i8_scaled_non_uniform_benchmarks,
     i1_benchmarks,
+    lvq2x8x8_benchmarks,
+    lvq2x4x8_benchmarks,
+    lvq2x4x4_benchmarks,
+    lvq2x1x8_benchmarks,
+    lvq1x8_benchmarks,
+    lvq1x4_benchmarks,
+    lvq1x1_benchmarks,
 );
 criterion_main!(benches);

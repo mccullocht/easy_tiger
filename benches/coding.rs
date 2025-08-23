@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use easy_tiger::vectors::{F32VectorCoding, VectorSimilarity};
 use rand::{Rng, SeedableRng};
 
@@ -56,7 +56,33 @@ fn binary_benchmarks(c: &mut Criterion) {
     benchmark_coding(c, F32VectorCoding::BinaryQuantized, None);
 }
 
-// XXX add lvq benchmarks
+fn lvq1x1_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::LVQ1x1, None);
+}
+
+fn lvq1x4_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::LVQ1x4, None);
+}
+
+fn lvq1x8_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::LVQ1x8, None);
+}
+
+fn lvq2x1x8_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::LVQ2x1x8, None);
+}
+
+fn lvq2x4x4_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::LVQ2x4x4, None);
+}
+
+fn lvq2x4x8_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::LVQ2x4x8, None);
+}
+
+fn lvq2x8x8_benchmarks(c: &mut Criterion) {
+    benchmark_coding(c, F32VectorCoding::LVQ2x8x8, None);
+}
 
 criterion_group!(
     benches,
@@ -65,6 +91,13 @@ criterion_group!(
     i4_scaled_uniform_benchmarks,
     i8_scaled_uniform_benchmarks,
     i16_scaled_uniform_benchmarks,
-    binary_benchmarks
+    binary_benchmarks,
+    lvq1x1_benchmarks,
+    lvq1x4_benchmarks,
+    lvq1x8_benchmarks,
+    lvq2x1x8_benchmarks,
+    lvq2x4x4_benchmarks,
+    lvq2x4x8_benchmarks,
+    lvq2x8x8_benchmarks,
 );
 criterion_main!(benches);

@@ -655,8 +655,8 @@ mod test {
     use crate::{
         distance::l2_normalize,
         vectors::{
-            F32VectorCoder, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
-            new_query_vector_distance_f32,
+            new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding,
+            NonUniformQuantizedDimensions, VectorSimilarity,
         },
     };
 
@@ -764,8 +764,8 @@ mod test {
     }
 
     use F32VectorCoding::{
-        F16, I4ScaledUniformQuantized, I8ScaledNonUniformQuantized, I8ScaledUniformQuantized,
-        I16ScaledUniformQuantized,
+        I16ScaledUniformQuantized, I4ScaledUniformQuantized, I8ScaledNonUniformQuantized,
+        I8ScaledUniformQuantized, F16,
     };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
 
@@ -863,5 +863,51 @@ mod test {
         }
     }
 
-    // XXX add lvq tests
+    #[test]
+    fn lvq1x4_dot() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, F32VectorCoding::LVQ1x4, i, &a, &b, 0.04);
+            query_distance_compare(Dot, F32VectorCoding::LVQ1x4, i, &a, &b, 0.05);
+        }
+    }
+
+    #[test]
+    fn lvq1x8_dot() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, F32VectorCoding::LVQ1x8, i, &a, &b, 0.01);
+            query_distance_compare(Dot, F32VectorCoding::LVQ1x8, i, &a, &b, 0.01);
+        }
+    }
+
+    #[test]
+    fn lvq2x1x8_dot() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, F32VectorCoding::LVQ2x1x8, i, &a, &b, 0.25);
+            query_distance_compare(Dot, F32VectorCoding::LVQ2x1x8, i, &a, &b, 0.25);
+        }
+    }
+
+    #[test]
+    fn lvq2x4x4_dot() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, F32VectorCoding::LVQ2x4x4, i, &a, &b, 0.01);
+            query_distance_compare(Dot, F32VectorCoding::LVQ2x4x4, i, &a, &b, 0.01);
+        }
+    }
+
+    #[test]
+    fn lvq2x4x8_dot() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, F32VectorCoding::LVQ2x4x8, i, &a, &b, 0.01);
+            query_distance_compare(Dot, F32VectorCoding::LVQ2x4x8, i, &a, &b, 0.01);
+        }
+    }
+
+    #[test]
+    fn lvq2x8x8_dot() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.01);
+            query_distance_compare(Dot, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.01);
+        }
+    }
 }

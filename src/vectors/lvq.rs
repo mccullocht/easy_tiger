@@ -553,8 +553,8 @@ mod test {
             lvq.header,
             VectorHeader {
                 l2_norm: 0.8500001,
-                lower: -0.5,
-                upper: 0.4,
+                lower: -0.32978323,
+                upper: 0.2198555,
                 component_sum: 5,
             }
         );
@@ -564,8 +564,16 @@ mod test {
             // yikes bikes, interpreting everything as min/max feels bad. i guess that's why you
             // should use anisotropic loss.
             &[
-                -0.5, -0.5, -0.5, -0.5, -0.5, 0.39999998, 0.39999998, 0.39999998, 0.39999998,
-                0.39999998
+                -0.32978323,
+                -0.32978323,
+                -0.32978323,
+                -0.32978323,
+                -0.32978323,
+                0.21985552,
+                0.21985552,
+                0.21985552,
+                0.21985552,
+                0.21985552
             ]
         );
     }
@@ -642,29 +650,32 @@ mod test {
         let lvq = TwoLevelVector::<1, 8>::new(&encoded).expect("readable");
         assert_eq!(lvq.primary.vector, &[0b11100000, 0b11]);
         // notably, this is only using 7 bits of residual.
-        assert_eq!(lvq.vector, &[128, 156, 184, 213, 241, 14, 43, 71, 99, 128]);
+        assert_eq!(
+            lvq.vector,
+            &[128, 128, 141, 188, 234, 25, 72, 118, 128, 128]
+        );
         assert_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.8500001,
-                lower: -0.5,
-                upper: 0.4,
+                lower: -0.32978323,
+                upper: 0.2198555,
                 component_sum: 5,
             }
         );
         assert_eq!(
             lvq.f32_iter().collect::<Vec<_>>(),
             &[
-                -0.4982353,
-                -0.39941174,
-                -0.30058825,
-                -0.19823527,
-                -0.099411786,
-                -0.00058823824,
-                0.10176468,
-                0.20058823,
-                0.29941174,
-                0.4017647
+                -0.32870552,
+                -0.32870552,
+                -0.30068472,
+                -0.19937876,
+                -0.10022822,
+                -0.0010777116,
+                0.10022825,
+                0.19937876,
+                0.22093323,
+                0.22093323
             ]
         );
     }

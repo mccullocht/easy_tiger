@@ -302,10 +302,18 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
-        let dot_quantized = packing::unpack_iter::<B>(self.vector)
-            .zip(packing::unpack_iter::<B>(other.vector))
-            .map(|(s, o)| s as u32 * o as u32)
-            .sum::<u32>();
+        let dot_quantized = if B == 1 {
+            self.vector
+                .iter()
+                .zip(other.vector.iter())
+                .map(|(s, o)| (*s & *o).count_ones())
+                .sum::<u32>()
+        } else {
+            packing::unpack_iter::<B>(self.vector)
+                .zip(packing::unpack_iter::<B>(other.vector))
+                .map(|(s, o)| s as u32 * o as u32)
+                .sum::<u32>()
+        };
         let sdelta = f64::from(self.delta);
         let slower = f64::from(self.header.lower);
         let odelta = f64::from(other.delta);

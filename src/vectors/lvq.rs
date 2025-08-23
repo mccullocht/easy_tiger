@@ -8,6 +8,10 @@
 //! anisotropic loss instead of simply taking min/max values. This grid search is more important
 //! at lower bit rates.
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+mod scalar;
+
 use std::{borrow::Cow, iter::FusedIterator};
 
 use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance};
@@ -159,21 +163,10 @@ fn optimize_interval(vector: &[f32], initial: (f32, f32), l2_norm: f32, bits: us
     (lower as f32, upper as f32)
 }
 
-fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {
-    let a: f64 = interval.0.into();
-    let b: f64 = interval.1.into();
-    let step = (b - a) / ((1 << bits) - 1) as f64;
-    let step_inv = step.recip();
-    let mut xe = 0.0;
-    let mut e = 0.0;
-    for xi in vector.iter().copied().map(f64::from) {
-        let xiq = a + step * ((xi.clamp(a, b) - a) * step_inv).round();
-        let diff = xi - xiq;
-        xe += xi * diff;
-        e += diff * diff;
-    }
-    (1.0 - LAMBDA) * xe * xe / norm_sq + LAMBDA * e
-}
+#[cfg(target_arch = "aarch64")]
+use aarch64::compute_loss;
+#[cfg(not(target_arch = "aarch64"))]
+use scalar::compute_loss;
 
 struct PrimaryQuantizer<'a> {
     it: std::slice::Iter<'a, f32>,

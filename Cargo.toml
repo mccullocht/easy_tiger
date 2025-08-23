@@ -42,3 +42,6 @@ members = ["et", "pt", "qt", "wt_mdb", "wt_sys"]
 [profile.profiling]
 inherits = "release"
 debug = true
+
+[profile.bench]
+debug = true

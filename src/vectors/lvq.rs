@@ -301,8 +301,6 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         packing::unpack_iter::<B>(self.vector).map(|q| q as f32 * self.delta + self.header.lower)
     }
 
-    // XXX figure out what's going on here. it's fucking awful
-    #[allow(dead_code)]
     fn dot_unnormalized(&self, other: &Self) -> f64 {
         let dot_quantized = packing::unpack_iter::<B>(self.vector)
             .zip(packing::unpack_iter::<B>(other.vector))
@@ -315,7 +313,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         dot_quantized as f64 * sdelta * odelta
             + self.header.component_sum as f64 * sdelta * olower
             + other.header.component_sum as f64 * odelta * slower
-            + slower * olower * self.vector.len().div_ceil(B) as f64
+            + slower * olower * (self.vector.len() * 8).div_ceil(B) as f64
     }
 }
 
@@ -405,14 +403,7 @@ impl<const B: usize> VectorDistance for PrimaryDotProductDistance<B> {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = PrimaryVector::<B>::new(query).unwrap();
         let doc = PrimaryVector::<B>::new(doc).unwrap();
-        // XXX the scalar implementation is crazy awful, much much worse.
-        //let dot = query.dot_unnormalized(&doc) / (query.l2_norm() * doc.l2_norm());
-        let dot = query
-            .f32_iter()
-            .zip(doc.f32_iter())
-            .map(|(q, d)| q * d)
-            .sum::<f32>() as f64
-            / (query.l2_norm() * doc.l2_norm());
+        let dot = query.dot_unnormalized(&doc) / (query.l2_norm() * doc.l2_norm());
         (-dot + 1.0) / 2.0
     }
 }

@@ -16,6 +16,47 @@ use std::{borrow::Cow, iter::FusedIterator};
 
 use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 
+#[derive(Debug, Clone, Copy, Default)]
+struct VectorStats {
+    min: f32,
+    max: f32,
+    mean: f64,
+    std_dev: f64,
+    l2_norm_sq: f64,
+}
+
+impl From<&[f32]> for VectorStats {
+    fn from(value: &[f32]) -> Self {
+        if value.is_empty() {
+            return VectorStats {
+                l2_norm_sq: 1.0,
+                ..Default::default()
+            };
+        }
+
+        let (min, max, mean, variance, dot) = value.iter().copied().enumerate().fold(
+            (f32::MAX, f32::MIN, 0.0, 0.0, 0.0),
+            |mut stats, (i, x)| {
+                stats.0 = x.min(stats.0);
+                stats.1 = x.max(stats.1);
+                let x: f64 = x.into();
+                let delta = x - stats.2;
+                stats.2 += delta / (i + 1) as f64;
+                stats.3 += delta * (x - stats.2);
+                stats.4 += x * x;
+                stats
+            },
+        );
+        Self {
+            min,
+            max,
+            mean,
+            std_dev: (variance / value.len() as f64).sqrt(),
+            l2_norm_sq: dot,
+        }
+    }
+}
+
 /// Header for an LVQ vector.
 ///
 /// Along with the bit configuration this carries enough metadata to transform a quantized vector
@@ -32,26 +73,6 @@ struct VectorHeader {
 impl VectorHeader {
     /// Encoded buffer size.
     const LEN: usize = 16;
-
-    fn partial_init_from_vector(v: &[f32]) -> Self {
-        if v.is_empty() {
-            return VectorHeader {
-                l2_norm: 1.0,
-                lower: 0.0,
-                upper: 0.0,
-                component_sum: 0,
-            };
-        }
-        let (min, max, dot) = v.iter().fold((f32::MAX, f32::MIN, 0.0), |state, x| {
-            (x.min(state.0), x.max(state.1), state.2 + x * x)
-        });
-        VectorHeader {
-            l2_norm: dot.sqrt(),
-            lower: min,
-            upper: max,
-            component_sum: 0,
-        }
-    }
 
     fn split_output_buf(buf: &mut [u8]) -> Option<(&mut [u8], &mut [u8])> {
         buf.split_at_mut_checked(Self::LEN)
@@ -80,7 +101,18 @@ impl VectorHeader {
     }
 }
 
-const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
+impl From<VectorStats> for VectorHeader {
+    fn from(value: VectorStats) -> Self {
+        VectorHeader {
+            l2_norm: value.l2_norm_sq.sqrt() as f32,
+            lower: value.min,
+            upper: value.max,
+            component_sum: 0,
+        }
+    }
+}
+
+const MINIMUM_MSE_GRID: [(f64, f64); 8] = [
     (-0.798, 0.798),
     (-1.493, 1.493),
     (-2.051, 2.051),
@@ -93,27 +125,15 @@ const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
 
 const LAMBDA: f64 = 0.1;
 
-fn optimize_interval(vector: &[f32], initial: (f32, f32), l2_norm: f32, bits: usize) -> (f32, f32) {
-    let norm_sq: f64 = (l2_norm * l2_norm).into();
-    let mut loss = compute_loss(vector, initial, norm_sq, bits);
+fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+    let norm_sq: f64 = stats.l2_norm_sq;
+    let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
 
-    let (mean, var) = vector
-        .iter()
-        .enumerate()
-        .fold((0.0, 0.0), |(mut mean, mut var), (i, x)| {
-            let delta = *x - mean;
-            mean += delta / (i + 1) as f32;
-            var += delta * (x - mean);
-            (mean, var)
-        });
-    let std_dev = (var / vector.len() as f32).sqrt();
     let scale = (1.0 - LAMBDA) / norm_sq;
-    let mut lower: f64 = (MINIMUM_MSE_GRID[bits - 1].0 * std_dev + mean)
-        .clamp(initial.0, initial.1)
-        .into();
-    let mut upper: f64 = (MINIMUM_MSE_GRID[bits - 1].1 * std_dev + mean)
-        .clamp(initial.0, initial.1)
-        .into();
+    let mut lower: f64 = (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean)
+        .clamp(stats.min.into(), stats.max.into());
+    let mut upper: f64 = (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean)
+        .clamp(stats.min.into(), stats.max.into());
 
     let points_incl = ((1 << bits) - 1) as f64;
     for _ in 0..5 {
@@ -176,9 +196,9 @@ struct PrimaryQuantizer<'a> {
 
 impl<'a> PrimaryQuantizer<'a> {
     fn new(v: &'a [f32], bits: usize) -> Self {
-        let mut header = VectorHeader::partial_init_from_vector(v);
-        (header.lower, header.upper) =
-            optimize_interval(v, (header.lower, header.upper), header.l2_norm, bits);
+        let stats = VectorStats::from(v);
+        let mut header = VectorHeader::from(stats);
+        (header.lower, header.upper) = optimize_interval(v, &stats, bits);
         let delta = (header.upper - header.lower) / ((1 << bits) - 1) as f32;
         Self {
             it: v.iter(),
@@ -544,9 +564,9 @@ mod test {
         assert_eq!(
             lvq.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.38059705,
-                upper: 0.25373137,
+                l2_norm: 0.92195445,
+                lower: -0.38059703,
+                upper: 0.25373134,
                 component_sum: 5,
             }
         );
@@ -554,16 +574,16 @@ mod test {
         assert_eq!(
             lvq.f32_iter().take(10).collect::<Vec<_>>(),
             &[
-                -0.38059705,
-                -0.38059705,
-                -0.38059705,
-                -0.38059705,
-                -0.38059705,
-                0.25373137,
-                0.25373137,
-                0.25373137,
-                0.25373137,
-                0.25373137
+                -0.38059703,
+                -0.38059703,
+                -0.38059703,
+                -0.38059703,
+                -0.38059703,
+                0.25373134,
+                0.25373134,
+                0.25373134,
+                0.25373134,
+                0.25373134
             ]
         );
     }
@@ -577,25 +597,25 @@ mod test {
         assert_eq!(
             lvq.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.5032572,
-                upper: 0.40300414,
+                l2_norm: 0.92195445,
+                lower: -0.50325716,
+                upper: 0.40300408,
                 component_sum: 75,
             }
         );
         assert_eq!(
             lvq.f32_iter().collect::<Vec<_>>(),
             &[
-                -0.5032572,
-                -0.3824224,
-                -0.32200494,
-                -0.20117012,
+                -0.50325716,
+                -0.38242233,
+                -0.3220049,
+                -0.20117009,
                 -0.08033526,
                 -0.019917846,
                 0.10091698,
-                0.22175187,
-                0.28216928,
-                0.4030041
+                0.22175181,
+                0.28216922,
+                0.40300405
             ]
         );
     }
@@ -610,21 +630,21 @@ mod test {
         assert_eq!(
             lvq.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.4998075,
-                upper: 0.39980662,
+                l2_norm: 0.92195445,
+                lower: -0.49980745,
+                upper: 0.3998066,
                 component_sum,
             }
         );
         assert_eq!(
             lvq.f32_iter().collect::<Vec<_>>(),
             &[
-                -0.4998075,
-                -0.40102637,
-                -0.29871732,
-                -0.19993615,
-                -0.10115498,
-                0.0011540353,
+                -0.49980745,
+                -0.4010263,
+                -0.29871726,
+                -0.19993612,
+                -0.10115495,
+                0.0011540949,
                 0.099935204,
                 0.19871637,
                 0.30102542,
@@ -646,25 +666,25 @@ mod test {
         assert_eq!(
             lvq.primary.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.38059705,
-                upper: 0.25373137,
+                l2_norm: 0.92195445,
+                lower: -0.38059703,
+                upper: 0.25373134,
                 component_sum: 5,
             }
         );
         assert_eq!(
             lvq.f32_iter().collect::<Vec<_>>(),
             &[
-                -0.37935328,
-                -0.37935328,
-                -0.29975128,
-                -0.20024881,
+                -0.37935326,
+                -0.37935326,
+                -0.29975125,
+                -0.20024878,
                 -0.100746304,
                 0.0012437701,
-                0.100746274,
-                0.20024878,
-                0.25497514,
-                0.25497514
+                0.10074626,
+                0.20024875,
+                0.2549751,
+                0.2549751
             ]
         );
     }
@@ -679,25 +699,25 @@ mod test {
         assert_eq!(
             lvq.primary.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.5032572,
-                upper: 0.40300414,
+                l2_norm: 0.92195445,
+                lower: -0.50325716,
+                upper: 0.40300408,
                 component_sum: 75,
             }
         );
         assert_eq!(
             lvq.f32_iter().collect::<Vec<_>>(),
             &[
-                -0.5012433,
-                -0.40054762,
-                -0.2998519,
-                -0.1991562,
-                -0.09846049,
+                -0.50124323,
+                -0.40054756,
+                -0.29985186,
+                -0.19915617,
+                -0.09846048,
                 -0.0017926209,
                 0.09890307,
-                0.19959882,
-                0.30029452,
-                0.4009902
+                0.19959876,
+                0.30029446,
+                0.40099013
             ]
         );
     }
@@ -712,25 +732,25 @@ mod test {
         assert_eq!(
             lvq.primary.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.5032572,
-                upper: 0.40300414,
+                l2_norm: 0.92195445,
+                lower: -0.50325716,
+                upper: 0.40300408,
                 component_sum: 75,
             }
         );
         assert_eq!(
             lvq.f32_iter().collect::<Vec<_>>(),
             &[
-                -0.50005865,
-                -0.40007377,
-                -0.30008882,
-                -0.20010392,
-                -0.09988207,
+                -0.5000586,
+                -0.40007368,
+                -0.3000888,
+                -0.2001039,
+                -0.099882066,
                 0.00010282919,
                 0.100087725,
-                0.20007268,
-                0.3000576,
-                0.40004247
+                0.20007262,
+                0.30005753,
+                0.4000424,
             ]
         );
     }
@@ -755,21 +775,21 @@ mod test {
         assert_eq!(
             lvq.primary.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.4998075,
-                upper: 0.39980662,
+                l2_norm: 0.92195445,
+                lower: -0.49980745,
+                upper: 0.3998066,
                 component_sum,
             }
         );
         assert_eq!(
             lvq.f32_iter().collect::<Vec<_>>(),
             &[
-                -0.4998006,
-                -0.39999565,
-                -0.29999706,
-                -0.19999841,
-                -0.09999977,
-                -1.1784723e-6,
+                -0.49980053,
+                -0.3999956,
+                -0.299997,
+                -0.19999838,
+                -0.09999974,
+                -1.1187512e-6,
                 0.09999746,
                 0.1999961,
                 0.2999947,

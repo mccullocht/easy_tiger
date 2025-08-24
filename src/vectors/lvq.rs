@@ -42,7 +42,7 @@ impl VectorHeader {
             (x.min(state.0), x.max(state.1), state.2 + x * x)
         });
         VectorHeader {
-            l2_norm: dot.sqrt() as f32,
+            l2_norm: dot.sqrt(),
             lower: min,
             upper: max,
             component_sum: 0,
@@ -93,11 +93,16 @@ fn optimize_interval(vector: &[f32], initial: (f32, f32), l2_norm: f32, bits: us
     let norm_sq: f64 = (l2_norm * l2_norm).into();
     let mut loss = compute_loss(vector, initial, norm_sq, bits);
 
-    let (sum, squared_sum) = vector
+    let (mean, var) = vector
         .iter()
-        .fold((0.0, 0.0), |s, x| (s.0 + *x, s.1 + (*x * *x)));
-    let mean = sum / vector.len() as f32;
-    let std_dev = (squared_sum / vector.len() as f32).sqrt();
+        .enumerate()
+        .fold((0.0, 0.0), |(mut mean, mut var), (i, x)| {
+            let delta = *x - mean;
+            mean += delta / (i + 1) as f32;
+            var += delta * (x - mean);
+            (mean, var)
+        });
+    let std_dev = (var / vector.len() as f32).sqrt();
     let scale = (1.0 - LAMBDA) / norm_sq;
     let mut lower: f64 = (MINIMUM_MSE_GRID[bits - 1].0 * std_dev + mean)
         .clamp(initial.0, initial.1)
@@ -633,7 +638,6 @@ mod test {
         let encoded = TwoLevelVectorCoder::<1, 8>::default().encode(&vec);
         let lvq = TwoLevelVector::<1, 8>::new(&encoded).expect("readable");
         assert_eq!(lvq.primary.vector, &[0b11100000, 0b11]);
-        // notably, this is only using 7 bits of residual.
         assert_eq!(
             lvq.vector,
             &[128, 128, 160, 200, 240, 26, 66, 106, 128, 128]

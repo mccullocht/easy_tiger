@@ -874,8 +874,8 @@ mod test {
     #[test]
     fn lvq1x8_dot() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ1x8, i, &a, &b, 0.01);
-            query_distance_compare(Dot, F32VectorCoding::LVQ1x8, i, &a, &b, 0.01);
+            distance_compare(Dot, F32VectorCoding::LVQ1x8, i, &a, &b, 0.001);
+            query_distance_compare(Dot, F32VectorCoding::LVQ1x8, i, &a, &b, 0.001);
         }
     }
 
@@ -883,6 +883,7 @@ mod test {
     fn lvq2x1x8_dot() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
             distance_compare(Dot, F32VectorCoding::LVQ2x1x8, i, &a, &b, 0.25);
+            // TODO: figure out why this is so much worse than 1x8.
             query_distance_compare(Dot, F32VectorCoding::LVQ2x1x8, i, &a, &b, 0.25);
         }
     }
@@ -906,8 +907,8 @@ mod test {
     #[test]
     fn lvq2x8x8_dot() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.01);
-            query_distance_compare(Dot, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.01);
+            distance_compare(Dot, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.001);
+            query_distance_compare(Dot, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.001);
         }
     }
 }

@@ -8,9 +8,40 @@
 //! anisotropic loss instead of simply taking min/max values. This grid search is more important
 //! at lower bit rates.
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+mod scalar;
+
 use std::{borrow::Cow, iter::FusedIterator};
 
 use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance};
+
+#[derive(Debug, Clone, Copy, Default)]
+struct VectorStats {
+    min: f32,
+    max: f32,
+    mean: f32,
+    std_dev: f32,
+    l2_norm_sq: f32,
+}
+
+impl From<&[f32]> for VectorStats {
+    fn from(value: &[f32]) -> Self {
+        if value.is_empty() {
+            return VectorStats {
+                l2_norm_sq: 1.0,
+                ..Default::default()
+            };
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        use aarch64::compute_vector_stats;
+        #[cfg(not(target_arch = "aarch64"))]
+        use scalar::compute_vector_stats;
+
+        compute_vector_stats(value)
+    }
+}
 
 /// Header for an LVQ vector.
 ///
@@ -28,26 +59,6 @@ struct VectorHeader {
 impl VectorHeader {
     /// Encoded buffer size.
     const LEN: usize = 16;
-
-    fn partial_init_from_vector(v: &[f32]) -> Self {
-        if v.is_empty() {
-            return VectorHeader {
-                l2_norm: 1.0,
-                lower: 0.0,
-                upper: 0.0,
-                component_sum: 0,
-            };
-        }
-        let (min, max, dot) = v.iter().fold((f32::MAX, f32::MIN, 0.0), |state, x| {
-            (x.min(state.0), x.max(state.1), state.2 + x * x)
-        });
-        VectorHeader {
-            l2_norm: dot.sqrt(),
-            lower: min,
-            upper: max,
-            component_sum: 0,
-        }
-    }
 
     fn split_output_buf(buf: &mut [u8]) -> Option<(&mut [u8], &mut [u8])> {
         buf.split_at_mut_checked(Self::LEN)
@@ -76,6 +87,17 @@ impl VectorHeader {
     }
 }
 
+impl From<VectorStats> for VectorHeader {
+    fn from(value: VectorStats) -> Self {
+        VectorHeader {
+            l2_norm: value.l2_norm_sq.sqrt(),
+            lower: value.min,
+            upper: value.max,
+            component_sum: 0,
+        }
+    }
+}
+
 const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
     (-0.798, 0.798),
     (-1.493, 1.493),
@@ -87,93 +109,12 @@ const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
     (-3.922, 3.922),
 ];
 
-const LAMBDA: f64 = 0.1;
+const LAMBDA: f32 = 0.1;
 
-fn optimize_interval(vector: &[f32], initial: (f32, f32), l2_norm: f32, bits: usize) -> (f32, f32) {
-    let norm_sq: f64 = (l2_norm * l2_norm).into();
-    let mut loss = compute_loss(vector, initial, norm_sq, bits);
-
-    let (mean, var) = vector
-        .iter()
-        .enumerate()
-        .fold((0.0, 0.0), |(mut mean, mut var), (i, x)| {
-            let delta = *x - mean;
-            mean += delta / (i + 1) as f32;
-            var += delta * (x - mean);
-            (mean, var)
-        });
-    let std_dev = (var / vector.len() as f32).sqrt();
-    let scale = (1.0 - LAMBDA) / norm_sq;
-    let mut lower: f64 = (MINIMUM_MSE_GRID[bits - 1].0 * std_dev + mean)
-        .clamp(initial.0, initial.1)
-        .into();
-    let mut upper: f64 = (MINIMUM_MSE_GRID[bits - 1].1 * std_dev + mean)
-        .clamp(initial.0, initial.1)
-        .into();
-
-    let points_incl = ((1 << bits) - 1) as f64;
-    for _ in 0..5 {
-        let step_inv = points_incl / (upper - lower);
-        // calculate the grid points for coordinate descent.
-        let mut daa = 0.0;
-        let mut dab = 0.0;
-        let mut dbb = 0.0;
-        let mut dax = 0.0;
-        let mut dbx = 0.0;
-        for xi in vector.iter().copied().map(f64::from) {
-            let k = ((xi.clamp(lower, upper) - lower) * step_inv).round();
-            let s = k / points_incl;
-            daa += (1.0 - s) * (1.0 - s);
-            dab += (1.0 - s) * s;
-            dbb += s * s;
-            dax += xi * (1.0 - s);
-            dbx += xi * s;
-        }
-        let m0 = scale * dax * dax + LAMBDA * daa;
-        let m1 = scale * dax * dbx + LAMBDA * dab;
-        let m2 = scale * dbx * dbx + LAMBDA * dbb;
-        let det = m0 * m2 - m1 * m1;
-        // if the determinant is zero we can't update the interval
-        if det == 0.0 {
-            break;
-        }
-
-        let lower_candidate = (m2 * dax - m1 * dbx) / det;
-        let upper_candidate = (m0 * dbx - m1 * dax) / det;
-        if (lower - lower_candidate).abs() < 1e-8 && (upper - upper_candidate).abs() < 1e-8 {
-            break;
-        }
-        let loss_candidate = compute_loss(
-            vector,
-            (lower_candidate as f32, upper_candidate as f32),
-            norm_sq,
-            bits,
-        );
-        if loss_candidate > loss {
-            break;
-        }
-        lower = lower_candidate;
-        upper = upper_candidate;
-        loss = loss_candidate;
-    }
-    (lower as f32, upper as f32)
-}
-
-fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {
-    let a: f64 = interval.0.into();
-    let b: f64 = interval.1.into();
-    let step = (b - a) / ((1 << bits) - 1) as f64;
-    let step_inv = step.recip();
-    let mut xe = 0.0;
-    let mut e = 0.0;
-    for xi in vector.iter().copied().map(f64::from) {
-        let xiq = a + step * ((xi.clamp(a, b) - a) * step_inv).round();
-        let diff = xi - xiq;
-        xe += xi * diff;
-        e += diff * diff;
-    }
-    (1.0 - LAMBDA) * xe * xe / norm_sq + LAMBDA * e
-}
+#[cfg(target_arch = "aarch64")]
+use aarch64::optimize_interval;
+#[cfg(not(target_arch = "aarch64"))]
+use scalar::optimize_interval;
 
 struct PrimaryQuantizer<'a> {
     it: std::slice::Iter<'a, f32>,
@@ -183,9 +124,9 @@ struct PrimaryQuantizer<'a> {
 
 impl<'a> PrimaryQuantizer<'a> {
     fn new(v: &'a [f32], bits: usize) -> Self {
-        let mut header = VectorHeader::partial_init_from_vector(v);
-        (header.lower, header.upper) =
-            optimize_interval(v, (header.lower, header.upper), header.l2_norm, bits);
+        let stats = VectorStats::from(v);
+        let mut header = VectorHeader::from(stats);
+        (header.lower, header.upper) = optimize_interval(v, &stats, bits);
         let delta = (header.upper - header.lower) / ((1 << bits) - 1) as f32;
         Self {
             it: v.iter(),
@@ -226,6 +167,7 @@ struct TwoLevelQuantizer<'a> {
     primary_it: PrimaryQuantizer<'a>,
     f32_it: std::slice::Iter<'a, f32>,
     lower: f32,
+    upper: f32,
     delta: f32,
 }
 
@@ -234,11 +176,13 @@ impl<'a> TwoLevelQuantizer<'a> {
         let primary_it = PrimaryQuantizer::new(v, bits1);
         let f32_it = v.iter();
         let lower = -primary_it.delta / 2.0;
+        let upper = primary_it.delta / 2.0;
         let delta = primary_it.delta / ((1 << bits2) - 1) as f32;
         Self {
             primary_it,
             f32_it,
             lower,
+            upper,
             delta,
         }
     }
@@ -254,8 +198,8 @@ impl Iterator for TwoLevelQuantizer<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         let x = self.f32_it.next()?;
         let q = self.primary_it.next()?;
-        let res = x.clamp(self.primary_it.header.lower, self.primary_it.header.upper)
-            - ((q as f32 * self.primary_it.delta) + self.primary_it.header.lower);
+        let res = (*x - ((q as f32 * self.primary_it.delta) + self.primary_it.header.lower))
+            .clamp(self.lower, self.upper);
         let r = ((res - self.lower) / self.delta).round() as u8;
         Some((q, r))
     }
@@ -302,10 +246,18 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
-        let dot_quantized = packing::unpack_iter::<B>(self.vector)
-            .zip(packing::unpack_iter::<B>(other.vector))
-            .map(|(s, o)| s as u32 * o as u32)
-            .sum::<u32>();
+        let dot_quantized = if B == 1 {
+            self.vector
+                .iter()
+                .zip(other.vector.iter())
+                .map(|(s, o)| (*s & *o).count_ones())
+                .sum::<u32>()
+        } else {
+            packing::unpack_iter::<B>(self.vector)
+                .zip(packing::unpack_iter::<B>(other.vector))
+                .map(|(s, o)| s as u32 * o as u32)
+                .sum::<u32>()
+        };
         let sdelta = f64::from(self.delta);
         let slower = f64::from(self.header.lower);
         let odelta = f64::from(other.delta);
@@ -529,10 +481,26 @@ mod packing {
 
 #[cfg(test)]
 mod test {
+    use approx::{abs_diff_eq, assert_abs_diff_eq, AbsDiffEq};
+
     use crate::vectors::lvq::{
         F32VectorCoder, PrimaryVector, PrimaryVectorCoder, TwoLevelVector, TwoLevelVectorCoder,
         VectorHeader,
     };
+
+    impl AbsDiffEq for VectorHeader {
+        type Epsilon = f32;
+
+        fn default_epsilon() -> Self::Epsilon {
+            0.00001
+        }
+
+        fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
+            abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
+                && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
+                && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
+        }
+    }
 
     #[test]
     fn lvq1_1() {
@@ -540,30 +508,32 @@ mod test {
         let encoded = PrimaryVectorCoder::<1>::default().encode(&vec);
         let lvq = PrimaryVector::<1>::new(&encoded).expect("readable");
         assert_eq!(lvq.vector, &[0b11100000, 0b11]);
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.header,
             VectorHeader {
                 l2_norm: 0.9219545,
-                lower: -0.38059705,
-                upper: 0.25373137,
+                lower: -0.38059697,
+                upper: 0.25373134,
                 component_sum: 5,
             }
         );
         // NB: vector dimensionality is not a multiple of 8 so we're producting extra dimensions.
-        assert_eq!(
-            lvq.f32_iter().take(10).collect::<Vec<_>>(),
-            &[
-                -0.38059705,
-                -0.38059705,
-                -0.38059705,
-                -0.38059705,
-                -0.38059705,
-                0.25373137,
-                0.25373137,
-                0.25373137,
-                0.25373137,
-                0.25373137
+        assert_abs_diff_eq!(
+            lvq.f32_iter().take(10).collect::<Vec<_>>().as_ref(),
+            [
+                -0.38059697,
+                -0.38059697,
+                -0.38059697,
+                -0.38059697,
+                -0.38059697,
+                0.25373134,
+                0.25373134,
+                0.25373134,
+                0.25373134,
+                0.25373134
             ]
+            .as_ref(),
+            epsilon = 0.00001
         );
     }
 
@@ -573,18 +543,18 @@ mod test {
         let encoded = PrimaryVectorCoder::<4>::default().encode(&vec);
         let lvq = PrimaryVector::<4>::new(&encoded).expect("readable");
         assert_eq!(lvq.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.header,
             VectorHeader {
                 l2_norm: 0.9219545,
                 lower: -0.5032572,
-                upper: 0.40300414,
+                upper: 0.40300408,
                 component_sum: 75,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
                 -0.5032572,
                 -0.3824224,
                 -0.32200494,
@@ -596,6 +566,7 @@ mod test {
                 0.28216928,
                 0.4030041
             ]
+            .as_ref()
         );
     }
 
@@ -606,29 +577,31 @@ mod test {
         let lvq = PrimaryVector::<8>::new(&encoded).expect("readable");
         assert_eq!(lvq.vector, &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]);
         let component_sum = lvq.vector.iter().copied().map(u32::from).sum::<u32>();
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.header,
             VectorHeader {
                 l2_norm: 0.9219545,
-                lower: -0.4998075,
-                upper: 0.39980662,
+                lower: -0.49980745,
+                upper: 0.39980674,
                 component_sum,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
-                -0.4998075,
-                -0.40102637,
-                -0.29871732,
-                -0.19993615,
-                -0.10115498,
-                0.0011540353,
-                0.099935204,
-                0.19871637,
-                0.30102542,
-                0.3998066
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
+                -0.49980745,
+                -0.40102628,
+                -0.2987172,
+                -0.19993606,
+                -0.10115489,
+                0.0011541545,
+                0.09993532,
+                0.19871649,
+                0.3010256,
+                0.39980677
             ]
+            .as_ref(),
+            epsilon = 0.0001
         );
     }
 
@@ -638,33 +611,36 @@ mod test {
         let encoded = TwoLevelVectorCoder::<1, 8>::default().encode(&vec);
         let lvq = TwoLevelVector::<1, 8>::new(&encoded).expect("readable");
         assert_eq!(lvq.primary.vector, &[0b11100000, 0b11]);
-        assert_eq!(
-            lvq.vector,
-            &[128, 128, 160, 200, 240, 26, 66, 106, 128, 128]
+        assert_abs_diff_eq!(
+            lvq.vector.as_ref(),
+            [79, 120, 160, 200, 240, 25, 66, 106, 146, 186].as_ref(),
+            epsilon = 1,
         );
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.9219545,
-                lower: -0.38059705,
-                upper: 0.25373137,
+                lower: -0.38059697,
+                upper: 0.25373134,
                 component_sum: 5,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
-                -0.37935328,
-                -0.37935328,
-                -0.29975128,
-                -0.20024881,
-                -0.100746304,
-                0.0012437701,
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
+                -0.5012437,
+                -0.3992537,
+                -0.29975122,
+                -0.20024875,
+                -0.100746274,
+                -0.0012437701,
                 0.100746274,
-                0.20024878,
-                0.25497514,
-                0.25497514
+                0.20024875,
+                0.29975122,
+                0.3992537
             ]
+            .as_ref(),
+            epsilon = 0.01
         );
     }
 
@@ -675,18 +651,18 @@ mod test {
         let lvq = TwoLevelVector::<4, 4>::new(&encoded).expect("readable");
         assert_eq!(lvq.primary.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
         assert_eq!(lvq.vector, &[0x38, 0x8d, 0xc3, 0x27, 0x7c]);
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.9219545,
                 lower: -0.5032572,
-                upper: 0.40300414,
+                upper: 0.40300408,
                 component_sum: 75,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
                 -0.5012433,
                 -0.40054762,
                 -0.2998519,
@@ -698,6 +674,7 @@ mod test {
                 0.30029452,
                 0.4009902
             ]
+            .as_ref()
         );
     }
 
@@ -708,18 +685,18 @@ mod test {
         let lvq = TwoLevelVector::<4, 8>::new(&encoded).expect("readable");
         assert_eq!(lvq.primary.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
         assert_eq!(lvq.vector, &[141, 53, 220, 132, 45, 212, 124, 36, 203, 115]);
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.9219545,
                 lower: -0.5032572,
-                upper: 0.40300414,
+                upper: 0.40300408,
                 component_sum: 75,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
                 -0.50005865,
                 -0.40007377,
                 -0.30008882,
@@ -731,6 +708,7 @@ mod test {
                 0.3000576,
                 0.40004247
             ]
+            .as_ref()
         );
     }
 
@@ -743,7 +721,11 @@ mod test {
             lvq.primary.vector,
             &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]
         );
-        assert_eq!(lvq.vector, &[128, 202, 35, 123, 211, 44, 132, 220, 53, 128]);
+        assert_abs_diff_eq!(
+            lvq.vector.as_ref(),
+            [114, 202, 35, 123, 211, 44, 132, 220, 53, 141].as_ref(),
+            epsilon = 1
+        );
         let component_sum = lvq
             .primary
             .vector
@@ -751,29 +733,31 @@ mod test {
             .copied()
             .map(u32::from)
             .sum::<u32>();
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.9219545,
-                lower: -0.4998075,
-                upper: 0.39980662,
+                lower: -0.49980745,
+                upper: 0.39980674,
                 component_sum,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
-                -0.4998006,
-                -0.39999565,
-                -0.29999706,
-                -0.19999841,
-                -0.09999977,
-                -1.1784723e-6,
-                0.09999746,
-                0.1999961,
-                0.2999947,
-                0.3998135
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
+                -0.49999422,
+                -0.39999557,
+                -0.29999694,
+                -0.19999832,
+                -0.09999968,
+                -1.0593794e-6,
+                0.09999758,
+                0.19999622,
+                0.2999949,
+                0.39999354
             ]
+            .as_ref(),
+            epsilon = 0.0001
         );
     }
 }

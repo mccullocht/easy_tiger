@@ -90,7 +90,7 @@ impl VectorHeader {
 impl From<VectorStats> for VectorHeader {
     fn from(value: VectorStats) -> Self {
         VectorHeader {
-            l2_norm: value.l2_norm_sq.sqrt() as f32,
+            l2_norm: value.l2_norm_sq.sqrt(),
             lower: value.min,
             upper: value.max,
             component_sum: 0,

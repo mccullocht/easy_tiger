@@ -20,9 +20,9 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     VectorStats {
         min,
         max,
-        mean: mean.into(),
-        std_dev: (variance / vector.len() as f32).sqrt().into(),
-        l2_norm_sq: dot.into(),
+        mean,
+        std_dev: (variance / vector.len() as f32).sqrt(),
+        l2_norm_sq: dot,
     }
 }
 
@@ -70,7 +70,7 @@ pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f
         }
         let loss_candidate = compute_loss(
             vector,
-            (lower_candidate as f32, upper_candidate as f32),
+            (lower_candidate, upper_candidate),
             norm_sq.into(),
             bits,
         );
@@ -81,7 +81,7 @@ pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f
         upper = upper_candidate;
         loss = loss_candidate;
     }
-    (lower as f32, upper as f32)
+    (lower, upper)
 }
 
 pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {

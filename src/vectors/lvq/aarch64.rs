@@ -55,9 +55,9 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     VectorStats {
         min,
         max,
-        mean: mean as f32,
-        std_dev: (mean_sq as f32 / vector.len() as f32).sqrt(),
-        l2_norm_sq: dot.into(),
+        mean,
+        std_dev: (mean_sq / vector.len() as f32).sqrt(),
+        l2_norm_sq: dot,
     }
 }
 
@@ -92,10 +92,10 @@ pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f
     let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
 
     let scale = (1.0 - LAMBDA) / norm_sq as f32;
-    let mut lower = (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev as f32 + stats.mean as f32)
-        .clamp(stats.min, stats.max);
-    let mut upper = (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev as f32 + stats.mean as f32)
-        .clamp(stats.min, stats.max);
+    let mut lower =
+        (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
+    let mut upper =
+        (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
 
     let points_incl = ((1 << bits) - 1) as f32;
     for _ in 0..5 {
@@ -162,12 +162,8 @@ pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f
         if (lower - lower_candidate).abs() < 1e-8 && (upper - upper_candidate).abs() < 1e-8 {
             break;
         }
-        let loss_candidate = compute_loss(
-            vector,
-            (lower_candidate as f32, upper_candidate as f32),
-            norm_sq,
-            bits,
-        );
+        let loss_candidate =
+            compute_loss(vector, (lower_candidate, upper_candidate), norm_sq, bits);
         if loss_candidate > loss {
             break;
         }
@@ -175,7 +171,7 @@ pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f
         upper = upper_candidate;
         loss = loss_candidate;
     }
-    (lower as f32, upper as f32)
+    (lower, upper)
 }
 
 pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {

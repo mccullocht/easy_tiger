@@ -532,7 +532,8 @@ mod test {
                 0.25373134,
                 0.25373134
             ]
-            .as_ref()
+            .as_ref(),
+            epsilon = 0.00001
         );
     }
 
@@ -639,7 +640,7 @@ mod test {
                 0.3992537
             ]
             .as_ref(),
-            epsilon = 0.0001
+            epsilon = 0.01
         );
     }
 

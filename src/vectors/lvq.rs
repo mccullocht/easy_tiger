@@ -167,6 +167,7 @@ struct TwoLevelQuantizer<'a> {
     primary_it: PrimaryQuantizer<'a>,
     f32_it: std::slice::Iter<'a, f32>,
     lower: f32,
+    upper: f32,
     delta: f32,
 }
 
@@ -175,11 +176,13 @@ impl<'a> TwoLevelQuantizer<'a> {
         let primary_it = PrimaryQuantizer::new(v, bits1);
         let f32_it = v.iter();
         let lower = -primary_it.delta / 2.0;
+        let upper = primary_it.delta / 2.0;
         let delta = primary_it.delta / ((1 << bits2) - 1) as f32;
         Self {
             primary_it,
             f32_it,
             lower,
+            upper,
             delta,
         }
     }
@@ -195,10 +198,8 @@ impl Iterator for TwoLevelQuantizer<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         let x = self.f32_it.next()?;
         let q = self.primary_it.next()?;
-        // TODO: clamp the residual rather than the input to use the full residual space when we
-        // are close the boundary.
-        let res = x.clamp(self.primary_it.header.lower, self.primary_it.header.upper)
-            - ((q as f32 * self.primary_it.delta) + self.primary_it.header.lower);
+        let res = (*x - ((q as f32 * self.primary_it.delta) + self.primary_it.header.lower))
+            .clamp(self.lower, self.upper);
         let r = ((res - self.lower) / self.delta).round() as u8;
         Some((q, r))
     }
@@ -611,7 +612,7 @@ mod test {
         assert_eq!(lvq.primary.vector, &[0b11100000, 0b11]);
         assert_abs_diff_eq!(
             lvq.vector.as_ref(),
-            [128, 128, 160, 200, 240, 25, 66, 106, 128, 128].as_ref(),
+            [79, 120, 160, 200, 240, 25, 66, 106, 146, 186].as_ref(),
             epsilon = 1,
         );
         assert_abs_diff_eq!(
@@ -626,19 +627,19 @@ mod test {
         assert_abs_diff_eq!(
             lvq.f32_iter().collect::<Vec<_>>().as_ref(),
             [
-                -0.3793532,
-                -0.3793532,
+                -0.5012437,
+                -0.3992537,
                 -0.29975122,
                 -0.20024875,
                 -0.100746274,
-                -0.0012437701,
+                0.0012437701, // XXX why is this negative on aarch64???
                 0.100746274,
                 0.20024875,
-                0.2549751,
-                0.2549751
+                0.29975122,
+                0.3992537
             ]
             .as_ref(),
-            epsilon = 0.001
+            epsilon = 0.0001
         );
     }
 
@@ -721,7 +722,7 @@ mod test {
         );
         assert_abs_diff_eq!(
             lvq.vector.as_ref(),
-            [128, 202, 35, 123, 211, 44, 132, 220, 53, 127].as_ref(),
+            [114, 202, 35, 123, 211, 44, 132, 220, 53, 141].as_ref(),
             epsilon = 1
         );
         let component_sum = lvq
@@ -743,7 +744,7 @@ mod test {
         assert_abs_diff_eq!(
             lvq.f32_iter().collect::<Vec<_>>().as_ref(),
             [
-                -0.49980053,
+                -0.49999422,
                 -0.39999557,
                 -0.29999694,
                 -0.19999832,
@@ -752,7 +753,7 @@ mod test {
                 0.09999758,
                 0.19999622,
                 0.2999949,
-                0.39979985
+                0.39999354
             ]
             .as_ref(),
             epsilon = 0.0001

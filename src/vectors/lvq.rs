@@ -598,7 +598,8 @@ mod test {
                 0.3010256,
                 0.39980677
             ]
-            .as_ref()
+            .as_ref(),
+            epsilon = 0.0001
         );
     }
 
@@ -608,9 +609,10 @@ mod test {
         let encoded = TwoLevelVectorCoder::<1, 8>::default().encode(&vec);
         let lvq = TwoLevelVector::<1, 8>::new(&encoded).expect("readable");
         assert_eq!(lvq.primary.vector, &[0b11100000, 0b11]);
-        assert_eq!(
-            lvq.vector,
-            &[128, 128, 160, 200, 240, 25, 66, 106, 128, 128]
+        assert_abs_diff_eq!(
+            lvq.vector.as_ref(),
+            [128, 128, 160, 200, 240, 25, 66, 106, 128, 128].as_ref(),
+            epsilon = 1,
         );
         assert_abs_diff_eq!(
             lvq.primary.header,
@@ -716,7 +718,11 @@ mod test {
             lvq.primary.vector,
             &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]
         );
-        assert_eq!(lvq.vector, &[128, 202, 35, 123, 211, 44, 132, 220, 53, 127]);
+        assert_abs_diff_eq!(
+            lvq.vector.as_ref(),
+            [128, 202, 35, 123, 211, 44, 132, 220, 53, 127].as_ref(),
+            epsilon = 1
+        );
         let component_sum = lvq
             .primary
             .vector

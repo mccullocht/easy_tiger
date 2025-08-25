@@ -1,9 +1,12 @@
 //! aarch64 implementations of lvq routines.
 
 use std::arch::aarch64::{
-    float32x4_t, vaddq_f32, vaddq_f64, vaddvq_f32, vcvt_f64_f32, vcvt_high_f64_f32, vdivq_f32,
-    vdupq_n_f32, vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64,
-    vld1q_f32, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vrndaq_f32,
+    float32x4_t, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddq_u32, vaddvq_f32, vaddvq_u32, vcombine_u16,
+    vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vdivq_f32, vdupq_n_f32, vdupq_n_f64,
+    vdupq_n_s8, vdupq_n_u32, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64,
+    vgetq_lane_u64, vld1q_f32, vld1q_s16, vld1q_s32, vld1q_s8, vmaxq_f32, vmaxvq_f32, vminq_f32,
+    vminvq_f32, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64,
+    vpaddq_u32, vpaddq_u8, vreinterpretq_u64_u8, vrndaq_f32, vshlq_u32, vshlq_u8, vst1q_u8,
     vsubq_f32, vsubq_f64,
 };
 
@@ -214,6 +217,117 @@ pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: us
         e += diff * diff;
     }
     (1.0 - LAMBDA as f64) * xe as f64 * xe as f64 / norm_sq + LAMBDA as f64 * e as f64
+}
+
+pub fn lvq1_quantize_and_pack<const B: usize>(
+    v: &[f32],
+    lower: f32,
+    upper: f32,
+    out: &mut [u8],
+) -> u32 {
+    // XXX basics of the loop is min/max, subtract, div delta, round
+    // XXX if I go 4 at a time then packing is pretty simple:
+    // * shift left by a fixed mask
+    //   - 1: 0, 1, 2, 3
+    //   - 2: 0, 2, 4, 6
+    //   - 4: 0, 4, 8, 12
+    //   - 8: 0, 8, 16, 24
+    // * sum across vector
+    // * write
+    //   - 1: nibble
+    //   - 2: byte
+    //   - 4: half word
+    //   - 8: word
+    // if i go 8 at a time then I have to narrow to 16x8
+    // * shift left by mask then sum across vector
+    //   - 1: 0, 1, 2, 3, 4, 5, 6, 7
+    //   - 2: 0, 2, 4, 6, 8, 10, 12, 14
+    // at 4 i pack 32 bits and 8 i pack 64 bits at a time
+    //   - 4: 0, 4, 8, 12, 0, 4, 8, 12 + add pairs
+    let tail_split = v.len() & !15;
+    let component_sum = if tail_split > 0 {
+        unsafe {
+            let lowerv = vdupq_n_f32(lower);
+            let upperv = vdupq_n_f32(upper);
+            let deltav = vdupq_n_f32(((upper - lower) / ((1 << B) - 1) as f32).recip());
+            let mut component_sumv = 0u32;
+            for i in (0..tail_split).step_by(16) {
+                // Load an quantize 16 values.
+                let a = vld1q_f32(v.as_ptr().add(i));
+                let qa = vcvtaq_u32_f32(vmulq_f32(
+                    vsubq_f32(vmaxq_f32(vminq_f32(a, upperv), lowerv), lowerv),
+                    deltav,
+                ));
+
+                let b = vld1q_f32(v.as_ptr().add(i + 4));
+                let qb = vcvtaq_u32_f32(vmulq_f32(
+                    vsubq_f32(vmaxq_f32(vminq_f32(b, upperv), lowerv), lowerv),
+                    deltav,
+                ));
+
+                let c = vld1q_f32(v.as_ptr().add(i + 8));
+                let qc = vcvtaq_u32_f32(vmulq_f32(
+                    vsubq_f32(vmaxq_f32(vminq_f32(c, upperv), lowerv), lowerv),
+                    deltav,
+                ));
+
+                let d = vld1q_f32(v.as_ptr().add(i + 12));
+                let qd = vcvtaq_u32_f32(vmulq_f32(
+                    vsubq_f32(vmaxq_f32(vminq_f32(d, upperv), lowerv), lowerv),
+                    deltav,
+                ));
+
+                // Narrow the 16 values into a single 8x16 register. 6x instr, 7 for component_sum
+                let qab = vmovn_high_u32(vmovn_u32(qa), qb);
+                let qcd = vmovn_high_u32(vmovn_u32(qc), qd);
+                let qabcd = vmovn_high_u16(vmovn_u16(qab), qcd);
+                // Add to component sum as an across vector op to minimize vector instructions.
+                // Alternatives are 4 32x4 adds or 2 16x8 adds plus a an add across every 256d.
+                component_sumv += u32::from(vaddlvq_u8(qabcd));
+                match B {
+                    // XXX this is only 2 bytes. maybe it needs to be 8? 64 elem at a time
+                    // XXX qabcd => shl, addp, addp, addp, extract lane (16), store
+                    // XXX qab|qcd => 2x shl, 2x sum across, 2x store
+                    1 => {
+                        // XXX 1x shl 0,1,0,1,... 1x vpaddlq, 1x shl [0, 2, 4, 8, ...], 1x sum across
+                    }
+                    // XXX this is only 4 bytes. maybe it needs to be 8? 32 elem at a time
+                    // XXX shl, addp, addp, extract lane (32-bit), store
+                    2 => todo!(),
+                    // XXX this is only 8 bytes
+                    // XXX if i start with qab, qcd then it's 2x shl, 2x sum across, 2x store
+                    // XXX qabcd => shl, addp, extract lane (64 bit), store
+                    4 => {
+                        // 10x instr for this.
+                        let sh = vshlq_u8(
+                            qabcd,
+                            vld1q_s8([0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4].as_ptr()),
+                        );
+                        let vec_lo8 = vpaddq_u8(sh, sh);
+                        std::ptr::write(
+                            out.as_mut_ptr().add(i / 2) as *mut u64,
+                            vgetq_lane_u64::<0>(vreinterpretq_u64_u8(vec_lo8)).to_le(),
+                        );
+                    }
+                    8 => vst1q_u8(out.as_mut_ptr().add(i), qabcd),
+                    _ => unimplemented!(),
+                }
+            }
+            component_sumv
+        }
+    } else {
+        0
+    };
+    todo!()
+}
+
+pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
+    v: &[f32],
+    lower: f32,
+    upper: f32,
+    out: &mut [u8],
+) -> u32 {
+    todo!()
 }
 
 #[cfg(test)]

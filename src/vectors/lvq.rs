@@ -480,10 +480,26 @@ mod packing {
 
 #[cfg(test)]
 mod test {
+    use approx::{abs_diff_eq, assert_abs_diff_eq, AbsDiffEq};
+
     use crate::vectors::lvq::{
         F32VectorCoder, PrimaryVector, PrimaryVectorCoder, TwoLevelVector, TwoLevelVectorCoder,
         VectorHeader,
     };
+
+    impl AbsDiffEq for VectorHeader {
+        type Epsilon = f32;
+
+        fn default_epsilon() -> Self::Epsilon {
+            0.00001
+        }
+
+        fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
+            abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
+                && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
+                && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
+        }
+    }
 
     #[test]
     fn lvq1_1() {
@@ -491,7 +507,7 @@ mod test {
         let encoded = PrimaryVectorCoder::<1>::default().encode(&vec);
         let lvq = PrimaryVector::<1>::new(&encoded).expect("readable");
         assert_eq!(lvq.vector, &[0b11100000, 0b11]);
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.header,
             VectorHeader {
                 l2_norm: 0.9219545,
@@ -524,7 +540,7 @@ mod test {
         let encoded = PrimaryVectorCoder::<4>::default().encode(&vec);
         let lvq = PrimaryVector::<4>::new(&encoded).expect("readable");
         assert_eq!(lvq.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.header,
             VectorHeader {
                 l2_norm: 0.9219545,
@@ -557,7 +573,7 @@ mod test {
         let lvq = PrimaryVector::<8>::new(&encoded).expect("readable");
         assert_eq!(lvq.vector, &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]);
         let component_sum = lvq.vector.iter().copied().map(u32::from).sum::<u32>();
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.header,
             VectorHeader {
                 l2_norm: 0.9219545,
@@ -593,7 +609,7 @@ mod test {
             lvq.vector,
             &[128, 128, 160, 200, 240, 25, 66, 106, 128, 128]
         );
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.9219545,
@@ -626,7 +642,7 @@ mod test {
         let lvq = TwoLevelVector::<4, 4>::new(&encoded).expect("readable");
         assert_eq!(lvq.primary.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
         assert_eq!(lvq.vector, &[0x38, 0x8d, 0xc3, 0x27, 0x7c]);
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.9219545,
@@ -659,7 +675,7 @@ mod test {
         let lvq = TwoLevelVector::<4, 8>::new(&encoded).expect("readable");
         assert_eq!(lvq.primary.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
         assert_eq!(lvq.vector, &[141, 53, 220, 132, 45, 212, 124, 36, 203, 115]);
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.9219545,
@@ -702,7 +718,7 @@ mod test {
             .copied()
             .map(u32::from)
             .sum::<u32>();
-        assert_eq!(
+        assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.9219545,

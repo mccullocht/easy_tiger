@@ -34,12 +34,12 @@ impl From<&[f32]> for VectorStats {
             };
         }
 
-        // XXX fix standard deviance and l2 norm on main first.
-        let scalar_stats = scalar::compute_vector_stats(value);
-        let aarch64_stats = aarch64::compute_vector_stats(value);
-        println!("  scalar  {scalar_stats:?}");
-        println!("  aarch64 {aarch64_stats:?}");
-        scalar_stats
+        #[cfg(target_arch = "aarch64")]
+        use aarch64::compute_vector_stats;
+        #[cfg(not(target_arch = "aarch64"))]
+        use scalar::compute_vector_stats;
+
+        compute_vector_stats(value)
     }
 }
 

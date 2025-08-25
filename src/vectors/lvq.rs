@@ -98,7 +98,7 @@ impl From<VectorStats> for VectorHeader {
     }
 }
 
-const MINIMUM_MSE_GRID: [(f64, f64); 8] = [
+const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
     (-0.798, 0.798),
     (-1.493, 1.493),
     (-2.051, 2.051),
@@ -109,70 +109,12 @@ const MINIMUM_MSE_GRID: [(f64, f64); 8] = [
     (-3.922, 3.922),
 ];
 
-const LAMBDA: f64 = 0.1;
-
-fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
-    let norm_sq: f64 = stats.l2_norm_sq;
-    let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
-
-    let scale = (1.0 - LAMBDA) / norm_sq;
-    let mut lower: f64 = (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean)
-        .clamp(stats.min.into(), stats.max.into());
-    let mut upper: f64 = (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean)
-        .clamp(stats.min.into(), stats.max.into());
-
-    let points_incl = ((1 << bits) - 1) as f64;
-    for _ in 0..5 {
-        let step_inv = points_incl / (upper - lower);
-        // calculate the grid points for coordinate descent.
-        let mut daa = 0.0;
-        let mut dab = 0.0;
-        let mut dbb = 0.0;
-        let mut dax = 0.0;
-        let mut dbx = 0.0;
-        for xi in vector.iter().copied().map(f64::from) {
-            let k = ((xi.clamp(lower, upper) - lower) * step_inv).round();
-            let s = k / points_incl;
-            daa += (1.0 - s) * (1.0 - s);
-            dab += (1.0 - s) * s;
-            dbb += s * s;
-            dax += xi * (1.0 - s);
-            dbx += xi * s;
-        }
-        let m0 = scale * dax * dax + LAMBDA * daa;
-        let m1 = scale * dax * dbx + LAMBDA * dab;
-        let m2 = scale * dbx * dbx + LAMBDA * dbb;
-        let det = m0 * m2 - m1 * m1;
-        // if the determinant is zero we can't update the interval
-        if det == 0.0 {
-            break;
-        }
-
-        let lower_candidate = (m2 * dax - m1 * dbx) / det;
-        let upper_candidate = (m0 * dbx - m1 * dax) / det;
-        if (lower - lower_candidate).abs() < 1e-8 && (upper - upper_candidate).abs() < 1e-8 {
-            break;
-        }
-        let loss_candidate = compute_loss(
-            vector,
-            (lower_candidate as f32, upper_candidate as f32),
-            norm_sq,
-            bits,
-        );
-        if loss_candidate > loss {
-            break;
-        }
-        lower = lower_candidate;
-        upper = upper_candidate;
-        loss = loss_candidate;
-    }
-    (lower as f32, upper as f32)
-}
+const LAMBDA: f32 = 0.1;
 
 #[cfg(target_arch = "aarch64")]
-use aarch64::compute_loss;
+use aarch64::optimize_interval;
 #[cfg(not(target_arch = "aarch64"))]
-use scalar::compute_loss;
+use scalar::optimize_interval;
 
 struct PrimaryQuantizer<'a> {
     it: std::slice::Iter<'a, f32>,
@@ -253,6 +195,8 @@ impl Iterator for TwoLevelQuantizer<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         let x = self.f32_it.next()?;
         let q = self.primary_it.next()?;
+        // TODO: clamp the residual rather than the input to use the full residual space when we
+        // are close the boundary.
         let res = x.clamp(self.primary_it.header.lower, self.primary_it.header.upper)
             - ((q as f32 * self.primary_it.delta) + self.primary_it.header.lower);
         let r = ((res - self.lower) / self.delta).round() as u8;
@@ -551,8 +495,8 @@ mod test {
             lvq.header,
             VectorHeader {
                 l2_norm: 0.9219545,
-                lower: -0.38059705,
-                upper: 0.25373137,
+                lower: -0.38059697,
+                upper: 0.25373134,
                 component_sum: 5,
             }
         );
@@ -560,16 +504,16 @@ mod test {
         assert_eq!(
             lvq.f32_iter().take(10).collect::<Vec<_>>(),
             &[
-                -0.38059705,
-                -0.38059705,
-                -0.38059705,
-                -0.38059705,
-                -0.38059705,
-                0.25373137,
-                0.25373137,
-                0.25373137,
-                0.25373137,
-                0.25373137
+                -0.38059697,
+                -0.38059697,
+                -0.38059697,
+                -0.38059697,
+                -0.38059697,
+                0.25373134,
+                0.25373134,
+                0.25373134,
+                0.25373134,
+                0.25373134
             ]
         );
     }
@@ -585,7 +529,7 @@ mod test {
             VectorHeader {
                 l2_norm: 0.9219545,
                 lower: -0.5032572,
-                upper: 0.4030041,
+                upper: 0.40300408,
                 component_sum: 75,
             }
         );
@@ -617,24 +561,24 @@ mod test {
             lvq.header,
             VectorHeader {
                 l2_norm: 0.9219545,
-                lower: -0.49980748,
-                upper: 0.39980662,
+                lower: -0.49980745,
+                upper: 0.39980674,
                 component_sum,
             }
         );
         assert_eq!(
             lvq.f32_iter().collect::<Vec<_>>(),
             &[
-                -0.49980748,
-                -0.4010263,
-                -0.29871726,
-                -0.19993612,
-                -0.10115495,
-                0.0011540651,
-                0.09993523,
-                0.1987164,
-                0.30102545,
-                0.39980662
+                -0.49980745,
+                -0.40102628,
+                -0.2987172,
+                -0.19993606,
+                -0.10115489,
+                0.0011541545,
+                0.09993532,
+                0.19871649,
+                0.3010256,
+                0.39980677
             ]
         );
     }
@@ -647,30 +591,30 @@ mod test {
         assert_eq!(lvq.primary.vector, &[0b11100000, 0b11]);
         assert_eq!(
             lvq.vector,
-            &[128, 128, 160, 200, 240, 26, 66, 106, 128, 128]
+            &[128, 128, 160, 200, 240, 25, 66, 106, 128, 128]
         );
         assert_eq!(
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.9219545,
-                lower: -0.38059705,
-                upper: 0.25373137,
+                lower: -0.38059697,
+                upper: 0.25373134,
                 component_sum: 5,
             }
         );
         assert_eq!(
             lvq.f32_iter().collect::<Vec<_>>(),
             &[
-                -0.37935328,
-                -0.37935328,
-                -0.29975128,
-                -0.20024881,
-                -0.100746304,
-                0.0012437701,
+                -0.3793532,
+                -0.3793532,
+                -0.29975122,
+                -0.20024875,
+                -0.100746274,
+                -0.0012437701,
                 0.100746274,
-                0.20024878,
-                0.25497514,
-                0.25497514
+                0.20024875,
+                0.2549751,
+                0.2549751
             ]
         );
     }
@@ -687,7 +631,7 @@ mod test {
             VectorHeader {
                 l2_norm: 0.9219545,
                 lower: -0.5032572,
-                upper: 0.4030041,
+                upper: 0.40300408,
                 component_sum: 75,
             }
         );
@@ -720,7 +664,7 @@ mod test {
             VectorHeader {
                 l2_norm: 0.9219545,
                 lower: -0.5032572,
-                upper: 0.4030041,
+                upper: 0.40300408,
                 component_sum: 75,
             }
         );
@@ -750,7 +694,7 @@ mod test {
             lvq.primary.vector,
             &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]
         );
-        assert_eq!(lvq.vector, &[128, 202, 35, 123, 211, 44, 132, 220, 53, 128]);
+        assert_eq!(lvq.vector, &[128, 202, 35, 123, 211, 44, 132, 220, 53, 127]);
         let component_sum = lvq
             .primary
             .vector
@@ -762,24 +706,24 @@ mod test {
             lvq.primary.header,
             VectorHeader {
                 l2_norm: 0.9219545,
-                lower: -0.49980748,
-                upper: 0.39980662,
+                lower: -0.49980745,
+                upper: 0.39980674,
                 component_sum,
             }
         );
         assert_eq!(
             lvq.f32_iter().collect::<Vec<_>>(),
             &[
-                -0.49980056,
-                -0.3999956,
-                -0.299997,
-                -0.19999838,
-                -0.09999974,
-                -1.14867e-6,
-                0.09999749,
-                0.19999613,
-                0.29999474,
-                0.39981353
+                -0.49980053,
+                -0.39999557,
+                -0.29999694,
+                -0.19999832,
+                -0.09999968,
+                -1.0593794e-6,
+                0.09999758,
+                0.19999622,
+                0.2999949,
+                0.39979985
             ]
         );
     }

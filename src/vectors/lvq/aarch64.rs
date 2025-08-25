@@ -7,35 +7,7 @@ use std::arch::aarch64::{
     vsubq_f32, vsubq_f64,
 };
 
-use super::{VectorStats, LAMBDA};
-
-// XXX this could compute both mean and variance
-fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f64 {
-    let (means2, m2) = unsafe {
-        // XXX switch to f32 here; widen once done.
-        let means0 = vcvt_f64_f32(vget_low_f32(means));
-        let means1 = vcvt_high_f64_f32(means);
-        let var0 = vcvt_f64_f32(vget_low_f32(m2));
-        let var1 = vcvt_high_f64_f32(m2);
-
-        let mean = vmulq_f64(vaddq_f64(means0, means1), vdupq_n_f64(0.5));
-
-        let delta = vsubq_f64(means0, means1);
-        let delta_sq = vmulq_f64(delta, delta);
-        let weight = vdupq_n_f64(((n / 4) * (n / 4) / (n / 2)) as f64);
-        let m2 = vfmaq_f64(vaddq_f64(var0, var1), delta_sq, weight);
-
-        (mean, m2)
-    };
-
-    unsafe {
-        let delta = vsubq_f64(means2, vextq_f64::<1>(means2, means2));
-        let delta_sq = vmulq_f64(delta, delta);
-        let weight = vdupq_n_f64(((n / 2) * (n / 2) / n) as f64);
-        let m2 = vfmaq_f64(vaddq_f64(m2, vextq_f64::<1>(m2, m2)), delta_sq, weight);
-        vgetq_lane_f64::<0>(m2)
-    }
-}
+use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let tail_split = vector.len() & !3;
@@ -90,6 +62,123 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     }
 }
 
+fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f64 {
+    let (means2, m2) = unsafe {
+        let means0 = vcvt_f64_f32(vget_low_f32(means));
+        let means1 = vcvt_high_f64_f32(means);
+        let var0 = vcvt_f64_f32(vget_low_f32(m2));
+        let var1 = vcvt_high_f64_f32(m2);
+
+        let mean = vmulq_f64(vaddq_f64(means0, means1), vdupq_n_f64(0.5));
+
+        let delta = vsubq_f64(means0, means1);
+        let delta_sq = vmulq_f64(delta, delta);
+        let weight = vdupq_n_f64(((n / 4) * (n / 4) / (n / 2)) as f64);
+        let m2 = vfmaq_f64(vaddq_f64(var0, var1), delta_sq, weight);
+
+        (mean, m2)
+    };
+
+    unsafe {
+        let delta = vsubq_f64(means2, vextq_f64::<1>(means2, means2));
+        let delta_sq = vmulq_f64(delta, delta);
+        let weight = vdupq_n_f64(((n / 2) * (n / 2) / n) as f64);
+        let m2 = vfmaq_f64(vaddq_f64(m2, vextq_f64::<1>(m2, m2)), delta_sq, weight);
+        vgetq_lane_f64::<0>(m2)
+    }
+}
+
+pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+    let norm_sq: f64 = stats.l2_norm_sq;
+    let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
+
+    let scale = (1.0 - LAMBDA) / norm_sq as f32;
+    let mut lower = (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev as f32 + stats.mean as f32)
+        .clamp(stats.min, stats.max);
+    let mut upper = (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev as f32 + stats.mean as f32)
+        .clamp(stats.min, stats.max);
+
+    let points_incl = ((1 << bits) - 1) as f32;
+    for _ in 0..5 {
+        let step_inv = points_incl / (upper - lower);
+        // calculate the grid points for coordinate descent.
+        let tail_split = vector.len() & !3;
+        let (mut daa, mut dab, mut dbb, mut dax, mut dbx) = if tail_split > 0 {
+            unsafe {
+                let lower = vdupq_n_f32(lower);
+                let upper = vdupq_n_f32(upper);
+                let step_inv = vdupq_n_f32(step_inv);
+                let mut daa = vdupq_n_f32(0.0);
+                let mut dab = vdupq_n_f32(0.0);
+                let mut dbb = vdupq_n_f32(0.0);
+                let mut dax = vdupq_n_f32(0.0);
+                let mut dbx = vdupq_n_f32(0.0);
+                for i in (0..tail_split).step_by(4) {
+                    let xi = vld1q_f32(vector.as_ptr().add(i));
+                    let k = vrndaq_f32(vmulq_f32(
+                        vsubq_f32(vminq_f32(vmaxq_f32(xi, lower), upper), lower),
+                        step_inv,
+                    ));
+                    let s = vdivq_f32(k, vdupq_n_f32(points_incl));
+                    let si = vsubq_f32(vdupq_n_f32(1.0), s);
+                    daa = vfmaq_f32(daa, si, si);
+                    dab = vfmaq_f32(dab, si, s);
+                    dbb = vfmaq_f32(dbb, s, s);
+                    dax = vfmaq_f32(dax, xi, si);
+                    dbx = vfmaq_f32(dbx, xi, s);
+                }
+
+                (
+                    vaddvq_f32(daa),
+                    vaddvq_f32(dab),
+                    vaddvq_f32(dbb),
+                    vaddvq_f32(dax),
+                    vaddvq_f32(dbx),
+                )
+            }
+        } else {
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        };
+
+        for xi in vector.iter().copied().skip(tail_split) {
+            let k = ((xi.clamp(lower, upper) - lower) * step_inv).round();
+            let s = k / points_incl;
+            daa += (1.0 - s) * (1.0 - s);
+            dab += (1.0 - s) * s;
+            dbb += s * s;
+            dax += xi * (1.0 - s);
+            dbx += xi * s;
+        }
+        let m0 = scale * dax * dax + LAMBDA * daa;
+        let m1 = scale * dax * dbx + LAMBDA * dab;
+        let m2 = scale * dbx * dbx + LAMBDA * dbb;
+        let det = m0 * m2 - m1 * m1;
+        // if the determinant is zero we can't update the interval
+        if det == 0.0 {
+            break;
+        }
+
+        let lower_candidate = (m2 * dax - m1 * dbx) / det;
+        let upper_candidate = (m0 * dbx - m1 * dax) / det;
+        if (lower - lower_candidate).abs() < 1e-8 && (upper - upper_candidate).abs() < 1e-8 {
+            break;
+        }
+        let loss_candidate = compute_loss(
+            vector,
+            (lower_candidate as f32, upper_candidate as f32),
+            norm_sq,
+            bits,
+        );
+        if loss_candidate > loss {
+            break;
+        }
+        lower = lower_candidate;
+        upper = upper_candidate;
+        loss = loss_candidate;
+    }
+    (lower as f32, upper as f32)
+}
+
 pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {
     let a = interval.0;
     let b = interval.1;
@@ -129,7 +218,7 @@ pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: us
         xe += xi * diff;
         e += diff * diff;
     }
-    (1.0 - LAMBDA) * xe as f64 * xe as f64 / norm_sq + LAMBDA * e as f64
+    (1.0 - LAMBDA as f64) * xe as f64 * xe as f64 / norm_sq + LAMBDA as f64 * e as f64
 }
 
 #[cfg(test)]

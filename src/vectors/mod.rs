@@ -866,8 +866,8 @@ mod test {
     #[test]
     fn lvq1x4_dot() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ1x4, i, &a, &b, 0.04);
-            query_distance_compare(Dot, F32VectorCoding::LVQ1x4, i, &a, &b, 0.05);
+            distance_compare(Dot, F32VectorCoding::LVQ1x4, i, &a, &b, 0.02);
+            query_distance_compare(Dot, F32VectorCoding::LVQ1x4, i, &a, &b, 0.02);
         }
     }
 

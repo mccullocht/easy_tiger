@@ -20,9 +20,9 @@ use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 struct VectorStats {
     min: f32,
     max: f32,
-    mean: f64,
-    std_dev: f64,
-    l2_norm_sq: f64,
+    mean: f32,
+    std_dev: f32,
+    l2_norm_sq: f32,
 }
 
 impl From<&[f32]> for VectorStats {
@@ -632,7 +632,7 @@ mod test {
                 -0.29975122,
                 -0.20024875,
                 -0.100746274,
-                0.0012437701, // XXX why is this negative on aarch64???
+                -0.0012437701,
                 0.100746274,
                 0.20024875,
                 0.29975122,

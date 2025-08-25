@@ -10,9 +10,8 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
         |mut stats, (i, x)| {
             stats.0 = x.min(stats.0);
             stats.1 = x.max(stats.1);
-            let x: f64 = x.into();
             let delta = x - stats.2;
-            stats.2 += delta / (i + 1) as f64;
+            stats.2 += delta / (i + 1) as f32;
             stats.3 += delta * (x - stats.2);
             stats.4 += x * x;
             stats
@@ -21,23 +20,23 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     VectorStats {
         min,
         max,
-        mean,
-        std_dev: (variance / vector.len() as f64).sqrt(),
-        l2_norm_sq: dot,
+        mean: mean.into(),
+        std_dev: (variance / vector.len() as f32).sqrt().into(),
+        l2_norm_sq: dot.into(),
     }
 }
 
 pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
-    let norm_sq: f64 = stats.l2_norm_sq;
-    let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
+    let norm_sq = stats.l2_norm_sq;
+    let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq.into(), bits);
 
-    let scale = (1.0 - LAMBDA as f64) / norm_sq;
-    let mut lower: f64 = (MINIMUM_MSE_GRID[bits - 1].0 as f64 * stats.std_dev + stats.mean)
-        .clamp(stats.min.into(), stats.max.into());
-    let mut upper: f64 = (MINIMUM_MSE_GRID[bits - 1].1 as f64 * stats.std_dev + stats.mean)
-        .clamp(stats.min.into(), stats.max.into());
+    let scale = (1.0 - LAMBDA) / norm_sq;
+    let mut lower =
+        (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
+    let mut upper =
+        (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
 
-    let points_incl = ((1 << bits) - 1) as f64;
+    let points_incl = ((1 << bits) - 1) as f32;
     for _ in 0..5 {
         let step_inv = points_incl / (upper - lower);
         // calculate the grid points for coordinate descent.
@@ -46,7 +45,7 @@ pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f
         let mut dbb = 0.0;
         let mut dax = 0.0;
         let mut dbx = 0.0;
-        for xi in vector.iter().copied().map(f64::from) {
+        for xi in vector.iter().copied() {
             let k = ((xi.clamp(lower, upper) - lower) * step_inv).round();
             let s = k / points_incl;
             daa += (1.0 - s) * (1.0 - s);
@@ -55,9 +54,9 @@ pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f
             dax += xi * (1.0 - s);
             dbx += xi * s;
         }
-        let m0 = scale * dax * dax + LAMBDA as f64 * daa;
-        let m1 = scale * dax * dbx + LAMBDA as f64 * dab;
-        let m2 = scale * dbx * dbx + LAMBDA as f64 * dbb;
+        let m0 = scale * dax * dax + LAMBDA * daa;
+        let m1 = scale * dax * dbx + LAMBDA * dab;
+        let m2 = scale * dbx * dbx + LAMBDA * dbb;
         let det = m0 * m2 - m1 * m1;
         // if the determinant is zero we can't update the interval
         if det == 0.0 {
@@ -72,7 +71,7 @@ pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f
         let loss_candidate = compute_loss(
             vector,
             (lower_candidate as f32, upper_candidate as f32),
-            norm_sq,
+            norm_sq.into(),
             bits,
         );
         if loss_candidate > loss {

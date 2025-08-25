@@ -32,7 +32,7 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
             (
                 vminvq_f32(min),
                 vmaxvq_f32(max),
-                vaddvq_f32(mean) as f64 / 4.0,
+                vaddvq_f32(mean) / 4.0,
                 reduce_variance(mean, mean_sq, tail_split),
                 vaddvq_f32(dot),
             )
@@ -46,9 +46,8 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
             stats.0 = x.min(stats.0);
             stats.1 = x.max(stats.1);
             stats.4 += x * x;
-            let x: f64 = x.into();
             let delta = x - stats.2;
-            stats.2 += delta / (i + 1) as f64;
+            stats.2 += delta / (i + 1) as f32;
             stats.3 += delta * (x - stats.2);
             stats
         },
@@ -56,13 +55,13 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     VectorStats {
         min,
         max,
-        mean,
-        std_dev: (mean_sq / vector.len() as f64).sqrt(),
+        mean: mean as f32,
+        std_dev: (mean_sq as f32 / vector.len() as f32).sqrt(),
         l2_norm_sq: dot.into(),
     }
 }
 
-fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f64 {
+fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f32 {
     let (means2, m2) = unsafe {
         let means0 = vcvt_f64_f32(vget_low_f32(means));
         let means1 = vcvt_high_f64_f32(means);
@@ -84,12 +83,12 @@ fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f64 {
         let delta_sq = vmulq_f64(delta, delta);
         let weight = vdupq_n_f64(n as f64 / 4.0);
         let m2 = vfmaq_f64(vaddq_f64(m2, vextq_f64::<1>(m2, m2)), delta_sq, weight);
-        vgetq_lane_f64::<0>(m2)
+        vgetq_lane_f64::<0>(m2) as f32
     }
 }
 
 pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
-    let norm_sq: f64 = stats.l2_norm_sq;
+    let norm_sq: f64 = stats.l2_norm_sq.into();
     let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
 
     let scale = (1.0 - LAMBDA) / norm_sq as f32;

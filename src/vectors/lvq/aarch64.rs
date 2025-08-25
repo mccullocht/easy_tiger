@@ -73,7 +73,7 @@ fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f64 {
 
         let delta = vsubq_f64(means0, means1);
         let delta_sq = vmulq_f64(delta, delta);
-        let weight = vdupq_n_f64(((n / 4) * (n / 4) / (n / 2)) as f64);
+        let weight = vdupq_n_f64(n as f64 / 8.0);
         let m2 = vfmaq_f64(vaddq_f64(var0, var1), delta_sq, weight);
 
         (mean, m2)
@@ -82,7 +82,7 @@ fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f64 {
     unsafe {
         let delta = vsubq_f64(means2, vextq_f64::<1>(means2, means2));
         let delta_sq = vmulq_f64(delta, delta);
-        let weight = vdupq_n_f64(((n / 2) * (n / 2) / n) as f64);
+        let weight = vdupq_n_f64(n as f64 / 4.0);
         let m2 = vfmaq_f64(vaddq_f64(m2, vextq_f64::<1>(m2, m2)), delta_sq, weight);
         vgetq_lane_f64::<0>(m2)
     }
@@ -245,6 +245,26 @@ mod test {
             0.9628870565403511,
             -0.5074461455585713,
         ];
+        let scalar_stats = crate::vectors::lvq::scalar::compute_vector_stats(&vector);
+        let aarch64_stats = super::compute_vector_stats(&vector);
+        assert_eq!(scalar_stats.min, aarch64_stats.min);
+        assert_eq!(scalar_stats.max, aarch64_stats.max);
+        assert_abs_diff_eq!(scalar_stats.mean, aarch64_stats.mean, epsilon = 0.00001);
+        assert_abs_diff_eq!(
+            scalar_stats.std_dev,
+            aarch64_stats.std_dev,
+            epsilon = 0.00001
+        );
+        assert_abs_diff_eq!(
+            scalar_stats.l2_norm_sq,
+            aarch64_stats.l2_norm_sq,
+            epsilon = 0.00001
+        );
+    }
+
+    #[test]
+    fn compute_vector_stats1() {
+        let vector = [-0.30671382, 0.76678455, 0.21469967, -0.5214135];
         let scalar_stats = crate::vectors::lvq::scalar::compute_vector_stats(&vector);
         let aarch64_stats = super::compute_vector_stats(&vector);
         assert_eq!(scalar_stats.min, aarch64_stats.min);

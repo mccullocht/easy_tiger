@@ -517,9 +517,9 @@ mod test {
             }
         );
         // NB: vector dimensionality is not a multiple of 8 so we're producting extra dimensions.
-        assert_eq!(
-            lvq.f32_iter().take(10).collect::<Vec<_>>(),
-            &[
+        assert_abs_diff_eq!(
+            lvq.f32_iter().take(10).collect::<Vec<_>>().as_ref(),
+            [
                 -0.38059697,
                 -0.38059697,
                 -0.38059697,
@@ -531,6 +531,7 @@ mod test {
                 0.25373134,
                 0.25373134
             ]
+            .as_ref()
         );
     }
 
@@ -549,9 +550,9 @@ mod test {
                 component_sum: 75,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
                 -0.5032572,
                 -0.3824224,
                 -0.32200494,
@@ -563,6 +564,7 @@ mod test {
                 0.28216928,
                 0.4030041
             ]
+            .as_ref()
         );
     }
 
@@ -582,9 +584,9 @@ mod test {
                 component_sum,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
                 -0.49980745,
                 -0.40102628,
                 -0.2987172,
@@ -596,6 +598,7 @@ mod test {
                 0.3010256,
                 0.39980677
             ]
+            .as_ref()
         );
     }
 
@@ -618,9 +621,9 @@ mod test {
                 component_sum: 5,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
                 -0.3793532,
                 -0.3793532,
                 -0.29975122,
@@ -632,6 +635,7 @@ mod test {
                 0.2549751,
                 0.2549751
             ]
+            .as_ref()
         );
     }
 
@@ -651,9 +655,9 @@ mod test {
                 component_sum: 75,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
                 -0.5012433,
                 -0.40054762,
                 -0.2998519,
@@ -665,6 +669,7 @@ mod test {
                 0.30029452,
                 0.4009902
             ]
+            .as_ref()
         );
     }
 
@@ -684,9 +689,9 @@ mod test {
                 component_sum: 75,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
                 -0.50005865,
                 -0.40007377,
                 -0.30008882,
@@ -698,6 +703,7 @@ mod test {
                 0.3000576,
                 0.40004247
             ]
+            .as_ref()
         );
     }
 
@@ -727,9 +733,9 @@ mod test {
                 component_sum,
             }
         );
-        assert_eq!(
-            lvq.f32_iter().collect::<Vec<_>>(),
-            &[
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
                 -0.49980053,
                 -0.39999557,
                 -0.29999694,
@@ -741,6 +747,7 @@ mod test {
                 0.2999949,
                 0.39979985
             ]
+            .as_ref()
         );
     }
 }

@@ -267,7 +267,6 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
     }
 }
 
-#[allow(dead_code, unused_variables)]
 pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     v: &[f32],
     lower: f32,
@@ -277,7 +276,6 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
 ) -> u32 {
     let delta = (upper - lower) / ((1 << B1) - 1) as f32;
     let res_lower = -delta / 2.0;
-    let res_upper = delta / 2.0;
     let res_delta = delta / ((1 << B2) - 1) as f32;
 
     let tail_split = v.len() & !15;

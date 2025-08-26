@@ -1,13 +1,13 @@
 //! aarch64 implementations of lvq routines.
 
 use std::arch::aarch64::{
-    float32x4_t, uint32x4_t, uint8x16x4_t, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddvq_f32,
-    vaddvq_u16, vaddvq_u32, vaddvq_u64, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vdivq_f32,
-    vdupq_n_f32, vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64,
-    vld1q_f32, vld1q_s16, vld1q_s32, vld1q_s64, vld1q_s8, vld1q_u8, vmaxq_f32, vmaxvq_f32,
-    vminq_f32, vminvq_f32, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32,
-    vmulq_f64, vpaddlq_u16, vpaddlq_u32, vpaddlq_u8, vqtbl4q_u8, vreinterpretq_u8_u32, vrndaq_f32,
-    vshlq_u16, vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u8, vsubq_f32, vsubq_f64,
+    float32x4_t, uint8x16_t, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddvq_f32, vaddvq_u16, vaddvq_u32,
+    vaddvq_u64, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vdivq_f32, vdupq_n_f32,
+    vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32,
+    vld1q_s16, vld1q_s32, vld1q_s64, vld1q_s8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32,
+    vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64, vpaddlq_u16,
+    vpaddlq_u32, vpaddlq_u8, vrndaq_f32, vshlq_u16, vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u8,
+    vsubq_f32, vsubq_f64,
 };
 
 use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
@@ -261,11 +261,17 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
                     deltav,
                 ));
 
-                component_sumv += match B {
-                    1 => pack1(i, qa, qb, qc, qd, head),
-                    2 => pack2(i, qa, qb, qc, qd, head),
-                    4 => pack4(i, qa, qb, qc, qd, head),
-                    8 => pack8(i, qa, qb, qc, qd, head),
+                // Reduce to a single byte per dimension.
+                let qab = vmovn_high_u32(vmovn_u32(qa), qb);
+                let qcd = vmovn_high_u32(vmovn_u32(qc), qd);
+                let qabcd = vmovn_high_u16(vmovn_u16(qab), qcd);
+                component_sumv += u32::from(vaddlvq_u8(qabcd));
+
+                match B {
+                    1 => pack1(i, qabcd, head),
+                    2 => pack2(i, qabcd, head),
+                    4 => pack4(i, qabcd, head),
+                    8 => pack8(i, qabcd, head),
                     _ => unimplemented!(),
                 };
             }
@@ -295,18 +301,7 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
 
 /// Pack 16 scalar quantized entries into 1 bit per dimension (2 bytes) and write to out.
 #[inline(always)]
-unsafe fn pack1(
-    start_dim: usize,
-    qa: uint32x4_t,
-    qb: uint32x4_t,
-    qc: uint32x4_t,
-    qd: uint32x4_t,
-    out: &mut [u8],
-) -> u32 {
-    let qab = vmovn_high_u32(vmovn_u32(qa), qb);
-    let qcd = vmovn_high_u32(vmovn_u32(qc), qd);
-    let qabcd = vmovn_high_u16(vmovn_u16(qab), qcd);
-
+unsafe fn pack1(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
     // pack 2 dimensions in a single lane and widen to 16
     let qp2abcd = vpaddlq_u8(vshlq_u8(
         qabcd,
@@ -317,24 +312,11 @@ unsafe fn pack1(
         vld1q_s16([0, 2, 4, 6, 8, 10, 12, 14].as_ptr()),
     ));
     std::ptr::write_unaligned(out.as_mut_ptr().add(start_dim / 8) as *mut u16, v.to_le());
-
-    u32::from(vaddlvq_u8(qabcd))
 }
 
 /// Pack 16 scalar quantized entries into 2 bits per dimension (4 bytes) and write to out.
 #[inline(always)]
-unsafe fn pack2(
-    start_dim: usize,
-    qa: uint32x4_t,
-    qb: uint32x4_t,
-    qc: uint32x4_t,
-    qd: uint32x4_t,
-    out: &mut [u8],
-) -> u32 {
-    let qab = vmovn_high_u32(vmovn_u32(qa), qb);
-    let qcd = vmovn_high_u32(vmovn_u32(qc), qd);
-    let qabcd = vmovn_high_u16(vmovn_u16(qab), qcd);
-
+unsafe fn pack2(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
     // pack 2 dimensions in a single lane with pair add and widen
     let qp2abcd = vpaddlq_u8(vshlq_u8(
         qabcd,
@@ -345,25 +327,11 @@ unsafe fn pack2(
     // shift each entry into a different byte and sum across.
     let v = vaddvq_u32(vshlq_u32(qp4abcd, vld1q_s32([0, 8, 16, 24].as_ptr())));
     std::ptr::write_unaligned(out.as_mut_ptr().add(start_dim / 4) as *mut u32, v.to_le());
-
-    u32::from(vaddlvq_u8(qabcd))
 }
 
 /// Pack 16 scalar quantized entries into 4 bits per dimension (8 bytes) and write to out.
 #[inline(always)]
-unsafe fn pack4(
-    start_dim: usize,
-    qa: uint32x4_t,
-    qb: uint32x4_t,
-    qc: uint32x4_t,
-    qd: uint32x4_t,
-    out: &mut [u8],
-) -> u32 {
-    // XXX i can probably do better here by shuffling into <evens> and <odds>
-    let qab = vmovn_high_u32(vmovn_u32(qa), qb);
-    let qcd = vmovn_high_u32(vmovn_u32(qc), qd);
-    let qabcd = vmovn_high_u16(vmovn_u16(qab), qcd);
-
+unsafe fn pack4(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
     // pack 2 dimensions in a single lane with pair add and widen to 16
     let qp2abcd = vpaddlq_u8(vshlq_u8(
         qabcd,
@@ -378,31 +346,12 @@ unsafe fn pack4(
     let qp8abcd = vpaddlq_u32(vshlq_u32(qp4abcd, vld1q_s32([0, 16, 0, 16].as_ptr())));
     let v = vaddvq_u64(vshlq_u64(qp8abcd, vld1q_s64([0, 32].as_ptr())));
     std::ptr::write_unaligned(out.as_mut_ptr().add(start_dim / 2) as *mut u64, v.to_le());
-
-    u32::from(vaddlvq_u8(qabcd))
 }
 
 /// Pack 16 scalar quantized entries into 8 bits per dimension (16 bytes) and write to out.
 #[inline(always)]
-unsafe fn pack8(
-    start_dim: usize,
-    qa: uint32x4_t,
-    qb: uint32x4_t,
-    qc: uint32x4_t,
-    qd: uint32x4_t,
-    out: &mut [u8],
-) -> u32 {
-    let qabcd = vqtbl4q_u8(
-        uint8x16x4_t(
-            vreinterpretq_u8_u32(qa),
-            vreinterpretq_u8_u32(qb),
-            vreinterpretq_u8_u32(qc),
-            vreinterpretq_u8_u32(qd),
-        ),
-        vld1q_u8([0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60].as_ptr()),
-    );
+unsafe fn pack8(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
     vst1q_u8(out.as_mut_ptr().add(start_dim), qabcd);
-    u32::from(vaddlvq_u8(qabcd))
 }
 
 #[cfg(test)]

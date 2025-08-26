@@ -1,13 +1,13 @@
 //! aarch64 implementations of lvq routines.
 
 use std::arch::aarch64::{
-    float32x4_t, uint8x16_t, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddvq_f32, vaddvq_u16, vaddvq_u32,
-    vaddvq_u64, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vdivq_f32, vdupq_n_f32,
-    vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32,
-    vld1q_s16, vld1q_s32, vld1q_s64, vld1q_s8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32,
-    vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64, vpaddlq_u16,
-    vpaddlq_u32, vpaddlq_u8, vrndaq_f32, vshlq_u16, vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u8,
-    vsubq_f32, vsubq_f64,
+    float32x4_t, uint32x4_t, uint8x16_t, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddvq_f32, vaddvq_u16,
+    vaddvq_u32, vaddvq_u64, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vdivq_f32,
+    vdupq_n_f32, vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64,
+    vld1q_f32, vld1q_s16, vld1q_s32, vld1q_s64, vld1q_s8, vmaxq_f32, vmaxvq_f32, vminq_f32,
+    vminvq_f32, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64,
+    vpaddlq_u16, vpaddlq_u32, vpaddlq_u8, vrndaq_f32, vshlq_u16, vshlq_u32, vshlq_u64, vshlq_u8,
+    vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
@@ -236,30 +236,11 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
             let deltav = vdupq_n_f32(delta.recip());
             let mut component_sumv = 0u32;
             for i in (0..tail_split).step_by(16) {
-                // Load an quantize 16 values.
-                let a = vld1q_f32(v.as_ptr().add(i));
-                let qa = vcvtaq_u32_f32(vmulq_f32(
-                    vsubq_f32(vmaxq_f32(vminq_f32(a, upperv), lowerv), lowerv),
-                    deltav,
-                ));
-
-                let b = vld1q_f32(v.as_ptr().add(i + 4));
-                let qb = vcvtaq_u32_f32(vmulq_f32(
-                    vsubq_f32(vmaxq_f32(vminq_f32(b, upperv), lowerv), lowerv),
-                    deltav,
-                ));
-
-                let c = vld1q_f32(v.as_ptr().add(i + 8));
-                let qc = vcvtaq_u32_f32(vmulq_f32(
-                    vsubq_f32(vmaxq_f32(vminq_f32(c, upperv), lowerv), lowerv),
-                    deltav,
-                ));
-
-                let d = vld1q_f32(v.as_ptr().add(i + 12));
-                let qd = vcvtaq_u32_f32(vmulq_f32(
-                    vsubq_f32(vmaxq_f32(vminq_f32(d, upperv), lowerv), lowerv),
-                    deltav,
-                ));
+                // Load and quantize 16 values.
+                let qa = quantize4(vld1q_f32(v.as_ptr().add(i)), lowerv, upperv, deltav);
+                let qb = quantize4(vld1q_f32(v.as_ptr().add(i + 4)), lowerv, upperv, deltav);
+                let qc = quantize4(vld1q_f32(v.as_ptr().add(i + 8)), lowerv, upperv, deltav);
+                let qd = quantize4(vld1q_f32(v.as_ptr().add(i + 12)), lowerv, upperv, deltav);
 
                 // Reduce to a single byte per dimension.
                 let qab = vmovn_high_u32(vmovn_u32(qa), qb);
@@ -297,6 +278,19 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     out: &mut [u8],
 ) -> u32 {
     todo!()
+}
+
+#[inline(always)]
+unsafe fn quantize4(
+    v: float32x4_t,
+    lower: float32x4_t,
+    upper: float32x4_t,
+    delta_inv: float32x4_t,
+) -> uint32x4_t {
+    vcvtaq_u32_f32(vmulq_f32(
+        vsubq_f32(vmaxq_f32(vminq_f32(v, upper), lower), lower),
+        delta_inv,
+    ))
 }
 
 /// Pack 16 scalar quantized entries into 1 bit per dimension (2 bytes) and write to out.

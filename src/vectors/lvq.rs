@@ -19,7 +19,7 @@ use aarch64::*;
 #[cfg(not(target_arch = "aarch64"))]
 use scalar::*;
 
-use std::{borrow::Cow, iter::FusedIterator};
+use std::borrow::Cow;
 
 use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 
@@ -112,103 +112,6 @@ const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
 ];
 
 const LAMBDA: f32 = 0.1;
-
-struct PrimaryQuantizer<'a> {
-    it: std::slice::Iter<'a, f32>,
-    header: VectorHeader,
-    delta: f32,
-}
-
-impl<'a> PrimaryQuantizer<'a> {
-    fn new(v: &'a [f32], bits: usize) -> Self {
-        let stats = VectorStats::from(v);
-        let mut header = VectorHeader::from(stats);
-        (header.lower, header.upper) = optimize_interval(v, &stats, bits);
-        let delta = (header.upper - header.lower) / ((1 << bits) - 1) as f32;
-        Self {
-            it: v.iter(),
-            header,
-            delta,
-        }
-    }
-
-    fn into_header(self) -> VectorHeader {
-        assert_eq!(self.it.len(), 0);
-        self.header
-    }
-}
-
-impl Iterator for PrimaryQuantizer<'_> {
-    type Item = u8;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.it.next().map(|x| {
-            let q = ((x.clamp(self.header.lower, self.header.upper) - self.header.lower)
-                / self.delta)
-                .round() as u8;
-            self.header.component_sum += u32::from(q);
-            q
-        })
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.it.size_hint()
-    }
-}
-
-impl ExactSizeIterator for PrimaryQuantizer<'_> {}
-
-impl FusedIterator for PrimaryQuantizer<'_> {}
-
-struct TwoLevelQuantizer<'a> {
-    primary_it: PrimaryQuantizer<'a>,
-    f32_it: std::slice::Iter<'a, f32>,
-    lower: f32,
-    upper: f32,
-    delta: f32,
-}
-
-impl<'a> TwoLevelQuantizer<'a> {
-    pub fn new(v: &'a [f32], bits1: usize, bits2: usize) -> Self {
-        let primary_it = PrimaryQuantizer::new(v, bits1);
-        let f32_it = v.iter();
-        let lower = -primary_it.delta / 2.0;
-        let upper = primary_it.delta / 2.0;
-        let delta = primary_it.delta / ((1 << bits2) - 1) as f32;
-        Self {
-            primary_it,
-            f32_it,
-            lower,
-            upper,
-            delta,
-        }
-    }
-
-    fn into_header(self) -> VectorHeader {
-        self.primary_it.into_header()
-    }
-}
-
-impl Iterator for TwoLevelQuantizer<'_> {
-    type Item = (u8, u8);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let x = self.f32_it.next()?;
-        let q = self.primary_it.next()?;
-        let res = (*x - ((q as f32 * self.primary_it.delta) + self.primary_it.header.lower))
-            .clamp(self.lower, self.upper);
-        let r = ((res - self.lower) / self.delta).round() as u8;
-        Some((q, r))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.primary_it.size_hint()
-    }
-}
-
-impl ExactSizeIterator for TwoLevelQuantizer<'_> {}
-
-impl FusedIterator for TwoLevelQuantizer<'_> {}
 
 /// An LVQ1 coded primary vector.
 ///
@@ -331,12 +234,20 @@ pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>;
 
 impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1, B2> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let mut it = TwoLevelQuantizer::new(vector, B1, B2);
+        let stats = VectorStats::from(vector);
+        let mut header = VectorHeader::from(stats);
+        (header.lower, header.upper) = optimize_interval(vector, &stats, B1);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
         let split = packing::two_vector_split(vector_bytes.len(), B1, B2);
         let (primary, residual) = vector_bytes.split_at_mut(split);
-        packing::pack_iter2::<B1, B2>(it.by_ref(), primary, residual);
-        it.into_header().serialize(header_bytes);
+        header.component_sum = scalar::lvq2_quantize_and_pack::<B1, B2>(
+            vector,
+            header.lower,
+            header.upper,
+            primary,
+            residual,
+        );
+        header.serialize(header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {

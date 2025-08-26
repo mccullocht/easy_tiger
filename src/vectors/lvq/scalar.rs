@@ -99,3 +99,22 @@ pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: us
     }
     (1.0 - LAMBDA as f64) * xe * xe / norm_sq + LAMBDA as f64 * e
 }
+
+pub fn lvq1_quantize_and_pack<const B: usize>(
+    v: &[f32],
+    lower: f32,
+    upper: f32,
+    out: &mut [u8],
+) -> u32 {
+    let delta = (upper - lower) / ((1 << B) - 1) as f32;
+    let mut component_sum = 0u32;
+    super::packing::pack_iter::<B>(
+        v.iter().copied().map(|x| {
+            let q = ((x.clamp(lower, upper) - lower) / delta).round() as u8;
+            component_sum += u32::from(q);
+            q
+        }),
+        out,
+    );
+    component_sum
+}

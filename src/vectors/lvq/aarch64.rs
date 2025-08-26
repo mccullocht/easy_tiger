@@ -1,12 +1,13 @@
 //! aarch64 implementations of lvq routines.
 
 use std::arch::aarch64::{
-    float32x4_t, vaddlvq_u32, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddvq_f32, vaddvq_u16, vaddvq_u32,
+    float32x4_t, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddvq_f32, vaddvq_u16, vaddvq_u32, vaddvq_u64,
     vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vdivq_f32, vdupq_n_f32, vdupq_n_f64,
     vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_s16, vld1q_s32,
-    vld1q_s8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmovn_high_u16, vmovn_high_u32,
-    vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64, vpaddlq_u16, vpaddlq_u8, vrndaq_f32, vshlq_u16,
-    vshlq_u32, vshlq_u8, vst1q_u8, vsubq_f32, vsubq_f64,
+    vld1q_s64, vld1q_s8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmovn_high_u16,
+    vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64, vpaddlq_u16, vpaddlq_u32,
+    vpaddlq_u8, vrndaq_f32, vshlq_u16, vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u8, vsubq_f32,
+    vsubq_f64,
 };
 
 use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
@@ -228,7 +229,7 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
 
     let tail_split = v.len() & !15;
     let (head, tail) = out.split_at_mut(tail_split * B / 8);
-    let mut component_sum = if tail_split > 0 {
+    let component_sum = if tail_split > 0 {
         unsafe {
             let lowerv = vdupq_n_f32(lower);
             let upperv = vdupq_n_f32(upper);
@@ -278,7 +279,10 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
                             qp2abcd,
                             vld1q_s16([0, 2, 4, 6, 8, 10, 12, 14].as_ptr()),
                         ));
-                        std::ptr::write_unaligned(head.as_mut_ptr().add(i / 8) as *mut u16, v);
+                        std::ptr::write_unaligned(
+                            head.as_mut_ptr().add(i / 8) as *mut u16,
+                            v.to_le(),
+                        );
                     }
                     2 => {
                         // pack 2 dimensions in a single lane with pair add and widen
@@ -290,7 +294,10 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
                         let qp4abcd = vpaddlq_u16(qp2abcd);
                         // shift each entry into a different byte and sum across.
                         let v = vaddvq_u32(vshlq_u32(qp4abcd, vld1q_s32([0, 8, 16, 24].as_ptr())));
-                        std::ptr::write_unaligned(head.as_mut_ptr().add(i / 4) as *mut u32, v);
+                        std::ptr::write_unaligned(
+                            head.as_mut_ptr().add(i / 4) as *mut u32,
+                            v.to_le(),
+                        );
                     }
                     4 => {
                         // pack 2 dimensions in a single lane with pair add and widen to 16
@@ -303,9 +310,14 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
                             qp2abcd,
                             vld1q_s16([0, 8, 0, 8, 0, 8, 0, 8].as_ptr()),
                         ));
-                        let v =
-                            vaddlvq_u32(vshlq_u32(qp4abcd, vld1q_s32([0, 16, 32, 48].as_ptr())));
-                        std::ptr::write_unaligned(head.as_mut_ptr().add(i / 2) as *mut u64, v);
+                        // pack 8 dimensions in a single lane with pair add and widen to 32.
+                        let qp8abcd =
+                            vpaddlq_u32(vshlq_u32(qp4abcd, vld1q_s32([0, 16, 0, 16].as_ptr())));
+                        let v = vaddvq_u64(vshlq_u64(qp8abcd, vld1q_s64([0, 32].as_ptr())));
+                        std::ptr::write_unaligned(
+                            head.as_mut_ptr().add(i / 2) as *mut u64,
+                            v.to_le(),
+                        );
                     }
                     8 => vst1q_u8(head.as_mut_ptr().add(i), qabcd),
                     _ => unimplemented!(),
@@ -317,16 +329,10 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
         0
     };
 
-    super::packing::pack_iter::<B>(
-        v.iter().skip(tail_split).map(|x| {
-            let q = ((x.clamp(lower, upper) - lower) / delta).round() as u8;
-            component_sum += u32::from(q);
-            q
-        }),
-        tail,
-    );
-
-    component_sum
+    let s = component_sum
+        + super::scalar::lvq1_quantize_and_pack::<B>(&v[tail_split..], lower, upper, tail);
+    super::scalar::lvq1_quantize_and_pack::<B>(v, lower, upper, out);
+    s
 }
 
 #[allow(dead_code, unused_variables)]

@@ -329,10 +329,12 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
         0
     };
 
-    let s = component_sum
-        + super::scalar::lvq1_quantize_and_pack::<B>(&v[tail_split..], lower, upper, tail);
-    super::scalar::lvq1_quantize_and_pack::<B>(v, lower, upper, out);
-    s
+    if tail_split < v.len() {
+        component_sum
+            + super::scalar::lvq1_quantize_and_pack::<B>(&v[tail_split..], lower, upper, tail)
+    } else {
+        component_sum
+    }
 }
 
 #[allow(dead_code, unused_variables)]

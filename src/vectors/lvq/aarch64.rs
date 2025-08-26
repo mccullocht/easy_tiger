@@ -1,10 +1,13 @@
 //! aarch64 implementations of lvq routines.
 
 use std::arch::aarch64::{
-    float32x4_t, vaddq_f32, vaddq_f64, vaddvq_f32, vcvt_f64_f32, vcvt_high_f64_f32, vdivq_f32,
-    vdupq_n_f32, vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64,
-    vld1q_f32, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vrndaq_f32,
-    vsubq_f32, vsubq_f64,
+    float32x4_t, uint32x4_t, uint8x16_t, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddvq_f32, vaddvq_u16,
+    vaddvq_u32, vaddvq_u64, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32,
+    vdivq_f32, vdupq_n_f32, vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32,
+    vgetq_lane_f64, vld1q_f32, vld1q_s16, vld1q_s32, vld1q_s64, vld1q_s8, vmaxq_f32, vmaxvq_f32,
+    vminq_f32, vminvq_f32, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32,
+    vmulq_f64, vpaddlq_u16, vpaddlq_u32, vpaddlq_u8, vrndaq_f32, vshlq_u16, vshlq_u32, vshlq_u64,
+    vshlq_u8, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
@@ -214,6 +217,218 @@ pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: us
         e += diff * diff;
     }
     (1.0 - LAMBDA as f64) * xe as f64 * xe as f64 / norm_sq + LAMBDA as f64 * e as f64
+}
+
+pub fn lvq1_quantize_and_pack<const B: usize>(
+    v: &[f32],
+    lower: f32,
+    upper: f32,
+    out: &mut [u8],
+) -> u32 {
+    let delta = (upper - lower) / ((1 << B) - 1) as f32;
+
+    let tail_split = v.len() & !15;
+    let (head, tail) = out.split_at_mut(super::packing::byte_len(tail_split, B));
+    let component_sum = if tail_split > 0 {
+        unsafe {
+            let lowerv = vdupq_n_f32(lower);
+            let deltav = vdupq_n_f32(delta.recip());
+            let mut component_sumv = 0u32;
+            for i in (0..tail_split).step_by(16) {
+                // Load and quantize 16 values.
+                let qa = quantize4(vld1q_f32(v.as_ptr().add(i)), lowerv, deltav);
+                let qb = quantize4(vld1q_f32(v.as_ptr().add(i + 4)), lowerv, deltav);
+                let qc = quantize4(vld1q_f32(v.as_ptr().add(i + 8)), lowerv, deltav);
+                let qd = quantize4(vld1q_f32(v.as_ptr().add(i + 12)), lowerv, deltav);
+
+                // Reduce to a single byte per dimension.
+                let qabcd = pack_to_byte(qa, qb, qc, qd);
+                component_sumv += u32::from(vaddlvq_u8(qabcd));
+
+                match B {
+                    1 => pack1(i, qabcd, head),
+                    2 => pack2(i, qabcd, head),
+                    4 => pack4(i, qabcd, head),
+                    8 => pack8(i, qabcd, head),
+                    _ => unimplemented!(),
+                };
+            }
+            component_sumv
+        }
+    } else {
+        0
+    };
+
+    if tail_split < v.len() {
+        component_sum
+            + super::scalar::lvq1_quantize_and_pack::<B>(&v[tail_split..], lower, upper, tail)
+    } else {
+        component_sum
+    }
+}
+
+pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
+    v: &[f32],
+    lower: f32,
+    upper: f32,
+    primary: &mut [u8],
+    residual: &mut [u8],
+) -> u32 {
+    let delta = (upper - lower) / ((1 << B1) - 1) as f32;
+    let res_lower = -delta / 2.0;
+    let res_delta = delta / ((1 << B2) - 1) as f32;
+
+    let tail_split = v.len() & !15;
+    let (head_primary, tail_primary) =
+        primary.split_at_mut(super::packing::byte_len(tail_split, B1));
+    let (head_residual, tail_residual) =
+        residual.split_at_mut(super::packing::byte_len(tail_split, B2));
+    let component_sum = if tail_split > 0 {
+        unsafe {
+            let lowerv = vdupq_n_f32(lower);
+            let deltav = vdupq_n_f32(delta);
+            let delta_inv = vdupq_n_f32(delta.recip());
+            let res_lowerv = vdupq_n_f32(res_lower);
+            let res_delta_inv = vdupq_n_f32(res_delta.recip());
+            let mut component_sumv = 0u32;
+            for i in (0..tail_split).step_by(16) {
+                // Load and quantize 16 values, primary and residual
+                let a = vld1q_f32(v.as_ptr().add(i));
+                let qa = quantize4(a, lowerv, delta_inv);
+                let ra = quantize_residual4(a, qa, lowerv, deltav, res_lowerv, res_delta_inv);
+
+                let b = vld1q_f32(v.as_ptr().add(i + 4));
+                let qb = quantize4(b, lowerv, delta_inv);
+                let rb = quantize_residual4(b, qb, lowerv, deltav, res_lowerv, res_delta_inv);
+
+                let c = vld1q_f32(v.as_ptr().add(i + 8));
+                let qc = quantize4(c, lowerv, delta_inv);
+                let rc = quantize_residual4(c, qc, lowerv, deltav, res_lowerv, res_delta_inv);
+
+                let d = vld1q_f32(v.as_ptr().add(i + 12));
+                let qd = quantize4(d, lowerv, delta_inv);
+                let rd = quantize_residual4(d, qd, lowerv, deltav, res_lowerv, res_delta_inv);
+
+                // Reduce to a single byte per dimension, sum, and pack.
+                let qabcd = pack_to_byte(qa, qb, qc, qd);
+                component_sumv += u32::from(vaddlvq_u8(qabcd));
+                match B1 {
+                    1 => pack1(i, qabcd, head_primary),
+                    2 => pack2(i, qabcd, head_primary),
+                    4 => pack4(i, qabcd, head_primary),
+                    8 => pack8(i, qabcd, head_primary),
+                    _ => unimplemented!(),
+                };
+
+                // Reduce to a single byte per dimension and pack.
+                let rabcd = pack_to_byte(ra, rb, rc, rd);
+                match B2 {
+                    1 => pack1(i, rabcd, head_residual),
+                    2 => pack2(i, rabcd, head_residual),
+                    4 => pack4(i, rabcd, head_residual),
+                    8 => pack8(i, rabcd, head_residual),
+                    _ => unimplemented!(),
+                };
+            }
+            component_sumv
+        }
+    } else {
+        0
+    };
+
+    if tail_split < v.len() {
+        component_sum
+            + super::scalar::lvq2_quantize_and_pack::<B1, B2>(
+                &v[tail_split..],
+                lower,
+                upper,
+                tail_primary,
+                tail_residual,
+            )
+    } else {
+        component_sum
+    }
+}
+
+#[inline(always)]
+unsafe fn quantize4(v: float32x4_t, lower: float32x4_t, delta_inv: float32x4_t) -> uint32x4_t {
+    vcvtaq_u32_f32(vmulq_f32(vsubq_f32(v, lower), delta_inv))
+}
+
+#[inline(always)]
+unsafe fn quantize_residual4(
+    v: float32x4_t,
+    q: uint32x4_t,
+    lower: float32x4_t,
+    delta: float32x4_t,
+    res_lower: float32x4_t,
+    res_delta_inv: float32x4_t,
+) -> uint32x4_t {
+    let q = vfmaq_f32(lower, vcvtq_f32_u32(q), delta);
+    let res = vsubq_f32(v, q);
+    vcvtaq_u32_f32(vmulq_f32(vsubq_f32(res, res_lower), res_delta_inv))
+}
+
+#[inline(always)]
+unsafe fn pack_to_byte(a: uint32x4_t, b: uint32x4_t, c: uint32x4_t, d: uint32x4_t) -> uint8x16_t {
+    let ab = vmovn_high_u32(vmovn_u32(a), b);
+    let cd = vmovn_high_u32(vmovn_u32(c), d);
+    vmovn_high_u16(vmovn_u16(ab), cd)
+}
+
+/// Pack 16 scalar quantized entries into 1 bit per dimension (2 bytes) and write to out.
+#[inline(always)]
+unsafe fn pack1(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
+    // pack 2 dimensions in a single lane and widen to 16
+    let qp2abcd = vpaddlq_u8(vshlq_u8(
+        qabcd,
+        vld1q_s8([0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1].as_ptr()),
+    ));
+    let v = vaddvq_u16(vshlq_u16(
+        qp2abcd,
+        vld1q_s16([0, 2, 4, 6, 8, 10, 12, 14].as_ptr()),
+    ));
+    std::ptr::write_unaligned(out.as_mut_ptr().add(start_dim / 8) as *mut u16, v.to_le());
+}
+
+/// Pack 16 scalar quantized entries into 2 bits per dimension (4 bytes) and write to out.
+#[inline(always)]
+unsafe fn pack2(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
+    // pack 2 dimensions in a single lane with pair add and widen
+    let qp2abcd = vpaddlq_u8(vshlq_u8(
+        qabcd,
+        vld1q_s8([0, 2, 4, 8, 0, 2, 4, 8, 0, 2, 4, 8, 0, 2, 4, 8].as_ptr()),
+    ));
+    // pack 4 dimensions in a single lane (low byte) with pair add and widen.
+    let qp4abcd = vpaddlq_u16(qp2abcd);
+    // shift each entry into a different byte and sum across.
+    let v = vaddvq_u32(vshlq_u32(qp4abcd, vld1q_s32([0, 8, 16, 24].as_ptr())));
+    std::ptr::write_unaligned(out.as_mut_ptr().add(start_dim / 4) as *mut u32, v.to_le());
+}
+
+/// Pack 16 scalar quantized entries into 4 bits per dimension (8 bytes) and write to out.
+#[inline(always)]
+unsafe fn pack4(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
+    // pack 2 dimensions in a single lane with pair add and widen to 16
+    let qp2abcd = vpaddlq_u8(vshlq_u8(
+        qabcd,
+        vld1q_s8([0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4].as_ptr()),
+    ));
+    // pack 4 dimensions in a single lane with pair add and widen to 32.
+    let qp4abcd = vpaddlq_u16(vshlq_u16(
+        qp2abcd,
+        vld1q_s16([0, 8, 0, 8, 0, 8, 0, 8].as_ptr()),
+    ));
+    // pack 8 dimensions in a single lane with pair add and widen to 32.
+    let qp8abcd = vpaddlq_u32(vshlq_u32(qp4abcd, vld1q_s32([0, 16, 0, 16].as_ptr())));
+    let v = vaddvq_u64(vshlq_u64(qp8abcd, vld1q_s64([0, 32].as_ptr())));
+    std::ptr::write_unaligned(out.as_mut_ptr().add(start_dim / 2) as *mut u64, v.to_le());
+}
+
+/// Pack 16 scalar quantized entries into 8 bits per dimension (16 bytes) and write to out.
+#[inline(always)]
+unsafe fn pack8(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
+    vst1q_u8(out.as_mut_ptr().add(start_dim), qabcd);
 }
 
 #[cfg(test)]

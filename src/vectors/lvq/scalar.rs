@@ -99,3 +99,50 @@ pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: us
     }
     (1.0 - LAMBDA as f64) * xe * xe / norm_sq + LAMBDA as f64 * e
 }
+
+pub fn lvq1_quantize_and_pack<const B: usize>(
+    v: &[f32],
+    lower: f32,
+    upper: f32,
+    out: &mut [u8],
+) -> u32 {
+    let delta = (upper - lower) / ((1 << B) - 1) as f32;
+    let mut component_sum = 0u32;
+    super::packing::pack_iter::<B>(
+        v.iter().copied().map(|x| {
+            let q = ((x.clamp(lower, upper) - lower) / delta).round() as u8;
+            component_sum += u32::from(q);
+            q
+        }),
+        out,
+    );
+    component_sum
+}
+
+pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
+    v: &[f32],
+    lower: f32,
+    upper: f32,
+    primary: &mut [u8],
+    residual: &mut [u8],
+) -> u32 {
+    let delta = (upper - lower) / ((1 << B1) - 1) as f32;
+    let res_lower = -delta / 2.0;
+    let res_upper = delta / 2.0;
+    let res_delta = delta / ((1 << B2) - 1) as f32;
+    let mut component_sum = 0u32;
+    super::packing::pack_iter2::<B1, B2>(
+        v.iter().copied().map(|x| {
+            let q = ((x.clamp(lower, upper) - lower) / delta).round() as u8;
+            component_sum += u32::from(q);
+            // After producing the primary value, calculate the error produced and quantize that
+            // value based on the delta between primary items.
+            let res = (x - ((q as f32 * delta) + lower)).clamp(res_lower, res_upper);
+            let r = ((res - res_lower) / res_delta).round() as u8;
+            (q, r)
+        }),
+        primary,
+        residual,
+    );
+    component_sum
+}

@@ -232,15 +232,14 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
     let component_sum = if tail_split > 0 {
         unsafe {
             let lowerv = vdupq_n_f32(lower);
-            let upperv = vdupq_n_f32(upper);
             let deltav = vdupq_n_f32(delta.recip());
             let mut component_sumv = 0u32;
             for i in (0..tail_split).step_by(16) {
                 // Load and quantize 16 values.
-                let qa = quantize4(vld1q_f32(v.as_ptr().add(i)), lowerv, upperv, deltav);
-                let qb = quantize4(vld1q_f32(v.as_ptr().add(i + 4)), lowerv, upperv, deltav);
-                let qc = quantize4(vld1q_f32(v.as_ptr().add(i + 8)), lowerv, upperv, deltav);
-                let qd = quantize4(vld1q_f32(v.as_ptr().add(i + 12)), lowerv, upperv, deltav);
+                let qa = quantize4(vld1q_f32(v.as_ptr().add(i)), lowerv, deltav);
+                let qb = quantize4(vld1q_f32(v.as_ptr().add(i + 4)), lowerv, deltav);
+                let qc = quantize4(vld1q_f32(v.as_ptr().add(i + 8)), lowerv, deltav);
+                let qd = quantize4(vld1q_f32(v.as_ptr().add(i + 12)), lowerv, deltav);
 
                 // Reduce to a single byte per dimension.
                 let qab = vmovn_high_u32(vmovn_u32(qa), qb);
@@ -281,16 +280,8 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
 }
 
 #[inline(always)]
-unsafe fn quantize4(
-    v: float32x4_t,
-    lower: float32x4_t,
-    upper: float32x4_t,
-    delta_inv: float32x4_t,
-) -> uint32x4_t {
-    vcvtaq_u32_f32(vmulq_f32(
-        vsubq_f32(vmaxq_f32(vminq_f32(v, upper), lower), lower),
-        delta_inv,
-    ))
+unsafe fn quantize4(v: float32x4_t, lower: float32x4_t, delta_inv: float32x4_t) -> uint32x4_t {
+    vcvtaq_u32_f32(vmulq_f32(vsubq_f32(v, lower), delta_inv))
 }
 
 /// Pack 16 scalar quantized entries into 1 bit per dimension (2 bytes) and write to out.

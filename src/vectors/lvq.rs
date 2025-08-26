@@ -240,13 +240,8 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
         let split = packing::two_vector_split(vector_bytes.len(), B1, B2);
         let (primary, residual) = vector_bytes.split_at_mut(split);
-        header.component_sum = scalar::lvq2_quantize_and_pack::<B1, B2>(
-            vector,
-            header.lower,
-            header.upper,
-            primary,
-            residual,
-        );
+        header.component_sum =
+            lvq2_quantize_and_pack::<B1, B2>(vector, header.lower, header.upper, primary, residual);
         header.serialize(header_bytes);
     }
 

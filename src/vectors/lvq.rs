@@ -311,6 +311,14 @@ pub struct PrimaryVectorCoder<const B: usize>;
 
 impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        /*
+        let it = PrimaryQuantizer::new(vector, B);
+        let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
+        let mut header = it.header;
+        header.component_sum =
+            aarch64::lvq1_quantize_and_pack::<B>(vector, header.lower, header.upper, vector_bytes);
+        header.serialize(header_bytes);
+        */
         let mut it = PrimaryQuantizer::new(vector, B);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
         packing::pack_iter::<B>(it.by_ref(), vector_bytes);

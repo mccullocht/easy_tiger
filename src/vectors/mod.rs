@@ -1,6 +1,6 @@
 //! Vector handling: formatting/quantization and distance computation.
 
-use std::{borrow::Cow, fmt::Debug, io, num::ParseIntError, ops::Deref, str::FromStr};
+use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 
 use crate::distance::l2_normalize;
 
@@ -8,14 +8,10 @@ mod binary;
 mod float16;
 mod float32;
 mod lvq;
-mod scaled_non_uniform;
 mod scaled_uniform;
 mod truncated;
 
 use serde::{Deserialize, Serialize};
-
-// Re-export to scaled_non_uniform to vector accelerate f32 x quantized distance.
-use scaled_uniform::dot_unnormalized_i8_f32;
 
 /// Functions used for to compute the distance between two vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,42 +110,6 @@ pub trait F32VectorDistance: VectorDistance {
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
 }
 
-/// List of dimension splits points for non-uniform quantization.
-///
-/// Only accepts a list of up to 7 dimensions.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NonUniformQuantizedDimensions([u16; 8]);
-
-impl NonUniformQuantizedDimensions {
-    fn len(&self) -> usize {
-        self.0[0] as usize
-    }
-}
-
-impl Deref for NonUniformQuantizedDimensions {
-    type Target = [u16];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0[1..(self.0[0] as usize + 1)]
-    }
-}
-
-impl TryFrom<&[u16]> for NonUniformQuantizedDimensions {
-    type Error = &'static str;
-    fn try_from(value: &[u16]) -> Result<Self, Self::Error> {
-        if value.len() >= 8 {
-            Err("no more than 7 dimensions allowed")
-        } else if !value.is_sorted() {
-            Err("dimensions must be sorted")
-        } else {
-            let mut inner = [0u16; 8];
-            inner[0] = value.len() as u16;
-            inner[1..(value.len() + 1)].copy_from_slice(value);
-            Ok(Self(inner))
-        }
-    }
-}
-
 /// Supported coding schemes for input f32 vectors.
 ///
 /// Raw vectors are stored little endian but the remaining formats are all lossy in some way with
@@ -197,15 +157,6 @@ pub enum F32VectorCoding {
     ///
     /// This uses 2 bytes per dimension and 8 additional bytes for a scaling factor and l2 norm.
     I16ScaledUniformQuantized,
-    /// Quantize into an i4 value shaped to the input vector, where we choose different scaling
-    /// factors for different segments of the dimension space.
-    ///
-    /// The argument value contains split points as a list of sorted dimensions. The representation
-    /// is opaque to ensure the value is [Copy]. This also limits the number of split points to 7.
-    ///
-    /// This is aimed at MRL vectors that are designed to be truncated and may have different value
-    /// distributions in different segments.
-    I8ScaledNonUniformQuantized(NonUniformQuantizedDimensions),
     /// LVQ one-level; 1 bit
     LVQ1x1,
     /// LVQ one-level; 4 bits
@@ -238,9 +189,6 @@ impl F32VectorCoding {
             }
             Self::I16ScaledUniformQuantized => {
                 Box::new(scaled_uniform::I16VectorCoder::new(similarity))
-            }
-            Self::I8ScaledNonUniformQuantized(s) => {
-                Box::new(scaled_non_uniform::I8VectorCoder::new(similarity, *s))
             }
             Self::LVQ1x1 => Box::new(lvq::PrimaryVectorCoder::<1>),
             Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::<4>),
@@ -281,13 +229,6 @@ impl F32VectorCoding {
             }
             (Self::I16ScaledUniformQuantized, Euclidean) => {
                 Box::new(scaled_uniform::I16EuclideanDistance)
-            }
-            (Self::I8ScaledNonUniformQuantized(s), Dot)
-            | (Self::I8ScaledNonUniformQuantized(s), Cosine) => {
-                Box::new(scaled_non_uniform::I8DotProductDistance::new(*s))
-            }
-            (Self::I8ScaledNonUniformQuantized(s), Euclidean) => {
-                Box::new(scaled_non_uniform::I8EuclideanDistance::new(*s))
             }
             (Self::LVQ1x1, Dot) | (Self::LVQ1x1, Cosine) => {
                 Box::new(lvq::PrimaryDotProductDistance::<1>)
@@ -339,20 +280,6 @@ impl FromStr for F32VectorCoding {
             "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
             "i4-scaled-uniform" => Ok(Self::I4ScaledUniformQuantized),
             "i16-scaled-uniform" => Ok(Self::I16ScaledUniformQuantized),
-            s if s.starts_with("i8-scaled-non-uniform:") => {
-                let s = s
-                    .strip_prefix("i8-scaled-non-uniform:")
-                    .expect("prefix matched");
-                let splits = NonUniformQuantizedDimensions::try_from(
-                    s.split(',')
-                        .map(|n| n.parse::<u16>())
-                        .collect::<Result<Vec<_>, ParseIntError>>()
-                        .map_err(|_| input_err("could not parse split values".into()))?
-                        .as_slice(),
-                )
-                .map_err(|e| input_err(e.into()))?;
-                Ok(Self::I8ScaledNonUniformQuantized(splits))
-            }
             "lvq1x1" => Ok(Self::LVQ1x1),
             "lvq1x4" => Ok(Self::LVQ1x4),
             "lvq1x8" => Ok(Self::LVQ1x8),
@@ -375,15 +302,6 @@ impl std::fmt::Display for F32VectorCoding {
             Self::I8ScaledUniformQuantized => write!(f, "i8-scaled-uniform"),
             Self::I4ScaledUniformQuantized => write!(f, "i4-scaled-uniform"),
             Self::I16ScaledUniformQuantized => write!(f, "i16-scaled-uniform"),
-            Self::I8ScaledNonUniformQuantized(splits) => write!(
-                f,
-                "i8-scaled-non-uniform:{}",
-                splits
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
             Self::LVQ1x1 => write!(f, "lvq1x1"),
             Self::LVQ1x4 => write!(f, "lvq1x4"),
             Self::LVQ1x8 => write!(f, "lvq1x8"),
@@ -507,15 +425,6 @@ pub fn new_query_vector_distance_f32<'a>(
         (Euclidean, F32VectorCoding::I4ScaledUniformQuantized) => Box::new(
             scaled_uniform::I4PackedEuclideanQueryDistance::new(query.into()),
         ),
-        (Cosine, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => Box::new(
-            scaled_non_uniform::I8DotProductQueryDistance::new(s, l2_normalize(query.into())),
-        ),
-        (Dot, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => Box::new(
-            scaled_non_uniform::I8DotProductQueryDistance::new(s, query.into()),
-        ),
-        (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => Box::new(
-            scaled_non_uniform::I8EuclideanQueryDistance::new(s, query.into()),
-        ),
         (Cosine, F32VectorCoding::LVQ1x1) => Box::new(
             lvq::PrimaryQueryDotProductDistance::<1>::new(l2_normalize(query.into())),
         ),
@@ -612,13 +521,6 @@ pub fn new_query_vector_distance_indexing<'a>(
         (Euclidean, F32VectorCoding::I16ScaledUniformQuantized) => {
             quantized_qvd!(scaled_uniform::I16EuclideanDistance, query)
         }
-        (Dot, F32VectorCoding::I8ScaledNonUniformQuantized(s))
-        | (Cosine, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
-            quantized_qvd!(scaled_non_uniform::I8DotProductDistance::new(s), query)
-        }
-        (Euclidean, F32VectorCoding::I8ScaledNonUniformQuantized(s)) => {
-            quantized_qvd!(scaled_non_uniform::I8EuclideanDistance::new(s), query)
-        }
         (Dot, F32VectorCoding::LVQ1x1) | (Cosine, F32VectorCoding::LVQ1x1) => {
             quantized_qvd!(lvq::PrimaryDotProductDistance::<1>, query)
         }
@@ -655,8 +557,7 @@ mod test {
     use crate::{
         distance::l2_normalize,
         vectors::{
-            new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding,
-            NonUniformQuantizedDimensions, VectorSimilarity,
+            new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, VectorSimilarity,
         },
     };
 
@@ -764,8 +665,7 @@ mod test {
     }
 
     use F32VectorCoding::{
-        I16ScaledUniformQuantized, I4ScaledUniformQuantized, I8ScaledNonUniformQuantized,
-        I8ScaledUniformQuantized, F16,
+        I16ScaledUniformQuantized, I4ScaledUniformQuantized, I8ScaledUniformQuantized, F16,
     };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
 
@@ -838,28 +738,6 @@ mod test {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
             distance_compare(Euclidean, I4ScaledUniformQuantized, i, &a, &b, 0.10);
             query_distance_compare(Euclidean, I4ScaledUniformQuantized, i, &a, &b, 0.10);
-        }
-    }
-
-    #[test]
-    fn i8_scaled_non_uniform_dot() {
-        let format = I8ScaledNonUniformQuantized(
-            NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap(),
-        );
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, format, i, &a, &b, 0.01);
-            query_distance_compare(Dot, format, i, &a, &b, 0.01);
-        }
-    }
-
-    #[test]
-    fn i8_scaled_non_uniform_l2() {
-        let format = I8ScaledNonUniformQuantized(
-            NonUniformQuantizedDimensions::try_from([2u16].as_slice()).unwrap(),
-        );
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, format, i, &a, &b, 0.01);
-            query_distance_compare(Euclidean, format, i, &a, &b, 0.01);
         }
     }
 

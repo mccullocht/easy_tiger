@@ -4,11 +4,14 @@ use std::arch::aarch64::{
     float32x4_t, uint32x4_t, uint8x16_t, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddvq_f32, vaddvq_u16,
     vaddvq_u32, vaddvq_u64, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32,
     vdivq_f32, vdupq_n_f32, vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32,
-    vgetq_lane_f64, vld1q_f32, vld1q_s16, vld1q_s32, vld1q_s64, vld1q_s8, vmaxq_f32, vmaxvq_f32,
-    vminq_f32, vminvq_f32, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32,
-    vmulq_f64, vpaddlq_u16, vpaddlq_u32, vpaddlq_u8, vrndaq_f32, vshlq_u16, vshlq_u32, vshlq_u64,
-    vshlq_u8, vst1q_u8, vsubq_f32, vsubq_f64,
+    vget_low_u16, vgetq_lane_f64, vld1_u8, vld1q_f32, vld1q_s16, vld1q_s32, vld1q_s64, vld1q_s8,
+    vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmovl_high_u16, vmovl_u16, vmovl_u8,
+    vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64, vpaddlq_u16,
+    vpaddlq_u32, vpaddlq_u8, vrndaq_f32, vshlq_u16, vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u8,
+    vsubq_f32, vsubq_f64,
 };
+
+use crate::vectors::lvq::PrimaryVector;
 
 use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
 
@@ -429,6 +432,52 @@ unsafe fn pack4(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
 #[inline(always)]
 unsafe fn pack8(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
     vst1q_u8(out.as_mut_ptr().add(start_dim), qabcd);
+}
+
+pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
+    match B {
+        1 | 2 | 4 => return super::scalar::lvq1_f32_dot_unnormalized(query, doc),
+        _ => {}
+    };
+
+    let (query_head, query_tail) = query.as_chunks::<8>();
+    let (doc_head, doc_tail) = doc.vector.as_chunks::<8>();
+
+    let pdot = if query_head.len() > 0 {
+        unsafe {
+            let delta_inv = vdupq_n_f32(doc.delta);
+            let lower = vdupq_n_f32(doc.header.lower);
+            let mut dot = vdupq_n_f32(0.0);
+            for (q, d) in query_head.iter().zip(doc_head.iter()) {
+                let q0 = vld1q_f32(q.as_ptr());
+                let q1 = vld1q_f32(q.as_ptr().add(4));
+
+                let d = vmovl_u8(vld1_u8(d.as_ptr()));
+                let d0 = vmovl_u16(vget_low_u16(d));
+                let d1 = vmovl_high_u16(d);
+
+                let d0f = vfmaq_f32(lower, vcvtq_f32_u32(d0), delta_inv);
+                let d1f = vfmaq_f32(lower, vcvtq_f32_u32(d1), delta_inv);
+
+                dot = vfmaq_f32(dot, q0, d0f);
+                dot = vfmaq_f32(dot, q1, d1f);
+            }
+            vaddvq_f32(dot)
+        }
+    } else {
+        0.0
+    };
+
+    (pdot
+        + query_tail
+            .iter()
+            .zip(
+                super::packing::unpack_iter::<B>(doc_tail)
+                    .map(|q| q as f32 * doc.delta + doc.header.lower),
+            )
+            .map(|(q, d)| *q * d)
+            .sum::<f32>())
+    .into()
 }
 
 #[cfg(test)]

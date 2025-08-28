@@ -290,12 +290,7 @@ impl<'a, const B: usize> PrimaryQueryDotProductDistance<'a, B> {
 impl<const B: usize> QueryVectorDistance for PrimaryQueryDotProductDistance<'_, B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = PrimaryVector::<B>::new(vector).unwrap();
-        let dot = self
-            .0
-            .iter()
-            .zip(vector.f32_iter())
-            .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64;
+        let dot = lvq1_f32_dot_unnormalized(self.0.as_ref(), &vector) / vector.l2_norm();
         (-dot + 1.0) / 2.0
     }
 }

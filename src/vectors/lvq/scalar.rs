@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+use crate::vectors::lvq::{PrimaryVector, TwoLevelVector};
+
 use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
@@ -145,4 +147,39 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
         residual,
     );
     component_sum
+}
+
+pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
+    query
+        .iter()
+        .zip(
+            super::packing::unpack_iter::<B>(doc.vector)
+                .map(|q| q as f32 * doc.delta + doc.header.lower),
+        )
+        .map(|(q, d)| *q * d)
+        .sum::<f32>()
+        .into()
+}
+
+pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
+    a: &TwoLevelVector<'_, B1, B2>,
+    b: &TwoLevelVector<'_, B1, B2>,
+) -> f64 {
+    a.f32_iter()
+        .zip(b.f32_iter())
+        .map(|(a, b)| a * b)
+        .sum::<f32>()
+        .into()
+}
+
+pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
+    query: &[f32],
+    doc: &TwoLevelVector<'_, B1, B2>,
+) -> f64 {
+    query
+        .iter()
+        .zip(doc.f32_iter())
+        .map(|(q, d)| *q * d)
+        .sum::<f32>()
+        .into()
 }

@@ -1,7 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use easy_tiger::vectors::{
-    new_query_vector_distance_f32, F32VectorCoding, NonUniformQuantizedDimensions, VectorSimilarity,
-};
+use easy_tiger::vectors::{new_query_vector_distance_f32, F32VectorCoding, VectorSimilarity};
 use rand::{Rng, SeedableRng};
 
 fn generate_test_vectors(dim: usize) -> (Vec<f32>, Vec<f32>) {
@@ -110,13 +108,6 @@ pub fn i4_scaled_uniform_benchmarks(c: &mut Criterion) {
     );
 }
 
-pub fn i8_scaled_non_uniform_benchmarks(c: &mut Criterion) {
-    let format = F32VectorCoding::I8ScaledNonUniformQuantized(
-        NonUniformQuantizedDimensions::try_from([256, 512].as_slice()).unwrap(),
-    );
-    query_and_doc_benchmarks(c, format, VectorSimilarity::all());
-}
-
 pub fn i1_benchmarks(c: &mut Criterion) {
     let (x, y) = generate_test_vectors(1024);
 
@@ -177,7 +168,6 @@ criterion_group!(
     i16_scaled_uniform_benchmarks,
     i8_scaled_uniform_benchmarks,
     i4_scaled_uniform_benchmarks,
-    i8_scaled_non_uniform_benchmarks,
     i1_benchmarks,
     lvq2x8x8_benchmarks,
     lvq2x4x8_benchmarks,

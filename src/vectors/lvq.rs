@@ -141,23 +141,17 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         self.header.l2_norm.into()
     }
 
-    fn f32_iter(&self) -> impl Iterator<Item = f32> + '_ {
+    fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
         packing::unpack_iter::<B>(self.vector).map(|q| q as f32 * self.delta + self.header.lower)
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
-        let dot_quantized = if B == 1 {
-            self.vector
-                .iter()
-                .zip(other.vector.iter())
-                .map(|(s, o)| (*s & *o).count_ones())
-                .sum::<u32>()
-        } else {
-            packing::unpack_iter::<B>(self.vector)
-                .zip(packing::unpack_iter::<B>(other.vector))
-                .map(|(s, o)| s as u32 * o as u32)
-                .sum::<u32>()
-        };
+        let dot_quantized = self
+            .vector
+            .iter()
+            .zip(other.vector.iter())
+            .map(|(s, o)| Self::dot_packed(*s, *o))
+            .sum::<u32>();
         let sdelta = f64::from(self.delta);
         let slower = f64::from(self.header.lower);
         let odelta = f64::from(other.delta);
@@ -166,6 +160,24 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
             + self.header.component_sum as f64 * sdelta * olower
             + other.header.component_sum as f64 * odelta * slower
             + slower * olower * (self.vector.len() * 8).div_ceil(B) as f64
+    }
+
+    fn dot_packed(a: u8, b: u8) -> u32 {
+        match B {
+            1 => (a & b).count_ones(),
+            2 => {
+                let a = [a & 0x3, (a >> 2) & 0x3, (a >> 4) & 0x3, (a >> 6) & 0x3];
+                let b = [b & 0x3, (b >> 2) & 0x3, (b >> 4) & 0x3, (b >> 6) & 0x3];
+                (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).into()
+            }
+            4 => {
+                let a = [a & 0xf, a >> 4];
+                let b = [b & 0xf, b >> 4];
+                (a[0] as u16 * b[0] as u16 + a[1] as u16 * b[1] as u16).into()
+            }
+            8 => a as u32 * b as u32,
+            _ => unimplemented!(),
+        }
     }
 }
 
@@ -196,7 +208,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         self.primary.l2_norm()
     }
 
-    fn f32_iter(&self) -> impl Iterator<Item = f32> + '_ {
+    fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
         self.primary
             .f32_iter()
             .zip(
@@ -278,12 +290,7 @@ impl<'a, const B: usize> PrimaryQueryDotProductDistance<'a, B> {
 impl<const B: usize> QueryVectorDistance for PrimaryQueryDotProductDistance<'_, B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = PrimaryVector::<B>::new(vector).unwrap();
-        let dot = self
-            .0
-            .iter()
-            .zip(vector.f32_iter())
-            .map(|(q, d)| *q * d)
-            .sum::<f32>() as f64;
+        let dot = lvq1_f32_dot_unnormalized(self.0.as_ref(), &vector) / vector.l2_norm();
         (-dot + 1.0) / 2.0
     }
 }
@@ -295,12 +302,7 @@ impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelDotProductDist
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = TwoLevelVector::<B1, B2>::new(query).unwrap();
         let doc = TwoLevelVector::<B1, B2>::new(doc).unwrap();
-        let dot = query
-            .f32_iter()
-            .zip(doc.f32_iter())
-            .map(|(q, d)| q * d)
-            .sum::<f32>() as f64
-            / (query.l2_norm() * doc.l2_norm());
+        let dot = lvq2_dot_unnormalized(&query, &doc) / (query.l2_norm() * doc.l2_norm());
         (-dot + 1.0) / 2.0
     }
 }
@@ -319,13 +321,7 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance
 {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TwoLevelVector::<B1, B2>::new(vector).unwrap();
-        let dot = self
-            .0
-            .iter()
-            .zip(vector.f32_iter())
-            .map(|(s, o)| *s * o)
-            .sum::<f32>() as f64
-            / vector.l2_norm();
+        let dot = lvq2_f32_dot_unnormalized(self.0.as_ref(), &vector) / vector.l2_norm();
         (-dot + 1.0) / 2.0
     }
 }
@@ -375,13 +371,73 @@ mod packing {
         }
     }
 
+    pub struct UnpackIter<'a, const B: usize> {
+        inner: std::slice::Iter<'a, u8>,
+        next_bit: usize,
+        buf: u8,
+    }
+
+    impl<'a, const B: usize> UnpackIter<'a, B> {
+        const MASK: u8 = ((1 << B) - 1) as u8;
+
+        fn new(packed: &'a [u8]) -> Self {
+            Self {
+                inner: packed.iter(),
+                next_bit: 8,
+                buf: 0,
+            }
+        }
+    }
+
+    impl<'a, const B: usize> Iterator for UnpackIter<'a, B> {
+        type Item = u8;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.next_bit == 8 {
+                self.buf = *self.inner.next()?;
+                self.next_bit = 0;
+            }
+
+            let v = (self.buf >> self.next_bit) & Self::MASK;
+            self.next_bit += B;
+            Some(v)
+        }
+
+        fn nth(&mut self, mut n: usize) -> Option<Self::Item> {
+            // Handle anything currently in buf.
+            let remaining = (8 - self.next_bit) / B;
+            if n <= remaining {
+                self.next_bit += n * B;
+                return self.next();
+            }
+            n -= remaining; // n is positive
+
+            // Skip 1 or more entries from inner.
+            let per_byte = 8 / B;
+            let byte_nth = per_byte / n;
+            self.buf = *self.inner.nth(byte_nth)?;
+            self.next_bit = 0;
+            n -= byte_nth * per_byte;
+
+            // Handle anything we need to skip in buf.
+            self.next_bit += n * B;
+            self.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let hint = self.inner.size_hint();
+            let extra = (8 - self.next_bit) / B;
+            (hint.0 + extra, hint.1.map(|s| s + extra))
+        }
+    }
+
+    impl<'a, const B: usize> ExactSizeIterator for UnpackIter<'a, B> {}
+    impl<'a, const B: usize> FusedIterator for UnpackIter<'a, B> {}
+
     /// Iterate over the value in each dimension where each dimension is `B` bits in `packed`
     /// REQUIRES: B must be in 1..=8 and B % 8 == 0
-    pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl FusedIterator<Item = u8> + '_ {
-        let mask = ((1 << B) - 1) as u8;
-        packed
-            .iter()
-            .flat_map(move |b| (0..8).step_by(B).map(move |i| (*b >> i) & mask))
+    pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u8> + '_ {
+        UnpackIter::<B>::new(packed)
     }
 }
 

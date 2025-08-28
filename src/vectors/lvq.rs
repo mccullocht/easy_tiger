@@ -141,7 +141,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         self.header.l2_norm.into()
     }
 
-    fn f32_iter(&self) -> impl Iterator<Item = f32> + '_ {
+    fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
         packing::unpack_iter::<B>(self.vector).map(|q| q as f32 * self.delta + self.header.lower)
     }
 
@@ -196,7 +196,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         self.primary.l2_norm()
     }
 
-    fn f32_iter(&self) -> impl Iterator<Item = f32> + '_ {
+    fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
         self.primary
             .f32_iter()
             .zip(
@@ -375,13 +375,52 @@ mod packing {
         }
     }
 
+    pub struct UnpackIter<'a, const B: usize> {
+        inner: std::slice::Iter<'a, u8>,
+        next_bit: usize,
+        buf: u8,
+    }
+
+    impl<'a, const B: usize> UnpackIter<'a, B> {
+        const MASK: u8 = ((1 << B) - 1) as u8;
+
+        fn new(packed: &'a [u8]) -> Self {
+            Self {
+                inner: packed.iter(),
+                next_bit: 8,
+                buf: 0,
+            }
+        }
+    }
+
+    impl<'a, const B: usize> Iterator for UnpackIter<'a, B> {
+        type Item = u8;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.next_bit == 8 {
+                self.buf = *self.inner.next()?;
+                self.next_bit = 0;
+            }
+
+            let v = (self.buf >> self.next_bit) & Self::MASK;
+            self.next_bit += B;
+            Some(v)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let hint = self.inner.size_hint();
+            let extra = (8 - self.next_bit) / B;
+            (hint.0 + extra, hint.1.map(|s| s + extra))
+        }
+    }
+
+    impl<'a, const B: usize> ExactSizeIterator for UnpackIter<'a, B> {}
+    impl<'a, const B: usize> FusedIterator for UnpackIter<'a, B> {}
+
     /// Iterate over the value in each dimension where each dimension is `B` bits in `packed`
     /// REQUIRES: B must be in 1..=8 and B % 8 == 0
-    pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl FusedIterator<Item = u8> + '_ {
-        let mask = ((1 << B) - 1) as u8;
-        packed
-            .iter()
-            .flat_map(move |b| (0..8).step_by(B).map(move |i| (*b >> i) & mask))
+    pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u8> + '_ {
+        UnpackIter::<B>::new(packed)
     }
 }
 

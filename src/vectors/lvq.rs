@@ -403,6 +403,27 @@ mod packing {
             Some(v)
         }
 
+        fn nth(&mut self, mut n: usize) -> Option<Self::Item> {
+            // Handle anything currently in buf.
+            let remaining = (8 - self.next_bit) / B;
+            if n <= remaining {
+                self.next_bit += n * B;
+                return self.next();
+            }
+            n -= remaining; // n is positive
+
+            // Skip 1 or more entries from inner.
+            let per_byte = 8 / B;
+            let byte_nth = per_byte / n;
+            self.buf = *self.inner.nth(byte_nth)?;
+            self.next_bit = 0;
+            n -= byte_nth * per_byte;
+
+            // Handle anything we need to skip in buf.
+            self.next_bit += n * B;
+            self.next()
+        }
+
         fn size_hint(&self) -> (usize, Option<usize>) {
             let hint = self.inner.size_hint();
             let extra = (8 - self.next_bit) / B;

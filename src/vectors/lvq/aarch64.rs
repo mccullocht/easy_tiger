@@ -560,7 +560,6 @@ pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
     };
 
     if tail_split < dim {
-        // XXX for this to actually be _fast_ I need to implement nth on the unpacking iterator.
         pdot + a
             .f32_iter()
             .skip(tail_split)
@@ -605,7 +604,6 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     };
 
     if tail_split < query.len() {
-        // XXX for this to actually be _fast_ I need to implement nth on the unpacking iterator.
         pdot + query
             .iter()
             .skip(tail_split)

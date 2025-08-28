@@ -225,6 +225,9 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let stats = VectorStats::from(vector);
         let mut header = VectorHeader::from(stats);
+        //let interval = (header.upper - header.lower) / 4.0;
+        //header.lower += interval;
+        //header.upper -= interval;
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
         header.component_sum =
@@ -247,8 +250,20 @@ pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>;
 impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1, B2> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let stats = VectorStats::from(vector);
+        // XXX extend header for lvq2 to record a delta or new lower/upper for 2nd level
+        // XXX independence will allow us to record a greater range of residuals while still
+        // XXX optimizing l1 for primary retrieval.
         let mut header = VectorHeader::from(stats);
-        (header.lower, header.upper) = optimize_interval(vector, &stats, B1);
+        // XXX all number for lvq2x1x8
+        // XXX adjusting interval like this to represent all values is 10x better than lvq1x1
+        // XXX adjusting interval like this to represent all values is 10x worse than lvq1x8
+        // XXX with lvq1x1 adjusted the same way it's 2x worse than BQ both f32 and quantized.
+        // XXX using a value that stands in for the norm _does not_ help, it makes it worse.
+        // XXX replacing B1 with other values definitely makes things worse.
+        let interval = (header.upper - header.lower) / 4.0;
+        header.lower += interval;
+        header.upper -= interval;
+        //(header.lower, header.upper) = optimize_interval(vector, &stats, B1);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
         let split = packing::two_vector_split(vector_bytes.len(), B1, B2);
         let (primary, residual) = vector_bytes.split_at_mut(split);

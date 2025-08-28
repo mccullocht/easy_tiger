@@ -302,12 +302,7 @@ impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelDotProductDist
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = TwoLevelVector::<B1, B2>::new(query).unwrap();
         let doc = TwoLevelVector::<B1, B2>::new(doc).unwrap();
-        let dot = query
-            .f32_iter()
-            .zip(doc.f32_iter())
-            .map(|(q, d)| q * d)
-            .sum::<f32>() as f64
-            / (query.l2_norm() * doc.l2_norm());
+        let dot = lvq2_dot_unnormalized(&query, &doc) / (query.l2_norm() * doc.l2_norm());
         (-dot + 1.0) / 2.0
     }
 }

@@ -13,9 +13,9 @@ use std::arch::aarch64::{
     vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
-use crate::vectors::lvq::PrimaryVector;
+use crate::vectors::lvq::{PrimaryVector, TwoLevelVector};
 
-use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
+use super::{packing, VectorStats, LAMBDA, MINIMUM_MSE_GRID};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let tail_split = vector.len() & !3;
@@ -233,7 +233,7 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
     let delta = (upper - lower) / ((1 << B) - 1) as f32;
 
     let tail_split = v.len() & !15;
-    let (head, tail) = out.split_at_mut(super::packing::byte_len(tail_split, B));
+    let (head, tail) = out.split_at_mut(packing::byte_len(tail_split, B));
     let component_sum = if tail_split > 0 {
         unsafe {
             let lowerv = vdupq_n_f32(lower);
@@ -284,10 +284,8 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     let res_delta = delta / ((1 << B2) - 1) as f32;
 
     let tail_split = v.len() & !15;
-    let (head_primary, tail_primary) =
-        primary.split_at_mut(super::packing::byte_len(tail_split, B1));
-    let (head_residual, tail_residual) =
-        residual.split_at_mut(super::packing::byte_len(tail_split, B2));
+    let (head_primary, tail_primary) = primary.split_at_mut(packing::byte_len(tail_split, B1));
+    let (head_residual, tail_residual) = residual.split_at_mut(packing::byte_len(tail_split, B2));
     let component_sum = if tail_split > 0 {
         unsafe {
             let lowerv = vdupq_n_f32(lower);
@@ -436,34 +434,70 @@ unsafe fn pack8(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
     vst1q_u8(out.as_mut_ptr().add(start_dim), qabcd);
 }
 
+struct LVQ1F32Converter {
+    delta: float32x4_t,
+    lower: float32x4_t,
+}
+
+impl LVQ1F32Converter {
+    #[inline(always)]
+    unsafe fn from_vector<const B: usize>(vector: &PrimaryVector<'_, B>) -> Self {
+        Self {
+            delta: vdupq_n_f32(vector.delta),
+            lower: vdupq_n_f32(vector.header.lower),
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn unpacked_to_f32(&self, unpacked: uint32x4_t) -> float32x4_t {
+        vfmaq_f32(self.lower, self.delta, vcvtq_f32_u32(unpacked))
+    }
+}
+
+struct LVQ2F32Converter {
+    l1: LVQ1F32Converter,
+    delta: float32x4_t,
+    lower: float32x4_t,
+}
+
+impl LVQ2F32Converter {
+    #[inline(always)]
+    unsafe fn from_vector<const B1: usize, const B2: usize>(
+        vector: &TwoLevelVector<'_, B1, B2>,
+    ) -> Self {
+        Self {
+            l1: LVQ1F32Converter::from_vector(&vector.primary),
+            delta: vdupq_n_f32(vector.delta),
+            lower: vdupq_n_f32(vector.lower),
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn unpacked_to_f32(&self, unpacked: (uint32x4_t, uint32x4_t)) -> float32x4_t {
+        let l1 = self.l1.unpacked_to_f32(unpacked.0);
+        let l2 = vfmaq_f32(self.lower, self.delta, vcvtq_f32_u32(unpacked.1));
+        vaddq_f32(l1, l2)
+    }
+}
+
 /// Perform unnormalized dot product between an `f32` query and a primary lvq vector.
 pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
     let tail_split = query.len() & !7;
     let (query_head, query_tail) = query.split_at(tail_split);
-    let (doc_head, doc_tail) = doc.vector.split_at(super::packing::byte_len(tail_split, B));
+    let (doc_head, doc_tail) = doc.vector.split_at(packing::byte_len(tail_split, B));
 
     let pdot = if !query_head.is_empty() {
         unsafe {
-            let delta_inv = vdupq_n_f32(doc.delta);
-            let lower = vdupq_n_f32(doc.header.lower);
+            let converter = LVQ1F32Converter::from_vector(doc);
             let mut dot = vdupq_n_f32(0.0);
             for i in (0..tail_split).step_by(8) {
-                let q0 = vld1q_f32(query_head.as_ptr().add(i));
-                let q1 = vld1q_f32(query_head.as_ptr().add(i + 4));
-
-                let (d0, d1) = match B {
-                    1 => unpack1(i, doc_head),
-                    2 => unpack2(i, doc_head),
-                    4 => unpack4(i, doc_head),
-                    8 => unpack8(i, doc_head),
-                    _ => unimplemented!(),
-                };
-
-                let d0f = vfmaq_f32(lower, vcvtq_f32_u32(d0), delta_inv);
-                let d1f = vfmaq_f32(lower, vcvtq_f32_u32(d1), delta_inv);
-
-                dot = vfmaq_f32(dot, q0, d0f);
-                dot = vfmaq_f32(dot, q1, d1f);
+                let q = (
+                    vld1q_f32(query_head.as_ptr().add(i)),
+                    vld1q_f32(query_head.as_ptr().add(i + 4)),
+                );
+                let d = unpack::<B>(i, doc_head);
+                dot = vfmaq_f32(dot, q.0, converter.unpacked_to_f32(d.0));
+                dot = vfmaq_f32(dot, q.1, converter.unpacked_to_f32(d.1));
             }
             vaddvq_f32(dot)
         }
@@ -475,7 +509,7 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVec
         + query_tail
             .iter()
             .zip(
-                super::packing::unpack_iter::<B>(doc_tail)
+                packing::unpack_iter::<B>(doc_tail)
                     .map(|q| q as f32 * doc.delta + doc.header.lower),
             )
             .map(|(q, d)| *q * d)
@@ -483,7 +517,87 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVec
     .into()
 }
 
-// Unpack a 8 values from a vector with 1-bit dimensions starting at `start_dim`.
+pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
+    a: &TwoLevelVector<'_, B1, B2>,
+    b: &TwoLevelVector<'_, B1, B2>,
+) -> f64 {
+    let dim = if B1 > B2 {
+        (a.primary.vector.len() * 8).div_ceil(B1)
+    } else {
+        (a.vector.len() * 8).div_ceil(B2)
+    };
+    let tail_split = dim & !7;
+
+    let (a_l1_head, _) = a.primary.vector.split_at(packing::byte_len(tail_split, B1));
+    let (a_l2_head, _) = a.vector.split_at(packing::byte_len(tail_split, B2));
+    let (b_l1_head, _) = b.primary.vector.split_at(packing::byte_len(tail_split, B1));
+    let (b_l2_head, _) = b.vector.split_at(packing::byte_len(tail_split, B2));
+
+    let pdot = if !a_l1_head.is_empty() {
+        unsafe {
+            let a_converter = LVQ2F32Converter::from_vector(a);
+            let b_converter = LVQ2F32Converter::from_vector(b);
+
+            let mut dot = vdupq_n_f32(0.0);
+            for i in (0..tail_split).step_by(8) {
+                let a = unpack_lvq2::<B1, B2>(i, a_l1_head, a_l2_head);
+                let b = unpack_lvq2::<B1, B2>(i, b_l1_head, b_l2_head);
+                dot = vfmaq_f32(
+                    dot,
+                    a_converter.unpacked_to_f32(a.0),
+                    b_converter.unpacked_to_f32(b.0),
+                );
+                dot = vfmaq_f32(
+                    dot,
+                    a_converter.unpacked_to_f32(a.1),
+                    b_converter.unpacked_to_f32(b.1),
+                );
+            }
+            vaddvq_f32(dot)
+        }
+    } else {
+        0.0
+    };
+
+    if tail_split < dim {
+        // XXX for this to actually be _fast_ I need to implement nth on the unpacking iterator.
+        pdot + a
+            .f32_iter()
+            .skip(tail_split)
+            .zip(b.f32_iter().skip(tail_split))
+            .map(|(a, b)| a * b)
+            .sum::<f32>()
+    } else {
+        pdot
+    }
+    .into()
+}
+
+// Unpack 8 values from a vector with N-bit dimensions starting at `start_dim`
+#[inline(always)]
+unsafe fn unpack_lvq2<const B1: usize, const B2: usize>(
+    start_dim: usize,
+    l1: &[u8],
+    l2: &[u8],
+) -> ((uint32x4_t, uint32x4_t), (uint32x4_t, uint32x4_t)) {
+    let l1 = unpack::<B1>(start_dim, l1);
+    let l2 = unpack::<B2>(start_dim, l2);
+    ((l1.0, l2.0), (l1.1, l2.1))
+}
+
+// Unpack 8 values from a vector with N-bit dimensions starting at `start_dim`
+#[inline(always)]
+unsafe fn unpack<const N: usize>(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
+    match N {
+        1 => unpack1(start_dim, vector),
+        2 => unpack2(start_dim, vector),
+        4 => unpack4(start_dim, vector),
+        8 => unpack8(start_dim, vector),
+        _ => unimplemented!(),
+    }
+}
+
+// Unpack 8 values from a vector with 1-bit dimensions starting at `start_dim`.
 #[inline(always)]
 unsafe fn unpack1(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
     let mut dp = vdup_n_u8(vector[start_dim / 8]);
@@ -504,7 +618,7 @@ unsafe fn unpack1(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
     )
 }
 
-// Unpack a 8 values from a vector with 2-bit dimensions starting at `start_dim`.
+// Unpack 8 values from a vector with 2-bit dimensions starting at `start_dim`.
 #[inline(always)]
 unsafe fn unpack2(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
     let mut dp = vdup_n_u16(u16::from_le_bytes(std::ptr::read_unaligned(
@@ -529,7 +643,7 @@ unsafe fn unpack2(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
     )
 }
 
-// Unpack a 8 values from a vector with 4-bit dimensions starting at `start_dim`.
+// Unpack 8 values from a vector with 4-bit dimensions starting at `start_dim`.
 #[inline(always)]
 unsafe fn unpack4(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
     let mut dp = vdup_n_u32(u32::from_le_bytes(std::ptr::read_unaligned(
@@ -553,7 +667,7 @@ unsafe fn unpack4(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
     )
 }
 
-// Unpack a 8 values from a vector with 8-bit dimensions starting at `start_dim`.
+// Unpack 8 values from a vector with 8-bit dimensions starting at `start_dim`.
 #[inline(always)]
 unsafe fn unpack8(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
     let d = vmovl_u8(vld1_u8(vector.as_ptr().add(start_dim)));

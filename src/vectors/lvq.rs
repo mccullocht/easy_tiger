@@ -321,13 +321,7 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance
 {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TwoLevelVector::<B1, B2>::new(vector).unwrap();
-        let dot = self
-            .0
-            .iter()
-            .zip(vector.f32_iter())
-            .map(|(s, o)| *s * o)
-            .sum::<f32>() as f64
-            / vector.l2_norm();
+        let dot = lvq2_f32_dot_unnormalized(self.0.as_ref(), &vector) / vector.l2_norm();
         (-dot + 1.0) / 2.0
     }
 }

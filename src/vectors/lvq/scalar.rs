@@ -171,3 +171,15 @@ pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
         .sum::<f32>()
         .into()
 }
+
+pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
+    query: &[f32],
+    doc: &TwoLevelVector<'_, B1, B2>,
+) -> f64 {
+    query
+        .iter()
+        .zip(doc.f32_iter())
+        .map(|(q, d)| *q * d)
+        .sum::<f32>()
+        .into()
+}

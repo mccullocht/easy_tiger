@@ -573,6 +573,51 @@ pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
     .into()
 }
 
+pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
+    query: &[f32],
+    doc: &TwoLevelVector<'_, B1, B2>,
+) -> f64 {
+    let tail_split = query.len() & !7;
+
+    let (doc_l1_head, _) = doc
+        .primary
+        .vector
+        .split_at(packing::byte_len(tail_split, B1));
+    let (doc_l2_head, _) = doc.vector.split_at(packing::byte_len(tail_split, B2));
+
+    let pdot = if !doc_l1_head.is_empty() {
+        unsafe {
+            let converter = LVQ2F32Converter::from_vector(doc);
+            let mut dot = vdupq_n_f32(0.0);
+            for i in (0..tail_split).step_by(8) {
+                let q = (
+                    vld1q_f32(query.as_ptr().add(i)),
+                    vld1q_f32(query.as_ptr().add(i + 4)),
+                );
+                let d = unpack_lvq2::<B1, B2>(i, doc_l1_head, doc_l2_head);
+                dot = vfmaq_f32(dot, q.0, converter.unpacked_to_f32(d.0));
+                dot = vfmaq_f32(dot, q.1, converter.unpacked_to_f32(d.1));
+            }
+            vaddvq_f32(dot)
+        }
+    } else {
+        0.0
+    };
+
+    if tail_split < query.len() {
+        // XXX for this to actually be _fast_ I need to implement nth on the unpacking iterator.
+        pdot + query
+            .iter()
+            .skip(tail_split)
+            .zip(doc.f32_iter().skip(tail_split))
+            .map(|(q, d)| *q * d)
+            .sum::<f32>()
+    } else {
+        pdot
+    }
+    .into()
+}
+
 // Unpack 8 values from a vector with N-bit dimensions starting at `start_dim`
 #[inline(always)]
 unsafe fn unpack_lvq2<const B1: usize, const B2: usize>(
@@ -629,7 +674,6 @@ unsafe fn unpack2(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
         vshl_u16(dp, vld1_s16([0, -2, -4, -6].as_ptr())),
         vdup_n_u16(0x3333),
     );
-    // XXX all these shuffles are wrong but how?
     let d = vreinterpretq_u8_u16(vcombine_u16(dp, dp));
     (
         vreinterpretq_u32_u8(vqtbl1q_u8(

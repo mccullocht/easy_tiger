@@ -191,11 +191,14 @@ struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
 impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
     fn new(encoded: &'a [u8]) -> Option<Self> {
         let (header, vector) = VectorHeader::deserialize(encoded)?;
-        let split = packing::two_vector_split(vector.len(), B1, B2);
-        let (primary_vector, residual_vector) = vector.split_at(split);
+        let split = packing::two_vector_split(vector.len() - std::mem::size_of::<f32>(), B1, B2);
+        let (primary_vector, residual) = vector.split_at(split);
+        let (residual_header_bytes, residual_vector) =
+            residual.split_at(std::mem::size_of::<f32>());
         let primary = PrimaryVector::<'_, B1>::with_header(header, primary_vector);
-        let delta = primary.delta / ((1 << B2) - 1) as f32;
-        let lower = -primary.delta / 2.0;
+        let interval = f32::from_le_bytes(residual_header_bytes.try_into().unwrap());
+        let delta = interval / ((1 << B2) - 1) as f32;
+        let lower = -interval / 2.0;
         Some(Self {
             primary,
             vector: residual_vector,
@@ -225,9 +228,6 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let stats = VectorStats::from(vector);
         let mut header = VectorHeader::from(stats);
-        //let interval = (header.upper - header.lower) / 4.0;
-        //header.lower += interval;
-        //header.upper -= interval;
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
         header.component_sum =
@@ -244,36 +244,63 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     }
 }
 
+/// Store a two level vector.
+///
+/// Format is as follows:
+/// * Vector header (16 bytes)
+/// * Primary vector -- length depends on dimensionality and B1
+/// * Residual interval value (4 bytes)
+/// * Residual vector -- length depends on dimensionality and B2
+///
+/// This format allows the representation to be split -- the primary vector can be used with just
+/// the header and primary vector contents; the residual delta and vector can be used along with
+/// the primary vector parts to provide a higher fidelity representation.
 #[derive(Debug, Copy, Clone, Default)]
 pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>;
 
 impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1, B2> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let stats = VectorStats::from(vector);
-        // XXX extend header for lvq2 to record a delta or new lower/upper for 2nd level
-        // XXX independence will allow us to record a greater range of residuals while still
-        // XXX optimizing l1 for primary retrieval.
         let mut header = VectorHeader::from(stats);
-        // XXX all number for lvq2x1x8
-        // XXX adjusting interval like this to represent all values is 10x better than lvq1x1
-        // XXX adjusting interval like this to represent all values is 10x worse than lvq1x8
-        // XXX with lvq1x1 adjusted the same way it's 2x worse than BQ both f32 and quantized.
-        // XXX using a value that stands in for the norm _does not_ help, it makes it worse.
-        // XXX replacing B1 with other values definitely makes things worse.
-        let interval = (header.upper - header.lower) / 4.0;
-        header.lower += interval;
-        header.upper -= interval;
-        //(header.lower, header.upper) = optimize_interval(vector, &stats, B1);
+        // NB: this interval optimization reduces loss for the primary vector, but this loss
+        // reduction can make the residual vector more lossy if we derive the delta from the primary
+        // interval as described in the LVQ paper. Compute and store a residual delta that is large
+        // enough to encode both the min and max value in the vector.
+        // TODO: investigate interval optimization on the derived residual vector.
+        let interval = optimize_interval(vector, &stats, B1);
+        // XXX interval needs to be 2x the largest delta we will have to encode. what i have here
+        // is correct when B1 == 1, but not in other cases. intuitively you only need to consider
+        // encoding in the lowest and highest primary vector buckets so long as the interval is at
+        // least as large as the interval that would be used by default (l1 delta).
+        let residual_interval = (header.lower - interval.0)
+            .abs()
+            .max((header.upper - interval.1).abs())
+            * 2.0;
+        let residual_interval = residual_interval.max((header.upper - header.lower) / 2.0);
+        (header.lower, header.upper) = interval;
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
-        let split = packing::two_vector_split(vector_bytes.len(), B1, B2);
-        let (primary, residual) = vector_bytes.split_at_mut(split);
-        header.component_sum =
-            lvq2_quantize_and_pack::<B1, B2>(vector, header.lower, header.upper, primary, residual);
+        let split =
+            packing::two_vector_split(vector_bytes.len() - std::mem::size_of::<f32>(), B1, B2);
+        let (primary, residual_bytes) = vector_bytes.split_at_mut(split);
+        let (residual_header_bytes, residual) =
+            residual_bytes.split_at_mut(std::mem::size_of::<f32>());
+        residual_header_bytes.copy_from_slice(residual_interval.to_le_bytes().as_slice());
+        header.component_sum = lvq2_quantize_and_pack::<B1, B2>(
+            vector,
+            header.lower,
+            header.upper,
+            primary,
+            residual_interval,
+            residual,
+        );
         header.serialize(header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        VectorHeader::LEN + packing::byte_len(dimensions, B1) + packing::byte_len(dimensions, B2)
+        VectorHeader::LEN
+            + packing::byte_len(dimensions, B1)
+            + std::mem::size_of::<f32>()
+            + packing::byte_len(dimensions, B2)
     }
 
     fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {

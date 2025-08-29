@@ -126,12 +126,13 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     lower: f32,
     upper: f32,
     primary: &mut [u8],
+    residual_interval: f32,
     residual: &mut [u8],
 ) -> u32 {
     let delta = (upper - lower) / ((1 << B1) - 1) as f32;
-    let res_lower = -delta / 2.0;
-    let res_upper = delta / 2.0;
-    let res_delta = delta / ((1 << B2) - 1) as f32;
+    let res_lower = -residual_interval / 2.0;
+    let res_upper = residual_interval / 2.0;
+    let res_delta = residual_interval / ((1 << B2) - 1) as f32;
     let mut component_sum = 0u32;
     super::packing::pack_iter2::<B1, B2>(
         v.iter().copied().map(|x| {

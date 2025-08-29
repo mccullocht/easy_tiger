@@ -277,11 +277,12 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     lower: f32,
     upper: f32,
     primary: &mut [u8],
+    residual_interval: f32,
     residual: &mut [u8],
 ) -> u32 {
     let delta = (upper - lower) / ((1 << B1) - 1) as f32;
-    let res_lower = -delta / 2.0;
-    let res_delta = delta / ((1 << B2) - 1) as f32;
+    let res_lower = -residual_interval / 2.0;
+    let res_delta = residual_interval / ((1 << B2) - 1) as f32;
 
     let tail_split = v.len() & !15;
     let (head_primary, tail_primary) = primary.split_at_mut(packing::byte_len(tail_split, B1));
@@ -346,6 +347,7 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
                 lower,
                 upper,
                 tail_primary,
+                residual_interval,
                 tail_residual,
             )
     } else {

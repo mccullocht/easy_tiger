@@ -70,6 +70,7 @@ fn quantization_loss(
     );
     let (abs_error, sq_error) = (0..vectors.len())
         .into_par_iter()
+        .take(100)
         .progress_count(vectors.len() as u64)
         .map(|i| {
             let v = mean

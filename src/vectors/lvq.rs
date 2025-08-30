@@ -199,6 +199,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         let interval = f32::from_le_bytes(residual_header_bytes.try_into().unwrap());
         let delta = interval / ((1 << B2) - 1) as f32;
         let lower = -interval / 2.0;
+        //println!("residual interval {interval} lower {lower} delta {delta}");
         Some(Self {
             primary,
             vector: residual_vector,
@@ -268,16 +269,18 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         // enough to encode both the min and max value in the vector.
         // TODO: investigate interval optimization on the derived residual vector.
         let interval = optimize_interval(vector, &stats, B1);
-        // XXX interval needs to be 2x the largest delta we will have to encode. what i have here
-        // is correct when B1 == 1, but not in other cases. intuitively you only need to consider
-        // encoding in the lowest and highest primary vector buckets so long as the interval is at
-        // least as large as the interval that would be used by default (l1 delta).
-        let residual_interval = (header.lower - interval.0)
-            .abs()
-            .max((header.upper - interval.1).abs())
-            * 2.0;
-        let residual_interval = residual_interval.max((header.upper - header.lower) / 2.0);
+        // For the residual interval choose the maximum based on primary delta, or the min/max
+        // values we may need to encode based on the gap between the initial and optimized interval.
+        let residual_interval = [
+            (interval.1 - interval.0) / ((1 << B1) - 1) as f32,
+            (header.lower.abs() - interval.0.abs()) * 2.0,
+            (header.upper.abs() - interval.1.abs()) * 2.0,
+        ]
+        .into_iter()
+        .max_by(f32::total_cmp)
+        .expect("3 values input");
         (header.lower, header.upper) = interval;
+
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
         let split =
             packing::two_vector_split(vector_bytes.len() - std::mem::size_of::<f32>(), B1, B2);
@@ -285,7 +288,8 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         let (residual_header_bytes, residual) =
             residual_bytes.split_at_mut(std::mem::size_of::<f32>());
         residual_header_bytes.copy_from_slice(residual_interval.to_le_bytes().as_slice());
-        header.component_sum = lvq2_quantize_and_pack::<B1, B2>(
+        // XXX something is fucked with the aarch64 implementation.
+        header.component_sum = scalar::lvq2_quantize_and_pack::<B1, B2>(
             vector,
             header.lower,
             header.upper,

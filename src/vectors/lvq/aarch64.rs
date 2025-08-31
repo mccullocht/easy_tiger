@@ -413,10 +413,7 @@ unsafe fn quantize_residual4(
 ) -> uint32x4_t {
     let q = vfmaq_f32(lower, vcvtq_f32_u32(q), delta);
     let res = vsubq_f32(v, q);
-    vcvtaq_u32_f32(vmulq_f32(
-        vsubq_f32(vminq_f32(res, res_upper), res_lower),
-        res_delta,
-    ))
+    quantize4(res, res_lower, res_upper, res_delta)
 }
 
 #[inline(always)]

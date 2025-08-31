@@ -289,6 +289,7 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
             residual_bytes.split_at_mut(std::mem::size_of::<f32>());
         residual_header_bytes.copy_from_slice(residual_interval.to_le_bytes().as_slice());
         // XXX something is fucked with the aarch64 implementation.
+        // XXX the test vector isn't large enough to figure this out.
         header.component_sum = scalar::lvq2_quantize_and_pack::<B1, B2>(
             vector,
             header.lower,
@@ -615,37 +616,46 @@ mod test {
 
     #[test]
     fn lvq2_1_8() {
-        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
+        let vec = [
+            1.22f32, 1.25, 2.37, -2.21, 2.28, -2.8, -0.61, 2.29, -2.56, -0.57, -2.62, -1.56, 1.92,
+            -0.63, 0.77, -2.86,
+        ];
         let encoded = TwoLevelVectorCoder::<1, 8>::default().encode(&vec);
         let lvq = TwoLevelVector::<1, 8>::new(&encoded).expect("readable");
-        assert_eq!(lvq.primary.vector, &[0b11100000, 0b11]);
+        assert_eq!(lvq.primary.vector, &[0b10010111, 0b1010000]);
         assert_abs_diff_eq!(
             lvq.vector.as_ref(),
-            [79, 120, 160, 200, 240, 25, 66, 106, 146, 186].as_ref(),
+            [78, 79, 148, 124, 142, 88, 221, 143, 103, 224, 99, 164, 120, 220, 50, 84].as_ref(),
             epsilon = 1,
         );
         assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.38059697,
-                upper: 0.25373134,
-                component_sum: 5,
+                l2_norm: 7.8255224,
+                lower: -2.1523309,
+                upper: 2.0392284,
+                component_sum: 7,
             }
         );
         assert_abs_diff_eq!(
             lvq.f32_iter().collect::<Vec<_>>().as_ref(),
             [
-                -0.5012437,
-                -0.3992537,
-                -0.29975122,
-                -0.20024875,
-                -0.100746274,
-                -0.0012437701,
-                0.100746274,
-                0.20024875,
-                0.29975122,
-                0.3992537
+                1.2255728,
+                1.2420104,
+                2.3761969,
+                -2.209862,
+                2.277572,
+                -2.8016117,
+                -0.6154258,
+                2.2940094,
+                -2.5550494,
+                -0.56611323,
+                -2.6207993,
+                -1.5523624,
+                1.9159473,
+                -0.63186336,
+                0.76532316,
+                -2.8673615
             ]
             .as_ref(),
             epsilon = 0.01

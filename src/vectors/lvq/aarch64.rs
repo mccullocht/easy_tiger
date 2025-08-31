@@ -237,14 +237,15 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
     let component_sum = if tail_split > 0 {
         unsafe {
             let lowerv = vdupq_n_f32(lower);
+            let upperv = vdupq_n_f32(upper);
             let deltav = vdupq_n_f32(delta.recip());
             let mut component_sumv = 0u32;
             for i in (0..tail_split).step_by(16) {
                 // Load and quantize 16 values.
-                let qa = quantize4(vld1q_f32(v.as_ptr().add(i)), lowerv, deltav);
-                let qb = quantize4(vld1q_f32(v.as_ptr().add(i + 4)), lowerv, deltav);
-                let qc = quantize4(vld1q_f32(v.as_ptr().add(i + 8)), lowerv, deltav);
-                let qd = quantize4(vld1q_f32(v.as_ptr().add(i + 12)), lowerv, deltav);
+                let qa = quantize4(vld1q_f32(v.as_ptr().add(i)), lowerv, upperv, deltav);
+                let qb = quantize4(vld1q_f32(v.as_ptr().add(i + 4)), lowerv, upperv, deltav);
+                let qc = quantize4(vld1q_f32(v.as_ptr().add(i + 8)), lowerv, upperv, deltav);
+                let qd = quantize4(vld1q_f32(v.as_ptr().add(i + 12)), lowerv, upperv, deltav);
 
                 // Reduce to a single byte per dimension.
                 let qabcd = pack_to_byte(qa, qb, qc, qd);
@@ -277,11 +278,13 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     lower: f32,
     upper: f32,
     primary: &mut [u8],
+    residual_interval: f32,
     residual: &mut [u8],
 ) -> u32 {
     let delta = (upper - lower) / ((1 << B1) - 1) as f32;
-    let res_lower = -delta / 2.0;
-    let res_delta = delta / ((1 << B2) - 1) as f32;
+    let res_lower = -residual_interval / 2.0;
+    let res_upper = residual_interval / 2.0;
+    let res_delta = residual_interval / ((1 << B2) - 1) as f32;
 
     let tail_split = v.len() & !15;
     let (head_primary, tail_primary) = primary.split_at_mut(packing::byte_len(tail_split, B1));
@@ -289,28 +292,62 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     let component_sum = if tail_split > 0 {
         unsafe {
             let lowerv = vdupq_n_f32(lower);
+            let upperv = vdupq_n_f32(upper);
             let deltav = vdupq_n_f32(delta);
             let delta_inv = vdupq_n_f32(delta.recip());
             let res_lowerv = vdupq_n_f32(res_lower);
+            let res_upperv = vdupq_n_f32(res_upper);
             let res_delta_inv = vdupq_n_f32(res_delta.recip());
             let mut component_sumv = 0u32;
             for i in (0..tail_split).step_by(16) {
                 // Load and quantize 16 values, primary and residual
                 let a = vld1q_f32(v.as_ptr().add(i));
-                let qa = quantize4(a, lowerv, delta_inv);
-                let ra = quantize_residual4(a, qa, lowerv, deltav, res_lowerv, res_delta_inv);
+                let qa = quantize4(a, lowerv, upperv, delta_inv);
+                let ra = quantize_residual4(
+                    a,
+                    qa,
+                    lowerv,
+                    deltav,
+                    res_lowerv,
+                    res_upperv,
+                    res_delta_inv,
+                );
 
                 let b = vld1q_f32(v.as_ptr().add(i + 4));
-                let qb = quantize4(b, lowerv, delta_inv);
-                let rb = quantize_residual4(b, qb, lowerv, deltav, res_lowerv, res_delta_inv);
+                let qb = quantize4(b, lowerv, upperv, delta_inv);
+                let rb = quantize_residual4(
+                    b,
+                    qb,
+                    lowerv,
+                    deltav,
+                    res_lowerv,
+                    res_upperv,
+                    res_delta_inv,
+                );
 
                 let c = vld1q_f32(v.as_ptr().add(i + 8));
-                let qc = quantize4(c, lowerv, delta_inv);
-                let rc = quantize_residual4(c, qc, lowerv, deltav, res_lowerv, res_delta_inv);
+                let qc = quantize4(c, lowerv, upperv, delta_inv);
+                let rc = quantize_residual4(
+                    c,
+                    qc,
+                    lowerv,
+                    deltav,
+                    res_lowerv,
+                    res_upperv,
+                    res_delta_inv,
+                );
 
                 let d = vld1q_f32(v.as_ptr().add(i + 12));
-                let qd = quantize4(d, lowerv, delta_inv);
-                let rd = quantize_residual4(d, qd, lowerv, deltav, res_lowerv, res_delta_inv);
+                let qd = quantize4(d, lowerv, upperv, delta_inv);
+                let rd = quantize_residual4(
+                    d,
+                    qd,
+                    lowerv,
+                    deltav,
+                    res_lowerv,
+                    res_upperv,
+                    res_delta_inv,
+                );
 
                 // Reduce to a single byte per dimension, sum, and pack.
                 let qabcd = pack_to_byte(qa, qb, qc, qd);
@@ -346,6 +383,7 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
                 lower,
                 upper,
                 tail_primary,
+                residual_interval,
                 tail_residual,
             )
     } else {
@@ -354,8 +392,13 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
 }
 
 #[inline(always)]
-unsafe fn quantize4(v: float32x4_t, lower: float32x4_t, delta_inv: float32x4_t) -> uint32x4_t {
-    vcvtaq_u32_f32(vmulq_f32(vsubq_f32(v, lower), delta_inv))
+unsafe fn quantize4(
+    v: float32x4_t,
+    lower: float32x4_t,
+    upper: float32x4_t,
+    delta_inv: float32x4_t,
+) -> uint32x4_t {
+    vcvtaq_u32_f32(vmulq_f32(vsubq_f32(vminq_f32(v, upper), lower), delta_inv))
 }
 
 #[inline(always)]
@@ -365,11 +408,12 @@ unsafe fn quantize_residual4(
     lower: float32x4_t,
     delta: float32x4_t,
     res_lower: float32x4_t,
-    res_delta_inv: float32x4_t,
+    res_upper: float32x4_t,
+    res_delta: float32x4_t,
 ) -> uint32x4_t {
     let q = vfmaq_f32(lower, vcvtq_f32_u32(q), delta);
     let res = vsubq_f32(v, q);
-    vcvtaq_u32_f32(vmulq_f32(vsubq_f32(res, res_lower), res_delta_inv))
+    quantize4(res, res_lower, res_upper, res_delta)
 }
 
 #[inline(always)]

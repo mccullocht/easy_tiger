@@ -191,11 +191,14 @@ struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
 impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
     fn new(encoded: &'a [u8]) -> Option<Self> {
         let (header, vector) = VectorHeader::deserialize(encoded)?;
-        let split = packing::two_vector_split(vector.len(), B1, B2);
-        let (primary_vector, residual_vector) = vector.split_at(split);
+        let split = packing::two_vector_split(vector.len() - std::mem::size_of::<f32>(), B1, B2);
+        let (primary_vector, residual) = vector.split_at(split);
+        let (residual_header_bytes, residual_vector) =
+            residual.split_at(std::mem::size_of::<f32>());
         let primary = PrimaryVector::<'_, B1>::with_header(header, primary_vector);
-        let delta = primary.delta / ((1 << B2) - 1) as f32;
-        let lower = -primary.delta / 2.0;
+        let interval = f32::from_le_bytes(residual_header_bytes.try_into().unwrap());
+        let delta = interval / ((1 << B2) - 1) as f32;
+        let lower = -interval / 2.0;
         Some(Self {
             primary,
             vector: residual_vector,
@@ -241,6 +244,17 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     }
 }
 
+/// Store a two level vector.
+///
+/// Format is as follows:
+/// * Vector header (16 bytes)
+/// * Primary vector -- length depends on dimensionality and B1
+/// * Residual interval value (4 bytes)
+/// * Residual vector -- length depends on dimensionality and B2
+///
+/// This format allows the representation to be split -- the primary vector can be used with just
+/// the header and primary vector contents; the residual delta and vector can be used along with
+/// the primary vector parts to provide a higher fidelity representation.
 #[derive(Debug, Copy, Clone, Default)]
 pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>;
 
@@ -248,17 +262,47 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let stats = VectorStats::from(vector);
         let mut header = VectorHeader::from(stats);
-        (header.lower, header.upper) = optimize_interval(vector, &stats, B1);
+        // NB: this interval optimization reduces loss for the primary vector, but this loss
+        // reduction can make the residual vector more lossy if we derive the delta from the primary
+        // interval as described in the LVQ paper. Compute and store a residual delta that is large
+        // enough to encode both the min and max value in the vector.
+        // TODO: investigate interval optimization on the derived residual vector.
+        let interval = optimize_interval(vector, &stats, B1);
+        // For the residual interval choose the maximum based on primary delta, or the min/max
+        // values we may need to encode based on the gap between the initial and optimized interval.
+        let residual_interval = [
+            (interval.1 - interval.0) / ((1 << B1) - 1) as f32,
+            (header.lower.abs() - interval.0.abs()) * 2.0,
+            (header.upper.abs() - interval.1.abs()) * 2.0,
+        ]
+        .into_iter()
+        .max_by(f32::total_cmp)
+        .expect("3 values input");
+        (header.lower, header.upper) = interval;
+
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
-        let split = packing::two_vector_split(vector_bytes.len(), B1, B2);
-        let (primary, residual) = vector_bytes.split_at_mut(split);
-        header.component_sum =
-            lvq2_quantize_and_pack::<B1, B2>(vector, header.lower, header.upper, primary, residual);
+        let split =
+            packing::two_vector_split(vector_bytes.len() - std::mem::size_of::<f32>(), B1, B2);
+        let (primary, residual_bytes) = vector_bytes.split_at_mut(split);
+        let (residual_header_bytes, residual) =
+            residual_bytes.split_at_mut(std::mem::size_of::<f32>());
+        residual_header_bytes.copy_from_slice(residual_interval.to_le_bytes().as_slice());
+        header.component_sum = lvq2_quantize_and_pack::<B1, B2>(
+            vector,
+            header.lower,
+            header.upper,
+            primary,
+            residual_interval,
+            residual,
+        );
         header.serialize(header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        VectorHeader::LEN + packing::byte_len(dimensions, B1) + packing::byte_len(dimensions, B2)
+        VectorHeader::LEN
+            + packing::byte_len(dimensions, B1)
+            + std::mem::size_of::<f32>()
+            + packing::byte_len(dimensions, B2)
     }
 
     fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
@@ -569,37 +613,46 @@ mod test {
 
     #[test]
     fn lvq2_1_8() {
-        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
+        let vec = [
+            1.22f32, 1.25, 2.37, -2.21, 2.28, -2.8, -0.61, 2.29, -2.56, -0.57, -2.62, -1.56, 1.92,
+            -0.63, 0.77, -2.86,
+        ];
         let encoded = TwoLevelVectorCoder::<1, 8>::default().encode(&vec);
         let lvq = TwoLevelVector::<1, 8>::new(&encoded).expect("readable");
-        assert_eq!(lvq.primary.vector, &[0b11100000, 0b11]);
+        assert_eq!(lvq.primary.vector, &[0b10010111, 0b1010000]);
         assert_abs_diff_eq!(
             lvq.vector.as_ref(),
-            [79, 120, 160, 200, 240, 25, 66, 106, 146, 186].as_ref(),
+            [78, 79, 148, 124, 142, 88, 221, 143, 103, 224, 99, 164, 120, 220, 50, 84].as_ref(),
             epsilon = 1,
         );
         assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.38059697,
-                upper: 0.25373134,
-                component_sum: 5,
+                l2_norm: 7.8255224,
+                lower: -2.1523309,
+                upper: 2.0392284,
+                component_sum: 7,
             }
         );
         assert_abs_diff_eq!(
             lvq.f32_iter().collect::<Vec<_>>().as_ref(),
             [
-                -0.5012437,
-                -0.3992537,
-                -0.29975122,
-                -0.20024875,
-                -0.100746274,
-                -0.0012437701,
-                0.100746274,
-                0.20024875,
-                0.29975122,
-                0.3992537
+                1.2255728,
+                1.2420104,
+                2.3761969,
+                -2.209862,
+                2.277572,
+                -2.8016117,
+                -0.6154258,
+                2.2940094,
+                -2.5550494,
+                -0.56611323,
+                -2.6207993,
+                -1.5523624,
+                1.9159473,
+                -0.63186336,
+                0.76532316,
+                -2.8673615
             ]
             .as_ref(),
             epsilon = 0.01

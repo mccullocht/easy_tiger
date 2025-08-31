@@ -199,7 +199,6 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         let interval = f32::from_le_bytes(residual_header_bytes.try_into().unwrap());
         let delta = interval / ((1 << B2) - 1) as f32;
         let lower = -interval / 2.0;
-        //println!("residual interval {interval} lower {lower} delta {delta}");
         Some(Self {
             primary,
             vector: residual_vector,
@@ -288,9 +287,7 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         let (residual_header_bytes, residual) =
             residual_bytes.split_at_mut(std::mem::size_of::<f32>());
         residual_header_bytes.copy_from_slice(residual_interval.to_le_bytes().as_slice());
-        // XXX something is fucked with the aarch64 implementation.
-        // XXX the test vector isn't large enough to figure this out.
-        header.component_sum = scalar::lvq2_quantize_and_pack::<B1, B2>(
+        header.component_sum = lvq2_quantize_and_pack::<B1, B2>(
             vector,
             header.lower,
             header.upper,

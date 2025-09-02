@@ -218,6 +218,10 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         self.primary.l2_norm()
     }
 
+    pub fn l2_norm_sq(&self) -> f64 {
+        self.primary.l2_norm_sq()
+    }
+
     fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
         self.primary
             .f32_iter()
@@ -388,6 +392,18 @@ impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelDotProductDist
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct TwoLevelEuclideanDistance<const B1: usize, const B2: usize>;
+
+impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelEuclideanDistance<B1, B2> {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = TwoLevelVector::<B1, B2>::new(query).unwrap();
+        let doc = TwoLevelVector::<B1, B2>::new(doc).unwrap();
+        let dot = lvq2_dot_unnormalized(&query, &doc);
+        query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TwoLevelQueryDotProductDistance<'a, const B1: usize, const B2: usize>(Cow<'a, [f32]>);
 
@@ -404,6 +420,29 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance
         let vector = TwoLevelVector::<B1, B2>::new(vector).unwrap();
         let dot = lvq2_f32_dot_unnormalized(self.0.as_ref(), &vector) / vector.l2_norm();
         (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TwoLevelQueryEuclideanDistance<'a, const B1: usize, const B2: usize>(
+    Cow<'a, [f32]>,
+    f64,
+);
+
+impl<'a, const B1: usize, const B2: usize> TwoLevelQueryEuclideanDistance<'a, B1, B2> {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
+        let l2_norm_sq = dot_f32(&query, &query);
+        Self(query, l2_norm_sq)
+    }
+}
+
+impl<const B1: usize, const B2: usize> QueryVectorDistance
+    for TwoLevelQueryEuclideanDistance<'_, B1, B2>
+{
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = TwoLevelVector::<B1, B2>::new(vector).unwrap();
+        let dot = lvq2_f32_dot_unnormalized(self.0.as_ref(), &vector);
+        self.1 + vector.l2_norm_sq() - (2.0 * dot)
     }
 }
 

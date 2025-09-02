@@ -515,7 +515,7 @@ pub fn new_query_vector_distance_indexing<'a>(
             new_query_vector_distance_indexing(query, similarity, F32VectorCoding::F32)
         }
         (Dot, F32VectorCoding::F16) => quantized_qvd!(float16::DotProductDistance, query),
-        (Cosine, F32VectorCoding::F16) => unimplemented!(),
+        (Cosine, F32VectorCoding::F16) => quantized_qvd!(float16::DotProductDistance, query),
         (Euclidean, F32VectorCoding::F16) => quantized_qvd!(float16::EuclideanDistance, query),
         (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
         (Dot, F32VectorCoding::I8ScaledUniformQuantized)

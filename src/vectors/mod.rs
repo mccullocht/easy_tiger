@@ -233,12 +233,15 @@ impl F32VectorCoding {
             (Self::LVQ1x1, Dot) | (Self::LVQ1x1, Cosine) => {
                 Box::new(lvq::PrimaryDotProductDistance::<1>)
             }
+            (Self::LVQ1x1, Euclidean) => Box::new(lvq::PrimaryEuclideanDistance::<1>),
             (Self::LVQ1x4, Dot) | (Self::LVQ1x4, Cosine) => {
                 Box::new(lvq::PrimaryDotProductDistance::<4>)
             }
+            (Self::LVQ1x4, _) => Box::new(lvq::PrimaryEuclideanDistance::<4>),
             (Self::LVQ1x8, Dot) | (Self::LVQ1x8, Cosine) => {
                 Box::new(lvq::PrimaryDotProductDistance::<8>)
             }
+            (Self::LVQ1x8, _) => Box::new(lvq::PrimaryEuclideanDistance::<8>),
             (Self::LVQ2x1x8, Dot) | (Self::LVQ2x1x8, Cosine) => {
                 Box::new(lvq::TwoLevelDotProductDistance::<1, 8>)
             }
@@ -251,10 +254,7 @@ impl F32VectorCoding {
             (Self::LVQ2x8x8, Dot) | (Self::LVQ2x8x8, Cosine) => {
                 Box::new(lvq::TwoLevelDotProductDistance::<8, 8>)
             }
-            (Self::LVQ1x1, _)
-            | (Self::LVQ1x4, _)
-            | (Self::LVQ1x8, _)
-            | (Self::LVQ2x1x8, _)
+            (Self::LVQ2x1x8, _)
             | (Self::LVQ2x4x4, _)
             | (Self::LVQ2x4x8, _)
             | (Self::LVQ2x8x8, _) => unimplemented!(),
@@ -431,17 +431,26 @@ pub fn new_query_vector_distance_f32<'a>(
         (Dot, F32VectorCoding::LVQ1x1) => {
             Box::new(lvq::PrimaryQueryDotProductDistance::<1>::new(query.into()))
         }
+        (Euclidean, F32VectorCoding::LVQ1x1) => {
+            Box::new(lvq::PrimaryQueryEuclideanDistance::<1>::new(query.into()))
+        }
         (Cosine, F32VectorCoding::LVQ1x4) => Box::new(
             lvq::PrimaryQueryDotProductDistance::<4>::new(l2_normalize(query.into())),
         ),
         (Dot, F32VectorCoding::LVQ1x4) => {
             Box::new(lvq::PrimaryQueryDotProductDistance::<4>::new(query.into()))
         }
+        (Euclidean, F32VectorCoding::LVQ1x4) => {
+            Box::new(lvq::PrimaryQueryEuclideanDistance::<4>::new(query.into()))
+        }
         (Cosine, F32VectorCoding::LVQ1x8) => Box::new(
             lvq::PrimaryQueryDotProductDistance::<8>::new(l2_normalize(query.into())),
         ),
         (Dot, F32VectorCoding::LVQ1x8) => {
             Box::new(lvq::PrimaryQueryDotProductDistance::<8>::new(query.into()))
+        }
+        (Euclidean, F32VectorCoding::LVQ1x8) => {
+            Box::new(lvq::PrimaryQueryEuclideanDistance::<8>::new(query.into()))
         }
         (Cosine, F32VectorCoding::LVQ2x1x8) => Box::new(
             lvq::TwoLevelQueryDotProductDistance::<1, 8>::new(l2_normalize(query.into())),
@@ -467,10 +476,7 @@ pub fn new_query_vector_distance_f32<'a>(
         (Dot, F32VectorCoding::LVQ2x8x8) => Box::new(
             lvq::TwoLevelQueryDotProductDistance::<8, 8>::new(query.into()),
         ),
-        (_, F32VectorCoding::LVQ1x1)
-        | (_, F32VectorCoding::LVQ1x4)
-        | (_, F32VectorCoding::LVQ1x8)
-        | (_, F32VectorCoding::LVQ2x1x8)
+        (_, F32VectorCoding::LVQ2x1x8)
         | (_, F32VectorCoding::LVQ2x4x4)
         | (_, F32VectorCoding::LVQ2x4x8)
         | (_, F32VectorCoding::LVQ2x8x8) => unimplemented!(),
@@ -524,11 +530,20 @@ pub fn new_query_vector_distance_indexing<'a>(
         (Dot, F32VectorCoding::LVQ1x1) | (Cosine, F32VectorCoding::LVQ1x1) => {
             quantized_qvd!(lvq::PrimaryDotProductDistance::<1>, query)
         }
+        (Euclidean, F32VectorCoding::LVQ1x1) => {
+            quantized_qvd!(lvq::PrimaryEuclideanDistance::<1>, query)
+        }
         (Dot, F32VectorCoding::LVQ1x4) | (Cosine, F32VectorCoding::LVQ1x4) => {
             quantized_qvd!(lvq::PrimaryDotProductDistance::<4>, query)
         }
+        (Euclidean, F32VectorCoding::LVQ1x4) => {
+            quantized_qvd!(lvq::PrimaryEuclideanDistance::<4>, query)
+        }
         (Dot, F32VectorCoding::LVQ1x8) | (Cosine, F32VectorCoding::LVQ1x8) => {
             quantized_qvd!(lvq::PrimaryDotProductDistance::<8>, query)
+        }
+        (Euclidean, F32VectorCoding::LVQ1x8) => {
+            quantized_qvd!(lvq::PrimaryEuclideanDistance::<8>, query)
         }
         (Dot, F32VectorCoding::LVQ2x1x8) | (Cosine, F32VectorCoding::LVQ2x1x8) => {
             quantized_qvd!(lvq::TwoLevelDotProductDistance::<1, 8>, query)
@@ -542,10 +557,7 @@ pub fn new_query_vector_distance_indexing<'a>(
         (Dot, F32VectorCoding::LVQ2x8x8) | (Cosine, F32VectorCoding::LVQ2x8x8) => {
             quantized_qvd!(lvq::TwoLevelDotProductDistance::<8, 8>, query)
         }
-        (_, F32VectorCoding::LVQ1x1)
-        | (_, F32VectorCoding::LVQ1x4)
-        | (_, F32VectorCoding::LVQ1x8)
-        | (_, F32VectorCoding::LVQ2x1x8)
+        (_, F32VectorCoding::LVQ2x1x8)
         | (_, F32VectorCoding::LVQ2x4x4)
         | (_, F32VectorCoding::LVQ2x4x8)
         | (_, F32VectorCoding::LVQ2x8x8) => unimplemented!(),
@@ -750,10 +762,26 @@ mod test {
     }
 
     #[test]
+    fn lvq1x4_l2() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Euclidean, F32VectorCoding::LVQ1x4, i, &a, &b, 0.02);
+            query_distance_compare(Euclidean, F32VectorCoding::LVQ1x4, i, &a, &b, 0.02);
+        }
+    }
+
+    #[test]
     fn lvq1x8_dot() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
             distance_compare(Dot, F32VectorCoding::LVQ1x8, i, &a, &b, 0.001);
             query_distance_compare(Dot, F32VectorCoding::LVQ1x8, i, &a, &b, 0.001);
+        }
+    }
+
+    #[test]
+    fn lvq1x8_l2() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Euclidean, F32VectorCoding::LVQ1x8, i, &a, &b, 0.001);
+            query_distance_compare(Euclidean, F32VectorCoding::LVQ1x8, i, &a, &b, 0.001);
         }
     }
 

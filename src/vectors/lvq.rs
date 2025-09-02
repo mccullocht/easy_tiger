@@ -21,7 +21,10 @@ use scalar::*;
 
 use std::borrow::Cow;
 
-use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance};
+use crate::{
+    distance::dot_f32,
+    vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance},
+};
 
 #[derive(Debug, Clone, Copy, Default)]
 struct VectorStats {
@@ -139,6 +142,10 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
 
     fn l2_norm(&self) -> f64 {
         self.header.l2_norm.into()
+    }
+
+    fn l2_norm_sq(&self) -> f64 {
+        self.l2_norm() * self.l2_norm()
     }
 
     fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
@@ -322,6 +329,18 @@ impl<const B: usize> VectorDistance for PrimaryDotProductDistance<B> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PrimaryEuclideanDistance<const B: usize>;
+
+impl<const B: usize> VectorDistance for PrimaryEuclideanDistance<B> {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = PrimaryVector::<B>::new(query).unwrap();
+        let doc = PrimaryVector::<B>::new(doc).unwrap();
+        let dot = query.dot_unnormalized(&doc);
+        query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PrimaryQueryDotProductDistance<'a, const B: usize>(Cow<'a, [f32]>);
 
@@ -336,6 +355,24 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDotProductDistance<'_, 
         let vector = PrimaryVector::<B>::new(vector).unwrap();
         let dot = lvq1_f32_dot_unnormalized(self.0.as_ref(), &vector) / vector.l2_norm();
         (-dot + 1.0) / 2.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PrimaryQueryEuclideanDistance<'a, const B: usize>(Cow<'a, [f32]>, f64);
+
+impl<'a, const B: usize> PrimaryQueryEuclideanDistance<'a, B> {
+    pub fn new(query: Cow<'a, [f32]>) -> Self {
+        let l2_norm_sq = dot_f32(&query, &query);
+        Self(query, l2_norm_sq)
+    }
+}
+
+impl<const B: usize> QueryVectorDistance for PrimaryQueryEuclideanDistance<'_, B> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = PrimaryVector::<B>::new(vector).unwrap();
+        let dot = lvq1_f32_dot_unnormalized(self.0.as_ref(), &vector);
+        self.1 + vector.l2_norm_sq() - (2.0 * dot)
     }
 }
 

@@ -116,6 +116,29 @@ const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
 
 const LAMBDA: f32 = 0.1;
 
+const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
+const SUPPORTED_RESIDUAL_BITS: [usize; 2] = [4, 8];
+
+const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
+    let mut i = 0;
+    while i < allowed.len() {
+        if bits == allowed[i] {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+const fn check_primary_bits(bits: usize) {
+    assert!(is_supported_bits(bits, &SUPPORTED_PRIMARY_BITS));
+}
+
+const fn check_residual_bits(primary: usize, residual: usize) {
+    assert!(is_supported_bits(primary, &SUPPORTED_PRIMARY_BITS));
+    assert!(is_supported_bits(residual, &SUPPORTED_RESIDUAL_BITS));
+}
+
 /// An LVQ1 coded primary vector.
 ///
 /// There may be a parallel residual vector that can be composed with this one to increase accuracy.
@@ -126,7 +149,13 @@ struct PrimaryVector<'a, const B: usize> {
 }
 
 impl<'a, const B: usize> PrimaryVector<'a, B> {
+    const B_CHECK: () = {
+        check_primary_bits(B);
+    };
+
     fn new(encoded: &'a [u8]) -> Option<Self> {
+        let _ = Self::B_CHECK;
+
         let (header, vector) = VectorHeader::deserialize(encoded)?;
         Some(Self::with_header(header, vector))
     }
@@ -196,7 +225,13 @@ struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
 }
 
 impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
+    const B_CHECK: () = {
+        check_residual_bits(B1, B2);
+    };
+
     fn new(encoded: &'a [u8]) -> Option<Self> {
+        let _ = Self::B_CHECK;
+
         let (header, vector) = VectorHeader::deserialize(encoded)?;
         let split = packing::two_vector_split(vector.len() - std::mem::size_of::<f32>(), B1, B2);
         let (primary_vector, residual) = vector.split_at(split);
@@ -232,11 +267,29 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
     }
 }
 
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone)]
 pub struct PrimaryVectorCoder<const B: usize>;
+
+impl<const B: usize> PrimaryVectorCoder<B> {
+    const B_CHECK: () = {
+        check_primary_bits(B);
+    };
+}
+
+impl<const B: usize> Default for PrimaryVectorCoder<B> {
+    fn default() -> Self {
+        let _ = Self::B_CHECK;
+        PrimaryVectorCoder::<B>
+    }
+}
 
 impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let _bcheck: () = {
+            assert!(B > 0, "primary vector bit must be in 1..=8");
+            assert!(B <= 8, "primary vector bit must be in 1..=8");
+        };
+
         let stats = VectorStats::from(vector);
         let mut header = VectorHeader::from(stats);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
@@ -266,8 +319,21 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
 /// This format allows the representation to be split -- the primary vector can be used with just
 /// the header and primary vector contents; the residual delta and vector can be used along with
 /// the primary vector parts to provide a higher fidelity representation.
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone)]
 pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>;
+
+impl<const B1: usize, const B2: usize> TwoLevelVectorCoder<B1, B2> {
+    const B_CHECK: () = {
+        check_residual_bits(B1, B2);
+    };
+}
+
+impl<const B1: usize, const B2: usize> Default for TwoLevelVectorCoder<B1, B2> {
+    fn default() -> Self {
+        let _ = Self::B_CHECK;
+        TwoLevelVectorCoder::<B1, B2>
+    }
+}
 
 impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1, B2> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {

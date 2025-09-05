@@ -27,7 +27,7 @@ use crate::{
 };
 
 const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
-const SUPPORTED_RESIDUAL_BITS: [usize; 2] = [4, 8];
+const SUPPORTED_RESIDUAL_BITS: [usize; 3] = [4, 8, 16];
 
 const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
     let mut i = 0;
@@ -545,7 +545,7 @@ mod packing {
     /// REQUIRES: B1 must be in 1..=8 and B1 % 8 == 0
     /// REQUIRES: B2 must be in 1..=8 and B2 % 8 == 0
     pub fn pack_iter2<const B1: usize, const B2: usize>(
-        it: impl ExactSizeIterator<Item = (u8, u8)>,
+        it: impl ExactSizeIterator<Item = (u8, u16)>,
         primary: &mut [u8],
         residual: &mut [u8],
     ) {
@@ -553,7 +553,11 @@ mod packing {
         let dims_per_byte2 = 8 / B2;
         for (i, (q, r)) in it.enumerate() {
             primary[i / dims_per_byte1] |= q << ((i % dims_per_byte1) * B1);
-            residual[i / dims_per_byte2] |= r << ((i % dims_per_byte2) * B2);
+            match B2 {
+                1..=8 => residual[i / dims_per_byte2] |= (r as u8) << ((i % dims_per_byte2) * B2),
+                16 => residual[i * 2..i * 2 + 2].copy_from_slice(&r.to_le_bytes()),
+                _ => unimplemented!(),
+            }
         }
     }
 
@@ -584,8 +588,7 @@ mod packing {
 
         fn next(&mut self) -> Option<Self::Item> {
             while self.nbuf < B {
-                self.buf <<= 8;
-                self.buf |= u32::from(*self.inner.next()?);
+                self.buf |= u32::from(*self.inner.next()?) << self.nbuf;
                 self.nbuf += 8;
             }
 
@@ -913,6 +916,58 @@ mod test {
             ]
             .as_ref(),
             epsilon = 0.0001
+        );
+    }
+
+    #[test]
+    fn lvq2_1_16() {
+        let vec = [
+            1.22f32, 1.25, 2.37, -2.21, 2.28, -2.8, -0.61, 2.29, -2.56, -0.57, -2.62, -1.56, 1.92,
+            -0.63, 0.77, -2.86,
+        ];
+        let encoded = TwoLevelVectorCoder::<1, 16>::default().encode(&vec);
+        let lvq = TwoLevelVector::<1, 16>::new(&encoded).expect("readable");
+        assert_eq!(lvq.primary.vector, &[0b10010111, 0b1010000]);
+        assert_abs_diff_eq!(
+            bytemuck::cast_slice::<_, u16>(lvq.vector.as_ref()),
+            [
+                19959, 20428, 37939, 31866, 36532, 22641, 56882, 36688, 26394, 57507, 25455, 42029,
+                30903, 56569, 12923, 21703
+            ]
+            .as_ref(),
+            epsilon = 1,
+        );
+        assert_abs_diff_eq!(
+            lvq.primary.header,
+            VectorHeader {
+                l2_norm: 7.8255224,
+                lower: -2.1523309,
+                upper: 2.0392284,
+                component_sum: 7,
+            }
+        );
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
+                1.2255728,
+                1.2420104,
+                2.3761969,
+                -2.209862,
+                2.277572,
+                -2.8016117,
+                -0.6154258,
+                2.2940094,
+                -2.5550494,
+                -0.56611323,
+                -2.6207993,
+                -1.5523624,
+                1.9159473,
+                -0.63186336,
+                0.76532316,
+                -2.8673615
+            ]
+            .as_ref(),
+            epsilon = 0.01
         );
     }
 }

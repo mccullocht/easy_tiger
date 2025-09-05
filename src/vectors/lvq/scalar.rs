@@ -141,7 +141,7 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
             // After producing the primary value, calculate the error produced and quantize that
             // value based on the delta between primary items.
             let res = x - ((q as f32 * delta) + lower);
-            let r = ((res.clamp(res_lower, res_upper) - res_lower) / res_delta).round() as u8;
+            let r = ((res.clamp(res_lower, res_upper) - res_lower) / res_delta).round() as u16;
             (q, r)
         }),
         primary,

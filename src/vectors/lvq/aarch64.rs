@@ -6,11 +6,12 @@ use std::arch::aarch64::{
     vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdup_n_u16,
     vdup_n_u32, vdup_n_u8, vdupq_n_f32, vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32,
     vget_low_u16, vgetq_lane_f64, vld1_s16, vld1_s32, vld1_s8, vld1_u8, vld1q_f32, vld1q_s16,
-    vld1q_s32, vld1q_s64, vld1q_s8, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32,
-    vmovl_high_u16, vmovl_u16, vmovl_u8, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
-    vmulq_f32, vmulq_f64, vpaddlq_u16, vpaddlq_u32, vpaddlq_u8, vqtbl1q_u8, vreinterpretq_u32_u8,
-    vreinterpretq_u8_u16, vreinterpretq_u8_u32, vrndaq_f32, vshl_u16, vshl_u32, vshl_u8, vshlq_u16,
-    vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u8, vsubq_f32, vsubq_f64,
+    vld1q_s32, vld1q_s64, vld1q_s8, vld1q_u16, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32,
+    vminvq_f32, vmovl_high_u16, vmovl_u16, vmovl_u8, vmovn_high_u16, vmovn_high_u32, vmovn_u16,
+    vmovn_u32, vmulq_f32, vmulq_f64, vpaddlq_u16, vpaddlq_u32, vpaddlq_u8, vqtbl1q_u8,
+    vreinterpretq_u32_u8, vreinterpretq_u8_u16, vreinterpretq_u8_u32, vrndaq_f32, vshl_u16,
+    vshl_u32, vshl_u8, vshlq_u16, vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u16, vst1q_u8, vsubq_f32,
+    vsubq_f64,
 };
 
 use crate::vectors::lvq::{PrimaryVector, TwoLevelVector};
@@ -361,12 +362,21 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
                 };
 
                 // Reduce to a single byte per dimension and pack.
-                let rabcd = pack_to_byte(ra, rb, rc, rd);
                 match B2 {
-                    1 => pack1(i, rabcd, head_residual),
-                    2 => pack2(i, rabcd, head_residual),
-                    4 => pack4(i, rabcd, head_residual),
-                    8 => pack8(i, rabcd, head_residual),
+                    1 => pack1(i, pack_to_byte(ra, rb, rc, rd), head_residual),
+                    2 => pack2(i, pack_to_byte(ra, rb, rc, rd), head_residual),
+                    4 => pack4(i, pack_to_byte(ra, rb, rc, rd), head_residual),
+                    8 => pack8(i, pack_to_byte(ra, rb, rc, rd), head_residual),
+                    16 => {
+                        vst1q_u16(
+                            (head_residual.as_mut_ptr() as *mut u16).add(i),
+                            vmovn_high_u32(vmovn_u32(ra), rb),
+                        );
+                        vst1q_u16(
+                            (head_residual.as_mut_ptr() as *mut u16).add(i + 8),
+                            vmovn_high_u32(vmovn_u32(rc), rd),
+                        );
+                    }
                     _ => unimplemented!(),
                 };
             }
@@ -680,6 +690,7 @@ unsafe fn unpack<const N: usize>(start_dim: usize, vector: &[u8]) -> (uint32x4_t
         2 => unpack2(start_dim, vector),
         4 => unpack4(start_dim, vector),
         8 => unpack8(start_dim, vector),
+        16 => unpack16(start_dim, vector),
         _ => unimplemented!(),
     }
 }
@@ -757,6 +768,13 @@ unsafe fn unpack4(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
 #[inline(always)]
 unsafe fn unpack8(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
     let d = vmovl_u8(vld1_u8(vector.as_ptr().add(start_dim)));
+    (vmovl_u16(vget_low_u16(d)), vmovl_high_u16(d))
+}
+
+// Unpack 8 values from a vector with 16-bit dimensions starting at `start_dim`.
+#[inline(always)]
+unsafe fn unpack16(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
+    let d = vld1q_u16((vector.as_ptr() as *const u16).add(start_dim));
     (vmovl_u16(vget_low_u16(d)), vmovl_high_u16(d))
 }
 

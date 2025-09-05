@@ -26,6 +26,29 @@ use crate::{
     vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance},
 };
 
+const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
+const SUPPORTED_RESIDUAL_BITS: [usize; 2] = [4, 8];
+
+const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
+    let mut i = 0;
+    while i < allowed.len() {
+        if bits == allowed[i] {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+const fn check_primary_bits(bits: usize) {
+    assert!(is_supported_bits(bits, &SUPPORTED_PRIMARY_BITS));
+}
+
+const fn check_residual_bits(primary: usize, residual: usize) {
+    assert!(is_supported_bits(primary, &SUPPORTED_PRIMARY_BITS));
+    assert!(is_supported_bits(residual, &SUPPORTED_RESIDUAL_BITS));
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct VectorStats {
     min: f32,
@@ -115,29 +138,6 @@ const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
 ];
 
 const LAMBDA: f32 = 0.1;
-
-const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
-const SUPPORTED_RESIDUAL_BITS: [usize; 2] = [4, 8];
-
-const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
-    let mut i = 0;
-    while i < allowed.len() {
-        if bits == allowed[i] {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-const fn check_primary_bits(bits: usize) {
-    assert!(is_supported_bits(bits, &SUPPORTED_PRIMARY_BITS));
-}
-
-const fn check_residual_bits(primary: usize, residual: usize) {
-    assert!(is_supported_bits(primary, &SUPPORTED_PRIMARY_BITS));
-    assert!(is_supported_bits(residual, &SUPPORTED_RESIDUAL_BITS));
-}
 
 /// An LVQ1 coded primary vector.
 ///
@@ -517,7 +517,7 @@ mod packing {
 
     /// The number of bytes required to pack `dimensions` with `bits` per entry.
     pub const fn byte_len(dimensions: usize, bits: usize) -> usize {
-        dimensions.div_ceil(8 / bits)
+        (dimensions * bits).div_ceil(8)
     }
 
     /// Pick where to split between primary and residual vector representation based on the number

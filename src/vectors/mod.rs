@@ -165,6 +165,8 @@ pub enum F32VectorCoding {
     LVQ1x8,
     /// LVQ two-level; 1 bit primary 8 bits residual
     LVQ2x1x8,
+    /// LVQ two-level; 1 bit primary 16 bits residual
+    LVQ2x1x16,
     /// LVQ two-level; 4 bits primary 4 bits residual
     LVQ2x4x4,
     /// LVQ two-level; 4 bits primary 8 bits residual
@@ -194,6 +196,7 @@ impl F32VectorCoding {
             Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::<4>),
             Self::LVQ1x8 => Box::new(lvq::PrimaryVectorCoder::<8>),
             Self::LVQ2x1x8 => Box::new(lvq::TwoLevelVectorCoder::<1, 8>),
+            Self::LVQ2x1x16 => Box::new(lvq::TwoLevelVectorCoder::<1, 16>),
             Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::<4, 4>),
             Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::<4, 8>),
             Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::<8, 8>),
@@ -237,15 +240,19 @@ impl F32VectorCoding {
             (Self::LVQ1x4, Dot) | (Self::LVQ1x4, Cosine) => {
                 Box::new(lvq::PrimaryDotProductDistance::<4>)
             }
-            (Self::LVQ1x4, _) => Box::new(lvq::PrimaryEuclideanDistance::<4>),
+            (Self::LVQ1x4, Euclidean) => Box::new(lvq::PrimaryEuclideanDistance::<4>),
             (Self::LVQ1x8, Dot) | (Self::LVQ1x8, Cosine) => {
                 Box::new(lvq::PrimaryDotProductDistance::<8>)
             }
-            (Self::LVQ1x8, _) => Box::new(lvq::PrimaryEuclideanDistance::<8>),
+            (Self::LVQ1x8, Euclidean) => Box::new(lvq::PrimaryEuclideanDistance::<8>),
             (Self::LVQ2x1x8, Dot) | (Self::LVQ2x1x8, Cosine) => {
                 Box::new(lvq::TwoLevelDotProductDistance::<1, 8>)
             }
             (Self::LVQ2x1x8, Euclidean) => Box::new(lvq::TwoLevelEuclideanDistance::<1, 8>),
+            (Self::LVQ2x1x16, Dot) | (Self::LVQ2x1x16, Cosine) => {
+                Box::new(lvq::TwoLevelDotProductDistance::<1, 16>)
+            }
+            (Self::LVQ2x1x16, Euclidean) => Box::new(lvq::TwoLevelEuclideanDistance::<1, 16>),
             (Self::LVQ2x4x4, Dot) | (Self::LVQ2x4x4, Cosine) => {
                 Box::new(lvq::TwoLevelDotProductDistance::<4, 4>)
             }
@@ -284,6 +291,7 @@ impl FromStr for F32VectorCoding {
             "lvq1x4" => Ok(Self::LVQ1x4),
             "lvq1x8" => Ok(Self::LVQ1x8),
             "lvq2x1x8" => Ok(Self::LVQ2x1x8),
+            "lvq2x1x16" => Ok(Self::LVQ2x1x16),
             "lvq2x4x4" => Ok(Self::LVQ2x4x4),
             "lvq2x4x8" => Ok(Self::LVQ2x4x8),
             "lvq2x8x8" => Ok(Self::LVQ2x8x8),
@@ -306,6 +314,7 @@ impl std::fmt::Display for F32VectorCoding {
             Self::LVQ1x4 => write!(f, "lvq1x4"),
             Self::LVQ1x8 => write!(f, "lvq1x8"),
             Self::LVQ2x1x8 => write!(f, "lvq2x1x8"),
+            Self::LVQ2x1x16 => write!(f, "lvq2x1x16"),
             Self::LVQ2x4x4 => write!(f, "lvq2x4x4"),
             Self::LVQ2x4x8 => write!(f, "lvq2x4x8"),
             Self::LVQ2x8x8 => write!(f, "lvq2x8x8"),
@@ -462,6 +471,18 @@ pub fn new_query_vector_distance_f32<'a>(
             1,
             8,
         >::new(query.into())),
+        (Cosine, F32VectorCoding::LVQ2x1x16) => {
+            Box::new(lvq::TwoLevelQueryDotProductDistance::<1, 16>::new(
+                l2_normalize(query.into()),
+            ))
+        }
+        (Dot, F32VectorCoding::LVQ2x1x16) => Box::new(
+            lvq::TwoLevelQueryDotProductDistance::<1, 16>::new(query.into()),
+        ),
+        (Euclidean, F32VectorCoding::LVQ2x1x16) => Box::new(lvq::TwoLevelQueryEuclideanDistance::<
+            1,
+            16,
+        >::new(query.into())),
         (Cosine, F32VectorCoding::LVQ2x4x4) => Box::new(
             lvq::TwoLevelQueryDotProductDistance::<4, 4>::new(l2_normalize(query.into())),
         ),
@@ -562,6 +583,12 @@ pub fn new_query_vector_distance_indexing<'a>(
         }
         (Euclidean, F32VectorCoding::LVQ2x1x8) => {
             quantized_qvd!(lvq::TwoLevelEuclideanDistance::<1, 8>, query)
+        }
+        (Dot, F32VectorCoding::LVQ2x1x16) | (Cosine, F32VectorCoding::LVQ2x1x16) => {
+            quantized_qvd!(lvq::TwoLevelDotProductDistance::<1, 16>, query)
+        }
+        (Euclidean, F32VectorCoding::LVQ2x1x16) => {
+            quantized_qvd!(lvq::TwoLevelEuclideanDistance::<1, 16>, query)
         }
         (Dot, F32VectorCoding::LVQ2x4x4) | (Cosine, F32VectorCoding::LVQ2x4x4) => {
             quantized_qvd!(lvq::TwoLevelDotProductDistance::<4, 4>, query)

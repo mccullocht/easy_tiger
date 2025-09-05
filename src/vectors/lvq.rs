@@ -559,61 +559,59 @@ mod packing {
 
     pub struct UnpackIter<'a, const B: usize> {
         inner: std::slice::Iter<'a, u8>,
-        next_bit: usize,
-        buf: u8,
+        buf: u32,
+        nbuf: usize,
     }
 
     impl<'a, const B: usize> UnpackIter<'a, B> {
-        const MASK: u8 = ((1 << B) - 1) as u8;
+        const MASK: u32 = (1 << B) - 1;
+        const BIT_CHECK: () = {
+            assert!(B <= 16);
+        };
 
         fn new(packed: &'a [u8]) -> Self {
+            let _ = Self::BIT_CHECK;
             Self {
                 inner: packed.iter(),
-                next_bit: 8,
                 buf: 0,
+                nbuf: 0,
             }
         }
     }
 
     impl<'a, const B: usize> Iterator for UnpackIter<'a, B> {
-        type Item = u8;
+        type Item = u16;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if self.next_bit == 8 {
-                self.buf = *self.inner.next()?;
-                self.next_bit = 0;
+            while self.nbuf < B {
+                self.buf <<= 8;
+                self.buf |= u32::from(*self.inner.next()?);
+                self.nbuf += 8;
             }
 
-            let v = (self.buf >> self.next_bit) & Self::MASK;
-            self.next_bit += B;
-            Some(v)
+            let v = self.buf & Self::MASK;
+            self.buf >>= B;
+            self.nbuf -= B;
+            Some(v as u16)
         }
 
-        fn nth(&mut self, mut n: usize) -> Option<Self::Item> {
-            // Handle anything currently in buf.
-            let remaining = (8 - self.next_bit) / B;
-            if n <= remaining {
-                self.next_bit += n * B;
-                return self.next();
+        fn nth(&mut self, n: usize) -> Option<Self::Item> {
+            let mut skip_bits = n * B;
+            if skip_bits > self.nbuf {
+                skip_bits -= self.nbuf;
+                self.nbuf = 0;
+                let skip_bytes = skip_bits / 8;
+                skip_bits -= skip_bytes * 8;
+                self.buf = u32::from(*self.inner.nth(skip_bytes)?);
             }
-            n -= remaining; // n is positive
 
-            // Skip 1 or more entries from inner.
-            let per_byte = 8 / B;
-            let byte_nth = per_byte / n;
-            self.buf = *self.inner.nth(byte_nth)?;
-            self.next_bit = 0;
-            n -= byte_nth * per_byte;
-
-            // Handle anything we need to skip in buf.
-            self.next_bit += n * B;
+            self.buf >>= skip_bits;
             self.next()
         }
 
         fn size_hint(&self) -> (usize, Option<usize>) {
-            let hint = self.inner.size_hint();
-            let extra = (8 - self.next_bit) / B;
-            (hint.0 + extra, hint.1.map(|s| s + extra))
+            let len = (self.nbuf + 8 * self.inner.len()) / B;
+            (len, Some(len))
         }
     }
 
@@ -622,7 +620,7 @@ mod packing {
 
     /// Iterate over the value in each dimension where each dimension is `B` bits in `packed`
     /// REQUIRES: B must be in 1..=8 and B % 8 == 0
-    pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u8> + '_ {
+    pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u16> + '_ {
         UnpackIter::<B>::new(packed)
     }
 }

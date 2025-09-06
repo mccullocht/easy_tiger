@@ -922,4 +922,38 @@ mod test {
             query_distance_compare(Euclidean, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.001);
         }
     }
+
+    // XXX this is hella busted for short vectors, the scalar implementation is probably shit.
+    #[test]
+    fn lvq2x1x12_dot() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, F32VectorCoding::LVQ2x1x12, i, &a, &b, 0.0001);
+            query_distance_compare(Dot, F32VectorCoding::LVQ2x1x12, i, &a, &b, 0.0001);
+        }
+    }
+
+    // XXX this is hella busted for short vectors, the scalar implementation is probably shit.
+    #[test]
+    fn lvq2x1x12_l2() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Euclidean, F32VectorCoding::LVQ2x1x12, i, &a, &b, 0.0001);
+            query_distance_compare(Euclidean, F32VectorCoding::LVQ2x1x12, i, &a, &b, 0.0001);
+        }
+    }
+
+    #[test]
+    fn lvq2x1x16_dot() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Dot, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
+            query_distance_compare(Dot, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
+        }
+    }
+
+    #[test]
+    fn lvq2x1x16_l2() {
+        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
+            distance_compare(Euclidean, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
+            query_distance_compare(Euclidean, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
+        }
+    }
 }

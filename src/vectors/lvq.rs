@@ -660,6 +660,9 @@ mod test {
         }
     }
 
+    // XXX all these tests should unpack the values!
+    // XXX all these tests should use vectors long enough to trigger SIMD impls!
+
     #[test]
     fn lvq1_1() {
         let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];

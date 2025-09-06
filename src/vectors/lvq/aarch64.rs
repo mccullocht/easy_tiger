@@ -2,16 +2,16 @@
 
 use std::arch::aarch64::{
     float32x4_t, uint32x4_t, uint8x16_t, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddvq_f32, vaddvq_u16,
-    vaddvq_u32, vaddvq_u64, vand_u16, vand_u32, vand_u8, vcombine_u16, vcombine_u32, vcombine_u8,
-    vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdup_n_u16,
-    vdup_n_u32, vdup_n_u8, vdupq_n_f32, vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32,
-    vget_low_u16, vgetq_lane_f64, vld1_s16, vld1_s32, vld1_s8, vld1_u8, vld1q_f32, vld1q_s16,
-    vld1q_s32, vld1q_s64, vld1q_s8, vld1q_u16, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32,
-    vminvq_f32, vmovl_high_u16, vmovl_u16, vmovl_u8, vmovn_high_u16, vmovn_high_u32, vmovn_u16,
-    vmovn_u32, vmulq_f32, vmulq_f64, vpaddlq_u16, vpaddlq_u32, vpaddlq_u8, vqtbl1q_u8,
-    vreinterpretq_u32_u8, vreinterpretq_u8_u16, vreinterpretq_u8_u32, vrndaq_f32, vshl_u16,
-    vshl_u32, vshl_u8, vshlq_u16, vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u16, vst1q_u8, vsubq_f32,
-    vsubq_f64,
+    vaddvq_u32, vaddvq_u64, vand_u16, vand_u32, vand_u8, vandq_u16, vcombine_u16, vcombine_u32,
+    vcombine_u8, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32,
+    vdup_n_u16, vdup_n_u32, vdup_n_u8, vdupq_n_f32, vdupq_n_f64, vdupq_n_u16, vextq_f64, vfmaq_f32,
+    vfmaq_f64, vget_low_f32, vget_low_u16, vgetq_lane_f64, vld1_s16, vld1_s32, vld1_s8, vld1_u8,
+    vld1q_f32, vld1q_s16, vld1q_s32, vld1q_s64, vld1q_s8, vld1q_u16, vld1q_u8, vmaxq_f32,
+    vmaxvq_f32, vminq_f32, vminvq_f32, vmovl_high_u16, vmovl_u16, vmovl_u8, vmovn_high_u16,
+    vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u16, vpaddlq_u32,
+    vpaddlq_u8, vqtbl1q_u8, vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u8_u16,
+    vreinterpretq_u8_u32, vrndaq_f32, vshl_u16, vshl_u32, vshl_u8, vshlq_u16, vshlq_u32, vshlq_u64,
+    vshlq_u8, vst1q_u16, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use crate::vectors::lvq::{PrimaryVector, TwoLevelVector};
@@ -367,16 +367,11 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
                     2 => pack2(i, pack_to_byte(ra, rb, rc, rd), head_residual),
                     4 => pack4(i, pack_to_byte(ra, rb, rc, rd), head_residual),
                     8 => pack8(i, pack_to_byte(ra, rb, rc, rd), head_residual),
-                    16 => {
-                        vst1q_u16(
-                            (head_residual.as_mut_ptr() as *mut u16).add(i),
-                            vmovn_high_u32(vmovn_u32(ra), rb),
-                        );
-                        vst1q_u16(
-                            (head_residual.as_mut_ptr() as *mut u16).add(i + 8),
-                            vmovn_high_u32(vmovn_u32(rc), rd),
-                        );
+                    12 => {
+                        pack12(i, ra, rb, head_residual);
+                        pack12(i + 8, rc, rd, head_residual);
                     }
+                    16 => pack16(i, ra, rb, rc, rd, head_residual),
                     _ => unimplemented!(),
                 };
             }
@@ -486,6 +481,52 @@ unsafe fn pack4(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
 #[inline(always)]
 unsafe fn pack8(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
     vst1q_u8(out.as_mut_ptr().add(start_dim), qabcd);
+}
+
+/// Pack 8 scalar quantized entries into 12 bits per dimension (12 bytes) and write to out.
+#[inline(always)]
+unsafe fn pack12(start_dim: usize, a: uint32x4_t, b: uint32x4_t, out: &mut [u8]) {
+    // perform <<= 4 on all odd entries, then shuffle evens and odds separately into the right
+    // position and OR them together to pack the 12 bytes.
+    let ab = vmovn_high_u32(vmovn_u32(a), b);
+    let abs = vshlq_u16(ab, vld1q_s16([0, 4, 0, 4, 0, 4, 0, 4].as_ptr()));
+    let evens = vqtbl1q_u8(
+        vreinterpretq_u8_u16(abs),
+        vld1q_u8([0, 1, 16, 4, 5, 16, 8, 9, 16, 12, 13, 16, 16, 16, 16, 16].as_ptr()),
+    );
+    let odds = vqtbl1q_u8(
+        vreinterpretq_u8_u16(abs),
+        vld1q_u8([16, 2, 3, 16, 6, 7, 16, 10, 11, 16, 14, 15, 16, 16, 16, 16].as_ptr()),
+    );
+    let packed = vorrq_u8(evens, odds);
+    let out = &mut out[(start_dim * 3 / 2)..];
+    if out.len() >= 16 {
+        vst1q_u8(out.as_mut_ptr(), packed);
+    } else {
+        let mut buf = [0u8; 16];
+        vst1q_u8(buf.as_mut_ptr(), packed);
+        out[..12].copy_from_slice(&buf[..12]);
+    }
+}
+
+/// Pack 16 scalar quantized entries into 16 bits per dimension (32 bytes) and write to out.
+#[inline(always)]
+unsafe fn pack16(
+    start_dim: usize,
+    a: uint32x4_t,
+    b: uint32x4_t,
+    c: uint32x4_t,
+    d: uint32x4_t,
+    out: &mut [u8],
+) {
+    vst1q_u16(
+        (out.as_mut_ptr() as *mut u16).add(start_dim),
+        vmovn_high_u32(vmovn_u32(a), b),
+    );
+    vst1q_u16(
+        (out.as_mut_ptr() as *mut u16).add(start_dim + 8),
+        vmovn_high_u32(vmovn_u32(c), d),
+    );
 }
 
 struct LVQ1F32Converter {
@@ -690,6 +731,7 @@ unsafe fn unpack<const N: usize>(start_dim: usize, vector: &[u8]) -> (uint32x4_t
         2 => unpack2(start_dim, vector),
         4 => unpack4(start_dim, vector),
         8 => unpack8(start_dim, vector),
+        12 => unpack12(start_dim, vector),
         16 => unpack16(start_dim, vector),
         _ => unimplemented!(),
     }
@@ -769,6 +811,33 @@ unsafe fn unpack4(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
 unsafe fn unpack8(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
     let d = vmovl_u8(vld1_u8(vector.as_ptr().add(start_dim)));
     (vmovl_u16(vget_low_u16(d)), vmovl_high_u16(d))
+}
+
+// Unpack 8 values from a vector with 12-bit dimensions starting at `start_dim`.
+#[inline(always)]
+unsafe fn unpack12(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
+    // shuffle to place all the necessary bytes in each 16 bit lane, then shift the odd entries
+    // and mask to produce 12-bit values.
+    let vector = &vector[(start_dim * 3 / 2)..];
+    let packed = if vector.len() >= 16 {
+        vld1q_u8(vector.as_ptr())
+    } else {
+        let mut buf = [0u8; 16];
+        buf[..12].copy_from_slice(&vector[..12]);
+        vld1q_u8(buf.as_ptr())
+    };
+    let shuffled = vqtbl1q_u8(
+        packed,
+        vld1q_u8([0, 1, 1, 2, 3, 4, 4, 5, 6, 7, 7, 8, 9, 10, 10, 11].as_ptr()),
+    );
+    let unpacked = vandq_u16(
+        vshlq_u16(
+            vreinterpretq_u16_u8(shuffled),
+            vld1q_s16([0, -4, 0, -4, 0, -4, 0, -4].as_ptr()),
+        ),
+        vdupq_n_u16(0xfff),
+    );
+    (vmovl_u16(vget_low_u16(unpacked)), vmovl_high_u16(unpacked))
 }
 
 // Unpack 8 values from a vector with 16-bit dimensions starting at `start_dim`.

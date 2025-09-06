@@ -27,7 +27,7 @@ use crate::{
 };
 
 const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
-const SUPPORTED_RESIDUAL_BITS: [usize; 3] = [4, 8, 16];
+const SUPPORTED_RESIDUAL_BITS: [usize; 4] = [4, 8, 12, 16];
 
 const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
     let mut i = 0;
@@ -555,6 +555,15 @@ mod packing {
             primary[i / dims_per_byte1] |= q << ((i % dims_per_byte1) * B1);
             match B2 {
                 1..=8 => residual[i / dims_per_byte2] |= (r as u8) << ((i % dims_per_byte2) * B2),
+                12 => {
+                    let b1 = i * 3 / 2;
+                    if i % 2 == 0 {
+                        residual[b1..b1 + 2].copy_from_slice(&r.to_le_bytes());
+                    } else {
+                        residual[b1] = (r as u8 & 0xf) << 4;
+                        residual[b1 + 1] = (r >> 4) as u8;
+                    }
+                }
                 16 => residual[i * 2..i * 2 + 2].copy_from_slice(&r.to_le_bytes()),
                 _ => unimplemented!(),
             }
@@ -916,6 +925,58 @@ mod test {
             ]
             .as_ref(),
             epsilon = 0.0001
+        );
+    }
+
+    #[test]
+    fn lvq2_1_12() {
+        let vec = [
+            1.22f32, 1.25, 2.37, -2.21, 2.28, -2.8, -0.61, 2.29, -2.56, -0.57, -2.62, -1.56, 1.92,
+            -0.63, 0.77, -2.86,
+        ];
+        let encoded = TwoLevelVectorCoder::<1, 12>::default().encode(&vec);
+        let lvq = TwoLevelVector::<1, 12>::new(&encoded).expect("readable");
+        assert_eq!(lvq.primary.vector, &[0b10010111, 0b1010000]);
+        assert_abs_diff_eq!(
+            lvq.vector.as_ref(),
+            [
+                223, 196, 79, 67, 121, 124, 235, 120, 88, 226, 77, 143, 113, 150, 224, 55, 38, 164,
+                139, 247, 220, 40, 195, 84
+            ]
+            .as_ref(),
+            epsilon = 1,
+        );
+        assert_abs_diff_eq!(
+            lvq.primary.header,
+            VectorHeader {
+                l2_norm: 7.8255224,
+                lower: -2.1523309,
+                upper: 2.0392284,
+                component_sum: 7,
+            }
+        );
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
+                1.2255728,
+                1.2420104,
+                2.3761969,
+                -2.209862,
+                2.277572,
+                -2.8016117,
+                -0.6154258,
+                2.2940094,
+                -2.5550494,
+                -0.56611323,
+                -2.6207993,
+                -1.5523624,
+                1.9159473,
+                -0.63186336,
+                0.76532316,
+                -2.8673615
+            ]
+            .as_ref(),
+            epsilon = 0.01
         );
     }
 

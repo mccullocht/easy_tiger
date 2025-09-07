@@ -142,21 +142,21 @@ pub enum F32VectorCoding {
     /// other vectors in the data set.
     ///
     /// This uses 1 byte per dimension and 8 additional bytes for a scaling factor and l2 norm.
-    I8ScaledUniformQuantized,
+    I8ScaledUniform,
     /// Quantize into an i4 value shaped to the input vector and pack 2 dimensions per byte.
     ///
     /// This uses the contents of the vector to try to reduce quantization error but no data from
     /// other vectors in the data set.
     ///
     /// This uses 1 byte per 2 dimensions and 8 additional bytes for a scaling factor and l2 norm.
-    I4ScaledUniformQuantized,
+    I4ScaledUniform,
     /// Quantize into an i16 value shaped to the input vector.
     ///
     /// This uses the contents of the vector to try to reduce quantization error but no data from
     /// other vectors in the data set.
     ///
     /// This uses 2 bytes per dimension and 8 additional bytes for a scaling factor and l2 norm.
-    I16ScaledUniformQuantized,
+    I16ScaledUniform,
     /// LVQ one-level; 1 bit
     LVQ1x1,
     /// LVQ one-level; 4 bits
@@ -185,15 +185,9 @@ impl F32VectorCoding {
             Self::TruncatedF32(d) => Box::new(truncated::VectorCoder::new(similarity, *d)),
             Self::F16 => Box::new(float16::VectorCoder::new(similarity)),
             Self::BinaryQuantized => Box::new(binary::BinaryQuantizedVectorCoder),
-            Self::I8ScaledUniformQuantized => {
-                Box::new(scaled_uniform::I8VectorCoder::new(similarity))
-            }
-            Self::I4ScaledUniformQuantized => {
-                Box::new(scaled_uniform::I4PackedVectorCoder::new(similarity))
-            }
-            Self::I16ScaledUniformQuantized => {
-                Box::new(scaled_uniform::I16VectorCoder::new(similarity))
-            }
+            Self::I8ScaledUniform => Box::new(scaled_uniform::I8VectorCoder::new(similarity)),
+            Self::I4ScaledUniform => Box::new(scaled_uniform::I4PackedVectorCoder::new(similarity)),
+            Self::I16ScaledUniform => Box::new(scaled_uniform::I16VectorCoder::new(similarity)),
             Self::LVQ1x1 => Box::new(lvq::PrimaryVectorCoder::<1>),
             Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::<4>),
             Self::LVQ1x8 => Box::new(lvq::PrimaryVectorCoder::<8>),
@@ -218,60 +212,20 @@ impl F32VectorCoding {
             (Self::F16, Dot) | (Self::F16, Cosine) => Box::new(float16::DotProductDistance),
             (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance),
             (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
-            (Self::I8ScaledUniformQuantized, Dot) | (Self::I8ScaledUniformQuantized, Cosine) => {
-                Box::new(scaled_uniform::I8DotProductDistance)
+            (Self::I8ScaledUniform, _) => Box::new(scaled_uniform::I8Distance::new(similarity)),
+            (Self::I4ScaledUniform, _) => {
+                Box::new(scaled_uniform::I4PackedDistance::new(similarity))
             }
-            (Self::I8ScaledUniformQuantized, Euclidean) => {
-                Box::new(scaled_uniform::I8EuclideanDistance)
-            }
-            (Self::I4ScaledUniformQuantized, Dot) | (Self::I4ScaledUniformQuantized, Cosine) => {
-                Box::new(scaled_uniform::I4PackedDotProductDistance)
-            }
-            (Self::I4ScaledUniformQuantized, Euclidean) => {
-                Box::new(scaled_uniform::I4PackedEuclideanDistance)
-            }
-            (Self::I16ScaledUniformQuantized, Dot) | (Self::I16ScaledUniformQuantized, Cosine) => {
-                Box::new(scaled_uniform::I16DotProductDistance)
-            }
-            (Self::I16ScaledUniformQuantized, Euclidean) => {
-                Box::new(scaled_uniform::I16EuclideanDistance)
-            }
-            (Self::LVQ1x1, Dot) | (Self::LVQ1x1, Cosine) => {
-                Box::new(lvq::PrimaryDotProductDistance::<1>)
-            }
-            (Self::LVQ1x1, Euclidean) => Box::new(lvq::PrimaryEuclideanDistance::<1>),
-            (Self::LVQ1x4, Dot) | (Self::LVQ1x4, Cosine) => {
-                Box::new(lvq::PrimaryDotProductDistance::<4>)
-            }
-            (Self::LVQ1x4, Euclidean) => Box::new(lvq::PrimaryEuclideanDistance::<4>),
-            (Self::LVQ1x8, Dot) | (Self::LVQ1x8, Cosine) => {
-                Box::new(lvq::PrimaryDotProductDistance::<8>)
-            }
-            (Self::LVQ1x8, Euclidean) => Box::new(lvq::PrimaryEuclideanDistance::<8>),
-            (Self::LVQ2x1x8, Dot) | (Self::LVQ2x1x8, Cosine) => {
-                Box::new(lvq::TwoLevelDotProductDistance::<1, 8>)
-            }
-            (Self::LVQ2x1x8, Euclidean) => Box::new(lvq::TwoLevelEuclideanDistance::<1, 8>),
-            (Self::LVQ2x1x12, Dot) | (Self::LVQ2x1x12, Cosine) => {
-                Box::new(lvq::TwoLevelDotProductDistance::<1, 12>)
-            }
-            (Self::LVQ2x1x12, Euclidean) => Box::new(lvq::TwoLevelEuclideanDistance::<1, 12>),
-            (Self::LVQ2x1x16, Dot) | (Self::LVQ2x1x16, Cosine) => {
-                Box::new(lvq::TwoLevelDotProductDistance::<1, 16>)
-            }
-            (Self::LVQ2x1x16, Euclidean) => Box::new(lvq::TwoLevelEuclideanDistance::<1, 16>),
-            (Self::LVQ2x4x4, Dot) | (Self::LVQ2x4x4, Cosine) => {
-                Box::new(lvq::TwoLevelDotProductDistance::<4, 4>)
-            }
-            (Self::LVQ2x4x4, Euclidean) => Box::new(lvq::TwoLevelEuclideanDistance::<4, 4>),
-            (Self::LVQ2x4x8, Dot) | (Self::LVQ2x4x8, Cosine) => {
-                Box::new(lvq::TwoLevelDotProductDistance::<4, 8>)
-            }
-            (Self::LVQ2x4x8, Euclidean) => Box::new(lvq::TwoLevelEuclideanDistance::<4, 8>),
-            (Self::LVQ2x8x8, Dot) | (Self::LVQ2x8x8, Cosine) => {
-                Box::new(lvq::TwoLevelDotProductDistance::<8, 8>)
-            }
-            (Self::LVQ2x8x8, Euclidean) => Box::new(lvq::TwoLevelEuclideanDistance::<8, 8>),
+            (Self::I16ScaledUniform, _) => Box::new(scaled_uniform::I16Distance::new(similarity)),
+            (Self::LVQ1x1, _) => Box::new(lvq::PrimaryDistance::<1>::new(similarity)),
+            (Self::LVQ1x4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
+            (Self::LVQ1x8, _) => Box::new(lvq::PrimaryDistance::<8>::new(similarity)),
+            (Self::LVQ2x1x8, _) => Box::new(lvq::TwoLevelDistance::<1, 8>::new(similarity)),
+            (Self::LVQ2x1x12, _) => Box::new(lvq::TwoLevelDistance::<1, 12>::new(similarity)),
+            (Self::LVQ2x1x16, _) => Box::new(lvq::TwoLevelDistance::<1, 16>::new(similarity)),
+            (Self::LVQ2x4x4, _) => Box::new(lvq::TwoLevelDistance::<4, 4>::new(similarity)),
+            (Self::LVQ2x4x8, _) => Box::new(lvq::TwoLevelDistance::<4, 8>::new(similarity)),
+            (Self::LVQ2x8x8, _) => Box::new(lvq::TwoLevelDistance::<8, 8>::new(similarity)),
         }
     }
 }
@@ -291,9 +245,9 @@ impl FromStr for F32VectorCoding {
             }
             "f16" => Ok(Self::F16),
             "binary" => Ok(Self::BinaryQuantized),
-            "i8-scaled-uniform" => Ok(Self::I8ScaledUniformQuantized),
-            "i4-scaled-uniform" => Ok(Self::I4ScaledUniformQuantized),
-            "i16-scaled-uniform" => Ok(Self::I16ScaledUniformQuantized),
+            "i8-scaled-uniform" => Ok(Self::I8ScaledUniform),
+            "i4-scaled-uniform" => Ok(Self::I4ScaledUniform),
+            "i16-scaled-uniform" => Ok(Self::I16ScaledUniform),
             "lvq1x1" => Ok(Self::LVQ1x1),
             "lvq1x4" => Ok(Self::LVQ1x4),
             "lvq1x8" => Ok(Self::LVQ1x8),
@@ -315,9 +269,9 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TruncatedF32(d) => write!(f, "truncatedf32:{}", *d),
             Self::F16 => write!(f, "f16"),
             Self::BinaryQuantized => write!(f, "binary"),
-            Self::I8ScaledUniformQuantized => write!(f, "i8-scaled-uniform"),
-            Self::I4ScaledUniformQuantized => write!(f, "i4-scaled-uniform"),
-            Self::I16ScaledUniformQuantized => write!(f, "i16-scaled-uniform"),
+            Self::I8ScaledUniform => write!(f, "i8-scaled-uniform"),
+            Self::I4ScaledUniform => write!(f, "i4-scaled-uniform"),
+            Self::I16ScaledUniform => write!(f, "i16-scaled-uniform"),
             Self::LVQ1x1 => write!(f, "lvq1x1"),
             Self::LVQ1x4 => write!(f, "lvq1x4"),
             Self::LVQ1x8 => write!(f, "lvq1x8"),
@@ -416,124 +370,53 @@ pub fn new_query_vector_distance_f32<'a>(
         (_, F32VectorCoding::BinaryQuantized) => Box::new(binary::I1DotProductQueryDistance::new(
             query.into().as_ref(),
         )),
-        (Cosine, F32VectorCoding::I8ScaledUniformQuantized) => Box::new(
-            scaled_uniform::I8DotProductQueryDistance::new(l2_normalize(query.into())),
+        (_, F32VectorCoding::I4ScaledUniform) => Box::new(
+            scaled_uniform::I4PackedQueryDistance::new(similarity, query.into()),
         ),
-        (Dot, F32VectorCoding::I8ScaledUniformQuantized) => {
-            Box::new(scaled_uniform::I8DotProductQueryDistance::new(query.into()))
-        }
-        (Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
-            Box::new(scaled_uniform::I8EuclideanQueryDistance::new(query.into()))
-        }
-        (Cosine, F32VectorCoding::I16ScaledUniformQuantized) => Box::new(
-            scaled_uniform::I16DotProductQueryDistance::new(l2_normalize(query.into())),
-        ),
-        (Dot, F32VectorCoding::I16ScaledUniformQuantized) => Box::new(
-            scaled_uniform::I16DotProductQueryDistance::new(query.into()),
-        ),
-        (Euclidean, F32VectorCoding::I16ScaledUniformQuantized) => {
-            Box::new(scaled_uniform::I16EuclideanQueryDistance::new(query.into()))
-        }
-        (Cosine, F32VectorCoding::I4ScaledUniformQuantized) => Box::new(
-            scaled_uniform::I4PackedDotProductQueryDistance::new(l2_normalize(query.into())),
-        ),
-        (Dot, F32VectorCoding::I4ScaledUniformQuantized) => Box::new(
-            scaled_uniform::I4PackedDotProductQueryDistance::new(query.into()),
-        ),
-        (Euclidean, F32VectorCoding::I4ScaledUniformQuantized) => Box::new(
-            scaled_uniform::I4PackedEuclideanQueryDistance::new(query.into()),
-        ),
-        (Cosine, F32VectorCoding::LVQ1x1) => Box::new(
-            lvq::PrimaryQueryDotProductDistance::<1>::new(l2_normalize(query.into())),
-        ),
-        (Dot, F32VectorCoding::LVQ1x1) => {
-            Box::new(lvq::PrimaryQueryDotProductDistance::<1>::new(query.into()))
-        }
-        (Euclidean, F32VectorCoding::LVQ1x1) => {
-            Box::new(lvq::PrimaryQueryEuclideanDistance::<1>::new(query.into()))
-        }
-        (Cosine, F32VectorCoding::LVQ1x4) => Box::new(
-            lvq::PrimaryQueryDotProductDistance::<4>::new(l2_normalize(query.into())),
-        ),
-        (Dot, F32VectorCoding::LVQ1x4) => {
-            Box::new(lvq::PrimaryQueryDotProductDistance::<4>::new(query.into()))
-        }
-        (Euclidean, F32VectorCoding::LVQ1x4) => {
-            Box::new(lvq::PrimaryQueryEuclideanDistance::<4>::new(query.into()))
-        }
-        (Cosine, F32VectorCoding::LVQ1x8) => Box::new(
-            lvq::PrimaryQueryDotProductDistance::<8>::new(l2_normalize(query.into())),
-        ),
-        (Dot, F32VectorCoding::LVQ1x8) => {
-            Box::new(lvq::PrimaryQueryDotProductDistance::<8>::new(query.into()))
-        }
-        (Euclidean, F32VectorCoding::LVQ1x8) => {
-            Box::new(lvq::PrimaryQueryEuclideanDistance::<8>::new(query.into()))
-        }
-        (Cosine, F32VectorCoding::LVQ2x1x8) => Box::new(
-            lvq::TwoLevelQueryDotProductDistance::<1, 8>::new(l2_normalize(query.into())),
-        ),
-        (Dot, F32VectorCoding::LVQ2x1x8) => Box::new(
-            lvq::TwoLevelQueryDotProductDistance::<1, 8>::new(query.into()),
-        ),
-        (Euclidean, F32VectorCoding::LVQ2x1x8) => Box::new(lvq::TwoLevelQueryEuclideanDistance::<
-            1,
-            8,
-        >::new(query.into())),
-        (Cosine, F32VectorCoding::LVQ2x1x12) => {
-            Box::new(lvq::TwoLevelQueryDotProductDistance::<1, 12>::new(
-                l2_normalize(query.into()),
-            ))
-        }
-        (Dot, F32VectorCoding::LVQ2x1x12) => Box::new(
-            lvq::TwoLevelQueryDotProductDistance::<1, 12>::new(query.into()),
-        ),
-        (Euclidean, F32VectorCoding::LVQ2x1x12) => Box::new(lvq::TwoLevelQueryEuclideanDistance::<
-            1,
-            12,
-        >::new(query.into())),
-        (Cosine, F32VectorCoding::LVQ2x1x16) => {
-            Box::new(lvq::TwoLevelQueryDotProductDistance::<1, 16>::new(
-                l2_normalize(query.into()),
-            ))
-        }
-        (Dot, F32VectorCoding::LVQ2x1x16) => Box::new(
-            lvq::TwoLevelQueryDotProductDistance::<1, 16>::new(query.into()),
-        ),
-        (Euclidean, F32VectorCoding::LVQ2x1x16) => Box::new(lvq::TwoLevelQueryEuclideanDistance::<
-            1,
-            16,
-        >::new(query.into())),
-        (Cosine, F32VectorCoding::LVQ2x4x4) => Box::new(
-            lvq::TwoLevelQueryDotProductDistance::<4, 4>::new(l2_normalize(query.into())),
-        ),
-        (Dot, F32VectorCoding::LVQ2x4x4) => Box::new(
-            lvq::TwoLevelQueryDotProductDistance::<4, 4>::new(query.into()),
-        ),
-        (Euclidean, F32VectorCoding::LVQ2x4x4) => Box::new(lvq::TwoLevelQueryEuclideanDistance::<
-            4,
-            4,
-        >::new(query.into())),
-        (Cosine, F32VectorCoding::LVQ2x4x8) => Box::new(
-            lvq::TwoLevelQueryDotProductDistance::<4, 8>::new(l2_normalize(query.into())),
-        ),
-        (Dot, F32VectorCoding::LVQ2x4x8) => Box::new(
-            lvq::TwoLevelQueryDotProductDistance::<4, 8>::new(query.into()),
-        ),
-        (Euclidean, F32VectorCoding::LVQ2x4x8) => Box::new(lvq::TwoLevelQueryEuclideanDistance::<
-            4,
-            8,
-        >::new(query.into())),
-        (Cosine, F32VectorCoding::LVQ2x8x8) => Box::new(
-            lvq::TwoLevelQueryDotProductDistance::<8, 8>::new(l2_normalize(query.into())),
-        ),
-        (Dot, F32VectorCoding::LVQ2x8x8) => Box::new(
-            lvq::TwoLevelQueryDotProductDistance::<8, 8>::new(query.into()),
-        ),
-        (Euclidean, F32VectorCoding::LVQ2x8x8) => Box::new(lvq::TwoLevelQueryEuclideanDistance::<
-            8,
-            8,
-        >::new(query.into())),
+        (_, F32VectorCoding::I8ScaledUniform) => Box::new(scaled_uniform::I8QueryDistance::new(
+            similarity,
+            query.into(),
+        )),
+        (_, F32VectorCoding::I16ScaledUniform) => Box::new(scaled_uniform::I16QueryDistance::new(
+            similarity,
+            query.into(),
+        )),
+        (_, F32VectorCoding::LVQ1x1) => Box::new(lvq::PrimaryQueryDistance::<1>::new(
+            similarity,
+            query.into(),
+        )),
+        (_, F32VectorCoding::LVQ1x4) => Box::new(lvq::PrimaryQueryDistance::<4>::new(
+            similarity,
+            query.into(),
+        )),
+        (_, F32VectorCoding::LVQ1x8) => Box::new(lvq::PrimaryQueryDistance::<8>::new(
+            similarity,
+            query.into(),
+        )),
+        (_, F32VectorCoding::LVQ2x1x8) => Box::new(lvq::TwoLevelQueryDistance::<1, 8>::new(
+            similarity,
+            query.into(),
+        )),
+        (_, F32VectorCoding::LVQ2x1x12) => Box::new(lvq::TwoLevelQueryDistance::<1, 12>::new(
+            similarity,
+            query.into(),
+        )),
+        (_, F32VectorCoding::LVQ2x1x16) => Box::new(lvq::TwoLevelQueryDistance::<1, 16>::new(
+            similarity,
+            query.into(),
+        )),
+        (_, F32VectorCoding::LVQ2x4x4) => Box::new(lvq::TwoLevelQueryDistance::<4, 4>::new(
+            similarity,
+            query.into(),
+        )),
+        (_, F32VectorCoding::LVQ2x4x8) => Box::new(lvq::TwoLevelQueryDistance::<4, 8>::new(
+            similarity,
+            query.into(),
+        )),
+        (_, F32VectorCoding::LVQ2x8x8) => Box::new(lvq::TwoLevelQueryDistance::<8, 8>::new(
+            similarity,
+            query.into(),
+        )),
     }
 }
 
@@ -560,80 +443,60 @@ pub fn new_query_vector_distance_indexing<'a>(
         (Cosine, F32VectorCoding::F16) => quantized_qvd!(float16::DotProductDistance, query),
         (Euclidean, F32VectorCoding::F16) => quantized_qvd!(float16::EuclideanDistance, query),
         (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
-        (Dot, F32VectorCoding::I8ScaledUniformQuantized)
-        | (Cosine, F32VectorCoding::I8ScaledUniformQuantized) => {
-            quantized_qvd!(scaled_uniform::I8DotProductDistance, query)
+        (_, F32VectorCoding::I8ScaledUniform) => {
+            quantized_qvd!(scaled_uniform::I8Distance::new(similarity), query)
         }
-        (Euclidean, F32VectorCoding::I8ScaledUniformQuantized) => {
-            quantized_qvd!(scaled_uniform::I8EuclideanDistance, query)
+        (_, F32VectorCoding::I4ScaledUniform) => {
+            quantized_qvd!(scaled_uniform::I4PackedDistance::new(similarity), query)
         }
-        (Dot, F32VectorCoding::I4ScaledUniformQuantized)
-        | (Cosine, F32VectorCoding::I4ScaledUniformQuantized) => {
-            quantized_qvd!(scaled_uniform::I4PackedDotProductDistance, query)
+        (_, F32VectorCoding::I16ScaledUniform) => {
+            quantized_qvd!(scaled_uniform::I16Distance::new(similarity), query)
         }
-        (Euclidean, F32VectorCoding::I4ScaledUniformQuantized) => {
-            quantized_qvd!(scaled_uniform::I4PackedEuclideanDistance, query)
+        (_, F32VectorCoding::LVQ1x1) => {
+            quantized_qvd!(lvq::PrimaryDistance::<1>::new(similarity), query)
         }
-        (Dot, F32VectorCoding::I16ScaledUniformQuantized)
-        | (Cosine, F32VectorCoding::I16ScaledUniformQuantized) => {
-            quantized_qvd!(scaled_uniform::I16DotProductDistance, query)
+        (_, F32VectorCoding::LVQ1x4) => {
+            quantized_qvd!(lvq::PrimaryDistance::<4>::new(similarity), query)
         }
-        (Euclidean, F32VectorCoding::I16ScaledUniformQuantized) => {
-            quantized_qvd!(scaled_uniform::I16EuclideanDistance, query)
+        (_, F32VectorCoding::LVQ1x8) => {
+            quantized_qvd!(lvq::PrimaryDistance::<8>::new(similarity), query)
         }
-        (Dot, F32VectorCoding::LVQ1x1) | (Cosine, F32VectorCoding::LVQ1x1) => {
-            quantized_qvd!(lvq::PrimaryDotProductDistance::<1>, query)
+        (_, F32VectorCoding::LVQ2x1x8) => {
+            quantized_qvd!(lvq::TwoLevelDistance::<1, 8>::new(similarity), query)
         }
-        (Euclidean, F32VectorCoding::LVQ1x1) => {
-            quantized_qvd!(lvq::PrimaryEuclideanDistance::<1>, query)
+        (_, F32VectorCoding::LVQ2x1x12) => {
+            quantized_qvd!(lvq::TwoLevelDistance::<1, 12>::new(similarity), query)
         }
-        (Dot, F32VectorCoding::LVQ1x4) | (Cosine, F32VectorCoding::LVQ1x4) => {
-            quantized_qvd!(lvq::PrimaryDotProductDistance::<4>, query)
+        (_, F32VectorCoding::LVQ2x1x16) => {
+            quantized_qvd!(lvq::TwoLevelDistance::<1, 16>::new(similarity), query)
         }
-        (Euclidean, F32VectorCoding::LVQ1x4) => {
-            quantized_qvd!(lvq::PrimaryEuclideanDistance::<4>, query)
+        (_, F32VectorCoding::LVQ2x4x4) => {
+            quantized_qvd!(lvq::TwoLevelDistance::<4, 4>::new(similarity), query)
         }
-        (Dot, F32VectorCoding::LVQ1x8) | (Cosine, F32VectorCoding::LVQ1x8) => {
-            quantized_qvd!(lvq::PrimaryDotProductDistance::<8>, query)
+        (_, F32VectorCoding::LVQ2x4x8) => {
+            quantized_qvd!(lvq::TwoLevelDistance::<4, 8>::new(similarity), query)
         }
-        (Euclidean, F32VectorCoding::LVQ1x8) => {
-            quantized_qvd!(lvq::PrimaryEuclideanDistance::<8>, query)
+        (_, F32VectorCoding::LVQ2x8x8) => {
+            quantized_qvd!(lvq::TwoLevelDistance::<8, 8>::new(similarity), query)
         }
-        (Dot, F32VectorCoding::LVQ2x1x8) | (Cosine, F32VectorCoding::LVQ2x1x8) => {
-            quantized_qvd!(lvq::TwoLevelDotProductDistance::<1, 8>, query)
+    }
+}
+
+// XXX use this in lvq too
+/// For a given similarity function, compute a distance score based on the unnormalized dot product
+/// of two vectors and their l2 norms.
+fn dot_unnormalized_to_distance(
+    similarity: VectorSimilarity,
+    dot_unnormalized: f64,
+    l2_norm: (f64, f64),
+) -> f64 {
+    match similarity {
+        VectorSimilarity::Cosine | VectorSimilarity::Dot => {
+            let dot = dot_unnormalized / (l2_norm.0 * l2_norm.1);
+            (-dot + 1.0) / 2.0
         }
-        (Euclidean, F32VectorCoding::LVQ2x1x8) => {
-            quantized_qvd!(lvq::TwoLevelEuclideanDistance::<1, 8>, query)
-        }
-        (Dot, F32VectorCoding::LVQ2x1x12) | (Cosine, F32VectorCoding::LVQ2x1x12) => {
-            quantized_qvd!(lvq::TwoLevelDotProductDistance::<1, 12>, query)
-        }
-        (Euclidean, F32VectorCoding::LVQ2x1x12) => {
-            quantized_qvd!(lvq::TwoLevelEuclideanDistance::<1, 12>, query)
-        }
-        (Dot, F32VectorCoding::LVQ2x1x16) | (Cosine, F32VectorCoding::LVQ2x1x16) => {
-            quantized_qvd!(lvq::TwoLevelDotProductDistance::<1, 16>, query)
-        }
-        (Euclidean, F32VectorCoding::LVQ2x1x16) => {
-            quantized_qvd!(lvq::TwoLevelEuclideanDistance::<1, 16>, query)
-        }
-        (Dot, F32VectorCoding::LVQ2x4x4) | (Cosine, F32VectorCoding::LVQ2x4x4) => {
-            quantized_qvd!(lvq::TwoLevelDotProductDistance::<4, 4>, query)
-        }
-        (Euclidean, F32VectorCoding::LVQ2x4x4) => {
-            quantized_qvd!(lvq::TwoLevelEuclideanDistance::<4, 4>, query)
-        }
-        (Dot, F32VectorCoding::LVQ2x4x8) | (Cosine, F32VectorCoding::LVQ2x4x8) => {
-            quantized_qvd!(lvq::TwoLevelDotProductDistance::<4, 8>, query)
-        }
-        (Euclidean, F32VectorCoding::LVQ2x4x8) => {
-            quantized_qvd!(lvq::TwoLevelEuclideanDistance::<4, 8>, query)
-        }
-        (Dot, F32VectorCoding::LVQ2x8x8) | (Cosine, F32VectorCoding::LVQ2x8x8) => {
-            quantized_qvd!(lvq::TwoLevelDotProductDistance::<8, 8>, query)
-        }
-        (Euclidean, F32VectorCoding::LVQ2x8x8) => {
-            quantized_qvd!(lvq::TwoLevelEuclideanDistance::<8, 8>, query)
+        VectorSimilarity::Euclidean => {
+            l2_norm.0 * l2_norm.0 + l2_norm.1 * l2_norm.1 - (2.0 * dot_unnormalized)
         }
     }
 }
@@ -750,9 +613,7 @@ mod test {
         ]
     }
 
-    use F32VectorCoding::{
-        I16ScaledUniformQuantized, I4ScaledUniformQuantized, I8ScaledUniformQuantized, F16,
-    };
+    use F32VectorCoding::{I16ScaledUniform, I4ScaledUniform, I8ScaledUniform, F16};
     use VectorSimilarity::{Cosine, Dot, Euclidean};
 
     #[test]
@@ -782,48 +643,48 @@ mod test {
     #[test]
     fn i16_scaled_dot() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, I16ScaledUniformQuantized, i, &a, &b, 0.001);
-            query_distance_compare(Dot, I16ScaledUniformQuantized, i, &a, &b, 0.001);
+            distance_compare(Dot, I16ScaledUniform, i, &a, &b, 0.001);
+            query_distance_compare(Dot, I16ScaledUniform, i, &a, &b, 0.001);
         }
     }
 
     #[test]
     fn i16_scaled_l2() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, I16ScaledUniformQuantized, i, &a, &b, 0.001);
-            query_distance_compare(Euclidean, I16ScaledUniformQuantized, i, &a, &b, 0.001);
+            distance_compare(Euclidean, I16ScaledUniform, i, &a, &b, 0.001);
+            query_distance_compare(Euclidean, I16ScaledUniform, i, &a, &b, 0.001);
         }
     }
 
     #[test]
     fn i8_scaled_dot() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, I8ScaledUniformQuantized, i, &a, &b, 0.01);
-            query_distance_compare(Dot, I8ScaledUniformQuantized, i, &a, &b, 0.01);
+            distance_compare(Dot, I8ScaledUniform, i, &a, &b, 0.01);
+            query_distance_compare(Dot, I8ScaledUniform, i, &a, &b, 0.01);
         }
     }
 
     #[test]
     fn i8_scaled_l2() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, I8ScaledUniformQuantized, i, &a, &b, 0.01);
-            query_distance_compare(Euclidean, I8ScaledUniformQuantized, i, &a, &b, 0.01);
+            distance_compare(Euclidean, I8ScaledUniform, i, &a, &b, 0.01);
+            query_distance_compare(Euclidean, I8ScaledUniform, i, &a, &b, 0.01);
         }
     }
 
     #[test]
     fn i4_scaled_dot() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, I4ScaledUniformQuantized, i, &a, &b, 0.10);
-            query_distance_compare(Dot, I4ScaledUniformQuantized, i, &a, &b, 0.10);
+            distance_compare(Dot, I4ScaledUniform, i, &a, &b, 0.10);
+            query_distance_compare(Dot, I4ScaledUniform, i, &a, &b, 0.10);
         }
     }
 
     #[test]
     fn i4_scaled_l2() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, I4ScaledUniformQuantized, i, &a, &b, 0.10);
-            query_distance_compare(Euclidean, I4ScaledUniformQuantized, i, &a, &b, 0.10);
+            distance_compare(Euclidean, I4ScaledUniform, i, &a, &b, 0.10);
+            query_distance_compare(Euclidean, I4ScaledUniform, i, &a, &b, 0.10);
         }
     }
 

@@ -11,7 +11,10 @@ use std::borrow::Cow;
 
 use crate::{
     distance::dot_f32,
-    vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity},
+    vectors::{
+        dot_unnormalized_to_distance, F32VectorCoder, QueryVectorDistance, VectorDistance,
+        VectorSimilarity,
+    },
 };
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -218,10 +221,6 @@ impl<'a> I8Vector<'a> {
         f32::from_le_bytes(self.0[0..4].try_into().unwrap()).into()
     }
 
-    fn l2_norm_sq(&self) -> f64 {
-        self.l2_norm() * self.l2_norm()
-    }
-
     fn l2_norm(&self) -> f64 {
         f32::from_le_bytes(self.0[4..8].try_into().unwrap()).into()
     }
@@ -232,61 +231,55 @@ impl<'a> I8Vector<'a> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I8DotProductDistance;
+pub struct I8Distance(VectorSimilarity);
 
-impl VectorDistance for I8DotProductDistance {
+impl I8Distance {
+    pub fn new(similarity: VectorSimilarity) -> Self {
+        Self(similarity)
+    }
+}
+
+impl VectorDistance for I8Distance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = I8Vector::new(query);
         let doc = I8Vector::new(doc);
-        let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
-        (-dot + 1.0) / 2.0
+        dot_unnormalized_to_distance(
+            self.0,
+            query.dot_unnormalized(&doc),
+            (query.l2_norm(), doc.l2_norm()),
+        )
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct I8DotProductQueryDistance<'a>(Cow<'a, [f32]>);
+pub struct I8QueryDistance<'a> {
+    similarity: VectorSimilarity,
+    query: Cow<'a, [f32]>,
+    query_l2_norm: f64,
+}
 
-impl<'a> I8DotProductQueryDistance<'a> {
-    pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(query)
+impl<'a> I8QueryDistance<'a> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
+        let query_l2_norm = match similarity {
+            VectorSimilarity::Dot => 1.0,
+            _ => dot_f32(&query, &query).sqrt(),
+        };
+        Self {
+            similarity,
+            query,
+            query_l2_norm,
+        }
     }
 }
 
-impl QueryVectorDistance for I8DotProductQueryDistance<'_> {
+impl QueryVectorDistance for I8QueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I8Vector::new(vector);
-        let dot = vector.dot_unnormalized_f32(&self.0) / vector.l2_norm();
-        (-dot + 1.0) / 2.0
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct I8EuclideanDistance;
-
-impl VectorDistance for I8EuclideanDistance {
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = I8Vector::new(query);
-        let doc = I8Vector::new(doc);
-        let dot = query.dot_unnormalized(&doc);
-        query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct I8EuclideanQueryDistance<'a>(Cow<'a, [f32]>, f64);
-
-impl<'a> I8EuclideanQueryDistance<'a> {
-    pub fn new(query: Cow<'a, [f32]>) -> Self {
-        let l2_norm_sq = dot_f32(&query, &query);
-        Self(query, l2_norm_sq)
-    }
-}
-
-impl QueryVectorDistance for I8EuclideanQueryDistance<'_> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = I8Vector::new(vector);
-        let dot = vector.dot_unnormalized_f32(&self.0);
-        self.1 + vector.l2_norm_sq() - (2.0 * dot)
+        dot_unnormalized_to_distance(
+            self.similarity,
+            vector.dot_unnormalized_f32(&self.query),
+            (self.query_l2_norm, vector.l2_norm()),
+        )
     }
 }
 
@@ -356,10 +349,6 @@ impl<'a> I4PackedVector<'a> {
 
     fn l2_norm(&self) -> f64 {
         f32::from_le_bytes(self.0[4..8].try_into().expect("4 bytes")).into()
-    }
-
-    fn l2_norm_sq(&self) -> f64 {
-        self.l2_norm() * self.l2_norm()
     }
 
     fn dimensions(&self) -> &[u8] {
@@ -456,61 +445,55 @@ impl<'a> I4PackedVector<'a> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I4PackedDotProductDistance;
+pub struct I4PackedDistance(VectorSimilarity);
 
-impl VectorDistance for I4PackedDotProductDistance {
+impl I4PackedDistance {
+    pub fn new(similarity: VectorSimilarity) -> Self {
+        Self(similarity)
+    }
+}
+
+impl VectorDistance for I4PackedDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = I4PackedVector::new(query).expect("valid format");
         let doc = I4PackedVector::new(doc).expect("valid format");
-        let dot = query.dot_unnormalized(&doc) * query.l2_norm().recip() * doc.l2_norm().recip();
-        (-dot + 1.0) / 2.0
+        dot_unnormalized_to_distance(
+            self.0,
+            query.dot_unnormalized(&doc),
+            (query.l2_norm(), doc.l2_norm()),
+        )
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct I4PackedDotProductQueryDistance<'a>(Cow<'a, [f32]>);
+pub struct I4PackedQueryDistance<'a> {
+    similarity: VectorSimilarity,
+    query: Cow<'a, [f32]>,
+    query_l2_norm: f64,
+}
 
-impl<'a> I4PackedDotProductQueryDistance<'a> {
-    pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(query)
+impl<'a> I4PackedQueryDistance<'a> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
+        let query_l2_norm = match similarity {
+            VectorSimilarity::Dot => 1.0,
+            _ => dot_f32(&query, &query).sqrt(),
+        };
+        Self {
+            similarity,
+            query,
+            query_l2_norm,
+        }
     }
 }
 
-impl QueryVectorDistance for I4PackedDotProductQueryDistance<'_> {
+impl QueryVectorDistance for I4PackedQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I4PackedVector::new(vector).expect("valid format");
-        let dot = vector.dot_unnormalized_f32(self.0.as_ref()) / vector.l2_norm();
-        (-dot + 1.0) / 2.0
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct I4PackedEuclideanDistance;
-
-impl VectorDistance for I4PackedEuclideanDistance {
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = I4PackedVector::new(query).expect("valid format");
-        let doc = I4PackedVector::new(doc).expect("valid format");
-        let dot = query.dot_unnormalized(&doc);
-        query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct I4PackedEuclideanQueryDistance<'a>(Cow<'a, [f32]>, f64);
-
-impl<'a> I4PackedEuclideanQueryDistance<'a> {
-    pub fn new(query: Cow<'a, [f32]>) -> Self {
-        let l2_norm_sq = dot_f32(&query, &query);
-        Self(query, l2_norm_sq)
-    }
-}
-
-impl QueryVectorDistance for I4PackedEuclideanQueryDistance<'_> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = I4PackedVector::new(vector).expect("valid format");
-        let dot = vector.dot_unnormalized_f32(self.0.as_ref());
-        self.1 + vector.l2_norm_sq() - (2.0 * dot)
+        dot_unnormalized_to_distance(
+            self.similarity,
+            vector.dot_unnormalized_f32(self.query.as_ref()),
+            (self.query_l2_norm, vector.l2_norm()),
+        )
     }
 }
 
@@ -568,10 +551,6 @@ impl<'a> I16Vector<'a> {
 
     fn l2_norm(&self) -> f64 {
         f32::from_le_bytes(self.0[4..8].try_into().unwrap()).into()
-    }
-
-    fn l2_norm_sq(&self) -> f64 {
-        self.l2_norm() * self.l2_norm()
     }
 
     fn raw_vector(&self) -> &[u8] {
@@ -670,60 +649,54 @@ impl<'a> I16Vector<'a> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct I16DotProductDistance;
+pub struct I16Distance(VectorSimilarity);
 
-impl VectorDistance for I16DotProductDistance {
+impl I16Distance {
+    pub fn new(similarity: VectorSimilarity) -> Self {
+        Self(similarity)
+    }
+}
+
+impl VectorDistance for I16Distance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = I16Vector::new(query);
         let doc = I16Vector::new(doc);
-        let dot = query.dot_unnormalized(&doc) / (query.l2_norm() * doc.l2_norm());
-        (-dot + 1.0) / 2.0
+        dot_unnormalized_to_distance(
+            self.0,
+            query.dot_unnormalized(&doc),
+            (query.l2_norm(), doc.l2_norm()),
+        )
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct I16DotProductQueryDistance<'a>(Cow<'a, [f32]>);
+pub struct I16QueryDistance<'a> {
+    similarity: VectorSimilarity,
+    query: Cow<'a, [f32]>,
+    query_l2_norm: f64,
+}
 
-impl<'a> I16DotProductQueryDistance<'a> {
-    pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(query)
+impl<'a> I16QueryDistance<'a> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
+        let query_l2_norm = match similarity {
+            VectorSimilarity::Dot => 1.0,
+            _ => dot_f32(&query, &query).sqrt(),
+        };
+        Self {
+            similarity,
+            query,
+            query_l2_norm,
+        }
     }
 }
 
-impl QueryVectorDistance for I16DotProductQueryDistance<'_> {
+impl QueryVectorDistance for I16QueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = I16Vector::new(vector);
-        let dot = vector.dot_unnormalized_f32(&self.0) / vector.l2_norm();
-        (-dot + 1.0) / 2.0
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct I16EuclideanDistance;
-
-impl VectorDistance for I16EuclideanDistance {
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = I16Vector::new(query);
-        let doc = I16Vector::new(doc);
-        let dot = query.dot_unnormalized(&doc);
-        query.l2_norm_sq() + doc.l2_norm_sq() - (2.0 * dot)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct I16EuclideanQueryDistance<'a>(Cow<'a, [f32]>, f64);
-
-impl<'a> I16EuclideanQueryDistance<'a> {
-    pub fn new(query: Cow<'a, [f32]>) -> Self {
-        let l2_norm_sq = dot_f32(&query, &query);
-        Self(query, l2_norm_sq)
-    }
-}
-
-impl QueryVectorDistance for I16EuclideanQueryDistance<'_> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = I16Vector::new(vector);
-        let dot = vector.dot_unnormalized_f32(&self.0);
-        self.1 + vector.l2_norm_sq() - (2.0 * dot)
+        dot_unnormalized_to_distance(
+            self.similarity,
+            vector.dot_unnormalized_f32(&self.query),
+            (self.query_l2_norm, vector.l2_norm()),
+        )
     }
 }

@@ -923,7 +923,6 @@ mod test {
         }
     }
 
-    // XXX this is hella busted for short vectors, the scalar implementation is probably shit.
     #[test]
     fn lvq2x1x12_dot() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
@@ -932,7 +931,6 @@ mod test {
         }
     }
 
-    // XXX this is hella busted for short vectors, the scalar implementation is probably shit.
     #[test]
     fn lvq2x1x12_l2() {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {

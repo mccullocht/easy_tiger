@@ -560,7 +560,7 @@ mod packing {
                     if i % 2 == 0 {
                         residual[b1..b1 + 2].copy_from_slice(&r.to_le_bytes());
                     } else {
-                        residual[b1] = (r as u8 & 0xf) << 4;
+                        residual[b1] |= (r as u8 & 0xf) << 4;
                         residual[b1 + 1] = (r >> 4) as u8;
                     }
                 }

@@ -54,11 +54,10 @@ pub fn float32_benchmarks(c: &mut Criterion) {
     }
 }
 
-fn query_and_doc_benchmarks(
-    c: &mut Criterion,
-    format: F32VectorCoding,
-    similarities: impl ExactSizeIterator<Item = VectorSimilarity>,
-) {
+fn query_and_doc_benchmarks<I>(c: &mut Criterion, format: F32VectorCoding, similarities: I)
+where
+    I: IntoIterator<Item = VectorSimilarity>,
+{
     let (x, y) = generate_test_vectors(1024);
     for similarity in similarities {
         benchmark_distance(
@@ -84,28 +83,13 @@ pub fn float16_benchmarks(c: &mut Criterion) {
     query_and_doc_benchmarks(c, F32VectorCoding::F16, VectorSimilarity::all());
 }
 
-pub fn i16_scaled_uniform_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(
-        c,
-        F32VectorCoding::I16ScaledUniformQuantized,
-        VectorSimilarity::all(),
-    );
-}
-
-pub fn i8_scaled_uniform_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(
-        c,
-        F32VectorCoding::I8ScaledUniformQuantized,
-        VectorSimilarity::all(),
-    );
-}
-
-pub fn i4_scaled_uniform_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(
-        c,
-        F32VectorCoding::I4ScaledUniformQuantized,
-        VectorSimilarity::all(),
-    );
+pub fn scaled_uniform_benchmarks(c: &mut Criterion) {
+    // Regardless of the similarity type all of the implementations use dot product internally and
+    // then adjust using stored hyper parameters.
+    let similarities = [VectorSimilarity::Dot];
+    query_and_doc_benchmarks(c, F32VectorCoding::I4ScaledUniformQuantized, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::I8ScaledUniformQuantized, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::I16ScaledUniformQuantized, similarities);
 }
 
 pub fn i1_benchmarks(c: &mut Criterion) {
@@ -129,52 +113,27 @@ pub fn i1_benchmarks(c: &mut Criterion) {
     );
 }
 
-fn angular_similarities() -> impl ExactSizeIterator<Item = VectorSimilarity> {
-    [VectorSimilarity::Dot, VectorSimilarity::Cosine].into_iter()
-}
-
-fn lvq2x8x8_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x8x8, angular_similarities());
-}
-
-fn lvq2x4x8_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x4x8, angular_similarities());
-}
-
-fn lvq2x4x4_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x4x4, angular_similarities());
-}
-
-fn lvq2x1x8_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x1x8, angular_similarities());
-}
-
-fn lvq1x8_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ1x8, angular_similarities());
-}
-
-fn lvq1x4_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ1x4, angular_similarities());
-}
-
-fn lvq1x1_benchmarks(c: &mut Criterion) {
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ1x1, angular_similarities());
+fn lvq_benchmarks(c: &mut Criterion) {
+    // Regardless of the similarity type all of the implementations use dot product internally and
+    // then adjust using stored hyper parameters.
+    let similarities = [VectorSimilarity::Dot];
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ1x1, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ1x4, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ1x8, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x1x8, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x1x12, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x1x16, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x4x4, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x4x8, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x8x8, similarities);
 }
 
 criterion_group!(
     benches,
     float32_benchmarks,
     float16_benchmarks,
-    i16_scaled_uniform_benchmarks,
-    i8_scaled_uniform_benchmarks,
-    i4_scaled_uniform_benchmarks,
     i1_benchmarks,
-    lvq2x8x8_benchmarks,
-    lvq2x4x8_benchmarks,
-    lvq2x4x4_benchmarks,
-    lvq2x1x8_benchmarks,
-    lvq1x8_benchmarks,
-    lvq1x4_benchmarks,
-    lvq1x1_benchmarks,
+    scaled_uniform_benchmarks,
+    lvq_benchmarks,
 );
 criterion_main!(benches);

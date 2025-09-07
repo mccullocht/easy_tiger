@@ -26,6 +26,29 @@ use crate::{
     vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance},
 };
 
+const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
+const SUPPORTED_RESIDUAL_BITS: [usize; 4] = [4, 8, 12, 16];
+
+const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
+    let mut i = 0;
+    while i < allowed.len() {
+        if bits == allowed[i] {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+const fn check_primary_bits(bits: usize) {
+    assert!(is_supported_bits(bits, &SUPPORTED_PRIMARY_BITS));
+}
+
+const fn check_residual_bits(primary: usize, residual: usize) {
+    assert!(is_supported_bits(primary, &SUPPORTED_PRIMARY_BITS));
+    assert!(is_supported_bits(residual, &SUPPORTED_RESIDUAL_BITS));
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct VectorStats {
     min: f32,
@@ -126,7 +149,12 @@ struct PrimaryVector<'a, const B: usize> {
 }
 
 impl<'a, const B: usize> PrimaryVector<'a, B> {
+    const B_CHECK: () = { check_primary_bits(B) };
+
     fn new(encoded: &'a [u8]) -> Option<Self> {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+
         let (header, vector) = VectorHeader::deserialize(encoded)?;
         Some(Self::with_header(header, vector))
     }
@@ -196,7 +224,12 @@ struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
 }
 
 impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
+    const B_CHECK: () = { check_residual_bits(B1, B2) };
+
     fn new(encoded: &'a [u8]) -> Option<Self> {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+
         let (header, vector) = VectorHeader::deserialize(encoded)?;
         let split = packing::two_vector_split(vector.len() - std::mem::size_of::<f32>(), B1, B2);
         let (primary_vector, residual) = vector.split_at(split);
@@ -232,11 +265,28 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
     }
 }
 
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone)]
 pub struct PrimaryVectorCoder<const B: usize>;
+
+impl<const B: usize> PrimaryVectorCoder<B> {
+    const B_CHECK: () = { check_primary_bits(B) };
+}
+
+impl<const B: usize> Default for PrimaryVectorCoder<B> {
+    fn default() -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+        PrimaryVectorCoder::<B>
+    }
+}
 
 impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let _bcheck: () = {
+            assert!(B > 0, "primary vector bit must be in 1..=8");
+            assert!(B <= 8, "primary vector bit must be in 1..=8");
+        };
+
         let stats = VectorStats::from(vector);
         let mut header = VectorHeader::from(stats);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
@@ -266,8 +316,20 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
 /// This format allows the representation to be split -- the primary vector can be used with just
 /// the header and primary vector contents; the residual delta and vector can be used along with
 /// the primary vector parts to provide a higher fidelity representation.
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone)]
 pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>;
+
+impl<const B1: usize, const B2: usize> TwoLevelVectorCoder<B1, B2> {
+    const B_CHECK: () = { check_residual_bits(B1, B2) };
+}
+
+impl<const B1: usize, const B2: usize> Default for TwoLevelVectorCoder<B1, B2> {
+    fn default() -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+        TwoLevelVectorCoder::<B1, B2>
+    }
+}
 
 impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1, B2> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
@@ -451,7 +513,7 @@ mod packing {
 
     /// The number of bytes required to pack `dimensions` with `bits` per entry.
     pub const fn byte_len(dimensions: usize, bits: usize) -> usize {
-        dimensions.div_ceil(8 / bits)
+        (dimensions * bits).div_ceil(8)
     }
 
     /// Pick where to split between primary and residual vector representation based on the number
@@ -479,7 +541,7 @@ mod packing {
     /// REQUIRES: B1 must be in 1..=8 and B1 % 8 == 0
     /// REQUIRES: B2 must be in 1..=8 and B2 % 8 == 0
     pub fn pack_iter2<const B1: usize, const B2: usize>(
-        it: impl ExactSizeIterator<Item = (u8, u8)>,
+        it: impl ExactSizeIterator<Item = (u8, u16)>,
         primary: &mut [u8],
         residual: &mut [u8],
     ) {
@@ -487,67 +549,76 @@ mod packing {
         let dims_per_byte2 = 8 / B2;
         for (i, (q, r)) in it.enumerate() {
             primary[i / dims_per_byte1] |= q << ((i % dims_per_byte1) * B1);
-            residual[i / dims_per_byte2] |= r << ((i % dims_per_byte2) * B2);
+            match B2 {
+                1..=8 => residual[i / dims_per_byte2] |= (r as u8) << ((i % dims_per_byte2) * B2),
+                12 => {
+                    let b1 = i * 3 / 2;
+                    if i % 2 == 0 {
+                        residual[b1..b1 + 2].copy_from_slice(&r.to_le_bytes());
+                    } else {
+                        residual[b1] |= (r as u8 & 0xf) << 4;
+                        residual[b1 + 1] = (r >> 4) as u8;
+                    }
+                }
+                16 => residual[i * 2..i * 2 + 2].copy_from_slice(&r.to_le_bytes()),
+                _ => unimplemented!(),
+            }
         }
     }
 
     pub struct UnpackIter<'a, const B: usize> {
         inner: std::slice::Iter<'a, u8>,
-        next_bit: usize,
-        buf: u8,
+        buf: u32,
+        nbuf: usize,
     }
 
     impl<'a, const B: usize> UnpackIter<'a, B> {
-        const MASK: u8 = ((1 << B) - 1) as u8;
+        const MASK: u32 = (1 << B) - 1;
+        const BIT_CHECK: () = { assert!(B <= 16) };
 
         fn new(packed: &'a [u8]) -> Self {
+            #[allow(clippy::let_unit_value)]
+            let _ = Self::BIT_CHECK;
             Self {
                 inner: packed.iter(),
-                next_bit: 8,
                 buf: 0,
+                nbuf: 0,
             }
         }
     }
 
     impl<'a, const B: usize> Iterator for UnpackIter<'a, B> {
-        type Item = u8;
+        type Item = u16;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if self.next_bit == 8 {
-                self.buf = *self.inner.next()?;
-                self.next_bit = 0;
+            while self.nbuf < B {
+                self.buf |= u32::from(*self.inner.next()?) << self.nbuf;
+                self.nbuf += 8;
             }
 
-            let v = (self.buf >> self.next_bit) & Self::MASK;
-            self.next_bit += B;
-            Some(v)
+            let v = self.buf & Self::MASK;
+            self.buf >>= B;
+            self.nbuf -= B;
+            Some(v as u16)
         }
 
-        fn nth(&mut self, mut n: usize) -> Option<Self::Item> {
-            // Handle anything currently in buf.
-            let remaining = (8 - self.next_bit) / B;
-            if n <= remaining {
-                self.next_bit += n * B;
-                return self.next();
+        fn nth(&mut self, n: usize) -> Option<Self::Item> {
+            let mut skip_bits = n * B;
+            if skip_bits > self.nbuf {
+                skip_bits -= self.nbuf;
+                self.nbuf = 0;
+                let skip_bytes = skip_bits / 8;
+                skip_bits -= skip_bytes * 8;
+                self.buf = u32::from(*self.inner.nth(skip_bytes)?);
             }
-            n -= remaining; // n is positive
 
-            // Skip 1 or more entries from inner.
-            let per_byte = 8 / B;
-            let byte_nth = per_byte / n;
-            self.buf = *self.inner.nth(byte_nth)?;
-            self.next_bit = 0;
-            n -= byte_nth * per_byte;
-
-            // Handle anything we need to skip in buf.
-            self.next_bit += n * B;
+            self.buf >>= skip_bits;
             self.next()
         }
 
         fn size_hint(&self) -> (usize, Option<usize>) {
-            let hint = self.inner.size_hint();
-            let extra = (8 - self.next_bit) / B;
-            (hint.0 + extra, hint.1.map(|s| s + extra))
+            let len = (self.nbuf + 8 * self.inner.len()) / B;
+            (len, Some(len))
         }
     }
 
@@ -556,7 +627,7 @@ mod packing {
 
     /// Iterate over the value in each dimension where each dimension is `B` bits in `packed`
     /// REQUIRES: B must be in 1..=8 and B % 8 == 0
-    pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u8> + '_ {
+    pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u16> + '_ {
         UnpackIter::<B>::new(packed)
     }
 }
@@ -584,35 +655,67 @@ mod test {
         }
     }
 
+    // This test vector contains randomly generated numbers in [-1,1] but is not l2 normalized.
+    // It has 19 elements -- long enough to trigger SIMD optimizations but with some remainder to
+    // test scalar tail paths.
+    const TEST_VECTOR: [f32; 19] = [
+        -0.921, -0.061, 0.659, 0.67, 0.573, 0.431, 0.646, 0.001, -0.2, -0.428, 0.73, -0.704,
+        -0.273, 0.539, -0.731, 0.436, 0.913, 0.694, 0.202,
+    ];
+
+    fn unpack_primary<const B: usize>(vector: &PrimaryVector<'_, B>) -> Vec<u16> {
+        super::packing::unpack_iter::<B>(vector.vector).collect()
+    }
+
+    fn unpack_residual<const B1: usize, const B2: usize>(
+        vector: &TwoLevelVector<'_, B1, B2>,
+    ) -> Vec<u16> {
+        super::packing::unpack_iter::<B2>(vector.vector).collect()
+    }
+
     #[test]
     fn lvq1_1() {
-        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let encoded = PrimaryVectorCoder::<1>::default().encode(&vec);
+        let encoded = PrimaryVectorCoder::<1>::default().encode(&TEST_VECTOR);
         let lvq = PrimaryVector::<1>::new(&encoded).expect("readable");
-        assert_eq!(lvq.vector, &[0b11100000, 0b11]);
+        assert_eq!(
+            &unpack_primary(&lvq)[..TEST_VECTOR.len()],
+            [0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1]
+        );
         assert_abs_diff_eq!(
             lvq.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.38059697,
-                upper: 0.25373134,
-                component_sum: 5,
+                l2_norm: 2.5226507,
+                lower: -0.49564388,
+                upper: 0.70561373,
+                component_sum: 11,
             }
         );
         // NB: vector dimensionality is not a multiple of 8 so we're producting extra dimensions.
         assert_abs_diff_eq!(
-            lvq.f32_iter().take(10).collect::<Vec<_>>().as_ref(),
+            lvq.f32_iter()
+                .take(TEST_VECTOR.len())
+                .collect::<Vec<_>>()
+                .as_ref(),
             [
-                -0.38059697,
-                -0.38059697,
-                -0.38059697,
-                -0.38059697,
-                -0.38059697,
-                0.25373134,
-                0.25373134,
-                0.25373134,
-                0.25373134,
-                0.25373134
+                -0.49564388,
+                -0.49564388,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                -0.49564388,
+                -0.49564388,
+                -0.49564388,
+                0.70561373,
+                -0.49564388,
+                -0.49564388,
+                0.70561373,
+                -0.49564388,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                0.70561373
             ]
             .as_ref(),
             epsilon = 0.00001
@@ -621,66 +724,94 @@ mod test {
 
     #[test]
     fn lvq1_4() {
-        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let encoded = PrimaryVectorCoder::<4>::default().encode(&vec);
+        let encoded = PrimaryVectorCoder::<4>::default().encode(&TEST_VECTOR);
         let lvq = PrimaryVector::<4>::new(&encoded).expect("readable");
-        assert_eq!(lvq.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
+        assert_eq!(
+            &unpack_primary(&lvq)[..TEST_VECTOR.len()],
+            [0, 7, 13, 13, 12, 11, 13, 8, 6, 4, 14, 2, 5, 12, 2, 11, 15, 13, 9]
+        );
         assert_abs_diff_eq!(
             lvq.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.5032572,
-                upper: 0.40300408,
-                component_sum: 75,
+                l2_norm: 2.5226507,
+                lower: -0.93474734,
+                upper: 0.9131211,
+                component_sum: 170,
             }
         );
         assert_abs_diff_eq!(
-            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            lvq.f32_iter()
+                .take(TEST_VECTOR.len())
+                .collect::<Vec<_>>()
+                .as_ref(),
             [
-                -0.5032572,
-                -0.3824224,
-                -0.32200494,
-                -0.20117012,
-                -0.08033526,
-                -0.019917846,
-                0.10091698,
-                0.22175187,
-                0.28216928,
-                0.4030041
+                -0.93474734,
+                -0.072408736,
+                0.6667386,
+                0.6667386,
+                0.5435474,
+                0.42035615,
+                0.6667386,
+                0.0507825,
+                -0.19559997,
+                -0.44198242,
+                0.78992987,
+                -0.68836486,
+                -0.3187912,
+                0.5435474,
+                -0.68836486,
+                0.42035615,
+                0.9131211,
+                0.6667386,
+                0.17397368
             ]
-            .as_ref()
+            .as_ref(),
+            epsilon = 0.0001,
         );
     }
 
     #[test]
     fn lvq1_8() {
-        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let encoded = PrimaryVectorCoder::<8>::default().encode(&vec);
+        let encoded = PrimaryVectorCoder::<8>::default().encode(&TEST_VECTOR);
         let lvq = PrimaryVector::<8>::new(&encoded).expect("readable");
-        assert_eq!(lvq.vector, &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]);
-        let component_sum = lvq.vector.iter().copied().map(u32::from).sum::<u32>();
+        assert_eq!(
+            unpack_primary(&lvq),
+            [
+                0, 120, 220, 221, 208, 188, 218, 128, 100, 69, 230, 30, 90, 203, 26, 189, 255, 225,
+                156
+            ]
+        );
         assert_abs_diff_eq!(
             lvq.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.49980745,
-                upper: 0.39980674,
-                component_sum,
+                l2_norm: 2.5226507,
+                lower: -0.92000645,
+                upper: 0.91146713,
+                component_sum: 2876,
             }
         );
         assert_abs_diff_eq!(
             lvq.f32_iter().collect::<Vec<_>>().as_ref(),
             [
-                -0.49980745,
-                -0.40102628,
-                -0.2987172,
-                -0.19993606,
-                -0.10115489,
-                0.0011541545,
-                0.09993532,
-                0.19871649,
-                0.3010256,
-                0.39980677
+                -0.92000645,
+                -0.058136523,
+                0.66008836,
+                0.6672706,
+                0.57390136,
+                0.43025643,
+                0.6457239,
+                -0.0006785393,
+                -0.20178151,
+                -0.42443126,
+                0.7319109,
+                -0.70453894,
+                -0.27360404,
+                0.53799015,
+                -0.73326796,
+                0.43743867,
+                0.91146713,
+                0.6959997,
+                0.20042449
             ]
             .as_ref(),
             epsilon = 0.0001
@@ -689,46 +820,160 @@ mod test {
 
     #[test]
     fn lvq2_1_8() {
-        let vec = [
-            1.22f32, 1.25, 2.37, -2.21, 2.28, -2.8, -0.61, 2.29, -2.56, -0.57, -2.62, -1.56, 1.92,
-            -0.63, 0.77, -2.86,
-        ];
-        let encoded = TwoLevelVectorCoder::<1, 8>::default().encode(&vec);
+        let encoded = TwoLevelVectorCoder::<1, 8>::default().encode(&TEST_VECTOR);
         let lvq = TwoLevelVector::<1, 8>::new(&encoded).expect("readable");
-        assert_eq!(lvq.primary.vector, &[0b10010111, 0b1010000]);
+        assert_eq!(
+            &unpack_primary(&lvq.primary)[..TEST_VECTOR.len()],
+            [0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1]
+        );
         assert_abs_diff_eq!(
-            lvq.vector.as_ref(),
-            [78, 79, 148, 124, 142, 88, 221, 143, 103, 224, 99, 164, 120, 220, 50, 84].as_ref(),
-            epsilon = 1,
+            unpack_residual(&lvq).as_ref(),
+            [
+                37, 220, 118, 120, 99, 69, 115, 233, 190, 142, 133, 83, 175, 92, 78, 70, 172, 125,
+                21
+            ]
+            .as_ref(),
+            epsilon = 1
         );
         assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
-                l2_norm: 7.8255224,
-                lower: -2.1523309,
-                upper: 2.0392284,
-                component_sum: 7,
+                l2_norm: 2.5226507,
+                lower: -0.49564388,
+                upper: 0.70561373,
+                component_sum: 11,
             }
         );
         assert_abs_diff_eq!(
             lvq.f32_iter().collect::<Vec<_>>().as_ref(),
             [
-                1.2255728,
-                1.2420104,
-                2.3761969,
-                -2.209862,
-                2.277572,
-                -2.8016117,
-                -0.6154258,
-                2.2940094,
-                -2.5550494,
-                -0.56611323,
-                -2.6207993,
-                -1.5523624,
-                1.9159473,
-                -0.63186336,
-                0.76532316,
-                -2.8673615
+                -0.9219725,
+                -0.05989358,
+                0.660861,
+                0.6702826,
+                0.5713555,
+                0.4300311,
+                0.6467286,
+                0.0013469756,
+                -0.20121804,
+                -0.42733708,
+                0.7315232,
+                -0.7052751,
+                -0.27188024,
+                0.5383798,
+                -0.72882915,
+                0.4347419,
+                0.91524494,
+                0.6938367,
+                0.20391202
+            ]
+            .as_ref(),
+            epsilon = 0.01
+        );
+    }
+
+    #[test]
+    fn lvq2_1_12() {
+        let encoded = TwoLevelVectorCoder::<1, 12>::default().encode(&TEST_VECTOR);
+        let lvq = TwoLevelVector::<1, 12>::new(&encoded).expect("readable");
+        assert_eq!(
+            &unpack_primary(&lvq.primary)[..TEST_VECTOR.len()],
+            [0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1]
+        );
+        assert_abs_diff_eq!(
+            unpack_residual(&lvq).as_ref(),
+            [
+                597, 3529, 1889, 1926, 1595, 1111, 1844, 3741, 3055, 2278, 2131, 1337, 2806, 1480,
+                1245, 1128, 2754, 2008, 331
+            ]
+            .as_ref(),
+            epsilon = 1
+        );
+        assert_abs_diff_eq!(
+            lvq.primary.header,
+            VectorHeader {
+                l2_norm: 2.5226507,
+                lower: -0.49564388,
+                upper: 0.70561373,
+                component_sum: 11,
+            }
+        );
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
+                -0.92114425,
+                -0.06104967,
+                0.6591182,
+                0.66997206,
+                0.57287407,
+                0.4308939,
+                0.64591753,
+                0.001139909,
+                -0.20009634,
+                -0.4280273,
+                0.73010826,
+                -0.70406723,
+                -0.27313986,
+                0.5391391,
+                -0.73105514,
+                0.4358808,
+                0.9128637,
+                0.6940265,
+                0.20208293
+            ]
+            .as_ref(),
+            epsilon = 0.01
+        );
+    }
+
+    #[test]
+    fn lvq2_1_16() {
+        let encoded = TwoLevelVectorCoder::<1, 16>::default().encode(&TEST_VECTOR);
+        let lvq = TwoLevelVector::<1, 16>::new(&encoded).expect("readable");
+        assert_eq!(
+            &unpack_primary(&lvq.primary)[..TEST_VECTOR.len()],
+            [0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1]
+        );
+        assert_abs_diff_eq!(
+            unpack_residual(&lvq).as_ref(),
+            [
+                9562, 56480, 30224, 30825, 25533, 17786, 29515, 59862, 48896, 36458, 34098, 21401,
+                44914, 23678, 19928, 18059, 44082, 32134, 5293
+            ]
+            .as_ref(),
+            epsilon = 1
+        );
+        assert_abs_diff_eq!(
+            lvq.primary.header,
+            VectorHeader {
+                l2_norm: 2.5226507,
+                lower: -0.49564388,
+                upper: 0.70561373,
+                component_sum: 11,
+            }
+        );
+        assert_abs_diff_eq!(
+            lvq.f32_iter().collect::<Vec<_>>().as_ref(),
+            [
+                -0.9210011,
+                -0.060993403,
+                0.65899134,
+                0.6700077,
+                0.5730052,
+                0.43100262,
+                0.6459954,
+                0.0009987652,
+                -0.20000818,
+                -0.42799696,
+                0.7300018,
+                -0.703992,
+                -0.2729983,
+                0.5390031,
+                -0.7309921,
+                0.4360067,
+                0.9130087,
+                0.6940017,
+                0.20200574
             ]
             .as_ref(),
             epsilon = 0.01
@@ -737,115 +982,164 @@ mod test {
 
     #[test]
     fn lvq2_4_4() {
-        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let encoded = TwoLevelVectorCoder::<4, 4>::default().encode(&vec);
+        let encoded = TwoLevelVectorCoder::<4, 4>::default().encode(&TEST_VECTOR);
         let lvq = TwoLevelVector::<4, 4>::new(&encoded).expect("readable");
-        assert_eq!(lvq.primary.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
-        assert_eq!(lvq.vector, &[0x38, 0x8d, 0xc3, 0x27, 0x7c]);
+        assert_abs_diff_eq!(
+            &unpack_primary(&lvq.primary)[..TEST_VECTOR.len()],
+            [0, 7, 13, 13, 12, 11, 13, 8, 6, 4, 14, 2, 5, 12, 2, 11, 15, 13, 9].as_ref(),
+            epsilon = 1,
+        );
+        assert_abs_diff_eq!(
+            &unpack_residual(&lvq)[..TEST_VECTOR.len()],
+            [9, 9, 7, 8, 11, 9, 5, 1, 7, 9, 0, 6, 13, 7, 2, 9, 7, 11, 11].as_ref(),
+            epsilon = 1
+        );
         assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.5032572,
-                upper: 0.40300408,
-                component_sum: 75,
+                l2_norm: 2.5226507,
+                lower: -0.93474734,
+                upper: 0.9131211,
+                component_sum: 170,
             }
         );
         assert_abs_diff_eq!(
             lvq.f32_iter().collect::<Vec<_>>().as_ref(),
             [
-                -0.5012433,
-                -0.40054762,
-                -0.2998519,
-                -0.1991562,
-                -0.09846049,
-                -0.0017926209,
-                0.09890307,
-                0.19959882,
-                0.30029452,
-                0.4009902
+                -0.9224282,
+                -0.060089614,
+                0.6626322,
+                0.67084503,
+                0.57229203,
+                0.43267527,
+                0.64620674,
+                -0.0026003644,
+                -0.19970635,
+                -0.4296633,
+                0.72833425,
+                -0.700684,
+                -0.27362108,
+                0.539441,
+                -0.733535,
+                0.43267527,
+                0.9090147,
+                0.69548327,
+                0.2027183,
+                -0.99634296
             ]
-            .as_ref()
+            .as_ref(),
+            epsilon = 0.0001,
         );
     }
 
     #[test]
     fn lvq2_4_8() {
-        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let encoded = TwoLevelVectorCoder::<4, 8>::default().encode(&vec);
+        let encoded = TwoLevelVectorCoder::<4, 8>::default().encode(&TEST_VECTOR);
         let lvq = TwoLevelVector::<4, 8>::new(&encoded).expect("readable");
-        assert_eq!(lvq.primary.vector, &[0x20, 0x53, 0x87, 0xca, 0xfd]);
-        assert_eq!(lvq.vector, &[141, 53, 220, 132, 45, 212, 124, 36, 203, 115]);
+        assert_abs_diff_eq!(
+            &unpack_primary(&lvq.primary)[..TEST_VECTOR.len()],
+            [0, 7, 13, 13, 12, 11, 13, 8, 6, 4, 14, 2, 5, 12, 2, 11, 15, 13, 9].as_ref(),
+            epsilon = 1,
+        );
+        assert_abs_diff_eq!(
+            unpack_residual(&lvq).as_ref(),
+            [
+                156, 151, 111, 134, 188, 150, 85, 24, 118, 156, 3, 95, 222, 118, 39, 160, 127, 184,
+                186
+            ]
+            .as_ref(),
+            epsilon = 1
+        );
         assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.5032572,
-                upper: 0.40300408,
-                component_sum: 75,
+                l2_norm: 2.5226507,
+                lower: -0.93474734,
+                upper: 0.9131211,
+                component_sum: 170,
             }
         );
         assert_abs_diff_eq!(
             lvq.f32_iter().collect::<Vec<_>>().as_ref(),
             [
-                -0.50005865,
-                -0.40007377,
-                -0.30008882,
-                -0.20010392,
-                -0.09988207,
-                0.00010282919,
-                0.100087725,
-                0.20007268,
-                0.3000576,
-                0.40004247
+                -0.9209789,
+                -0.06105582,
+                0.65876746,
+                0.6698788,
+                0.5727751,
+                0.43122596,
+                0.64620674,
+                0.0007813573,
+                -0.20018944,
+                -0.42821398,
+                0.72978354,
+                -0.7040657,
+                -0.273138,
+                0.5389579,
+                -0.73111945,
+                0.436057,
+                0.9128795,
+                0.6940339,
+                0.20223519
             ]
-            .as_ref()
+            .as_ref(),
+            epsilon = 0.0001,
         );
     }
 
     #[test]
     fn lvq2_8_8() {
-        let vec = [-0.5f32, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4];
-        let encoded = TwoLevelVectorCoder::<8, 8>::default().encode(&vec);
+        let encoded = TwoLevelVectorCoder::<8, 8>::default().encode(&TEST_VECTOR);
         let lvq = TwoLevelVector::<8, 8>::new(&encoded).expect("readable");
-        assert_eq!(
-            lvq.primary.vector,
-            &[0, 28, 57, 85, 113, 142, 170, 198, 227, 255]
+        assert_abs_diff_eq!(
+            &unpack_primary(&lvq.primary)[..TEST_VECTOR.len()],
+            [
+                0, 120, 220, 221, 208, 188, 218, 128, 100, 69, 230, 30, 90, 203, 26, 189, 255, 225,
+                156
+            ]
+            .as_ref(),
+            epsilon = 1,
         );
         assert_abs_diff_eq!(
-            lvq.vector.as_ref(),
-            [114, 202, 35, 123, 211, 44, 132, 220, 53, 141].as_ref(),
+            unpack_residual(&lvq).as_ref(),
+            [
+                92, 26, 89, 224, 95, 154, 137, 187, 191, 1, 60, 147, 149, 163, 208, 76, 182, 57,
+                183
+            ]
+            .as_ref(),
             epsilon = 1
         );
-        let component_sum = lvq
-            .primary
-            .vector
-            .iter()
-            .copied()
-            .map(u32::from)
-            .sum::<u32>();
         assert_abs_diff_eq!(
             lvq.primary.header,
             VectorHeader {
-                l2_norm: 0.9219545,
-                lower: -0.49980745,
-                upper: 0.39980674,
-                component_sum,
+                l2_norm: 2.5226507,
+                lower: -0.92000645,
+                upper: 0.91146713,
+                component_sum: 2876,
             }
         );
         assert_abs_diff_eq!(
             lvq.f32_iter().collect::<Vec<_>>().as_ref(),
             [
-                -0.49999422,
-                -0.39999557,
-                -0.29999694,
-                -0.19999832,
-                -0.09999968,
-                -1.0593794e-6,
-                0.09999758,
-                0.19999622,
-                0.2999949,
-                0.39999354
+                -0.9210063,
+                -0.06099534,
+                0.659004,
+                0.6699886,
+                0.57298595,
+                0.43100283,
+                0.64599144,
+                0.0009973187,
+                -0.19999298,
+                -0.42799422,
+                0.7300097,
+                -0.7039897,
+                -0.27299848,
+                0.53899,
+                -0.7310006,
+                0.43598813,
+                0.9130022,
+                0.694014,
+                0.20198768
             ]
             .as_ref(),
             epsilon = 0.0001

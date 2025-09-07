@@ -152,6 +152,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     const B_CHECK: () = { check_primary_bits(B) };
 
     fn new(encoded: &'a [u8]) -> Option<Self> {
+        #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
 
         let (header, vector) = VectorHeader::deserialize(encoded)?;
@@ -226,6 +227,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
     const B_CHECK: () = { check_residual_bits(B1, B2) };
 
     fn new(encoded: &'a [u8]) -> Option<Self> {
+        #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
 
         let (header, vector) = VectorHeader::deserialize(encoded)?;
@@ -272,6 +274,7 @@ impl<const B: usize> PrimaryVectorCoder<B> {
 
 impl<const B: usize> Default for PrimaryVectorCoder<B> {
     fn default() -> Self {
+        #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
         PrimaryVectorCoder::<B>
     }
@@ -322,6 +325,7 @@ impl<const B1: usize, const B2: usize> TwoLevelVectorCoder<B1, B2> {
 
 impl<const B1: usize, const B2: usize> Default for TwoLevelVectorCoder<B1, B2> {
     fn default() -> Self {
+        #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
         TwoLevelVectorCoder::<B1, B2>
     }
@@ -573,6 +577,7 @@ mod packing {
         const BIT_CHECK: () = { assert!(B <= 16) };
 
         fn new(packed: &'a [u8]) -> Self {
+            #[allow(clippy::let_unit_value)]
             let _ = Self::BIT_CHECK;
             Self {
                 inner: packed.iter(),

@@ -482,7 +482,6 @@ pub fn new_query_vector_distance_indexing<'a>(
     }
 }
 
-// XXX use this in lvq too
 /// For a given similarity function, compute a distance score based on the unnormalized dot product
 /// of two vectors and their l2 norms.
 fn dot_unnormalized_to_distance(

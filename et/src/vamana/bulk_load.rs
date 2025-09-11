@@ -40,11 +40,6 @@ pub struct BulkLoadArgs {
     /// This can be significantly faster than reading these values from WiredTiger.
     #[arg(long, default_value_t = true)]
     memory_quantized_vectors: bool,
-    /// If true, cluster the input data set to choose insertion order. This improves locality
-    /// during the insertion step, yielding higher cache hit rates and graph build times, at the
-    /// expense of a compute intensive k-means clustering step.
-    #[arg(long, default_value_t = false)]
-    cluster_ordered_insert: bool,
 
     /// Number of edges to search for when indexing a vertex.
     ///

@@ -160,6 +160,24 @@ impl Session {
         }
     }
 
+    /// Rename a table.
+    ///
+    /// This requires exclusive access -- if any cursors are open on the specified table the call will fail
+    /// and return an EBUSY posix error.
+    pub fn rename_table(&self, table_name: &str, new_table_name: &str) -> Result<()> {
+        let old_uri = table_uri(table_name);
+        let new_uri = table_uri(new_table_name);
+        unsafe {
+            wt_call!(
+                self.ptr,
+                rename,
+                old_uri.as_ptr(),
+                new_uri.as_ptr(),
+                std::ptr::null()
+            )
+        }
+    }
+
     /// Open a record cursor over the named table.
     ///
     /// Returns [rustix::io::Errno::INVAL] if the underlying table is not a record table.

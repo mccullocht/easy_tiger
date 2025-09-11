@@ -8,7 +8,6 @@
 //! Caveats:
 //! * Only `numpy` little-endian formatted `f32` vectors are accepted.
 //! * Row keys are assigned densely beginning at zero.
-use core::f64;
 use std::{
     cell::RefCell,
     num::NonZero,
@@ -263,6 +262,7 @@ where
         let in_flight = SkipSet::new();
         (0..self.limit)
             .into_par_iter()
+            .by_uniform_blocks(self.index.config().pruning.max_edges.get() * 2)
             .filter(|&i| i != 0)
             .try_for_each(|v| {
                 let session = tl_session.get()?;
@@ -540,6 +540,8 @@ where
             let (mut iv, mut ev) = self.lock_edge(vertex, e as usize);
             if iv.len() > config.max_edges.get() || ev.len() > config.max_edges.get() {
                 iv.retain(|n| n.vertex() != e);
+                // TODO: consider allowing the graph to be undirected as a configuration parameter.
+                // There is a recent VLDB paper describing a mechanism for doing this.
                 ev.retain(|n| n.vertex() != vertex as i64);
             }
         }

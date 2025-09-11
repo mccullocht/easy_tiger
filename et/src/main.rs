@@ -1,3 +1,4 @@
+mod chrng;
 mod compute_neighbors;
 mod neighbor_util;
 mod quantization;
@@ -11,6 +12,8 @@ mod wt_stats;
 use std::io::{self};
 
 use clap::{command, Parser, Subcommand};
+
+use chrng::{chrng_command, ChrngArgs};
 use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
 use quantization::{quantization, QuantizationArgs};
 use spann::{spann_command, SpannArgs};
@@ -29,6 +32,8 @@ enum Commands {
     Spann(SpannArgs),
     /// Perform Vamana/DiskANN index operations.
     Vamana(VamanaArgs),
+    /// Perform Hierarchical Relative Neighbor graph index operations.
+    Chrng(ChrngArgs),
     /// Compute the top k neighbors for a set of queries against a set of document vectors.
     ComputeNeighbors(ComputeNeighborsArgs),
     /// Quantization related utilities.
@@ -42,6 +47,7 @@ fn main() -> io::Result<()> {
     match cli.command {
         Commands::Spann(args) => spann_command(args),
         Commands::Vamana(args) => vamana_command(args),
+        Commands::Chrng(args) => chrng_command(args),
         Commands::ComputeNeighbors(args) => compute_neighbors(args),
         Commands::Quantization(args) => quantization(args),
     }

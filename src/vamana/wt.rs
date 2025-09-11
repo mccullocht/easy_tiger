@@ -53,6 +53,12 @@ pub struct Leb128EdgeIterator<'a> {
     prev: i64,
 }
 
+impl<'a> Leb128EdgeIterator<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { data, prev: 0 }
+    }
+}
+
 impl Iterator for Leb128EdgeIterator<'_> {
     type Item = i64;
 

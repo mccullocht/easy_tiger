@@ -93,7 +93,6 @@ type CentroidsAndAssignments = (VecVectorStore<f32>, Vec<usize>, Vec<usize>);
 ///
 /// Returns a vector store containing a "left" and a "right" centroid along with cluster assignment.
 /// Note that these cluster assignments may not match the results of compute_assignments().
-// XXX this needs to allow a distance function.
 fn binary_partition<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + Sync>(
     dataset: &V,
     max_iters: usize,

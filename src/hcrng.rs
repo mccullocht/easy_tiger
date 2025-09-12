@@ -38,3 +38,14 @@
 //!
 //! This data structure borrows inspiration from SPANN, HNSW, and the Lucene experiment with using
 //! binary partitioning to order the neighbor graph.
+
+// XXX should not be pub.
+pub mod clustering;
+
+// XXX I want to re-use as much as I possibly can
+// * bp yields batches as (centroid, assigned) tuples
+// * centroids are saved and use with a batch loader to write the head index.
+// * assignment used to quantized the vectors into a new order and write them into a temporary location
+// * assignment is also used to generate an ordinal -> (cluster_id, vector_id) tuple
+// * feed temporary vectors to vamana bulk ingestion
+// * extract the graph information, write with full keys.

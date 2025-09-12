@@ -39,8 +39,47 @@
 //! This data structure borrows inspiration from SPANN, HNSW, and the Lucene experiment with using
 //! binary partitioning to order the neighbor graph.
 
+use crate::{hcrng::clustering::ClusterIter, input::VectorStore, vectors::VectorSimilarity};
+
 // XXX should not be pub.
 pub mod clustering;
+
+pub struct VectorOrdinalMapping;
+
+impl VectorOrdinalMapping {
+    /// Maps an ordinal in the clustered id space back to the original data set ordinal.
+    pub fn to_original_id(&self, clustered_id: usize) -> usize {
+        todo!()
+    }
+
+    /// Identify the cluster that a given clustered_id is in.
+    pub fn identify_cluster_id(&self, clustered_id: usize) -> usize {
+        // XXX binary_search will return the index that this element would be inserted at to
+        // maintain order OR an exact match so this index would be sufficient to identify cluster.
+        todo!()
+    }
+}
+
+pub fn create_clusters(
+    dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+    similarity: VectorSimilarity,
+    max_cluster_len: usize,
+    progress: &(impl Fn(u64) + Send + Sync),
+) {
+    // XXX enumerate to generate cluster ids.
+    // XXX to build the final graph I will take clustered_id keys (in tables and edges) to process.
+    // XXX for each i will identify the cluster id and original ordinal. don't need original -> clustered.
+    let mut cluster_it = ClusterIter::new(
+        dataset,
+        max_cluster_len,
+        similarity.new_distance_function(),
+        progress,
+    );
+
+    // XXX we have to return a DerefVectorStore pointing to a temp file.
+    // XXX we also have to flush this file before we deref it.
+    todo!()
+}
 
 // XXX I want to re-use as much as I possibly can
 // * bp yields batches as (centroid, assigned) tuples

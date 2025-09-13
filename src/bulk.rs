@@ -133,13 +133,12 @@ where
     /// Phases to be executed by the builder.
     /// This can vary depending on the options.
     pub fn phases(&self) -> Vec<BulkLoadPhase> {
-        let mut phases = vec![BulkLoadPhase::LoadVectors];
-        phases.extend_from_slice(&[
+        vec![
+            BulkLoadPhase::LoadVectors,
             BulkLoadPhase::BuildGraph,
             BulkLoadPhase::CleanupGraph,
             BulkLoadPhase::LoadGraph,
-        ]);
-        phases
+        ]
     }
 
     /// Total number of vectors to process. Useful for status reporting.

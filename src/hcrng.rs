@@ -103,9 +103,6 @@ pub fn create_clusters(
     // Original id for each vector in the clustered list.
     let mut original_ids = Vec::with_capacity(dataset.len());
 
-    // XXX enumerate to generate cluster ids.
-    // XXX to build the final graph I will take clustered_id keys (in tables and edges) to process.
-    // XXX for each i will identify the cluster id and original ordinal. don't need original -> clustered.
     let cluster_it = ClusterIter::new(
         dataset,
         max_cluster_len,

@@ -108,7 +108,9 @@ fn binary_partition<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send 
     let mut assignments = vec![0u8; dataset.len()];
     assignments[split..].fill(1);
 
+    progress(1);
     let mut centroids = compute_centroids(dataset, &assignments);
+    progress(1);
     let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
     let mut prev_inertia = dataset.len();
     let mut converged = false;
@@ -118,6 +120,7 @@ fn binary_partition<V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send 
             let rdist = dist_fn.distance_f32(&centroids[1], &dataset[i]);
             *d = (i, ldist, rdist, ldist - rdist)
         });
+        progress(1);
         distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
         let split_point = distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
         let inertia = split.abs_diff(split_point);

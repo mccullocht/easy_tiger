@@ -18,9 +18,9 @@ pub(crate) fn progress_bar(len: usize, message: impl Into<Cow<'static, str>>) ->
 pub(crate) fn progress_spinner(message: impl Into<Cow<'static, str>>) -> ProgressBar {
     let message = message.into();
     let fmt = if !message.is_empty() {
-        "{msg} {wide_bar} {pos:>8} Elapsed: {elapsed_precise}"
+        "{msg} {spinner} {pos:>8} Elapsed: {elapsed_precise}"
     } else {
-        "{wide_bar} {pos:>8} Elapsed: {elapsed_precise}"
+        "{spinner} {pos:>8} Elapsed: {elapsed_precise}"
     };
     ProgressBar::new_spinner()
         .with_style(

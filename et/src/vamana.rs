@@ -1,6 +1,6 @@
 mod bulk_load;
 mod delete;
-mod drop_index;
+pub mod drop_index;
 mod init_index;
 mod insert;
 mod lookup;

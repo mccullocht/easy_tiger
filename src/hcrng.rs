@@ -39,46 +39,118 @@
 //! This data structure borrows inspiration from SPANN, HNSW, and the Lucene experiment with using
 //! binary partitioning to order the neighbor graph.
 
-use crate::{hcrng::clustering::ClusterIter, input::VectorStore, vectors::VectorSimilarity};
+use std::{
+    fs::File,
+    io::{self, BufWriter, Write},
+    num::NonZero,
+};
+
+use memmap2::Mmap;
+use tempfile::tempfile;
+
+use crate::{
+    distance::l2_normalize,
+    hcrng::clustering::ClusterIter,
+    input::{DerefVectorStore, VectorStore},
+    vectors::VectorSimilarity,
+};
 
 // XXX should not be pub.
 pub mod clustering;
 
-pub struct VectorOrdinalMapping;
+#[derive(Debug, Clone)]
+pub struct VectorOrdinalMapping {
+    original_ids: Vec<usize>,
+    cluster_ends: Vec<usize>,
+}
 
 impl VectorOrdinalMapping {
     /// Maps an ordinal in the clustered id space back to the original data set ordinal.
     pub fn to_original_id(&self, clustered_id: usize) -> usize {
-        todo!()
+        self.original_ids[clustered_id]
     }
 
     /// Identify the cluster that a given clustered_id is in.
     pub fn identify_cluster_id(&self, clustered_id: usize) -> usize {
-        // XXX binary_search will return the index that this element would be inserted at to
-        // maintain order OR an exact match so this index would be sufficient to identify cluster.
-        todo!()
+        match self.cluster_ends.binary_search(&clustered_id) {
+            Ok(x) => x + 1,
+            Err(x) => x,
+        }
     }
 }
 
+/// Create clusters from dataset using the given similiarity and max cluster length.
+///
+/// Returns the input dataset reordered by the cluster, the set of centroids, and an ordinal mapper
+/// to help associate the new vectors with their original ordinals.
 pub fn create_clusters(
     dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
     similarity: VectorSimilarity,
     max_cluster_len: usize,
     progress: &(impl Fn(u64) + Send + Sync),
-) {
+) -> io::Result<(
+    DerefVectorStore<f32, Mmap>,
+    DerefVectorStore<f32, Mmap>,
+    VectorOrdinalMapping,
+)> {
+    // Vector file containing the cluster centroids.
+    let mut cluster_writer = BufWriter::with_capacity(128 << 10, tempfile()?);
+    // Vector file containing the reordered vectors.
+    let mut vector_writer = BufWriter::with_capacity(128 << 10, tempfile()?);
+    // Indexed by cluster id, contains the index of the first vector in the next cluster.
+    // This is used to identify the cluster given an ordinal in the clustered space.
+    let mut cluster_ends = vec![];
+    // Original id for each vector in the clustered list.
+    let mut original_ids = Vec::with_capacity(dataset.len());
+
     // XXX enumerate to generate cluster ids.
     // XXX to build the final graph I will take clustered_id keys (in tables and edges) to process.
     // XXX for each i will identify the cluster id and original ordinal. don't need original -> clustered.
-    let mut cluster_it = ClusterIter::new(
+    let cluster_it = ClusterIter::new(
         dataset,
         max_cluster_len,
         similarity.new_distance_function(),
         progress,
     );
 
-    // XXX we have to return a DerefVectorStore pointing to a temp file.
-    // XXX we also have to flush this file before we deref it.
-    todo!()
+    for (centroid, original_vector_ids) in cluster_it {
+        // Make sure the centroids are normalized for dot product similarity.
+        let centroid = match similarity {
+            VectorSimilarity::Dot => l2_normalize(centroid),
+            _ => centroid.into(),
+        };
+        for d in centroid.iter() {
+            cluster_writer.write_all(&d.to_le_bytes())?;
+        }
+        for vector in original_vector_ids.iter().map(|i| &dataset[*i]) {
+            for d in vector {
+                vector_writer.write_all(&d.to_le_bytes())?;
+            }
+        }
+        cluster_ends.push(cluster_ends.last().unwrap_or(&0) + original_vector_ids.len());
+        original_ids.extend_from_slice(&original_vector_ids);
+    }
+
+    let clusters = writer_to_vector_store(cluster_writer, dataset.elem_stride())?;
+    let vectors = writer_to_vector_store(vector_writer, dataset.elem_stride())?;
+    let mapping = VectorOrdinalMapping {
+        original_ids,
+        cluster_ends,
+    };
+
+    Ok((vectors, clusters, mapping))
+}
+
+fn writer_to_vector_store(
+    writer: BufWriter<File>,
+    stride: usize,
+) -> io::Result<DerefVectorStore<f32, Mmap>> {
+    let file = writer.into_inner()?;
+    file.sync_all()?;
+    DerefVectorStore::<f32, _>::new(
+        unsafe { memmap2::Mmap::map(&file) }?,
+        NonZero::new(stride).unwrap(),
+    )
 }
 
 // XXX I want to re-use as much as I possibly can

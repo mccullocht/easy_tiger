@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
+use std::{collections::HashSet, fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::{Args, Subcommand};
 use easy_tiger::{
@@ -7,7 +7,7 @@ use easy_tiger::{
     hcrng::create_clusters,
     input::{DerefVectorStore, VectorStore},
     vectors::{F32VectorCoding, VectorSimilarity},
-    wt::TableGraphVectorIndex,
+    wt::{Leb128EdgeIterator, TableGraphVectorIndex},
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;
@@ -164,10 +164,10 @@ fn bulk_load(connection: Arc<Connection>, index_name: &str, args: BulkLoadArgs) 
     }
 
     {
-        let len = vectors.len();
+        let len = args.limit.unwrap_or(vectors.len());
         let mut builder = BulkLoadBuilder::new(
             connection.clone(),
-            tail_index,
+            tail_index.clone(),
             vectors,
             Options {
                 memory_quantized_vectors: args.memory_quantized_vectors,
@@ -190,6 +190,33 @@ fn bulk_load(connection: Arc<Connection>, index_name: &str, args: BulkLoadArgs) 
         stats.search_calls,
         stats.read_bytes,
     );
+
+    // XXX this is a bit silly.
+    let session = connection.open_session()?;
+    let cursor = session.open_record_cursor(tail_index.graph_table_name())?;
+    let mut edges_in_cluster = 0usize;
+    let mut edges_out_cluster = 0usize;
+    let mut edges_out_clusters = 0;
+    let mut cluster_id_delta = 0;
+    for r in cursor {
+        let (ord, raw_edges) = r?;
+        let cluster_id = mapping.identify_cluster_id(ord as usize);
+
+        let mut out_clusters = HashSet::new();
+        for e in Leb128EdgeIterator::new(&raw_edges) {
+            let e_cluster_id = mapping.identify_cluster_id(e as usize);
+            cluster_id_delta += cluster_id.abs_diff(e_cluster_id);
+            if e_cluster_id == cluster_id {
+                edges_in_cluster += 1;
+            } else {
+                edges_out_cluster += 1;
+                out_clusters.insert(e_cluster_id);
+            }
+        }
+        edges_out_clusters += out_clusters.len();
+    }
+
+    println!("edges within cluster: {edges_in_cluster} edges outside cluster: {edges_out_cluster} count of out clusters {edges_out_clusters} cluster id delta {cluster_id_delta}");
 
     Ok(())
 }

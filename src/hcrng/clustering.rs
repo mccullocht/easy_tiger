@@ -51,7 +51,7 @@ impl<'a, V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + Sync> Ite
             if vectors.len() <= self.max_cluster_len {
                 return Some((centroid, vectors.into_subset()));
             }
-            let (centroids, cluster0, cluster1) = match binary_partition(
+            let (centroids, mut cluster0, mut cluster1) = match binary_partition(
                 &vectors,
                 15,
                 self.max_cluster_len / 2,
@@ -68,6 +68,14 @@ impl<'a, V: VectorStore<Elem = f32> + Send + Sync, P: Fn(u64) + Send + Sync> Ite
                     (c, a, b)
                 }
             };
+
+            for c in cluster0.iter_mut() {
+                *c = vectors.original_index(*c);
+            }
+            for c in cluster1.iter_mut() {
+                *c = vectors.original_index(*c);
+            }
+
             self.queue.push_front((
                 centroids[1].to_vec(),
                 SubsetViewVectorStore::new(self.dataset, cluster1),

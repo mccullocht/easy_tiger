@@ -192,6 +192,19 @@ fn bulk_load(connection: Arc<Connection>, index_name: &str, args: BulkLoadArgs) 
     );
 
     // XXX this is a bit silly.
+    // XXX if i set the max cluster size to 1024 ~52% of links stay in cluster and there are links out to ~1.5 other clusters on avg.
+    // XXX at 256 it is ~45% and ~1.3 other clusters.
+    // XXX at 128 it is ~38% and ~1.3 other clusters.
+    // XXX on search the number of nav vectors scored drops by 12% at 256
+    // XXX 13% at 128
+    // XXX 8% at 1024
+    // XXX this begs some questions: am I saving due to locality or improved graph shape or both?
+    // XXX it has to be both -- the drop is 13% on scoring but ~25% on latency and cpu time
+    // XXX but if I just _insert_ in the bp order do i still get the 13%??? it's worth asking
+    // because it's less invasive and potentially a good optimization step. you still need more to
+    // maintain the advantage.
+    // XXX it's also worth counting how many clusters we visit during a search, i wonder if we could
+    // score more vectors but still do better due to access patterns.
     let session = connection.open_session()?;
     let cursor = session.open_record_cursor(tail_index.graph_table_name())?;
     let mut edges_in_cluster = 0usize;

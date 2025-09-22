@@ -39,20 +39,26 @@
 //! This data structure borrows inspiration from SPANN, HNSW, and the Lucene experiment with using
 //! binary partitioning to order the neighbor graph.
 
+// TODO: rename to CHRNG
+
 use std::{
+    array::TryFromSliceError,
     fs::File,
     io::{self, BufWriter, Write},
     num::NonZero,
+    sync::Arc,
 };
 
 use memmap2::Mmap;
 use tempfile::tempfile;
+use wt_mdb::{options::CreateOptionsBuilder, Connection, Result};
 
 use crate::{
     distance::l2_normalize,
     hcrng::clustering::ClusterIter,
     input::{DerefVectorStore, VectorStore},
     vectors::VectorSimilarity,
+    wt::{read_app_metadata, Leb128EdgeIterator, ENTRY_POINT_KEY},
 };
 
 // XXX should not be pub.
@@ -106,7 +112,7 @@ pub fn create_clusters(
     let cluster_it = ClusterIter::new(
         dataset,
         max_cluster_len,
-        similarity.new_distance_function(),
+        VectorSimilarity::Euclidean.new_distance_function(),
         progress,
     );
 
@@ -148,6 +154,128 @@ fn writer_to_vector_store(
         unsafe { memmap2::Mmap::map(&file) }?,
         NonZero::new(stride).unwrap(),
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ClusterKey {
+    cluster_id: u32,
+    vector_id: i64,
+}
+
+impl ClusterKey {
+    fn from_mapping(clustered_id: i64, mapping: &VectorOrdinalMapping) -> Self {
+        Self {
+            cluster_id: mapping.identify_cluster_id(clustered_id as usize) as u32,
+            vector_id: mapping.to_original_id(clustered_id as usize) as i64,
+        }
+    }
+
+    fn to_key_bytes(&self) -> [u8; 12] {
+        let mut key = [0u8; 12];
+        key[..4].copy_from_slice(&self.cluster_id.to_be_bytes());
+        key[4..].copy_from_slice(&self.vector_id.to_be_bytes());
+        key
+    }
+}
+
+impl From<[u8; 12]> for ClusterKey {
+    fn from(value: [u8; 12]) -> Self {
+        let cluster_id = u32::from_be_bytes(value[..4].try_into().unwrap());
+        let vector_id = i64::from_be_bytes(value[4..].try_into().unwrap());
+        Self {
+            cluster_id,
+            vector_id,
+        }
+    }
+}
+
+impl TryFrom<&[u8]> for ClusterKey {
+    type Error = TryFromSliceError;
+
+    fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
+        let rep: [u8; 12] = value.try_into()?;
+        Ok(ClusterKey::from(rep))
+    }
+}
+
+/// Rewrite the table containing a Vamana graph to have hierarchical keys, using the given key
+/// mapping to write the hierarchy.
+pub fn rewrite_graph_table(
+    connection: &Arc<Connection>,
+    table_name: &str,
+    mapping: &VectorOrdinalMapping,
+    progress: impl Fn(u64),
+) -> Result<()> {
+    let session = connection.open_session()?;
+    let app_metadata = read_app_metadata(&session, table_name).unwrap()?;
+    let input_cursor = session.open_record_cursor(table_name)?;
+    let tmp_table_name = format!("{table_name}.tmp");
+    let mut output_cursor = session.new_bulk_load_cursor::<Vec<u8>, Vec<u8>>(
+        &tmp_table_name,
+        Some(CreateOptionsBuilder::default().app_metadata(&app_metadata)),
+    )?;
+    let mut out_edges = vec![];
+    for e in input_cursor {
+        let (record_id, edges) = e?;
+        if record_id == ENTRY_POINT_KEY {
+            // we don't need an entry point. the head graph will be used for this.
+            continue;
+        }
+        let key = ClusterKey::from_mapping(record_id, mapping);
+
+        out_edges.clear();
+        let mut last_edge = ClusterKey {
+            cluster_id: 0,
+            vector_id: 0,
+        };
+        for edge in Leb128EdgeIterator::new(&edges) {
+            let out_edge = ClusterKey::from_mapping(edge, mapping);
+            let cluster_delta = out_edge.cluster_id - last_edge.cluster_id;
+            let vector_delta = if cluster_delta == 0 {
+                out_edge.vector_id - last_edge.vector_id
+            } else {
+                out_edge.vector_id
+            };
+            leb128::write::unsigned(&mut out_edges, cluster_delta.into()).expect("write to vec");
+            leb128::write::signed(&mut out_edges, vector_delta).expect("write to vec");
+            last_edge = out_edge;
+        }
+
+        output_cursor.insert(&key.to_key_bytes(), &out_edges)?;
+        progress(1);
+    }
+    drop(output_cursor);
+
+    session.drop_table(table_name, None)?;
+    session.rename_table(&tmp_table_name, table_name)?;
+
+    Ok(())
+}
+
+/// Rewrite a table to have hierarchical keys, using the given key mapping to write the hierarchy.
+pub fn rewrite_table(
+    connection: &Arc<Connection>,
+    table_name: &str,
+    mapping: &VectorOrdinalMapping,
+    progress: impl Fn(u64),
+) -> Result<()> {
+    let session = connection.open_session()?;
+    let input_cursor = session.open_record_cursor(table_name)?;
+    let tmp_table_name = format!("{table_name}.tmp");
+    let mut output_cursor =
+        session.new_bulk_load_cursor::<Vec<u8>, Vec<u8>>(&tmp_table_name, None)?;
+    for e in input_cursor {
+        let (record_id, payload) = e?;
+        let key = ClusterKey::from_mapping(record_id, mapping);
+        output_cursor.insert(&key.to_key_bytes(), &payload)?;
+        progress(1);
+    }
+    drop(output_cursor);
+
+    session.drop_table(table_name, None)?;
+    session.rename_table(&tmp_table_name, table_name)?;
+
+    Ok(())
 }
 
 // XXX I want to re-use as much as I possibly can

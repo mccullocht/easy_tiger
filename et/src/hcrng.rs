@@ -1,13 +1,13 @@
-use std::{collections::HashSet, fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
+use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::{Args, Subcommand};
 use easy_tiger::{
     bulk::{BulkLoadBuilder, Options},
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
-    hcrng::create_clusters,
+    hcrng::{create_clusters, rewrite_graph_table, rewrite_table},
     input::{DerefVectorStore, VectorStore},
     vectors::{F32VectorCoding, VectorSimilarity},
-    wt::{Leb128EdgeIterator, TableGraphVectorIndex},
+    wt::TableGraphVectorIndex,
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;
@@ -163,8 +163,8 @@ fn bulk_load(connection: Arc<Connection>, index_name: &str, args: BulkLoadArgs) 
         println!("{:?}", builder.graph_stats().unwrap());
     }
 
+    let len = args.limit.unwrap_or(vectors.len());
     {
-        let len = args.limit.unwrap_or(vectors.len());
         let mut builder = BulkLoadBuilder::new(
             connection.clone(),
             tail_index.clone(),
@@ -191,45 +191,19 @@ fn bulk_load(connection: Arc<Connection>, index_name: &str, args: BulkLoadArgs) 
         stats.read_bytes,
     );
 
-    // XXX this is a bit silly.
-    // XXX if i set the max cluster size to 1024 ~52% of links stay in cluster and there are links out to ~1.5 other clusters on avg.
-    // XXX at 256 it is ~45% and ~1.3 other clusters.
-    // XXX at 128 it is ~38% and ~1.3 other clusters.
-    // XXX on search the number of nav vectors scored drops by 12% at 256
-    // XXX 13% at 128
-    // XXX 8% at 1024
-    // XXX this begs some questions: am I saving due to locality or improved graph shape or both?
-    // XXX it has to be both -- the drop is 13% on scoring but ~25% on latency and cpu time
-    // XXX but if I just _insert_ in the bp order do i still get the 13%??? it's worth asking
-    // because it's less invasive and potentially a good optimization step. you still need more to
-    // maintain the advantage.
-    // XXX it's also worth counting how many clusters we visit during a search, i wonder if we could
-    // score more vectors but still do better due to access patterns.
-    let session = connection.open_session()?;
-    let cursor = session.open_record_cursor(tail_index.graph_table_name())?;
-    let mut edges_in_cluster = 0usize;
-    let mut edges_out_cluster = 0usize;
-    let mut edges_out_clusters = 0;
-    let mut cluster_id_delta = 0;
-    for r in cursor {
-        let (ord, raw_edges) = r?;
-        let cluster_id = mapping.identify_cluster_id(ord as usize);
-
-        let mut out_clusters = HashSet::new();
-        for e in Leb128EdgeIterator::new(&raw_edges) {
-            let e_cluster_id = mapping.identify_cluster_id(e as usize);
-            cluster_id_delta += cluster_id.abs_diff(e_cluster_id);
-            if e_cluster_id == cluster_id {
-                edges_in_cluster += 1;
-            } else {
-                edges_out_cluster += 1;
-                out_clusters.insert(e_cluster_id);
-            }
-        }
-        edges_out_clusters += out_clusters.len();
+    {
+        let progress = progress_bar(len, "rewrite graph");
+        rewrite_graph_table(&connection, &tail_index.graph_table_name(), &mapping, |i| {
+            progress.inc(i)
+        })?;
     }
 
-    println!("edges within cluster: {edges_in_cluster} edges outside cluster: {edges_out_cluster} count of out clusters {edges_out_clusters} cluster id delta {cluster_id_delta}");
+    {
+        let progress = progress_bar(len, "rewrite nav");
+        rewrite_table(&connection, &tail_index.nav_table().name(), &mapping, |i| {
+            progress.inc(i)
+        })?;
+    }
 
     Ok(())
 }

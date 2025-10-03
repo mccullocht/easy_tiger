@@ -163,7 +163,7 @@ impl Session {
     /// Open a record cursor over the named table.
     ///
     /// Returns [rustix::io::Errno::INVAL] if the underlying table is not a record table.
-    pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor> {
+    pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor<'_>> {
         self.new_typed_cursor::<i64, Vec<u8>>(table_name, None)
     }
 
@@ -175,7 +175,7 @@ impl Session {
     }
 
     /// Open a cursor over database metadata.
-    pub fn open_metadata_cursor(&self) -> Result<MetadataCursor> {
+    pub fn open_metadata_cursor(&self) -> Result<MetadataCursor<'_>> {
         self.new_typed_cursor_uri::<CString, CString>(METADATA_URI, None)
     }
 

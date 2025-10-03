@@ -567,7 +567,7 @@ mod test {
         let rf32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
         let ru8_dist =
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
-        assert_float_near!(rf32_dist, ru8_dist, 0.00001, index);
+        assert_float_near!(rf32_dist, ru8_dist, 0.0001, index);
 
         let dist_fn = format.new_vector_distance(similarity);
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);

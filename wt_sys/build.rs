@@ -11,6 +11,7 @@ fn build_wt() -> PathBuf {
         .define("HAVE_UNITTEST", "0")
         // We have quasi-vendored WT and won't change upstream source to handle errors from new compiler versions.
         .cflag("-Wno-everything")
+        .cflag("-w")
         // CMake crate is not doing this correctly for whatever reason.
         .build_arg(format!("-j{jobs}"))
         .build_target("wiredtiger_static")

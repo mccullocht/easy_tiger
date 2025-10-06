@@ -1,11 +1,13 @@
 #define EXPORT __attribute__((visibility("default")))
 #define HIDDEN __attribute__((visibility("hidden")))
 
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
 #ifdef __aarch64__
 
 #include <arm_neon.h>
-#include <stddef.h>
-#include <string.h>
 
 EXPORT void et_serialize_f16(const float* v, size_t len, const float* scale,
                              uint8_t* out) {
@@ -137,3 +139,39 @@ EXPORT float et_l2_f32_f16(const float* a, const __fp16* b, size_t len) {
 }
 
 #endif /* __aarch64__ */
+
+#if defined(__x86_64__)
+
+#include <immintrin.h>
+
+__attribute__((target("avx,f16c")))
+EXPORT void et_serialize_f16_avx512(
+    const float* v,
+    size_t len,
+    const float* scale,
+    uint8_t* out) {
+  size_t tail_split = len & ~7;
+  for (size_t i = 0; i < tail_split; i += 8) {
+    __m256 vs = _mm256_loadu_ps(v + i);
+    if (scale != NULL) {
+      vs = _mm256_mul_ps(vs, _mm256_set1_ps(*scale));
+    }
+    __m128i vh = _mm256_cvtps_ph(vs, _MM_FROUND_TO_NEAREST_INT);
+    _mm_storeu_si128((__m128i*)(out + i * 2), vh);
+  }
+
+  if (tail_split != len) {
+    float vt[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    memcpy(vt, v + tail_split, (len - tail_split) * 4);
+    __m256 vs = _mm256_loadu_ps(vt);
+    if (scale != NULL) {
+      vs = _mm256_mul_ps(vs, _mm256_set1_ps(*scale));
+    }
+    __m128i vh = _mm256_cvtps_ph(vs, _MM_FROUND_TO_NEAREST_INT);
+    uint8_t vo[16];
+    _mm_storeu_si128((__m128i*)vo, vh);
+    memcpy(out + tail_split * 2, vo, (len - tail_split) * 2);
+  }
+}
+
+#endif /* __x86_64__ */

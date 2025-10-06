@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+#[derive(Debug, Copy, Clone)]
 pub(crate) enum Acceleration {
     Scalar,
     #[cfg(target_arch = "aarch64")]

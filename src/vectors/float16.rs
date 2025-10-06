@@ -3,11 +3,13 @@ use std::borrow::Cow;
 use half::f16;
 use simsimd::SpatialSimilarity;
 
+use crate::distance::Acceleration;
 use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity};
 
 // While the `half` crate supports f16, SIMD features are limited to nightly and even the related
 // intrinsics are not stable on aarch64, so resort to C linkage.
 #[allow(dead_code)]
+#[cfg(target_arch = "aarch64")]
 unsafe extern "C" {
     unsafe fn et_serialize_f16(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
 
@@ -18,15 +20,20 @@ unsafe extern "C" {
     unsafe fn et_l2_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
 }
 
+#[allow(dead_code)]
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" {
+    unsafe fn et_serialize_f16_avx512(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
+}
+
 #[derive(Debug, Copy, Clone)]
-pub struct VectorCoder(VectorSimilarity);
+pub struct VectorCoder(VectorSimilarity, Acceleration);
 
 impl VectorCoder {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity)
+        Self(similarity, Acceleration::default())
     }
 
-    #[allow(dead_code)]
     fn convert_and_encode_scalar(
         &self,
         vector: impl ExactSizeIterator<Item = f32> + Clone,
@@ -38,28 +45,40 @@ impl VectorCoder {
         }
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
     fn convert_and_encode(&self, vector: &[f32], scale: Option<f32>, out: &mut [u8]) {
-        let vector_it = vector.iter().copied();
-        if let Some(scale) = scale {
-            self.convert_and_encode_scalar(vector_it.map(|d| d * scale), out)
-        } else {
-            self.convert_and_encode_scalar(vector_it, out)
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn convert_and_encode(&self, vector: &[f32], scale: Option<f32>, out: &mut [u8]) {
-        unsafe {
-            et_serialize_f16(
-                vector.as_ptr(),
-                vector.len(),
-                scale
-                    .as_ref()
-                    .map(std::ptr::from_ref)
-                    .unwrap_or(std::ptr::null()),
-                out.as_mut_ptr(),
-            )
+        match self.1 {
+            Acceleration::Scalar => {
+                let vector_it = vector.iter().copied();
+                if let Some(scale) = scale {
+                    self.convert_and_encode_scalar(vector_it.map(|d| d * scale), out)
+                } else {
+                    self.convert_and_encode_scalar(vector_it, out)
+                }
+            }
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => unsafe {
+                et_serialize_f16(
+                    vector.as_ptr(),
+                    vector.len(),
+                    scale
+                        .as_ref()
+                        .map(std::ptr::from_ref)
+                        .unwrap_or(std::ptr::null()),
+                    out.as_mut_ptr(),
+                )
+            },
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                et_serialize_f16_avx512(
+                    vector.as_ptr(),
+                    vector.len(),
+                    scale
+                        .as_ref()
+                        .map(std::ptr::from_ref)
+                        .unwrap_or(std::ptr::null()),
+                    out.as_mut_ptr(),
+                )
+            },
         }
     }
 }

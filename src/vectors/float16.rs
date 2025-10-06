@@ -26,8 +26,10 @@ unsafe extern "C" {
     unsafe fn et_serialize_f16_avx512(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
 
     unsafe fn et_dot_f16_f16_avx512(a: *const u16, b: *const u16, len: usize) -> f32;
+    unsafe fn et_dot_f32_f16_avx512(a: *const f32, b: *const u16, len: usize) -> f32;
 
     unsafe fn et_l2_f16_f16_avx512(a: *const u16, b: *const u16, len: usize) -> f32;
+    unsafe fn et_l2_f32_f16_avx512(a: *const f32, b: *const u16, len: usize) -> f32;
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -158,30 +160,39 @@ impl VectorDistance for DotProductDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct DotProductQueryDistance<'a>(Cow<'a, [f32]>);
+pub struct DotProductQueryDistance<'a>(Cow<'a, [f32]>, Acceleration);
 
 impl<'a> DotProductQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(query)
+        Self(query, Acceleration::default())
     }
 
-    #[allow(dead_code)]
-    fn dot_scalar(&self, vector: &[u8]) -> f32 {
-        self.0
-            .iter()
-            .zip(vector.chunks_exact(2))
-            .map(|(s, o)| *s * f16::from_le_bytes(o.try_into().unwrap()).to_f32())
-            .sum::<f32>()
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
     fn dot(&self, v: &[u8]) -> f32 {
-        self.dot_scalar(v)
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn dot(&self, v: &[u8]) -> f32 {
-        unsafe { et_dot_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len()) }
+        match self.1 {
+            Acceleration::Scalar => {
+                self.0
+                    .iter()
+                    .zip(v.chunks_exact(2))
+                    .map(|(s, o)| *s * f16::from_le_bytes(o.try_into().unwrap()).to_f32())
+                    .sum::<f32>()
+            }
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => unsafe {
+                et_dot_f32_f16(
+                    self.0.as_ptr(),
+                    v.as_ptr() as *const u16,
+                    self.0.len(),
+                )
+            },
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                et_dot_f32_f16_avx512(
+                    self.0.as_ptr(),
+                    v.as_ptr() as *const u16,
+                    self.0.len(),
+                )
+            },
+        }
     }
 }
 
@@ -232,33 +243,34 @@ impl VectorDistance for EuclideanDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct EuclideanQueryDistance<'a>(Cow<'a, [f32]>);
+pub struct EuclideanQueryDistance<'a>(Cow<'a, [f32]>, Acceleration);
 
 impl<'a> EuclideanQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(query)
+        Self(query, Acceleration::default())
     }
 
-    #[allow(dead_code)]
-    fn l2_scalar(&self, v: &[u8]) -> f32 {
-        self.0
-            .iter()
-            .zip(v.chunks_exact(2))
-            .map(|(s, o)| {
-                let diff = *s - f16::from_le_bytes(o.try_into().unwrap()).to_f32();
-                diff * diff
-            })
-            .sum::<f32>()
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
     fn l2(&self, v: &[u8]) -> f32 {
-        self.l2_scalar(v)
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn l2(&self, v: &[u8]) -> f32 {
-        unsafe { et_l2_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len()) }
+        match self.1 {
+            Acceleration::Scalar => {
+                self.0
+                    .iter()
+                    .zip(v.chunks_exact(2))
+                    .map(|(s, o)| {
+                        let diff = *s - f16::from_le_bytes(o.try_into().unwrap()).to_f32();
+                        diff * diff
+                    })
+                    .sum::<f32>()
+            }
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => unsafe {
+                et_l2_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
+            }
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                et_l2_f32_f16_avx512(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
+            }
+        }
     }
 }
 

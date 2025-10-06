@@ -82,6 +82,16 @@ impl From<&[f32]> for VectorStats {
     }
 }
 
+fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+    match Acceleration::default() {
+        Acceleration::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
+        #[cfg(target_arch = "aarch64")]
+        Acceleration::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
+        #[cfg(target_arch = "x86_64")]
+        Acceleration::Avx512 => unsafe { x86_64::optimize_interval_avx512(vector, stats, bits) },
+    }
+}
+
 /// Header for an LVQ vector.
 ///
 /// Along with the bit configuration this carries enough metadata to transform a quantized vector

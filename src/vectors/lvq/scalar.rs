@@ -28,7 +28,7 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     }
 }
 
-pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+pub fn optimize_interval_scalar(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     let norm_sq = stats.l2_norm_sq;
     let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq.into(), bits);
 

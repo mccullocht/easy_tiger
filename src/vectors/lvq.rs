@@ -11,6 +11,8 @@
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 mod scalar;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 #[allow(unused_imports)]
 #[cfg(target_arch = "aarch64")]
@@ -22,7 +24,7 @@ use scalar::*;
 use std::borrow::Cow;
 
 use crate::{
-    distance::dot_f32,
+    distance::{dot_f32, Acceleration},
     vectors::{
         dot_unnormalized_to_distance, F32VectorCoder, QueryVectorDistance, VectorDistance,
         VectorSimilarity,
@@ -64,12 +66,18 @@ struct VectorStats {
 impl From<&[f32]> for VectorStats {
     fn from(value: &[f32]) -> Self {
         if value.is_empty() {
-            VectorStats {
+            return VectorStats {
                 l2_norm_sq: 1.0,
                 ..Default::default()
-            }
-        } else {
-            compute_vector_stats(value)
+            };
+        }
+
+        match Acceleration::default() {
+            Acceleration::Scalar => scalar::compute_vector_stats(value),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => aarch64::compute_vector_stats(value),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe { x86_64::compute_vector_stats_avx512(value) },
         }
     }
 }

@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 
+#[derive(Debug, Copy, Clone)]
 pub(crate) enum Acceleration {
     Scalar,
     #[cfg(target_arch = "aarch64")]
@@ -60,15 +61,13 @@ pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
     assert_eq!(q.len(), d.len());
     assert_eq!(q.len() % 4, 0);
     match Acceleration::default() {
-        Acceleration::Scalar => {
-            f32_le_iter(q)
-                .zip(f32_le_iter(d))
-                .map(|(q, d)| {
-                    let delta = q - d;
-                    delta * delta
-                })
-                .sum::<f32>() as f64
-        }
+        Acceleration::Scalar => f32_le_iter(q)
+            .zip(f32_le_iter(d))
+            .map(|(q, d)| {
+                let delta = q - d;
+                delta * delta
+            })
+            .sum::<f32>() as f64,
         #[cfg(target_arch = "aarch64")]
         Acceleration::Neon => unsafe {
             use core::arch::aarch64::{vaddvq_f32, vdupq_n_f32, vfmaq_f32, vsubq_f32};
@@ -88,30 +87,33 @@ pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
                 l2sq += delta * delta;
             }
             l2sq as f64
-        }
+        },
         #[cfg(target_arch = "x86_64")]
-        Acceleration::Avx512 => unsafe {
-            use core::arch::x86_64::{
-                _mm512_add_ps, _mm512_castps512_ps128, _mm512_fmadd_ps, _mm512_maskz_loadu_ps,
-                _mm512_set1_ps, _mm512_shuffle_f32x4, _mm_cvtss_f32, _mm_hadd_ps, _mm512_sub_ps
-            };
-            let mut sum = _mm512_set1_ps(0.0);
-            for i in (0..q.len()).step_by(64) {
-                let rem = (q.len() - i).min(64) / 4;
-                let mask = u16::MAX >> (16 - rem);
-                let qv = _mm512_maskz_loadu_ps(mask, q.as_ptr().add(i) as *const f32);
-                let dv = _mm512_maskz_loadu_ps(mask, d.as_ptr().add(i) as *const f32);
-                let diff = _mm512_sub_ps(qv, dv);
-                sum = _mm512_fmadd_ps(diff, diff, sum);
-            }
-
-            let x = _mm512_add_ps(sum, _mm512_shuffle_f32x4(sum, sum, 0b00_00_11_10));
-            let r =
-                _mm512_castps512_ps128(_mm512_add_ps(x, _mm512_shuffle_f32x4(x, x, 0b00_00_00_01)));
-            let r = _mm_hadd_ps(r, r);
-            _mm_cvtss_f32(_mm_hadd_ps(r, r)).into()
-        }
+        Acceleration::Avx512 => unsafe { l2sq_f32_bytes_avx512(q, d) },
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn l2sq_f32_bytes_avx512(q: &[u8], d: &[u8]) -> f64 {
+    use core::arch::x86_64::{
+        _mm512_add_ps, _mm512_castps512_ps128, _mm512_fmadd_ps, _mm512_maskz_loadu_ps,
+        _mm512_set1_ps, _mm512_shuffle_f32x4, _mm512_sub_ps, _mm_cvtss_f32, _mm_hadd_ps,
+    };
+    let mut sum = _mm512_set1_ps(0.0);
+    for i in (0..q.len()).step_by(64) {
+        let rem = (q.len() - i).min(64) / 4;
+        let mask = u16::MAX >> (16 - rem);
+        let qv = _mm512_maskz_loadu_ps(mask, q.as_ptr().add(i) as *const f32);
+        let dv = _mm512_maskz_loadu_ps(mask, d.as_ptr().add(i) as *const f32);
+        let diff = _mm512_sub_ps(qv, dv);
+        sum = _mm512_fmadd_ps(diff, diff, sum);
+    }
+
+    let x = _mm512_add_ps(sum, _mm512_shuffle_f32x4(sum, sum, 0b00_00_11_10));
+    let r = _mm512_castps512_ps128(_mm512_add_ps(x, _mm512_shuffle_f32x4(x, x, 0b00_00_00_01)));
+    let r = _mm_hadd_ps(r, r);
+    _mm_cvtss_f32(_mm_hadd_ps(r, r)).into()
 }
 
 pub(crate) fn l2(q: &[f32], d: &[f32]) -> f64 {
@@ -151,27 +153,30 @@ pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
             dot as f64
         },
         #[cfg(target_arch = "x86_64")]
-        Acceleration::Avx512 => unsafe {
-            use core::arch::x86_64::{
-                _mm512_add_ps, _mm512_castps512_ps128, _mm512_fmadd_ps, _mm512_maskz_loadu_ps,
-                _mm512_set1_ps, _mm512_shuffle_f32x4, _mm_cvtss_f32, _mm_hadd_ps,
-            };
-            let mut dot = _mm512_set1_ps(0.0);
-            for i in (0..q.len()).step_by(64) {
-                let rem = (q.len() - i).min(64) / 4;
-                let mask = u16::MAX >> (16 - rem);
-                let qv = _mm512_maskz_loadu_ps(mask, q.as_ptr().add(i) as *const f32);
-                let dv = _mm512_maskz_loadu_ps(mask, d.as_ptr().add(i) as *const f32);
-                dot = _mm512_fmadd_ps(qv, dv, dot);
-            }
-
-            let x = _mm512_add_ps(dot, _mm512_shuffle_f32x4(dot, dot, 0b00001110));
-            let r =
-                _mm512_castps512_ps128(_mm512_add_ps(x, _mm512_shuffle_f32x4(x, x, 0b00000001)));
-            let r = _mm_hadd_ps(r, r);
-            _mm_cvtss_f32(_mm_hadd_ps(r, r)).into()
-        },
+        Acceleration::Avx512 => unsafe { dot_f32_bytes_avx512f(q, d) },
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn dot_f32_bytes_avx512f(q: &[u8], d: &[u8]) -> f64 {
+    use core::arch::x86_64::{
+        _mm512_add_ps, _mm512_castps512_ps128, _mm512_fmadd_ps, _mm512_maskz_loadu_ps,
+        _mm512_set1_ps, _mm512_shuffle_f32x4, _mm_cvtss_f32, _mm_hadd_ps,
+    };
+    let mut dot = _mm512_set1_ps(0.0);
+    for i in (0..q.len()).step_by(64) {
+        let rem = (q.len() - i).min(64) / 4;
+        let mask = u16::MAX >> (16 - rem);
+        let qv = _mm512_maskz_loadu_ps(mask, q.as_ptr().add(i) as *const f32);
+        let dv = _mm512_maskz_loadu_ps(mask, d.as_ptr().add(i) as *const f32);
+        dot = _mm512_fmadd_ps(qv, dv, dot);
+    }
+
+    let x = _mm512_add_ps(dot, _mm512_shuffle_f32x4(dot, dot, 0b00001110));
+    let r = _mm512_castps512_ps128(_mm512_add_ps(x, _mm512_shuffle_f32x4(x, x, 0b00000001)));
+    let r = _mm_hadd_ps(r, r);
+    _mm_cvtss_f32(_mm_hadd_ps(r, r)).into()
 }
 
 /// Normalize the contents of vector in l2 space.

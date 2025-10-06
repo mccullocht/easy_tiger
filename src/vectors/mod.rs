@@ -209,8 +209,10 @@ impl F32VectorCoding {
             (Self::F32, Dot) => Box::new(float32::DotProductDistance),
             (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance),
             (Self::TruncatedF32(_), _) => F32VectorCoding::F32.new_vector_distance(similarity),
-            (Self::F16, Dot) | (Self::F16, Cosine) => Box::new(float16::DotProductDistance),
-            (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance),
+            (Self::F16, Dot) | (Self::F16, Cosine) => {
+                Box::new(float16::DotProductDistance::default())
+            }
+            (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance::default()),
             (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
             (Self::I8ScaledUniform, _) => Box::new(scaled_uniform::I8Distance::new(similarity)),
             (Self::I4ScaledUniform, _) => {
@@ -439,9 +441,15 @@ pub fn new_query_vector_distance_indexing<'a>(
         (_, F32VectorCoding::TruncatedF32(_)) => {
             new_query_vector_distance_indexing(query, similarity, F32VectorCoding::F32)
         }
-        (Dot, F32VectorCoding::F16) => quantized_qvd!(float16::DotProductDistance, query),
-        (Cosine, F32VectorCoding::F16) => quantized_qvd!(float16::DotProductDistance, query),
-        (Euclidean, F32VectorCoding::F16) => quantized_qvd!(float16::EuclideanDistance, query),
+        (Dot, F32VectorCoding::F16) => {
+            quantized_qvd!(float16::DotProductDistance::default(), query)
+        }
+        (Cosine, F32VectorCoding::F16) => {
+            quantized_qvd!(float16::DotProductDistance::default(), query)
+        }
+        (Euclidean, F32VectorCoding::F16) => {
+            quantized_qvd!(float16::EuclideanDistance::default(), query)
+        }
         (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
         (_, F32VectorCoding::I8ScaledUniform) => {
             quantized_qvd!(scaled_uniform::I8Distance::new(similarity), query)

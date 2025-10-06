@@ -24,6 +24,10 @@ unsafe extern "C" {
 #[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
     unsafe fn et_serialize_f16_avx512(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
+
+    unsafe fn et_dot_f16_f16_avx512(a: *const u16, b: *const u16, len: usize) -> f32;
+
+    unsafe fn et_l2_f16_f16_avx512(a: *const u16, b: *const u16, len: usize) -> f32;
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -116,31 +120,32 @@ fn f16_iter(raw: &[u8]) -> impl ExactSizeIterator<Item = f16> + '_ {
         .map(|c| f16::from_le_bytes(c.try_into().unwrap()))
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct DotProductDistance;
+#[derive(Debug, Copy, Clone, Default)]
+pub struct DotProductDistance(Acceleration);
 
 impl DotProductDistance {
-    #[allow(dead_code)]
-    fn dot_scalar(&self, a: &[u8], b: &[u8]) -> f32 {
-        f16_iter(a)
-            .zip(f16_iter(b))
-            .map(|(a, b)| a.to_f32() * b.to_f32())
-            .sum::<f32>()
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
     fn dot(&self, a: &[u8], b: &[u8]) -> f32 {
-        self.dot_scalar(a, b)
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn dot(&self, a: &[u8], b: &[u8]) -> f32 {
-        unsafe {
-            et_dot_f16_f16(
-                a.as_ptr() as *const u16,
-                b.as_ptr() as *const u16,
-                a.len() / 2,
-            )
+        match self.0 {
+            Acceleration::Scalar => f16_iter(a)
+                .zip(f16_iter(b))
+                .map(|(a, b)| a.to_f32() * b.to_f32())
+                .sum::<f32>(),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => unsafe {
+                et_dot_f16_f16(
+                    a.as_ptr() as *const u16,
+                    b.as_ptr() as *const u16,
+                    a.len() / 2,
+                )
+            },
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                et_dot_f16_f16_avx512(
+                    a.as_ptr() as *const u16,
+                    b.as_ptr() as *const u16,
+                    a.len() / 2,
+                )
+            },
         }
     }
 }
@@ -187,34 +192,35 @@ impl QueryVectorDistance for DotProductQueryDistance<'_> {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct EuclideanDistance;
+#[derive(Debug, Copy, Clone, Default)]
+pub struct EuclideanDistance(Acceleration);
 
 impl EuclideanDistance {
-    #[allow(dead_code)]
-    fn l2_scalar(&self, a: &[u8], b: &[u8]) -> f32 {
-        f16_iter(a)
-            .zip(f16_iter(b))
-            .map(|(a, b)| {
-                let diff = a.to_f32() - b.to_f32();
-                diff * diff
-            })
-            .sum::<f32>()
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
     fn l2(&self, a: &[u8], b: &[u8]) -> f32 {
-        self.l2_scalar(a, b)
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn l2(&self, a: &[u8], b: &[u8]) -> f32 {
-        unsafe {
-            et_l2_f16_f16(
-                a.as_ptr() as *const u16,
-                b.as_ptr() as *const u16,
-                a.len() / 2,
-            )
+        match self.0 {
+            Acceleration::Scalar => f16_iter(a)
+                .zip(f16_iter(b))
+                .map(|(a, b)| {
+                    let diff = a.to_f32() - b.to_f32();
+                    diff * diff
+                })
+                .sum::<f32>(),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => unsafe {
+                et_l2_f16_f16(
+                    a.as_ptr() as *const u16,
+                    b.as_ptr() as *const u16,
+                    a.len() / 2,
+                )
+            },
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                et_l2_f16_f16_avx512(
+                    a.as_ptr() as *const u16,
+                    b.as_ptr() as *const u16,
+                    a.len() / 2,
+                )
+            },
         }
     }
 }

@@ -11,6 +11,8 @@
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 mod scalar;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 #[allow(unused_imports)]
 #[cfg(target_arch = "aarch64")]
@@ -22,7 +24,7 @@ use scalar::*;
 use std::borrow::Cow;
 
 use crate::{
-    distance::dot_f32,
+    distance::{dot_f32, Acceleration},
     vectors::{
         dot_unnormalized_to_distance, F32VectorCoder, QueryVectorDistance, VectorDistance,
         VectorSimilarity,
@@ -64,13 +66,29 @@ struct VectorStats {
 impl From<&[f32]> for VectorStats {
     fn from(value: &[f32]) -> Self {
         if value.is_empty() {
-            VectorStats {
+            return VectorStats {
                 l2_norm_sq: 1.0,
                 ..Default::default()
-            }
-        } else {
-            compute_vector_stats(value)
+            };
         }
+
+        match Acceleration::default() {
+            Acceleration::Scalar => scalar::compute_vector_stats(value),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => aarch64::compute_vector_stats(value),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe { x86_64::compute_vector_stats_avx512(value) },
+        }
+    }
+}
+
+fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+    match Acceleration::default() {
+        Acceleration::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
+        #[cfg(target_arch = "aarch64")]
+        Acceleration::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
+        #[cfg(target_arch = "x86_64")]
+        Acceleration::Avx512 => unsafe { x86_64::optimize_interval_avx512(vector, stats, bits) },
     }
 }
 
@@ -149,6 +167,7 @@ struct PrimaryVector<'a, const B: usize> {
     header: VectorHeader,
     delta: f32,
     vector: &'a [u8],
+    accel: Acceleration,
 }
 
 impl<'a, const B: usize> PrimaryVector<'a, B> {
@@ -168,6 +187,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
             header,
             delta,
             vector,
+            accel: Acceleration::default(),
         }
     }
 
@@ -180,12 +200,13 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
-        let dot_quantized = self
-            .vector
-            .iter()
-            .zip(other.vector.iter())
-            .map(|(s, o)| Self::dot_packed(*s, *o))
-            .sum::<u32>();
+        let dot_quantized = match self.accel {
+            Acceleration::Scalar => scalar::dot_u8::<B>(self.vector, other.vector),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => scalar::dot_u8::<B>(self.vector, other.vector),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe { x86_64::dot_u8::<B>(self.vector, other.vector) },
+        };
         let sdelta = f64::from(self.delta);
         let slower = f64::from(self.header.lower);
         let odelta = f64::from(other.delta);
@@ -196,21 +217,13 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
             + slower * olower * (self.vector.len() * 8).div_ceil(B) as f64
     }
 
-    fn dot_packed(a: u8, b: u8) -> u32 {
-        match B {
-            1 => (a & b).count_ones(),
-            2 => {
-                let a = [a & 0x3, (a >> 2) & 0x3, (a >> 4) & 0x3, (a >> 6) & 0x3];
-                let b = [b & 0x3, (b >> 2) & 0x3, (b >> 4) & 0x3, (b >> 6) & 0x3];
-                (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).into()
-            }
-            4 => {
-                let a = [a & 0xf, a >> 4];
-                let b = [b & 0xf, b >> 4];
-                (a[0] as u16 * b[0] as u16 + a[1] as u16 * b[1] as u16).into()
-            }
-            8 => a as u32 * b as u32,
-            _ => unimplemented!(),
+    fn f32_dot_unnormalized(&self, query: &[f32]) -> f64 {
+        match self.accel {
+            Acceleration::Scalar => scalar::lvq1_f32_dot_unnormalized::<B>(query, self),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => scalar::lvq1_f32_dot_unnormalized::<B>(query, self),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe { x86_64::lvq1_f32_dot_unnormalized::<B>(query, self) },
         }
     }
 }
@@ -426,7 +439,7 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
         let vector = PrimaryVector::<B>::new(vector).unwrap();
         dot_unnormalized_to_distance(
             self.similarity,
-            lvq1_f32_dot_unnormalized(self.query.as_ref(), &vector),
+            vector.f32_dot_unnormalized(&self.query),
             (self.query_l2_norm, vector.l2_norm()),
         )
     }

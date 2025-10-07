@@ -4,6 +4,7 @@ use std::borrow::Cow;
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) enum Acceleration {
+    #[allow(dead_code)]
     Scalar,
     #[cfg(target_arch = "aarch64")]
     Neon,
@@ -44,7 +45,6 @@ unsafe fn load_f32x4_le(p: *const u8) -> core::arch::aarch64::float32x4_t {
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
 fn f32_le_iter<'b>(b: &'b [u8]) -> impl ExactSizeIterator<Item = f32> + 'b {
     b.chunks_exact(4)
         .map(|f| f32::from_le_bytes(f.try_into().expect("4 bytes")))

@@ -28,7 +28,7 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     }
 }
 
-pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+pub fn optimize_interval_scalar(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     let norm_sq = stats.l2_norm_sq;
     let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq.into(), bits);
 
@@ -150,6 +150,30 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     component_sum
 }
 
+#[inline]
+pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
+    a.iter()
+        .copied()
+        .zip(b.iter().copied())
+        .map(|(a, b)| match B {
+            1 => (a & b).count_ones(),
+            2 => {
+                let a = [a & 0x3, (a >> 2) & 0x3, (a >> 4) & 0x3, (a >> 6) & 0x3];
+                let b = [b & 0x3, (b >> 2) & 0x3, (b >> 4) & 0x3, (b >> 6) & 0x3];
+                (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).into()
+            }
+            4 => {
+                let a = [a & 0xf, a >> 4];
+                let b = [b & 0xf, b >> 4];
+                (a[0] as u16 * b[0] as u16 + a[1] as u16 * b[1] as u16).into()
+            }
+            8 => a as u32 * b as u32,
+            _ => unimplemented!(),
+        })
+        .sum::<u32>()
+}
+
+#[inline]
 pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
     query
         .iter()

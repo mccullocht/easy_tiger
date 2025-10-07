@@ -96,7 +96,7 @@ fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f32 {
     }
 }
 
-pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+pub fn optimize_interval_neon(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     let norm_sq: f64 = stats.l2_norm_sq.into();
     let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
 
@@ -183,7 +183,7 @@ pub fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f
     (lower, upper)
 }
 
-pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {
+fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {
     let a = interval.0;
     let b = interval.1;
     let step = (b - a) / ((1 << bits) - 1) as f32;

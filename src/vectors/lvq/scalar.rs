@@ -173,6 +173,7 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
         .sum::<u32>()
 }
 
+#[inline]
 pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
     query
         .iter()

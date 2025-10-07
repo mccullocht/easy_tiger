@@ -1,13 +1,20 @@
-use std::arch::x86_64::{
-    _mm256_add_ps, _mm256_castps256_ps128, _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_mul_ps,
-    _mm256_set1_ps, _mm256_sub_ps, _mm512_add_ps, _mm512_castps512_ps256, _mm512_div_ps,
-    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_mask_mul_ps,
-    _mm512_mask_sub_ps, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
-    _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
-    _mm512_set1_ps, _mm512_sub_ps, _mm_add_ps, _mm_cvtps_pd, _mm_cvtsd_f64, _mm_fmadd_pd,
-    _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps, _mm_mul_pd, _mm_mul_ps,
-    _mm_set1_pd, _mm_set1_ps, _mm_sub_ps, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT,
+use std::{
+    arch::x86_64::{
+        _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps,
+        _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_sub_ps, _mm512_add_ps,
+        _mm512_castps512_ps256, _mm512_cvtepu16_epi32, _mm512_cvtepu32_ps, _mm512_div_ps,
+        _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_mask_mul_ps,
+        _mm512_mask_sub_ps, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
+        _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
+        _mm512_set1_ps, _mm512_sub_ps, _mm_add_ps, _mm_cvtps_pd, _mm_cvtsd_f64, _mm_fmadd_pd,
+        _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps, _mm_maskz_loadu_epi8,
+        _mm_mul_pd, _mm_mul_ps, _mm_set1_pd, _mm_set1_ps, _mm_sub_ps, _MM_FROUND_NO_EXC,
+        _MM_FROUND_TO_NEAREST_INT,
+    },
+    u16,
 };
+
+use crate::vectors::lvq::PrimaryVector;
 
 use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
 
@@ -235,6 +242,31 @@ unsafe fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits:
 }
 
 #[target_feature(enable = "avx512vnni,avx512bw,avx512vl,avx512vpopcntdq,avx512f")]
-pub unsafe fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
+pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     super::scalar::dot_u8::<B>(a, b)
+}
+
+#[target_feature(enable = "avx512vnni,avx512bw,avx512vl,avx512f")]
+pub unsafe fn lvq1_f32_dot_unnormalized<const B: usize>(
+    query: &[f32],
+    doc: &PrimaryVector<'_, B>,
+) -> f64 {
+    match B {
+        8 => {
+            let delta = _mm512_set1_ps(doc.delta);
+            let lower = _mm512_set1_ps(doc.header.lower);
+            let mut dot = _mm512_set1_ps(0.0);
+            for (q, d) in query.chunks(16).zip(doc.vector.chunks(16)) {
+                let mask = u16::MAX >> (16 - q.len());
+                let qv = _mm512_maskz_loadu_ps(mask, q.as_ptr());
+                let dqv = _mm512_cvtepu32_ps(_mm512_cvtepu16_epi32(_mm256_cvtepu8_epi16(
+                    _mm_maskz_loadu_epi8(mask, d.as_ptr() as *const i8),
+                )));
+                let dv = _mm512_fmadd_ps(dqv, delta, lower);
+                dot = _mm512_fmadd_ps(qv, dv, dot);
+            }
+            _mm512_reduce_add_ps(dot).into()
+        }
+        _ => super::scalar::lvq1_f32_dot_unnormalized::<B>(query, doc),
+    }
 }

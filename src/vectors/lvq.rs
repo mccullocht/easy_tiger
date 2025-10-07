@@ -216,6 +216,16 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
             + other.header.component_sum as f64 * odelta * slower
             + slower * olower * (self.vector.len() * 8).div_ceil(B) as f64
     }
+
+    fn f32_dot_unnormalized(&self, query: &[f32]) -> f64 {
+        match self.accel {
+            Acceleration::Scalar => scalar::lvq1_f32_dot_unnormalized::<B>(query, self),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => scalar::lvq1_f32_dot_unnormalized::<B>(query, self),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe { x86_64::lvq1_f32_dot_unnormalized::<B>(query, self) },
+        }
+    }
 }
 
 struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
@@ -429,7 +439,7 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
         let vector = PrimaryVector::<B>::new(vector).unwrap();
         dot_unnormalized_to_distance(
             self.similarity,
-            lvq1_f32_dot_unnormalized(self.query.as_ref(), &vector),
+            vector.f32_dot_unnormalized(&self.query),
             (self.query_l2_norm, vector.l2_norm()),
         )
     }

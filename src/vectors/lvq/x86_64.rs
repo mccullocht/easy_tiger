@@ -1,14 +1,17 @@
 use std::{
     arch::x86_64::{
-        _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps,
-        _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_sub_ps, _mm512_add_ps,
-        _mm512_castps512_ps256, _mm512_cvtepu16_epi32, _mm512_cvtepu32_ps, _mm512_div_ps,
-        _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_mask_mul_ps,
-        _mm512_mask_sub_ps, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
+        __m128i, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepu8_epi16,
+        _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_sub_ps,
+        _mm512_add_ps, _mm512_castps512_ps256, _mm512_cvtepu16_epi32, _mm512_cvtepu32_ps,
+        _mm512_div_ps, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps,
+        _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_add_ps, _mm512_maskz_fmadd_ps,
+        _mm512_maskz_loadu_ps, _mm512_maskz_mov_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
         _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
-        _mm512_set1_ps, _mm512_sub_ps, _mm_add_ps, _mm_cvtps_pd, _mm_cvtsd_f64, _mm_fmadd_pd,
-        _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps, _mm_maskz_loadu_epi8,
-        _mm_mul_pd, _mm_mul_ps, _mm_set1_pd, _mm_set1_ps, _mm_sub_ps, _MM_FROUND_NO_EXC,
+        _mm512_set1_ps, _mm512_sub_ps, _mm_add_ps, _mm_and_si128, _mm_cmpgt_epi8, _mm_cvtps_pd,
+        _mm_cvtsd_f64, _mm_fmadd_pd, _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd,
+        _mm_hsub_ps, _mm_load_epi64, _mm_loadu_epi64, _mm_loadu_si128, _mm_maskz_loadu_epi8,
+        _mm_movemask_epi8, _mm_mul_pd, _mm_mul_ps, _mm_set1_epi16, _mm_set1_epi64x, _mm_set1_epi8,
+        _mm_set1_pd, _mm_set1_ps, _mm_shuffle_epi8, _mm_sub_ps, _MM_FROUND_NO_EXC,
         _MM_FROUND_TO_NEAREST_INT,
     },
     u16,
@@ -252,6 +255,66 @@ pub unsafe fn lvq1_f32_dot_unnormalized<const B: usize>(
     doc: &PrimaryVector<'_, B>,
 ) -> f64 {
     match B {
+        1 => {
+            let delta = _mm512_set1_ps(doc.delta);
+            let lower = _mm512_set1_ps(doc.header.lower);
+            let mut dot = _mm512_set1_ps(0.0);
+            for (q, d) in query.chunks(16).zip(doc.vector.chunks(2)) {
+                let mask = u16::MAX >> (16 - q.len());
+                let qv = _mm512_maskz_loadu_ps(mask, q.as_ptr());
+                // Load 16 bits and shuffle such that the first byte occupies the low part of the
+                // register and the second byte occupies the high part of the register.
+                let rd = if d.len() == 2 {
+                    u16::from_le_bytes(d.try_into().unwrap())
+                } else {
+                    d[0] as u16
+                };
+                let mut dqv = _mm_shuffle_epi8(
+                    _mm_set1_epi16(rd as i16),
+                    _mm_load_epi64([0, 0x0101010101010101].as_ptr()),
+                );
+                // Mask each byte down to the representative bit and compare to zero.
+                dqv = _mm_and_si128(dqv, _mm_set1_epi64x(0x0807060504030201));
+                dqv = _mm_cmpgt_epi8(dqv, _mm_set1_epi8(0));
+                let dmask = _mm_movemask_epi8(dqv) as u16;
+                // Mask out delta, then combine it with lower to generate to doc values.
+                let dv = _mm512_maskz_add_ps(mask, _mm512_maskz_mov_ps(dmask, delta), lower);
+                dot = _mm512_fmadd_ps(qv, dv, dot);
+            }
+            _mm512_reduce_add_ps(dot).into()
+        }
+        4 => {
+            let delta = _mm512_set1_ps(doc.delta);
+            let lower = _mm512_set1_ps(doc.header.lower);
+            let mut dot = _mm512_set1_ps(0.0);
+            for (q, d) in query.chunks(16).zip(doc.vector.chunks(8)) {
+                let mask = u16::MAX >> (16 - q.len());
+                let qv = _mm512_maskz_loadu_ps(mask, q.as_ptr());
+                // Load 64 bits and shuffle so that all the low nibbles appear in the low lanes and
+                // all the upper nibbles appear in the high lanes.
+                let rd = if d.len() == 8 {
+                    u64::from_le_bytes(d.try_into().unwrap())
+                } else {
+                    let mut buf = [0u8; 8];
+                    buf[..d.len()].copy_from_slice(d);
+                    u64::from_le_bytes(buf)
+                } as i64;
+                let dqv = _mm_and_si128(
+                    _mm_shuffle_epi8(
+                        _mm_loadu_epi64([rd, rd >> 4].as_ptr()),
+                        _mm_loadu_si128(
+                            [0u8, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15].as_ptr()
+                                as *const __m128i,
+                        ),
+                    ),
+                    _mm_set1_epi8(0xf),
+                );
+                let dqvf = _mm512_cvtepu32_ps(_mm512_cvtepu16_epi32(_mm256_cvtepu8_epi16(dqv)));
+                let dv = _mm512_maskz_fmadd_ps(mask, dqvf, delta, lower);
+                dot = _mm512_fmadd_ps(qv, dv, dot);
+            }
+            _mm512_reduce_add_ps(dot).into()
+        }
         8 => {
             let delta = _mm512_set1_ps(doc.delta);
             let lower = _mm512_set1_ps(doc.header.lower);
@@ -262,7 +325,7 @@ pub unsafe fn lvq1_f32_dot_unnormalized<const B: usize>(
                 let dqv = _mm512_cvtepu32_ps(_mm512_cvtepu16_epi32(_mm256_cvtepu8_epi16(
                     _mm_maskz_loadu_epi8(mask, d.as_ptr() as *const i8),
                 )));
-                let dv = _mm512_fmadd_ps(dqv, delta, lower);
+                let dv = _mm512_maskz_fmadd_ps(mask, dqv, delta, lower);
                 dot = _mm512_fmadd_ps(qv, dv, dot);
             }
             _mm512_reduce_add_ps(dot).into()

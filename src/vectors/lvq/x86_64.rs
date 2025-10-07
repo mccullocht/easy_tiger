@@ -233,3 +233,8 @@ unsafe fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits:
     let e = _mm512_reduce_add_ps(ev) as f64;
     (1.0 - LAMBDA as f64) * xe * xe / norm_sq + LAMBDA as f64 * e
 }
+
+#[target_feature(enable = "avx512vnni,avx512bw,avx512vl,avx512vpopcntdq,avx512f")]
+pub unsafe fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
+    super::scalar::dot_u8::<B>(a, b)
+}

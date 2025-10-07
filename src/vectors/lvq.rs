@@ -167,6 +167,7 @@ struct PrimaryVector<'a, const B: usize> {
     header: VectorHeader,
     delta: f32,
     vector: &'a [u8],
+    accel: Acceleration,
 }
 
 impl<'a, const B: usize> PrimaryVector<'a, B> {
@@ -186,6 +187,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
             header,
             delta,
             vector,
+            accel: Acceleration::default(),
         }
     }
 
@@ -198,12 +200,13 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
-        let dot_quantized = self
-            .vector
-            .iter()
-            .zip(other.vector.iter())
-            .map(|(s, o)| Self::dot_packed(*s, *o))
-            .sum::<u32>();
+        let dot_quantized = match self.accel {
+            Acceleration::Scalar => scalar::dot_u8::<B>(self.vector, other.vector),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => scalar::dot_u8::<B>(self.vector, other.vector),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe { x86_64::dot_u8::<B>(self.vector, other.vector) },
+        };
         let sdelta = f64::from(self.delta);
         let slower = f64::from(self.header.lower);
         let odelta = f64::from(other.delta);
@@ -212,24 +215,6 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
             + self.header.component_sum as f64 * sdelta * olower
             + other.header.component_sum as f64 * odelta * slower
             + slower * olower * (self.vector.len() * 8).div_ceil(B) as f64
-    }
-
-    fn dot_packed(a: u8, b: u8) -> u32 {
-        match B {
-            1 => (a & b).count_ones(),
-            2 => {
-                let a = [a & 0x3, (a >> 2) & 0x3, (a >> 4) & 0x3, (a >> 6) & 0x3];
-                let b = [b & 0x3, (b >> 2) & 0x3, (b >> 4) & 0x3, (b >> 6) & 0x3];
-                (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).into()
-            }
-            4 => {
-                let a = [a & 0xf, a >> 4];
-                let b = [b & 0xf, b >> 4];
-                (a[0] as u16 * b[0] as u16 + a[1] as u16 * b[1] as u16).into()
-            }
-            8 => a as u32 * b as u32,
-            _ => unimplemented!(),
-        }
     }
 }
 

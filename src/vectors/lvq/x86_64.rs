@@ -1,11 +1,12 @@
 use std::arch::x86_64::{
     _mm256_add_ps, _mm256_castps256_ps128, _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_mul_ps,
     _mm256_set1_ps, _mm256_sub_ps, _mm512_add_ps, _mm512_castps512_ps256, _mm512_div_ps,
-    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_maskz_loadu_ps, _mm512_max_ps,
-    _mm512_min_ps, _mm512_mul_ps, _mm512_mul_round_ps, _mm512_reduce_add_ps, _mm512_reduce_max_ps,
-    _mm512_reduce_min_ps, _mm512_set1_ps, _mm512_sub_ps, _mm_add_ps, _mm_cvtps_pd, _mm_cvtsd_f64,
-    _mm_fmadd_pd, _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps, _mm_mul_pd,
-    _mm_mul_ps, _mm_set1_pd, _mm_set1_ps, _mm_sub_ps, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT,
+    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_mask_mul_ps,
+    _mm512_mask_sub_ps, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
+    _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
+    _mm512_set1_ps, _mm512_sub_ps, _mm_add_ps, _mm_cvtps_pd, _mm_cvtsd_f64, _mm_fmadd_pd,
+    _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps, _mm_mul_pd, _mm_mul_ps,
+    _mm_set1_pd, _mm_set1_ps, _mm_sub_ps, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT,
 };
 
 use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
@@ -127,7 +128,6 @@ pub unsafe fn optimize_interval_avx512(
 ) -> (f32, f32) {
     let norm_sq = stats.l2_norm_sq;
     let mut loss = unsafe { compute_loss(vector, (stats.min, stats.max), norm_sq.into(), bits) };
-    println!("loss={loss} scalar loss={}", super::scalar::compute_loss(vector, (stats.min, stats.max), norm_sq.into(), bits));
 
     let scale = (1.0 - LAMBDA) / norm_sq;
     let mut lower =
@@ -153,9 +153,10 @@ pub unsafe fn optimize_interval_avx512(
             let mut xq = _mm512_max_ps(xv, lowerv);
             xq = _mm512_min_ps(xq, upperv);
             xq = _mm512_sub_ps(xq, lowerv);
-            xq = _mm512_mul_round_ps(xq, step_inv, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-            let s = _mm512_mul_ps(xq, points_incl_inv);
-            let s1 = _mm512_sub_ps(_mm512_set1_ps(1.0), s);
+            xq = _mm512_mul_ps(xq, step_inv);
+            xq = _mm512_roundscale_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(xq);
+            let s = _mm512_mask_mul_ps(_mm512_set1_ps(0.0), mask, xq, points_incl_inv);
+            let s1 = _mm512_mask_sub_ps(_mm512_set1_ps(0.0), mask, _mm512_set1_ps(1.0), s);
             daav = _mm512_fmadd_ps(s1, s1, daav);
             dabv = _mm512_fmadd_ps(s1, s, dabv);
             dbbv = _mm512_fmadd_ps(s, s, dbbv);
@@ -168,6 +169,7 @@ pub unsafe fn optimize_interval_avx512(
         let dbb = _mm512_reduce_add_ps(dbbv);
         let dax = _mm512_reduce_add_ps(daxv);
         let dbx = _mm512_reduce_add_ps(dbxv);
+
         let m0 = scale * dax * dax + LAMBDA * daa;
         let m1 = scale * dax * dbx + LAMBDA * dab;
         let m2 = scale * dbx * dbx + LAMBDA * dbb;
@@ -219,13 +221,10 @@ unsafe fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits:
         let mut xiq = _mm512_max_ps(xi, av);
         xiq = _mm512_min_ps(xiq, bv);
         xiq = _mm512_sub_ps(xiq, av);
-        xiq = _mm512_mul_round_ps(
-            xiq,
-            step_invv,
-            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
-        );
+        xiq = _mm512_mul_ps(xiq, step_invv);
+        xiq = _mm512_roundscale_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(xiq);
         xiq = _mm512_fmadd_ps(stepv, xiq, av);
-        let diff = _mm512_sub_ps(xi, xiq);
+        let diff = _mm512_mask_sub_ps(_mm512_set1_ps(0.0), mask, xi, xiq);
         xev = _mm512_fmadd_ps(xi, diff, xev);
         ev = _mm512_fmadd_ps(diff, diff, ev);
     }

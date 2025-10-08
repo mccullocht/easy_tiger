@@ -169,28 +169,19 @@ impl<'a> DotProductQueryDistance<'a> {
 
     fn dot(&self, v: &[u8]) -> f32 {
         match self.1 {
-            Acceleration::Scalar => {
-                self.0
-                    .iter()
-                    .zip(v.chunks_exact(2))
-                    .map(|(s, o)| *s * f16::from_le_bytes(o.try_into().unwrap()).to_f32())
-                    .sum::<f32>()
-            }
+            Acceleration::Scalar => self
+                .0
+                .iter()
+                .zip(v.chunks_exact(2))
+                .map(|(s, o)| *s * f16::from_le_bytes(o.try_into().unwrap()).to_f32())
+                .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
             Acceleration::Neon => unsafe {
-                et_dot_f32_f16(
-                    self.0.as_ptr(),
-                    v.as_ptr() as *const u16,
-                    self.0.len(),
-                )
+                et_dot_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
             },
             #[cfg(target_arch = "x86_64")]
             Acceleration::Avx512 => unsafe {
-                et_dot_f32_f16_avx512(
-                    self.0.as_ptr(),
-                    v.as_ptr() as *const u16,
-                    self.0.len(),
-                )
+                et_dot_f32_f16_avx512(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
             },
         }
     }
@@ -252,24 +243,23 @@ impl<'a> EuclideanQueryDistance<'a> {
 
     fn l2(&self, v: &[u8]) -> f32 {
         match self.1 {
-            Acceleration::Scalar => {
-                self.0
-                    .iter()
-                    .zip(v.chunks_exact(2))
-                    .map(|(s, o)| {
-                        let diff = *s - f16::from_le_bytes(o.try_into().unwrap()).to_f32();
-                        diff * diff
-                    })
-                    .sum::<f32>()
-            }
+            Acceleration::Scalar => self
+                .0
+                .iter()
+                .zip(v.chunks_exact(2))
+                .map(|(s, o)| {
+                    let diff = *s - f16::from_le_bytes(o.try_into().unwrap()).to_f32();
+                    diff * diff
+                })
+                .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
             Acceleration::Neon => unsafe {
                 et_l2_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
-            }
+            },
             #[cfg(target_arch = "x86_64")]
             Acceleration::Avx512 => unsafe {
                 et_l2_f32_f16_avx512(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
-            }
+            },
         }
     }
 }

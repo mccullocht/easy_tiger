@@ -1,16 +1,18 @@
 use std::arch::x86_64::{
-    __m128i, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps,
-    _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_sub_ps, _mm512_add_ps,
-    _mm512_castps512_ps256, _mm512_cvtepu16_epi32, _mm512_cvtepu32_ps, _mm512_div_ps,
-    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_mask_mul_ps,
-    _mm512_mask_sub_ps, _mm512_maskz_add_ps, _mm512_maskz_fmadd_ps, _mm512_maskz_loadu_ps,
-    _mm512_maskz_mov_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps, _mm512_reduce_add_ps,
-    _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set1_ps,
-    _mm512_sub_ps, _mm_add_ps, _mm_and_si128, _mm_cmpgt_epi8, _mm_cvtps_pd, _mm_cvtsd_f64,
-    _mm_fmadd_pd, _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps, _mm_load_epi64,
-    _mm_loadu_epi64, _mm_loadu_si128, _mm_maskz_loadu_epi8, _mm_movemask_epi8, _mm_mul_pd,
-    _mm_mul_ps, _mm_set1_epi16, _mm_set1_epi64x, _mm_set1_epi8, _mm_set1_pd, _mm_set1_ps,
-    _mm_shuffle_epi8, _mm_sub_ps, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT,
+    __m128i, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepi16_epi8, _mm256_cvtepu8_epi16,
+    _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_sub_ps,
+    _mm512_add_ps, _mm512_castps512_ps256, _mm512_cvtepu16_epi32, _mm512_cvtepu32_ps,
+    _mm512_cvtps_epu32, _mm512_div_ps, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps,
+    _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_add_epi32, _mm512_maskz_add_ps,
+    _mm512_maskz_cvtepi32_epi16, _mm512_maskz_fmadd_ps, _mm512_maskz_loadu_ps, _mm512_maskz_mov_ps,
+    _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
+    _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set1_epi32,
+    _mm512_set1_ps, _mm512_sub_ps, _mm_add_ps, _mm_and_si128, _mm_bsrli_si128, _mm_cmpgt_epi8,
+    _mm_cvtps_pd, _mm_cvtsd_f64, _mm_fmadd_pd, _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd,
+    _mm_hsub_ps, _mm_load_epi64, _mm_loadu_epi64, _mm_loadu_epi8, _mm_loadu_si128,
+    _mm_mask_storeu_epi8, _mm_maskz_loadu_epi8, _mm_movemask_epi8, _mm_mul_pd, _mm_mul_ps,
+    _mm_or_epi64, _mm_set1_epi16, _mm_set1_epi64x, _mm_set1_epi8, _mm_set1_pd, _mm_set1_ps,
+    _mm_shuffle_epi8, _mm_sllv_epi64, _mm_sub_ps, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT,
 };
 
 use crate::vectors::lvq::PrimaryVector;
@@ -238,6 +240,71 @@ unsafe fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits:
     let xe = _mm512_reduce_add_ps(xev) as f64;
     let e = _mm512_reduce_add_ps(ev) as f64;
     (1.0 - LAMBDA as f64) * xe * xe / norm_sq + LAMBDA as f64 * e
+}
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vl")]
+pub unsafe fn lvq1_quantize_and_pack_avx512<const B: usize>(
+    v: &[f32],
+    lower: f32,
+    upper: f32,
+    out: &mut [u8],
+) -> u32 {
+    match B {
+        2 => return super::scalar::lvq1_quantize_and_pack::<B>(v, lower, upper, out),
+        _ => {}
+    };
+
+    let delta = (upper - lower) / ((1 << B) - 1) as f32;
+    let delta_inv = _mm512_set1_ps(delta.recip());
+    let lower = _mm512_set1_ps(lower);
+    let upper = _mm512_set1_ps(upper);
+    let mut component_sum = _mm512_set1_epi32(0);
+    let out_chunks = match B {
+        1 => 2,
+        2 => 4,
+        4 => 8,
+        8 => 16,
+        _ => unimplemented!(),
+    };
+    for (c, o) in v.chunks(16).zip(out.chunks_mut(out_chunks)) {
+        let mask = u16::MAX >> (16 - c.len());
+        let mut v = _mm512_maskz_loadu_ps(mask, c.as_ptr());
+        // NB: we'll clamp to the lower bound later by converting to unsigned while saturating.
+        v = _mm512_min_ps(v, upper);
+        v = _mm512_sub_ps(v, lower);
+        v = _mm512_mul_ps(v, delta_inv);
+        let qf = _mm512_cvtps_epu32(v);
+        component_sum = _mm512_maskz_add_epi32(mask, component_sum, qf);
+        let q = _mm256_cvtepi16_epi8(_mm512_maskz_cvtepi32_epi16(mask, qf));
+        match B {
+            1 => {
+                let bitmask = _mm_movemask_epi8(_mm_cmpgt_epi8(q, _mm_set1_epi8(0))) as u16;
+                if o.len() == 2 {
+                    o[..2].copy_from_slice(&bitmask.to_le_bytes());
+                } else {
+                    o[0] = bitmask.to_le_bytes()[0];
+                }
+            }
+            4 => {
+                let even_odd = _mm_and_si128(
+                    _mm_shuffle_epi8(
+                        q,
+                        _mm_loadu_epi8(
+                            [0i8, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15].as_ptr(),
+                        ),
+                    ),
+                    _mm_set1_epi8(0xf),
+                );
+                let aligned = _mm_sllv_epi64(even_odd, _mm_loadu_epi64([0i64, 4].as_ptr()));
+                let packed = _mm_or_epi64(aligned, _mm_bsrli_si128::<8>(aligned));
+                let omask = (1 << o.len()) - 1;
+                _mm_mask_storeu_epi8(o.as_mut_ptr() as *mut i8, omask, packed);
+            }
+            8 => _mm_mask_storeu_epi8(o.as_mut_ptr() as *mut i8, mask, q),
+            _ => unimplemented!(),
+        }
+    }
+    _mm512_reduce_add_epi32(component_sum) as u32
 }
 
 #[target_feature(enable = "avx512vnni,avx512bw,avx512vl,avx512vpopcntdq,avx512f")]

@@ -274,7 +274,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct PrimaryVectorCoder<const B: usize>;
+pub struct PrimaryVectorCoder<const B: usize>(Acceleration);
 
 impl<const B: usize> PrimaryVectorCoder<B> {
     const B_CHECK: () = { check_primary_bits(B) };
@@ -284,7 +284,7 @@ impl<const B: usize> Default for PrimaryVectorCoder<B> {
     fn default() -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
-        PrimaryVectorCoder::<B>
+        PrimaryVectorCoder::<B>(Acceleration::default())
     }
 }
 
@@ -299,8 +299,30 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
         let mut header = VectorHeader::from(stats);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
-        header.component_sum =
-            lvq1_quantize_and_pack::<B>(vector, header.lower, header.upper, vector_bytes);
+        header.component_sum = match self.0 {
+            Acceleration::Scalar => scalar::lvq1_quantize_and_pack::<B>(
+                vector,
+                header.lower,
+                header.upper,
+                vector_bytes,
+            ),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => aarch64::lvq1_quantize_and_pack::<B>(
+                vector,
+                header.lower,
+                header.upper,
+                vector_bytes,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                x86_64::lvq1_quantize_and_pack_avx512::<B>(
+                    vector,
+                    header.lower,
+                    header.upper,
+                    vector_bytes,
+                )
+            },
+        };
         header.serialize(header_bytes);
     }
 

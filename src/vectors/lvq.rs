@@ -468,11 +468,11 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TwoLevelDistance<const B1: usize, const B2: usize>(VectorSimilarity);
+pub struct TwoLevelDistance<const B1: usize, const B2: usize>(VectorSimilarity, Acceleration);
 
 impl<const B1: usize, const B2: usize> TwoLevelDistance<B1, B2> {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity)
+        Self(similarity, Acceleration::default())
     }
 }
 
@@ -480,11 +480,16 @@ impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelDistance<B1, B
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = TwoLevelVector::<B1, B2>::new(query).unwrap();
         let doc = TwoLevelVector::<B1, B2>::new(doc).unwrap();
-        dot_unnormalized_to_distance(
-            self.0,
-            lvq2_dot_unnormalized(&query, &doc),
-            (query.l2_norm(), doc.l2_norm()),
-        )
+        let dot = match self.1 {
+            Acceleration::Scalar => scalar::lvq2_dot_unnormalized::<B1, B2>(&query, &doc),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => aarch64::lvq2_dot_unnormalized::<B1, B2>(&query, &doc),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                x86_64::lvq2_dot_unnormalized::<B1, B2>(&query, &doc)
+            },
+        };
+        dot_unnormalized_to_distance(self.0, dot, (query.l2_norm(), doc.l2_norm()))
     }
 }
 
@@ -493,6 +498,7 @@ pub struct TwoLevelQueryDistance<'a, const B1: usize, const B2: usize> {
     similarity: VectorSimilarity,
     query: Cow<'a, [f32]>,
     query_l2_norm: f64,
+    accel: Acceleration,
 }
 
 impl<'a, const B1: usize, const B2: usize> TwoLevelQueryDistance<'a, B1, B2> {
@@ -505,6 +511,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelQueryDistance<'a, B1, B2> {
             similarity,
             query,
             query_l2_norm,
+            accel: Acceleration::default(),
         }
     }
 }
@@ -512,11 +519,20 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelQueryDistance<'a, B1, B2> {
 impl<const B1: usize, const B2: usize> QueryVectorDistance for TwoLevelQueryDistance<'_, B1, B2> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TwoLevelVector::<B1, B2>::new(vector).unwrap();
-        dot_unnormalized_to_distance(
-            self.similarity,
-            lvq2_f32_dot_unnormalized(self.query.as_ref(), &vector),
-            (self.query_l2_norm, vector.l2_norm()),
-        )
+        let dot = match self.accel {
+            Acceleration::Scalar => {
+                scalar::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
+            }
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => {
+                aarch64::lvq2_f32_dot_unnormalized::<B1, B2>(&self.query.as_ref(), &vector)
+            }
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                x86_64::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
+            },
+        };
+        dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))
     }
 }
 

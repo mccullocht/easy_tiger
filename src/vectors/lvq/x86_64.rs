@@ -15,7 +15,7 @@ use std::arch::x86_64::{
     _mm_shuffle_epi8, _mm_sllv_epi64, _mm_sub_ps, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT,
 };
 
-use crate::vectors::lvq::PrimaryVector;
+use crate::vectors::lvq::{PrimaryVector, TwoLevelVector};
 
 use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
 
@@ -395,4 +395,20 @@ pub unsafe fn lvq1_f32_dot_unnormalized<const B: usize>(
         }
         _ => super::scalar::lvq1_f32_dot_unnormalized::<B>(query, doc),
     }
+}
+
+#[target_feature(enable = "avx512f")]
+pub unsafe fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
+    a: &TwoLevelVector<'_, B1, B2>,
+    b: &TwoLevelVector<'_, B1, B2>,
+) -> f64 {
+    super::scalar::lvq2_dot_unnormalized::<B1, B2>(a, b)
+}
+
+#[target_feature(enable = "avx512f")]
+pub unsafe fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
+    query: &[f32],
+    doc: &TwoLevelVector<'_, B1, B2>,
+) -> f64 {
+    super::scalar::lvq2_f32_dot_unnormalized::<B1, B2>(query, doc)
 }

@@ -701,6 +701,7 @@ mod test {
             distance_compare(Dot, F32VectorCoding::LVQ1x4, i, &a, &b, 0.02);
             query_distance_compare(Dot, F32VectorCoding::LVQ1x4, i, &a, &b, 0.02);
         }
+        panic!("foo");
     }
 
     #[test]

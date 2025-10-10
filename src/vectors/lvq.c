@@ -55,11 +55,11 @@ EXPORT uint32_t et_lvq_dot_u4(const uint8_t* a, const uint8_t* b, size_t len) {
 
     uint32_t dot = vaddvq_u32(vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3)));
     for (size_t i = tail; i < len; i++) {
-        uint32_t av = a[i];
-        uint32_t bv = b[i];
-        fprintf(stderr, "i=%lu av=%u, bv=%u\n", i, av, bv);
-        fprintf(stderr, "d=%lu %u * %u = %u\n", i * 2, av & 0xf, bv & 0xf, (av & 0xf) * (bv & 0xf));
-        fprintf(stderr, "d=%lu %u * %u = %u\n", i * 2 + 1, av >> 4, bv >> 4, (av >> 4) * (bv >> 4));
+        uint32_t av = a[i] & 0xff;
+        uint32_t bv = b[i] & 0xff;
+        printf("i=%lu av=%u, bv=%u\n", i, av, bv);
+        printf("d=%lu %u * %u = %u\n", i * 2, av & 0xf, bv & 0xf, (av & 0xf) * (bv & 0xf));
+        printf("d=%lu %u * %u = %u\n", i * 2 + 1, av >> 4, bv >> 4, (av >> 4) * (bv >> 4));
         dot += (av & 0xf) * (bv & 0xf) + ((av >> 4) & 0xf) * ((bv >> 4) & 0xf);
     }
 

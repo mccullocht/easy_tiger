@@ -63,6 +63,7 @@ EXPORT uint32_t et_lvq_dot_u4(const uint8_t* a, const uint8_t* b, size_t len) {
 
 __attribute__((target("+dotprod")))
 EXPORT uint32_t et_lvq_dot_u8(const uint8_t* a, const uint8_t* b, size_t len) {
+    // XXX consider unrolling more. this is so stupid!
     size_t tail = len & ~31;
     uint32x4_t dot0 = vdupq_n_u32(0);
     uint32x4_t dot1 = vdupq_n_u32(0);

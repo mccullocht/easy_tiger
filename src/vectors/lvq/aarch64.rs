@@ -597,6 +597,7 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVec
     let (query_head, query_tail) = query.split_at(tail_split);
     let (doc_head, doc_tail) = doc.vector.split_at(packing::byte_len(tail_split, B));
 
+    // XXX consider unrolling more. this is so stupid!
     let pdot = if !query_head.is_empty() {
         unsafe {
             let converter = LVQ1F32Converter::from_vector(doc);

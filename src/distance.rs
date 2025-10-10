@@ -54,6 +54,7 @@ fn f32_le_iter<'b>(b: &'b [u8]) -> impl ExactSizeIterator<Item = f32> + 'b {
 
 #[inline(always)]
 pub(crate) fn l2sq_f32(q: &[f32], d: &[f32]) -> f64 {
+    // XXX unroll this loop on aarch64! this is so stupid!
     simsimd::SpatialSimilarity::l2sq(q, d).expect("same dimensions")
 }
 
@@ -70,6 +71,7 @@ pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
             .sum::<f32>() as f64,
         #[cfg(target_arch = "aarch64")]
         Acceleration::Neon => unsafe {
+            // XXX unroll this loop to 64 bytes! this is so stupid!
             use core::arch::aarch64::{vaddvq_f32, vdupq_n_f32, vfmaq_f32, vsubq_f32};
             use std::arch::aarch64::vaddq_f32;
             let suffix_start = q.len() & !31;
@@ -129,6 +131,7 @@ pub(crate) fn l2(q: &[f32], d: &[f32]) -> f64 {
 
 #[inline(always)]
 pub(crate) fn dot_f32(q: &[f32], d: &[f32]) -> f64 {
+    // XXX unroll this loop on aarch64! this is so stupid!
     simsimd::SpatialSimilarity::dot(q, d).expect("same dimensions")
 }
 

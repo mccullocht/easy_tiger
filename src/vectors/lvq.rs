@@ -196,7 +196,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         let dot_quantized = match self.accel {
             Acceleration::Scalar => scalar::dot_u8::<B>(self.vector, other.vector),
             #[cfg(target_arch = "aarch64")]
-            Acceleration::Neon => scalar::dot_u8::<B>(self.vector, other.vector),
+            Acceleration::Neon => aarch64::dot_u8::<B>(self.vector, other.vector),
             #[cfg(target_arch = "x86_64")]
             Acceleration::Avx512 => unsafe { x86_64::dot_u8::<B>(self.vector, other.vector) },
         };

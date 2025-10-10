@@ -1,6 +1,8 @@
 fn main() {
-    println!("cargo::rerun-if-changed=src/vector/float16.c");
+    println!("cargo::rerun-if-changed=src/vectors/float16.c");
+    println!("cargo::rerun-if-changed=src/vectors/lvq.c");
     cc::Build::new()
         .file("src/vectors/float16.c")
-        .compile("float16");
+        .file("src/vectors/lvq.c")
+        .compile("vectors");
 }

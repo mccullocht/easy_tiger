@@ -14,13 +14,6 @@ mod scalar;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
-#[allow(unused_imports)]
-#[cfg(target_arch = "aarch64")]
-use aarch64::*;
-#[allow(unused_imports)]
-#[cfg(not(target_arch = "aarch64"))]
-use scalar::*;
-
 use std::borrow::Cow;
 
 use crate::{

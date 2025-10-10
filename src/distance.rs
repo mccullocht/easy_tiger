@@ -71,16 +71,23 @@ pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
         #[cfg(target_arch = "aarch64")]
         Acceleration::Neon => unsafe {
             use core::arch::aarch64::{vaddvq_f32, vdupq_n_f32, vfmaq_f32, vsubq_f32};
-            let suffix_start = q.len() & !15;
-            let mut l2sqv = vdupq_n_f32(0.0);
-            for i in (0..suffix_start).step_by(16) {
-                let dv = vsubq_f32(
+            use std::arch::aarch64::vaddq_f32;
+            let suffix_start = q.len() & !31;
+            let mut l2sq0 = vdupq_n_f32(0.0);
+            let mut l2sq1 = vdupq_n_f32(0.0);
+            for i in (0..suffix_start).step_by(32) {
+                let dv0 = vsubq_f32(
                     load_f32x4_le(q.as_ptr().add(i)),
                     load_f32x4_le(d.as_ptr().add(i)),
                 );
-                l2sqv = vfmaq_f32(l2sqv, dv, dv);
+                l2sq0 = vfmaq_f32(l2sq0, dv0, dv0);
+                let dv1 = vsubq_f32(
+                    load_f32x4_le(q.as_ptr().add(i + 16)),
+                    load_f32x4_le(d.as_ptr().add(i + 16)),
+                );
+                l2sq1 = vfmaq_f32(l2sq1, dv1, dv1);
             }
-            let mut l2sq = vaddvq_f32(l2sqv);
+            let mut l2sq = vaddvq_f32(vaddq_f32(l2sq0, l2sq1));
             for i in (suffix_start..q.len()).step_by(4) {
                 let delta = std::ptr::read_unaligned(q.as_ptr().add(i) as *const f32)
                     - std::ptr::read_unaligned(d.as_ptr().add(i) as *const f32);
@@ -136,16 +143,23 @@ pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
         #[cfg(target_arch = "aarch64")]
         Acceleration::Neon => unsafe {
             use core::arch::aarch64::{vaddvq_f32, vdupq_n_f32, vfmaq_f32};
-            let suffix_start = q.len() & !15;
-            let mut dotv = vdupq_n_f32(0.0);
-            for i in (0..suffix_start).step_by(16) {
-                dotv = vfmaq_f32(
-                    dotv,
+            use std::arch::aarch64::vaddq_f32;
+            let suffix_start = q.len() & !21;
+            let mut dot0 = vdupq_n_f32(0.0);
+            let mut dot1 = vdupq_n_f32(0.0);
+            for i in (0..suffix_start).step_by(32) {
+                dot0 = vfmaq_f32(
+                    dot0,
                     load_f32x4_le(q.as_ptr().add(i)),
                     load_f32x4_le(d.as_ptr().add(i)),
                 );
+                dot1 = vfmaq_f32(
+                    dot1,
+                    load_f32x4_le(q.as_ptr().add(i + 16)),
+                    load_f32x4_le(d.as_ptr().add(i + 16)),
+                );
             }
-            let mut dot = vaddvq_f32(dotv);
+            let mut dot = vaddvq_f32(vaddq_f32(dot0, dot1));
             for i in (suffix_start..q.len()).step_by(4) {
                 dot += std::ptr::read_unaligned(q.as_ptr().add(i) as *const f32)
                     * std::ptr::read_unaligned(d.as_ptr().add(i) as *const f32);

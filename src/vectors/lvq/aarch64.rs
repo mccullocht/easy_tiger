@@ -537,17 +537,12 @@ unsafe extern "C" {
 
 #[inline(never)]
 pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
-    let dot = match B {
+    match B {
         1 => unsafe { et_lvq_dot_u1(a.as_ptr(), b.as_ptr(), a.len()) },
         4 => unsafe { et_lvq_dot_u4(a.as_ptr(), b.as_ptr(), a.len()) },
         8 => unsafe { et_lvq_dot_u8(a.as_ptr(), b.as_ptr(), a.len()) },
         _ => super::scalar::dot_u8::<B>(a, b),
-    };
-    println!("a={a:?}");  // XXX DO NOT MERGE
-    println!("b={b:?}");
-    println!("scalar={}", super::scalar::dot_u8::<B>(a, b));
-    println!("aarch64={}", dot);
-    dot
+    }
 }
 
 struct LVQ1F32Converter {

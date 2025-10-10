@@ -60,7 +60,7 @@ EXPORT uint32_t et_lvq_dot_u4(const uint8_t* a, const uint8_t* b, size_t len) {
         fprintf(stderr, "i=%lu av=%u, bv=%u\n", i, av, bv);
         fprintf(stderr, "d=%lu %u * %u = %u\n", i * 2, av & 0xf, bv & 0xf, (av & 0xf) * (bv & 0xf));
         fprintf(stderr, "d=%lu %u * %u = %u\n", i * 2 + 1, av >> 4, bv >> 4, (av >> 4) * (bv >> 4));
-        dot += (av & 0xf) * (bv & 0xf) + (av >> 4) * (bv >> 4);
+        dot += (av & 0xf) * (bv & 0xf) + ((av >> 4) & 0xf) * ((bv >> 4) & 0xf);
     }
 
     return dot;

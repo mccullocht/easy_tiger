@@ -540,7 +540,7 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for TwoLevelQueryDist
             }
             #[cfg(target_arch = "aarch64")]
             Acceleration::Neon => {
-                aarch64::lvq2_f32_dot_unnormalized::<B1, B2>(&self.query.as_ref(), &vector)
+                aarch64::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
             }
             #[cfg(target_arch = "x86_64")]
             Acceleration::Avx512 => unsafe {

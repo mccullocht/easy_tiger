@@ -347,7 +347,7 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
 /// the header and primary vector contents; the residual delta and vector can be used along with
 /// the primary vector parts to provide a higher fidelity representation.
 #[derive(Debug, Copy, Clone)]
-pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>;
+pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>(Acceleration);
 
 impl<const B1: usize, const B2: usize> TwoLevelVectorCoder<B1, B2> {
     const B_CHECK: () = { check_residual_bits(B1, B2) };
@@ -357,7 +357,7 @@ impl<const B1: usize, const B2: usize> Default for TwoLevelVectorCoder<B1, B2> {
     fn default() -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
-        TwoLevelVectorCoder::<B1, B2>
+        TwoLevelVectorCoder::<B1, B2>(Acceleration::default())
     }
 }
 
@@ -390,14 +390,38 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         let (residual_header_bytes, residual) =
             residual_bytes.split_at_mut(std::mem::size_of::<f32>());
         residual_header_bytes.copy_from_slice(residual_interval.to_le_bytes().as_slice());
-        header.component_sum = lvq2_quantize_and_pack::<B1, B2>(
-            vector,
-            header.lower,
-            header.upper,
-            primary,
-            residual_interval,
-            residual,
-        );
+        header.component_sum = match self.0 {
+            Acceleration::Scalar => scalar::lvq2_quantize_and_pack::<B1, B2>(
+                vector,
+                header.lower,
+                header.upper,
+                primary,
+                residual_interval,
+                residual,
+            ),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => unsafe {
+                aarch64::lvq2_quantize_and_pack::<B1, B2>(
+                    vector,
+                    header.lower,
+                    header.upper,
+                    primary,
+                    residual_interval,
+                    residual,
+                )
+            },
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                x86_64::lvq2_quantize_and_pack::<B1, B2>(
+                    vector,
+                    header.lower,
+                    header.upper,
+                    primary,
+                    residual_interval,
+                    residual,
+                )
+            },
+        };
         header.serialize(header_bytes);
     }
 

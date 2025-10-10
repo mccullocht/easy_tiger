@@ -543,7 +543,7 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
         8 => unsafe { et_lvq_dot_u8(a.as_ptr(), b.as_ptr(), a.len()) },
         _ => super::scalar::dot_u8::<B>(a, b),
     };
-    println!("a={a:?}");
+    println!("a={a:?}");  // XXX DO NOT MERGE
     println!("b={b:?}");
     println!("scalar={}", super::scalar::dot_u8::<B>(a, b));
     println!("aarch64={}", dot);

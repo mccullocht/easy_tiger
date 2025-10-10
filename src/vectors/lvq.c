@@ -31,6 +31,8 @@ EXPORT uint32_t et_lvq_dot_u1(const uint8_t* a, const uint8_t* b, size_t len) {
     return dot;
 }
 
+#include <stdio.h> // XXX DO NOT MERGE
+
 __attribute__((target("+dotprod")))
 EXPORT uint32_t et_lvq_dot_u4(const uint8_t* a, const uint8_t* b, size_t len) {
     size_t tail = len & ~32;
@@ -55,6 +57,9 @@ EXPORT uint32_t et_lvq_dot_u4(const uint8_t* a, const uint8_t* b, size_t len) {
     for (size_t i = tail; i < len; i++) {
         uint32_t av = a[i];
         uint32_t bv = b[i];
+        printf("i=%lu av=%u, bv=%u\n", i, av, bv);
+        printf("d=%lu %u * %u = %u\n", i * 2, av & 0xf, bv & 0xf, (av & 0xf) * (bv & 0xf));
+        printf("d=%lu %u * %u = %u\n", i * 2 + 1, av >> 4, bv >> 4, (av >> 4) * (bv >> 4));
         dot += (av & 0xf) * (bv & 0xf) + (av >> 4) * (bv >> 4);
     }
 

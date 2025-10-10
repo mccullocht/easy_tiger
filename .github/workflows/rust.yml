@@ -11,8 +11,11 @@ env:
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [ubuntu-24.04, ubuntu-24.04-arm]
+    
+    runs-on: ${{ matrix.target }}
 
     steps:
     - uses: actions/checkout@v4

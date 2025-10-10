@@ -214,7 +214,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         match self.accel {
             Acceleration::Scalar => scalar::lvq1_f32_dot_unnormalized::<B>(query, self),
             #[cfg(target_arch = "aarch64")]
-            Acceleration::Neon => scalar::lvq1_f32_dot_unnormalized::<B>(query, self),
+            Acceleration::Neon => aarch64::lvq1_f32_dot_unnormalized::<B>(query, self),
             #[cfg(target_arch = "x86_64")]
             Acceleration::Avx512 => unsafe { x86_64::lvq1_f32_dot_unnormalized::<B>(query, self) },
         }
@@ -393,16 +393,14 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
                 residual,
             ),
             #[cfg(target_arch = "aarch64")]
-            Acceleration::Neon => unsafe {
-                aarch64::lvq2_quantize_and_pack::<B1, B2>(
-                    vector,
-                    header.lower,
-                    header.upper,
-                    primary,
-                    residual_interval,
-                    residual,
-                )
-            },
+            Acceleration::Neon => aarch64::lvq2_quantize_and_pack::<B1, B2>(
+                vector,
+                header.lower,
+                header.upper,
+                primary,
+                residual_interval,
+                residual,
+            ),
             #[cfg(target_arch = "x86_64")]
             Acceleration::Avx512 => unsafe {
                 x86_64::lvq2_quantize_and_pack::<B1, B2>(

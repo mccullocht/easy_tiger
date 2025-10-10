@@ -534,7 +534,6 @@ mod test {
             } else {
                 vec.into()
             };
-            println!("normalized {vec:?}"); // XXX
             let f32_coder = F32VectorCoding::F32.new_coder(similarity);
             let rvec = f32_coder
                 .encode(&vec)

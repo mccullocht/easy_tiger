@@ -31,6 +31,7 @@ EXPORT uint32_t et_lvq_dot_u1(const uint8_t* a, const uint8_t* b, size_t len) {
     return dot;
 }
 
+__attribute__((target("+dotprod")))
 EXPORT uint32_t et_lvq_dot_u4(const uint8_t* a, const uint8_t* b, size_t len) {
     size_t tail = len & ~32;
     uint32x4_t dot0 = vdupq_n_u32(0);
@@ -60,6 +61,7 @@ EXPORT uint32_t et_lvq_dot_u4(const uint8_t* a, const uint8_t* b, size_t len) {
     return dot;
 }
 
+__attribute__((target("+dotprod")))
 EXPORT uint32_t et_lvq_dot_u8(const uint8_t* a, const uint8_t* b, size_t len) {
     size_t tail = len & ~31;
     uint32x4_t dot0 = vdupq_n_u32(0);

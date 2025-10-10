@@ -256,10 +256,9 @@ pub unsafe fn lvq1_quantize_and_pack_avx512<const B: usize>(
     upper: f32,
     out: &mut [u8],
 ) -> u32 {
-    match B {
-        2 => return super::scalar::lvq1_quantize_and_pack::<B>(v, lower, upper, out),
-        _ => {}
-    };
+    if B == 2 {
+        return super::scalar::lvq1_quantize_and_pack::<B>(v, lower, upper, out);
+    }
 
     let delta = (upper - lower) / ((1 << B) - 1) as f32;
     let delta_inv = _mm512_set1_ps(delta.recip());

@@ -4,5 +4,6 @@ fn main() {
     cc::Build::new()
         .file("src/vectors/float16.c")
         .file("src/vectors/lvq.c")
+        .opt_level(3)
         .compile("vectors");
 }

@@ -535,7 +535,7 @@ unsafe extern "C" {
     unsafe fn et_lvq_dot_u8(a: *const u8, b: *const u8, len: usize) -> u32;
 }
 
-#[inline]
+#[inline(never)]
 pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     match B {
         1 => unsafe { et_lvq_dot_u1(a.as_ptr(), b.as_ptr(), a.len()) },

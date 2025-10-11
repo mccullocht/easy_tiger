@@ -70,36 +70,66 @@ pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
             })
             .sum::<f32>() as f64,
         #[cfg(target_arch = "aarch64")]
-        Acceleration::Neon => unsafe {
-            // XXX unroll this loop to 64 bytes! this is so stupid!
-            use core::arch::aarch64::{vaddvq_f32, vdupq_n_f32, vfmaq_f32, vsubq_f32};
-            use std::arch::aarch64::vaddq_f32;
-            let suffix_start = q.len() & !31;
-            let mut l2sq0 = vdupq_n_f32(0.0);
-            let mut l2sq1 = vdupq_n_f32(0.0);
-            for i in (0..suffix_start).step_by(32) {
-                let dv0 = vsubq_f32(
-                    load_f32x4_le(q.as_ptr().add(i)),
-                    load_f32x4_le(d.as_ptr().add(i)),
-                );
-                l2sq0 = vfmaq_f32(l2sq0, dv0, dv0);
-                let dv1 = vsubq_f32(
-                    load_f32x4_le(q.as_ptr().add(i + 16)),
-                    load_f32x4_le(d.as_ptr().add(i + 16)),
-                );
-                l2sq1 = vfmaq_f32(l2sq1, dv1, dv1);
-            }
-            let mut l2sq = vaddvq_f32(vaddq_f32(l2sq0, l2sq1));
-            for i in (suffix_start..q.len()).step_by(4) {
-                let delta = std::ptr::read_unaligned(q.as_ptr().add(i) as *const f32)
-                    - std::ptr::read_unaligned(d.as_ptr().add(i) as *const f32);
-                l2sq += delta * delta;
-            }
-            l2sq as f64
-        },
+        Acceleration::Neon => unsafe { l2sq_f32_bytes_neon(q, d) },
         #[cfg(target_arch = "x86_64")]
         Acceleration::Avx512 => unsafe { l2sq_f32_bytes_avx512(q, d) },
     }
+}
+
+// XXX model other bits after this???
+#[cfg(target_arch = "aarch64")]
+unsafe fn l2sq_f32_bytes_neon(q: &[u8], d: &[u8]) -> f64 {
+    use std::arch::aarch64::{vaddq_f32, vaddvq_f32, vdupq_n_f32, vfmaq_f32, vsubq_f32};
+
+    let len64 = q.len() & !63;
+    let mut sum0 = vdupq_n_f32(0.0);
+    let mut sum1 = vdupq_n_f32(0.0);
+    let mut sum2 = vdupq_n_f32(0.0);
+    let mut sum3 = vdupq_n_f32(0.0);
+    for i in (0..len64).step_by(64) {
+        let mut diff = vsubq_f32(
+            load_f32x4_le(q.as_ptr().add(i)),
+            load_f32x4_le(d.as_ptr().add(i)),
+        );
+        sum0 = vfmaq_f32(sum0, diff, diff);
+
+        diff = vsubq_f32(
+            load_f32x4_le(q.as_ptr().add(i + 16)),
+            load_f32x4_le(d.as_ptr().add(i + 16)),
+        );
+        sum1 = vfmaq_f32(sum1, diff, diff);
+
+        diff = vsubq_f32(
+            load_f32x4_le(q.as_ptr().add(i + 32)),
+            load_f32x4_le(d.as_ptr().add(i + 32)),
+        );
+        sum2 = vfmaq_f32(sum2, diff, diff);
+
+        diff = vsubq_f32(
+            load_f32x4_le(q.as_ptr().add(i + 48)),
+            load_f32x4_le(d.as_ptr().add(i + 48)),
+        );
+        sum3 = vfmaq_f32(sum3, diff, diff);
+    }
+
+    sum0 = vaddq_f32(vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3));
+    let len16 = q.len() & !15;
+    for i in (len64..len16).step_by(16) {
+        let diff = vsubq_f32(
+            load_f32x4_le(q.as_ptr().add(i)),
+            load_f32x4_le(d.as_ptr().add(i)),
+        );
+        sum0 = vfmaq_f32(sum0, diff, diff);
+    }
+
+    let mut sum = vaddvq_f32(sum0);
+    for i in (len16..q.len()).step_by(4) {
+        let diff = std::ptr::read_unaligned(q.as_ptr().add(i) as *const f32)
+            - std::ptr::read_unaligned(d.as_ptr().add(i) as *const f32);
+        sum = diff.mul_add(diff, sum);
+    }
+
+    sum.into()
 }
 
 #[cfg(target_arch = "x86_64")]

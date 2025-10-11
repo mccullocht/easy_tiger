@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use half::f16;
-use simsimd::SpatialSimilarity;
 
 use crate::distance::Acceleration;
 use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity};
@@ -92,11 +91,7 @@ impl VectorCoder {
 impl F32VectorCoder for VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let scale = if self.0.l2_normalize() {
-            Some(
-                (1.0 / SpatialSimilarity::dot(vector, vector)
-                    .expect("identical vectors")
-                    .sqrt()) as f32,
-            )
+            Some((1.0 / crate::distance::dot_f32(vector, vector).sqrt()) as f32)
         } else {
             None
         };

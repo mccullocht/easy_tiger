@@ -50,12 +50,12 @@ fn f32_le_iter<'b>(b: &'b [u8]) -> impl ExactSizeIterator<Item = f32> + 'b {
         .map(|f| f32::from_le_bytes(f.try_into().expect("4 bytes")))
 }
 
-// TODO: byte swapped load on big endian archs.
-
 #[inline(always)]
 pub(crate) fn l2sq_f32(q: &[f32], d: &[f32]) -> f64 {
-    // XXX unroll this loop on aarch64! this is so stupid!
-    simsimd::SpatialSimilarity::l2sq(q, d).expect("same dimensions")
+    l2sq_f32_bytes(
+        bytemuck::cast_slice::<_, u8>(q),
+        bytemuck::cast_slice::<_, u8>(d),
+    )
 }
 
 pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
@@ -131,8 +131,10 @@ pub(crate) fn l2(q: &[f32], d: &[f32]) -> f64 {
 
 #[inline(always)]
 pub(crate) fn dot_f32(q: &[f32], d: &[f32]) -> f64 {
-    // XXX unroll this loop on aarch64! this is so stupid!
-    simsimd::SpatialSimilarity::dot(q, d).expect("same dimensions")
+    dot_f32_bytes(
+        bytemuck::cast_slice::<_, u8>(q),
+        bytemuck::cast_slice::<_, u8>(d),
+    )
 }
 
 pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
@@ -153,7 +155,7 @@ pub(crate) fn dot_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
 #[cfg(target_arch = "aarch64")]
 #[inline]
 unsafe fn dot_f32_bytes_neon(q: &[u8], d: &[u8]) -> f64 {
-    use core::arch::aarch64::{vaddvq_f32, vdupq_n_f32, vfmaq_f32, vaddq_f32};
+    use core::arch::aarch64::{vaddq_f32, vaddvq_f32, vdupq_n_f32, vfmaq_f32};
     let len64 = q.len() & !63;
     let mut dot0 = vdupq_n_f32(0.0);
     let mut dot1 = vdupq_n_f32(0.0);
@@ -185,7 +187,11 @@ unsafe fn dot_f32_bytes_neon(q: &[u8], d: &[u8]) -> f64 {
     dot0 = vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3));
     let len16 = q.len() & !15;
     for i in (len64..len16).step_by(16) {
-        dot0 = vfmaq_f32(dot0, load_f32x4_le(q.as_ptr().add(i)), load_f32x4_le(d.as_ptr().add(i)));
+        dot0 = vfmaq_f32(
+            dot0,
+            load_f32x4_le(q.as_ptr().add(i)),
+            load_f32x4_le(d.as_ptr().add(i)),
+        );
     }
 
     let mut dot = vaddvq_f32(dot0);

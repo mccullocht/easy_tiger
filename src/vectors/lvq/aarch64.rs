@@ -601,17 +601,18 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVec
     let pdot = if !query_head.is_empty() {
         unsafe {
             let converter = LVQ1F32Converter::from_vector(doc);
-            let mut dot = vdupq_n_f32(0.0);
+            let mut dot0 = vdupq_n_f32(0.0);
+            let mut dot1 = vdupq_n_f32(0.0);
             for i in (0..tail_split).step_by(8) {
                 let q = (
                     vld1q_f32(query_head.as_ptr().add(i)),
                     vld1q_f32(query_head.as_ptr().add(i + 4)),
                 );
                 let d = unpack::<B>(i, doc_head);
-                dot = vfmaq_f32(dot, q.0, converter.unpacked_to_f32(d.0));
-                dot = vfmaq_f32(dot, q.1, converter.unpacked_to_f32(d.1));
+                dot0 = vfmaq_f32(dot0, q.0, converter.unpacked_to_f32(d.0));
+                dot1 = vfmaq_f32(dot1, q.1, converter.unpacked_to_f32(d.1));
             }
-            vaddvq_f32(dot)
+            vaddvq_f32(vaddq_f32(dot0, dot1))
         }
     } else {
         0.0

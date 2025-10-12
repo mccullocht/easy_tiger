@@ -57,12 +57,13 @@ HIDDEN float32x4_t load_tail_f32x4(const float* v, size_t len) {
 }
 
 EXPORT float et_dot_f16_f16(const __fp16* a, const __fp16* b, size_t len) {
-  size_t tail_split = len & ~15;
   float32x4_t dot0 = vdupq_n_f32(0.0);
   float32x4_t dot1 = vdupq_n_f32(0.0);
   float32x4_t dot2 = vdupq_n_f32(0.0);
   float32x4_t dot3 = vdupq_n_f32(0.0);
-  for (size_t i = 0; i < tail_split; i += 16) {
+
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 16) {
     float16x8_t av16 = vld1q_f16(a + i);
     float16x8_t bv16 = vld1q_f16(b + i);
     dot0 = vfmaq_f32(dot0, vcvt_f32_f16(vget_low_f16(av16)),
@@ -77,16 +78,15 @@ EXPORT float et_dot_f16_f16(const __fp16* a, const __fp16* b, size_t len) {
   }
 
   dot0 = vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3));
-  for (; tail_split + 4 <= len; tail_split += 4) {
-    dot0 = vfmaq_f32(dot0, vcvt_f32_f16(vld1_f16(a + tail_split)),
-                     vcvt_f32_f16(vld1_f16(b + tail_split)));
+  size_t len4 = len & ~3;
+  for (size_t i = len16; i < len4; i += 4) {
+    dot0 = vfmaq_f32(dot0, vcvt_f32_f16(vld1_f16(a + i)),
+                     vcvt_f32_f16(vld1_f16(b + i)));
   }
 
-  if (tail_split < len) {
-    float32x4_t av =
-        vcvt_f32_f16(load_tail_f16x4(a + tail_split, len - tail_split));
-    float32x4_t bv =
-        vcvt_f32_f16(load_tail_f16x4(b + tail_split, len - tail_split));
+  if (len4 < len) {
+    float32x4_t av = vcvt_f32_f16(load_tail_f16x4(a + len4, len - len4));
+    float32x4_t bv = vcvt_f32_f16(load_tail_f16x4(b + len4, len - len4));
     dot0 = vfmaq_f32(dot0, av, bv);
   }
 
@@ -94,12 +94,13 @@ EXPORT float et_dot_f16_f16(const __fp16* a, const __fp16* b, size_t len) {
 }
 
 EXPORT float et_dot_f32_f16(const float* a, const __fp16* b, size_t len) {
-  size_t tail_split = len & ~15;
   float32x4_t dot0 = vdupq_n_f32(0.0);
   float32x4_t dot1 = vdupq_n_f32(0.0);
   float32x4_t dot2 = vdupq_n_f32(0.0);
   float32x4_t dot3 = vdupq_n_f32(0.0);
-  for (size_t i = 0; i < tail_split; i += 16) {
+
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 16) {
     float16x8_t bv16 = vld1q_f16(b + i);
     dot0 = vfmaq_f32(dot0, vld1q_f32(a + i), vcvt_f32_f16(vget_low_f16(bv16)));
     dot1 = vfmaq_f32(dot1, vld1q_f32(a + i + 4), vcvt_high_f32_f16(bv16));
@@ -111,16 +112,16 @@ EXPORT float et_dot_f32_f16(const float* a, const __fp16* b, size_t len) {
   }
 
   dot0 = vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3));
-  for (; tail_split + 4 <= len; tail_split += 4) {
-    float32x4_t av = vld1q_f32(a + tail_split);
-    float32x4_t bv = vcvt_f32_f16(vld1_f16(b + tail_split));
+  size_t len4 = len & ~3;
+  for (size_t i = len16; i <= len4; i += 4) {
+    float32x4_t av = vld1q_f32(a + i);
+    float32x4_t bv = vcvt_f32_f16(vld1_f16(b + i));
     dot0 = vfmaq_f32(dot0, av, bv);
   }
 
-  if (tail_split < len) {
-    float32x4_t av = load_tail_f32x4(a + tail_split, len - tail_split);
-    float32x4_t bv =
-        vcvt_f32_f16(load_tail_f16x4(b + tail_split, len - tail_split));
+  if (len4 < len) {
+    float32x4_t av = load_tail_f32x4(a + len4, len - len4);
+    float32x4_t bv = vcvt_f32_f16(load_tail_f16x4(b + len4, len - len4));
     dot0 = vfmaq_f32(dot0, av, bv);
   }
 
@@ -128,12 +129,13 @@ EXPORT float et_dot_f32_f16(const float* a, const __fp16* b, size_t len) {
 }
 
 EXPORT float et_l2_f16_f16(const __fp16* a, const __fp16* b, size_t len) {
-  size_t tail_split = len & ~15;
   float32x4_t sum0 = vdupq_n_f32(0.0);
   float32x4_t sum1 = vdupq_n_f32(0.0);
   float32x4_t sum2 = vdupq_n_f32(0.0);
   float32x4_t sum3 = vdupq_n_f32(0.0);
-  for (size_t i = 0; i < tail_split; i += 16) {
+
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 16) {
     float16x8_t av16 = vld1q_f16(a + i);
     float16x8_t bv16 = vld1q_f16(b + i);
 
@@ -154,17 +156,16 @@ EXPORT float et_l2_f16_f16(const __fp16* a, const __fp16* b, size_t len) {
   }
 
   sum0 = vaddq_f32(vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3));
-  for (; tail_split + 4 <= len; tail_split += 4) {
-    float32x4_t diff = vsubq_f32(vcvt_f32_f16(vld1_f16(a + tail_split)),
-                                 vcvt_f32_f16(vld1_f16(b + tail_split)));
+  const size_t len4 = len & ~3;
+  for (size_t i = len16; i < len4; i += 4) {
+    float32x4_t diff =
+        vsubq_f32(vcvt_f32_f16(vld1_f16(a + i)), vcvt_f32_f16(vld1_f16(b + i)));
     sum0 = vfmaq_f32(sum0, diff, diff);
   }
 
-  if (tail_split < len) {
-    float32x4_t av =
-        vcvt_f32_f16(load_tail_f16x4(a + tail_split, len - tail_split));
-    float32x4_t bv =
-        vcvt_f32_f16(load_tail_f16x4(b + tail_split, len - tail_split));
+  if (len4 < len) {
+    float32x4_t av = vcvt_f32_f16(load_tail_f16x4(a + len4, len - len4));
+    float32x4_t bv = vcvt_f32_f16(load_tail_f16x4(b + len4, len - len4));
     float32x4_t dv = vsubq_f32(av, bv);
     sum0 = vfmaq_f32(sum0, dv, dv);
   }
@@ -173,12 +174,13 @@ EXPORT float et_l2_f16_f16(const __fp16* a, const __fp16* b, size_t len) {
 }
 
 EXPORT float et_l2_f32_f16(const float* a, const __fp16* b, size_t len) {
-  size_t tail_split = len & ~15;
   float32x4_t sum0 = vdupq_n_f32(0.0);
   float32x4_t sum1 = vdupq_n_f32(0.0);
   float32x4_t sum2 = vdupq_n_f32(0.0);
   float32x4_t sum3 = vdupq_n_f32(0.0);
-  for (size_t i = 0; i < tail_split; i += 16) {
+
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 16) {
     float16x8_t bv16 = vld1q_f16(b + i);
     float32x4_t dv =
         vsubq_f32(vld1q_f32(a + i), vcvt_f32_f16(vget_low_f16(bv16)));
@@ -194,16 +196,16 @@ EXPORT float et_l2_f32_f16(const float* a, const __fp16* b, size_t len) {
   }
 
   sum0 = vaddq_f32(vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3));
-  for (; tail_split + 4 <= len; tail_split += 4) {
-    float32x4_t dv = vsubq_f32(vld1q_f32(a + tail_split),
-                               vcvt_f32_f16(vld1_f16(b + tail_split)));
+  size_t len4 = len & ~3;
+  for (size_t i = len16; i < len4; i += 4) {
+    float32x4_t dv = vsubq_f32(vld1q_f32(a + i), vcvt_f32_f16(vld1_f16(b + i)));
     sum0 = vfmaq_f32(sum0, dv, dv);
   }
 
-  if (tail_split < len) {
-    float32x4_t dv = vsubq_f32(
-        load_tail_f32x4(a + tail_split, len - tail_split),
-        vcvt_f32_f16(load_tail_f16x4(b + tail_split, len - tail_split)));
+  if (len4 < len) {
+    float32x4_t dv =
+        vsubq_f32(load_tail_f32x4(a + len4, len - len4),
+                  vcvt_f32_f16(load_tail_f16x4(b + len, len - len4)));
     sum0 = vfmaq_f32(sum0, dv, dv);
   }
 

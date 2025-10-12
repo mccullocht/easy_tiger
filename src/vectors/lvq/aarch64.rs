@@ -680,23 +680,22 @@ pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
             let a_converter = LVQ2F32Converter::from_vector(a);
             let b_converter = LVQ2F32Converter::from_vector(b);
 
-            let mut dot0 = vdupq_n_f32(0.0);
-            let mut dot1 = vdupq_n_f32(0.0);
+            let mut dot = vdupq_n_f32(0.0);
             for i in (0..tail_split).step_by(8) {
                 let a = unpack_lvq2::<B1, B2>(i, a_l1_head, a_l2_head);
                 let b = unpack_lvq2::<B1, B2>(i, b_l1_head, b_l2_head);
-                dot0 = vfmaq_f32(
-                    dot0,
+                dot = vfmaq_f32(
+                    dot,
                     a_converter.unpacked_to_f32(a.0),
                     b_converter.unpacked_to_f32(b.0),
                 );
-                dot1 = vfmaq_f32(
-                    dot1,
+                dot = vfmaq_f32(
+                    dot,
                     a_converter.unpacked_to_f32(a.1),
                     b_converter.unpacked_to_f32(b.1),
                 );
             }
-            vaddvq_f32(vaddq_f32(dot0, dot1))
+            vaddvq_f32(dot)
         }
     } else {
         0.0

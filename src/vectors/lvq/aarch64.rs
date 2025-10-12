@@ -1,17 +1,18 @@
 //! aarch64 implementations of lvq routines.
 
 use std::arch::aarch64::{
-    float32x4_t, uint32x4_t, uint8x16_t, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddvq_f32, vaddvq_u16,
-    vaddvq_u32, vaddvq_u64, vand_u16, vand_u32, vand_u8, vandq_u16, vcombine_u16, vcombine_u32,
-    vcombine_u8, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32,
-    vdup_n_u16, vdup_n_u32, vdup_n_u8, vdupq_n_f32, vdupq_n_f64, vdupq_n_u16, vextq_f64, vfmaq_f32,
-    vfmaq_f64, vget_low_f32, vget_low_u16, vgetq_lane_f64, vld1_s16, vld1_s32, vld1_s8, vld1_u8,
-    vld1q_f32, vld1q_s16, vld1q_s32, vld1q_s64, vld1q_s8, vld1q_u16, vld1q_u8, vmaxq_f32,
-    vmaxvq_f32, vminq_f32, vminvq_f32, vmovl_high_u16, vmovl_u16, vmovl_u8, vmovn_high_u16,
-    vmovn_high_u32, vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u16, vpaddlq_u32,
-    vpaddlq_u8, vqtbl1q_u8, vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u8_u16,
-    vreinterpretq_u8_u32, vrndaq_f32, vshl_u16, vshl_u32, vshl_u8, vshlq_u16, vshlq_u32, vshlq_u64,
-    vshlq_u8, vst1q_u16, vst1q_u8, vsubq_f32, vsubq_f64,
+    float32x4_t, uint32x4_t, uint8x16_t, vaddlvq_u16, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddq_u16,
+    vaddvq_f32, vaddvq_u16, vaddvq_u32, vaddvq_u64, vand_u16, vand_u32, vand_u8, vandq_u16,
+    vandq_u8, vcntq_u8, vcombine_u16, vcombine_u32, vcombine_u8, vcvt_f64_f32, vcvt_high_f64_f32,
+    vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdup_n_u16, vdup_n_u32, vdup_n_u8, vdupq_n_f32,
+    vdupq_n_f64, vdupq_n_u16, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vget_low_u16,
+    vgetq_lane_f64, vld1_s16, vld1_s32, vld1_s8, vld1_u8, vld1q_f32, vld1q_s16, vld1q_s32,
+    vld1q_s64, vld1q_s8, vld1q_u16, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32,
+    vmovl_high_u16, vmovl_u16, vmovl_u8, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
+    vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u16, vpaddlq_u32, vpaddlq_u8, vqtbl1q_u8,
+    vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u8_u16, vreinterpretq_u8_u32,
+    vrndaq_f32, vshl_u16, vshl_u32, vshl_u8, vshlq_u16, vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u16,
+    vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use crate::vectors::lvq::{PrimaryVector, TwoLevelVector};
@@ -530,7 +531,7 @@ unsafe fn pack16(
 }
 
 unsafe extern "C" {
-    unsafe fn et_lvq_dot_u1(a: *const u8, b: *const u8, len: usize) -> u32;
+    unsafe fn et_lvq_dot_u2(a: *const u8, b: *const u8, len: usize) -> u32;
     unsafe fn et_lvq_dot_u4(a: *const u8, b: *const u8, len: usize) -> u32;
     unsafe fn et_lvq_dot_u8(a: *const u8, b: *const u8, len: usize) -> u32;
 }
@@ -538,10 +539,38 @@ unsafe extern "C" {
 #[inline(never)]
 pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     match B {
-        1 => unsafe { et_lvq_dot_u1(a.as_ptr(), b.as_ptr(), a.len()) },
+        1 => unsafe {
+            let mut dot0 = vdupq_n_u16(0);
+            let mut dot1 = vdupq_n_u16(0);
+            let len32 = a.len() & !31;
+            for i in (0..len32).step_by(32) {
+                let mut av = vld1q_u8(a.as_ptr().add(i));
+                let mut bv = vld1q_u8(b.as_ptr().add(i));
+                dot0 = vaddq_u16(dot0, vpaddlq_u8(vcntq_u8(vandq_u8(av, bv))));
+
+                av = vld1q_u8(a.as_ptr().add(i + 16));
+                bv = vld1q_u8(b.as_ptr().add(i + 16));
+                dot1 = vaddq_u16(dot1, vpaddlq_u8(vcntq_u8(vandq_u8(av, bv))));
+            }
+
+            dot0 = vaddq_u16(dot0, dot1);
+            let len16 = a.len() & !15;
+            if len32 < len16 {
+                let av = vld1q_u8(a.as_ptr().add(len32));
+                let bv = vld1q_u8(b.as_ptr().add(len32));
+                dot0 = vaddq_u16(dot0, vpaddlq_u8(vcntq_u8(vandq_u8(av, bv))));
+            }
+
+            let mut dot = vaddlvq_u16(dot0);
+            for i in len16..a.len() {
+                dot += (a[i] & b[i]).count_ones();
+            }
+            dot
+        },
+        2 => unsafe { et_lvq_dot_u2(a.as_ptr(), b.as_ptr(), a.len()) },
         4 => unsafe { et_lvq_dot_u4(a.as_ptr(), b.as_ptr(), a.len()) },
         8 => unsafe { et_lvq_dot_u8(a.as_ptr(), b.as_ptr(), a.len()) },
-        _ => super::scalar::dot_u8::<B>(a, b),
+        _ => unimplemented!(),
     }
 }
 
@@ -597,20 +626,22 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVec
     let (query_head, query_tail) = query.split_at(tail_split);
     let (doc_head, doc_tail) = doc.vector.split_at(packing::byte_len(tail_split, B));
 
+    // TODO: consider unrolling more, since up to 4 independent accumulators seems to help.
     let pdot = if !query_head.is_empty() {
         unsafe {
             let converter = LVQ1F32Converter::from_vector(doc);
-            let mut dot = vdupq_n_f32(0.0);
+            let mut dot0 = vdupq_n_f32(0.0);
+            let mut dot1 = vdupq_n_f32(0.0);
             for i in (0..tail_split).step_by(8) {
                 let q = (
                     vld1q_f32(query_head.as_ptr().add(i)),
                     vld1q_f32(query_head.as_ptr().add(i + 4)),
                 );
                 let d = unpack::<B>(i, doc_head);
-                dot = vfmaq_f32(dot, q.0, converter.unpacked_to_f32(d.0));
-                dot = vfmaq_f32(dot, q.1, converter.unpacked_to_f32(d.1));
+                dot0 = vfmaq_f32(dot0, q.0, converter.unpacked_to_f32(d.0));
+                dot1 = vfmaq_f32(dot1, q.1, converter.unpacked_to_f32(d.1));
             }
-            vaddvq_f32(dot)
+            vaddvq_f32(vaddq_f32(dot0, dot1))
         }
     } else {
         0.0
@@ -698,17 +729,18 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     let pdot = if !doc_l1_head.is_empty() {
         unsafe {
             let converter = LVQ2F32Converter::from_vector(doc);
-            let mut dot = vdupq_n_f32(0.0);
+            let mut dot0 = vdupq_n_f32(0.0);
+            let mut dot1 = vdupq_n_f32(0.0);
             for i in (0..tail_split).step_by(8) {
                 let q = (
                     vld1q_f32(query.as_ptr().add(i)),
                     vld1q_f32(query.as_ptr().add(i + 4)),
                 );
                 let d = unpack_lvq2::<B1, B2>(i, doc_l1_head, doc_l2_head);
-                dot = vfmaq_f32(dot, q.0, converter.unpacked_to_f32(d.0));
-                dot = vfmaq_f32(dot, q.1, converter.unpacked_to_f32(d.1));
+                dot0 = vfmaq_f32(dot0, q.0, converter.unpacked_to_f32(d.0));
+                dot1 = vfmaq_f32(dot1, q.1, converter.unpacked_to_f32(d.1));
             }
-            vaddvq_f32(dot)
+            vaddvq_f32(vaddq_f32(dot0, dot1))
         }
     } else {
         0.0

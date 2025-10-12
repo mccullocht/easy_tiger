@@ -30,7 +30,7 @@ et_lvq_dot_u2(const uint8_t* a, const uint8_t* b, size_t len) {
   }
 
   uint32_t dot =
-      vaddvq_f32(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
+      vaddvq_u32(vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3)));
   for (size_t i = len16; i < len; i++) {
     uint32_t av = a[i];
     uint32_t bv = b[i];

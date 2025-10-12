@@ -10,6 +10,38 @@
 #include <arm_neon.h>
 
 __attribute__((target("+dotprod"))) EXPORT uint32_t
+et_lvq_dot_u2(const uint8_t* a, const uint8_t* b, size_t len) {
+  uint32x4_t dot0 = vdupq_n_u32(0);
+  uint32x4_t dot1 = vdupq_n_u32(0);
+  uint32x4_t dot2 = vdupq_n_u32(0);
+  uint32x4_t dot3 = vdupq_n_u32(0);
+  uint8x16_t mask = vdupq_n_u8(0x3);
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 32) {
+    uint8x16_t av = vld1q_u8(a + i);
+    uint8x16_t bv = vld1q_u8(b + i);
+
+    dot0 = vdotq_u32(dot0, vandq_u8(av, mask), vandq_u8(bv, mask));
+    dot1 = vdotq_u32(dot1, vandq_u8(vshrq_n_u8(av, 2), mask),
+                     vandq_u8(vshrq_n_u8(bv, 2), mask));
+    dot2 = vdotq_u32(dot2, vandq_u8(vshrq_n_u8(av, 4), mask),
+                     vandq_u8(vshrq_n_u8(bv, 4), mask));
+    dot3 = vdotq_u32(dot3, vshrq_n_u8(av, 6), vshrq_n_u8(bv, 6));
+  }
+
+  uint32_t dot =
+      vaddvq_f32(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
+  for (size_t i = len16; i < len; i++) {
+    uint32_t av = a[i];
+    uint32_t bv = b[i];
+    dot += (av & 0x3) * (bv & 0x3) + ((av >> 2) & 0x3) * ((bv >> 2) & 0x3) +
+           ((av >> 4) & 0x3) * ((bv >> 4) & 0x3) + (av >> 6) * (bv >> 6);
+  }
+
+  return dot;
+}
+
+__attribute__((target("+dotprod"))) EXPORT uint32_t
 et_lvq_dot_u4(const uint8_t* a, const uint8_t* b, size_t len) {
   uint32x4_t dot0 = vdupq_n_u32(0);
   uint32x4_t dot1 = vdupq_n_u32(0);

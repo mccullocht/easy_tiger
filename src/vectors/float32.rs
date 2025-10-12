@@ -7,8 +7,6 @@
 
 use std::borrow::Cow;
 
-use simsimd::SpatialSimilarity;
-
 use crate::{
     distance::{dot_f32, dot_f32_bytes, l2_normalize, l2sq_f32, l2sq_f32_bytes},
     vectors::{
@@ -41,10 +39,7 @@ impl F32VectorCoder for VectorCoder {
         assert!(out.len() >= std::mem::size_of_val(vector));
         let vector_it = vector.iter().copied();
         if self.0.l2_normalize() {
-            let scale = (1.0
-                / SpatialSimilarity::dot(vector, vector)
-                    .expect("identical vectors")
-                    .sqrt()) as f32;
+            let scale = (1.0 / crate::distance::dot_f32(vector, vector).sqrt()) as f32;
             Self::encode_it(vector_it.map(|d| d * scale), out);
         } else {
             Self::encode_it(vector_it, out);

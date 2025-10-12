@@ -444,7 +444,7 @@ mod test {
             Self { data: rep, config }
         }
 
-        pub fn reader(&self) -> TestGraphVectorIndexReader {
+        pub fn reader(&self) -> TestGraphVectorIndexReader<'_> {
             TestGraphVectorIndexReader(self)
         }
 

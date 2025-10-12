@@ -11,18 +11,13 @@
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 mod scalar;
-
-#[allow(unused_imports)]
-#[cfg(target_arch = "aarch64")]
-use aarch64::*;
-#[allow(unused_imports)]
-#[cfg(not(target_arch = "aarch64"))]
-use scalar::*;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 use std::borrow::Cow;
 
 use crate::{
-    distance::dot_f32,
+    distance::{dot_f32, Acceleration},
     vectors::{
         dot_unnormalized_to_distance, F32VectorCoder, QueryVectorDistance, VectorDistance,
         VectorSimilarity,
@@ -64,13 +59,29 @@ struct VectorStats {
 impl From<&[f32]> for VectorStats {
     fn from(value: &[f32]) -> Self {
         if value.is_empty() {
-            VectorStats {
+            return VectorStats {
                 l2_norm_sq: 1.0,
                 ..Default::default()
-            }
-        } else {
-            compute_vector_stats(value)
+            };
         }
+
+        match Acceleration::default() {
+            Acceleration::Scalar => scalar::compute_vector_stats(value),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => aarch64::compute_vector_stats(value),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe { x86_64::compute_vector_stats_avx512(value) },
+        }
+    }
+}
+
+fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+    match Acceleration::default() {
+        Acceleration::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
+        #[cfg(target_arch = "aarch64")]
+        Acceleration::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
+        #[cfg(target_arch = "x86_64")]
+        Acceleration::Avx512 => unsafe { x86_64::optimize_interval_avx512(vector, stats, bits) },
     }
 }
 
@@ -149,6 +160,7 @@ struct PrimaryVector<'a, const B: usize> {
     header: VectorHeader,
     delta: f32,
     vector: &'a [u8],
+    accel: Acceleration,
 }
 
 impl<'a, const B: usize> PrimaryVector<'a, B> {
@@ -168,6 +180,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
             header,
             delta,
             vector,
+            accel: Acceleration::default(),
         }
     }
 
@@ -180,12 +193,13 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
-        let dot_quantized = self
-            .vector
-            .iter()
-            .zip(other.vector.iter())
-            .map(|(s, o)| Self::dot_packed(*s, *o))
-            .sum::<u32>();
+        let dot_quantized = match self.accel {
+            Acceleration::Scalar => scalar::dot_u8::<B>(self.vector, other.vector),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => aarch64::dot_u8::<B>(self.vector, other.vector),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe { x86_64::dot_u8::<B>(self.vector, other.vector) },
+        };
         let sdelta = f64::from(self.delta);
         let slower = f64::from(self.header.lower);
         let odelta = f64::from(other.delta);
@@ -196,21 +210,13 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
             + slower * olower * (self.vector.len() * 8).div_ceil(B) as f64
     }
 
-    fn dot_packed(a: u8, b: u8) -> u32 {
-        match B {
-            1 => (a & b).count_ones(),
-            2 => {
-                let a = [a & 0x3, (a >> 2) & 0x3, (a >> 4) & 0x3, (a >> 6) & 0x3];
-                let b = [b & 0x3, (b >> 2) & 0x3, (b >> 4) & 0x3, (b >> 6) & 0x3];
-                (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).into()
-            }
-            4 => {
-                let a = [a & 0xf, a >> 4];
-                let b = [b & 0xf, b >> 4];
-                (a[0] as u16 * b[0] as u16 + a[1] as u16 * b[1] as u16).into()
-            }
-            8 => a as u32 * b as u32,
-            _ => unimplemented!(),
+    fn f32_dot_unnormalized(&self, query: &[f32]) -> f64 {
+        match self.accel {
+            Acceleration::Scalar => scalar::lvq1_f32_dot_unnormalized::<B>(query, self),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => aarch64::lvq1_f32_dot_unnormalized::<B>(query, self),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe { x86_64::lvq1_f32_dot_unnormalized::<B>(query, self) },
         }
     }
 }
@@ -261,7 +267,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub struct PrimaryVectorCoder<const B: usize>;
+pub struct PrimaryVectorCoder<const B: usize>(Acceleration);
 
 impl<const B: usize> PrimaryVectorCoder<B> {
     const B_CHECK: () = { check_primary_bits(B) };
@@ -271,7 +277,7 @@ impl<const B: usize> Default for PrimaryVectorCoder<B> {
     fn default() -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
-        PrimaryVectorCoder::<B>
+        PrimaryVectorCoder::<B>(Acceleration::default())
     }
 }
 
@@ -286,8 +292,30 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
         let mut header = VectorHeader::from(stats);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
-        header.component_sum =
-            lvq1_quantize_and_pack::<B>(vector, header.lower, header.upper, vector_bytes);
+        header.component_sum = match self.0 {
+            Acceleration::Scalar => scalar::lvq1_quantize_and_pack::<B>(
+                vector,
+                header.lower,
+                header.upper,
+                vector_bytes,
+            ),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => aarch64::lvq1_quantize_and_pack::<B>(
+                vector,
+                header.lower,
+                header.upper,
+                vector_bytes,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                x86_64::lvq1_quantize_and_pack_avx512::<B>(
+                    vector,
+                    header.lower,
+                    header.upper,
+                    vector_bytes,
+                )
+            },
+        };
         header.serialize(header_bytes);
     }
 
@@ -312,7 +340,7 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
 /// the header and primary vector contents; the residual delta and vector can be used along with
 /// the primary vector parts to provide a higher fidelity representation.
 #[derive(Debug, Copy, Clone)]
-pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>;
+pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>(Acceleration);
 
 impl<const B1: usize, const B2: usize> TwoLevelVectorCoder<B1, B2> {
     const B_CHECK: () = { check_residual_bits(B1, B2) };
@@ -322,7 +350,7 @@ impl<const B1: usize, const B2: usize> Default for TwoLevelVectorCoder<B1, B2> {
     fn default() -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
-        TwoLevelVectorCoder::<B1, B2>
+        TwoLevelVectorCoder::<B1, B2>(Acceleration::default())
     }
 }
 
@@ -355,14 +383,36 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         let (residual_header_bytes, residual) =
             residual_bytes.split_at_mut(std::mem::size_of::<f32>());
         residual_header_bytes.copy_from_slice(residual_interval.to_le_bytes().as_slice());
-        header.component_sum = lvq2_quantize_and_pack::<B1, B2>(
-            vector,
-            header.lower,
-            header.upper,
-            primary,
-            residual_interval,
-            residual,
-        );
+        header.component_sum = match self.0 {
+            Acceleration::Scalar => scalar::lvq2_quantize_and_pack::<B1, B2>(
+                vector,
+                header.lower,
+                header.upper,
+                primary,
+                residual_interval,
+                residual,
+            ),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => aarch64::lvq2_quantize_and_pack::<B1, B2>(
+                vector,
+                header.lower,
+                header.upper,
+                primary,
+                residual_interval,
+                residual,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                x86_64::lvq2_quantize_and_pack::<B1, B2>(
+                    vector,
+                    header.lower,
+                    header.upper,
+                    primary,
+                    residual_interval,
+                    residual,
+                )
+            },
+        };
         header.serialize(header_bytes);
     }
 
@@ -426,18 +476,18 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
         let vector = PrimaryVector::<B>::new(vector).unwrap();
         dot_unnormalized_to_distance(
             self.similarity,
-            lvq1_f32_dot_unnormalized(self.query.as_ref(), &vector),
+            vector.f32_dot_unnormalized(&self.query),
             (self.query_l2_norm, vector.l2_norm()),
         )
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TwoLevelDistance<const B1: usize, const B2: usize>(VectorSimilarity);
+pub struct TwoLevelDistance<const B1: usize, const B2: usize>(VectorSimilarity, Acceleration);
 
 impl<const B1: usize, const B2: usize> TwoLevelDistance<B1, B2> {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity)
+        Self(similarity, Acceleration::default())
     }
 }
 
@@ -445,11 +495,16 @@ impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelDistance<B1, B
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = TwoLevelVector::<B1, B2>::new(query).unwrap();
         let doc = TwoLevelVector::<B1, B2>::new(doc).unwrap();
-        dot_unnormalized_to_distance(
-            self.0,
-            lvq2_dot_unnormalized(&query, &doc),
-            (query.l2_norm(), doc.l2_norm()),
-        )
+        let dot = match self.1 {
+            Acceleration::Scalar => scalar::lvq2_dot_unnormalized::<B1, B2>(&query, &doc),
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => aarch64::lvq2_dot_unnormalized::<B1, B2>(&query, &doc),
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                x86_64::lvq2_dot_unnormalized::<B1, B2>(&query, &doc)
+            },
+        };
+        dot_unnormalized_to_distance(self.0, dot, (query.l2_norm(), doc.l2_norm()))
     }
 }
 
@@ -458,6 +513,7 @@ pub struct TwoLevelQueryDistance<'a, const B1: usize, const B2: usize> {
     similarity: VectorSimilarity,
     query: Cow<'a, [f32]>,
     query_l2_norm: f64,
+    accel: Acceleration,
 }
 
 impl<'a, const B1: usize, const B2: usize> TwoLevelQueryDistance<'a, B1, B2> {
@@ -470,6 +526,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelQueryDistance<'a, B1, B2> {
             similarity,
             query,
             query_l2_norm,
+            accel: Acceleration::default(),
         }
     }
 }
@@ -477,11 +534,20 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelQueryDistance<'a, B1, B2> {
 impl<const B1: usize, const B2: usize> QueryVectorDistance for TwoLevelQueryDistance<'_, B1, B2> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TwoLevelVector::<B1, B2>::new(vector).unwrap();
-        dot_unnormalized_to_distance(
-            self.similarity,
-            lvq2_f32_dot_unnormalized(self.query.as_ref(), &vector),
-            (self.query_l2_norm, vector.l2_norm()),
-        )
+        let dot = match self.accel {
+            Acceleration::Scalar => {
+                scalar::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
+            }
+            #[cfg(target_arch = "aarch64")]
+            Acceleration::Neon => {
+                aarch64::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
+            }
+            #[cfg(target_arch = "x86_64")]
+            Acceleration::Avx512 => unsafe {
+                x86_64::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
+            },
+        };
+        dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))
     }
 }
 

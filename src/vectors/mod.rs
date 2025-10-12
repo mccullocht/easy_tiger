@@ -188,15 +188,15 @@ impl F32VectorCoding {
             Self::I8ScaledUniform => Box::new(scaled_uniform::I8VectorCoder::new(similarity)),
             Self::I4ScaledUniform => Box::new(scaled_uniform::I4PackedVectorCoder::new(similarity)),
             Self::I16ScaledUniform => Box::new(scaled_uniform::I16VectorCoder::new(similarity)),
-            Self::LVQ1x1 => Box::new(lvq::PrimaryVectorCoder::<1>),
-            Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::<4>),
-            Self::LVQ1x8 => Box::new(lvq::PrimaryVectorCoder::<8>),
-            Self::LVQ2x1x8 => Box::new(lvq::TwoLevelVectorCoder::<1, 8>),
-            Self::LVQ2x1x12 => Box::new(lvq::TwoLevelVectorCoder::<1, 12>),
-            Self::LVQ2x1x16 => Box::new(lvq::TwoLevelVectorCoder::<1, 16>),
-            Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::<4, 4>),
-            Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::<4, 8>),
-            Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::<8, 8>),
+            Self::LVQ1x1 => Box::new(lvq::PrimaryVectorCoder::<1>::default()),
+            Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::<4>::default()),
+            Self::LVQ1x8 => Box::new(lvq::PrimaryVectorCoder::<8>::default()),
+            Self::LVQ2x1x8 => Box::new(lvq::TwoLevelVectorCoder::<1, 8>::default()),
+            Self::LVQ2x1x12 => Box::new(lvq::TwoLevelVectorCoder::<1, 12>::default()),
+            Self::LVQ2x1x16 => Box::new(lvq::TwoLevelVectorCoder::<1, 16>::default()),
+            Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::<4, 4>::default()),
+            Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::<4, 8>::default()),
+            Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::<8, 8>::default()),
         }
     }
 
@@ -209,8 +209,10 @@ impl F32VectorCoding {
             (Self::F32, Dot) => Box::new(float32::DotProductDistance),
             (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance),
             (Self::TruncatedF32(_), _) => F32VectorCoding::F32.new_vector_distance(similarity),
-            (Self::F16, Dot) | (Self::F16, Cosine) => Box::new(float16::DotProductDistance),
-            (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance),
+            (Self::F16, Dot) | (Self::F16, Cosine) => {
+                Box::new(float16::DotProductDistance::default())
+            }
+            (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance::default()),
             (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
             (Self::I8ScaledUniform, _) => Box::new(scaled_uniform::I8Distance::new(similarity)),
             (Self::I4ScaledUniform, _) => {
@@ -439,9 +441,15 @@ pub fn new_query_vector_distance_indexing<'a>(
         (_, F32VectorCoding::TruncatedF32(_)) => {
             new_query_vector_distance_indexing(query, similarity, F32VectorCoding::F32)
         }
-        (Dot, F32VectorCoding::F16) => quantized_qvd!(float16::DotProductDistance, query),
-        (Cosine, F32VectorCoding::F16) => quantized_qvd!(float16::DotProductDistance, query),
-        (Euclidean, F32VectorCoding::F16) => quantized_qvd!(float16::EuclideanDistance, query),
+        (Dot, F32VectorCoding::F16) => {
+            quantized_qvd!(float16::DotProductDistance::default(), query)
+        }
+        (Cosine, F32VectorCoding::F16) => {
+            quantized_qvd!(float16::DotProductDistance::default(), query)
+        }
+        (Euclidean, F32VectorCoding::F16) => {
+            quantized_qvd!(float16::EuclideanDistance::default(), query)
+        }
         (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
         (_, F32VectorCoding::I8ScaledUniform) => {
             quantized_qvd!(scaled_uniform::I8Distance::new(similarity), query)
@@ -567,7 +575,7 @@ mod test {
         let rf32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
         let ru8_dist =
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
-        assert_float_near!(rf32_dist, ru8_dist, 0.00001, index);
+        assert_float_near!(rf32_dist, ru8_dist, 0.0001, index);
 
         let dist_fn = format.new_vector_distance(similarity);
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);

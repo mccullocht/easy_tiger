@@ -76,7 +76,6 @@ pub(crate) fn l2sq_f32_bytes(q: &[u8], d: &[u8]) -> f64 {
     }
 }
 
-// XXX model other bits after this???
 #[cfg(target_arch = "aarch64")]
 unsafe fn l2sq_f32_bytes_neon(q: &[u8], d: &[u8]) -> f64 {
     use std::arch::aarch64::{vaddq_f32, vaddvq_f32, vdupq_n_f32, vfmaq_f32, vsubq_f32};

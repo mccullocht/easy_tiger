@@ -109,7 +109,7 @@ et_lvq_dot_u8(const uint8_t* a, const uint8_t* b, size_t len) {
     dot3 = vdotq_u32(dot3, av, bv);
   }
 
-  dot0 = vaddq_u32(vaddq_u32(dot0, dot1), vaddq_f32(dot2, dot3));
+  dot0 = vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3));
   size_t len16 = len & ~15;
   for (size_t i = len64; i < len16; i += 16) {
     uint8x16_t av = vld1q_u8(a + i);

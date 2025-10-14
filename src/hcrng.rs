@@ -157,9 +157,9 @@ fn writer_to_vector_store(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct ClusterKey {
-    cluster_id: u32,
-    vector_id: i64,
+pub struct ClusterKey {
+    pub cluster_id: u32,
+    pub vector_id: i64,
 }
 
 impl ClusterKey {

@@ -1,3 +1,5 @@
+mod analyze_graph;
+
 use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::{Args, Subcommand};
@@ -13,6 +15,7 @@ use memmap2::Mmap;
 use wt_mdb::Connection;
 
 use crate::{
+    chrng::analyze_graph::{analyze_graph, AnalyzeGraphArgs},
     ui::{progress_bar, progress_spinner},
     vamana::drop_index::drop_index,
     wt_args::WiredTigerArgs,
@@ -20,7 +23,7 @@ use crate::{
 };
 
 #[derive(Args)]
-pub struct HcrngArgs {
+pub struct ChrngArgs {
     #[command(flatten)]
     wt: WiredTigerArgs,
 
@@ -33,6 +36,8 @@ pub enum Command {
     /// Bulk load a set of vectors into an index.
     /// Requires that the index be uninitialized.
     BulkLoad(BulkLoadArgs),
+    /// Analyze the output tail graph.
+    AnalyzeGraph(AnalyzeGraphArgs),
 }
 
 #[derive(Args)]
@@ -91,12 +96,13 @@ pub struct BulkLoadArgs {
     limit: Option<usize>,
 }
 
-pub fn hcrng_command(args: HcrngArgs) -> io::Result<()> {
+pub fn chrng_command(args: ChrngArgs) -> io::Result<()> {
     let connection = args.wt.open_connection()?;
     let session = connection.open_session()?;
     let index_name = args.wt.index_name();
     match args.command {
         Command::BulkLoad(args) => bulk_load(connection, index_name, args),
+        Command::AnalyzeGraph(args) => analyze_graph(connection, index_name, args),
     }?;
     session.checkpoint()?;
     Ok(())

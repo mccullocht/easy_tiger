@@ -10,11 +10,8 @@
 use std::borrow::Cow;
 
 use crate::{
-    distance::dot_f32,
-    vectors::{
-        dot_unnormalized_to_distance, F32VectorCoder, QueryVectorDistance, VectorDistance,
-        VectorSimilarity,
-    },
+    F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
+    dot_unnormalized_to_distance,
 };
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -98,7 +95,7 @@ impl I8VectorCoder {
 impl F32VectorCoder for I8VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let l2_norm = if self.0 != VectorSimilarity::Dot {
-            crate::distance::dot_f32(vector, vector).sqrt() as f32
+            super::l2_norm(vector)
         } else {
             1.0
         };
@@ -137,8 +134,8 @@ fn dot_unnormalized_i8_f32_aarch64(quantized: &[i8], scale: f64, float: &[f32]) 
     let split = quantized.len() & !15;
     let mut sum = unsafe {
         use std::arch::aarch64::{
-            vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_low_s16, vget_low_s8,
-            vld1q_f32, vld1q_s8, vmovl_high_s16, vmovl_high_s8, vmovl_s16, vmovl_s8,
+            vaddvq_f32, vcvtq_f32_s32, vdupq_n_f32, vfmaq_f32, vget_low_s8, vget_low_s16,
+            vld1q_f32, vld1q_s8, vmovl_high_s8, vmovl_high_s16, vmovl_s8, vmovl_s16,
         };
 
         let mut dot = vdupq_n_f32(0.0);
@@ -262,7 +259,7 @@ impl<'a> I8QueryDistance<'a> {
     pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
         let query_l2_norm = match similarity {
             VectorSimilarity::Dot => 1.0,
-            _ => dot_f32(&query, &query).sqrt(),
+            _ => super::l2_norm(&query).into(),
         };
         Self {
             similarity,
@@ -295,7 +292,7 @@ impl I4PackedVectorCoder {
 impl F32VectorCoder for I4PackedVectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let l2_norm = if self.0 != VectorSimilarity::Dot {
-            crate::distance::dot_f32(vector, vector).sqrt() as f32
+            super::l2_norm(vector)
         } else {
             1.0
         };
@@ -396,7 +393,7 @@ impl<'a> I4PackedVector<'a> {
     fn dot_unnormalized_f32(&self, other: &[f32]) -> f64 {
         use std::arch::aarch64::{
             vaddvq_f32, vand_s8, vcvtq_f32_s32, vdup_n_s8, vdupq_n_f32, vfmaq_f32, vget_low_s16,
-            vld1_u8, vld1q_f32, vmovl_high_s16, vmovl_s16, vmovl_s8, vreinterpret_s8_u8, vshr_n_u8,
+            vld1_u8, vld1q_f32, vmovl_high_s16, vmovl_s8, vmovl_s16, vreinterpret_s8_u8, vshr_n_u8,
             vsub_s8, vzip1_s8, vzip2_s8,
         };
 
@@ -476,7 +473,7 @@ impl<'a> I4PackedQueryDistance<'a> {
     pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
         let query_l2_norm = match similarity {
             VectorSimilarity::Dot => 1.0,
-            _ => dot_f32(&query, &query).sqrt(),
+            _ => super::l2_norm(&query).into(),
         };
         Self {
             similarity,
@@ -509,7 +506,7 @@ impl I16VectorCoder {
 impl F32VectorCoder for I16VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let l2_norm = if self.0 != VectorSimilarity::Dot {
-            crate::distance::dot_f32(vector, vector).sqrt() as f32
+            super::l2_norm(vector)
         } else {
             1.0
         };
@@ -680,7 +677,7 @@ impl<'a> I16QueryDistance<'a> {
     pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
         let query_l2_norm = match similarity {
             VectorSimilarity::Dot => 1.0,
-            _ => dot_f32(&query, &query).sqrt(),
+            _ => super::l2_norm(&query).into(),
         };
         Self {
             similarity,

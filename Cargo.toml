@@ -38,7 +38,7 @@ name = "coding"
 harness = false
 
 [workspace]
-members = ["et", "pt", "qt", "wt_mdb", "wt_sys"]
+members = ["et", "pt", "qt", "vectors", "wt_mdb", "wt_sys"]
 
 [profile.profiling]
 inherits = "release"

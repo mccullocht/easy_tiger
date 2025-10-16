@@ -1,8 +1,6 @@
 //! Binary vector coding and distance computation.
 
-use simsimd::BinarySimilarity;
-
-use crate::vectors::{F32VectorCoder, QueryVectorDistance, VectorDistance};
+use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 
 #[derive(Debug, Copy, Clone)]
 pub struct BinaryQuantizedVectorCoder;
@@ -29,7 +27,13 @@ pub struct HammingDistance;
 
 impl VectorDistance for HammingDistance {
     fn distance(&self, a: &[u8], b: &[u8]) -> f64 {
-        BinarySimilarity::hamming(a, b).expect("same dimensionality") / (a.len() * 8) as f64
+        // TODO: consider vector acceleration this.
+        let dist = a
+            .iter()
+            .zip(b.iter())
+            .map(|(a, b)| (*a ^ *b).count_ones())
+            .sum::<u32>() as f64;
+        dist / (a.len() * 8) as f64
     }
 }
 

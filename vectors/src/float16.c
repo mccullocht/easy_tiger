@@ -9,9 +9,8 @@
 
 #include <arm_neon.h>
 
-__attribute__((target("+fp16")))
-EXPORT void et_serialize_f16(const float* v, size_t len, const float* scale,
-                             uint8_t* out) {
+__attribute__((target("+fp16"))) EXPORT void et_serialize_f16(
+    const float* v, size_t len, const float* scale, uint8_t* out) {
   size_t tail_split = len & ~3;
   for (size_t i = 0; i < tail_split; i += 4) {
     float32x4_t in = vld1q_f32(v + i);
@@ -39,8 +38,8 @@ EXPORT void et_serialize_f16(const float* v, size_t len, const float* scale,
 
 // It's faster to fill out a full 4 value tail entry than it is
 // to convert and compute one element at a time.
-__attribute__((target("+fp16")))
-HIDDEN float16x4_t load_tail_f16x4(const __fp16* v, size_t len) {
+__attribute__((target("+fp16"))) HIDDEN float16x4_t
+load_tail_f16x4(const __fp16* v, size_t len) {
   __fp16 tail[4] = {0, 0, 0, 0};
   for (size_t i = 0; i < len; i++) {
     tail[i] = v[i];
@@ -58,8 +57,9 @@ HIDDEN float32x4_t load_tail_f32x4(const float* v, size_t len) {
   return vld1q_f32(&tail[0]);
 }
 
-__attribute__((target("+fp16")))
-EXPORT float et_dot_f16_f16(const __fp16* a, const __fp16* b, size_t len) {
+__attribute__((target("+fp16"))) EXPORT float et_dot_f16_f16(const __fp16* a,
+                                                             const __fp16* b,
+                                                             size_t len) {
   float32x4_t dot0 = vdupq_n_f32(0.0);
   float32x4_t dot1 = vdupq_n_f32(0.0);
   float32x4_t dot2 = vdupq_n_f32(0.0);
@@ -96,8 +96,9 @@ EXPORT float et_dot_f16_f16(const __fp16* a, const __fp16* b, size_t len) {
   return vaddvq_f32(dot0);
 }
 
-__attribute__((target("+fp16")))
-EXPORT float et_dot_f32_f16(const float* a, const __fp16* b, size_t len) {
+__attribute__((target("+fp16"))) EXPORT float et_dot_f32_f16(const float* a,
+                                                             const __fp16* b,
+                                                             size_t len) {
   float32x4_t dot0 = vdupq_n_f32(0.0);
   float32x4_t dot1 = vdupq_n_f32(0.0);
   float32x4_t dot2 = vdupq_n_f32(0.0);
@@ -117,7 +118,7 @@ EXPORT float et_dot_f32_f16(const float* a, const __fp16* b, size_t len) {
 
   dot0 = vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3));
   size_t len4 = len & ~3;
-  for (size_t i = len16; i <= len4; i += 4) {
+  for (size_t i = len16; i < len4; i += 4) {
     float32x4_t av = vld1q_f32(a + i);
     float32x4_t bv = vcvt_f32_f16(vld1_f16(b + i));
     dot0 = vfmaq_f32(dot0, av, bv);
@@ -132,8 +133,9 @@ EXPORT float et_dot_f32_f16(const float* a, const __fp16* b, size_t len) {
   return vaddvq_f32(dot0);
 }
 
-__attribute__((target("+fp16")))
-EXPORT float et_l2_f16_f16(const __fp16* a, const __fp16* b, size_t len) {
+__attribute__((target("+fp16"))) EXPORT float et_l2_f16_f16(const __fp16* a,
+                                                            const __fp16* b,
+                                                            size_t len) {
   float32x4_t sum0 = vdupq_n_f32(0.0);
   float32x4_t sum1 = vdupq_n_f32(0.0);
   float32x4_t sum2 = vdupq_n_f32(0.0);
@@ -178,8 +180,9 @@ EXPORT float et_l2_f16_f16(const __fp16* a, const __fp16* b, size_t len) {
   return vaddvq_f32(sum0);
 }
 
-__attribute__((target("+fp16")))
-EXPORT float et_l2_f32_f16(const float* a, const __fp16* b, size_t len) {
+__attribute__((target("+fp16"))) EXPORT float et_l2_f32_f16(const float* a,
+                                                            const __fp16* b,
+                                                            size_t len) {
   float32x4_t sum0 = vdupq_n_f32(0.0);
   float32x4_t sum1 = vdupq_n_f32(0.0);
   float32x4_t sum2 = vdupq_n_f32(0.0);

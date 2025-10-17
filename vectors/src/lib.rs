@@ -599,6 +599,8 @@ mod test {
         let coder = format.new_coder(similarity);
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
+        println!("a: {:?}", coder.decode(&a.qvec).unwrap());
+        println!("b: {:?}", coder.decode(&b.qvec).unwrap());
 
         let f32_dist_fn = similarity.new_distance_function();
         let f32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);

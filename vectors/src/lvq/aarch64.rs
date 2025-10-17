@@ -1,23 +1,23 @@
 //! aarch64 implementations of lvq routines.
 
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use std::arch::aarch64::{
-    float32x4_t, uint32x4_t, uint8x16_t, vaddlvq_u16, vaddlvq_u8, vaddq_f32, vaddq_f64, vaddq_u16,
-    vaddvq_f32, vaddvq_u16, vaddvq_u32, vaddvq_u64, vand_u16, vand_u32, vand_u8, vandq_u16,
-    vandq_u8, vcntq_u8, vcombine_u16, vcombine_u32, vcombine_u8, vcvt_f64_f32, vcvt_high_f64_f32,
-    vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdup_n_u16, vdup_n_u32, vdup_n_u8, vdupq_n_f32,
+    float32x4_t, uint8x16_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32, vaddq_f64, vaddq_u16,
+    vaddvq_f32, vaddvq_u16, vaddvq_u32, vaddvq_u64, vand_u8, vand_u16, vand_u32, vandq_u8,
+    vandq_u16, vcntq_u8, vcombine_u8, vcombine_u16, vcombine_u32, vcvt_f64_f32, vcvt_high_f64_f32,
+    vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdup_n_u8, vdup_n_u16, vdup_n_u32, vdupq_n_f32,
     vdupq_n_f64, vdupq_n_u16, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vget_low_u16,
-    vgetq_lane_f64, vld1_s16, vld1_s32, vld1_s8, vld1_u8, vld1q_f32, vld1q_s16, vld1q_s32,
-    vld1q_s64, vld1q_s8, vld1q_u16, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32,
-    vmovl_high_u16, vmovl_u16, vmovl_u8, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
-    vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u16, vpaddlq_u32, vpaddlq_u8, vqtbl1q_u8,
-    vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u8_u16, vreinterpretq_u8_u32,
-    vrndaq_f32, vshl_u16, vshl_u32, vshl_u8, vshlq_u16, vshlq_u32, vshlq_u64, vshlq_u8, vst1q_u16,
-    vst1q_u8, vsubq_f32, vsubq_f64,
+    vgetq_lane_f64, vld1_s8, vld1_s16, vld1_s32, vld1_u8, vld1q_f32, vld1q_s8, vld1q_s16,
+    vld1q_s32, vld1q_s64, vld1q_u8, vld1q_u16, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32,
+    vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
+    vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8,
+    vreinterpretq_u8_u16, vreinterpretq_u8_u32, vreinterpretq_u16_u8, vreinterpretq_u32_u8,
+    vrndaq_f32, vshl_u8, vshl_u16, vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64, vst1q_u8,
+    vst1q_u16, vsubq_f32, vsubq_f64,
 };
 
-use crate::vectors::lvq::{PrimaryVector, TwoLevelVector};
-
-use super::{packing, VectorStats, LAMBDA, MINIMUM_MSE_GRID};
+use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats, packing};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let tail_split = vector.len() & !3;
@@ -919,7 +919,7 @@ mod test {
             0.9628870565403511,
             -0.5074461455585713,
         ];
-        let scalar_stats = crate::vectors::lvq::scalar::compute_vector_stats(&vector);
+        let scalar_stats = crate::lvq::scalar::compute_vector_stats(&vector);
         let aarch64_stats = super::compute_vector_stats(&vector);
         assert_eq!(scalar_stats.min, aarch64_stats.min);
         assert_eq!(scalar_stats.max, aarch64_stats.max);
@@ -939,7 +939,7 @@ mod test {
     #[test]
     fn compute_vector_stats1() {
         let vector = [-0.30671382, 0.76678455, 0.21469967, -0.5214135];
-        let scalar_stats = crate::vectors::lvq::scalar::compute_vector_stats(&vector);
+        let scalar_stats = crate::lvq::scalar::compute_vector_stats(&vector);
         let aarch64_stats = super::compute_vector_stats(&vector);
         assert_eq!(scalar_stats.min, aarch64_stats.min);
         assert_eq!(scalar_stats.max, aarch64_stats.max);

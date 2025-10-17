@@ -17,6 +17,7 @@ mod distance {
 
     #[derive(Debug, Clone, Copy)]
     pub enum InstructionSet {
+        #[allow(unused)]
         Scalar,
         #[cfg(target_arch = "aarch64")]
         Neon,
@@ -47,6 +48,8 @@ mod distance {
 
     #[inline]
     pub fn dot(a: &[u8], b: &[u8], inst: Option<InstructionSet>) -> f64 {
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a.len() % 4, 0);
         match inst.unwrap_or_default() {
             InstructionSet::Scalar => dot_scalar(a, b),
             #[cfg(target_arch = "aarch64")]
@@ -69,7 +72,7 @@ mod distance {
     #[inline]
     unsafe fn dot_neon(a: &[u8], b: &[u8]) -> f64 {
         use std::arch::aarch64::{vaddq_f32, vaddvq_f32, vdupq_n_f32, vfmaq_f32};
-        let len64 = q.len() & !63;
+        let len64 = a.len() & !63;
         let mut dot0 = vdupq_n_f32(0.0);
         let mut dot1 = vdupq_n_f32(0.0);
         let mut dot2 = vdupq_n_f32(0.0);
@@ -77,40 +80,40 @@ mod distance {
         for i in (0..len64).step_by(64) {
             dot0 = vfmaq_f32(
                 dot0,
-                load_f32x4_le(q.as_ptr().add(i)),
-                load_f32x4_le(d.as_ptr().add(i)),
+                load_f32x4_le(a.as_ptr().add(i)),
+                load_f32x4_le(b.as_ptr().add(i)),
             );
             dot1 = vfmaq_f32(
                 dot1,
-                load_f32x4_le(q.as_ptr().add(i + 16)),
-                load_f32x4_le(d.as_ptr().add(i + 16)),
+                load_f32x4_le(a.as_ptr().add(i + 16)),
+                load_f32x4_le(b.as_ptr().add(i + 16)),
             );
             dot2 = vfmaq_f32(
                 dot2,
-                load_f32x4_le(q.as_ptr().add(i + 32)),
-                load_f32x4_le(d.as_ptr().add(i + 32)),
+                load_f32x4_le(a.as_ptr().add(i + 32)),
+                load_f32x4_le(b.as_ptr().add(i + 32)),
             );
             dot3 = vfmaq_f32(
                 dot3,
-                load_f32x4_le(q.as_ptr().add(i + 48)),
-                load_f32x4_le(d.as_ptr().add(i + 48)),
+                load_f32x4_le(a.as_ptr().add(i + 48)),
+                load_f32x4_le(b.as_ptr().add(i + 48)),
             );
         }
 
         dot0 = vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3));
-        let len16 = q.len() & !15;
+        let len16 = a.len() & !15;
         for i in (len64..len16).step_by(16) {
             dot0 = vfmaq_f32(
                 dot0,
-                load_f32x4_le(q.as_ptr().add(i)),
-                load_f32x4_le(d.as_ptr().add(i)),
+                load_f32x4_le(a.as_ptr().add(i)),
+                load_f32x4_le(b.as_ptr().add(i)),
             );
         }
 
         let mut dot = vaddvq_f32(dot0);
-        for i in (len16..q.len()).step_by(4) {
-            dot += std::ptr::read_unaligned(q.as_ptr().add(i) as *const f32)
-                * std::ptr::read_unaligned(d.as_ptr().add(i) as *const f32);
+        for i in (len16..a.len()).step_by(4) {
+            dot += std::ptr::read_unaligned(a.as_ptr().add(i) as *const f32)
+                * std::ptr::read_unaligned(b.as_ptr().add(i) as *const f32);
         }
         dot.into()
     }

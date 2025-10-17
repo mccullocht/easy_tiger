@@ -287,7 +287,7 @@ impl<'a> EuclideanQueryDistance<'a> {
                 })
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
-            Acceleration::Neon => unsafe {
+            InstructionSet::Neon => unsafe {
                 et_l2_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
             },
             #[cfg(target_arch = "x86_64")]

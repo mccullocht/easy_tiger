@@ -3,9 +3,9 @@ use std::{io, num::NonZero, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
-    vectors::{F32VectorCoding, VectorSimilarity},
     wt::TableGraphVectorIndex,
 };
+use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;
 
 use super::drop_index::drop_index;

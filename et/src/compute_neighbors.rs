@@ -8,12 +8,12 @@ use std::{
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
-    vectors::VectorSimilarity,
     Neighbor,
 };
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
+use vectors::VectorSimilarity;
 
 use crate::neighbor_util::TopNeighbors;
 

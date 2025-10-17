@@ -7,12 +7,10 @@ use std::{collections::BTreeSet, io, num::NonZero, str::FromStr};
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
+use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity};
 use wt_mdb::{Error, Result};
 
-use crate::{
-    vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity},
-    Neighbor,
-};
+use crate::Neighbor;
 
 /// Parameters for a search over a Vamana graph.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]

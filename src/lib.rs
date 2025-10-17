@@ -12,7 +12,6 @@ pub mod input;
 pub mod kmeans;
 pub mod search;
 pub mod spann;
-pub mod vectors;
 pub mod wt;
 
 use std::cmp::Ordering;

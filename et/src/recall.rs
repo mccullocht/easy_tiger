@@ -9,10 +9,10 @@ use std::{
 use clap::{Args, ValueEnum};
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
-    vectors::VectorSimilarity,
     Neighbor,
 };
 use memmap2::Mmap;
+use vectors::VectorSimilarity;
 
 /// Supported recall metrics.
 #[derive(Default, Debug, Copy, Clone, ValueEnum)]

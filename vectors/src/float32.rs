@@ -47,7 +47,7 @@ mod distance {
 
     #[inline]
     pub fn dot(a: &[u8], b: &[u8], inst: Option<InstructionSet>) -> f64 {
-        match inst.unwrap_or(InstructionSet::default()) {
+        match inst.unwrap_or_default() {
             InstructionSet::Scalar => dot_scalar(a, b),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => unsafe { dot_neon(a, b) },
@@ -141,7 +141,7 @@ mod distance {
     pub fn l2sq(a: &[u8], b: &[u8], inst: Option<InstructionSet>) -> f64 {
         assert_eq!(a.len(), b.len());
         assert_eq!(a.len() % 4, 0);
-        match inst.unwrap_or(InstructionSet::default()) {
+        match inst.unwrap_or_default() {
             InstructionSet::Scalar => l2sq_scalar(a, b),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => unsafe { l2sq_neon(a, b) },

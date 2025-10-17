@@ -17,6 +17,10 @@ use std::{
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use vectors::{
+    new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, QueryVectorDistance,
+    VectorDistance,
+};
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
     session::{FormatString, FormatWriter, Formatted, PackedFormatReader},
@@ -27,10 +31,6 @@ use crate::{
     graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore},
     input::{VecVectorStore, VectorStore},
     search::{GraphSearchStats, GraphSearcher},
-    vectors::{
-        new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, QueryVectorDistance,
-        VectorDistance,
-    },
     wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };

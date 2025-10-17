@@ -22,20 +22,11 @@ wt_mdb = { path = "./wt_mdb" }
 
 [dev-dependencies]
 approx = "0.5.1"
-criterion = "0.7.0"
 rand_xoshiro = "0.7.0"
 tempfile = "3.20.0"
 
 [build-dependencies]
 cc = "1.2.31"
-
-[[bench]]
-name = "distance"
-harness = false
-
-[[bench]]
-name = "coding"
-harness = false
 
 [workspace]
 members = ["et", "pt", "qt", "vectors", "wt_mdb", "wt_sys"]

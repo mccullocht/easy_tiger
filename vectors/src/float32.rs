@@ -9,7 +9,7 @@ use std::borrow::Cow;
 
 use crate::{
     F32VectorCoder, F32VectorDistance, QueryVectorDistance as QueryVectorDistanceT, VectorDistance,
-    VectorSimilarity,
+    VectorSimilarity, float32::distance::InstructionSet,
 };
 
 mod distance {
@@ -336,49 +336,55 @@ impl F32VectorCoder for VectorCoder {
 }
 
 /// Computes a score based on l2 distance.
-#[derive(Debug, Copy, Clone)]
-pub struct EuclideanDistance;
+#[derive(Debug, Copy, Clone, Default)]
+pub struct EuclideanDistance(InstructionSet);
 
 impl VectorDistance for EuclideanDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // XXX save inst
-        distance::l2sq(query, doc, None)
+        distance::l2sq(query, doc, Some(self.0))
     }
 }
 
 impl F32VectorDistance for EuclideanDistance {
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
-        // XXX save inst
-        distance::l2sq(bytemuck::cast_slice(a), bytemuck::cast_slice(b), None)
+        distance::l2sq(
+            bytemuck::cast_slice(a),
+            bytemuck::cast_slice(b),
+            Some(self.0),
+        )
     }
 }
 
 /// Computes a score based on the dot product.
-#[derive(Debug, Copy, Clone)]
-pub struct DotProductDistance;
+#[derive(Debug, Copy, Clone, Default)]
+pub struct DotProductDistance(InstructionSet);
 
 impl VectorDistance for DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // Assuming values are normalized, this will produce a distance in [0,1]
-        // XXX precompute inst here.
-        (-distance::dot(query, doc, None) + 1.0) / 2.0
+        (-distance::dot(query, doc, Some(self.0)) + 1.0) / 2.0
     }
 }
 
 impl F32VectorDistance for DotProductDistance {
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
         // Assuming values are normalized, this will produce a distance in [0,1]
-        (-distance::dot(bytemuck::cast_slice(a), bytemuck::cast_slice(b), None) + 1.0) / 2.0
+        (-distance::dot(
+            bytemuck::cast_slice(a),
+            bytemuck::cast_slice(b),
+            Some(self.0),
+        ) + 1.0)
+            / 2.0
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct CosineDistance;
+#[derive(Debug, Default, Copy, Clone)]
+pub struct CosineDistance(DotProductDistance);
 
 impl VectorDistance for CosineDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // Vectors are normalized during encoding so we can make this fast.
-        DotProductDistance.distance(query, doc)
+        self.0.distance(query, doc)
     }
 }
 
@@ -421,10 +427,16 @@ pub fn new_query_vector_distance<'a>(
 ) -> Box<dyn QueryVectorDistanceT + 'a> {
     match similarity {
         VectorSimilarity::Cosine => Box::new(QueryVectorDistance::new(
-            CosineDistance,
+            CosineDistance::default(),
             l2_normalize(query),
         )),
-        VectorSimilarity::Dot => Box::new(QueryVectorDistance::new(DotProductDistance, query)),
-        VectorSimilarity::Euclidean => Box::new(QueryVectorDistance::new(EuclideanDistance, query)),
+        VectorSimilarity::Dot => Box::new(QueryVectorDistance::new(
+            DotProductDistance::default(),
+            query,
+        )),
+        VectorSimilarity::Euclidean => Box::new(QueryVectorDistance::new(
+            EuclideanDistance::default(),
+            query,
+        )),
     }
 }

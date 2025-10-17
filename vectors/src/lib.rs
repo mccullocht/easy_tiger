@@ -42,9 +42,9 @@ impl VectorSimilarity {
     // XXX figure out if we can do away with F32VectorDistance.
     pub fn new_distance_function(self) -> Box<dyn F32VectorDistance> {
         match self {
-            Self::Euclidean => Box::new(float32::EuclideanDistance),
-            Self::Dot => Box::new(float32::DotProductDistance),
-            Self::Cosine => Box::new(float32::CosineDistance),
+            Self::Euclidean => Box::new(float32::EuclideanDistance::default()),
+            Self::Dot => Box::new(float32::DotProductDistance::default()),
+            Self::Cosine => Box::new(float32::CosineDistance::default()),
         }
     }
 
@@ -210,9 +210,9 @@ impl F32VectorCoding {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
 
         match (self, similarity) {
-            (Self::F32, Cosine) => Box::new(float32::CosineDistance),
-            (Self::F32, Dot) => Box::new(float32::DotProductDistance),
-            (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance),
+            (Self::F32, Cosine) => Box::new(float32::CosineDistance::default()),
+            (Self::F32, Dot) => Box::new(float32::DotProductDistance::default()),
+            (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance::default()),
             (Self::TruncatedF32(_), _) => F32VectorCoding::F32.new_vector_distance(similarity),
             (Self::F16, Dot) | (Self::F16, Cosine) => {
                 Box::new(float16::DotProductDistance::default())
@@ -440,9 +440,13 @@ pub fn new_query_vector_distance_indexing<'a>(
         };
     }
     match (similarity, coding) {
-        (Cosine, F32VectorCoding::F32) => quantized_qvd!(float32::CosineDistance, query),
-        (Dot, F32VectorCoding::F32) => quantized_qvd!(float32::DotProductDistance, query),
-        (Euclidean, F32VectorCoding::F32) => quantized_qvd!(float32::EuclideanDistance, query),
+        (Cosine, F32VectorCoding::F32) => quantized_qvd!(float32::CosineDistance::default(), query),
+        (Dot, F32VectorCoding::F32) => {
+            quantized_qvd!(float32::DotProductDistance::default(), query)
+        }
+        (Euclidean, F32VectorCoding::F32) => {
+            quantized_qvd!(float32::EuclideanDistance::default(), query)
+        }
         (_, F32VectorCoding::TruncatedF32(_)) => {
             new_query_vector_distance_indexing(query, similarity, F32VectorCoding::F32)
         }

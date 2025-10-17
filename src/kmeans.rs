@@ -7,6 +7,7 @@ use rand::seq::index;
 use rand::{distr::weighted::WeightedIndex, prelude::*};
 use rayon::prelude::*;
 use tracing::debug;
+use vectors::{EuclideanDistance, F32VectorDistance};
 
 use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
 
@@ -321,12 +322,13 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
     centroids.push(&vec![0.0; dataset.elem_stride()]);
     let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
     let mut prev_inertia = dataset.len();
+    let l2_dist = vectors::EuclideanDistance::default();
     for _ in 0..max_iters {
         bp_update_centroid(&left_vectors, &mut centroids[0]);
         bp_update_centroid(&right_vectors, &mut centroids[1]);
         distances.par_iter_mut().enumerate().for_each(|(i, d)| {
-            let ldist = crate::distance::l2sq_f32(&dataset[i], &centroids[0]);
-            let rdist = crate::distance::l2sq_f32(&dataset[i], &centroids[1]);
+            let ldist = l2_dist.distance_f32(&dataset[i], &centroids[0]);
+            let rdist = l2_dist.distance_f32(&dataset[i], &centroids[1]);
             *d = (i, ldist, rdist, ldist - rdist)
         });
         distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
@@ -366,10 +368,10 @@ fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
 
     let mut assignments = vec![(0, 0.0); dataset.len()];
     for i in left_vectors.into_subset().into_iter() {
-        assignments[i] = (0, crate::distance::l2sq_f32(&centroids[0], &dataset[i]));
+        assignments[i] = (0, l2_dist.distance_f32(&centroids[0], &dataset[i]));
     }
     for i in right_vectors.into_subset().into_iter() {
-        assignments[i] = (1, crate::distance::l2sq_f32(&centroids[1], &dataset[i]));
+        assignments[i] = (1, l2_dist.distance_f32(&centroids[1], &dataset[i]));
     }
 
     if converged {
@@ -471,6 +473,7 @@ fn initialize_centroids<
         InitializationMethod::KMeansPlusPlus => {
             centroids.push(&dataset[rng.random_range(0..dataset.len())]);
             let mut assignments = compute_assignments(training_data, &centroids);
+            let l2_dist = EuclideanDistance::default();
             while centroids.len() < k {
                 let index = WeightedIndex::new(assignments.iter().map(|a| a.1))
                     .unwrap()
@@ -480,7 +483,7 @@ fn initialize_centroids<
                 centroids.push(&training_data[index]);
                 let centroid_vector = &centroids[centroid];
                 assignments.par_iter_mut().enumerate().for_each(|(i, a)| {
-                    let d = crate::distance::l2(&training_data[i], centroid_vector);
+                    let d = l2_dist.distance_f32(&training_data[i], centroid_vector);
                     if d < a.1 {
                         *a = (centroid, d);
                     }
@@ -501,13 +504,14 @@ pub fn compute_assignments<
     dataset: &V,
     centroids: &C,
 ) -> Vec<(usize, f64)> {
+    let l2_dist = EuclideanDistance::default();
     (0..dataset.len())
         .into_par_iter()
         .map(|i| {
             let v = &dataset[i];
             centroids
                 .iter()
-                .map(|c| crate::distance::l2(v, c))
+                .map(|c| l2_dist.distance_f32(v, c))
                 .enumerate()
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .expect("at least one centroid")
@@ -523,9 +527,10 @@ fn compute_centroid_distance_max<
     old: &C,
     new: &D,
 ) -> f64 {
+    let l2_dist = vectors::EuclideanDistance::default();
     (0..old.len())
         .into_par_iter()
-        .map(|i| crate::distance::l2(&old[i], &new[i]))
+        .map(|i| l2_dist.distance_f32(&old[i], &new[i]))
         .max_by(|a, b| a.total_cmp(b))
         .expect("non-zero k")
 }

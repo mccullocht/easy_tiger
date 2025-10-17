@@ -18,27 +18,19 @@ simsimd = { version = "6.5.0" }
 stable_deref_trait = "1.2.0"
 thread_local = "1.1.8"
 tracing = "0.1.41"
+vectors = { path = "./vectors" }
 wt_mdb = { path = "./wt_mdb" }
 
 [dev-dependencies]
 approx = "0.5.1"
-criterion = "0.7.0"
 rand_xoshiro = "0.7.0"
 tempfile = "3.20.0"
 
 [build-dependencies]
 cc = "1.2.31"
 
-[[bench]]
-name = "distance"
-harness = false
-
-[[bench]]
-name = "coding"
-harness = false
-
 [workspace]
-members = ["et", "pt", "qt", "wt_mdb", "wt_sys"]
+members = ["et", "pt", "qt", "vectors", "wt_mdb", "wt_sys"]
 
 [profile.profiling]
 inherits = "release"

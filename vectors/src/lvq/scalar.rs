@@ -2,9 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::vectors::lvq::{PrimaryVector, TwoLevelVector};
-
-use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
+use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let (min, max, mean, variance, dot) = vector.iter().copied().enumerate().fold(

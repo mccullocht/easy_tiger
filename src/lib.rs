@@ -5,14 +5,12 @@
 //! graph-based DiskANN index is used to serve vector similarity queries.
 pub mod bulk;
 pub mod crud;
-pub mod distance;
 pub mod graph;
 pub mod graph_clustering;
 pub mod input;
 pub mod kmeans;
 pub mod search;
 pub mod spann;
-pub mod vectors;
 pub mod wt;
 
 use std::cmp::Ordering;

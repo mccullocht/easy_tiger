@@ -1,0 +1,26 @@
+[package]
+name = "vectors"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = "1.24.0"
+half = "2.7.1"
+serde = { version = "1.0.228", features = ["serde_derive"] }
+
+[build-dependencies]
+cc = "1.2.41"
+
+[dev-dependencies]
+approx = "0.5.1"
+criterion = "0.7.0"
+rand = "0.9.2"
+rand_xoshiro = "0.7.0"
+
+[[bench]]
+name = "distance"
+harness = false
+
+[[bench]]
+name = "coding"
+harness = false

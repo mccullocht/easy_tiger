@@ -7,10 +7,10 @@ use crate::{
         GraphVectorStore, GraphVertex,
     },
     search::GraphSearcher,
-    vectors::{F32VectorCoder, VectorDistance},
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
+use vectors::{F32VectorCoder, VectorDistance};
 use wt_mdb::{Error, Result, Session};
 
 /// Perform mutations on the vector index.
@@ -310,6 +310,7 @@ impl IndexMutator {
 mod tests {
     use std::{num::NonZero, sync::Arc};
 
+    use vectors::{F32VectorCoding, VectorSimilarity};
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
     use crate::{
@@ -317,7 +318,6 @@ mod tests {
             Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
         },
         search::GraphSearcher,
-        vectors::{F32VectorCoding, VectorSimilarity},
         wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     };
 

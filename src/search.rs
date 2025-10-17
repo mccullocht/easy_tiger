@@ -7,13 +7,13 @@ use std::{
 
 use crate::{
     graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex},
-    vectors::{
-        new_query_vector_distance_f32, new_query_vector_distance_indexing, QueryVectorDistance,
-    },
     Neighbor,
 };
 
 use rustix::io::Errno;
+use vectors::{
+    new_query_vector_distance_f32, new_query_vector_distance_indexing, QueryVectorDistance,
+};
 use wt_mdb::{Error, Result};
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -377,13 +377,13 @@ impl<'a> VisitCandidateGuard<'a> {
 mod test {
     use std::num::NonZero;
 
+    use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
     use wt_mdb::Result;
 
     use crate::{
         graph::{
             Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
         },
-        vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity},
         Neighbor,
     };
 

@@ -7,16 +7,14 @@
 use std::{ffi::CString, io, sync::Arc};
 
 use rustix::io::Errno;
+use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity};
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
     options::{CreateOptionsBuilder, DropOptions},
     Connection, Error, RecordCursorGuard, Result, Session,
 };
 
-use crate::{
-    graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex},
-    vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity},
-};
+use crate::graph::{Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex};
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;

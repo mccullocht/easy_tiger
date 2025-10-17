@@ -1,6 +1,6 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use easy_tiger::vectors::{F32VectorCoding, VectorSimilarity};
+use criterion::{Criterion, criterion_group, criterion_main};
 use rand::{Rng, SeedableRng};
+use vectors::{F32VectorCoding, VectorSimilarity};
 
 fn generate_test_vector(dim: usize) -> Vec<f32> {
     let rng = rand_xoshiro::Xoroshiro128PlusPlus::seed_from_u64(0x455A_5469676572);

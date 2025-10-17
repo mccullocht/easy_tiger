@@ -39,7 +39,6 @@ pub enum VectorSimilarity {
 
 impl VectorSimilarity {
     /// Return an [`F32VectorDistance`] for this similarity function.
-    // XXX figure out if we can do away with F32VectorDistance.
     pub fn new_distance_function(self) -> Box<dyn F32VectorDistance> {
         match self {
             Self::Euclidean => Box::new(float32::EuclideanDistance::default()),

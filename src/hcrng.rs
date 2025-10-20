@@ -51,13 +51,12 @@ use std::{
 
 use memmap2::Mmap;
 use tempfile::tempfile;
+use vectors::{l2_normalize, VectorSimilarity};
 use wt_mdb::{options::CreateOptionsBuilder, Connection, Result};
 
 use crate::{
-    distance::l2_normalize,
     hcrng::clustering::ClusterIter,
     input::{DerefVectorStore, VectorStore},
-    vectors::VectorSimilarity,
     wt::{read_app_metadata, Leb128EdgeIterator, ENTRY_POINT_KEY},
 };
 

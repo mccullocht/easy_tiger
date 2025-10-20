@@ -1,4 +1,4 @@
-use crate::vectors::{F32VectorCoder, F32VectorCoding, VectorSimilarity};
+use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity};
 
 pub struct VectorCoder {
     dimensions: usize,

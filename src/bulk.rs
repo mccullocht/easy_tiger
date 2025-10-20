@@ -22,6 +22,7 @@ use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
+use vectors::{new_query_vector_distance_indexing, F32VectorCoding, VectorSimilarity};
 use wt_mdb::{options::CreateOptionsBuilder, Connection, Result, Session};
 
 use crate::{
@@ -31,7 +32,6 @@ use crate::{
     },
     input::{DerefVectorStore, VectorStore},
     search::GraphSearcher,
-    vectors::{new_query_vector_distance_indexing, F32VectorCoding, VectorSimilarity},
     wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
@@ -735,7 +735,7 @@ impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
         }
     }
 
-    fn similarity(&self) -> crate::vectors::VectorSimilarity {
+    fn similarity(&self) -> VectorSimilarity {
         match self {
             Self::Cursor(c) => c.similarity(),
             Self::Memory(_, s, _) => *s,

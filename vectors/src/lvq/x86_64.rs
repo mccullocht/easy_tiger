@@ -1,31 +1,31 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+
 use std::arch::x86_64::{
-    __m512i, _mm256_add_ps, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_castps256_ps128,
-    _mm256_cvtepi16_epi8, _mm256_cvtepi8_epi16, _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps,
-    _mm256_fmadd_ps, _mm256_loadu_epi16, _mm256_loadu_epi32, _mm256_loadu_epi8,
-    _mm256_mask_storeu_epi16, _mm256_mask_storeu_epi8, _mm256_maskz_loadu_epi16, _mm256_mul_ps,
-    _mm256_or_si256, _mm256_permutevar8x32_epi32, _mm256_permutexvar_epi32, _mm256_set1_epi16,
-    _mm256_set1_epi32, _mm256_set1_ps, _mm256_shuffle_epi8, _mm256_sllv_epi16, _mm256_srlv_epi16,
-    _mm256_sub_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32, _mm512_and_si512,
-    _mm512_castps512_ps256, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi16, _mm512_cvtepu16_epi32,
-    _mm512_cvtepu32_ps, _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32,
-    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_mask_mul_ps,
-    _mm512_mask_sub_ps, _mm512_maskz_add_ps, _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32,
-    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
-    _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps,
-    _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set1_epi32, _mm512_set1_epi8,
-    _mm512_set1_ps, _mm512_srli_epi64, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
-    _mm_add_ps, _mm_and_si128, _mm_andnot_si128, _mm_broadcastd_epi32, _mm_bsrli_si128,
-    _mm_cmpeq_epi8, _mm_cvtps_pd, _mm_cvtsd_f64, _mm_fmadd_pd, _mm_fmadd_ps, _mm_hadd_pd,
-    _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps, _mm_loadu_epi32, _mm_loadu_epi64, _mm_loadu_epi8,
-    _mm_mask_storeu_epi8, _mm_maskz_loadu_epi8, _mm_mul_pd, _mm_mul_ps, _mm_or_si128,
-    _mm_set1_epi16, _mm_set1_epi64x, _mm_set1_epi8, _mm_set1_pd, _mm_set1_ps, _mm_shuffle_epi8,
-    _mm_sllv_epi64, _mm_srli_epi64, _mm_srlv_epi32, _mm_sub_ps, _mm_unpacklo_epi8,
-    _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT,
+    __m512i, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT, _mm_add_ps, _mm_and_si128,
+    _mm_andnot_si128, _mm_broadcastd_epi32, _mm_bsrli_si128, _mm_cmpeq_epi8, _mm_cvtps_pd,
+    _mm_cvtsd_f64, _mm_fmadd_pd, _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps,
+    _mm_loadu_epi8, _mm_loadu_epi32, _mm_loadu_epi64, _mm_mask_storeu_epi8, _mm_maskz_loadu_epi8,
+    _mm_mul_pd, _mm_mul_ps, _mm_or_si128, _mm_set1_epi8, _mm_set1_epi16, _mm_set1_epi64x,
+    _mm_set1_pd, _mm_set1_ps, _mm_shuffle_epi8, _mm_sllv_epi64, _mm_srli_epi64, _mm_srlv_epi32,
+    _mm_sub_ps, _mm_unpacklo_epi8, _mm256_add_ps, _mm256_and_si256, _mm256_broadcastsi128_si256,
+    _mm256_castps256_ps128, _mm256_cvtepi8_epi16, _mm256_cvtepi16_epi8, _mm256_cvtepu8_epi16,
+    _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_loadu_epi8, _mm256_loadu_epi16,
+    _mm256_loadu_epi32, _mm256_mask_storeu_epi8, _mm256_mask_storeu_epi16,
+    _mm256_maskz_loadu_epi16, _mm256_mul_ps, _mm256_or_si256, _mm256_permutevar8x32_epi32,
+    _mm256_permutexvar_epi32, _mm256_set1_epi16, _mm256_set1_epi32, _mm256_set1_ps,
+    _mm256_shuffle_epi8, _mm256_sllv_epi16, _mm256_srlv_epi16, _mm256_sub_ps, _mm512_add_epi32,
+    _mm512_add_ps, _mm512_and_epi32, _mm512_and_si512, _mm512_castps512_ps256,
+    _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi16, _mm512_cvtepu16_epi32, _mm512_cvtepu32_ps,
+    _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32, _mm512_extractf32x8_ps,
+    _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_add_ps,
+    _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32, _mm512_maskz_loadu_epi8,
+    _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps, _mm512_popcnt_epi32,
+    _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps,
+    _mm512_roundscale_ps, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_srli_epi64,
+    _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
-use crate::vectors::lvq::{PrimaryVector, TwoLevelVector};
-
-use super::{VectorStats, LAMBDA, MINIMUM_MSE_GRID};
+use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
 
 #[target_feature(enable = "avx512f,avx,fma")]
 pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {

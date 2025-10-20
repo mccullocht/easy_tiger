@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use clap::Parser;
 use easy_tiger::hcrng;
 use easy_tiger::input::DerefVectorStore;
-use easy_tiger::vectors::VectorSimilarity;
 use histogram::Histogram;
 use indicatif::ProgressBar;
 use memmap2::Mmap;
+use vectors::VectorSimilarity;
 
 #[derive(Parser)]
 #[command(version, about = "Tool for instrumenting vector partitioning techniques", long_about = None)]

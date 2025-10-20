@@ -11,3 +11,4 @@ rayon = "1.10.0"
 indicatif = { version = "0.18.0", features = ["rayon"] }
 bytemuck = "1.23.1"
 crossbeam-utils = "0.8.21"
+vectors = { path = "../vectors" }

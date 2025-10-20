@@ -5,11 +5,9 @@ use std::collections::VecDeque;
 
 use rayon::prelude::*;
 use tracing::debug;
+use vectors::F32VectorDistance;
 
-use crate::{
-    input::{SubsetViewVectorStore, VecVectorStore, VectorStore},
-    vectors::F32VectorDistance,
-};
+use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
 
 pub struct ClusterIter<'a, V, P> {
     dataset: &'a V,

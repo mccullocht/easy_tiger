@@ -12,10 +12,10 @@ use easy_tiger::{
         },
         IndexConfig, TableIndex,
     },
-    vectors::{F32VectorCoding, VectorSimilarity},
 };
 use histogram::Histogram;
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
+use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{options::DropOptionsBuilder, Connection};
 
 use crate::ui::{progress_bar, progress_spinner};

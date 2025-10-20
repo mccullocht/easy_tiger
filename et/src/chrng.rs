@@ -8,10 +8,10 @@ use easy_tiger::{
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
     hcrng::{create_clusters, rewrite_graph_table, rewrite_table},
     input::{DerefVectorStore, VectorStore},
-    vectors::{F32VectorCoding, VectorSimilarity},
     wt::TableGraphVectorIndex,
 };
 use memmap2::Mmap;
+use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;
 
 use crate::{

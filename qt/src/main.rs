@@ -8,16 +8,14 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand};
-use easy_tiger::{
-    input::{DerefVectorStore, VectorStore},
-    vectors::{
-        F32VectorCoding, VectorSimilarity, new_query_vector_distance_f32,
-        new_query_vector_distance_indexing,
-    },
-};
+use easy_tiger::input::{DerefVectorStore, VectorStore};
 use indicatif::{ParallelProgressIterator, ProgressIterator};
 use memmap2::Mmap;
 use rayon::prelude::*;
+use vectors::{
+    F32VectorCoding, VectorSimilarity, new_query_vector_distance_f32,
+    new_query_vector_distance_indexing,
+};
 
 #[derive(Parser)]
 #[command(version, about = "Tool for instrumenting vector quantization techniques", long_about = None)]

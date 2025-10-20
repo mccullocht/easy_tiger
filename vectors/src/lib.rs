@@ -2,8 +2,6 @@
 
 use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 
-use crate::distance::l2_normalize;
-
 mod binary;
 mod float16;
 mod float32;
@@ -13,10 +11,15 @@ mod truncated;
 
 use serde::{Deserialize, Serialize};
 
+pub use float32::{CosineDistance, DotProductDistance, EuclideanDistance, l2_norm, l2_normalize};
+
 /// Functions used for to compute the distance between two vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VectorSimilarity {
-    /// Euclidean (l2) distance.
+    /// Euclidean (l2) distance, squared.
+    ///
+    /// True euclidean distance is the square root of this calculation, but computing the square
+    /// root is expensive and would not alter the order of results.
     Euclidean,
     /// Dot product distance.
     ///
@@ -38,9 +41,9 @@ impl VectorSimilarity {
     /// Return an [`F32VectorDistance`] for this similarity function.
     pub fn new_distance_function(self) -> Box<dyn F32VectorDistance> {
         match self {
-            Self::Euclidean => Box::new(float32::EuclideanDistance),
-            Self::Dot => Box::new(float32::DotProductDistance),
-            Self::Cosine => Box::new(float32::CosineDistance),
+            Self::Euclidean => Box::new(float32::EuclideanDistance::default()),
+            Self::Dot => Box::new(float32::DotProductDistance::default()),
+            Self::Cosine => Box::new(float32::CosineDistance::default()),
         }
     }
 
@@ -49,6 +52,7 @@ impl VectorSimilarity {
         *self == Self::Cosine
     }
 
+    /// Return an iterator over all similarity functions.
     pub fn all() -> impl ExactSizeIterator<Item = VectorSimilarity> {
         [
             VectorSimilarity::Euclidean,
@@ -205,9 +209,9 @@ impl F32VectorCoding {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
 
         match (self, similarity) {
-            (Self::F32, Cosine) => Box::new(float32::CosineDistance),
-            (Self::F32, Dot) => Box::new(float32::DotProductDistance),
-            (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance),
+            (Self::F32, Cosine) => Box::new(float32::CosineDistance::default()),
+            (Self::F32, Dot) => Box::new(float32::DotProductDistance::default()),
+            (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance::default()),
             (Self::TruncatedF32(_), _) => F32VectorCoding::F32.new_vector_distance(similarity),
             (Self::F16, Dot) | (Self::F16, Cosine) => {
                 Box::new(float16::DotProductDistance::default())
@@ -435,9 +439,13 @@ pub fn new_query_vector_distance_indexing<'a>(
         };
     }
     match (similarity, coding) {
-        (Cosine, F32VectorCoding::F32) => quantized_qvd!(float32::CosineDistance, query),
-        (Dot, F32VectorCoding::F32) => quantized_qvd!(float32::DotProductDistance, query),
-        (Euclidean, F32VectorCoding::F32) => quantized_qvd!(float32::EuclideanDistance, query),
+        (Cosine, F32VectorCoding::F32) => quantized_qvd!(float32::CosineDistance::default(), query),
+        (Dot, F32VectorCoding::F32) => {
+            quantized_qvd!(float32::DotProductDistance::default(), query)
+        }
+        (Euclidean, F32VectorCoding::F32) => {
+            quantized_qvd!(float32::EuclideanDistance::default(), query)
+        }
         (_, F32VectorCoding::TruncatedF32(_)) => {
             new_query_vector_distance_indexing(query, similarity, F32VectorCoding::F32)
         }
@@ -511,10 +519,8 @@ fn dot_unnormalized_to_distance(
 #[cfg(test)]
 mod test {
     use crate::{
-        distance::l2_normalize,
-        vectors::{
-            new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, VectorSimilarity,
-        },
+        F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize,
+        new_query_vector_distance_f32,
     };
 
     struct TestVector {
@@ -620,7 +626,7 @@ mod test {
         ]
     }
 
-    use F32VectorCoding::{I16ScaledUniform, I4ScaledUniform, I8ScaledUniform, F16};
+    use F32VectorCoding::{F16, I4ScaledUniform, I8ScaledUniform, I16ScaledUniform};
     use VectorSimilarity::{Cosine, Dot, Euclidean};
 
     #[test]

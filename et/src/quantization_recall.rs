@@ -7,15 +7,15 @@ use crate::{
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
-    vectors::{
-        new_query_vector_distance_f32, new_query_vector_distance_indexing, F32VectorCoding,
-        VectorSimilarity,
-    },
     Neighbor,
 };
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
+use vectors::{
+    new_query_vector_distance_f32, new_query_vector_distance_indexing, F32VectorCoding,
+    VectorSimilarity,
+};
 
 #[derive(Args)]
 pub struct QuantizationRecallArgs {

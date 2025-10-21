@@ -3,7 +3,7 @@
 use std::{collections::HashSet, io, sync::Arc, u32};
 
 use clap::Args;
-use easy_tiger::{hcrng::ClusterKey, wt::TableGraphVectorIndex};
+use easy_tiger::{chrng::ClusterKey, wt::TableGraphVectorIndex};
 use wt_mdb::Connection;
 
 #[derive(Args)]

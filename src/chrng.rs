@@ -55,13 +55,15 @@ use vectors::{l2_normalize, VectorSimilarity};
 use wt_mdb::{options::CreateOptionsBuilder, Connection, Result};
 
 use crate::{
-    hcrng::clustering::ClusterIter,
+    chrng::clustering::ClusterIter,
     input::{DerefVectorStore, VectorStore},
     wt::{read_app_metadata, Leb128EdgeIterator, ENTRY_POINT_KEY},
 };
 
 // XXX should not be pub.
 pub mod clustering;
+pub mod search;
+pub mod wt;
 
 #[derive(Debug, Clone)]
 pub struct VectorOrdinalMapping {
@@ -169,7 +171,7 @@ impl ClusterKey {
         }
     }
 
-    fn to_key_bytes(&self) -> [u8; 12] {
+    fn to_key_bytes(self) -> [u8; 12] {
         let mut key = [0u8; 12];
         key[..4].copy_from_slice(&self.cluster_id.to_be_bytes());
         key[4..].copy_from_slice(&self.vector_id.to_be_bytes());
@@ -275,6 +277,96 @@ pub fn rewrite_table(
     session.rename_table(&tmp_table_name, table_name)?;
 
     Ok(())
+}
+
+/// Cursor over the head graph, providing access to the outbound edges from each vertex.
+pub trait HeadGraphCursor {
+    /// Iterator over a list of vector ordinals.
+    type EdgeIterator<'a>: Iterator<Item = i64>
+    where
+        Self: 'a;
+
+    /// Returns the entry point to the graph.
+    fn entry_point(&mut self) -> Result<i64>;
+
+    /// Return an iterator over the outbound edges from `vertex_id`.
+    fn edges(&mut self, vertex_id: i64) -> Result<Self::EdgeIterator<'_>>;
+}
+
+/// Cursor over head vectors, returning the distance between a fixed query and the named vertex.
+pub trait HeadVectorDistanceCursor {
+    /// Compute the distance between the fixed query and vertex_id.
+    ///
+    /// Returns a not found error if `vertex_id` cannot be found.
+    fn distance(&mut self, vertex_id: i64) -> Result<f64>;
+}
+
+/// Cursor over the tail graph, providing access to the outbound edges from each vertex.
+pub trait TailGraphCursor {
+    /// Iterator over a sequence of `ClusterKey`
+    type EdgeIterator<'a>: Iterator<Item = ClusterKey>
+    where
+        Self: 'a;
+
+    /// Return an iterator over the outbound edges from `vertex_id`.
+    fn edges(&mut self, vertex_id: ClusterKey) -> Result<Self::EdgeIterator<'_>>;
+}
+
+/// Cursor over tail vectors accessible by [`ClusterKey`] or a `cluster_id`, computing the distance
+/// against a fixed input query vector.
+pub trait TailVectorDistanceCursor {
+    type VectorDistanceIter<'a, F: FnMut(ClusterKey) -> bool>: Iterator<
+        Item = Result<(ClusterKey, f64)>,
+    >
+    where
+        Self: 'a;
+
+    /// Compute the distance to the given vertex.
+    ///
+    /// Returns a not found error if `vertex_id` cannot be found.
+    fn distance(&mut self, vertex_id: ClusterKey) -> Result<f64>;
+
+    /// Compute the distance to the vectors in `cluster_id`, after imposing `filter` on the input.
+    fn cluster_distance<F: FnMut(ClusterKey) -> bool>(
+        &mut self,
+        cluster_id: u32,
+        filter: F,
+    ) -> Self::VectorDistanceIter<'_, F>;
+}
+
+pub trait IndexReader {
+    type HeadGraphCursor<'a>: HeadGraphCursor + 'a
+    where
+        Self: 'a;
+    type HeadVectorDistanceCursor<'a>: HeadVectorDistanceCursor + 'a
+    where
+        Self: 'a;
+    type TailGraphCursor<'a>: TailGraphCursor + 'a
+    where
+        Self: 'a;
+    type TailVectorDistanceCursor<'a>: TailVectorDistanceCursor + 'a
+    where
+        Self: 'a;
+
+    /// Return a cursor over graph data for head index.
+    fn head_graph_cursor(&self) -> Result<Self::HeadGraphCursor<'_>>;
+
+    /// Return a cursor over head vectors that will yield the distance between `query` and arbitrary
+    /// vectors in the index.
+    fn head_vector_distance_cursor(
+        &self,
+        query: impl Into<Vec<f32>>,
+    ) -> Result<Self::HeadVectorDistanceCursor<'_>>;
+
+    /// Return a cursor over graph data for the tail index.
+    fn tail_graph_cursor(&self) -> Result<Self::TailGraphCursor<'_>>;
+
+    /// Return a cursor over tail vectors that will yield the distance between `query` and arbitrary
+    /// vectors in the index.
+    fn tail_vector_distance_cursor(
+        &self,
+        query: impl Into<Vec<f32>>,
+    ) -> Result<Self::TailVectorDistanceCursor<'_>>;
 }
 
 // XXX I want to re-use as much as I possibly can

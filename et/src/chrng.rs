@@ -5,8 +5,8 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::{Args, Subcommand};
 use easy_tiger::{
     bulk::{BulkLoadBuilder, Options},
+    chrng::{create_clusters, rewrite_graph_table, rewrite_table},
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
-    hcrng::{create_clusters, rewrite_graph_table, rewrite_table},
     input::{DerefVectorStore, VectorStore},
     wt::TableGraphVectorIndex,
 };

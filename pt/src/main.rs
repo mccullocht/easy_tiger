@@ -4,7 +4,7 @@ use std::num::NonZero;
 use std::path::PathBuf;
 
 use clap::Parser;
-use easy_tiger::hcrng;
+use easy_tiger::chrng;
 use easy_tiger::input::DerefVectorStore;
 use histogram::Histogram;
 use indicatif::ProgressBar;
@@ -37,7 +37,7 @@ fn main() -> io::Result<()> {
     let progress = ProgressBar::new_spinner();
 
     let mut histogram = Histogram::new(2, 20).unwrap();
-    let cluster_iter = hcrng::clustering::ClusterIter::new(
+    let cluster_iter = chrng::clustering::ClusterIter::new(
         &input_vectors,
         cli.max_centroid_len.get(),
         VectorSimilarity::Euclidean.new_distance_function(),

@@ -4,10 +4,10 @@
 //! another table as a projection of vector data from that source. Underneath a
 //! graph-based DiskANN index is used to serve vector similarity queries.
 pub mod bulk;
+pub mod chrng;
 pub mod crud;
 pub mod graph;
 pub mod graph_clustering;
-pub mod hcrng;
 pub mod input;
 pub mod kmeans;
 pub mod search;

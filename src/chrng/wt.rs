@@ -5,6 +5,7 @@ use wt_mdb::{Connection, Error, IndexCursorGuard, RecordCursorGuard, Result, Ses
 
 use crate::{
     chrng::ClusterKey,
+    graph::GraphConfig,
     wt::{Leb128EdgeIterator, TableGraphVectorIndex, ENTRY_POINT_KEY},
 };
 
@@ -202,33 +203,38 @@ impl<'c> super::TailVectorDistanceCursor for TailVectorDistanceCursor<'c> {
     }
 }
 
-pub struct SessionIndexReader {
-    session: Session,
-    head: Arc<TableGraphVectorIndex>,
-    tail: Arc<TableGraphVectorIndex>,
+pub struct VectorIndex {
+    index_name: String,
+    head: TableGraphVectorIndex,
+    tail: TableGraphVectorIndex,
 }
 
-impl SessionIndexReader {
+impl VectorIndex {
     pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {
         Ok(Self {
-            session: connection.open_session()?,
-            head: TableGraphVectorIndex::from_db(connection, &format!("{index_name}.head"))
-                .map(Arc::new)?,
-            tail: TableGraphVectorIndex::from_db(connection, &format!("{index_name}.tail"))
-                .map(Arc::new)?,
+            index_name: index_name.to_owned(),
+            head: TableGraphVectorIndex::from_db(connection, &format!("{index_name}.head"))?,
+            tail: TableGraphVectorIndex::from_db(connection, &format!("{index_name}.tail"))?,
         })
     }
 
-    pub fn new(
-        session: Session,
-        head: Arc<TableGraphVectorIndex>,
-        tail: Arc<TableGraphVectorIndex>,
-    ) -> Self {
-        Self {
-            session,
-            head,
-            tail,
-        }
+    pub fn index_name(&self) -> &str {
+        &self.index_name
+    }
+
+    pub fn config(&self) -> &GraphConfig {
+        self.head.config()
+    }
+}
+
+pub struct SessionIndexReader {
+    session: Session,
+    index: Arc<VectorIndex>,
+}
+
+impl SessionIndexReader {
+    pub fn new(session: Session, index: Arc<VectorIndex>) -> Self {
+        Self { session, index }
     }
 
     pub fn session(&self) -> &Session {
@@ -260,7 +266,7 @@ impl super::IndexReader for SessionIndexReader {
 
     fn head_graph_cursor(&self) -> Result<Self::HeadGraphCursor<'_>> {
         self.session
-            .get_record_cursor(self.head.graph_table_name())
+            .get_record_cursor(self.index.head.graph_table_name())
             .map(HeadGraphCursor)
     }
 
@@ -270,17 +276,17 @@ impl super::IndexReader for SessionIndexReader {
     ) -> Result<Self::HeadVectorDistanceCursor<'_>> {
         let dist = new_query_vector_distance_f32(
             query.into(),
-            self.head.config().similarity,
-            self.head.config().nav_format,
+            self.index.config().similarity,
+            self.index.config().nav_format,
         );
         self.session
-            .get_record_cursor(self.head.nav_table().name())
+            .get_record_cursor(self.index.head.nav_table().name())
             .map(|cursor| HeadVectorDistanceCursor { cursor, dist })
     }
 
     fn tail_graph_cursor(&self) -> Result<Self::TailGraphCursor<'_>> {
         self.session
-            .get_index_cursor(self.tail.graph_table_name())
+            .get_index_cursor(self.index.tail.graph_table_name())
             .map(TailGraphCursor)
     }
 
@@ -290,11 +296,11 @@ impl super::IndexReader for SessionIndexReader {
     ) -> Result<Self::TailVectorDistanceCursor<'_>> {
         let dist = new_query_vector_distance_f32(
             query.into(),
-            self.head.config().similarity,
-            self.head.config().nav_format,
+            self.index.config().similarity,
+            self.index.config().nav_format,
         );
         self.session
-            .get_index_cursor(self.head.nav_table().name())
+            .get_index_cursor(self.index.head.nav_table().name())
             .map(|cursor| TailVectorDistanceCursor { cursor, dist })
     }
 }

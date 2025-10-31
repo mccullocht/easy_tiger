@@ -1,4 +1,5 @@
 mod analyze_graph;
+mod search;
 
 use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
@@ -15,7 +16,10 @@ use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;
 
 use crate::{
-    chrng::analyze_graph::{analyze_graph, AnalyzeGraphArgs},
+    chrng::{
+        analyze_graph::{analyze_graph, AnalyzeGraphArgs},
+        search::{search, SearchArgs},
+    },
     ui::{progress_bar, progress_spinner},
     vamana::drop_index::drop_index,
     wt_args::WiredTigerArgs,
@@ -38,6 +42,8 @@ pub enum Command {
     BulkLoad(BulkLoadArgs),
     /// Analyze the output tail graph.
     AnalyzeGraph(AnalyzeGraphArgs),
+    /// Search a CHRNG index.
+    Search(SearchArgs),
 }
 
 #[derive(Args)]
@@ -103,6 +109,7 @@ pub fn chrng_command(args: ChrngArgs) -> io::Result<()> {
     match args.command {
         Command::BulkLoad(args) => bulk_load(connection, index_name, args),
         Command::AnalyzeGraph(args) => analyze_graph(connection, index_name, args),
+        Command::Search(args) => search(connection, index_name, args),
     }?;
     session.checkpoint()?;
     Ok(())

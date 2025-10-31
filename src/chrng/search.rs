@@ -186,6 +186,10 @@ impl Searcher {
         Ok(self.results.drain_asc().collect::<Vec<_>>())
     }
 
+    pub fn stats(&self) -> Stats {
+        self.stats
+    }
+
     pub fn clear(&mut self) {
         self.candidates.clear();
         self.results.clear();

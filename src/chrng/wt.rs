@@ -1,7 +1,7 @@
-use std::{iter::FusedIterator, sync::Arc};
+use std::{io, iter::FusedIterator, sync::Arc};
 
 use vectors::{new_query_vector_distance_f32, QueryVectorDistance};
-use wt_mdb::{Error, IndexCursorGuard, RecordCursorGuard, Result, Session};
+use wt_mdb::{Connection, Error, IndexCursorGuard, RecordCursorGuard, Result, Session};
 
 use crate::{
     chrng::ClusterKey,
@@ -208,7 +208,37 @@ pub struct SessionIndexReader {
     tail: Arc<TableGraphVectorIndex>,
 }
 
-impl SessionIndexReader {}
+impl SessionIndexReader {
+    pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {
+        Ok(Self {
+            session: connection.open_session()?,
+            head: TableGraphVectorIndex::from_db(connection, &format!("{index_name}.head"))
+                .map(Arc::new)?,
+            tail: TableGraphVectorIndex::from_db(connection, &format!("{index_name}.tail"))
+                .map(Arc::new)?,
+        })
+    }
+
+    pub fn new(
+        session: Session,
+        head: Arc<TableGraphVectorIndex>,
+        tail: Arc<TableGraphVectorIndex>,
+    ) -> Self {
+        Self {
+            session,
+            head,
+            tail,
+        }
+    }
+
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    pub fn into_session(self) -> Session {
+        self.session
+    }
+}
 
 impl super::IndexReader for SessionIndexReader {
     type HeadGraphCursor<'a>

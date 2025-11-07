@@ -87,6 +87,8 @@ pub struct Stats {
     pub head_seen_vertexes: usize,
     /// The number of clusters we scored completely during the search.
     pub tail_seen_clusters: usize,
+    /// The number of individual vertexes we scored by lookup.
+    pub tail_seen_vertexes: usize,
     /// The number of vectors we performed distance computation on.
     pub tail_distance_computed_count: usize,
     /// The number of graph vertexes visited during the tail search.
@@ -102,6 +104,7 @@ impl Add for Stats {
         Self {
             head_seen_vertexes: self.head_seen_vertexes + rhs.head_seen_vertexes,
             tail_seen_clusters: self.tail_seen_clusters + rhs.tail_seen_clusters,
+            tail_seen_vertexes: self.tail_seen_vertexes + rhs.tail_seen_vertexes,
             tail_distance_computed_count: self.tail_distance_computed_count
                 + rhs.tail_distance_computed_count,
             tail_visited: self.tail_visited + rhs.tail_visited,
@@ -115,6 +118,27 @@ impl AddAssign for Stats {
     }
 }
 
+// XXX list of ideas for improvements:
+// * snap head to mediods and rewrite head to be ClusterKey-ed. seed the search with some number of
+//   points from that list.
+//   - note that avoiding mediods is otherwise worth almost nothing, just 115 scored/query of 8.5k.
+// * search top N in head index and pre-seed with the contents of those clusters, then do "normal"
+//   graph search after that point?
+//   - alt termination condition: keep going until you reach a cluster that contributes nothing to
+//     the candidate list.
+// * search by cluster. clusters are ordered by composite distance of every unvisited candidate.
+//   - best distance, then subtract rank-weighted score of each subsequent vertex.
+// * select next cluster by examining all outbound edges from this cluster? hard to do without
+//   scoring anything at all.
+// * graph link direction to pick the next cluster to score
+//   - take union of edges from this vertex and all in-cluster vertexes it points to.
+//   - pick this most pointed to cluster that has not yet been scored.
+//   - how does this terminate??? do i lose precision if i ignore other links???
+//   - this is probably easiest to try next.
+// * score all of the unseen outbound clusters from the closest node?
+//   x this one is dogshit. 6-7x slower, 8-9x as much scoring.
+//
+// we score 1/8 of the total scored and ~40% of the entire vamana scored count by point lookup!
 impl Searcher {
     pub fn new(beam_width: usize) -> Self {
         Self {
@@ -181,6 +205,7 @@ impl Searcher {
         }
 
         self.stats.head_seen_vertexes = self.seen_head_vertexes.len();
+        self.stats.tail_seen_vertexes = self.seen_tail_vertexes.len();
         self.stats.tail_seen_clusters = self.seen_tail_clusters.len();
 
         Ok(self.results.drain_asc().collect::<Vec<_>>())

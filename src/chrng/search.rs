@@ -1,7 +1,5 @@
 //! Routines to search a CHRNG graph index.
 
-// XXX try to abstract out the searcher interface. is this even possible? maybe with GATs?
-
 use min_max_heap::MinMaxHeap;
 use std::{
     cmp::Ordering,
@@ -118,27 +116,6 @@ impl AddAssign for Stats {
     }
 }
 
-// XXX list of ideas for improvements:
-// * snap head to mediods and rewrite head to be ClusterKey-ed. seed the search with some number of
-//   points from that list.
-//   - note that avoiding mediods is otherwise worth almost nothing, just 115 scored/query of 8.5k.
-// * search top N in head index and pre-seed with the contents of those clusters, then do "normal"
-//   graph search after that point?
-//   - alt termination condition: keep going until you reach a cluster that contributes nothing to
-//     the candidate list.
-// * search by cluster. clusters are ordered by composite distance of every unvisited candidate.
-//   - best distance, then subtract rank-weighted score of each subsequent vertex.
-// * select next cluster by examining all outbound edges from this cluster? hard to do without
-//   scoring anything at all.
-// * graph link direction to pick the next cluster to score
-//   - take union of edges from this vertex and all in-cluster vertexes it points to.
-//   - pick this most pointed to cluster that has not yet been scored.
-//   - how does this terminate??? do i lose precision if i ignore other links???
-//   - this is probably easiest to try next.
-// * score all of the unseen outbound clusters from the closest node?
-//   x this one is dogshit. 6-7x slower, 8-9x as much scoring.
-//
-// we score 1/8 of the total scored and ~40% of the entire vamana scored count by point lookup!
 impl Searcher {
     pub fn new(beam_width: usize) -> Self {
         Self {
@@ -163,6 +140,16 @@ impl Searcher {
         let mut graph_cursor = index.tail_graph_cursor()?;
         let mut vec_cursor = index.tail_vector_distance_cursor(query)?;
         self.push_cluster_candidates(entry_cluster, &mut vec_cursor)?;
+        // Score every cluster immediately adjacent to the best result in the entry cluster.
+        if let Some(best_candidate) = self.candidates.peek_min() {
+            for e in graph_cursor.edges(best_candidate.vertex_id)? {
+                if self.seen_tail_clusters.insert(e.cluster_id) {
+                    self.push_cluster_candidates(e.cluster_id, &mut vec_cursor)?;
+                }
+            }
+        }
+
+        // Run the traditional search loop after seeding the candidate queue.
         while let Some(candidate) = self.candidates.pop_min() {
             self.stats.tail_visited += 1;
             if self.results.len() >= self.beam_width
@@ -185,16 +172,8 @@ impl Searcher {
                 self.results.push_pop_max(candidate.into());
             }
 
-            // If we haven't seen any results in this cluster, compute distance for every vector in
-            // the cluster. The assumption is that if the top candidate is in a cluster that many of
-            // the vectors will also be candidates and scoring together avoids storage latency.
-            if self
-                .seen_tail_clusters
-                .insert(candidate.vertex_id.cluster_id)
-            {
-                self.push_cluster_candidates(candidate.vertex_id.cluster_id, &mut vec_cursor)?;
-            }
-
+            // Add unseen outbound edges from this vertex to the candidate queue.
+            // If removed latency halves but so does recall.
             for e in graph_cursor.edges(candidate.vertex_id)? {
                 if !self.seen_tail_clusters.contains(&e.cluster_id)
                     && self.seen_tail_vertexes.insert(e)
@@ -262,20 +241,23 @@ impl Searcher {
         Ok(())
     }
 
+    /// Returns the number of values successfully inserted.
     fn push_cluster_candidates(
         &mut self,
         cluster_id: u32,
         vectors: &mut impl TailVectorDistanceCursor,
-    ) -> Result<()> {
+    ) -> Result<usize> {
+        let mut num_inserted = 0usize;
         for r in vectors.cluster_distance(cluster_id, |k| self.seen_tail_vertexes.contains(&k)) {
             self.stats.tail_distance_computed_count += 1;
             let n = r.map(|(k, d)| ClusterNeighbor::new(k, d))?;
             if self.candidates.len() < self.beam_width {
                 self.candidates.push(n);
-            } else {
-                self.candidates.push_pop_max(n);
+                num_inserted += 1;
+            } else if self.candidates.push_pop_max(n).vertex_id == n.vertex_id {
+                num_inserted += 1;
             }
         }
-        Ok(())
+        Ok(num_inserted)
     }
 }

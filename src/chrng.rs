@@ -1,9 +1,9 @@
-//! Hierarchical clustered relative neighbor graph.
+//! # Clustered hierarchical relative neighbor graph (CHRNG).
 //!
-//! Using binary partitioning, the input data set is clustered into groups of no more than M'
-//! vectors, where M' is some small multiple of M, the maximum number of edges at each vertex in
-//! the graph. The cluster means are saved and an RNG is built over them to use as a "head" graph
-//! that we use to select an entry point into the "tail" graph over the data set.
+//! Partition the input data set into clusters of no more than M' vectors, where M' is some small
+//! multiple of M, the maximum number of edges at each vertex in the graph. Cluster centroids are
+//! saved and an RNG is built over them to use as a "head" graph that we use to select an entry
+//! point into the "tail" graph over the data set.
 //!
 //! Lucene binary vector partitioning uses a similar algorithm to reorder the docid space within a
 //! segment which dramatically reduces index and search latency over a graph based index. This
@@ -16,12 +16,15 @@
 //! table containing the original full fidelity vectors and filtering metadata will be keyed by
 //! the input vector id and contain a link to the associated cluster id.
 //!
-//! To search this index we will search the head graph for an entry point cluster id (k=1), then
-//! initialize the candidate queue with the first entry in the cluster and search using the regular
-//! RNG search algorithm that HNSW and Vamana use. At this point we are relying on the clustering
-//! of the graph to reduce the need for IO -- traversal should pull us towards a handful of clusters
-//! and those clusters and vectors within those clusters should be physically contiguous or nearly
-//! so.
+//! To search this index:
+//! * Search the head graph for an entry point cluster id E.
+//! * Score every vector in E and add them to the candidate queue.
+//! * Examine the top entry in the candidate queue and score every vector in every cluster it has
+//!   an outbound ege to.
+//! * Continue with the standard graph vector search algorithm.
+//!
+//! In practice most of the results comes from E and its neighboring clusters with only a small
+//! number of candidates coming from outside these clusters.
 //!
 //! To insert into this index we will search the head index, select the nearest centroid, and add
 //! the vector to this cluster. Graph edges will be built using a full search of the tail graph in
@@ -29,7 +32,7 @@
 //! its cluster and remove vector and graph edges, reconnecting any missing nodes. Upserts will
 //! perform a compound version of insert + delete. If clusters become imbalanced in size according
 //! to policy (too small or too large) we will gather the vectors from nearby clusters and
-//! repartition to add or remove a cluster.
+//! repartition to add or remove a cluster as is suggested in the SPFresh paper.
 //!
 //! Bulk builds can use a path like Vamana and it will likely be faster due to the clustering. We
 //! may also want to experiment with limiting the scope of the search, pre-seeding links within
@@ -38,8 +41,59 @@
 //!
 //! This data structure borrows inspiration from SPANN, HNSW, and the Lucene experiment with using
 //! binary partitioning to order the neighbor graph.
-
-// TODO: rename to CHRNG
+//!
+//! ## Performance
+//! All tests performed on a 1.9M voyage 3.5 dbpedia data set with 2048 dimensions and lvq1x8.
+//!
+//! When there is enough space for everything to be memory resident this performs about the same as
+//! Vamana in terms of latency but scores about 70% more vectors and gets a 2.4% recall boost.
+//! Improved vector locality and sequential scoring allow us to score more vectors without a
+//! substantial increase in latency, since we aren't stalling on last-level cache misses or reads as
+//! often as in a typical graph search.
+//!
+//! When memory is artifically restricted (by setting WT cache size to 256MB) latency is 10% lower
+//! and 20% fewer bytes are read into WT cache.
+//!
+//! ## Future work
+//!
+//! ### Add a normal vamana switch
+//!
+//! This can be searched like a normal Vamana index, so add an option in the searcher to do that.
+//!
+//! ### Measure pointer chase length.
+//!
+//! Logically speaking:
+//! * Search the head graph.
+//! * Score the entry cluster.
+//! * Score first neighboring clusters.
+//!
+//! Is a sequence of 3 sets of reads that can largely be done in parallel. After that we score
+//! vertex-by-vertex and it would nice to be know how many rounds of scoring we do after that point
+//! as it would influence what our latency looks like. If the vectors are on object storage it would
+//! not be possible to hit a 500ms latency target in any case but <5s would be interesting.
+//!
+//! ### Head graph improvements
+//!
+//! The head graph could use mediods instead of centroids and pivot directly into the graph in the
+//! same way HNSW does today.
+//!
+//! ### Bulk builds
+//!
+//! Bulk builds are implemented by clustering and building a regular Vamana graph, then re-keying
+//! the data set. After clustering completes builds are faster than regular Vamana owing to locality
+//! improvements, but there may be more gains from seeding in-cluster graph edges and bulk scoring
+//! against other clusters.
+//!
+//! ### Clustering Improvements
+//!
+//! We are using binary partitioning but would probably be better off with batch k-means at the
+//! beginning of clustering to reduce costs.
+//!
+//! ### Filtered search
+//!
+//! Figure out a story here. ACORN style approaches don't map as well to this approach, but the bulk
+//! scoring step is also very cheap due to locality so it might not matter?
+//!
 
 use std::{
     array::TryFromSliceError,

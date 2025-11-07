@@ -129,6 +129,7 @@ impl<F: FnMut(ClusterKey) -> bool> Iterator for TailVectorDistanceIter<'_, '_, F
 
     fn next(&mut self) -> Option<Self::Item> {
         if !self.bounds_set {
+            self.cursor.cursor.reset().unwrap();
             self.bounds_set = true;
             let start = ClusterKey {
                 cluster_id: self.cluster_id,
@@ -153,7 +154,7 @@ impl<F: FnMut(ClusterKey) -> bool> Iterator for TailVectorDistanceIter<'_, '_, F
                 Err(e) => return Some(Err(e)),
             };
             let key = ClusterKey::try_from(raw_key).expect("12 byte key");
-            if !(self.filter_fn)(key) {
+            if (self.filter_fn)(key) {
                 continue;
             }
 
@@ -300,7 +301,7 @@ impl super::IndexReader for SessionIndexReader {
             self.index.config().nav_format,
         );
         self.session
-            .get_index_cursor(self.index.head.nav_table().name())
+            .get_index_cursor(self.index.tail.nav_table().name())
             .map(|cursor| TailVectorDistanceCursor { cursor, dist })
     }
 }

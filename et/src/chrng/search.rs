@@ -101,10 +101,14 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         )?;
 
         println!(
-            "queries {} avg duration {:0.6}s max duration {:0.6}s  avg head seen {:.2} avg tail clusters {:.2} avg tail seen {:.2} avg tail candidates {:.2} avg tail visited {:.2}",
+            "queries {} avg duration {:0.6}s max duration {:0.6}s",
             stats.count,
             stats.total_duration.as_secs_f64() / stats.count as f64,
-            stats.max_duration.as_secs_f64(),
+            stats.max_duration.as_secs_f64()
+        );
+
+        println!(
+            "  avg head seen {:.2} avg tail clusters {:.2} avg tail seen {:.2} avg tail candidates {:.2} avg tail visited {:.2}",
             stats.total_search_stats.head_seen_vertexes as f64 / stats.count as f64,
             stats.total_search_stats.tail_seen_clusters as f64 / stats.count as f64,
             stats.total_search_stats.tail_seen_vertexes as f64 / stats.count as f64,

@@ -139,6 +139,7 @@ impl Searcher {
         let entry_cluster = self.find_best_entry_cluster(&query, index)?;
         let mut graph_cursor = index.tail_graph_cursor()?;
         let mut vec_cursor = index.tail_vector_distance_cursor(query)?;
+        self.seen_tail_clusters.insert(entry_cluster);
         self.push_cluster_candidates(entry_cluster, &mut vec_cursor)?;
         // Score every cluster immediately adjacent to the best result in the entry cluster.
         if let Some(best_candidate) = self.candidates.peek_min() {

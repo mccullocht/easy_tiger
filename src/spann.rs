@@ -38,17 +38,43 @@ use crate::{
 #[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct IndexConfig {
     pub replica_count: usize,
+    pub replica_selection: ReplicaSelectionAlgorithm,
     pub head_search_params: GraphSearchParams,
     pub posting_coder: F32VectorCoding,
     pub rerank_format: Option<F32VectorCoding>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplicaSelectionAlgorithm {
     /// Select replicas using relative neighbor graph edge pruning.
+    #[default]
     RNG,
     /// Select replicas using SOAR distance scoring.
     SOAR,
+}
+
+impl std::str::FromStr for ReplicaSelectionAlgorithm {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "rng" => Ok(Self::RNG),
+            "soar" => Ok(Self::SOAR),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown replica selection algorithm {s}"),
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ReplicaSelectionAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RNG => write!(f, "rng"),
+            Self::SOAR => write!(f, "soar"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -288,9 +314,8 @@ impl SessionIndexWriter {
         let candidates = self
             .head_searcher
             .search(vector.as_ref(), &mut self.head_reader)?;
-        // XXX allow selecting the algorithm
         let centroid_ids = select_centroids(
-            ReplicaSelectionAlgorithm::RNG,
+            self.index.config.replica_selection,
             self.index.config.replica_count,
             candidates,
             vector,

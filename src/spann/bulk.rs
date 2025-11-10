@@ -3,7 +3,7 @@ use std::{cell::RefCell, ops::DerefMut, sync::Arc};
 use crate::{
     input::VectorStore,
     search::GraphSearcher,
-    spann::{select_centroids, PostingKey, ReplicaSelectionAlgorithm, TableIndex},
+    spann::{select_centroids, PostingKey, TableIndex},
     wt::SessionGraphVectorIndexReader,
 };
 use rayon::prelude::*;
@@ -40,9 +40,8 @@ pub fn assign_to_centroids(
                 .get_or(|| RefCell::new(GraphSearcher::new(index.config().head_search_params)))
                 .borrow_mut();
             let candidates = searcher.search(&vectors[i], head_reader.deref_mut())?;
-            // XXX allow selecting the algorithm
             let selected = select_centroids(
-                ReplicaSelectionAlgorithm::RNG,
+                index.config().replica_selection,
                 index.config().replica_count,
                 candidates,
                 &vectors[i],

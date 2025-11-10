@@ -10,7 +10,7 @@ use easy_tiger::{
         bulk::{
             assign_to_centroids, bulk_load_centroids, bulk_load_postings, bulk_load_raw_vectors,
         },
-        IndexConfig, TableIndex,
+        IndexConfig, ReplicaSelectionAlgorithm, TableIndex,
     },
 };
 use histogram::Histogram;
@@ -85,6 +85,10 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     replica_count: NonZero<usize>,
 
+    /// Replica selection algorithm to use.
+    #[arg(long)]
+    replica_selection: ReplicaSelectionAlgorithm,
+
     /// Quantizer to use for vectors written to centroid posting lists.
     #[arg(long)]
     posting_coder: F32VectorCoding,
@@ -149,6 +153,7 @@ pub fn bulk_load(
     };
     let spann_config = IndexConfig {
         replica_count: args.replica_count.get(),
+        replica_selection: args.replica_selection,
         head_search_params: GraphSearchParams {
             beam_width: args.head_edge_candidates,
             num_rerank: args

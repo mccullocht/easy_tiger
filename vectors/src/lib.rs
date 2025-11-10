@@ -7,6 +7,7 @@ mod float16;
 mod float32;
 mod lvq;
 mod scaled_uniform;
+pub mod soar;
 mod truncated;
 
 use serde::{Deserialize, Serialize};

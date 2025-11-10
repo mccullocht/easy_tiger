@@ -18,8 +18,8 @@ use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use vectors::{
-    new_query_vector_distance_f32, F32VectorCoder, F32VectorCoding, QueryVectorDistance,
-    VectorDistance,
+    new_query_vector_distance_f32, soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding,
+    QueryVectorDistance, VectorDistance,
 };
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
@@ -35,12 +35,20 @@ use crate::{
     Neighbor,
 };
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct IndexConfig {
     pub replica_count: usize,
     pub head_search_params: GraphSearchParams,
     pub posting_coder: F32VectorCoding,
     pub rerank_format: Option<F32VectorCoding>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaSelectionAlgorithm {
+    /// Select replicas using relative neighbor graph edge pruning.
+    RNG,
+    /// Select replicas using SOAR distance scoring.
+    SOAR,
 }
 
 #[derive(Clone)]
@@ -280,11 +288,14 @@ impl SessionIndexWriter {
         let candidates = self
             .head_searcher
             .search(vector.as_ref(), &mut self.head_reader)?;
+        // XXX allow selecting the algorithm
         let centroid_ids = select_centroids(
-            &self.head_reader,
-            candidates,
-            self.distance_fn.as_ref(),
+            ReplicaSelectionAlgorithm::RNG,
             self.index.config.replica_count,
+            candidates,
+            vector,
+            &self.head_reader,
+            self.distance_fn.as_ref(),
         )?;
 
         let mut centroid_cursor = self.centroid_cursor()?;
@@ -382,10 +393,28 @@ impl SessionIndexWriter {
 }
 
 fn select_centroids(
-    head_reader: &impl GraphVectorIndexReader,
-    candidates: Vec<Neighbor>,
-    distance_fn: &dyn VectorDistance,
+    algorithm: ReplicaSelectionAlgorithm,
     replica_count: usize,
+    candidates: Vec<Neighbor>,
+    vector: &[f32],
+    head_reader: &impl GraphVectorIndexReader,
+    distance_fn: &dyn VectorDistance,
+) -> Result<Vec<u32>> {
+    match algorithm {
+        ReplicaSelectionAlgorithm::RNG => {
+            select_centroids_rng(replica_count, candidates, head_reader, distance_fn)
+        }
+        ReplicaSelectionAlgorithm::SOAR => {
+            select_centroids_soar(replica_count, candidates, vector, head_reader)
+        }
+    }
+}
+
+fn select_centroids_rng(
+    replica_count: usize,
+    candidates: Vec<Neighbor>,
+    head_reader: &impl GraphVectorIndexReader,
+    distance_fn: &dyn VectorDistance,
 ) -> Result<Vec<u32>> {
     assert!(!candidates.is_empty());
     let mut vectors = head_reader.high_fidelity_vectors()?;
@@ -418,6 +447,45 @@ fn select_centroids(
         }
     }
     Ok(centroid_ids)
+}
+
+fn select_centroids_soar(
+    replica_count: usize,
+    candidates: Vec<Neighbor>,
+    vector: &[f32],
+    head_reader: &impl GraphVectorIndexReader,
+) -> Result<Vec<u32>> {
+    assert!(!candidates.is_empty());
+    let mut vectors = head_reader.high_fidelity_vectors()?;
+    let coder = vectors.new_coder();
+
+    let primary = coder.decode(
+        vectors
+            .get(candidates[0].vertex())
+            .unwrap_or(Err(Error::not_found_error()))?,
+    );
+    let soar_dist = SoarQueryVectorDistance::new(vector, &primary);
+    let mut secondary_centroid_ids = Vec::with_capacity(candidates.len() - 1);
+    let mut candidate_vector = vec![0.0f32; primary.len()];
+    for candidate in candidates.iter().skip(1) {
+        coder.decode_to(
+            vectors
+                .get(candidate.vertex())
+                .unwrap_or(Err(Error::not_found_error()))?,
+            &mut candidate_vector,
+        );
+        secondary_centroid_ids.push(Neighbor::new(
+            candidate.vertex(),
+            soar_dist.distance(&candidate_vector),
+        ));
+    }
+
+    secondary_centroid_ids.sort_unstable();
+    Ok(std::iter::once(&candidates[0])
+        .chain(secondary_centroid_ids.iter())
+        .take(replica_count)
+        .map(|n| n.vertex() as u32)
+        .collect())
 }
 
 struct PostingIter<'a, 'b, 'c> {

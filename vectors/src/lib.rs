@@ -8,7 +8,6 @@ mod float32;
 mod lvq;
 mod scaled_uniform;
 pub mod soar;
-mod truncated;
 
 use serde::{Deserialize, Serialize};
 
@@ -127,16 +126,9 @@ pub enum F32VectorCoding {
     /// so users should not rely on the value being identical.
     #[default]
     F32,
-    /// Little-endian f32 values truncated at some maximum dimension.
-    ///
-    /// This is useful for Matryoshka Representation Learned (MRL) models.
-    ///
-    /// Note that for dot product similarity the truncated value will be l2 normalized before it is
-    /// encoded.
-    TruncatedF32(usize),
     /// Little-endian IEEE f16 encoding.
     F16,
-    /// Single bit (sign bit) per dimension.
+    /// Single bit (sign bit) per dimension; positive or negative.
     ///
     /// This encoding is very compact and efficient for distance computation but also does not have
     /// high fidelity with distances computed between raw vectors.
@@ -187,7 +179,6 @@ impl F32VectorCoding {
     pub fn new_coder(&self, similarity: VectorSimilarity) -> Box<dyn F32VectorCoder> {
         match self {
             Self::F32 => Box::new(float32::VectorCoder::new(similarity)),
-            Self::TruncatedF32(d) => Box::new(truncated::VectorCoder::new(similarity, *d)),
             Self::F16 => Box::new(float16::VectorCoder::new(similarity)),
             Self::BinaryQuantized => Box::new(binary::BinaryQuantizedVectorCoder),
             Self::I8ScaledUniform => Box::new(scaled_uniform::I8VectorCoder::new(similarity)),
@@ -213,7 +204,6 @@ impl F32VectorCoding {
             (Self::F32, Cosine) => Box::new(float32::CosineDistance::default()),
             (Self::F32, Dot) => Box::new(float32::DotProductDistance::default()),
             (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance::default()),
-            (Self::TruncatedF32(_), _) => F32VectorCoding::F32.new_vector_distance(similarity),
             (Self::F16, Dot) | (Self::F16, Cosine) => {
                 Box::new(float16::DotProductDistance::default())
             }
@@ -244,12 +234,6 @@ impl FromStr for F32VectorCoding {
         let input_err = |s| io::Error::new(io::ErrorKind::InvalidInput, s);
         match s {
             "raw" | "raw-l2-norm" | "f32" => Ok(Self::F32),
-            s if s.starts_with("truncatedf32:") => {
-                let s = s.strip_prefix("truncatedf32:").expect("prefix matched");
-                s.parse::<usize>()
-                    .map(Self::TruncatedF32)
-                    .map_err(|_| input_err("could not parse dimension".into()))
-            }
             "f16" => Ok(Self::F16),
             "binary" => Ok(Self::BinaryQuantized),
             "i8-scaled-uniform" => Ok(Self::I8ScaledUniform),
@@ -273,7 +257,6 @@ impl std::fmt::Display for F32VectorCoding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::F32 => write!(f, "f32"),
-            Self::TruncatedF32(d) => write!(f, "truncatedf32:{}", *d),
             Self::F16 => write!(f, "f16"),
             Self::BinaryQuantized => write!(f, "binary"),
             Self::I8ScaledUniform => write!(f, "i8-scaled-uniform"),
@@ -356,15 +339,6 @@ pub fn new_query_vector_distance_f32<'a>(
 
     match (similarity, coding) {
         (_, F32VectorCoding::F32) => float32::new_query_vector_distance(similarity, query.into()),
-        (_, F32VectorCoding::TruncatedF32(n)) => {
-            let query = query.into();
-            let truncated = match similarity {
-                VectorSimilarity::Dot => l2_normalize(&query[..(n.min(query.len()))]),
-                _ => Cow::from(&query[..(n.min(query.len()))]),
-            }
-            .to_vec();
-            float32::new_query_vector_distance(similarity, truncated.into())
-        }
         (Cosine, F32VectorCoding::F16) => Box::new(float16::DotProductQueryDistance::new(
             l2_normalize(query.into()),
         )),
@@ -446,9 +420,6 @@ pub fn new_query_vector_distance_indexing<'a>(
         }
         (Euclidean, F32VectorCoding::F32) => {
             quantized_qvd!(float32::EuclideanDistance::default(), query)
-        }
-        (_, F32VectorCoding::TruncatedF32(_)) => {
-            new_query_vector_distance_indexing(query, similarity, F32VectorCoding::F32)
         }
         (Dot, F32VectorCoding::F16) => {
             quantized_qvd!(float16::DotProductDistance::default(), query)

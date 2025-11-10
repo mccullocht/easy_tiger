@@ -3,7 +3,7 @@
 use min_max_heap::MinMaxHeap;
 use std::{
     cmp::Ordering,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ops::{Add, AddAssign},
 };
 use wt_mdb::Result;
@@ -141,52 +141,121 @@ impl Searcher {
         let mut vec_cursor = index.tail_vector_distance_cursor(query)?;
         self.seen_tail_clusters.insert(entry_cluster);
         self.push_cluster_candidates(entry_cluster, &mut vec_cursor)?;
-        // Score every cluster immediately adjacent to the best result in the entry cluster.
-        if let Some(best_candidate) = self.candidates.peek_min() {
-            for e in graph_cursor.edges(best_candidate.vertex_id)? {
-                if self.seen_tail_clusters.insert(e.cluster_id) {
-                    self.push_cluster_candidates(e.cluster_id, &mut vec_cursor)?;
+
+        // XXX with composite keying I could put each vector in two clusters if I really wanted to.
+        // this can be graph aware (which would be _very_ annoying) or graph unaware (only the nav
+        // vector is duplicated). I would want to implement SOAR scoring for this.
+        //
+        // XXX graph unaware smearing
+        // * I need a coherent strategy for cluster scoring becuase that's the only way I'm going to
+        //   find this thing.
+        // * I need to be able to canonicalize to the primary cluster to pivot back into the graph.
+        //
+        // XXX graph aware
+        // * Easy enough to canonicalize references back to the original vector when searching,
+        //   which also avoids duplicating results in the queue.
+        // * They do need to point to each other to handle updates correctly.
+
+        let mut rounds = 1usize;
+        loop {
+            // XXX at 16 we do 10-12 rounds
+            // XXX at 32 we do 7-9 rounds
+            // XXX at 64 we do 6-7 rounds
+            // XXX this is the number of rounds of IO we'd have to do assuming unlimited capacity to
+            // actually do them and the penalty on object storage is ~200ms per. This does not
+            // count graph access which we are assuming(!) is free.
+            let num_bulk_candidates = 32;
+            let bulk_score_min_edges = 4;
+            let mut candidates = Vec::with_capacity(num_bulk_candidates);
+            while let Some(candidate) = self.candidates.pop_min() {
+                if self.results.len() >= self.beam_width
+                    && self
+                        .results
+                        .peek_max()
+                        .map(|n| n.distance)
+                        .unwrap()
+                        .total_cmp(&candidate.distance)
+                        .is_lt()
+                {
+                    // If the candidate is worse than the worst result, break.
+                    break;
+                }
+
+                candidates.push(candidate);
+                if candidates.len() == num_bulk_candidates {
+                    break;
                 }
             }
-        }
 
-        // Run the traditional search loop after seeding the candidate queue.
-        while let Some(candidate) = self.candidates.pop_min() {
-            self.stats.tail_visited += 1;
-            if self.results.len() >= self.beam_width
-                && self
-                    .results
-                    .peek_max()
-                    .map(|n| n.distance)
-                    .unwrap()
-                    .total_cmp(&candidate.distance)
-                    .is_lt()
-            {
-                // If the candidate is worse than the worst result, break.
+            // Either there are no more candidates or no more candidates better than any results.
+            if candidates.is_empty() {
                 break;
             }
 
-            // Push the candidate into results, obeying beam_width.
-            if self.results.len() < self.beam_width {
-                self.results.push(candidate.into());
-            } else {
-                self.results.push_pop_max(candidate.into());
-            }
+            // XXX it would be worth counting under full candidate lists.
 
-            // Add unseen outbound edges from this vertex to the candidate queue.
-            // If removed latency halves but so does recall.
-            for e in graph_cursor.edges(candidate.vertex_id)? {
-                if !self.seen_tail_clusters.contains(&e.cluster_id)
-                    && self.seen_tail_vertexes.insert(e)
-                {
-                    self.push_candidate(e, &mut vec_cursor)?;
+            self.stats.tail_visited += candidates.len();
+            let mut clustered_candidates: HashMap<u32, HashSet<ClusterKey>> = HashMap::new();
+            for c in candidates {
+                if self.results.len() < self.beam_width {
+                    self.results.push(c.into());
+                } else {
+                    self.results.push_pop_max(c.into());
+                }
+
+                for e in graph_cursor.edges(c.vertex_id)? {
+                    if self.seen_tail_clusters.contains(&e.cluster_id)
+                        || self.seen_tail_vertexes.contains(&e)
+                    {
+                        continue;
+                    }
+
+                    clustered_candidates
+                        .entry(e.cluster_id)
+                        .or_default()
+                        .insert(e);
                 }
             }
+
+            let mut clusters_scored = 0usize;
+            let mut vertexes_scored = 0usize;
+            for (cluster_id, edges) in clustered_candidates {
+                if edges.len() >= bulk_score_min_edges {
+                    self.push_cluster_candidates(cluster_id, &mut vec_cursor)?;
+                    clusters_scored += 1;
+                    self.seen_tail_clusters.insert(cluster_id);
+                } else {
+                    vertexes_scored += edges.len();
+                    for e in edges {
+                        self.push_candidate(e, &mut vec_cursor)?;
+                        self.seen_tail_vertexes.insert(e);
+                    }
+                }
+            }
+
+            println!("  round={rounds:2} clusters_scored={clusters_scored:2} vertexes_scored={vertexes_scored:3}");
+            rounds += 1;
         }
 
         self.stats.head_seen_vertexes = self.seen_head_vertexes.len();
         self.stats.tail_seen_vertexes = self.seen_tail_vertexes.len();
         self.stats.tail_seen_clusters = self.seen_tail_clusters.len();
+
+        // XXX we've concluded that many vertexes are scored individually before cluster scoring.
+
+        let tail_not_cluster_scored = self
+            .seen_tail_vertexes
+            .iter()
+            .copied()
+            .filter(|k| !self.seen_tail_clusters.contains(&k.cluster_id))
+            .collect::<HashSet<ClusterKey>>();
+        println!(
+            "  rounds {} seen clusters {} seen vertexes {} seen vertexes not cluster scored {}",
+            rounds,
+            self.seen_tail_clusters.len(),
+            self.seen_tail_vertexes.len(),
+            tail_not_cluster_scored.len()
+        );
 
         Ok(self.results.drain_asc().collect::<Vec<_>>())
     }

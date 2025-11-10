@@ -2,10 +2,12 @@
 //!
 //! https://arxiv.org/abs/2404.00774
 
-use crate::QueryVectorDistance;
-
 /// Compute SOAR distance between an input vector and another (centroid) vector, considering
-/// orthogonality to the parimary centroid.
+/// orthogonality to the primary centroid.
+///
+/// This computation requires the input vectors to be single precision floats; callers are required
+/// to decode any quantized vector format into floats before computing the value. It is recommended
+/// that callers use a high precision format for this purpose: f32, f16, or lvq2x.
 pub struct SoarQueryVectorDistance<'a> {
     // The vector to compute centroid distance against.
     vector: &'a [f32],
@@ -47,19 +49,18 @@ impl<'a> SoarQueryVectorDistance<'a> {
             lambda,
         }
     }
-}
 
-impl<'a> QueryVectorDistance for SoarQueryVectorDistance<'a> {
-    fn distance(&self, centroid: &[u8]) -> f64 {
+    /// Compute the SOAR distance between a fixed query and a new centroid vector.
+    pub fn distance(&self, centroid: &[f32]) -> f64 {
         let mut centroid_l2_dist_sq = 0.0;
         let mut centroid_residual_projection = 0.0;
         for ((v, r), c) in self
             .vector
             .iter()
             .zip(self.residual.iter())
-            .zip(centroid.as_chunks::<4>().0.iter())
+            .zip(centroid.iter())
         {
-            let diff = *v - f32::from_le_bytes(*c);
+            let diff = *v - *c;
             centroid_l2_dist_sq = diff.mul_add(diff, centroid_l2_dist_sq);
             centroid_residual_projection = diff.mul_add(*r, centroid_residual_projection)
         }

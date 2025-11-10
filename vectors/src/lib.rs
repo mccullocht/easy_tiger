@@ -293,13 +293,22 @@ pub trait F32VectorCoder: Send + Sync {
     fn byte_len(&self, dimensions: usize) -> usize;
 
     /// Decode `encoded` to a float vector.
-    ///
-    /// This is not supported for all codecs, and in cases where the format is packed may
-    /// return more dimensions than originally specified.
-    #[allow(unused_variables)]
-    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
-        None
+    fn decode(&self, encoded: &[u8]) -> Vec<f32> {
+        let mut out = vec![0.0; self.dimensions(encoded.len())];
+        self.decode_to(encoded, &mut out);
+        out
     }
+
+    /// Decode `encoded` to `out`.
+    ///
+    /// *Panics* if `out.len() < self.dimensions(encoded.len())`.
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]);
+
+    /// Return the number of dimensions that a vector of `byte_len` bytes will decode to.
+    ///
+    /// Some codecs may generate more dimensions than were originally specified due to sub-byte
+    /// packing of dimensions.
+    fn dimensions(&self, byte_len: usize) -> usize;
 }
 
 /// Compute the distance between a fixed vector provided at creation time and other vectors.

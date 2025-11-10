@@ -109,13 +109,16 @@ impl F32VectorCoder for I8VectorCoder {
         dimensions + std::mem::size_of::<f32>() * 2
     }
 
-    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         let v = I8Vector::new(encoded);
-        // Decode based on the scale. We could also produce l2 normalized output but there's no
-        // good way for the caller to express this distinction and this is inverting something that
-        // is inherently lossy.
         let scale = v.scale() as f32;
-        Some(v.vector().iter().map(|d| *d as f32 * scale).collect())
+        for (d, o) in v.vector().iter().zip(out.iter_mut()) {
+            *o = *d as f32 * scale;
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        byte_len - std::mem::size_of::<f32>() * 2
     }
 }
 
@@ -312,20 +315,23 @@ impl F32VectorCoder for I4PackedVectorCoder {
         dimensions.div_ceil(2) + std::mem::size_of::<f32>() * 2
     }
 
-    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         let v = I4PackedVector::new(encoded).unwrap();
-        // Decode based on the scale. We could also produce l2 normalized output but there's no
-        // good way for the caller to express this distinction and this is inverting something that
-        // is inherently lossy.
         let scale = v.scale() as f32;
-        Some(
-            v.dimensions()
-                .iter()
-                .copied()
-                .flat_map(I4PackedVector::unpack)
-                .map(|d| d as f32 * scale)
-                .collect(),
-        )
+        for (d, o) in v
+            .dimensions()
+            .iter()
+            .copied()
+            .flat_map(I4PackedVector::unpack)
+            .map(|d| d as f32 * scale)
+            .zip(out.iter_mut())
+        {
+            *o = d;
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        (byte_len - std::mem::size_of::<f32>() * 2) * 2
     }
 }
 
@@ -522,16 +528,15 @@ impl F32VectorCoder for I16VectorCoder {
         dimensions * 2 + std::mem::size_of::<f32>() * 2
     }
 
-    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         let scale = f32::from_le_bytes(encoded[0..4].try_into().unwrap());
-        Some(
-            encoded[8..]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|c| i16::from_le_bytes(*c) as f32 * scale)
-                .collect(),
-        )
+        for (d, o) in encoded[8..].as_chunks::<2>().0.iter().zip(out) {
+            *o = i16::from_le_bytes(*d) as f32 * scale;
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        (byte_len - std::mem::size_of::<f32>() * 2) / std::mem::size_of::<u16>()
     }
 }
 

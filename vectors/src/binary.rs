@@ -19,6 +19,25 @@ impl F32VectorCoder for BinaryQuantizedVectorCoder {
     fn byte_len(&self, dimensions: usize) -> usize {
         dimensions.div_ceil(8)
     }
+
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        // Use a placeholder value that is equivalent to the average per-dimension contribution when
+        // the l2 norm is 1. We don't have the actual l2 norm so this is the best we can do.
+        let placeholder = (1.0 / out.len() as f64).sqrt() as f32;
+        for (c, o) in encoded.iter().zip(out.chunks_mut(8)) {
+            for (i, d) in o.iter_mut().enumerate() {
+                *d = if *c & (1 << i) != 0 {
+                    placeholder
+                } else {
+                    -placeholder
+                };
+            }
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        byte_len * 8
+    }
 }
 
 /// Computes a score from two bitmaps using hamming distance.

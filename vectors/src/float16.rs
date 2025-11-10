@@ -136,13 +136,14 @@ impl F32VectorCoder for VectorCoder {
         dimensions * 2
     }
 
-    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
-        Some(
-            encoded
-                .chunks(2)
-                .map(|h| f16::from_le_bytes(h.try_into().unwrap()).to_f32())
-                .collect(),
-        )
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        for (d, o) in f16_iter(encoded).zip(out.iter_mut()) {
+            *o = d.to_f32();
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        byte_len / std::mem::size_of::<f16>()
     }
 }
 

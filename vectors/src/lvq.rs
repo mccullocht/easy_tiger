@@ -363,8 +363,18 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
         VectorHeader::LEN + packing::byte_len(dimensions, B)
     }
 
-    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
-        Some(PrimaryVector::<B>::new(encoded)?.f32_iter().collect())
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        for (d, o) in PrimaryVector::<B>::new(encoded)
+            .expect("valid vector")
+            .f32_iter()
+            .zip(out.iter_mut())
+        {
+            *o = d;
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        (byte_len - VectorHeader::LEN) * 8 / B
     }
 }
 
@@ -463,8 +473,25 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
             + packing::byte_len(dimensions, B2)
     }
 
-    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
-        Some(TwoLevelVector::<B1, B2>::new(encoded)?.f32_iter().collect())
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        for (d, o) in TwoLevelVector::<B1, B2>::new(encoded)
+            .expect("valid vector")
+            .f32_iter()
+            .zip(out.iter_mut())
+        {
+            *o = d;
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        let split = packing::two_vector_split(
+            byte_len - VectorHeader::LEN - std::mem::size_of::<f32>(),
+            B1,
+            B2,
+        );
+        let dim1 = (split - VectorHeader::LEN) * 8 / B1;
+        let dim2 = (byte_len - split - std::mem::size_of::<f32>()) * 8 / B2;
+        dim1.min(dim2)
     }
 }
 

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use vectors::{
     new_query_vector_distance_f32, soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding,
-    QueryVectorDistance, VectorDistance,
+    QueryVectorDistance, VectorDistance, F32VectorDistance,
 };
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
@@ -489,6 +489,9 @@ fn select_centroids_soar(
             .get(candidates[0].vertex())
             .unwrap_or(Err(Error::not_found_error()))?,
     );
+    if vectors::EuclideanDistance::default().distance_f32(vector, &primary) < 0.000001 {
+        return Ok(vec![candidates[0].vertex() as u32])
+    }
     let soar_dist = SoarQueryVectorDistance::new(vector, &primary);
     let mut secondary_centroid_ids = Vec::with_capacity(candidates.len() - 1);
     let mut candidate_vector = vec![0.0f32; primary.len()];

@@ -77,9 +77,9 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     head_rerank_edges: Option<usize>,
 
-    /// If set replace each head centroid with a representative mediod.
-    #[arg(long, default_value_t = true)]
-    head_use_mediods: bool,
+    /// If false replace each head centroid with a representative mediod.
+    #[arg(long, default_value_t = false)]
+    head_use_means: bool,
 
     /// Maximum number of replica centroids to assign each vector to.
     #[arg(long)]
@@ -193,7 +193,7 @@ pub fn bulk_load(
             |x| progress.inc(x),
         );
 
-        if args.head_use_mediods {
+        if !args.head_use_means {
             let mediods = assignments.into_iter().enumerate().fold(
                 vec![(usize::MAX, f64::MAX); centroids.len()],
                 |mut m, (i, (c, d))| {

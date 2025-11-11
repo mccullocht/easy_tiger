@@ -2,9 +2,9 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    bulk::{BulkLoadBuilder, Options},
     graph::{GraphConfig, GraphLayout, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
+    vamana::bulk::{BulkLoadBuilder, Options},
     wt::TableGraphVectorIndex,
 };
 use vectors::{F32VectorCoding, VectorSimilarity};

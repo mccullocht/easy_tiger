@@ -2,10 +2,10 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    bulk::{BulkLoadBuilder, Options},
-    graph::{GraphConfig, GraphLayout, GraphSearchParams},
     input::{DerefVectorStore, VectorStore},
-    wt::TableGraphVectorIndex,
+    vamana::bulk::{BulkLoadBuilder, Options},
+    vamana::graph::{GraphConfig, GraphLayout, GraphSearchParams},
+    vamana::wt::TableGraphVectorIndex,
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, Result, Session};

@@ -12,9 +12,9 @@ use std::{
 
 use clap::Args;
 use easy_tiger::{
-    graph::GraphSearchParams,
     input::{DerefVectorStore, VectorStore},
     spann::{SessionIndexReader, SpannSearchParams, SpannSearchStats, SpannSearcher, TableIndex},
+    vamana::graph::GraphSearchParams,
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;

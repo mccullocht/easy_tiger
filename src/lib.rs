@@ -3,15 +3,12 @@
 //! This is built on top of WiredTiger APIs and designed to be used in parallel to
 //! another table as a projection of vector data from that source. Underneath a
 //! graph-based DiskANN index is used to serve vector similarity queries.
-pub mod bulk;
-pub mod crud;
-pub mod graph;
+
 pub mod graph_clustering;
 pub mod input;
 pub mod kmeans;
-pub mod search;
 pub mod spann;
-pub mod wt;
+pub mod vamana;
 
 use std::cmp::Ordering;
 

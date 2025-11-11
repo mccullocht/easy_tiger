@@ -2,9 +2,9 @@ use std::{fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    crud::IndexMutator,
     input::{DerefVectorStore, VectorStore},
-    wt::TableGraphVectorIndex,
+    vamana::crud::IndexMutator,
+    vamana::wt::TableGraphVectorIndex,
 };
 use indicatif::ProgressIterator;
 use wt_mdb::{Connection, Result};

@@ -2,3 +2,4 @@
 //!
 
 pub mod bulk;
+pub mod crud;

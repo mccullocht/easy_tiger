@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::crud::IndexMutator,
-    wt::TableGraphVectorIndex,
+    vamana::wt::TableGraphVectorIndex,
 };
 use indicatif::ProgressIterator;
 use wt_mdb::{Connection, Result};

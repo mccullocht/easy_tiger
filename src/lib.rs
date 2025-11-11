@@ -4,14 +4,11 @@
 //! another table as a projection of vector data from that source. Underneath a
 //! graph-based DiskANN index is used to serve vector similarity queries.
 
-pub mod graph;
 pub mod graph_clustering;
 pub mod input;
 pub mod kmeans;
-pub mod search;
 pub mod spann;
 pub mod vamana;
-pub mod wt;
 
 use std::cmp::Ordering;
 

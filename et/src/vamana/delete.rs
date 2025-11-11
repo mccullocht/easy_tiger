@@ -1,7 +1,7 @@
 use std::{io, ops::Range, str::FromStr, sync::Arc};
 
 use clap::Args;
-use easy_tiger::wt::TableGraphVectorIndex;
+use easy_tiger::vamana::wt::TableGraphVectorIndex;
 use indicatif::ProgressIterator;
 use wt_mdb::{Connection, RecordCursor};
 

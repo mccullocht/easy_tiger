@@ -28,10 +28,10 @@ use wt_mdb::{
 };
 
 use crate::{
-    graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore},
     input::{VecVectorStore, VectorStore},
-    search::{GraphSearchStats, GraphSearcher},
-    wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
+    vamana::graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore},
+    vamana::search::{GraphSearchStats, GraphSearcher},
+    vamana::wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
 };
 

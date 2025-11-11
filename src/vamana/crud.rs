@@ -1,15 +1,15 @@
 //! Tools for mutating WiredTiger backed vector indices.
 use std::sync::Arc;
 
-use crate::{
+use crate::vamana::{
     graph::{
         prune_edges, EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndexReader,
         GraphVectorStore, GraphVertex,
     },
     search::GraphSearcher,
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY},
-    Neighbor,
 };
+use crate::Neighbor;
 use vectors::{F32VectorCoder, VectorDistance};
 use wt_mdb::{Error, Result, Session};
 
@@ -313,7 +313,7 @@ mod tests {
     use vectors::{F32VectorCoding, VectorSimilarity};
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
-    use crate::{
+    use crate::vamana::{
         graph::{
             Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
         },

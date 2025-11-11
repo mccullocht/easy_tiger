@@ -28,14 +28,14 @@ use vectors::{new_query_vector_distance_indexing, F32VectorCoding, VectorSimilar
 use wt_mdb::{options::CreateOptionsBuilder, Connection, Result, Session};
 
 use crate::{
-    graph::{
+    graph_clustering,
+    input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
+    vamana::graph::{
         prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
         GraphVectorIndexReader, GraphVectorStore, GraphVertex,
     },
-    graph_clustering,
-    input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
-    search::GraphSearcher,
-    wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
+    vamana::search::GraphSearcher,
+    vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
 

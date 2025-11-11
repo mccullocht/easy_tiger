@@ -10,10 +10,10 @@ use std::{
 
 use clap::Args;
 use easy_tiger::{
-    graph::GraphSearchParams,
     input::{DerefVectorStore, VectorStore},
-    search::{GraphSearchStats, GraphSearcher},
-    wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
+    vamana::graph::GraphSearchParams,
+    vamana::search::{GraphSearchStats, GraphSearcher},
+    vamana::wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;

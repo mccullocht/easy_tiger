@@ -5,10 +5,10 @@ use std::{
     ops::{Add, AddAssign},
 };
 
-use crate::{
-    graph::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex},
-    Neighbor,
+use super::graph::{
+    Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
 };
+use crate::Neighbor;
 
 use rustix::io::Errno;
 use vectors::{
@@ -380,12 +380,10 @@ mod test {
     use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
     use wt_mdb::Result;
 
-    use crate::{
-        graph::{
-            Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
-        },
-        Neighbor,
+    use crate::vamana::graph::{
+        Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
     };
+    use crate::Neighbor;
 
     use super::{GraphSearchParams, GraphSearcher};
 

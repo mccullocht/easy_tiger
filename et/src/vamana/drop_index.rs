@@ -1,6 +1,6 @@
 use std::{io, sync::Arc};
 
-use easy_tiger::wt::TableGraphVectorIndex;
+use easy_tiger::vamana::wt::TableGraphVectorIndex;
 use wt_mdb::{options::DropOptionsBuilder, Connection};
 
 pub fn drop_index(connection: Arc<Connection>, index_name: &str) -> io::Result<()> {

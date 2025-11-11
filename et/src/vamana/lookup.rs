@@ -1,7 +1,7 @@
 use std::{io, sync::Arc};
 
 use clap::Args;
-use easy_tiger::{
+use easy_tiger::vamana::{
     graph::{Graph, GraphVertex},
     wt::{CursorGraph, TableGraphVectorIndex},
 };

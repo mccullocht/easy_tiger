@@ -2,7 +2,6 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    graph::{GraphConfig, GraphLayout, GraphSearchParams},
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     kmeans::{iterative_balanced_kmeans, Params},
     spann::{
@@ -12,6 +11,7 @@ use easy_tiger::{
         IndexConfig, ReplicaSelectionAlgorithm, TableIndex,
     },
     vamana::bulk::{self, BulkLoadBuilder},
+    vamana::graph::{GraphConfig, GraphLayout, GraphSearchParams},
 };
 use histogram::Histogram;
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};

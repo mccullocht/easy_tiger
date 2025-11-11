@@ -2,9 +2,9 @@ use std::{cell::RefCell, ops::DerefMut, sync::Arc};
 
 use crate::{
     input::VectorStore,
-    search::GraphSearcher,
     spann::{select_centroids, PostingKey, TableIndex},
-    wt::SessionGraphVectorIndexReader,
+    vamana::search::GraphSearcher,
+    vamana::wt::SessionGraphVectorIndexReader,
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;

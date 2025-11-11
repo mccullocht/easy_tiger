@@ -130,7 +130,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             stats.max_duration.as_secs_f64(),
         );
         println!(
-            "head search avg candidates {:.2} avg visited {:2}",
+            "head search avg candidates {:.2} avg visited {:.2}",
             stats.total_stats.head.candidates as f64 / stats.count as f64,
             stats.total_stats.head.visited as f64 / stats.count as f64
         );

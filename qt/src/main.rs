@@ -62,10 +62,6 @@ fn quantization_loss(
     // Assume Euclidean. It might be best to make this configurable as some encodings might perform
     // better when the inputs are l2 normalized.
     let coder = args.format.new_coder(VectorSimilarity::Euclidean);
-    assert!(
-        coder.decode(&coder.encode(&vectors[0])).is_some(),
-        "specified vector format doesn't support decoding"
-    );
     let (abs_error, sq_error) = (0..vectors.len())
         .into_par_iter()
         .progress_count(vectors.len() as u64)
@@ -83,7 +79,7 @@ fn quantization_loss(
                 })
                 .unwrap_or(Cow::from(&vectors[i]));
             let encoded = coder.encode(&v);
-            let q = coder.decode(&encoded).unwrap();
+            let q = coder.decode(&encoded);
             let error = v
                 .iter()
                 .zip(q.iter())

@@ -245,7 +245,7 @@ mod distance {
         _mm_cvtss_f32(_mm_hadd_ps(r, r)).into()
     }
 
-    fn f32_le_iter<'b>(b: &'b [u8]) -> impl ExactSizeIterator<Item = f32> + 'b {
+    pub fn f32_le_iter<'b>(b: &'b [u8]) -> impl ExactSizeIterator<Item = f32> + 'b {
         let (chunks, rem) = b.as_chunks::<{ std::mem::size_of::<f32>() }>();
         debug_assert!(rem.is_empty());
         chunks.iter().map(|c| {
@@ -324,17 +324,14 @@ impl F32VectorCoder for VectorCoder {
         }
     }
 
-    fn decode(&self, encoded: &[u8]) -> Option<Vec<f32>> {
-        // NB: if the input value was l2 normalized we can't recreate that value -- we've already
-        // discarded the norm.
-        let f32_len = std::mem::size_of::<f32>();
-        assert!(encoded.len() % f32_len == 0);
-        Some(
-            encoded
-                .chunks(f32_len)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                .collect(),
-        )
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        for (d, o) in distance::f32_le_iter(encoded).zip(out.iter_mut()) {
+            *o = d
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        byte_len / std::mem::size_of::<f32>()
     }
 }
 

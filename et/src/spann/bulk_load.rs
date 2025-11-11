@@ -10,7 +10,7 @@ use easy_tiger::{
         bulk::{
             assign_to_centroids, bulk_load_centroids, bulk_load_postings, bulk_load_raw_vectors,
         },
-        IndexConfig, TableIndex,
+        IndexConfig, ReplicaSelectionAlgorithm, TableIndex,
     },
 };
 use histogram::Histogram;
@@ -77,13 +77,17 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     head_rerank_edges: Option<usize>,
 
-    /// If set replace each head centroid with a representative mediod.
-    #[arg(long, default_value_t = true)]
-    head_use_mediods: bool,
+    /// If false replace each head centroid with a representative mediod.
+    #[arg(long, default_value_t = false)]
+    head_use_means: bool,
 
     /// Maximum number of replica centroids to assign each vector to.
     #[arg(long)]
     replica_count: NonZero<usize>,
+
+    /// Replica selection algorithm to use.
+    #[arg(long)]
+    replica_selection: ReplicaSelectionAlgorithm,
 
     /// Quantizer to use for vectors written to centroid posting lists.
     #[arg(long)]
@@ -149,6 +153,7 @@ pub fn bulk_load(
     };
     let spann_config = IndexConfig {
         replica_count: args.replica_count.get(),
+        replica_selection: args.replica_selection,
         head_search_params: GraphSearchParams {
             beam_width: args.head_edge_candidates,
             num_rerank: args
@@ -188,7 +193,7 @@ pub fn bulk_load(
             |x| progress.inc(x),
         );
 
-        if args.head_use_mediods {
+        if !args.head_use_means {
             let mediods = assignments.into_iter().enumerate().fold(
                 vec![(usize::MAX, f64::MAX); centroids.len()],
                 |mut m, (i, (c, d))| {

@@ -41,10 +41,12 @@ pub fn assign_to_centroids(
                 .borrow_mut();
             let candidates = searcher.search(&vectors[i], head_reader.deref_mut())?;
             let selected = select_centroids(
-                head_reader.deref_mut(),
-                candidates,
-                distance_fn.as_ref(),
+                index.config().replica_selection,
                 index.config().replica_count,
+                candidates,
+                &vectors[i],
+                head_reader.deref_mut(),
+                distance_fn.as_ref(),
             );
             progress(1);
             selected

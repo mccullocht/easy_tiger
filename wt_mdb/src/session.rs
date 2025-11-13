@@ -500,8 +500,8 @@ impl<'a> TransactionGuard<'a> {
     /// Commit this transaction with any specified `options`.
     pub fn commit(mut self, options: Option<&CommitTransactionOptions>) -> Result<()> {
         if let TxnState::Open(session) = self.0 {
-            session.commit_transaction(options)?;
             self.0 = TxnState::Closed;
+            session.commit_transaction(options)?;
         };
         Ok(())
     }
@@ -512,8 +512,8 @@ impl<'a> TransactionGuard<'a> {
     /// any options in that case.
     pub fn rollback(mut self, options: Option<&RollbackTransactionOptions>) -> Result<()> {
         if let TxnState::Open(session) = self.0 {
-            session.rollback_transaction(options)?;
             self.0 = TxnState::Closed;
+            session.rollback_transaction(options)?;
         };
         Ok(())
     }

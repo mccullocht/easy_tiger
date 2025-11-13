@@ -275,3 +275,11 @@ impl<'a, K, V> Drop for TypedCursorGuard<'a, K, V> {
         cursor.session.return_cursor(cursor.inner);
     }
 }
+
+impl<'a, K: Formatted, V: Formatted> Iterator for TypedCursorGuard<'a, K, V> {
+    type Item = Result<(K, V)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+}

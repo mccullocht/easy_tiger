@@ -333,7 +333,7 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
         header.component_sum = match self.0 {
-            InstructionSet::Scalar => scalar::lvq1_quantize_and_pack::<B>(
+            InstructionSet::Scalar | InstructionSet::Avx512 => scalar::lvq1_quantize_and_pack::<B>(
                 vector,
                 header.lower,
                 header.upper,
@@ -346,15 +346,15 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
                 header.upper,
                 vector_bytes,
             ),
-            #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::lvq1_quantize_and_pack_avx512::<B>(
-                    vector,
-                    header.lower,
-                    header.upper,
-                    vector_bytes,
-                )
-            },
+            //#[cfg(target_arch = "x86_64")]
+            //InstructionSet::Avx512 => unsafe {
+            //    x86_64::lvq1_quantize_and_pack_avx512::<B>(
+            //        vector,
+            //        header.lower,
+            //        header.upper,
+            //        vector_bytes,
+            //    )
+            //},
         };
         header.serialize(header_bytes);
     }

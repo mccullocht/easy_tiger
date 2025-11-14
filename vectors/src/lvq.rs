@@ -311,6 +311,13 @@ pub struct PrimaryVectorCoder<const B: usize>(InstructionSet);
 
 impl<const B: usize> PrimaryVectorCoder<B> {
     const B_CHECK: () = { check_primary_bits(B) };
+
+    #[allow(unused)]
+    pub fn scalar() -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+        PrimaryVectorCoder::<B>(InstructionSet::Scalar)
+    }
 }
 
 impl<const B: usize> Default for PrimaryVectorCoder<B> {
@@ -333,7 +340,7 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
         let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
         header.component_sum = match self.0 {
-            InstructionSet::Scalar | InstructionSet::Avx512 => scalar::lvq1_quantize_and_pack::<B>(
+            InstructionSet::Scalar => scalar::lvq1_quantize_and_pack::<B>(
                 vector,
                 header.lower,
                 header.upper,
@@ -346,15 +353,15 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
                 header.upper,
                 vector_bytes,
             ),
-            //#[cfg(target_arch = "x86_64")]
-            //InstructionSet::Avx512 => unsafe {
-            //    x86_64::lvq1_quantize_and_pack_avx512::<B>(
-            //        vector,
-            //        header.lower,
-            //        header.upper,
-            //        vector_bytes,
-            //    )
-            //},
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::lvq1_quantize_and_pack_avx512::<B>(
+                    vector,
+                    header.lower,
+                    header.upper,
+                    vector_bytes,
+                )
+            },
         };
         header.serialize(header_bytes);
     }
@@ -394,6 +401,13 @@ pub struct TwoLevelVectorCoder<const B1: usize, const B2: usize>(InstructionSet)
 
 impl<const B1: usize, const B2: usize> TwoLevelVectorCoder<B1, B2> {
     const B_CHECK: () = { check_residual_bits(B1, B2) };
+
+    #[allow(unused)]
+    pub fn scalar() -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+        TwoLevelVectorCoder::<B1, B2>(InstructionSet::Scalar)
+    }
 }
 
 impl<const B1: usize, const B2: usize> Default for TwoLevelVectorCoder<B1, B2> {

@@ -501,6 +501,7 @@ fn dot_unnormalized_to_distance(
 mod test {
     use crate::{
         F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize,
+        lvq::{PrimaryVectorCoder, TwoLevelVectorCoder},
         new_query_vector_distance_f32,
     };
 
@@ -609,6 +610,7 @@ mod test {
 
     use F32VectorCoding::{F16, I4ScaledUniform, I8ScaledUniform, I16ScaledUniform};
     use VectorSimilarity::{Cosine, Dot, Euclidean};
+    use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
 
     #[test]
     fn f16_cosine() {
@@ -807,6 +809,53 @@ mod test {
         for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
             distance_compare(Euclidean, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
             query_distance_compare(Euclidean, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
+        }
+    }
+
+    // XXX make this generic.
+    #[test]
+    fn lvq1x8_coding_random() {
+        let seed = OsRng::default().try_next_u64().unwrap();
+        println!("SEED {seed:#016x}");
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+        let scoder = PrimaryVectorCoder::<8>::scalar();
+        let ocoder = PrimaryVectorCoder::<8>::default();
+        for i in 0..16384 {
+            let vec = l2_normalize(
+                (0..16)
+                    .map(|_| rng.random_range(-1.0f32..=1.0))
+                    .collect::<Vec<_>>(),
+            );
+            let svec = scoder.encode(&vec);
+            let ovec = ocoder.encode(&vec);
+            assert_eq!(
+                scoder.decode(&svec),
+                ocoder.decode(&ovec),
+                "index {i} input vector {vec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lvq2x8x8_coding_random() {
+        let seed = OsRng::default().try_next_u64().unwrap();
+        println!("SEED {seed:#016x}");
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+        let scoder = TwoLevelVectorCoder::<8, 8>::scalar();
+        let ocoder = TwoLevelVectorCoder::<8, 8>::default();
+        for i in 0..16384 {
+            let vec = l2_normalize(
+                (0..16)
+                    .map(|_| rng.random_range(-1.0f32..=1.0))
+                    .collect::<Vec<_>>(),
+            );
+            let svec = scoder.encode(&vec);
+            let ovec = ocoder.encode(&vec);
+            assert_eq!(
+                scoder.decode(&svec),
+                ocoder.decode(&ovec),
+                "index {i} input vector {vec:?}"
+            );
         }
     }
 }

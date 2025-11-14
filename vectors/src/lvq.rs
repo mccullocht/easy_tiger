@@ -498,13 +498,10 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
-        let split = packing::two_vector_split(
-            byte_len - VectorHeader::LEN - std::mem::size_of::<f32>(),
-            B1,
-            B2,
-        );
-        let dim1 = (split - VectorHeader::LEN) * 8 / B1;
-        let dim2 = (byte_len - split - std::mem::size_of::<f32>()) * 8 / B2;
+        let len_no_corrective_terms = byte_len - VectorHeader::LEN - std::mem::size_of::<f32>();
+        let split = packing::two_vector_split(len_no_corrective_terms, B1, B2);
+        let dim1 = split * 8 / B1;
+        let dim2 = (len_no_corrective_terms - split) * 8 / B2;
         dim1.min(dim2)
     }
 }

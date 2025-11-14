@@ -270,8 +270,8 @@ pub unsafe fn lvq1_quantize_and_pack_avx512<const B: usize>(
     for (c, o) in v.chunks(16).zip(out.chunks_mut(out_chunks)) {
         let mask = u16::MAX >> (16 - c.len());
         let mut v = _mm512_maskz_loadu_ps(mask, c.as_ptr());
-        // NB: we'll clamp to the lower bound later by converting to unsigned while saturating.
         v = _mm512_min_ps(v, upper);
+        v = _mm512_max_ps(v, lower);
         v = _mm512_sub_ps(v, lower);
         v = _mm512_mul_ps(v, delta_inv);
         let q = _mm512_maskz_cvtps_epu32(mask, v);

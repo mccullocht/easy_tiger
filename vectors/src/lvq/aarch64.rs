@@ -284,9 +284,10 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     residual: &mut [u8],
 ) -> u32 {
     let delta = (upper - lower) / ((1 << B1) - 1) as f32;
+    let delta_inv = ((1 << B1) - 1) as f32 / (upper - lower);
     let res_lower = -residual_interval / 2.0;
     let res_upper = residual_interval / 2.0;
-    let res_delta = residual_interval / ((1 << B2) - 1) as f32;
+    let res_delta_inv = ((1 << B2) - 1) as f32 / residual_interval;
 
     let tail_split = v.len() & !15;
     let (head_primary, tail_primary) = primary.split_at_mut(packing::byte_len(tail_split, B1));
@@ -296,10 +297,10 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
             let lowerv = vdupq_n_f32(lower);
             let upperv = vdupq_n_f32(upper);
             let deltav = vdupq_n_f32(delta);
-            let delta_inv = vdupq_n_f32(delta.recip());
+            let delta_inv = vdupq_n_f32(delta_inv);
             let res_lowerv = vdupq_n_f32(res_lower);
             let res_upperv = vdupq_n_f32(res_upper);
-            let res_delta_inv = vdupq_n_f32(res_delta.recip());
+            let res_delta_inv = vdupq_n_f32(res_delta_inv);
             let mut component_sumv = 0u32;
             for i in (0..tail_split).step_by(16) {
                 // Load and quantize 16 values, primary and residual

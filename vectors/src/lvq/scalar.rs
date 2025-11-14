@@ -106,11 +106,11 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
     upper: f32,
     out: &mut [u8],
 ) -> u32 {
-    let delta = (upper - lower) / ((1 << B) - 1) as f32;
+    let delta_inv = ((1 << B) - 1) as f32 / (upper - lower);
     let mut component_sum = 0u32;
     super::packing::pack_iter::<B>(
         v.iter().copied().map(|x| {
-            let q = ((x.clamp(lower, upper) - lower) / delta).round() as u8;
+            let q = ((x.clamp(lower, upper) - lower) * delta_inv).round() as u8;
             component_sum += u32::from(q);
             q
         }),
@@ -128,18 +128,19 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     residual: &mut [u8],
 ) -> u32 {
     let delta = (upper - lower) / ((1 << B1) - 1) as f32;
+    let delta_inv = ((1 << B1) - 1) as f32 / (upper - lower);
     let res_lower = -residual_interval / 2.0;
     let res_upper = residual_interval / 2.0;
-    let res_delta = residual_interval / ((1 << B2) - 1) as f32;
+    let res_delta_inv = ((1 << B2) - 1) as f32 / residual_interval;
     let mut component_sum = 0u32;
     super::packing::pack_iter2::<B1, B2>(
         v.iter().copied().map(|x| {
-            let q = ((x.clamp(lower, upper) - lower) / delta).round() as u8;
+            let q = ((x.clamp(lower, upper) - lower) * delta_inv).round() as u8;
             component_sum += u32::from(q);
             // After producing the primary value, calculate the error produced and quantize that
             // value based on the delta between primary items.
-            let res = x - ((q as f32 * delta) + lower);
-            let r = ((res.clamp(res_lower, res_upper) - res_lower) / res_delta).round() as u16;
+            let res = x - (q as f32).mul_add(delta, lower);
+            let r = ((res.clamp(res_lower, res_upper) - res_lower) * res_delta_inv).round() as u16;
             (q, r)
         }),
         primary,

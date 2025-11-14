@@ -501,6 +501,7 @@ fn dot_unnormalized_to_distance(
 mod test {
     use crate::{
         F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize,
+        lvq::{PrimaryVectorCoder, TwoLevelVectorCoder},
         new_query_vector_distance_f32,
     };
 
@@ -609,6 +610,7 @@ mod test {
 
     use F32VectorCoding::{F16, I4ScaledUniform, I8ScaledUniform, I16ScaledUniform};
     use VectorSimilarity::{Cosine, Dot, Euclidean};
+    use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
 
     #[test]
     fn f16_cosine() {
@@ -809,4 +811,41 @@ mod test {
             query_distance_compare(Euclidean, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
         }
     }
+
+    macro_rules! lvq_coding_simd_test {
+        ($name:ident, $coder:ty) => {
+            #[test]
+            fn $name() {
+                let seed = OsRng::default().try_next_u64().unwrap();
+                println!("SEED {seed:#016x}");
+                let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+                let scoder = <$coder>::scalar();
+                let ocoder = <$coder>::default();
+                for i in 0..1024 {
+                    let vec = l2_normalize(
+                        (0..16)
+                            .map(|_| rng.random_range(-1.0f32..=1.0))
+                            .collect::<Vec<_>>(),
+                    );
+                    let svec = scoder.encode(&vec);
+                    let ovec = ocoder.encode(&vec);
+                    assert_eq!(
+                        scoder.decode(&svec),
+                        ocoder.decode(&ovec),
+                        "index {i} input vector {vec:?}"
+                    );
+                }
+            }
+        };
+    }
+
+    lvq_coding_simd_test!(lvq1x1_coding_simd, PrimaryVectorCoder::<1>);
+    lvq_coding_simd_test!(lvq1x4_coding_simd, PrimaryVectorCoder::<4>);
+    lvq_coding_simd_test!(lvq1x8_coding_simd, PrimaryVectorCoder::<8>);
+    lvq_coding_simd_test!(lvq2x1x8_coding_simd, TwoLevelVectorCoder::<1, 8>);
+    lvq_coding_simd_test!(lvq2x1x12_coding_simd, TwoLevelVectorCoder::<1, 12>);
+    lvq_coding_simd_test!(lvq2x1x16_coding_simd, TwoLevelVectorCoder::<1, 16>);
+    lvq_coding_simd_test!(lvq2x4x4_coding_simd, TwoLevelVectorCoder::<4, 4>);
+    lvq_coding_simd_test!(lvq2x4x8_coding_simd, TwoLevelVectorCoder::<4, 8>);
+    lvq_coding_simd_test!(lvq2x8x8_coding_simd, TwoLevelVectorCoder::<8, 8>);
 }

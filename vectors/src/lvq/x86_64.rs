@@ -1,7 +1,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::arch::x86_64::{
-    __m512i, _MM_FROUND_NO_EXC, _MM_FROUND_TO_NEAREST_INT, _mm_add_ps, _mm_and_si128,
+    __m512, __m512i, _MM_FROUND_NO_EXC, _MM_FROUND_TRUNC, _mm_add_ps, _mm_and_si128,
     _mm_andnot_si128, _mm_broadcastd_epi32, _mm_bsrli_si128, _mm_cmpeq_epi8, _mm_cvtps_pd,
     _mm_cvtsd_f64, _mm_fmadd_pd, _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps,
     _mm_loadu_epi8, _mm_loadu_epi32, _mm_loadu_epi64, _mm_mask_storeu_epi8, _mm_maskz_loadu_epi8,
@@ -26,6 +26,17 @@ use std::arch::x86_64::{
 };
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
+
+/// For an input vector `v` where all values are non-negative, round each value with ties (e.g. 0.5)
+/// rounding away from zero.
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn mm512_round_nonnegative_ties_away_zero_ps(v: __m512) -> __m512 {
+    _mm512_roundscale_ps(
+        _mm512_add_ps(v, _mm512_set1_ps(0.5)),
+        _MM_FROUND_TRUNC | _MM_FROUND_NO_EXC,
+    )
+}
 
 #[target_feature(enable = "avx512f,avx,fma")]
 pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
@@ -170,7 +181,7 @@ pub unsafe fn optimize_interval_avx512(
             xq = _mm512_min_ps(xq, upperv);
             xq = _mm512_sub_ps(xq, lowerv);
             xq = _mm512_mul_ps(xq, step_inv);
-            xq = _mm512_roundscale_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(xq);
+            xq = mm512_round_nonnegative_ties_away_zero_ps(xq);
             let s = _mm512_mask_mul_ps(_mm512_set1_ps(0.0), mask, xq, points_incl_inv);
             let s1 = _mm512_mask_sub_ps(_mm512_set1_ps(0.0), mask, _mm512_set1_ps(1.0), s);
             daav = _mm512_fmadd_ps(s1, s1, daav);
@@ -238,7 +249,7 @@ unsafe fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits:
         xiq = _mm512_min_ps(xiq, bv);
         xiq = _mm512_sub_ps(xiq, av);
         xiq = _mm512_mul_ps(xiq, step_invv);
-        xiq = _mm512_roundscale_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(xiq);
+        xiq = mm512_round_nonnegative_ties_away_zero_ps(xiq);
         xiq = _mm512_fmadd_ps(stepv, xiq, av);
         let diff = _mm512_mask_sub_ps(_mm512_set1_ps(0.0), mask, xi, xiq);
         xev = _mm512_fmadd_ps(xi, diff, xev);
@@ -261,8 +272,7 @@ pub unsafe fn lvq1_quantize_and_pack_avx512<const B: usize>(
         return super::scalar::lvq1_quantize_and_pack::<B>(v, lower, upper, out);
     }
 
-    let delta = (upper - lower) / ((1 << B) - 1) as f32;
-    let delta_inv = _mm512_set1_ps(delta.recip());
+    let delta_inv = _mm512_set1_ps(((1 << B) - 1) as f32 / (upper - lower));
     let lower = _mm512_set1_ps(lower);
     let upper = _mm512_set1_ps(upper);
     let mut component_sum = _mm512_set1_epi32(0);
@@ -270,11 +280,11 @@ pub unsafe fn lvq1_quantize_and_pack_avx512<const B: usize>(
     for (c, o) in v.chunks(16).zip(out.chunks_mut(out_chunks)) {
         let mask = u16::MAX >> (16 - c.len());
         let mut v = _mm512_maskz_loadu_ps(mask, c.as_ptr());
-        // NB: we'll clamp to the lower bound later by converting to unsigned while saturating.
         v = _mm512_min_ps(v, upper);
+        v = _mm512_max_ps(v, lower);
         v = _mm512_sub_ps(v, lower);
         v = _mm512_mul_ps(v, delta_inv);
-        let q = _mm512_maskz_cvtps_epu32(mask, v);
+        let q = _mm512_maskz_cvtps_epu32(mask, mm512_round_nonnegative_ties_away_zero_ps(v));
         component_sum = _mm512_add_epi32(component_sum, q);
         pack::<B>(q, o);
     }
@@ -309,20 +319,21 @@ pub unsafe fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     ) {
         let vmask = u16::MAX >> (16 - vc.len());
         let v = _mm512_maskz_loadu_ps(vmask, vc.as_ptr());
-        // NB: we'll clamp to the lower bound later by converting to unsigned while saturating.
         let mut ps = _mm512_min_ps(v, p_upper);
+        ps = _mm512_max_ps(ps, p_lower);
         ps = _mm512_sub_ps(ps, p_lower);
         ps = _mm512_mul_ps(ps, p_delta_inv);
-        let pi = _mm512_maskz_cvtps_epu32(vmask, ps);
+        let pi = _mm512_maskz_cvtps_epu32(vmask, mm512_round_nonnegative_ties_away_zero_ps(ps));
         p_sum = _mm512_add_epi32(p_sum, pi);
         pack::<B1>(pi, pc);
 
         // Compute the residual delta from the dequantized value.
         let mut rs = _mm512_sub_ps(v, _mm512_fmadd_ps(_mm512_cvtepu32_ps(pi), p_delta, p_lower));
         rs = _mm512_min_ps(rs, r_upper);
+        rs = _mm512_max_ps(rs, r_lower);
         rs = _mm512_sub_ps(rs, r_lower);
         rs = _mm512_mul_ps(rs, r_delta_inv);
-        let ri = _mm512_maskz_cvtps_epu32(vmask, rs);
+        let ri = _mm512_maskz_cvtps_epu32(vmask, mm512_round_nonnegative_ties_away_zero_ps(rs));
         pack::<B2>(ri, rc);
     }
 

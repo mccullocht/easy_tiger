@@ -812,7 +812,7 @@ mod test {
         }
     }
 
-    macro_rules! lvq_coding_random_test {
+    macro_rules! lvq_coding_simd_test {
         ($name:ident, $coder:ty) => {
             #[test]
             fn $name() {
@@ -839,13 +839,13 @@ mod test {
         };
     }
 
-    lvq_coding_random_test!(lvq1x1_coding_random, PrimaryVectorCoder::<1>);
-    lvq_coding_random_test!(lvq1x4_coding_random, PrimaryVectorCoder::<4>);
-    lvq_coding_random_test!(lvq1x8_coding_random, PrimaryVectorCoder::<8>);
-    lvq_coding_random_test!(lvq2x1x8_coding_random, TwoLevelVectorCoder::<1, 8>);
-    lvq_coding_random_test!(lvq2x1x12_coding_random, TwoLevelVectorCoder::<1, 12>);
-    lvq_coding_random_test!(lvq2x1x16_coding_random, TwoLevelVectorCoder::<1, 16>);
-    lvq_coding_random_test!(lvq2x4x4_coding_random, TwoLevelVectorCoder::<4, 4>);
-    lvq_coding_random_test!(lvq2x4x8_coding_random, TwoLevelVectorCoder::<4, 8>);
-    lvq_coding_random_test!(lvq2x8x8_coding_random, TwoLevelVectorCoder::<8, 8>);
+    lvq_coding_simd_test!(lvq1x1_coding_simd, PrimaryVectorCoder::<1>);
+    lvq_coding_simd_test!(lvq1x4_coding_simd, PrimaryVectorCoder::<4>);
+    lvq_coding_simd_test!(lvq1x8_coding_simd, PrimaryVectorCoder::<8>);
+    lvq_coding_simd_test!(lvq2x1x8_coding_simd, TwoLevelVectorCoder::<1, 8>);
+    lvq_coding_simd_test!(lvq2x1x12_coding_simd, TwoLevelVectorCoder::<1, 12>);
+    lvq_coding_simd_test!(lvq2x1x16_coding_simd, TwoLevelVectorCoder::<1, 16>);
+    lvq_coding_simd_test!(lvq2x4x4_coding_simd, TwoLevelVectorCoder::<4, 4>);
+    lvq_coding_simd_test!(lvq2x4x8_coding_simd, TwoLevelVectorCoder::<4, 8>);
+    lvq_coding_simd_test!(lvq2x8x8_coding_simd, TwoLevelVectorCoder::<8, 8>);
 }

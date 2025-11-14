@@ -321,22 +321,21 @@ pub unsafe fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     ) {
         let vmask = u16::MAX >> (16 - vc.len());
         let v = _mm512_maskz_loadu_ps(vmask, vc.as_ptr());
-        // NB: we'll clamp to the lower bound later by converting to unsigned while saturating.
         let mut ps = _mm512_min_ps(v, p_upper);
+        ps = _mm512_max_ps(ps, p_lower);
         ps = _mm512_sub_ps(ps, p_lower);
         ps = _mm512_mul_ps(ps, p_delta_inv);
-        // XXX bad rounding
-        let pi = _mm512_maskz_cvtps_epu32(vmask, ps);
+        let pi = _mm512_maskz_cvtps_epu32(vmask, mm512_round_nonnegative_ties_away_zero_ps(ps));
         p_sum = _mm512_add_epi32(p_sum, pi);
         pack::<B1>(pi, pc);
 
         // Compute the residual delta from the dequantized value.
         let mut rs = _mm512_sub_ps(v, _mm512_fmadd_ps(_mm512_cvtepu32_ps(pi), p_delta, p_lower));
         rs = _mm512_min_ps(rs, r_upper);
+        rs = _mm512_max_ps(rs, r_lower);
         rs = _mm512_sub_ps(rs, r_lower);
         rs = _mm512_mul_ps(rs, r_delta_inv);
-        // XXX bad rounding
-        let ri = _mm512_maskz_cvtps_epu32(vmask, rs);
+        let ri = _mm512_maskz_cvtps_epu32(vmask, mm512_round_nonnegative_ties_away_zero_ps(rs));
         pack::<B2>(ri, rc);
     }
 

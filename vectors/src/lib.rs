@@ -812,7 +812,7 @@ mod test {
         }
     }
 
-    // XXX make this generic.
+    // XXX generate these test cases for all supported configurations
     #[test]
     fn lvq1x8_coding_random() {
         let seed = OsRng::default().try_next_u64().unwrap();
@@ -820,7 +820,7 @@ mod test {
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
         let scoder = PrimaryVectorCoder::<8>::scalar();
         let ocoder = PrimaryVectorCoder::<8>::default();
-        for i in 0..16384 {
+        for i in 0..65536 {
             let vec = l2_normalize(
                 (0..16)
                     .map(|_| rng.random_range(-1.0f32..=1.0))
@@ -857,5 +857,33 @@ mod test {
                 "index {i} input vector {vec:?}"
             );
         }
+    }
+
+    // XXX remove me
+    #[test]
+    fn lvq1x8_coding_one() {
+        let scoder = PrimaryVectorCoder::<8>::scalar();
+        let ocoder = PrimaryVectorCoder::<8>::default();
+        let vec = vec![
+            -0.31235695,
+            0.31431934,
+            0.021299133,
+            -0.20996684,
+            0.1613528,
+            0.015767884,
+            -0.34150437,
+            -0.07286831,
+            -0.29755062,
+            0.34145725,
+            -0.34754112,
+            -0.33750474,
+            0.33119246,
+            -0.013224465,
+            -0.24047649,
+            0.057985708,
+        ];
+        let svec = scoder.encode(&vec);
+        let ovec = ocoder.encode(&vec);
+        assert_eq!(scoder.decode(&svec), ocoder.decode(&ovec));
     }
 }

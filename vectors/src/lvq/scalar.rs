@@ -106,11 +106,11 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
     upper: f32,
     out: &mut [u8],
 ) -> u32 {
-    let delta = (upper - lower) / ((1 << B) - 1) as f32;
+    let delta_inv = ((1 << B) - 1) as f32 / (upper - lower);
     let mut component_sum = 0u32;
     super::packing::pack_iter::<B>(
         v.iter().copied().map(|x| {
-            let q = ((x.clamp(lower, upper) - lower) / delta).round() as u8;
+            let q = ((x.clamp(lower, upper) - lower) * delta_inv).round() as u8;
             component_sum += u32::from(q);
             q
         }),

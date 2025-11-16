@@ -629,6 +629,31 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for TwoLevelQueryDist
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct FastTwoLevelQueryDistance<const B1: usize, const B2: usize> {
+    similarity: VectorSimilarity,
+    query: Vec<u8>,
+}
+
+impl<const B1: usize, const B2: usize> FastTwoLevelQueryDistance<B1, B2> {
+    pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
+        let query = PrimaryVectorCoder::<B1>::default().encode(query);
+        Self { similarity, query }
+    }
+}
+
+impl<const B1: usize, const B2: usize> QueryVectorDistance for FastTwoLevelQueryDistance<B1, B2> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let query = PrimaryVector::<B1>::new(&self.query).unwrap();
+        let doc = TwoLevelVector::<B1, B2>::new(vector).unwrap();
+        dot_unnormalized_to_distance(
+            self.similarity,
+            query.dot_unnormalized(&doc.primary),
+            (query.l2_norm(), doc.l2_norm()),
+        )
+    }
+}
+
 mod packing {
     use std::iter::FusedIterator;
 

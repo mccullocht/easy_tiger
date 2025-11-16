@@ -6,20 +6,20 @@
 pub mod bulk;
 
 use std::{
-    collections::{BinaryHeap, HashSet},
+    collections::HashSet,
     io,
-    iter::FusedIterator,
     num::NonZero,
     ops::{Add, AddAssign},
     sync::Arc,
 };
 
+use min_max_heap::MinMaxHeap;
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use vectors::{
     new_query_vector_distance_f32, soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding,
-    QueryVectorDistance, VectorDistance, F32VectorDistance,
+    F32VectorDistance, QueryVectorDistance, VectorDistance, VectorSimilarity,
 };
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
@@ -490,7 +490,7 @@ fn select_centroids_soar(
             .unwrap_or(Err(Error::not_found_error()))?,
     );
     if vectors::EuclideanDistance::default().distance_f32(vector, &primary) < 0.000001 {
-        return Ok(vec![candidates[0].vertex() as u32])
+        return Ok(vec![candidates[0].vertex() as u32]);
     }
     let soar_dist = SoarQueryVectorDistance::new(vector, &primary);
     let mut secondary_centroid_ids = Vec::with_capacity(candidates.len() - 1);
@@ -515,64 +515,6 @@ fn select_centroids_soar(
         .map(|n| n.vertex() as u32)
         .collect())
 }
-
-struct PostingIter<'a, 'b, 'c> {
-    cursor: TypedCursorGuard<'a, PostingKey, Vec<u8>>,
-    seen: &'b mut HashSet<i64>,
-    tail_query: &'c dyn QueryVectorDistance,
-
-    read: usize,
-}
-
-impl<'a, 'b, 'c> PostingIter<'a, 'b, 'c> {
-    fn new(
-        reader: &'a SessionIndexReader,
-        centroid_id: u32,
-        seen: &'b mut HashSet<i64>,
-        tail_query: &'c dyn QueryVectorDistance,
-    ) -> Result<Self> {
-        // I _think_ wt copies bounds so we should be cool with temporaries here.
-        let mut cursor = reader
-            .session()
-            .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
-                &reader.index().table_names.postings,
-            )?;
-        cursor.set_bounds(
-            PostingKey::for_centroid(centroid_id)..PostingKey::for_centroid(centroid_id + 1),
-        )?;
-        Ok(Self {
-            cursor,
-            seen,
-            tail_query,
-            read: 0,
-        })
-    }
-
-    fn read(&self) -> usize {
-        self.read
-    }
-}
-
-impl Iterator for PostingIter<'_, '_, '_> {
-    type Item = Result<Neighbor>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some(record_result) = unsafe { self.cursor.next_unsafe() } {
-            self.read += 1;
-            let (record_id, vector) = match record_result {
-                Ok((k, v)) => (k.record_id, v),
-                Err(e) => return Some(Err(e)),
-            };
-            if self.seen.insert(record_id) {
-                let dist = self.tail_query.distance(vector);
-                return Some(Ok(Neighbor::new(record_id, dist)));
-            }
-        }
-        None
-    }
-}
-
-impl FusedIterator for PostingIter<'_, '_, '_> {}
 
 pub struct SessionIndexReader {
     index: Arc<TableIndex>,
@@ -681,36 +623,40 @@ impl SpannSearcher {
         }
 
         self.seen.clear();
-        let tail_query = new_query_vector_distance_f32(
+        let mut result_queue = MultiResultQueue::new(
             query,
+            reader.index.config().posting_coder,
             reader.index().head_config().config().similarity,
-            reader.index().config().posting_coder,
+            self.params.limit.get(),
         );
-        // TODO: replace the heap, try https://quickwit.io/blog/top-k-complexity
-        let mut results = BinaryHeap::with_capacity(self.params.limit.get());
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
-            // TODO: consider structuring as a single iterator over centroids to avoid cursor freelisting.
             // TODO: if I can't read a posting list then skip and warn rather than exiting early.
-            let mut it =
-                PostingIter::new(reader, centroid_id, &mut self.seen, tail_query.as_ref())?;
-            for candidate_result in &mut it {
-                match candidate_result {
-                    Ok(candidate) => {
-                        if results.len() < self.params.limit.get() {
-                            results.push(candidate);
-                        } else {
-                            let mut top = results.peek_mut().expect("pq full");
-                            if candidate < *top {
-                                *top = candidate;
-                            }
-                        }
-                        self.stats.posting_entries_scored += 1;
+            let mut cursor = reader
+                .session()
+                .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
+                    &reader.index().table_names.postings,
+                )?;
+            cursor.set_bounds(
+                PostingKey::for_centroid(centroid_id)..PostingKey::for_centroid(centroid_id + 1),
+            )?;
+            while let Some(r) = unsafe { cursor.next_unsafe() } {
+                self.stats.posting_entries_read += 1;
+                let (record_id, vector) = match r {
+                    Ok((k, v)) => (k.record_id, v),
+                    Err(e) => {
+                        warn!("failed to read posting in centroid {centroid_id}: {e}");
+                        continue;
                     }
-                    Err(e) => warn!("Failed to read posting in centroid {}: {}", centroid_id, e),
+                };
+
+                if !self.seen.insert(record_id) {
+                    continue; // already seen
                 }
+
+                result_queue.push(record_id, vector);
+                self.stats.posting_entries_scored += 1;
             }
-            self.stats.posting_entries_read += it.read();
         }
 
         if self.params.num_rerank > 0 {
@@ -726,8 +672,8 @@ impl SpannSearcher {
             let mut raw_cursor = reader
                 .session()
                 .open_record_cursor(&reader.index().table_names.raw_vectors)?;
-            let mut reranked = results
-                .into_sorted_vec()
+            let mut reranked = result_queue
+                .into_results()
                 .into_iter()
                 .take(self.params.num_rerank)
                 .map(|n| {
@@ -745,7 +691,71 @@ impl SpannSearcher {
 
             Ok(reranked)
         } else {
-            Ok(results.into_sorted_vec())
+            Ok(result_queue.into_results())
         }
+    }
+}
+
+struct ResultQueue<'a> {
+    dist_fn: Box<dyn QueryVectorDistance + 'a>,
+    results: MinMaxHeap<Neighbor>,
+    max_len: usize,
+}
+
+impl<'a> ResultQueue<'a> {
+    fn new(max_len: usize, dist_fn: Box<dyn QueryVectorDistance + 'a>) -> Self {
+        Self {
+            dist_fn,
+            results: MinMaxHeap::with_capacity(max_len),
+            max_len,
+        }
+    }
+
+    /// Returns `true` if `v` is kept in the queue rather than discarded.
+    fn push(&mut self, vertex: i64, vector: &[u8]) -> bool {
+        let n = Neighbor::new(vertex, self.dist_fn.distance(vector));
+        if self.results.len() < self.max_len {
+            self.results.push(n);
+            true
+        } else {
+            self.results.push_pop_max(n).vertex() != vertex
+        }
+    }
+}
+
+struct MultiResultQueue<'a> {
+    lo: Option<ResultQueue<'a>>,
+    hi: ResultQueue<'a>,
+}
+
+impl<'a> MultiResultQueue<'a> {
+    fn new(
+        query: &'a [f32],
+        coding: F32VectorCoding,
+        similarity: VectorSimilarity,
+        limit: usize,
+    ) -> Self {
+        let lo = coding
+            .query_vector_distance_f32_fast(query, similarity)
+            .map(|d| ResultQueue::new(limit, d));
+        let hi = ResultQueue::new(
+            limit,
+            new_query_vector_distance_f32(query, similarity, coding),
+        );
+        Self { lo, hi }
+    }
+
+    fn push(&mut self, vertex: i64, vector: &[u8]) {
+        if let Some(lo) = self.lo.as_mut() {
+            // If we have a lo queue and the result doesn't rank, don't bother with the hi score.
+            if !lo.push(vertex, vector) {
+                return;
+            }
+        }
+        self.hi.push(vertex, vector);
+    }
+
+    fn into_results(self) -> Vec<Neighbor> {
+        self.hi.results.into_vec_asc()
     }
 }

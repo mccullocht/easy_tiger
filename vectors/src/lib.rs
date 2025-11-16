@@ -225,6 +225,68 @@ impl F32VectorCoding {
             (Self::LVQ2x8x8, _) => Box::new(lvq::TwoLevelDistance::<8, 8>::new(similarity)),
         }
     }
+
+    /// Create a new [QueryVectorDistance] between `query` and vectors formatted with this encoding
+    /// by `similarity` distance metric, but trade fidelity for speed.
+    /// * This is not implemented for all codings and similarities.
+    /// * Distances are less accurate but this does not mean the distances are more or less than a
+    ///   a higher fidelity distance computation. YMMV.
+    pub fn query_vector_distance_f32_fast(
+        &self,
+        query: &[f32],
+        similarity: VectorSimilarity,
+    ) -> Option<Box<dyn QueryVectorDistance>> {
+        match *self {
+            F32VectorCoding::F32 | F32VectorCoding::F16 => None,
+            // TODO: this should be a quantized coding.
+            F32VectorCoding::BinaryQuantized => Some(Box::new(QuantizedQueryVectorDistance::new(
+                binary::HammingDistance,
+                binary::BinaryQuantizedVectorCoder.encode(query),
+            ))),
+            F32VectorCoding::I4ScaledUniform => Some(Box::new(QuantizedQueryVectorDistance::new(
+                scaled_uniform::I4PackedDistance::new(similarity),
+                scaled_uniform::I4PackedVectorCoder::new(similarity).encode(query),
+            ))),
+            F32VectorCoding::I8ScaledUniform => Some(Box::new(QuantizedQueryVectorDistance::new(
+                scaled_uniform::I8Distance::new(similarity),
+                scaled_uniform::I8VectorCoder::new(similarity).encode(query),
+            ))),
+            F32VectorCoding::I16ScaledUniform => Some(Box::new(QuantizedQueryVectorDistance::new(
+                scaled_uniform::I16Distance::new(similarity),
+                scaled_uniform::I16VectorCoder::new(similarity).encode(query),
+            ))),
+            F32VectorCoding::LVQ1x1 => Some(Box::new(QuantizedQueryVectorDistance::new(
+                lvq::PrimaryDistance::<1>::new(similarity),
+                lvq::PrimaryVectorCoder::<1>::default().encode(query),
+            ))),
+            F32VectorCoding::LVQ1x4 => Some(Box::new(QuantizedQueryVectorDistance::new(
+                lvq::PrimaryDistance::<4>::new(similarity),
+                lvq::PrimaryVectorCoder::<4>::default().encode(query),
+            ))),
+            F32VectorCoding::LVQ1x8 => Some(Box::new(QuantizedQueryVectorDistance::new(
+                lvq::PrimaryDistance::<8>::new(similarity),
+                lvq::PrimaryVectorCoder::<8>::default().encode(query),
+            ))),
+            F32VectorCoding::LVQ2x1x8 => Some(Box::new(
+                lvq::FastTwoLevelQueryDistance::<1, 8>::new(similarity, query),
+            )),
+            F32VectorCoding::LVQ2x1x12 => Some(Box::new(
+                lvq::FastTwoLevelQueryDistance::<1, 12>::new(similarity, query),
+            )),
+            F32VectorCoding::LVQ2x1x16 => Some(Box::new(
+                lvq::FastTwoLevelQueryDistance::<1, 16>::new(similarity, query),
+            )),
+            F32VectorCoding::LVQ2x4x4 => Some(Box::new(
+                lvq::FastTwoLevelQueryDistance::<4, 4>::new(similarity, query),
+            )),
+            F32VectorCoding::LVQ2x4x8 => Some(Box::new(
+                lvq::FastTwoLevelQueryDistance::<4, 8>::new(similarity, query),
+            )),
+            F32VectorCoding::LVQ2x8x8 => Some(Box::new(
+                lvq::FastTwoLevelQueryDistance::<8, 8>::new(similarity, query),
+            )),
+        }
+    }
 }
 
 impl FromStr for F32VectorCoding {

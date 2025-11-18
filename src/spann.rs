@@ -23,7 +23,7 @@ use vectors::{
 };
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
-    session::{pack2, unpack2, FormatString, Formatted},
+    session::{FormatString, Formatted},
     Connection, Error, RecordCursorGuard, Result, Session, TypedCursorGuard,
 };
 
@@ -250,23 +250,32 @@ impl PostingKey {
 }
 
 impl Formatted for PostingKey {
-    const FORMAT: FormatString = FormatString::new(c"Iq");
+    const FORMAT: FormatString = FormatString::new(c"u");
 
     type Ref<'a> = Self;
 
+    #[inline(always)]
     fn to_formatted_ref(&self) -> Self::Ref<'_> {
         *self
     }
 
+    #[inline(always)]
     fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
-        pack2::<u32, i64>(Self::FORMAT, value.centroid_id, value.record_id, packed)
+        packed.resize(12, 0);
+        packed[..4].copy_from_slice(&value.centroid_id.to_be_bytes());
+        packed[4..].copy_from_slice(&value.record_id.to_be_bytes());
+        Ok(())
     }
 
+    #[inline(always)]
     fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
-        unpack2::<u32, i64>(Self::FORMAT, packed).map(|(c, r)| PostingKey {
-            centroid_id: c,
-            record_id: r,
-        })
+        if packed.len() == 12 {
+            let centroid_id = u32::from_be_bytes(packed[..4].try_into().unwrap());
+            let record_id = i64::from_be_bytes(packed[4..].try_into().unwrap());
+            Ok(Self::new(centroid_id, record_id))
+        } else {
+            Err(Error::WiredTiger(wt_mdb::WiredTigerError::Generic))
+        }
     }
 }
 

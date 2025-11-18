@@ -23,7 +23,7 @@ use vectors::{
 };
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
-    session::{FormatString, FormatWriter, Formatted, PackedFormatReader},
+    session::{FormatString, Formatted},
     Connection, Error, RecordCursorGuard, Result, Session, TypedCursorGuard,
 };
 
@@ -250,26 +250,32 @@ impl PostingKey {
 }
 
 impl Formatted for PostingKey {
-    const FORMAT: FormatString = FormatString::new(c"Iq");
+    const FORMAT: FormatString = FormatString::new(c"u");
 
     type Ref<'a> = Self;
 
+    #[inline(always)]
     fn to_formatted_ref(&self) -> Self::Ref<'_> {
         *self
     }
 
-    fn pack(writer: &mut impl FormatWriter, value: &PostingKey) -> Result<()> {
-        writer.pack(value.centroid_id)?;
-        writer.pack(value.record_id)
+    #[inline(always)]
+    fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
+        packed.resize(12, 0);
+        packed[..4].copy_from_slice(&value.centroid_id.to_be_bytes());
+        packed[4..].copy_from_slice(&value.record_id.to_be_bytes());
+        Ok(())
     }
 
-    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
-        let centroid_id = reader.unpack()?;
-        let record_id = reader.unpack()?;
-        Ok(Self {
-            centroid_id,
-            record_id,
-        })
+    #[inline(always)]
+    fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+        if packed.len() == 12 {
+            let centroid_id = u32::from_be_bytes(packed[..4].try_into().unwrap());
+            let record_id = i64::from_be_bytes(packed[4..].try_into().unwrap());
+            Ok(Self::new(centroid_id, record_id))
+        } else {
+            Err(Error::WiredTiger(wt_mdb::WiredTigerError::Generic))
+        }
     }
 }
 

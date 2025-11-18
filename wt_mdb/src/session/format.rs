@@ -220,34 +220,41 @@ impl FormattedPrimitive for Vec<u8> {
     type Raw = RawItem;
 }
 
+macro_rules! struct_pack {
+    ($packed:ident, $format:expr, $( $v:expr ),* ) => {
+        {
+            let mut len = 0usize;
+            make_result(
+                unsafe {
+                    wt_sys::wiredtiger_struct_size(
+                        std::ptr::null_mut(),
+                        &mut len,
+                        $format.0.as_ptr(),
+                        $( $v, )*
+                    )
+                },
+                ()
+            )?;
+            $packed.resize(len, 0);
+            make_result(
+                unsafe {
+                    wt_sys::wiredtiger_struct_pack(
+                        std::ptr::null_mut(),
+                        $packed.as_mut_ptr() as *mut c_void,
+                        len,
+                        $format.0.as_ptr(),
+                        $( $v, )*
+                    )
+                },
+                ()
+            )
+        }
+    };
+}
+
 #[inline]
 pub fn pack1<A: FormattedPrimitive>(a: A::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
-    let mut len = 0usize;
-    let raw = A::Raw::from(a);
-    make_result(
-        unsafe {
-            wt_sys::wiredtiger_struct_size(
-                std::ptr::null_mut(),
-                &mut len,
-                A::FORMAT.0.as_ptr(),
-                raw,
-            )
-        },
-        (),
-    )?;
-    packed.resize(len, 0);
-    make_result(
-        unsafe {
-            wt_sys::wiredtiger_struct_pack(
-                std::ptr::null_mut(),
-                packed.as_mut_ptr() as *mut c_void,
-                len,
-                A::FORMAT.0.as_ptr(),
-                raw,
-            )
-        },
-        (),
-    )
+    struct_pack!(packed, A::FORMAT, A::Raw::from(a))
 }
 
 #[inline]
@@ -257,35 +264,7 @@ pub fn pack2<A: FormattedPrimitive, B: FormattedPrimitive>(
     b: B::Ref<'_>,
     packed: &mut Vec<u8>,
 ) -> Result<()> {
-    let mut len = 0usize;
-    let raw_a = A::Raw::from(a);
-    let raw_b = B::Raw::from(b);
-    make_result(
-        unsafe {
-            wt_sys::wiredtiger_struct_size(
-                std::ptr::null_mut(),
-                &mut len,
-                format.0.as_ptr(),
-                raw_a,
-                raw_b,
-            )
-        },
-        (),
-    )?;
-    packed.resize(len, 0);
-    make_result(
-        unsafe {
-            wt_sys::wiredtiger_struct_pack(
-                std::ptr::null_mut(),
-                packed.as_mut_ptr() as *mut c_void,
-                len,
-                format.0.as_ptr(),
-                raw_a,
-                raw_b,
-            )
-        },
-        (),
-    )
+    struct_pack!(packed, format, A::Raw::from(a), B::Raw::from(b))
 }
 
 #[inline]
@@ -296,56 +275,38 @@ pub fn pack3<A: FormattedPrimitive, B: FormattedPrimitive, C: FormattedPrimitive
     c: C::Ref<'_>,
     packed: &mut Vec<u8>,
 ) -> Result<()> {
-    let mut len = 0usize;
-    let raw_a = A::Raw::from(a);
-    let raw_b = B::Raw::from(b);
-    let raw_c = C::Raw::from(c);
-    make_result(
-        unsafe {
-            wt_sys::wiredtiger_struct_size(
-                std::ptr::null_mut(),
-                &mut len,
-                format.0.as_ptr(),
-                raw_a,
-                raw_b,
-                raw_c,
-            )
-        },
-        (),
-    )?;
-    packed.resize(len, 0);
-    make_result(
-        unsafe {
-            wt_sys::wiredtiger_struct_pack(
-                std::ptr::null_mut(),
-                packed.as_mut_ptr() as *mut c_void,
-                len,
-                format.0.as_ptr(),
-                raw_a,
-                raw_b,
-                raw_c,
-            )
-        },
-        (),
+    struct_pack!(
+        packed,
+        format,
+        A::Raw::from(a),
+        B::Raw::from(b),
+        C::Raw::from(c)
     )
+}
+
+macro_rules! struct_unpack {
+    ($format:expr, $packed:expr, $( $v:ident ),* ) => {
+        make_result(
+            unsafe {
+                wt_sys::wiredtiger_struct_unpack(
+                    std::ptr::null_mut(),
+                    $packed.as_ptr() as *const c_void,
+                    $packed.len(),
+                    $format.0.as_ptr(),
+                    $(
+                        &mut $v,
+                    )*
+                )
+            },
+            (),
+        ).map(|()| ($( $v.into(), )*))
+    };
 }
 
 #[inline]
 pub fn unpack1<'a, A: FormattedPrimitive>(packed: &'a [u8]) -> Result<A::Ref<'a>> {
     let mut raw = A::Raw::default();
-    make_result(
-        unsafe {
-            wt_sys::wiredtiger_struct_unpack(
-                std::ptr::null_mut(),
-                packed.as_ptr() as *const c_void,
-                packed.len(),
-                A::FORMAT.0.as_ptr(),
-                &mut raw,
-            )
-        },
-        (),
-    )?;
-    Ok(raw.into())
+    struct_unpack!(A::FORMAT, packed, raw).map(|(raw,)| raw)
 }
 
 #[inline]
@@ -355,20 +316,7 @@ pub fn unpack2<'a, A: FormattedPrimitive, B: FormattedPrimitive>(
 ) -> Result<(A::Ref<'a>, B::Ref<'a>)> {
     let mut raw_a = A::Raw::default();
     let mut raw_b = B::Raw::default();
-    make_result(
-        unsafe {
-            wt_sys::wiredtiger_struct_unpack(
-                std::ptr::null_mut(),
-                packed.as_ptr() as *const c_void,
-                packed.len(),
-                format.0.as_ptr(),
-                &mut raw_a,
-                &mut raw_b,
-            )
-        },
-        (),
-    )?;
-    Ok((raw_a.into(), raw_b.into()))
+    struct_unpack!(format, packed, raw_a, raw_b)
 }
 
 #[inline]
@@ -379,19 +327,5 @@ pub fn unpack3<'a, A: FormattedPrimitive, B: FormattedPrimitive, C: FormattedPri
     let mut raw_a = A::Raw::default();
     let mut raw_b = B::Raw::default();
     let mut raw_c = C::Raw::default();
-    make_result(
-        unsafe {
-            wt_sys::wiredtiger_struct_unpack(
-                std::ptr::null_mut(),
-                packed.as_ptr() as *const c_void,
-                packed.len(),
-                format.0.as_ptr(),
-                &mut raw_a,
-                &mut raw_b,
-                &mut raw_c,
-            )
-        },
-        (),
-    )?;
-    Ok((raw_a.into(), raw_b.into(), raw_c.into()))
+    struct_unpack!(format, packed, raw_a, raw_b, raw_c)
 }

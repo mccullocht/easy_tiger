@@ -90,11 +90,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     /// is rolled back, we cannot guarantee that view value data is safe to access. Use
     /// `Iterator.next()` to ensure safe access at the cost of a copy of the record value.
     pub unsafe fn next_unsafe(&mut self) -> Option<Result<(K::Ref<'_>, V::Ref<'_>)>> {
-        map_not_found(
-            unsafe { wt_call!(self.inner.0, next) }
-                .and_then(|()| self.key())
-                .and_then(|k| self.value().map(|v| (k, v))),
-        )
+        map_not_found(unsafe { wt_call!(self.inner.0, next) }.and_then(|()| self.key_and_value()))
     }
 
     /// Seek to the for `key` and return any associated `RecordView` if present.
@@ -196,6 +192,24 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     fn value(&self) -> Result<V::Ref<'_>> {
         let mut v = Item::default();
         unsafe { wt_call!(self.inner.0, get_value, &mut v.0).and_then(|()| V::unpack(v.into())) }
+    }
+
+    /// Return the current key and value. This assumes that we have just positioned the cursor
+    /// and WT_NOTFOUND will not be returned.
+    #[inline]
+    fn key_and_value(&self) -> Result<(K::Ref<'_>, V::Ref<'_>)> {
+        let mut k = Item::default();
+        let mut v = Item::default();
+        match unsafe { wt_call!(self.inner.0, get_raw_key_value, &mut k.0, &mut v.0) } {
+            // Some cursors do not support get_raw_key_value and return ENOTSUP in that case.
+            // Fall back to reading key and value separately in that case.
+            Err(Error::Errno(errno)) if errno == Errno::NOTSUP => unsafe {
+                wt_call!(self.inner.0, get_key, &mut k.0)
+                    .and_then(|()| wt_call!(self.inner.0, get_value, &mut v.0))
+            },
+            r => r,
+        }?;
+        K::unpack(k.into()).and_then(|k| V::unpack(v.into()).map(|v| (k, v)))
     }
 }
 

@@ -2,4 +2,5 @@
 /testdata
 Cargo.lock
 profile.json
+profile.json.gz
 flamegraph.svg

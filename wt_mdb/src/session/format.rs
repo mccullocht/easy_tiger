@@ -86,14 +86,17 @@ macro_rules! define_primitive_formatter {
 
             type Ref<'a> = $owned;
 
+            #[inline(always)]
             fn to_formatted_ref(&self) -> Self::Ref<'_> {
                 (*self).into()
             }
 
+            #[inline(always)]
             fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
                 pack1::<Self>(value, packed)
             }
 
+            #[inline(always)]
             fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
                 unpack1::<Self>(packed)
             }
@@ -119,16 +122,19 @@ impl Formatted for Vec<u8> {
 
     type Ref<'a> = &'a [u8];
 
+    #[inline(always)]
     fn to_formatted_ref(&self) -> Self::Ref<'_> {
         (*self).as_ref()
     }
 
+    #[inline(always)]
     fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
         packed.clear();
         packed.extend_from_slice(value);
         Ok(())
     }
 
+    #[inline(always)]
     fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
         Ok(packed)
     }
@@ -139,16 +145,19 @@ impl Formatted for CString {
 
     type Ref<'a> = &'a CStr;
 
+    #[inline(always)]
     fn to_formatted_ref(&self) -> Self::Ref<'_> {
         (*self).as_ref()
     }
 
+    #[inline(always)]
     fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
         packed.clear();
         packed.extend_from_slice(value.to_bytes_with_nul());
         Ok(())
     }
 
+    #[inline(always)]
     fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
         CStr::from_bytes_with_nul(packed)
             .map_err(|_| Error::WiredTiger(crate::WiredTigerError::Generic))
@@ -172,12 +181,14 @@ pub trait FormattedPrimitive: Formatted {
 pub struct RawCStr(*const c_char);
 
 impl From<RawCStr> for &CStr {
+    #[inline(always)]
     fn from(value: RawCStr) -> Self {
         unsafe { CStr::from_ptr(value.0) }
     }
 }
 
 impl From<&CStr> for RawCStr {
+    #[inline(always)]
     fn from(value: &CStr) -> Self {
         Self(value.as_ptr())
     }
@@ -192,12 +203,14 @@ impl FormattedPrimitive for CString {
 pub struct RawItem(super::Item);
 
 impl From<RawItem> for &[u8] {
+    #[inline(always)]
     fn from(value: RawItem) -> Self {
         <&[u8]>::from(value.0)
     }
 }
 
 impl From<&[u8]> for RawItem {
+    #[inline(always)]
     fn from(value: &[u8]) -> Self {
         Self(value.into())
     }
@@ -207,6 +220,7 @@ impl FormattedPrimitive for Vec<u8> {
     type Raw = RawItem;
 }
 
+#[inline]
 pub fn pack1<A: FormattedPrimitive>(a: A::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
     let mut len = 0usize;
     let raw = A::Raw::from(a);
@@ -236,6 +250,7 @@ pub fn pack1<A: FormattedPrimitive>(a: A::Ref<'_>, packed: &mut Vec<u8>) -> Resu
     )
 }
 
+#[inline]
 pub fn pack2<A: FormattedPrimitive, B: FormattedPrimitive>(
     format: FormatString,
     a: A::Ref<'_>,
@@ -273,6 +288,7 @@ pub fn pack2<A: FormattedPrimitive, B: FormattedPrimitive>(
     )
 }
 
+#[inline]
 pub fn pack3<A: FormattedPrimitive, B: FormattedPrimitive, C: FormattedPrimitive>(
     format: FormatString,
     a: A::Ref<'_>,
@@ -314,6 +330,7 @@ pub fn pack3<A: FormattedPrimitive, B: FormattedPrimitive, C: FormattedPrimitive
     )
 }
 
+#[inline]
 pub fn unpack1<'a, A: FormattedPrimitive>(packed: &'a [u8]) -> Result<A::Ref<'a>> {
     let mut raw = A::Raw::default();
     make_result(
@@ -331,6 +348,7 @@ pub fn unpack1<'a, A: FormattedPrimitive>(packed: &'a [u8]) -> Result<A::Ref<'a>
     Ok(raw.into())
 }
 
+#[inline]
 pub fn unpack2<'a, A: FormattedPrimitive, B: FormattedPrimitive>(
     format: FormatString,
     packed: &'a [u8],
@@ -353,6 +371,7 @@ pub fn unpack2<'a, A: FormattedPrimitive, B: FormattedPrimitive>(
     Ok((raw_a.into(), raw_b.into()))
 }
 
+#[inline]
 pub fn unpack3<'a, A: FormattedPrimitive, B: FormattedPrimitive, C: FormattedPrimitive>(
     format: FormatString,
     packed: &'a [u8],

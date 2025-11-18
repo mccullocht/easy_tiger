@@ -184,6 +184,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
 
     /// Return the current key. This assumes that we have just positioned the cursor
     /// and WT_NOTFOUND will not be returned.
+    #[inline]
     fn key(&self) -> Result<K::Ref<'_>> {
         let mut k = Item::default();
         unsafe { wt_call!(self.inner.0, get_key, &mut k.0).and_then(|()| K::unpack(k.into())) }
@@ -191,6 +192,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
 
     /// Return the current raw value. This assumes that we have just positioned the cursor
     /// and WT_NOTFOUND will not be returned.
+    #[inline]
     fn value(&self) -> Result<V::Ref<'_>> {
         let mut v = Item::default();
         unsafe { wt_call!(self.inner.0, get_value, &mut v.0).and_then(|()| V::unpack(v.into())) }

@@ -23,7 +23,7 @@ use vectors::{
 };
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
-    session::{FormatString, FormatWriter, Formatted, PackedFormatReader},
+    session::{pack2, unpack2, FormatString, FormatWriter, Formatted, PackedFormatReader},
     Connection, Error, RecordCursorGuard, Result, Session, TypedCursorGuard,
 };
 
@@ -256,6 +256,17 @@ impl Formatted for PostingKey {
 
     fn to_formatted_ref(&self) -> Self::Ref<'_> {
         *self
+    }
+
+    fn pack_oneshot(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
+        pack2::<u32, i64>(Self::FORMAT, value.centroid_id, value.record_id, packed)
+    }
+
+    fn unpack_oneshot<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+        unpack2::<u32, i64>(Self::FORMAT, packed).map(|(c, r)| PostingKey {
+            centroid_id: c,
+            record_id: r,
+        })
     }
 
     fn pack(writer: &mut impl FormatWriter, value: &PostingKey) -> Result<()> {

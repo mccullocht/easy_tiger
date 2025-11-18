@@ -430,6 +430,13 @@ pub trait Formatted: Sized {
     // * From/Into doesn't work for CString or Vec<u8>
     fn to_formatted_ref(&self) -> Self::Ref<'_>;
 
+    /// Pack a reference into a byte array.
+    fn pack_oneshot(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()>;
+    /// Unpack a byte array into a reference.
+    fn unpack_oneshot<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>>;
+
+    // XXX delete all methods below this point.
+
     /// Format the contents of this object into `writer`.
     fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()>;
     /// Unpack formatted data into a new object.
@@ -451,24 +458,22 @@ pub trait Formatted: Sized {
 }
 
 macro_rules! define_primitive_formatter {
-    ($primitive:ty, $format:literal) => {
-        define_primitive_formatter!(
-            $primitive,
-            $primitive,
-            into,
-            $format,
-            default_trivial_pack,
-            default_trivial_unpack
-        );
-    };
-    ($owned:ty, $ref:ty, $as_ref:ident, $format:literal, $pack_trivial:ident, $unpack_trivial:ident) => {
+    ($owned:ty, $format:literal) => {
         impl Formatted for $owned {
             const FORMAT: FormatString = FormatString::new($format);
 
-            type Ref<'a> = $ref;
+            type Ref<'a> = $owned;
 
             fn to_formatted_ref(&self) -> Self::Ref<'_> {
-                (*self).$as_ref()
+                (*self).into()
+            }
+
+            fn pack_oneshot(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
+                pack1::<Self>(value, packed)
+            }
+
+            fn unpack_oneshot<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+                unpack1::<Self>(packed)
             }
 
             fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
@@ -479,13 +484,19 @@ macro_rules! define_primitive_formatter {
                 reader.unpack()
             }
 
+            #[allow(unused)]
             fn pack_trivial<'b>(value: &Self::Ref<'b>) -> Option<&'b [u8]> {
-                $pack_trivial(value)
+                None
             }
 
+            #[allow(unused)]
             fn unpack_trivial<'b>(packed: &'b [u8]) -> Option<Self::Ref<'b>> {
-                $unpack_trivial(packed)
+                None
             }
+        }
+
+        impl FormattedPrimitive for $owned {
+            type Raw = $owned;
         }
     };
 }
@@ -498,32 +509,297 @@ define_primitive_formatter!(u8, c"B");
 define_primitive_formatter!(u16, c"H");
 define_primitive_formatter!(u32, c"I");
 define_primitive_formatter!(u64, c"Q");
-define_primitive_formatter!(Vec<u8>, &'a [u8], as_ref, c"u", Some, Some);
-define_primitive_formatter!(
-    CString,
-    &'a CStr,
-    as_ref,
-    c"S",
-    pack_trivial_cstr,
-    unpack_trivial_cstr
-);
 
-#[inline(always)]
-fn default_trivial_pack<'b, T>(_t: &T) -> Option<&'b [u8]> {
-    None
+impl Formatted for Vec<u8> {
+    const FORMAT: FormatString = FormatString::new(c"u");
+
+    type Ref<'a> = &'a [u8];
+
+    fn to_formatted_ref(&self) -> Self::Ref<'_> {
+        (*self).as_ref()
+    }
+
+    fn pack_oneshot(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
+        packed.clear();
+        packed.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn unpack_oneshot<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+        Ok(packed)
+    }
+
+    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
+        writer.pack(*value)
+    }
+
+    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
+        reader.unpack()
+    }
+
+    fn pack_trivial<'b>(value: &Self::Ref<'b>) -> Option<&'b [u8]> {
+        Some(value)
+    }
+
+    fn unpack_trivial<'b>(packed: &'b [u8]) -> Option<Self::Ref<'b>> {
+        Some(packed)
+    }
 }
 
-#[inline(always)]
-fn default_trivial_unpack<T>(_p: &[u8]) -> Option<T> {
-    None
+impl Formatted for CString {
+    const FORMAT: FormatString = FormatString::new(c"S");
+
+    type Ref<'a> = &'a CStr;
+
+    fn to_formatted_ref(&self) -> Self::Ref<'_> {
+        (*self).as_ref()
+    }
+
+    fn pack_oneshot(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
+        packed.clear();
+        packed.extend_from_slice(value.to_bytes_with_nul());
+        Ok(())
+    }
+
+    fn unpack_oneshot<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+        CStr::from_bytes_with_nul(packed)
+            .map_err(|_| Error::WiredTiger(crate::WiredTigerError::Generic))
+    }
+
+    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
+        writer.pack(*value)
+    }
+
+    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
+        reader.unpack()
+    }
+
+    fn pack_trivial<'b>(value: &Self::Ref<'b>) -> Option<&'b [u8]> {
+        Some(value.to_bytes_with_nul())
+    }
+
+    fn unpack_trivial<'b>(packed: &'b [u8]) -> Option<Self::Ref<'b>> {
+        CStr::from_bytes_with_nul(packed).ok()
+    }
 }
 
-#[inline(always)]
-fn pack_trivial_cstr(value: &CStr) -> Option<&[u8]> {
-    Some(value.to_bytes_with_nul())
+// XXX with this I can accept a list of types and pack or unpack
+// - the packing has to be specific to key/value unless i find another way.
+
+// XXX this is a reasonable for the low-level types but not for any composite types, those should
+// probably be formatted.
+pub trait FormattedPrimitive: Formatted {
+    type Raw: Sized + Default + for<'a> From<Self::Ref<'a>> + for<'a> Into<Self::Ref<'a>>;
 }
 
-#[inline(always)]
-fn unpack_trivial_cstr(packed: &[u8]) -> Option<&CStr> {
-    CStr::from_bytes_with_nul(packed).ok()
+#[derive(Default)]
+#[repr(transparent)]
+pub struct RawCStr(*const c_char);
+
+impl<'a> From<RawCStr> for &'a CStr {
+    fn from(value: RawCStr) -> Self {
+        unsafe { CStr::from_ptr(value.0) }
+    }
+}
+
+impl From<&CStr> for RawCStr {
+    fn from(value: &CStr) -> Self {
+        Self(value.as_ptr())
+    }
+}
+
+impl FormattedPrimitive for CString {
+    type Raw = RawCStr;
+}
+
+#[derive(Default)]
+#[repr(transparent)]
+pub struct RawItem(super::Item);
+
+impl<'a> From<RawItem> for &'a [u8] {
+    fn from(value: RawItem) -> Self {
+        value.into()
+    }
+}
+
+impl From<&[u8]> for RawItem {
+    fn from(value: &[u8]) -> Self {
+        Self(value.into())
+    }
+}
+
+impl FormattedPrimitive for Vec<u8> {
+    type Raw = RawItem;
+}
+
+// XXX I can write a packN<...> unpackN<...> with a list of `Packed`.
+
+pub fn pack1<'a, A: FormattedPrimitive>(a: A::Ref<'a>, packed: &mut Vec<u8>) -> Result<()> {
+    let mut len = 0usize;
+    let raw = A::Raw::from(a);
+    make_result(
+        unsafe {
+            wt_sys::wiredtiger_struct_size(
+                std::ptr::null_mut(),
+                &mut len,
+                A::FORMAT.0.as_ptr(),
+                &raw,
+            )
+        },
+        (),
+    )?;
+    packed.resize(len, 0);
+    make_result(
+        unsafe {
+            wt_sys::wiredtiger_struct_pack(
+                std::ptr::null_mut(),
+                packed.as_mut_ptr() as *mut c_void,
+                len,
+                A::FORMAT.0.as_ptr(),
+                &raw,
+            )
+        },
+        (),
+    )
+}
+
+pub fn pack2<'a, 'b, A: FormattedPrimitive, B: FormattedPrimitive>(
+    format: FormatString,
+    a: A::Ref<'a>,
+    b: B::Ref<'a>,
+    packed: &mut Vec<u8>,
+) -> Result<()> {
+    let mut len = 0usize;
+    let raw_a = A::Raw::from(a);
+    let raw_b = B::Raw::from(b);
+    make_result(
+        unsafe {
+            wt_sys::wiredtiger_struct_size(
+                std::ptr::null_mut(),
+                &mut len,
+                format.0.as_ptr(),
+                &raw_a,
+                &raw_b,
+            )
+        },
+        (),
+    )?;
+    packed.resize(len, 0);
+    make_result(
+        unsafe {
+            wt_sys::wiredtiger_struct_pack(
+                std::ptr::null_mut(),
+                packed.as_mut_ptr() as *mut c_void,
+                len,
+                format.0.as_ptr(),
+                &raw_a,
+                &raw_b,
+            )
+        },
+        (),
+    )
+}
+
+pub fn pack3<'a, 'b, A: FormattedPrimitive, B: FormattedPrimitive, C: FormattedPrimitive>(
+    format: FormatString,
+    a: A::Ref<'a>,
+    b: B::Ref<'a>,
+    c: C::Ref<'a>,
+    packed: &mut Vec<u8>,
+) -> Result<()> {
+    let mut len = 0usize;
+    let raw_a = A::Raw::from(a);
+    let raw_b = B::Raw::from(b);
+    let raw_c = C::Raw::from(c);
+    make_result(
+        unsafe {
+            wt_sys::wiredtiger_struct_size(
+                std::ptr::null_mut(),
+                &mut len,
+                format.0.as_ptr(),
+                &raw_a,
+                &raw_b,
+                &raw_c,
+            )
+        },
+        (),
+    )?;
+    packed.resize(len, 0);
+    make_result(
+        unsafe {
+            wt_sys::wiredtiger_struct_pack(
+                std::ptr::null_mut(),
+                packed.as_mut_ptr() as *mut c_void,
+                len,
+                format.0.as_ptr(),
+                &raw_a,
+                &raw_b,
+                &raw_c,
+            )
+        },
+        (),
+    )
+}
+
+pub fn unpack1<'a, A: FormattedPrimitive>(packed: &'a [u8]) -> Result<A::Ref<'a>> {
+    let mut raw = A::Raw::default();
+    make_result(
+        unsafe {
+            wt_sys::wiredtiger_struct_unpack(
+                std::ptr::null_mut(),
+                packed.as_ptr() as *const c_void,
+                packed.len(),
+                A::FORMAT.0.as_ptr(),
+                &mut raw,
+            )
+        },
+        (),
+    )?;
+    Ok(raw.into())
+}
+
+pub fn unpack2<'a, A: FormattedPrimitive, B: FormattedPrimitive>(
+    format: FormatString,
+    packed: &'a [u8],
+) -> Result<(A::Ref<'a>, B::Ref<'a>)> {
+    let mut raw_a = A::Raw::default();
+    let mut raw_b = B::Raw::default();
+    make_result(
+        unsafe {
+            wt_sys::wiredtiger_struct_unpack(
+                std::ptr::null_mut(),
+                packed.as_ptr() as *const c_void,
+                packed.len(),
+                format.0.as_ptr(),
+                &mut raw_a,
+                &mut raw_b,
+            )
+        },
+        (),
+    )?;
+    Ok((raw_a.into(), raw_b.into()))
+}
+
+pub fn unpack3<'a, A: FormattedPrimitive, B: FormattedPrimitive, C: FormattedPrimitive>(
+    format: FormatString,
+    packed: &'a [u8],
+) -> Result<(A::Ref<'a>, B::Ref<'a>, C::Ref<'a>)> {
+    let mut raw_a = A::Raw::default();
+    let mut raw_b = B::Raw::default();
+    let mut raw_c = C::Raw::default();
+    make_result(
+        unsafe {
+            wt_sys::wiredtiger_struct_unpack(
+                std::ptr::null_mut(),
+                packed.as_ptr() as *const c_void,
+                packed.len(),
+                format.0.as_ptr(),
+                &mut raw_a,
+                &mut raw_b,
+                &mut raw_c,
+            )
+        },
+        (),
+    )?;
+    Ok((raw_a.into(), raw_b.into(), raw_c.into()))
 }

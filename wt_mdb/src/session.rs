@@ -21,7 +21,10 @@ use crate::{
     wt_call, Error, Result,
 };
 
-pub use format::{ColumnValue, FormatString, FormatWriter, Formatted, PackedFormatReader};
+pub use format::{
+    pack1, pack2, pack3, unpack1, unpack2, unpack3, ColumnValue, FormatString, FormatWriter,
+    Formatted, PackedFormatReader,
+};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
 const METADATA_URI: &CStr = c"metadata:";
@@ -427,6 +430,24 @@ impl Formatted for StatValue {
             value_str: &self.value_str,
             value: self.value,
         }
+    }
+
+    fn pack_oneshot(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
+        pack3::<CString, CString, i64>(
+            Self::FORMAT,
+            value.description,
+            value.value_str,
+            value.value,
+            packed,
+        )
+    }
+
+    fn unpack_oneshot<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+        unpack3::<CString, CString, i64>(Self::FORMAT, packed).map(move |(a, b, c)| StatValueRef {
+            description: unsafe { CStr::from_ptr::<'static>(a.as_ptr()) },
+            value_str: b,
+            value: c,
+        })
     }
 
     fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {

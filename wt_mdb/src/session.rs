@@ -21,10 +21,7 @@ use crate::{
     wt_call, Error, Result,
 };
 
-pub use format::{
-    pack1, pack2, pack3, unpack1, unpack2, unpack3, ColumnValue, FormatString, FormatWriter,
-    Formatted, PackedFormatReader,
-};
+pub use format::{pack1, pack2, pack3, unpack1, unpack2, unpack3, FormatString, Formatted};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
 const METADATA_URI: &CStr = c"metadata:";
@@ -34,7 +31,7 @@ fn table_uri(name: &str) -> CString {
 }
 
 /// Wrapper around [wt_sys::WT_ITEM].
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 struct Item(WT_ITEM);
 
 // Use an empty slice so that the default pointer is not null.
@@ -432,7 +429,7 @@ impl Formatted for StatValue {
         }
     }
 
-    fn pack_oneshot(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
+    fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
         pack3::<CString, CString, i64>(
             Self::FORMAT,
             value.description,
@@ -442,32 +439,11 @@ impl Formatted for StatValue {
         )
     }
 
-    fn unpack_oneshot<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+    fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
         unpack3::<CString, CString, i64>(Self::FORMAT, packed).map(move |(a, b, c)| StatValueRef {
             description: unsafe { CStr::from_ptr::<'static>(a.as_ptr()) },
             value_str: b,
             value: c,
-        })
-    }
-
-    fn pack(writer: &mut impl FormatWriter, value: &Self::Ref<'_>) -> Result<()> {
-        writer.pack(value.description)?;
-        writer.pack(value.value_str)?;
-        writer.pack(value.value)
-    }
-
-    fn unpack<'b>(reader: &mut PackedFormatReader<'b>) -> Result<Self::Ref<'b>> {
-        let description = {
-            let d: &CStr = reader.unpack()?;
-            // Safety: description strings in wt metadata cursors are statically defined.
-            unsafe { CStr::from_ptr::<'static>(d.as_ptr()) }
-        };
-        let value_str = reader.unpack()?;
-        let value = reader.unpack()?;
-        Ok(StatValueRef {
-            description,
-            value_str,
-            value,
         })
     }
 }

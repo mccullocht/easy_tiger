@@ -8,15 +8,18 @@ use easy_tiger::{
         bulk::{
             assign_to_centroids, bulk_load_centroids, bulk_load_postings, bulk_load_raw_vectors,
         },
+        centroid_stats::CentroidStats,
         IndexConfig, ReplicaSelectionAlgorithm, TableIndex,
     },
-    vamana::bulk::{self, BulkLoadBuilder},
-    vamana::graph::{GraphConfig, GraphLayout, GraphSearchParams},
+    vamana::{
+        bulk::{self, BulkLoadBuilder},
+        graph::{GraphConfig, GraphLayout, GraphSearchParams},
+    },
 };
 use histogram::Histogram;
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{options::DropOptionsBuilder, Connection};
+use wt_mdb::{options::DropOptionsBuilder, session::TransactionGuard, Connection};
 
 use crate::ui::{progress_bar, progress_spinner};
 
@@ -262,96 +265,67 @@ pub fn bulk_load(
         )?;
     }
 
-    let mut stats = CentroidAssignmentStats::new(centroids_len);
-    for assignments in centroid_assignments.iter() {
-        stats.add(assignments);
-    }
+    let stats = {
+        let _guard = TransactionGuard::new(&session, None)?;
+        CentroidStats::from_index(&session, index.as_ref())
+    }?;
 
     println!(
         "Head contains {} centroids ({:4.2}%)",
-        centroids_len,
-        (centroids_len as f64 / index_vectors.len() as f64) * 100.0
+        stats.len(),
+        (stats.len() as f64 / index_vectors.len() as f64) * 100.0
     );
     println!(
         "Inserted {} tail posting entries (avg {:4.2})",
-        stats.total_assigned(),
-        stats.total_assigned() as f64 / limit as f64
+        stats.assigned(),
+        stats.assigned() as f64 / limit as f64
     );
     if args.print_tail_assignment_stats {
-        println!("Primary assignments per centroid:");
-        CentroidAssignmentStats::print_histogram(stats.primary_assignment_histogram())?;
-        println!("Secondary assignments per centroid:");
-        CentroidAssignmentStats::print_histogram(stats.secondary_assignment_histogram())?;
-        println!("Total assignments per centroid:");
-        CentroidAssignmentStats::print_histogram(stats.total_assignment_histogram())?;
+        print_tail_assignment_stats(&stats)?;
     }
 
     Ok(())
 }
 
-struct CentroidAssignmentStats {
-    primary: Vec<usize>,
-    secondary: Vec<usize>,
+fn print_tail_assignment_stats(stats: &CentroidStats) -> io::Result<()> {
+    let max_value_power = max_value_power(stats);
+    println!("Primary assignments per centroid:");
+    print_histogram(
+        max_value_power,
+        stats.primary_assignment_counts_iter().map(|(_, c)| c),
+    )?;
+    println!("Secondary assignments per centroid:");
+    print_histogram(
+        max_value_power,
+        stats.secondary_assignment_counts_iter().map(|(_, c)| c),
+    )?;
+    println!("Total assignments per centroid:");
+    print_histogram(
+        max_value_power,
+        stats.assignment_counts_iter().map(|(_, c)| c),
+    )
 }
 
-impl CentroidAssignmentStats {
-    pub fn new(centroids_len: usize) -> Self {
-        Self {
-            primary: vec![0; centroids_len],
-            secondary: vec![0; centroids_len],
-        }
-    }
+fn max_value_power(stats: &CentroidStats) -> u8 {
+    (stats
+        .assignment_counts_iter()
+        .map(|(_, c)| c)
+        .max()
+        .unwrap()
+        .next_power_of_two()
+        .ilog2() as u8)
+        .max(3)
+}
 
-    pub fn add(&mut self, centroids: &[u32]) {
-        if let Some((primary, secondaries)) = centroids.split_first() {
-            self.primary[*primary as usize] += 1;
-            for s in secondaries {
-                self.secondary[*s as usize] += 1;
-            }
-        }
+fn print_histogram(max_value_power: u8, input: impl Iterator<Item = u64>) -> io::Result<()> {
+    let mut histogram = Histogram::new(2, max_value_power).unwrap();
+    for c in input {
+        histogram.add(c as u64, 1).unwrap();
     }
-
-    pub fn total_assigned(&self) -> usize {
-        self.primary.iter().copied().sum::<usize>() + self.secondary.iter().copied().sum::<usize>()
+    use std::io::Write;
+    let mut lock = std::io::stdout().lock();
+    for b in histogram.into_iter().filter(|b| b.count() > 0) {
+        writeln!(lock, "[{:5}..{:5}] {:7}", b.start(), b.end(), b.count())?;
     }
-
-    pub fn primary_assignment_histogram(&self) -> Histogram {
-        Self::make_histogram(self.primary.iter().copied())
-    }
-
-    pub fn secondary_assignment_histogram(&self) -> Histogram {
-        Self::make_histogram(self.secondary.iter().copied())
-    }
-
-    pub fn total_assignment_histogram(&self) -> Histogram {
-        Self::make_histogram(
-            self.primary
-                .iter()
-                .zip(self.secondary.iter())
-                .map(|(p, s)| *p + *s),
-        )
-    }
-
-    pub fn print_histogram(histogram: Histogram) -> io::Result<()> {
-        use std::io::Write;
-        let mut lock = std::io::stdout().lock();
-        for b in histogram.into_iter().filter(|b| b.count() > 0) {
-            writeln!(lock, "[{:5}..{:5}] {:7}", b.start(), b.end(), b.count())?;
-        }
-        Ok(())
-    }
-
-    fn make_histogram(centroid_sizes: impl Iterator<Item = usize> + Clone) -> Histogram {
-        let max_value_power = centroid_sizes
-            .clone()
-            .max()
-            .unwrap()
-            .next_power_of_two()
-            .ilog2() as u8;
-        let mut histogram = Histogram::new(2, max_value_power.max(3)).unwrap();
-        for c in centroid_sizes {
-            histogram.add(c as u64, 1).unwrap();
-        }
-        histogram
-    }
+    Ok(())
 }

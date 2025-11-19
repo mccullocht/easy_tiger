@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, time::Duration};
 
 use indicatif::{ProgressBar, ProgressFinish, ProgressStyle};
 
@@ -18,11 +18,11 @@ pub(crate) fn progress_bar(len: usize, message: impl Into<Cow<'static, str>>) ->
 pub(crate) fn progress_spinner(message: impl Into<Cow<'static, str>>) -> ProgressBar {
     let message = message.into();
     let fmt = if !message.is_empty() {
-        "{msg} {wide_bar} {pos:>8} Elapsed: {elapsed_precise}"
+        "{spinner} {msg} {pos:>8} Elapsed: {elapsed_precise}"
     } else {
-        "{wide_bar} {pos:>8} Elapsed: {elapsed_precise}"
+        "{spinner} {pos:>8} Elapsed: {elapsed_precise}"
     };
-    ProgressBar::new_spinner()
+    let spinner = ProgressBar::new_spinner()
         .with_style(
             ProgressStyle::default_spinner()
                 .tick_strings(&[
@@ -38,5 +38,7 @@ pub(crate) fn progress_spinner(message: impl Into<Cow<'static, str>>) -> Progres
                 .unwrap(),
         )
         .with_finish(ProgressFinish::AndLeave)
-        .with_message(message)
+        .with_message(message);
+    spinner.enable_steady_tick(Duration::from_millis(100));
+    spinner
 }

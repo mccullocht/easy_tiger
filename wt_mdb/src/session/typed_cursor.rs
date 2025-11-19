@@ -31,6 +31,7 @@ pub struct TypedCursor<'a, K, V> {
     // zero allocations, particularly for small keys.
     key_buf: Vec<u8>,
     value_buf: Vec<u8>,
+    supports_get_raw_kv: bool,
     _km: PhantomData<&'a K>,
     _vm: PhantomData<&'a V>,
 }
@@ -38,11 +39,15 @@ pub struct TypedCursor<'a, K, V> {
 impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     pub(super) fn new(inner: InnerCursor, session: &'a Session) -> Result<Self> {
         if inner.key_format() == K::FORMAT && inner.value_format() == V::FORMAT {
+            // We opt in certain uri types to this behavior. It is faster but not supported by all
+            // cursor types -- in particular stats cursors do not support this call.
+            let supports_get_raw_kv = inner.uri().to_str().unwrap().starts_with("table:");
             Ok(Self {
                 inner,
                 session,
                 key_buf: vec![],
                 value_buf: vec![],
+                supports_get_raw_kv,
                 _km: PhantomData,
                 _vm: PhantomData,
             })
@@ -194,15 +199,14 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     fn key_and_value(&self) -> Result<(K::Ref<'_>, V::Ref<'_>)> {
         let mut k = Item::default();
         let mut v = Item::default();
-        match unsafe { wt_call!(self.inner.0, get_raw_key_value, &mut k.0, &mut v.0) } {
-            // Some cursors do not support get_raw_key_value and return ENOTSUP in that case.
-            // Fall back to reading key and value separately in that case.
-            Err(Error::Errno(errno)) if errno == Errno::NOTSUP => unsafe {
+        unsafe {
+            if self.supports_get_raw_kv {
+                wt_call!(self.inner.0, get_raw_key_value, &mut k.0, &mut v.0)
+            } else {
                 wt_call!(self.inner.0, get_key, &mut k.0)
                     .and_then(|()| wt_call!(self.inner.0, get_value, &mut v.0))
-            },
-            r => r,
-        }?;
+            }?
+        };
         K::unpack(k.into()).and_then(|k| V::unpack(v.into()).map(|v| (k, v)))
     }
 }

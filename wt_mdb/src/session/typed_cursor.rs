@@ -23,6 +23,7 @@ macro_rules! format_to_buf {
         $formatter::pack($var, &mut $buf).map(|()| $buf.as_slice())
     }};
 }
+
 pub struct TypedCursor<'a, K, V> {
     inner: InnerCursor,
     session: &'a Session,
@@ -126,51 +127,44 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         )
     }
 
-    /// Set the bounds this cursor. This affects almost all positioning operations, so for instance
-    /// a `seek_exact()` with a key out of bounds might yield `None`.
+    /// Set the bounds this cursor.
     ///
-    /// Cursor bounds are removed by `reset()`.
+    /// This resets the cursor to an unpositioned state. Once imposed the bounds affect all
+    /// positioning operations, so for instance a `seek_exact()` with a key out of bounds would
+    /// yield `None`, `next()` will yield the first entry after the lower bound, etc.
     pub fn set_bounds<'b>(&mut self, bounds: impl RangeBounds<K::Ref<'b>>) -> Result<()> {
+        // Reset to an unpositioned state and remove any existing bounds.
+        // * If the cursor is positioned this call will return EINVAL which is unintiuitive.
+        // * action=clear removes _both_ bounds and action=set checks any existing bounds for
+        //   soundness so it makes more sense to start with a clean slate.
+        self.reset()?;
         self.set_bound(bounds.start_bound(), false)?;
         self.set_bound(bounds.end_bound(), true)
     }
 
     fn set_bound(&mut self, bound: Bound<&K::Ref<'_>>, upper: bool) -> Result<()> {
-        let bound: Bound<&[u8]> = match bound {
-            Bound::Included(k) => Bound::Included(format_to_buf!(*k, K, self.key_buf)?),
-            Bound::Excluded(k) => Bound::Excluded(format_to_buf!(*k, K, self.key_buf)?),
-            Bound::Unbounded => Bound::Unbounded,
-        };
         let (key, config_str) = match bound {
-            Bound::Included(key) => (
-                Some(key),
+            Bound::Unbounded => return Ok(()),
+            Bound::Included(k) => {
                 if upper {
-                    c"bound=upper,action=set"
+                    (k, c"bound=upper")
                 } else {
-                    c"bound=lower,action=set"
-                },
-            ),
-            Bound::Excluded(key) => (
-                Some(key),
+                    (k, c"bound=lower")
+                }
+            }
+            Bound::Excluded(k) => {
                 if upper {
-                    c"bound=upper,action=set,inclusive=false"
+                    (k, c"bound=upper,inclusive=false")
                 } else {
-                    c"bound=lower,action=set,inclusive=false"
-                },
-            ),
-            Bound::Unbounded => (
-                None,
-                if upper {
-                    c"bound=upper,action=clear"
-                } else {
-                    c"bound=lower,action=clear"
-                },
-            ),
+                    (k, c"bound=lower,inclusive=false")
+                }
+            }
         };
-        if let Some(k) = key.map(Item::from) {
-            unsafe { wt_call!(void self.inner.0, set_key, &k) }?;
+        K::pack(*key, &mut self.key_buf)?;
+        unsafe {
+            wt_call!(void self.inner.0, set_key, &Item::from(self.key_buf.as_slice()).0)?;
+            wt_call!(self.inner.0, bound, config_str.as_ptr())
         }
-        unsafe { wt_call!(self.inner.0, bound, config_str.as_ptr()) }
     }
 
     /// Reset the cursor to an unpositioned state.

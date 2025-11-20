@@ -48,7 +48,7 @@ impl<'a> SoarQueryVectorDistance<'a> {
         Some(Self {
             vector,
             residual,
-            l2_dist_sq: l2_dist_sq.into(),
+            l2_dist_sq,
             lambda,
         })
     }

@@ -226,6 +226,78 @@ impl F32VectorCoding {
         }
     }
 
+    /// Create a new [QueryVectorDistance] given a query, similarity function, and vector coding.
+    pub fn query_vector_distance_f32<'a>(
+        &self,
+        query: impl Into<Cow<'a, [f32]>>,
+        similarity: VectorSimilarity,
+    ) -> Box<dyn QueryVectorDistance + 'a> {
+        use VectorSimilarity::{Cosine, Dot, Euclidean};
+
+        match (similarity, *self) {
+            (_, F32VectorCoding::F32) => {
+                float32::new_query_vector_distance(similarity, query.into())
+            }
+            (Cosine, F32VectorCoding::F16) => Box::new(float16::DotProductQueryDistance::new(
+                l2_normalize(query.into()),
+            )),
+            (Dot, F32VectorCoding::F16) => {
+                Box::new(float16::DotProductQueryDistance::new(query.into()))
+            }
+            (Euclidean, F32VectorCoding::F16) => {
+                Box::new(float16::EuclideanQueryDistance::new(query.into()))
+            }
+            (_, F32VectorCoding::BinaryQuantized) => Box::new(
+                binary::I1DotProductQueryDistance::new(query.into().as_ref()),
+            ),
+            (_, F32VectorCoding::I4ScaledUniform) => Box::new(
+                scaled_uniform::I4PackedQueryDistance::new(similarity, query.into()),
+            ),
+            (_, F32VectorCoding::I8ScaledUniform) => Box::new(
+                scaled_uniform::I8QueryDistance::new(similarity, query.into()),
+            ),
+            (_, F32VectorCoding::I16ScaledUniform) => Box::new(
+                scaled_uniform::I16QueryDistance::new(similarity, query.into()),
+            ),
+            (_, F32VectorCoding::LVQ1x1) => Box::new(lvq::PrimaryQueryDistance::<1>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::LVQ1x4) => Box::new(lvq::PrimaryQueryDistance::<4>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::LVQ1x8) => Box::new(lvq::PrimaryQueryDistance::<8>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::LVQ2x1x8) => Box::new(lvq::TwoLevelQueryDistance::<1, 8>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::LVQ2x1x12) => Box::new(lvq::TwoLevelQueryDistance::<1, 12>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::LVQ2x1x16) => Box::new(lvq::TwoLevelQueryDistance::<1, 16>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::LVQ2x4x4) => Box::new(lvq::TwoLevelQueryDistance::<4, 4>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::LVQ2x4x8) => Box::new(lvq::TwoLevelQueryDistance::<4, 8>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::LVQ2x8x8) => Box::new(lvq::TwoLevelQueryDistance::<8, 8>::new(
+                similarity,
+                query.into(),
+            )),
+        }
+    }
+
     /// Create a new [QueryVectorDistance] between `query` and vectors formatted with this encoding
     /// by `similarity` distance metric, but trade fidelity for speed.
     /// * This is not implemented for all codings and similarities.
@@ -238,7 +310,6 @@ impl F32VectorCoding {
     ) -> Option<Box<dyn QueryVectorDistance>> {
         match *self {
             F32VectorCoding::F32 | F32VectorCoding::F16 => None,
-            // TODO: this should be a quantized coding.
             F32VectorCoding::BinaryQuantized => Some(Box::new(QuantizedQueryVectorDistance::new(
                 binary::HammingDistance,
                 binary::BinaryQuantizedVectorCoder.encode(query),
@@ -400,78 +471,6 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
     }
 }
 
-/// Create a new [QueryVectorDistance] given a query, similarity function, and vector coding.
-pub fn new_query_vector_distance_f32<'a>(
-    query: impl Into<Cow<'a, [f32]>>,
-    similarity: VectorSimilarity,
-    coding: F32VectorCoding,
-) -> Box<dyn QueryVectorDistance + 'a> {
-    use VectorSimilarity::{Cosine, Dot, Euclidean};
-
-    match (similarity, coding) {
-        (_, F32VectorCoding::F32) => float32::new_query_vector_distance(similarity, query.into()),
-        (Cosine, F32VectorCoding::F16) => Box::new(float16::DotProductQueryDistance::new(
-            l2_normalize(query.into()),
-        )),
-        (Dot, F32VectorCoding::F16) => {
-            Box::new(float16::DotProductQueryDistance::new(query.into()))
-        }
-        (Euclidean, F32VectorCoding::F16) => {
-            Box::new(float16::EuclideanQueryDistance::new(query.into()))
-        }
-        (_, F32VectorCoding::BinaryQuantized) => Box::new(binary::I1DotProductQueryDistance::new(
-            query.into().as_ref(),
-        )),
-        (_, F32VectorCoding::I4ScaledUniform) => Box::new(
-            scaled_uniform::I4PackedQueryDistance::new(similarity, query.into()),
-        ),
-        (_, F32VectorCoding::I8ScaledUniform) => Box::new(scaled_uniform::I8QueryDistance::new(
-            similarity,
-            query.into(),
-        )),
-        (_, F32VectorCoding::I16ScaledUniform) => Box::new(scaled_uniform::I16QueryDistance::new(
-            similarity,
-            query.into(),
-        )),
-        (_, F32VectorCoding::LVQ1x1) => Box::new(lvq::PrimaryQueryDistance::<1>::new(
-            similarity,
-            query.into(),
-        )),
-        (_, F32VectorCoding::LVQ1x4) => Box::new(lvq::PrimaryQueryDistance::<4>::new(
-            similarity,
-            query.into(),
-        )),
-        (_, F32VectorCoding::LVQ1x8) => Box::new(lvq::PrimaryQueryDistance::<8>::new(
-            similarity,
-            query.into(),
-        )),
-        (_, F32VectorCoding::LVQ2x1x8) => Box::new(lvq::TwoLevelQueryDistance::<1, 8>::new(
-            similarity,
-            query.into(),
-        )),
-        (_, F32VectorCoding::LVQ2x1x12) => Box::new(lvq::TwoLevelQueryDistance::<1, 12>::new(
-            similarity,
-            query.into(),
-        )),
-        (_, F32VectorCoding::LVQ2x1x16) => Box::new(lvq::TwoLevelQueryDistance::<1, 16>::new(
-            similarity,
-            query.into(),
-        )),
-        (_, F32VectorCoding::LVQ2x4x4) => Box::new(lvq::TwoLevelQueryDistance::<4, 4>::new(
-            similarity,
-            query.into(),
-        )),
-        (_, F32VectorCoding::LVQ2x4x8) => Box::new(lvq::TwoLevelQueryDistance::<4, 8>::new(
-            similarity,
-            query.into(),
-        )),
-        (_, F32VectorCoding::LVQ2x8x8) => Box::new(lvq::TwoLevelQueryDistance::<8, 8>::new(
-            similarity,
-            query.into(),
-        )),
-    }
-}
-
 /// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
 pub fn new_query_vector_distance_indexing<'a>(
     query: impl Into<Cow<'a, [u8]>>,
@@ -564,7 +563,6 @@ mod test {
     use crate::{
         F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize,
         lvq::{PrimaryVectorCoder, TwoLevelVectorCoder},
-        new_query_vector_distance_f32,
     };
 
     struct TestVector {
@@ -647,7 +645,7 @@ mod test {
         let f32_dist_fn = similarity.new_distance_function();
         let f32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
 
-        let query_dist_fn = new_query_vector_distance_f32(&a.rvec, similarity, format);
+        let query_dist_fn = format.query_vector_distance_f32(&a.rvec, similarity);
         let query_dist = query_dist_fn.distance(&b.qvec);
 
         assert_float_near!(f32_dist, query_dist, threshold, index);

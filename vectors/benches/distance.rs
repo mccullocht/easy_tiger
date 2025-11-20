@@ -1,6 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use rand::{Rng, SeedableRng};
-use vectors::{F32VectorCoding, VectorSimilarity, new_query_vector_distance_f32};
+use vectors::{F32VectorCoding, VectorSimilarity};
 
 fn generate_test_vectors(dim: usize) -> (Vec<f32>, Vec<f32>) {
     let mut rng = rand_xoshiro::Xoroshiro128PlusPlus::seed_from_u64(0x455A_5469676572);
@@ -42,7 +42,7 @@ fn benchmark_query_distance(
     c: &mut Criterion,
 ) {
     let y = coding.new_coder(similarity).encode(y);
-    let dist = new_query_vector_distance_f32(x, similarity, coding);
+    let dist = coding.query_vector_distance_f32(x, similarity);
     c.bench_function(name, |b| b.iter(|| std::hint::black_box(dist.distance(&y))));
 }
 

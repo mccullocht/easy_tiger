@@ -11,9 +11,7 @@ use super::graph::{
 use crate::Neighbor;
 
 use rustix::io::Errno;
-use vectors::{
-    new_query_vector_distance_f32, new_query_vector_distance_indexing, QueryVectorDistance,
-};
+use vectors::{new_query_vector_distance_indexing, QueryVectorDistance};
 use wt_mdb::{Error, Result};
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -157,20 +155,16 @@ impl GraphSearcher {
         filter_predicate: impl FnMut(i64) -> bool,
         reader: &mut impl GraphVectorIndexReader,
     ) -> Result<Vec<Neighbor>> {
-        let nav_query = new_query_vector_distance_f32(
-            query,
-            reader.config().similarity,
-            reader.config().nav_format,
-        );
+        let nav_query = reader
+            .config()
+            .nav_format
+            .query_vector_distance_f32(query, reader.config().similarity);
         let rerank_query = if self.params.num_rerank > 0 {
-            Some(new_query_vector_distance_f32(
-                query,
-                reader.config().similarity,
-                reader
-                    .config()
-                    .rerank_format
-                    .ok_or(Error::Errno(Errno::NOTSUP))?,
-            ))
+            let rerank_format = reader
+                .config()
+                .rerank_format
+                .ok_or(Error::Errno(Errno::NOTSUP))?;
+            Some(rerank_format.query_vector_distance_f32(query, reader.config().similarity))
         } else {
             None
         };

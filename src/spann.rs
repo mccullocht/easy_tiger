@@ -19,8 +19,8 @@ use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use vectors::{
-    new_query_vector_distance_f32, soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding,
-    QueryVectorDistance, VectorDistance, VectorSimilarity,
+    soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding, QueryVectorDistance,
+    VectorDistance, VectorSimilarity,
 };
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
@@ -677,15 +677,13 @@ impl SpannSearcher {
         }
 
         if self.params.num_rerank > 0 {
-            let query = new_query_vector_distance_f32(
-                query,
-                reader.head_reader.config().similarity,
-                reader
-                    .head_reader
-                    .config()
-                    .rerank_format
-                    .ok_or(Error::Errno(Errno::NOTSUP))?,
-            );
+            let format = reader
+                .head_reader
+                .config()
+                .rerank_format
+                .ok_or(Error::Errno(Errno::NOTSUP))?;
+            let query =
+                format.query_vector_distance_f32(query, reader.head_reader.config().similarity);
             let mut raw_cursor = reader
                 .session()
                 .open_record_cursor(&reader.index().table_names.raw_vectors)?;
@@ -755,10 +753,7 @@ impl<'a> MultiResultQueue<'a> {
         let lo = coding
             .query_vector_distance_f32_fast(query, similarity)
             .map(|d| ResultQueue::new(limit, d));
-        let hi = ResultQueue::new(
-            limit,
-            new_query_vector_distance_f32(query, similarity, coding),
-        );
+        let hi = ResultQueue::new(limit, coding.query_vector_distance_f32(query, similarity));
         Self { lo, hi }
     }
 

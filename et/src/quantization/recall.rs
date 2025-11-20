@@ -9,10 +9,7 @@ use easy_tiger::{
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
-use vectors::{
-    new_query_vector_distance_f32, new_query_vector_distance_indexing, F32VectorCoding,
-    VectorSimilarity,
-};
+use vectors::{new_query_vector_distance_indexing, F32VectorCoding, VectorSimilarity};
 
 #[derive(Args)]
 pub struct RecallArgs {
@@ -76,11 +73,8 @@ pub fn recall(
                     args.format,
                 )
             } else {
-                new_query_vector_distance_f32(
-                    query_vectors[i].to_vec(),
-                    args.similarity,
-                    args.format,
-                )
+                args.format
+                    .query_vector_distance_f32(query_vectors[i].to_vec(), args.similarity)
             };
             qdist
         })

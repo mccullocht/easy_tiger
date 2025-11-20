@@ -2,6 +2,8 @@
 //!
 //! https://arxiv.org/abs/2404.00774
 
+use crate::{F32VectorDistance, float32::EuclideanDistance};
+
 /// Compute SOAR distance between an input vector and another (centroid) vector, considering
 /// orthogonality to the primary centroid.
 ///
@@ -24,30 +26,31 @@ impl<'a> SoarQueryVectorDistance<'a> {
     const DEFAULT_LAMBDA: f64 = 1.0;
 
     /// Create a new soar vector from a vector reference and the closest centroid.
-    pub fn new(vector: &'a [f32], centroid: &[f32]) -> Self {
+    pub fn new(vector: &'a [f32], centroid: &[f32]) -> Option<Self> {
         Self::with_lambda(vector, centroid, Self::DEFAULT_LAMBDA)
     }
 
     /// Create a new soar vector from a vector reference, the closest centroid, and lambda param.
-    pub fn with_lambda(vector: &'a [f32], centroid: &[f32], lambda: f64) -> Self {
+    pub fn with_lambda(vector: &'a [f32], centroid: &[f32], lambda: f64) -> Option<Self> {
         assert_eq!(vector.len(), centroid.len());
 
-        let mut l2_dist_sq = 0.0;
+        // If the vector and centroid are very close to each other then decline to provide SOAR
+        // distance scoring; the caller should not select any replicas.
+        let l2_dist_sq = EuclideanDistance::default().distance_f32(vector, centroid);
+        if l2_dist_sq < 1e-10 {
+            return None;
+        }
         let residual = vector
             .iter()
             .zip(centroid.iter())
-            .map(|(v, c)| {
-                let diff = *v - *c;
-                l2_dist_sq = diff.mul_add(diff, l2_dist_sq);
-                diff * diff
-            })
+            .map(|(v, c)| *v - *c)
             .collect::<Vec<_>>();
-        Self {
+        Some(Self {
             vector,
             residual,
-            l2_dist_sq: l2_dist_sq.into(),
+            l2_dist_sq,
             lambda,
-        }
+        })
     }
 
     /// Compute the SOAR distance between a fixed query and a new centroid vector.

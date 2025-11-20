@@ -24,7 +24,7 @@ use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use vectors::{new_query_vector_distance_indexing, F32VectorCoding, VectorSimilarity};
+use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{options::CreateOptionsBuilder, Connection, Result, Session};
 
 use crate::{
@@ -503,11 +503,8 @@ where
         edges: &mut Vec<Neighbor>,
     ) -> Result<()> {
         let vertex_vector = vector_store.get(vertex_id as i64).unwrap()?.to_vec();
-        let vertex_dist_fn = new_query_vector_distance_indexing(
-            &vertex_vector,
-            self.index.config().similarity,
-            vector_format,
-        );
+        let vertex_dist_fn = vector_format
+            .query_vector_distance_indexing(&vertex_vector, self.index.config().similarity);
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
             let in_flight_vertex_vector = vector_store.get(in_flight_vertex as i64).unwrap()?;

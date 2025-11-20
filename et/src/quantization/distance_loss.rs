@@ -5,10 +5,7 @@ use easy_tiger::input::{DerefVectorStore, VectorStore};
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
-use vectors::{
-    new_query_vector_distance_f32, new_query_vector_distance_indexing, F32VectorCoding,
-    VectorSimilarity,
-};
+use vectors::{F32VectorCoding, VectorSimilarity};
 
 #[derive(Args)]
 pub struct DistanceLossArgs {
@@ -62,19 +59,14 @@ pub fn distance_loss(
                 }
             }
             let qdist = if args.quantize_query {
-                new_query_vector_distance_indexing(
-                    coder.encode(&query),
-                    args.similarity,
-                    args.format,
-                )
+                args.format
+                    .query_vector_distance_indexing(coder.encode(&query), args.similarity)
             } else {
-                new_query_vector_distance_f32(query.to_vec(), args.similarity, args.format)
+                args.format
+                    .query_vector_distance_f32(query.to_vec(), args.similarity)
             };
-            let f32_dist = new_query_vector_distance_f32(
-                query.into_owned(),
-                args.similarity,
-                F32VectorCoding::F32,
-            );
+            let f32_dist =
+                F32VectorCoding::F32.query_vector_distance_f32(query.into_owned(), args.similarity);
             (f32_dist, qdist)
         })
         .collect::<Vec<_>>();

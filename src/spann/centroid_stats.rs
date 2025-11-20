@@ -1,6 +1,6 @@
 use wt_mdb::{Result, Session};
 
-use crate::spann::{PostingKey, TableIndex};
+use crate::spann::TableIndex;
 
 /// Tracks occupancy statistics for centroids.
 pub struct CentroidStats {
@@ -87,8 +87,8 @@ impl CentroidStats {
         primary: &mut [i64],
         secondary: &mut [i64],
     ) -> Result<()> {
-        let centroid_cursor = session
-            .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(&index.table_names.centroids)?;
+        let centroid_cursor =
+            session.get_or_create_typed_cursor::<i64, Vec<u8>>(&index.table_names.centroids)?;
         for r in centroid_cursor {
             let centroids = r.map(|(_, c)| c)?;
             if let Some((p, s)) = centroids.as_chunks::<4>().0.split_first() {

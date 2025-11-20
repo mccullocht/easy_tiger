@@ -168,9 +168,10 @@ use wt_call;
 
 #[cfg(test)]
 mod test {
-    use std::io::ErrorKind;
+    use std::{io::ErrorKind, sync::Arc};
 
     use rustix::io::Errno;
+    use tempfile::TempDir;
 
     use crate::{
         connection::Connection,
@@ -178,8 +179,8 @@ mod test {
             ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
             Statistics,
         },
-        session::TransactionGuard,
-        Error, Result, WiredTigerError,
+        session::{Formatted, TransactionGuard},
+        Error, RecordCursor, Result, Session, WiredTigerError,
     };
 
     fn conn_options() -> Option<ConnectionOptions> {
@@ -550,6 +551,135 @@ mod test {
                 "table:test"
             ],
         );
+    }
+
+    struct RecordTableFixture {
+        table_name: String,
+        session: Session,
+        _connection: Arc<Connection>,
+        _dir: TempDir,
+    }
+
+    impl RecordTableFixture {
+        fn with_data(table_name: &str, data: &[(i64, Vec<u8>)]) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let connection =
+                Connection::open(dir.path().to_str().unwrap(), conn_options()).unwrap();
+            let session = connection.open_session().unwrap();
+            let mut bulk_cursor = session
+                .new_bulk_load_cursor::<i64, Vec<u8>>(table_name, None)
+                .unwrap();
+            for (k, v) in data {
+                bulk_cursor.insert(*k, v.to_formatted_ref()).unwrap()
+            }
+            Self {
+                table_name: table_name.to_string(),
+                session,
+                _connection: connection,
+                _dir: dir,
+            }
+        }
+
+        fn open_cursor(&self) -> Result<RecordCursor<'_>> {
+            self.session.open_record_cursor(&self.table_name)
+        }
+    }
+
+    fn cursor_bounds_test_data() -> Vec<(i64, Vec<u8>)> {
+        [(-2i64, "a"), (-1, "b"), (0, "c"), (1, "d"), (2, "e")]
+            .into_iter()
+            .map(|(k, v)| (k, v.as_bytes().to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn cursor_bounds_lower() -> Result<()> {
+        let data = cursor_bounds_test_data();
+        let fixture = RecordTableFixture::with_data("test", &data);
+        let mut cursor = fixture.open_cursor()?;
+        cursor.set_bounds(0..)?;
+        assert_eq!(
+            cursor.collect::<Result<Vec<_>>>()?,
+            data.into_iter()
+                .filter(|(k, _)| *k >= 0)
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_bounds_upper_exclusive() -> Result<()> {
+        let data = cursor_bounds_test_data();
+        let fixture = RecordTableFixture::with_data("test", &data);
+        let mut cursor = fixture.open_cursor()?;
+        cursor.set_bounds(..0)?;
+        assert_eq!(
+            cursor.collect::<Result<Vec<_>>>()?,
+            data.into_iter().filter(|(k, _)| *k < 0).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_bounds_upper_inclusive() -> Result<()> {
+        let data = cursor_bounds_test_data();
+        let fixture = RecordTableFixture::with_data("test", &data);
+        let mut cursor = fixture.open_cursor()?;
+        cursor.set_bounds(..=0)?;
+        assert_eq!(
+            cursor.collect::<Result<Vec<_>>>()?,
+            data.into_iter()
+                .filter(|(k, _)| *k <= 0)
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_bounds_lower_and_upper() -> Result<()> {
+        let data = cursor_bounds_test_data();
+        let fixture = RecordTableFixture::with_data("test", &data);
+        let mut cursor = fixture.open_cursor()?;
+        cursor.set_bounds(-1..2)?;
+        assert_eq!(
+            cursor.collect::<Result<Vec<_>>>()?,
+            data.into_iter()
+                .filter(|(k, _)| k.abs() <= 1)
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_bounds_full() -> Result<()> {
+        let data = cursor_bounds_test_data();
+        let fixture = RecordTableFixture::with_data("test", &data);
+        let mut cursor = fixture.open_cursor()?;
+        cursor.set_bounds(..)?;
+        assert_eq!(cursor.collect::<Result<Vec<_>>>()?, data);
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_bounds_invalid() {
+        let data = cursor_bounds_test_data();
+        let fixture = RecordTableFixture::with_data("test", &data);
+        let mut cursor = fixture.open_cursor().unwrap();
+        assert_eq!(cursor.set_bounds(1..-1), Err(Error::Errno(Errno::INVAL)));
+    }
+
+    #[test]
+    fn cursor_bounds_resets() -> Result<()> {
+        let data = cursor_bounds_test_data();
+        let fixture = RecordTableFixture::with_data("test", &data);
+        let mut cursor = fixture.open_cursor()?;
+        assert_ne!(cursor.next(), None);
+        cursor.set_bounds(..0)?;
+        assert_eq!(
+            cursor.collect::<Result<Vec<_>>>()?,
+            data.into_iter().filter(|(k, _)| *k < 0).collect::<Vec<_>>()
+        );
+        Ok(())
     }
 
     #[test]

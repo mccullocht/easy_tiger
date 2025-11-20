@@ -577,32 +577,6 @@ mod test {
         }
     }
 
-    #[derive(Debug)]
-    pub struct TestGraph<'a>(&'a TestGraphVectorIndex);
-
-    impl Graph for TestGraph<'_> {
-        type Vertex<'c>
-            = TestGraphVertex<'c>
-        where
-            Self: 'c;
-
-        fn entry_point(&mut self) -> Option<Result<i64>> {
-            if self.0.data.is_empty() {
-                None
-            } else {
-                Some(Ok(0))
-            }
-        }
-
-        fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-            if vertex_id < 0 || vertex_id as usize >= self.0.data.len() {
-                None
-            } else {
-                Some(Ok(TestGraphVertex(&self.0.data[vertex_id as usize])))
-            }
-        }
-    }
-
     pub struct TestGraphVertex<'a>(&'a TestVector);
 
     impl GraphVertex for TestGraphVertex<'_> {

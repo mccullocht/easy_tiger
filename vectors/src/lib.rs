@@ -358,6 +358,77 @@ impl F32VectorCoding {
             )),
         }
     }
+
+    /// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
+    pub fn query_vector_distance_indexing<'a>(
+        &self,
+        query: impl Into<Cow<'a, [u8]>>,
+        similarity: VectorSimilarity,
+    ) -> Box<dyn QueryVectorDistance + 'a> {
+        use VectorSimilarity::{Cosine, Dot, Euclidean};
+        macro_rules! quantized_qvd {
+            ($dist_fn:expr, $query:ident) => {
+                Box::new(QuantizedQueryVectorDistance::new($dist_fn, $query))
+            };
+        }
+        match (similarity, *self) {
+            (Cosine, F32VectorCoding::F32) => {
+                quantized_qvd!(float32::CosineDistance::default(), query)
+            }
+            (Dot, F32VectorCoding::F32) => {
+                quantized_qvd!(float32::DotProductDistance::default(), query)
+            }
+            (Euclidean, F32VectorCoding::F32) => {
+                quantized_qvd!(float32::EuclideanDistance::default(), query)
+            }
+            (Dot, F32VectorCoding::F16) => {
+                quantized_qvd!(float16::DotProductDistance::default(), query)
+            }
+            (Cosine, F32VectorCoding::F16) => {
+                quantized_qvd!(float16::DotProductDistance::default(), query)
+            }
+            (Euclidean, F32VectorCoding::F16) => {
+                quantized_qvd!(float16::EuclideanDistance::default(), query)
+            }
+            (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
+            (_, F32VectorCoding::I8ScaledUniform) => {
+                quantized_qvd!(scaled_uniform::I8Distance::new(similarity), query)
+            }
+            (_, F32VectorCoding::I4ScaledUniform) => {
+                quantized_qvd!(scaled_uniform::I4PackedDistance::new(similarity), query)
+            }
+            (_, F32VectorCoding::I16ScaledUniform) => {
+                quantized_qvd!(scaled_uniform::I16Distance::new(similarity), query)
+            }
+            (_, F32VectorCoding::LVQ1x1) => {
+                quantized_qvd!(lvq::PrimaryDistance::<1>::new(similarity), query)
+            }
+            (_, F32VectorCoding::LVQ1x4) => {
+                quantized_qvd!(lvq::PrimaryDistance::<4>::new(similarity), query)
+            }
+            (_, F32VectorCoding::LVQ1x8) => {
+                quantized_qvd!(lvq::PrimaryDistance::<8>::new(similarity), query)
+            }
+            (_, F32VectorCoding::LVQ2x1x8) => {
+                quantized_qvd!(lvq::TwoLevelDistance::<1, 8>::new(similarity), query)
+            }
+            (_, F32VectorCoding::LVQ2x1x12) => {
+                quantized_qvd!(lvq::TwoLevelDistance::<1, 12>::new(similarity), query)
+            }
+            (_, F32VectorCoding::LVQ2x1x16) => {
+                quantized_qvd!(lvq::TwoLevelDistance::<1, 16>::new(similarity), query)
+            }
+            (_, F32VectorCoding::LVQ2x4x4) => {
+                quantized_qvd!(lvq::TwoLevelDistance::<4, 4>::new(similarity), query)
+            }
+            (_, F32VectorCoding::LVQ2x4x8) => {
+                quantized_qvd!(lvq::TwoLevelDistance::<4, 8>::new(similarity), query)
+            }
+            (_, F32VectorCoding::LVQ2x8x8) => {
+                quantized_qvd!(lvq::TwoLevelDistance::<8, 8>::new(similarity), query)
+            }
+        }
+    }
 }
 
 impl FromStr for F32VectorCoding {
@@ -468,75 +539,6 @@ impl<'a, D: VectorDistance> QuantizedQueryVectorDistance<'a, D> {
 impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance<'a, D> {
     fn distance(&self, vector: &[u8]) -> f64 {
         self.distance_fn.distance(self.query.as_ref(), vector)
-    }
-}
-
-/// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
-pub fn new_query_vector_distance_indexing<'a>(
-    query: impl Into<Cow<'a, [u8]>>,
-    similarity: VectorSimilarity,
-    coding: F32VectorCoding,
-) -> Box<dyn QueryVectorDistance + 'a> {
-    use VectorSimilarity::{Cosine, Dot, Euclidean};
-    macro_rules! quantized_qvd {
-        ($dist_fn:expr, $query:ident) => {
-            Box::new(QuantizedQueryVectorDistance::new($dist_fn, $query))
-        };
-    }
-    match (similarity, coding) {
-        (Cosine, F32VectorCoding::F32) => quantized_qvd!(float32::CosineDistance::default(), query),
-        (Dot, F32VectorCoding::F32) => {
-            quantized_qvd!(float32::DotProductDistance::default(), query)
-        }
-        (Euclidean, F32VectorCoding::F32) => {
-            quantized_qvd!(float32::EuclideanDistance::default(), query)
-        }
-        (Dot, F32VectorCoding::F16) => {
-            quantized_qvd!(float16::DotProductDistance::default(), query)
-        }
-        (Cosine, F32VectorCoding::F16) => {
-            quantized_qvd!(float16::DotProductDistance::default(), query)
-        }
-        (Euclidean, F32VectorCoding::F16) => {
-            quantized_qvd!(float16::EuclideanDistance::default(), query)
-        }
-        (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
-        (_, F32VectorCoding::I8ScaledUniform) => {
-            quantized_qvd!(scaled_uniform::I8Distance::new(similarity), query)
-        }
-        (_, F32VectorCoding::I4ScaledUniform) => {
-            quantized_qvd!(scaled_uniform::I4PackedDistance::new(similarity), query)
-        }
-        (_, F32VectorCoding::I16ScaledUniform) => {
-            quantized_qvd!(scaled_uniform::I16Distance::new(similarity), query)
-        }
-        (_, F32VectorCoding::LVQ1x1) => {
-            quantized_qvd!(lvq::PrimaryDistance::<1>::new(similarity), query)
-        }
-        (_, F32VectorCoding::LVQ1x4) => {
-            quantized_qvd!(lvq::PrimaryDistance::<4>::new(similarity), query)
-        }
-        (_, F32VectorCoding::LVQ1x8) => {
-            quantized_qvd!(lvq::PrimaryDistance::<8>::new(similarity), query)
-        }
-        (_, F32VectorCoding::LVQ2x1x8) => {
-            quantized_qvd!(lvq::TwoLevelDistance::<1, 8>::new(similarity), query)
-        }
-        (_, F32VectorCoding::LVQ2x1x12) => {
-            quantized_qvd!(lvq::TwoLevelDistance::<1, 12>::new(similarity), query)
-        }
-        (_, F32VectorCoding::LVQ2x1x16) => {
-            quantized_qvd!(lvq::TwoLevelDistance::<1, 16>::new(similarity), query)
-        }
-        (_, F32VectorCoding::LVQ2x4x4) => {
-            quantized_qvd!(lvq::TwoLevelDistance::<4, 4>::new(similarity), query)
-        }
-        (_, F32VectorCoding::LVQ2x4x8) => {
-            quantized_qvd!(lvq::TwoLevelDistance::<4, 8>::new(similarity), query)
-        }
-        (_, F32VectorCoding::LVQ2x8x8) => {
-            quantized_qvd!(lvq::TwoLevelDistance::<8, 8>::new(similarity), query)
-        }
     }
 }
 

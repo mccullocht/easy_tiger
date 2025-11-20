@@ -11,7 +11,7 @@ use super::graph::{
 use crate::Neighbor;
 
 use rustix::io::Errno;
-use vectors::{new_query_vector_distance_indexing, QueryVectorDistance};
+use vectors::QueryVectorDistance;
 use wt_mdb::{Error, Result};
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -118,11 +118,10 @@ impl GraphSearcher {
             .get(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
             .to_vec();
-        let nav_query = new_query_vector_distance_indexing(
-            &nav_query_rep,
-            reader.config().similarity,
-            reader.config().nav_format,
-        );
+        let nav_query = reader
+            .config()
+            .nav_format
+            .query_vector_distance_indexing(&nav_query_rep, reader.config().similarity);
 
         let rerank_query = if self.params.num_rerank > 0 {
             let mut vectors = reader
@@ -132,11 +131,11 @@ impl GraphSearcher {
                 .get(vertex_id)
                 .unwrap_or(Err(Error::not_found_error()))?
                 .to_vec();
-            Some(new_query_vector_distance_indexing(
-                query,
-                vectors.similarity(),
-                vectors.format(),
-            ))
+            Some(
+                vectors
+                    .format()
+                    .query_vector_distance_indexing(query, vectors.similarity()),
+            )
         } else {
             None
         };

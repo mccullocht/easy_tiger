@@ -4,6 +4,7 @@
 //! select centroids. This index is used to build and navigate a posting index.
 
 pub mod bulk;
+pub mod centroid_stats;
 
 use std::{
     collections::HashSet,

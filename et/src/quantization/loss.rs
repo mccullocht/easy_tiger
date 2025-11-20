@@ -16,9 +16,9 @@ pub struct LossArgs {
     center: bool,
 }
 
-pub fn loss<V: VectorStore<Elem = f32> + Send + Sync>(
+pub fn loss(
     args: LossArgs,
-    vectors: &V,
+    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
 ) -> io::Result<()> {
     let mean = if args.center {
         Some(super::compute_center(vectors))

@@ -1,3 +1,4 @@
+mod distance_loss;
 mod loss;
 
 use std::{fs::File, io, num::NonZero, path::PathBuf};
@@ -6,8 +7,10 @@ use clap::{Args, Subcommand};
 
 use easy_tiger::input::{DerefVectorStore, VectorStore};
 use indicatif::ProgressIterator;
-use loss::{loss, LossArgs};
 use memmap2::Mmap;
+
+use distance_loss::{distance_loss, DistanceLossArgs};
+use loss::{loss, LossArgs};
 
 #[derive(Args)]
 pub struct QuantizationArgs {
@@ -26,6 +29,8 @@ pub struct QuantizationArgs {
 pub enum Command {
     /// Compute loss resulting from quantization.
     Loss(LossArgs),
+    /// Compute loss in distance computation resulting from quantization.
+    DistanceLoss(DistanceLossArgs),
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
@@ -36,6 +41,7 @@ pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
 
     match args.command {
         Command::Loss(args) => loss(args, &vectors),
+        Command::DistanceLoss(args) => distance_loss(args, &vectors),
     }
 }
 

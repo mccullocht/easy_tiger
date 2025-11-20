@@ -1,59 +1,17 @@
-use std::{
-    borrow::Cow,
-    fs::File,
-    io::{self},
-    num::NonZero,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{borrow::Cow, fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
-use clap::{Args, Parser, Subcommand};
+use clap::Args;
 use easy_tiger::input::{DerefVectorStore, VectorStore};
-use indicatif::{ParallelProgressIterator, ProgressIterator};
+use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use vectors::{
-    F32VectorCoding, VectorSimilarity, new_query_vector_distance_f32,
-    new_query_vector_distance_indexing,
+    new_query_vector_distance_f32, new_query_vector_distance_indexing, F32VectorCoding,
+    VectorSimilarity,
 };
 
-#[derive(Parser)]
-#[command(version, about = "Tool for instrumenting vector quantization techniques", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-
-    /// Input vector file for partitioning.
-    #[arg(short = 'v', long)]
-    input_vectors: PathBuf,
-    /// Vector dimensions for --input-vectors
-    #[arg(short, long)]
-    dimensions: NonZero<usize>,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Compute precision loss in distance computation resulting from vector quantization.
-    DistanceLoss(DistanceLossArgs),
-}
-
-fn compute_center(vectors: &impl VectorStore<Elem = f32>) -> Vec<f32> {
-    let mut mean = vec![0.0; vectors.elem_stride()];
-    for (i, v) in vectors
-        .iter()
-        .enumerate()
-        .progress_count(vectors.len() as u64)
-    {
-        for (d, m) in v.iter().zip(mean.iter_mut()) {
-            let delta = *d as f64 - *m;
-            *m += delta / (i + 1) as f64;
-        }
-    }
-    mean.into_iter().map(|m| m as f32).collect()
-}
-
 #[derive(Args)]
-struct DistanceLossArgs {
+pub struct DistanceLossArgs {
     /// Little-endian f32 vectors of some dimensionality as input vectors.
     #[arg(long)]
     query_vectors: PathBuf,
@@ -78,7 +36,7 @@ struct DistanceLossArgs {
     center: bool,
 }
 
-fn distance_loss(
+pub fn distance_loss(
     args: DistanceLossArgs,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
 ) -> io::Result<()> {
@@ -88,7 +46,7 @@ fn distance_loss(
     )?;
 
     let center = if args.center {
-        Some(compute_center(vectors))
+        Some(super::compute_center(vectors))
     } else {
         None
     };
@@ -158,16 +116,4 @@ fn distance_loss(
         error_sq_sum / count as f64
     );
     Ok(())
-}
-
-fn main() -> io::Result<()> {
-    let cli = Cli::parse();
-
-    let vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(cli.input_vectors)?)? },
-        cli.dimensions,
-    )?;
-    match cli.command {
-        Command::DistanceLoss(args) => distance_loss(args, &vectors),
-    }
 }

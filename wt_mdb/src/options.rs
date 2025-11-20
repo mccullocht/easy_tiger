@@ -73,8 +73,10 @@ impl ConnectionOptionsBuilder {
 /// Note that the level for a stats cursor must be less than the connection level
 /// or an error may occur.
 #[derive(Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum Statistics {
     /// Collect no stats.
+    #[default]
     None,
     /// Collect stats that are fast/cheap to collect.
     Fast,
@@ -91,11 +93,6 @@ impl Statistics {
     }
 }
 
-impl Default for Statistics {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 impl std::fmt::Display for Statistics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

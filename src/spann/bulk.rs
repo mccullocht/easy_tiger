@@ -17,7 +17,7 @@ pub fn assign_to_centroids(
     connection: &Arc<Connection>,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     limit: usize,
-    progress: (impl Fn(u64) + Send + Sync),
+    progress: impl Fn(u64) + Send + Sync,
 ) -> Result<Vec<Vec<u32>>> {
     let tl_head_reader = ThreadLocal::new();
     let tl_searcher = ThreadLocal::new();
@@ -59,7 +59,7 @@ pub fn bulk_load_centroids(
     index: &TableIndex,
     session: &Session,
     centroid_assignments: &[Vec<u32>],
-    progress: (impl Fn(u64) + Send + Sync),
+    progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     let mut bulk_cursor =
         session.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.centroids, None)?;
@@ -87,7 +87,7 @@ pub fn bulk_load_postings(
     session: &Session,
     centroid_assignments: &[Vec<u32>],
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
-    progress: (impl Fn(u64) + Send + Sync),
+    progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     let mut posting_keys: Vec<PostingKey> = centroid_assignments
         .into_par_iter()
@@ -126,7 +126,7 @@ pub fn bulk_load_raw_vectors(
     session: &Session,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     limit: usize,
-    progress: (impl Fn(u64) + Send + Sync),
+    progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     let mut bulk_cursor =
         session.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;

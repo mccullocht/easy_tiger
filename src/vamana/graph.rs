@@ -25,16 +25,13 @@ pub struct GraphSearchParams {
 /// Describes how fields within the vector index are laid out -- split completely or with some
 /// colocated fields.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default)]
 pub enum GraphLayout {
     /// Each field appears in its own table.
+    #[default]
     Split,
 }
 
-impl Default for GraphLayout {
-    fn default() -> Self {
-        Self::Split
-    }
-}
 
 impl FromStr for GraphLayout {
     type Err = io::Error;

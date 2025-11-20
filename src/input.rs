@@ -54,7 +54,7 @@ where
                 ),
             ));
         }
-        if data.len() % (elem_width * stride.get()) != 0 {
+        if !data.len().is_multiple_of(elem_width * stride.get()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(

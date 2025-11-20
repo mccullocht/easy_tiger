@@ -1,17 +1,25 @@
 mod loss;
 
-use std::io;
+use std::{fs::File, io, num::NonZero, path::PathBuf};
 
 use clap::{Args, Subcommand};
 
-use easy_tiger::input::VectorStore;
+use easy_tiger::input::{DerefVectorStore, VectorStore};
 use indicatif::ProgressIterator;
 use loss::{loss, LossArgs};
+use memmap2::Mmap;
 
 #[derive(Args)]
 pub struct QuantizationArgs {
     #[command(subcommand)]
     command: Command,
+
+    /// Input doc vector file for quantization.
+    #[arg(short = 'v', long)]
+    doc_vectors: PathBuf,
+    /// Vector dimensions for --input-vectors
+    #[arg(short, long)]
+    dimensions: NonZero<usize>,
 }
 
 #[derive(Subcommand)]
@@ -21,8 +29,13 @@ pub enum Command {
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
+    let vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
+        unsafe { Mmap::map(&File::open(args.doc_vectors)?)? },
+        args.dimensions,
+    )?;
+
     match args.command {
-        Command::Loss(args) => loss(args),
+        Command::Loss(args) => loss(args, &vectors),
     }
 }
 

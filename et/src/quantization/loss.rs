@@ -1,20 +1,13 @@
-use std::{borrow::Cow, fs::File, io, num::NonZero, path::PathBuf};
+use std::{borrow::Cow, io};
 
 use clap::Args;
-use easy_tiger::input::{DerefVectorStore, VectorStore};
+use easy_tiger::input::VectorStore;
 use indicatif::ParallelProgressIterator;
-use memmap2::Mmap;
 use rayon::prelude::*;
 use vectors::{F32VectorCoding, VectorSimilarity};
 
 #[derive(Args)]
 pub struct LossArgs {
-    /// Input vector file for for quantization.
-    #[arg(short = 'v', long)]
-    input_vectors: PathBuf,
-    /// Vector dimensions for --input-vectors
-    #[arg(short, long)]
-    dimensions: NonZero<usize>,
     /// Target format to measure the quantization loss of.
     #[arg(short, long)]
     format: F32VectorCoding,
@@ -23,13 +16,12 @@ pub struct LossArgs {
     center: bool,
 }
 
-pub fn loss(args: LossArgs) -> io::Result<()> {
-    let vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.input_vectors)?)? },
-        args.dimensions,
-    )?;
+pub fn loss<V: VectorStore<Elem = f32> + Send + Sync>(
+    args: LossArgs,
+    vectors: &V,
+) -> io::Result<()> {
     let mean = if args.center {
-        Some(super::compute_center(&vectors))
+        Some(super::compute_center(vectors))
     } else {
         None
     };

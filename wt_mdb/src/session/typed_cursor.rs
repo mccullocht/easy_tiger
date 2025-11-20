@@ -23,6 +23,7 @@ macro_rules! format_to_buf {
         $formatter::pack($var, &mut $buf).map(|()| $buf.as_slice())
     }};
 }
+
 pub struct TypedCursor<'a, K, V> {
     inner: InnerCursor,
     session: &'a Session,
@@ -30,6 +31,7 @@ pub struct TypedCursor<'a, K, V> {
     // zero allocations, particularly for small keys.
     key_buf: Vec<u8>,
     value_buf: Vec<u8>,
+    supports_get_raw_kv: bool,
     _km: PhantomData<&'a K>,
     _vm: PhantomData<&'a V>,
 }
@@ -37,11 +39,19 @@ pub struct TypedCursor<'a, K, V> {
 impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     pub(super) fn new(inner: InnerCursor, session: &'a Session) -> Result<Self> {
         if inner.key_format() == K::FORMAT && inner.value_format() == V::FORMAT {
+            // We opt in certain uri types to this behavior. It is faster but not supported by all
+            // cursor types -- in particular stats cursors do not support this call.
+            let supports_get_raw_kv = inner
+                .uri()
+                .to_str()
+                .expect("uri is ascii")
+                .starts_with("table:");
             Ok(Self {
                 inner,
                 session,
                 key_buf: vec![],
                 value_buf: vec![],
+                supports_get_raw_kv,
                 _km: PhantomData,
                 _vm: PhantomData,
             })
@@ -126,51 +136,44 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         )
     }
 
-    /// Set the bounds this cursor. This affects almost all positioning operations, so for instance
-    /// a `seek_exact()` with a key out of bounds might yield `None`.
+    /// Set the bounds this cursor.
     ///
-    /// Cursor bounds are removed by `reset()`.
+    /// This resets the cursor to an unpositioned state. Once imposed the bounds affect all
+    /// positioning operations, so for instance a `seek_exact()` with a key out of bounds would
+    /// yield `None`, `next()` will yield the first entry after the lower bound, etc.
     pub fn set_bounds<'b>(&mut self, bounds: impl RangeBounds<K::Ref<'b>>) -> Result<()> {
+        // Reset to an unpositioned state and remove any existing bounds.
+        // * If the cursor is positioned this call will return EINVAL which is unintuitive.
+        // * action=clear removes _both_ bounds and action=set checks any existing bounds for
+        //   soundness so it makes more sense to start with a clean slate.
+        self.reset()?;
         self.set_bound(bounds.start_bound(), false)?;
         self.set_bound(bounds.end_bound(), true)
     }
 
     fn set_bound(&mut self, bound: Bound<&K::Ref<'_>>, upper: bool) -> Result<()> {
-        let bound: Bound<&[u8]> = match bound {
-            Bound::Included(k) => Bound::Included(format_to_buf!(*k, K, self.key_buf)?),
-            Bound::Excluded(k) => Bound::Excluded(format_to_buf!(*k, K, self.key_buf)?),
-            Bound::Unbounded => Bound::Unbounded,
-        };
         let (key, config_str) = match bound {
-            Bound::Included(key) => (
-                Some(key),
+            Bound::Unbounded => return Ok(()),
+            Bound::Included(k) => {
                 if upper {
-                    c"bound=upper,action=set"
+                    (k, c"bound=upper")
                 } else {
-                    c"bound=lower,action=set"
-                },
-            ),
-            Bound::Excluded(key) => (
-                Some(key),
+                    (k, c"bound=lower")
+                }
+            }
+            Bound::Excluded(k) => {
                 if upper {
-                    c"bound=upper,action=set,inclusive=false"
+                    (k, c"bound=upper,inclusive=false")
                 } else {
-                    c"bound=lower,action=set,inclusive=false"
-                },
-            ),
-            Bound::Unbounded => (
-                None,
-                if upper {
-                    c"bound=upper,action=clear"
-                } else {
-                    c"bound=lower,action=clear"
-                },
-            ),
+                    (k, c"bound=lower,inclusive=false")
+                }
+            }
         };
-        if let Some(k) = key.map(Item::from) {
-            unsafe { wt_call!(void self.inner.0, set_key, &k) }?;
+        K::pack(*key, &mut self.key_buf)?;
+        unsafe {
+            wt_call!(void self.inner.0, set_key, &Item::from(self.key_buf.as_slice()).0)?;
+            wt_call!(self.inner.0, bound, config_str.as_ptr())
         }
-        unsafe { wt_call!(self.inner.0, bound, config_str.as_ptr()) }
     }
 
     /// Reset the cursor to an unpositioned state.
@@ -200,15 +203,14 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     fn key_and_value(&self) -> Result<(K::Ref<'_>, V::Ref<'_>)> {
         let mut k = Item::default();
         let mut v = Item::default();
-        match unsafe { wt_call!(self.inner.0, get_raw_key_value, &mut k.0, &mut v.0) } {
-            // Some cursors do not support get_raw_key_value and return ENOTSUP in that case.
-            // Fall back to reading key and value separately in that case.
-            Err(Error::Errno(errno)) if errno == Errno::NOTSUP => unsafe {
+        unsafe {
+            if self.supports_get_raw_kv {
+                wt_call!(self.inner.0, get_raw_key_value, &mut k.0, &mut v.0)
+            } else {
                 wt_call!(self.inner.0, get_key, &mut k.0)
                     .and_then(|()| wt_call!(self.inner.0, get_value, &mut v.0))
-            },
-            r => r,
-        }?;
+            }?
+        };
         K::unpack(k.into()).and_then(|k| V::unpack(v.into()).map(|v| (k, v)))
     }
 }

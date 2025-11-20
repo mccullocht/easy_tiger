@@ -41,7 +41,11 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         if inner.key_format() == K::FORMAT && inner.value_format() == V::FORMAT {
             // We opt in certain uri types to this behavior. It is faster but not supported by all
             // cursor types -- in particular stats cursors do not support this call.
-            let supports_get_raw_kv = inner.uri().to_str().unwrap().starts_with("table:");
+            let supports_get_raw_kv = inner
+                .uri()
+                .to_str()
+                .expect("uri is ascii")
+                .starts_with("table:");
             Ok(Self {
                 inner,
                 session,
@@ -139,7 +143,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     /// yield `None`, `next()` will yield the first entry after the lower bound, etc.
     pub fn set_bounds<'b>(&mut self, bounds: impl RangeBounds<K::Ref<'b>>) -> Result<()> {
         // Reset to an unpositioned state and remove any existing bounds.
-        // * If the cursor is positioned this call will return EINVAL which is unintiuitive.
+        // * If the cursor is positioned this call will return EINVAL which is unintuitive.
         // * action=clear removes _both_ bounds and action=set checks any existing bounds for
         //   soundness so it makes more sense to start with a clean slate.
         self.reset()?;

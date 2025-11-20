@@ -87,7 +87,7 @@ pub struct BulkLoadArgs {
     replica_count: NonZero<usize>,
 
     /// Replica selection algorithm to use.
-    #[arg(long)]
+    #[arg(long, default_value_t = ReplicaSelectionAlgorithm::SOAR)]
     replica_selection: ReplicaSelectionAlgorithm,
 
     /// Quantizer to use for vectors written to centroid posting lists.

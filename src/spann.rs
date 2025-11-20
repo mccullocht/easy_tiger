@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use vectors::{
     new_query_vector_distance_f32, soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding,
-    F32VectorDistance, QueryVectorDistance, VectorDistance, VectorSimilarity,
+    QueryVectorDistance, VectorDistance, VectorSimilarity,
 };
 use wt_mdb::{
     options::{CreateOptionsBuilder, DropOptions},
@@ -48,9 +48,9 @@ pub struct IndexConfig {
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplicaSelectionAlgorithm {
     /// Select replicas using relative neighbor graph edge pruning.
-    #[default]
     RNG,
     /// Select replicas using SOAR distance scoring.
+    #[default]
     SOAR,
 }
 
@@ -432,6 +432,15 @@ fn select_centroids(
     head_reader: &impl GraphVectorIndexReader,
     distance_fn: &dyn VectorDistance,
 ) -> Result<Vec<u32>> {
+    assert!(
+        !candidates.is_empty(),
+        "at least one candidate is required for replica selection"
+    );
+    if replica_count == 1 {
+        // If we aren't selecting multiple replicas then just return the first candidate.
+        return Ok(vec![candidates[0].vertex() as u32]);
+    }
+
     match algorithm {
         ReplicaSelectionAlgorithm::RNG => {
             select_centroids_rng(replica_count, candidates, head_reader, distance_fn)
@@ -496,10 +505,11 @@ fn select_centroids_soar(
             .get(candidates[0].vertex())
             .unwrap_or(Err(Error::not_found_error()))?,
     );
-    if vectors::EuclideanDistance::default().distance_f32(vector, &primary) < 0.000001 {
+    let soar_dist = if let Some(dist) = SoarQueryVectorDistance::new(vector, &primary) {
+        dist
+    } else {
         return Ok(vec![candidates[0].vertex() as u32]);
-    }
-    let soar_dist = SoarQueryVectorDistance::new(vector, &primary);
+    };
     let mut secondary_centroid_ids = Vec::with_capacity(candidates.len() - 1);
     let mut candidate_vector = vec![0.0f32; primary.len()];
     for candidate in candidates.iter().skip(1) {

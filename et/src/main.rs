@@ -1,5 +1,6 @@
 mod compute_neighbors;
 mod neighbor_util;
+mod quantization;
 mod quantization_recall;
 mod recall;
 mod spann;
@@ -12,6 +13,7 @@ use std::io::{self};
 
 use clap::{command, Parser, Subcommand};
 use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
+use quantization::{quantization, QuantizationArgs};
 use spann::{spann_command, SpannArgs};
 use vamana::{vamana_command, VamanaArgs};
 
@@ -32,6 +34,8 @@ enum Commands {
     Vamana(VamanaArgs),
     /// Compute the top k neighbors for a set of queries against a set of document vectors.
     ComputeNeighbors(ComputeNeighborsArgs),
+    /// Quantization related utilities.
+    Quantization(QuantizationArgs),
     /// Quantize a vector set and compute exact recall against a ground truth.
     QuantizationRecall(QuantizationRecallArgs),
 }
@@ -44,6 +48,7 @@ fn main() -> io::Result<()> {
         Commands::Spann(args) => spann_command(args),
         Commands::Vamana(args) => vamana_command(args),
         Commands::ComputeNeighbors(args) => compute_neighbors(args),
+        Commands::Quantization(args) => quantization(args),
         Commands::QuantizationRecall(args) => quantization_recall(args),
     }
 }

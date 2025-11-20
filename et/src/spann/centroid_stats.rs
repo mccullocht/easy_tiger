@@ -9,8 +9,8 @@ pub fn centroid_stats(connection: Arc<Connection>, index_name: &str) -> io::Resu
     let session = connection.open_session()?;
     let stats = CentroidStats::from_index(&session, &index)?;
 
-    println!("Head contains {} centroids", stats.len());
-    println!("{} tail posting entries", stats.assigned());
+    println!("Head contains {} centroids", stats.centroid_count());
+    println!("{} tail posting entries", stats.vector_count());
     let max_value_power = max_value_power(&stats);
     println!("Primary assignments per centroid:");
     print_histogram(

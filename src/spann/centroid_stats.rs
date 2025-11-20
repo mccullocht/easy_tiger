@@ -20,12 +20,12 @@ impl CentroidStats {
     }
 
     /// Return the number of centroids in the index.
-    pub fn len(&self) -> usize {
+    pub fn centroid_count(&self) -> usize {
         self.counts_iter().count()
     }
 
     /// Return the number of vector -> centroid assignments.
-    pub fn assigned(&self) -> usize {
+    pub fn vector_count(&self) -> usize {
         self.assignment_counts_iter().map(|(_, c)| c).sum::<u64>() as usize
     }
 

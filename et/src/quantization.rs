@@ -1,5 +1,6 @@
 mod distance_loss;
 mod loss;
+mod recall;
 
 use std::{fs::File, io, num::NonZero, path::PathBuf};
 
@@ -11,6 +12,7 @@ use memmap2::Mmap;
 
 use distance_loss::{distance_loss, DistanceLossArgs};
 use loss::{loss, LossArgs};
+use recall::{recall, RecallArgs};
 
 #[derive(Args)]
 pub struct QuantizationArgs {
@@ -31,6 +33,8 @@ pub enum Command {
     Loss(LossArgs),
     /// Compute loss in distance computation resulting from quantization.
     DistanceLoss(DistanceLossArgs),
+    /// Compute recall difference with quantization using exhaustive search.
+    Recall(RecallArgs),
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
@@ -42,6 +46,7 @@ pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
     match args.command {
         Command::Loss(args) => loss(args, &vectors),
         Command::DistanceLoss(args) => distance_loss(args, &vectors),
+        Command::Recall(args) => recall(args, &vectors),
     }
 }
 

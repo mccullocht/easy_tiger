@@ -31,7 +31,7 @@ tempfile = "3.20.0"
 cc = "1.2.31"
 
 [workspace]
-members = ["et", "pt", "qt", "vectors", "wt_mdb", "wt_sys"]
+members = ["et", "vectors", "wt_mdb", "wt_sys"]
 
 [profile.profiling]
 inherits = "release"

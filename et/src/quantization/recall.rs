@@ -1,9 +1,6 @@
 use std::{fs::File, io, num::NonZero, path::PathBuf};
 
-use crate::{
-    neighbor_util::TopNeighbors,
-    recall::{RecallArgs, RecallComputer},
-};
+use crate::{neighbor_util::TopNeighbors, recall::RecallComputer};
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
@@ -18,11 +15,7 @@ use vectors::{
 };
 
 #[derive(Args)]
-pub struct QuantizationRecallArgs {
-    /// Number of dimensions for input vectors.
-    #[arg(short, long)]
-    dimensions: NonZero<usize>,
-
+pub struct RecallArgs {
     /// Little-endian f32 vectors as a flat file where each vector has --dimensions
     #[arg(long)]
     query_vectors: PathBuf,
@@ -35,9 +28,6 @@ pub struct QuantizationRecallArgs {
     #[arg(long, default_value_t = false)]
     quantize_query: bool,
 
-    /// Little-endian f32 vectors as a flat file where each vector has --dimensions
-    #[arg(long)]
-    doc_vectors: PathBuf,
     /// If set, only process this many input doc vectors.
     #[arg(long)]
     doc_limit: Option<usize>,
@@ -50,23 +40,22 @@ pub struct QuantizationRecallArgs {
     similarity: VectorSimilarity,
 
     #[command(flatten)]
-    recall: RecallArgs,
+    recall: crate::recall::RecallArgs,
 }
 
-pub fn quantization_recall(args: QuantizationRecallArgs) -> io::Result<()> {
+pub fn recall(
+    args: RecallArgs,
+    doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+) -> io::Result<()> {
     let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
-        args.dimensions,
+        NonZero::new(doc_vectors.elem_stride()).unwrap(),
     )?;
     let query_limit = args
         .query_limit
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
 
-    let doc_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.doc_vectors)?)? },
-        args.dimensions,
-    )?;
     let doc_limit = args
         .doc_limit
         .unwrap_or(doc_vectors.len())

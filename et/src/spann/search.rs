@@ -13,7 +13,10 @@ use std::{
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
-    spann::{SessionIndexReader, SpannSearchParams, SpannSearchStats, SpannSearcher, TableIndex},
+    spann::{
+        search::{SearchParams, SearchStats, Searcher},
+        SessionIndexReader, TableIndex,
+    },
     vamana::graph::GraphSearchParams,
 };
 use memmap2::Mmap;
@@ -70,7 +73,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
     );
-    let search_params = SpannSearchParams {
+    let search_params = SearchParams {
         head_params: GraphSearchParams {
             beam_width: args.head_candidates,
             num_rerank: args
@@ -106,7 +109,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             &query_vectors,
             &index,
             &connection,
-            search_params,
+            search_params.clone(),
             recall_computer.as_ref(),
         )?;
     }
@@ -163,7 +166,7 @@ fn search_phase<Q: Send + Sync>(
     query_vectors: &DerefVectorStore<f32, Q>,
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
-    search_params: SpannSearchParams,
+    search_params: SearchParams,
     recall_computer: Option<&RecallComputer>,
 ) -> io::Result<AggregateSearchStats> {
     let query_indices = (0..limit).cycle().take(iters * limit).collect::<Vec<_>>();
@@ -189,7 +192,7 @@ fn search_phase<Q: Send + Sync>(
         query_indices
             .into_par_iter()
             .map_init(
-                || SearcherState::new(index, connection, search_params).unwrap(),
+                || SearcherState::new(index, connection, search_params.clone()).unwrap(),
                 |searcher, index| {
                     let stats = searcher.query(index, &query_vectors[index], recall_computer);
                     progress.inc(1);
@@ -205,18 +208,18 @@ fn search_phase<Q: Send + Sync>(
 
 struct SearcherState {
     reader: SessionIndexReader,
-    searcher: SpannSearcher,
+    searcher: Searcher,
 }
 
 impl SearcherState {
     fn new(
         index: &Arc<TableIndex>,
         connection: &Arc<Connection>,
-        search_params: SpannSearchParams,
+        search_params: SearchParams,
     ) -> io::Result<Self> {
         Ok(Self {
             reader: SessionIndexReader::new(index, connection.open_session()?),
-            searcher: SpannSearcher::new(search_params),
+            searcher: Searcher::new(search_params),
         })
     }
 
@@ -244,12 +247,12 @@ struct AggregateSearchStats {
     count: usize,
     total_duration: Duration,
     max_duration: Duration,
-    total_stats: SpannSearchStats,
+    total_stats: SearchStats,
     sum_recall: Option<f64>,
 }
 
 impl AggregateSearchStats {
-    fn new(duration: Duration, total_stats: SpannSearchStats, recall: Option<f64>) -> Self {
+    fn new(duration: Duration, total_stats: SearchStats, recall: Option<f64>) -> Self {
         Self {
             count: 1,
             total_duration: duration,

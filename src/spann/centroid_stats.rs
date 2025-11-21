@@ -76,7 +76,7 @@ impl CentroidStats {
 
     /// Get the assignment counts for a specific centroid or `None` if the centroid does not exist.
     pub fn assignment_counts(&self, centroid_id: usize) -> Option<CentroidCounts> {
-        self.0.get(centroid_id).unwrap_or(&None).clone()
+        *self.0.get(centroid_id).unwrap_or(&None)
     }
 
     /// Iterate over a list of centroid identifiers and the number of primary assigned vectors for each.
@@ -91,13 +91,10 @@ impl CentroidStats {
 
     /// Iterate over counts for all centroids with at least one assignment.
     fn counts_iter(&self) -> impl Iterator<Item = (usize, CentroidCounts)> + '_ {
-        self.0.iter().enumerate().filter_map(|(i, c)| {
-            if let Some(counts) = c {
-                Some((i, *counts))
-            } else {
-                None
-            }
-        })
+        self.0
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| c.as_ref().map(|counts| (i, *counts)))
     }
 
     /// Iterate over available centroid ids. The returned iterator is effectively unbounded (up to

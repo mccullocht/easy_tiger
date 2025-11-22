@@ -10,7 +10,6 @@ use super::graph::{
 };
 use crate::Neighbor;
 
-use rustix::io::Errno;
 use vectors::QueryVectorDistance;
 use wt_mdb::{Error, Result};
 
@@ -124,18 +123,20 @@ impl GraphSearcher {
             .query_vector_distance_indexing(&nav_query_rep, reader.config().similarity);
 
         let rerank_query = if self.params.num_rerank > 0 {
-            let mut vectors = reader
-                .rerank_vectors()
-                .unwrap_or(Err(Error::Errno(Errno::NOTSUP)))?;
-            let query = vectors
-                .get(vertex_id)
-                .unwrap_or(Err(Error::not_found_error()))?
-                .to_vec();
-            Some(
-                vectors
-                    .format()
-                    .query_vector_distance_indexing(query, vectors.similarity()),
-            )
+            if let Some(vectors) = reader.rerank_vectors() {
+                let mut vectors = vectors?;
+                let query = vectors
+                    .get(vertex_id)
+                    .unwrap_or(Err(Error::not_found_error()))?
+                    .to_vec();
+                Some(
+                    vectors
+                        .format()
+                        .query_vector_distance_indexing(query, vectors.similarity()),
+                )
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -159,11 +160,10 @@ impl GraphSearcher {
             .nav_format
             .query_vector_distance_f32(query, reader.config().similarity);
         let rerank_query = if self.params.num_rerank > 0 {
-            let rerank_format = reader
+            reader
                 .config()
                 .rerank_format
-                .ok_or(Error::Errno(Errno::NOTSUP))?;
-            Some(rerank_format.query_vector_distance_f32(query, reader.config().similarity))
+                .map(|f| f.query_vector_distance_f32(query, reader.config().similarity))
         } else {
             None
         };
@@ -644,6 +644,28 @@ mod test {
                 Neighbor::new(4, 0.06813),
                 Neighbor::new(16, 0.06813),
                 Neighbor::new(0, 0.09),
+            ]
+        );
+    }
+
+    #[test]
+    fn rerank_requested_but_not_supported() {
+        let mut index = build_test_graph(4);
+        index.config.rerank_format = None;
+
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(4).unwrap(),
+            num_rerank: 4,
+        });
+        assert_eq!(
+            searcher
+                .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+                .unwrap(),
+            vec![
+                Neighbor::new(0, 0.47999999940395355),
+                Neighbor::new(1, 0.47999999940395355),
+                Neighbor::new(4, 0.47999999940395355),
+                Neighbor::new(16, 0.47999999940395355),
             ]
         );
     }

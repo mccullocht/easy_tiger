@@ -40,10 +40,10 @@ fn max_value_power(stats: &CentroidStats) -> u8 {
         .max(3)
 }
 
-fn print_histogram(max_value_power: u8, input: impl Iterator<Item = u64>) -> io::Result<()> {
+fn print_histogram(max_value_power: u8, input: impl Iterator<Item = u32>) -> io::Result<()> {
     let mut histogram = Histogram::new(2, max_value_power).unwrap();
     for c in input {
-        histogram.add(c as u64, 1).unwrap();
+        histogram.add(c.into(), 1).unwrap();
     }
     use std::io::Write;
     let mut lock = std::io::stdout().lock();

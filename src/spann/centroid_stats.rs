@@ -18,6 +18,7 @@ impl CentroidCounts {
 }
 
 /// Tracks occupancy statistics for centroids.
+#[derive(Debug, Clone)]
 pub struct CentroidStats(Vec<Option<CentroidCounts>>);
 
 impl CentroidStats {

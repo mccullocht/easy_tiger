@@ -14,7 +14,9 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        search::{SearchParams, SearchStats, Searcher},
+        search::{
+            CentroidSelector, CentroidSelectorAlgorithm, SearchParams, SearchStats, Searcher,
+        },
         SessionIndexReader, TableIndex,
     },
     vamana::graph::GraphSearchParams,
@@ -38,16 +40,20 @@ pub struct SearchArgs {
     head_candidates: NonZero<usize>,
     /// Number of head (centroid) results to re-rank at the end of each search.
     /// If unset, use the same figure as --head-candidates.
+    /// If the head index does not have a rerank format, this is ignored.
     #[arg(long)]
     head_rerank_budget: Option<usize>,
-    /// Number of centroids to search postings of. Must be >= than --head-rerank-budget
+    /// The algorithm to use to select centroids to search postings of.
+    /// top_n:<value> will select the closest <value> centroids by distance up to --head-candidates.
+    /// vector_count:<value> will select centroids to score at least <value> vectors.
     #[arg(long)]
-    posting_centroids: NonZero<usize>,
+    centroid_selector: CentroidSelectorAlgorithm,
     /// Number of posting list candidates to keep, effectively a limit.
     #[arg(long)]
     posting_candidates: NonZero<usize>,
-    /// Number of posting results to keep.
+    /// Number of posting list results to rerank at the end of search.
     /// If unset, use the same figure as --posting-candidates
+    /// If the index does not have a rerank format, this is ignored.
     #[arg(long)]
     posting_rerank_budget: Option<usize>,
     /// Maximum number of queries to run. If unset, run all queries in the vector file.
@@ -73,6 +79,8 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
     );
+    let session = connection.open_session()?;
+    let centroid_selector = CentroidSelector::new(args.centroid_selector, &index, &session)?;
     let search_params = SearchParams {
         head_params: GraphSearchParams {
             beam_width: args.head_candidates,
@@ -80,7 +88,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
                 .head_rerank_budget
                 .unwrap_or(args.head_candidates.get()),
         },
-        num_centroids: args.posting_centroids,
+        centroid_selector,
         limit: args.posting_candidates,
         num_rerank: args
             .posting_rerank_budget

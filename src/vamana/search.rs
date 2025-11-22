@@ -160,11 +160,10 @@ impl GraphSearcher {
             .nav_format
             .query_vector_distance_f32(query, reader.config().similarity);
         let rerank_query = if self.params.num_rerank > 0 {
-            if let Some(rerank_format) = reader.config().rerank_format {
-                Some(rerank_format.query_vector_distance_f32(query, reader.config().similarity))
-            } else {
-                None
-            }
+            reader
+                .config()
+                .rerank_format
+                .map(|f| f.query_vector_distance_f32(query, reader.config().similarity))
         } else {
             None
         };

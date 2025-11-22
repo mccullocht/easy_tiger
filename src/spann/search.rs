@@ -2,17 +2,19 @@
 
 use std::{
     collections::HashSet,
+    io,
     num::NonZero,
     ops::{Add, AddAssign},
+    str::FromStr,
 };
 
 use min_max_heap::MinMaxHeap;
 use tracing::warn;
 use vectors::{F32VectorCoding, QueryVectorDistance, VectorSimilarity};
-use wt_mdb::Result;
+use wt_mdb::{Result, Session};
 
 use crate::{
-    spann::{PostingKey, SessionIndexReader},
+    spann::{centroid_stats::CentroidStats, PostingKey, SessionIndexReader, TableIndex},
     vamana::{
         graph::{GraphSearchParams, GraphVectorIndexReader},
         search::{GraphSearchStats, GraphSearcher},
@@ -20,15 +22,111 @@ use crate::{
     Neighbor,
 };
 
-// XXX centroid selection algorithm.
+/// The algorithm used to select centroids to search in the tail index.
+#[derive(Debug, Copy, Clone)]
+pub enum CentroidSelectorAlgorithm {
+    /// Select the top N centroids based on the head graph search.
+    TopN(usize),
+    /// Select centroids from closest to farthest until we will score the request number of vectors.
+    VectorCount(usize),
+}
+
+impl FromStr for CentroidSelectorAlgorithm {
+    type Err = io::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            topn if topn.starts_with("top_n:") => {
+                let n = topn
+                    .strip_prefix("top_n:")
+                    .expect("starts with prefix")
+                    .parse::<usize>()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid number"))?;
+                Ok(Self::TopN(n))
+            }
+            vc if vc.starts_with("vector_count:") => {
+                let n = vc
+                    .strip_prefix("vector_count:")
+                    .expect("starts with prefix")
+                    .parse::<usize>()
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid number"))?;
+                Ok(Self::VectorCount(n))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unknown centroid selection algorithm",
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for CentroidSelectorAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TopN(n) => write!(f, "top_n:{}", n),
+            Self::VectorCount(n) => write!(f, "vector_count:{}", n),
+        }
+    }
+}
+
+/// Selects a set of centroids to search the tail postings of.
+#[derive(Debug, Clone)]
+pub enum CentroidSelector {
+    /// Select the top N centroids by distance.
+    TopN(usize),
+    /// Select centroids until we will score the requested number of vectors, using statistics about
+    /// the distribution of vectors across centroids.
+    VectorCount { count: usize, stats: CentroidStats },
+}
+
+impl CentroidSelector {
+    /// Create a new centroid selector based on the algorithm and data that can be derived from the
+    /// index.
+    pub fn new(
+        algorithm: CentroidSelectorAlgorithm,
+        index: &TableIndex,
+        session: &Session,
+    ) -> Result<Self> {
+        match algorithm {
+            CentroidSelectorAlgorithm::TopN(n) => Ok(Self::TopN(n)),
+            CentroidSelectorAlgorithm::VectorCount(n) => {
+                let stats = CentroidStats::from_index(session, index)?;
+                Ok(Self::VectorCount { count: n, stats })
+            }
+        }
+    }
+
+    /// Select the set of centroids to search from 'candidates'.
+    pub fn select(&self, mut candidates: Vec<Neighbor>) -> Vec<Neighbor> {
+        match self {
+            Self::TopN(n) => {
+                candidates.truncate(*n);
+            }
+            Self::VectorCount { count, stats } => {
+                let mut selected = 0;
+                for (i, c) in candidates.iter().enumerate() {
+                    if selected >= *count {
+                        candidates.truncate(i);
+                        break;
+                    }
+                    selected += stats
+                        .assignment_counts(c.vertex() as usize)
+                        .map_or(0usize, |counts| counts.total() as usize);
+                }
+            }
+        };
+        candidates
+    }
+}
+
 /// Tuning parameters for searching a SPANN index.
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     /// Parameters for searching the head graph.
     /// NB: `head_params.beam_width` should be at least as large as `num_centroids`
     pub head_params: GraphSearchParams,
-    /// The number of centroids to search.
-    pub num_centroids: NonZero<usize>,
+    /// Selects the centroids from candidates produced by searching the head graph.
+    pub centroid_selector: CentroidSelector,
     /// The number of vectors to rerank using raw vectors.
     pub num_rerank: usize,
     /// The number of results to return.
@@ -108,12 +206,12 @@ impl Searcher {
 
         let mut centroids = self.head_searcher.search(query, &mut reader.head_reader)?;
         self.stats.head = self.head_searcher.stats();
-        // TODO: be clever about choosing centroids.
-        centroids.truncate(self.params.num_centroids.get());
-        self.stats.postings_read = centroids.len();
         if centroids.is_empty() {
             return Ok(vec![]);
         }
+
+        centroids = self.params.centroid_selector.select(centroids);
+        self.stats.postings_read = centroids.len();
 
         self.seen.clear();
         let mut result_queue = MultiResultQueue::new(

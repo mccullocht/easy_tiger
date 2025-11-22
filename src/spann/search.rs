@@ -7,10 +7,9 @@ use std::{
 };
 
 use min_max_heap::MinMaxHeap;
-use rustix::io::Errno;
 use tracing::warn;
 use vectors::{F32VectorCoding, QueryVectorDistance, VectorSimilarity};
-use wt_mdb::{Error, Result};
+use wt_mdb::Result;
 
 use crate::{
     spann::{PostingKey, SessionIndexReader},
@@ -155,39 +154,46 @@ impl Searcher {
         self.stats.posting_vectors_fast_scored = result_queue.fast_count;
         self.stats.posting_vectors_slow_scored = result_queue.slow_count;
 
-        // XXX fix this so it is less stupid
-        if self.params.num_rerank > 0 {
-            let format = reader
-                .head_reader
-                .config()
-                .rerank_format
-                .ok_or(Error::Errno(Errno::NOTSUP))?;
-            let query =
-                format.query_vector_distance_f32(query, reader.head_reader.config().similarity);
-            let mut raw_cursor = reader
-                .session()
-                .open_record_cursor(&reader.index().table_names.raw_vectors)?;
-            let mut reranked = result_queue
-                .into_results()
-                .into_iter()
-                .take(self.params.num_rerank)
-                .map(|n| {
-                    Ok(Neighbor::new(
-                        n.vertex(),
-                        query.distance(unsafe {
-                            raw_cursor
-                                .seek_exact_unsafe(n.vertex())
-                                .expect("raw vector for candidate")?
-                        }),
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            reranked.sort_unstable();
+        self.maybe_rerank_results(query, result_queue, reader)
+    }
 
-            Ok(reranked)
-        } else {
-            Ok(result_queue.into_results())
+    fn maybe_rerank_results(
+        &mut self,
+        query: &[f32],
+        result_queue: MultiResultQueue<'_>,
+        reader: &mut SessionIndexReader,
+    ) -> Result<Vec<Neighbor>> {
+        if self.params.num_rerank == 0 || reader.index().config().rerank_format.is_none() {
+            return Ok(result_queue.into_results());
         }
+
+        let format = reader
+            .head_reader
+            .config()
+            .rerank_format
+            .expect("rerank format is set");
+        let query = format.query_vector_distance_f32(query, reader.head_reader.config().similarity);
+        let mut raw_cursor = reader
+            .session()
+            .open_record_cursor(&reader.index().table_names.raw_vectors)?;
+        let mut reranked = result_queue
+            .into_results()
+            .into_iter()
+            .take(self.params.num_rerank)
+            .map(|n| {
+                Ok(Neighbor::new(
+                    n.vertex(),
+                    query.distance(unsafe {
+                        raw_cursor
+                            .seek_exact_unsafe(n.vertex())
+                            .expect("raw vector for candidate")?
+                    }),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        reranked.sort_unstable();
+
+        Ok(reranked)
     }
 }
 

@@ -138,10 +138,11 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             stats.total_stats.head.visited as f64 / stats.count as f64
         );
         println!(
-            "tail search avg postings {:.2} avg read {:.2} avg scored {:.2}",
+            "tail search avg postings {:.2} avg read {:.2} avg fast scored {:.2} avg slow scored {:.2}",
             stats.total_stats.postings_read as f64 / stats.count as f64,
-            stats.total_stats.posting_entries_read as f64 / stats.count as f64,
-            stats.total_stats.posting_entries_scored as f64 / stats.count as f64
+            stats.total_stats.posting_vectors_read as f64 / stats.count as f64,
+            stats.total_stats.posting_vectors_fast_scored as f64 / stats.count as f64,
+            stats.total_stats.posting_vectors_slow_scored as f64 / stats.count as f64,
         );
 
         let wt_stats = WiredTigerConnectionStats::try_from(&connection)?;

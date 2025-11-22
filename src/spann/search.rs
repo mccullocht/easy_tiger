@@ -43,13 +43,18 @@ pub struct SearchStats {
     pub head: GraphSearchStats,
     /// Number of posting lists read.
     pub postings_read: usize,
-    /// Number of posting entries read.
+    /// Number of posting vectors read.
     ///
     /// This may be greater than the number scored if vectors are replicated across centroids.
-    pub posting_entries_read: usize,
-    /// Number of posting entries scored.
-    pub posting_entries_scored: usize,
-    // XXX fast and slow scored entries.
+    pub posting_vectors_read: usize,
+    /// Number of posting entries "fast" scored.
+    ///
+    /// Certain vector encodings support a "fast" distance function that is less accurate but faster
+    /// than the "slow" distance function. Depending on the posting coding this will either be 0
+    /// or some number less than `posting_vectors_slow_scored`.
+    pub posting_vectors_fast_scored: usize,
+    /// Number of posting entries "slow" scored.
+    pub posting_vectors_slow_scored: usize,
 }
 
 impl Add for SearchStats {
@@ -59,8 +64,11 @@ impl Add for SearchStats {
         Self {
             head: self.head + rhs.head,
             postings_read: self.postings_read + rhs.postings_read,
-            posting_entries_read: self.posting_entries_read + rhs.posting_entries_read,
-            posting_entries_scored: self.posting_entries_scored + rhs.posting_entries_scored,
+            posting_vectors_read: self.posting_vectors_read + rhs.posting_vectors_read,
+            posting_vectors_fast_scored: self.posting_vectors_fast_scored
+                + rhs.posting_vectors_fast_scored,
+            posting_vectors_slow_scored: self.posting_vectors_slow_scored
+                + rhs.posting_vectors_slow_scored,
         }
     }
 }
@@ -127,7 +135,7 @@ impl Searcher {
                 PostingKey::for_centroid(centroid_id)..PostingKey::for_centroid(centroid_id + 1),
             )?;
             while let Some(r) = unsafe { cursor.next_unsafe() } {
-                self.stats.posting_entries_read += 1;
+                self.stats.posting_vectors_read += 1;
                 let (record_id, vector) = match r {
                     Ok((k, v)) => (k.record_id, v),
                     Err(e) => {
@@ -141,9 +149,11 @@ impl Searcher {
                 }
 
                 result_queue.push(record_id, vector);
-                self.stats.posting_entries_scored += 1;
             }
         }
+
+        self.stats.posting_vectors_fast_scored = result_queue.fast_count;
+        self.stats.posting_vectors_slow_scored = result_queue.slow_count;
 
         // XXX fix this so it is less stupid
         if self.params.num_rerank > 0 {
@@ -209,8 +219,11 @@ impl<'a> ResultQueue<'a> {
 }
 
 struct MultiResultQueue<'a> {
-    lo: Option<ResultQueue<'a>>,
-    hi: ResultQueue<'a>,
+    fast: Option<ResultQueue<'a>>,
+    fast_count: usize,
+
+    slow: ResultQueue<'a>,
+    slow_count: usize,
 }
 
 impl<'a> MultiResultQueue<'a> {
@@ -220,24 +233,31 @@ impl<'a> MultiResultQueue<'a> {
         similarity: VectorSimilarity,
         limit: usize,
     ) -> Self {
-        let lo = coding
+        let fast = coding
             .query_vector_distance_f32_fast(query, similarity)
             .map(|d| ResultQueue::new(limit, d));
-        let hi = ResultQueue::new(limit, coding.query_vector_distance_f32(query, similarity));
-        Self { lo, hi }
+        let slow = ResultQueue::new(limit, coding.query_vector_distance_f32(query, similarity));
+        Self {
+            fast,
+            fast_count: 0,
+            slow,
+            slow_count: 0,
+        }
     }
 
     fn push(&mut self, vertex: i64, vector: &[u8]) {
-        if let Some(lo) = self.lo.as_mut() {
+        if let Some(fast) = self.fast.as_mut() {
             // If we have a lo queue and the result doesn't rank, don't bother with the hi score.
-            if !lo.push(vertex, vector) {
+            self.fast_count += 1;
+            if !fast.push(vertex, vector) {
                 return;
             }
         }
-        self.hi.push(vertex, vector);
+        self.slow_count += 1;
+        self.slow.push(vertex, vector);
     }
 
     fn into_results(self) -> Vec<Neighbor> {
-        self.hi.results.into_vec_asc()
+        self.slow.results.into_vec_asc()
     }
 }

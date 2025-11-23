@@ -209,8 +209,7 @@ impl EdgeSetDistanceComputer {
 /// decisions.
 /// REQUIRES: `edges.is_sorted()`.
 // TODO: alpha value(s) should be tuneable.
-// XXX non-pub?
-pub(crate) fn select_pruned_edges(
+fn select_pruned_edges(
     edges: &[Neighbor],
     max_edges: NonZero<usize>,
     edge_distance_computer: EdgeSetDistanceComputer,
@@ -254,8 +253,7 @@ pub(crate) fn select_pruned_edges(
 /// Returns a split point: all edges before that point are selected, all after are to be dropped.
 /// REQUIRES: `edges.is_sorted()`.
 // TODO: alpha value(s) should be tuneable.
-// XXX non-pub?
-pub(crate) fn prune_edges(
+fn prune_edges(
     edges: &mut [Neighbor],
     max_edges: NonZero<usize>,
     edge_distance_computer: EdgeSetDistanceComputer,

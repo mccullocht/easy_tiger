@@ -11,6 +11,8 @@ use crate::Neighbor;
 use vectors::QueryVectorDistance;
 use wt_mdb::{Error, Result};
 
+const MAX_EXHAUSTIVE_SEARCH_LEN: usize = 1_000;
+
 #[derive(Debug, Copy, Clone, Default)]
 pub struct GraphSearchStats {
     /// Total number of candidates vertices seen and nav scored.
@@ -187,35 +189,45 @@ impl GraphSearcher {
 
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
-        if let Some(epr) = graph.entry_point() {
-            let entry_point = epr?;
-            let entry_vector = nav
-                .get(entry_point)
-                .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates
-                .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)));
-            self.seen.insert(entry_point);
-        }
-
-        while let Some(best_candidate) = self.candidates.next_unvisited() {
-            self.visited += 1;
-            let vertex_id = best_candidate.neighbor().vertex();
-            let node = graph
-                .get_vertex(vertex_id)
-                .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            if filter_predicate(vertex_id) {
-                best_candidate.visit();
-            } else {
-                best_candidate.remove();
+        if nav.estimated_len()? < MAX_EXHAUSTIVE_SEARCH_LEN {
+            nav.scan_all(|vertex_id, vector| {
+                if filter_predicate(vertex_id) {
+                    self.candidates
+                        .add_unvisited(Neighbor::new(vertex_id, nav_query.distance(vector)));
+                    self.visited += 1;
+                }
+            })?;
+        } else {
+            if let Some(epr) = graph.entry_point() {
+                let entry_point = epr?;
+                let entry_vector = nav
+                    .get(entry_point)
+                    .unwrap_or(Err(Error::not_found_error()))?;
+                self.candidates
+                    .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)));
+                self.seen.insert(entry_point);
             }
 
-            for edge in node.edges() {
-                if !self.seen.insert(edge) {
-                    continue;
+            while let Some(best_candidate) = self.candidates.next_unvisited() {
+                self.visited += 1;
+                let vertex_id = best_candidate.neighbor().vertex();
+                let node = graph
+                    .get_vertex(vertex_id)
+                    .unwrap_or_else(|| Err(Error::not_found_error()))?;
+                if filter_predicate(vertex_id) {
+                    best_candidate.visit();
+                } else {
+                    best_candidate.remove();
                 }
-                let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
-                self.candidates
-                    .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)));
+
+                for edge in node.edges() {
+                    if !self.seen.insert(edge) {
+                        continue;
+                    }
+                    let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
+                    self.candidates
+                        .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)));
+                }
             }
         }
 

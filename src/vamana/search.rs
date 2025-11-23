@@ -5,9 +5,7 @@ use std::{
     ops::{Add, AddAssign},
 };
 
-use super::graph::{
-    Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
-};
+use super::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex};
 use crate::Neighbor;
 
 use vectors::QueryVectorDistance;
@@ -373,7 +371,7 @@ mod test {
     use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
     use wt_mdb::Result;
 
-    use crate::vamana::graph::{
+    use crate::vamana::{
         Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
     };
     use crate::Neighbor;

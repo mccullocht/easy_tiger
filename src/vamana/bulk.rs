@@ -30,12 +30,12 @@ use wt_mdb::{options::CreateOptionsBuilder, Connection, Result, Session};
 use crate::{
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
-    vamana::graph::{
+    vamana::search::GraphSearcher,
+    vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
+    vamana::{
         prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
         GraphVectorIndexReader, GraphVectorStore, GraphVertex,
     },
-    vamana::search::GraphSearcher,
-    vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     Neighbor,
 };
 

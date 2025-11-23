@@ -175,8 +175,27 @@ impl GraphVectorStore for CursorVectorStore<'_> {
         self.format
     }
 
+    fn estimated_len(&mut self) -> Result<usize> {
+        self.inner
+            .largest_key()
+            .unwrap_or(Err(Error::not_found_error()))
+            .map(|k| k as usize + 1)
+    }
+
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
         Some(unsafe { self.inner.seek_exact_unsafe(vertex_id)? })
+    }
+
+    fn scan_all(&mut self, mut cb: impl FnMut(i64, &[u8])) -> Result<()> {
+        self.inner.reset()?;
+        // This kind of solves the unsafe issue, you'd have to commit in the callback and there's
+        // no way to communicate an error when that happens, making it more likely that this usage
+        // is "pure" and won't result in a rollback that invalidates the buffer.
+        while let Some(r) = unsafe { self.inner.next_unsafe() } {
+            let (k, v) = r?;
+            cb(k, v);
+        }
+        Ok(())
     }
 }
 

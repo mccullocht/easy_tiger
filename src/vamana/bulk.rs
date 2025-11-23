@@ -779,6 +779,13 @@ impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
         }
     }
 
+    fn estimated_len(&mut self) -> Result<usize> {
+        match self {
+            Self::Cursor(c) => c.estimated_len(),
+            Self::Memory(m, _, _) => Ok(m.len()),
+        }
+    }
+
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
         match self {
             Self::Cursor(c) => c.get(vertex_id),
@@ -788,6 +795,18 @@ impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
                 } else {
                     None
                 }
+            }
+        }
+    }
+
+    fn scan_all(&mut self, mut cb: impl FnMut(i64, &[u8])) -> Result<()> {
+        match self {
+            Self::Cursor(c) => c.scan_all(cb),
+            Self::Memory(m, _, _) => {
+                for (i, v) in m.iter().enumerate() {
+                    cb(i as i64, v);
+                }
+                Ok(())
             }
         }
     }

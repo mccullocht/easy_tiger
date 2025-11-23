@@ -558,6 +558,10 @@ mod test {
             self.0.config.similarity
         }
 
+        fn estimated_len(&mut self) -> Result<usize> {
+            Ok(self.0.data.len())
+        }
+
         fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
             self.0.data.get(vertex_id as usize).map(|v| {
                 Ok(match self.1 {
@@ -565,6 +569,19 @@ mod test {
                     TestVectorStoreType::Rerank => bytemuck::cast_slice(v.vector.as_ref()),
                 })
             })
+        }
+
+        fn scan_all(&mut self, mut cb: impl FnMut(i64, &[u8])) -> Result<()> {
+            for (i, v) in self.0.data.iter().enumerate() {
+                cb(
+                    i as i64,
+                    match self.1 {
+                        TestVectorStoreType::Nav => v.nav_vector.as_ref(),
+                        TestVectorStoreType::Rerank => bytemuck::cast_slice(v.vector.as_ref()),
+                    },
+                );
+            }
+            Ok(())
         }
     }
 

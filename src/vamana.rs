@@ -150,9 +150,17 @@ pub trait GraphVectorStore {
         self.format().new_coder(self.similarity())
     }
 
+    /// Return the estimated number of vectors in this store.
+    fn estimated_len(&mut self) -> Result<usize>;
+
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.
     // TODO: consider removing this method as it is _unsafe_ in the event of a rollback.
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>>;
+
+    /// Scan all the vectors in this store, receiving a callback for each vector.
+    ///
+    /// This returns an error if there is an error reading any vector.
+    fn scan_all(&mut self, cb: impl FnMut(i64, &[u8])) -> Result<()>;
 
     // TODO: extract many vectors into VecVectorStore.
     // TODO: method to turn self into a QueryVectorDistance wrapper.

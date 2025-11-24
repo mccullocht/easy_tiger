@@ -281,7 +281,6 @@ fn correct_dot_uint(dot: u32, dim: usize, a: &VectorTerms, b: &VectorTerms) -> f
 struct PrimaryVector<'a, const B: usize> {
     l2_norm: f32,
     v: EncodedVector<'a>,
-    inst: InstructionSet,
 }
 
 impl<'a, const B: usize> PrimaryVector<'a, B> {
@@ -296,18 +295,16 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     }
 
     fn with_header(header: PrimaryVectorHeader, vector: &'a [u8]) -> Self {
-        let v = EncodedVector {
-            terms: VectorTerms {
-                lower: header.lower,
-                delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
-                component_sum: header.component_sum,
-            },
-            data: vector,
-        };
         Self {
             l2_norm: header.l2_norm,
-            v,
-            inst: InstructionSet::default(),
+            v: EncodedVector {
+                terms: VectorTerms {
+                    lower: header.lower,
+                    delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
+                    component_sum: header.component_sum,
+                },
+                data: vector,
+            },
         }
     }
 
@@ -322,18 +319,6 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
         packing::unpack_iter::<B>(self.v.data)
             .map(|q| q as f32 * self.v.terms.delta + self.v.terms.lower)
-    }
-
-    fn f32_dot_unnormalized(&self, query: &[f32]) -> f64 {
-        match self.inst {
-            InstructionSet::Scalar => scalar::lvq1_f32_dot_unnormalized::<B>(query, self),
-            #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::lvq1_f32_dot_unnormalized::<B>(query, self),
-            #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::lvq1_f32_dot_unnormalized::<B>(query, self)
-            },
-        }
     }
 }
 
@@ -606,6 +591,7 @@ pub struct PrimaryQueryDistance<'a, const B: usize> {
     similarity: VectorSimilarity,
     query: Cow<'a, [f32]>,
     query_l2_norm: f64,
+    inst: InstructionSet,
 }
 
 impl<'a, const B: usize> PrimaryQueryDistance<'a, B> {
@@ -619,6 +605,7 @@ impl<'a, const B: usize> PrimaryQueryDistance<'a, B> {
             similarity,
             query,
             query_l2_norm,
+            inst: InstructionSet::default(),
         }
     }
 }
@@ -626,11 +613,20 @@ impl<'a, const B: usize> PrimaryQueryDistance<'a, B> {
 impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = PrimaryVector::<B>::new(vector).unwrap();
-        dot_unnormalized_to_distance(
-            self.similarity,
-            vector.f32_dot_unnormalized(&self.query),
-            (self.query_l2_norm, vector.l2_norm()),
-        )
+        let dot = match self.inst {
+            InstructionSet::Scalar => {
+                scalar::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
+            }
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => {
+                aarch64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
+            }
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
+            },
+        };
+        dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))
     }
 }
 

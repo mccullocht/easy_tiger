@@ -294,7 +294,7 @@ pub unsafe fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     primary: &mut [u8],
     residual_interval: f32,
     residual: &mut [u8],
-) -> u32 {
+) -> (u32, u32) {
     let p_chunk_size = (B1 * 16) / 8;
     let p_lower = _mm512_set1_ps(lower);
     let p_upper = _mm512_set1_ps(upper);
@@ -306,6 +306,7 @@ pub unsafe fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     let r_lower = _mm512_set1_ps(-residual_interval / 2.0);
     let r_upper = _mm512_set1_ps(residual_interval / 2.0);
     let r_delta_inv = _mm512_set1_ps(((1 << B2) - 1) as f32 / residual_interval);
+    let mut r_sum = _mm512_set1_epi32(0);
 
     for (vc, (pc, rc)) in v.chunks(16).zip(
         primary
@@ -329,10 +330,14 @@ pub unsafe fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
         rs = _mm512_sub_ps(rs, r_lower);
         rs = _mm512_mul_ps(rs, r_delta_inv);
         let ri = _mm512_maskz_cvtps_epu32(vmask, mm512_round_nonnegative_ties_away_zero_ps(rs));
+        r_sum = _mm512_add_epi32(r_sum, ri);
         pack::<B2>(ri, rc);
     }
 
-    _mm512_reduce_add_epi32(p_sum) as u32
+    (
+        _mm512_reduce_add_epi32(p_sum) as u32,
+        _mm512_reduce_add_epi32(r_sum) as u32,
+    )
 }
 
 #[inline]

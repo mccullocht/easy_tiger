@@ -191,7 +191,7 @@ impl From<VectorStats> for PrimaryVectorHeader {
 #[repr(C)]
 struct ResidualVectorHeader {
     magnitude: f32,
-    // XXX component_sum: u32,
+    component_sum: u32,
 }
 
 impl ResidualVectorHeader {
@@ -207,7 +207,7 @@ impl ResidualVectorHeader {
     fn serialize(&self, header_bytes: &mut [u8]) {
         let header = header_bytes.as_chunks_mut::<4>().0;
         header[0] = self.magnitude.to_le_bytes();
-        // XXX header[1] = self.component_sum.to_le_bytes();
+        header[1] = self.component_sum.to_le_bytes();
     }
 
     #[inline]
@@ -217,7 +217,7 @@ impl ResidualVectorHeader {
         Some((
             Self {
                 magnitude: f32::from_le_bytes(header_entries[0]),
-                // XXX component_sum: u32::from_le_bytes(header_entries[1]),
+                component_sum: u32::from_le_bytes(header_entries[1]),
             },
             vector_bytes,
         ))
@@ -489,11 +489,11 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         let (primary, residual_bytes) = vector_bytes.split_at_mut(split);
         let (residual_header_bytes, residual) =
             ResidualVectorHeader::split_output_buf(residual_bytes).unwrap();
-        let residual_header = ResidualVectorHeader {
+        let mut residual_header = ResidualVectorHeader {
             magnitude: residual_interval,
-            // XXX component_sum: 0,
+            component_sum: 0,
         };
-        primary_header.component_sum = match self.0 {
+        (primary_header.component_sum, residual_header.component_sum) = match self.0 {
             InstructionSet::Scalar => scalar::lvq2_quantize_and_pack::<B1, B2>(
                 vector,
                 primary_header.lower,

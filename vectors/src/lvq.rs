@@ -374,11 +374,6 @@ impl<const B: usize> Default for PrimaryVectorCoder<B> {
 
 impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let _bcheck: () = {
-            assert!(B > 0, "primary vector bit must be in 1..=8");
-            assert!(B <= 8, "primary vector bit must be in 1..=8");
-        };
-
         let stats = VectorStats::from(vector);
         let mut header = PrimaryVectorHeader::from(stats);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
@@ -484,6 +479,9 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         .expect("3 values input");
         (primary_header.lower, primary_header.upper) = interval;
 
+        // XXX do i want the residual header to appear right after the primary header? yes?
+        // right now i'm going to induce more memory latency for no reason, particularly if I just
+        // want to score the primary vector and ignore the residual.
         let (primary_header_bytes, vector_bytes) =
             PrimaryVectorHeader::split_output_buf(out).unwrap();
         let split =

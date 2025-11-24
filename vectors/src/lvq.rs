@@ -255,8 +255,8 @@ const LAMBDA: f32 = 0.1;
 ///
 /// There may be a parallel residual vector that can be composed with this one to increase accuracy.
 struct PrimaryVector<'a, const B: usize> {
-    header: PrimaryVectorHeader,
-    delta: f32,
+    terms: VectorTerms,
+    l2_norm: f32,
     vector: &'a [u8],
     inst: InstructionSet,
 }
@@ -273,25 +273,25 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     }
 
     fn with_header(header: PrimaryVectorHeader, vector: &'a [u8]) -> Self {
-        let delta = (header.upper - header.lower) / ((1 << B) - 1) as f32;
+        let terms = VectorTerms {
+            lower: header.lower,
+            delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
+            component_sum: header.component_sum,
+        };
         Self {
-            header,
-            delta,
+            terms,
+            l2_norm: header.l2_norm,
             vector,
             inst: InstructionSet::default(),
         }
     }
 
     fn l2_norm(&self) -> f64 {
-        self.header.l2_norm.into()
+        self.l2_norm.into()
     }
 
-    fn terms(&self) -> VectorTerms {
-        VectorTerms {
-            lower: self.header.lower,
-            delta: self.delta,
-            component_sum: self.header.component_sum,
-        }
+    fn terms(&self) -> &VectorTerms {
+        &self.terms
     }
 
     fn dim(&self) -> usize {
@@ -299,7 +299,8 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     }
 
     fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
-        packing::unpack_iter::<B>(self.vector).map(|q| q as f32 * self.delta + self.header.lower)
+        packing::unpack_iter::<B>(self.vector)
+            .map(|q| q as f32 * self.terms.delta + self.terms.lower)
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
@@ -882,7 +883,7 @@ mod test {
             [0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1]
         );
         assert_abs_diff_eq!(
-            lvq.header,
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
@@ -933,7 +934,7 @@ mod test {
             ]
         );
         assert_abs_diff_eq!(
-            lvq.header,
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
@@ -984,7 +985,7 @@ mod test {
             ]
         );
         assert_abs_diff_eq!(
-            lvq.header,
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
@@ -1038,7 +1039,7 @@ mod test {
             epsilon = 1
         );
         assert_abs_diff_eq!(
-            lvq.primary.header,
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
@@ -1092,7 +1093,7 @@ mod test {
             epsilon = 1
         );
         assert_abs_diff_eq!(
-            lvq.primary.header,
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
@@ -1151,7 +1152,7 @@ mod test {
             epsilon = 1
         );
         assert_abs_diff_eq!(
-            lvq.primary.header,
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
@@ -1210,7 +1211,7 @@ mod test {
             epsilon = 1
         );
         assert_abs_diff_eq!(
-            lvq.primary.header,
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,

@@ -175,7 +175,7 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVec
         .iter()
         .zip(
             super::packing::unpack_iter::<B>(doc.vector)
-                .map(|q| q as f32 * doc.delta + doc.header.lower),
+                .map(|q| q as f32 * doc.terms.delta + doc.terms.lower),
         )
         .map(|(q, d)| *q * d)
         .sum::<f32>()

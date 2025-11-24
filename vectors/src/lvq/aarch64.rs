@@ -516,8 +516,8 @@ impl LVQ1F32Converter {
     #[inline(always)]
     unsafe fn from_vector<const B: usize>(vector: &PrimaryVector<'_, B>) -> Self {
         Self {
-            delta: vdupq_n_f32(vector.delta),
-            lower: vdupq_n_f32(vector.header.lower),
+            delta: vdupq_n_f32(vector.terms.delta),
+            lower: vdupq_n_f32(vector.terms.lower),
         }
     }
 
@@ -585,7 +585,7 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVec
             .iter()
             .zip(
                 packing::unpack_iter::<B>(doc_tail)
-                    .map(|q| q as f32 * doc.delta + doc.header.lower),
+                    .map(|q| q as f32 * doc.terms.delta + doc.terms.lower),
             )
             .map(|(q, d)| *q * d)
             .sum::<f32>())

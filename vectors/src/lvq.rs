@@ -251,13 +251,18 @@ const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
 
 const LAMBDA: f32 = 0.1;
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+struct EncodedVector<'a> {
+    terms: VectorTerms,
+    data: &'a [u8],
+}
+
 /// An LVQ1 coded primary vector.
 ///
 /// There may be a parallel residual vector that can be composed with this one to increase accuracy.
 struct PrimaryVector<'a, const B: usize> {
-    terms: VectorTerms,
     l2_norm: f32,
-    vector: &'a [u8],
+    v: EncodedVector<'a>,
     inst: InstructionSet,
 }
 
@@ -273,15 +278,17 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     }
 
     fn with_header(header: PrimaryVectorHeader, vector: &'a [u8]) -> Self {
-        let terms = VectorTerms {
-            lower: header.lower,
-            delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
-            component_sum: header.component_sum,
+        let v = EncodedVector {
+            terms: VectorTerms {
+                lower: header.lower,
+                delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
+                component_sum: header.component_sum,
+            },
+            data: vector,
         };
         Self {
-            terms,
             l2_norm: header.l2_norm,
-            vector,
+            v,
             inst: InstructionSet::default(),
         }
     }
@@ -291,25 +298,25 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     }
 
     fn terms(&self) -> &VectorTerms {
-        &self.terms
+        &self.v.terms
     }
 
     fn dim(&self) -> usize {
-        (self.vector.len() * 8).div_ceil(B)
+        (self.v.data.len() * 8).div_ceil(B)
     }
 
     fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
-        packing::unpack_iter::<B>(self.vector)
-            .map(|q| q as f32 * self.terms.delta + self.terms.lower)
+        packing::unpack_iter::<B>(self.v.data)
+            .map(|q| q as f32 * self.v.terms.delta + self.v.terms.lower)
     }
 
     fn dot_unnormalized(&self, other: &Self) -> f64 {
         let dot_quantized = match self.inst {
-            InstructionSet::Scalar => scalar::dot_u8::<B>(self.vector, other.vector),
+            InstructionSet::Scalar => scalar::dot_u8::<B>(self.v.data, other.v.data),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::dot_u8::<B>(self.vector, other.vector),
+            InstructionSet::Neon => aarch64::dot_u8::<B>(self.v.data, other.v.data),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe { x86_64::dot_u8::<B>(self.vector, other.vector) },
+            InstructionSet::Avx512 => unsafe { x86_64::dot_u8::<B>(self.v.data, other.v.data) },
         };
         correct_dot_uint(dot_quantized, self.dim(), &self.terms(), &other.terms()).into()
     }
@@ -865,7 +872,7 @@ mod test {
     ];
 
     fn unpack_primary<const B: usize>(vector: &PrimaryVector<'_, B>) -> Vec<u8> {
-        super::packing::unpack_iter::<B>(vector.vector).collect()
+        super::packing::unpack_iter::<B>(vector.v.data).collect()
     }
 
     fn unpack_residual<const B1: usize, const B2: usize>(

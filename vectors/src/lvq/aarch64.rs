@@ -516,8 +516,8 @@ impl LVQ1F32Converter {
     #[inline(always)]
     unsafe fn from_vector<const B: usize>(vector: &PrimaryVector<'_, B>) -> Self {
         Self {
-            delta: vdupq_n_f32(vector.terms.delta),
-            lower: vdupq_n_f32(vector.terms.lower),
+            delta: vdupq_n_f32(vector.v.terms.delta),
+            lower: vdupq_n_f32(vector.v.terms.lower),
         }
     }
 
@@ -557,7 +557,7 @@ impl LVQ2F32Converter {
 pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
     let tail_split = query.len() & !7;
     let (query_head, query_tail) = query.split_at(tail_split);
-    let (doc_head, doc_tail) = doc.vector.split_at(packing::byte_len(tail_split, B));
+    let (doc_head, doc_tail) = doc.v.data.split_at(packing::byte_len(tail_split, B));
 
     // TODO: consider unrolling more, since up to 4 independent accumulators seems to help.
     let pdot = if !query_head.is_empty() {
@@ -585,7 +585,7 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVec
             .iter()
             .zip(
                 packing::unpack_iter::<B>(doc_tail)
-                    .map(|q| q as f32 * doc.terms.delta + doc.terms.lower),
+                    .map(|q| q as f32 * doc.v.terms.delta + doc.v.terms.lower),
             )
             .map(|(q, d)| *q * d)
             .sum::<f32>())
@@ -597,15 +597,15 @@ pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
     b: &TwoLevelVector<'_, B1, B2>,
 ) -> f64 {
     let dim = if B1 > B2 {
-        (a.primary.vector.len() * 8).div_ceil(B1)
+        (a.primary.v.data.len() * 8).div_ceil(B1)
     } else {
         (a.vector.len() * 8).div_ceil(B2)
     };
     let tail_split = dim & !7;
 
-    let (a_l1_head, _) = a.primary.vector.split_at(packing::byte_len(tail_split, B1));
+    let (a_l1_head, _) = a.primary.v.data.split_at(packing::byte_len(tail_split, B1));
     let (a_l2_head, _) = a.vector.split_at(packing::byte_len(tail_split, B2));
-    let (b_l1_head, _) = b.primary.vector.split_at(packing::byte_len(tail_split, B1));
+    let (b_l1_head, _) = b.primary.v.data.split_at(packing::byte_len(tail_split, B1));
     let (b_l2_head, _) = b.vector.split_at(packing::byte_len(tail_split, B2));
 
     let pdot = if !a_l1_head.is_empty() {
@@ -655,7 +655,8 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
 
     let (doc_l1_head, _) = doc
         .primary
-        .vector
+        .v
+        .data
         .split_at(packing::byte_len(tail_split, B1));
     let (doc_l2_head, _) = doc.vector.split_at(packing::byte_len(tail_split, B2));
 

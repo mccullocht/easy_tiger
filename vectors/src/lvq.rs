@@ -340,11 +340,11 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
 
-        let (header, vector) = PrimaryVectorHeader::deserialize(encoded)?;
-        let split = packing::two_vector_split(vector.len() - ResidualVectorHeader::LEN, B1, B2);
-        let (primary_vector, residual) = vector.split_at(split);
-        let (residual_header, residual_vector) = ResidualVectorHeader::deserialize(residual)?;
-        let primary = PrimaryVector::<'_, B1>::with_header(header, primary_vector);
+        let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(encoded)?;
+        let (residual_header, vector_bytes) = ResidualVectorHeader::deserialize(vector_bytes)?;
+        let split = packing::two_vector_split(vector_bytes.len(), B1, B2);
+        let (primary_vector, residual_vector) = vector_bytes.split_at(split);
+        let primary = PrimaryVector::<'_, B1>::with_header(primary_header, primary_vector);
         let delta = residual_header.magnitude / ((1 << B2) - 1) as f32;
         let lower = -residual_header.magnitude / 2.0;
         Some(Self {
@@ -498,16 +498,12 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         .expect("3 values input");
         (primary_header.lower, primary_header.upper) = interval;
 
-        // XXX do i want the residual header to appear right after the primary header? yes?
-        // right now i'm going to induce more memory latency for no reason, particularly if I just
-        // want to score the primary vector and ignore the residual.
         let (primary_header_bytes, vector_bytes) =
             PrimaryVectorHeader::split_output_buf(out).unwrap();
-        let split =
-            packing::two_vector_split(vector_bytes.len() - ResidualVectorHeader::LEN, B1, B2);
-        let (primary, residual_bytes) = vector_bytes.split_at_mut(split);
-        let (residual_header_bytes, residual) =
-            ResidualVectorHeader::split_output_buf(residual_bytes).unwrap();
+        let (residual_header_bytes, vector_bytes) =
+            ResidualVectorHeader::split_output_buf(vector_bytes).unwrap();
+        let split = packing::two_vector_split(vector_bytes.len(), B1, B2);
+        let (primary, residual) = vector_bytes.split_at_mut(split);
         let mut residual_header = ResidualVectorHeader {
             magnitude: residual_interval,
             component_sum: 0,
@@ -548,8 +544,8 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
 
     fn byte_len(&self, dimensions: usize) -> usize {
         PrimaryVectorHeader::LEN
-            + packing::byte_len(dimensions, B1)
             + ResidualVectorHeader::LEN
+            + packing::byte_len(dimensions, B1)
             + packing::byte_len(dimensions, B2)
     }
 

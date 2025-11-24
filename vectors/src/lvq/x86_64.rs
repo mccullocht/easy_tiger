@@ -514,6 +514,15 @@ pub unsafe fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
     super::scalar::lvq2_dot_unnormalized::<B1, B2>(a, b)
 }
 
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,avx")]
+#[inline]
+pub unsafe fn lvq2_multi_dot_unnormalized<const B1: usize, const B2: usize>(
+    a: &TwoLevelVector<'_, B1, B2>,
+    b: &TwoLevelVector<'_, B1, B2>,
+) -> (u32, u32, u32, u32) {
+    super::scalar::lvq2_multi_dot_unnormalized::<B1, B2>(a, b)
+}
+
 #[target_feature(enable = "avx512f")]
 #[inline]
 pub unsafe fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(

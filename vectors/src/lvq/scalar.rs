@@ -200,6 +200,27 @@ pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
 }
 
 #[inline]
+pub fn lvq2_multi_dot_unnormalized<const B1: usize, const B2: usize>(
+    a: &TwoLevelVector<'_, B1, B2>,
+    b: &TwoLevelVector<'_, B1, B2>,
+) -> (u32, u32, u32, u32) {
+    super::packing::unpack_iter::<B1>(a.primary.vector)
+        .zip(super::packing::unpack_iter::<B2>(a.vector))
+        .zip(
+            super::packing::unpack_iter::<B1>(b.primary.vector)
+                .zip(super::packing::unpack_iter::<B2>(b.vector)),
+        )
+        .fold((0u32, 0u32, 0u32, 0u32), |acc, (a, b)| {
+            (
+                acc.0 + a.0 as u32 * b.0 as u32,
+                acc.1 + a.0 as u32 * b.1 as u32,
+                acc.2 + a.1 as u32 * b.0 as u32,
+                acc.3 + a.1 as u32 * b.1 as u32,
+            )
+        })
+}
+
+#[inline]
 pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     query: &[f32],
     doc: &TwoLevelVector<'_, B1, B2>,

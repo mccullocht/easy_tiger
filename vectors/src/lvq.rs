@@ -299,6 +299,7 @@ struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
     delta: f32,
     lower: f32,
     component_sum: u32,
+    inst: InstructionSet,
 }
 
 impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
@@ -322,11 +323,100 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
             delta,
             lower,
             component_sum: residual_header.component_sum,
+            inst: InstructionSet::default(),
         })
     }
 
     pub fn l2_norm(&self) -> f64 {
         self.primary.l2_norm()
+    }
+
+    /*
+    fn dot_unnormalized(&self, other: &Self) -> f64 {
+        let dot_quantized = match self.inst {
+            InstructionSet::Scalar => scalar::dot_u8::<B>(self.vector, other.vector),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::dot_u8::<B>(self.vector, other.vector),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe { x86_64::dot_u8::<B>(self.vector, other.vector) },
+        };
+        let sdelta = f64::from(self.delta);
+        let slower = f64::from(self.header.lower);
+        let odelta = f64::from(other.delta);
+        let olower = f64::from(other.header.lower);
+        dot_quantized as f64 * sdelta * odelta
+            + self.header.component_sum as f64 * sdelta * olower
+            + other.header.component_sum as f64 * odelta * slower
+            + slower * olower * (self.vector.len() * 8).div_ceil(B) as f64
+    }
+    */
+
+    fn dot_unnormalized(&self, other: &Self) -> f64 {
+        let (ap_bp, ap_br, ar_bp, ar_br) = match self.inst {
+            InstructionSet::Scalar => scalar::lvq2_multi_dot_unnormalized::<B1, B2>(self, other),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => scalar::lvq2_multi_dot_unnormalized::<B1, B2>(self, other),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::lvq2_multi_dot_unnormalized::<B1, B2>(self, other)
+            },
+        };
+        let dim = (self.primary.vector.len() * 8).div_ceil(B1) as f32;
+        let dot = Self::adjust_dot(
+            ap_bp,
+            self.primary.delta,
+            self.lower,
+            self.component_sum,
+            other.primary.delta,
+            other.lower,
+            other.component_sum,
+            dim,
+        ) + Self::adjust_dot(
+            ap_br,
+            self.primary.delta,
+            self.lower,
+            self.component_sum,
+            other.primary.delta,
+            other.lower,
+            other.component_sum,
+            dim,
+        ) + Self::adjust_dot(
+            ar_bp,
+            self.primary.delta,
+            self.lower,
+            self.component_sum,
+            other.primary.delta,
+            other.lower,
+            other.component_sum,
+            dim,
+        ) + Self::adjust_dot(
+            ar_br,
+            self.primary.delta,
+            self.lower,
+            self.component_sum,
+            other.primary.delta,
+            other.lower,
+            other.component_sum,
+            dim,
+        );
+        dot.into()
+    }
+
+    #[inline]
+    fn adjust_dot(
+        dot: u32,
+        a_delta: f32,
+        a_lower: f32,
+        a_component_sum: u32,
+        b_delta: f32,
+        b_lower: f32,
+        b_component_sum: u32,
+        dim: f32,
+    ) -> f32 {
+        dot as f32 * a_delta * b_delta
+            + a_component_sum as f32 * a_delta * b_lower
+            + b_component_sum as f32 * b_delta * a_lower
+            + a_lower * b_lower * dim
     }
 
     fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
@@ -612,15 +702,16 @@ impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelDistance<B1, B
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = TwoLevelVector::<B1, B2>::new(query).unwrap();
         let doc = TwoLevelVector::<B1, B2>::new(doc).unwrap();
-        let dot = match self.1 {
-            InstructionSet::Scalar => scalar::lvq2_dot_unnormalized::<B1, B2>(&query, &doc),
-            #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::lvq2_dot_unnormalized::<B1, B2>(&query, &doc),
-            #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::lvq2_dot_unnormalized::<B1, B2>(&query, &doc)
-            },
-        };
+        //let dot = match self.1 {
+        //    InstructionSet::Scalar => scalar::lvq2_dot_unnormalized::<B1, B2>(&query, &doc),
+        //    #[cfg(target_arch = "aarch64")]
+        //    InstructionSet::Neon => aarch64::lvq2_dot_unnormalized::<B1, B2>(&query, &doc),
+        //    #[cfg(target_arch = "x86_64")]
+        //    InstructionSet::Avx512 => unsafe {
+        //        x86_64::lvq2_dot_unnormalized::<B1, B2>(&query, &doc)
+        //    },
+        //};
+        let dot = query.dot_unnormalized(&doc);
         dot_unnormalized_to_distance(self.0, dot, (query.l2_norm(), doc.l2_norm()))
     }
 }

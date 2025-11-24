@@ -123,27 +123,29 @@ fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, 
     }
 }
 
-/// Header for an LVQ vector.
+/// Header for an LVQ primary vector.
 ///
 /// Along with the bit configuration this carries enough metadata to transform a quantized vector
 /// value stream back to an f32 representation or compute angular or l2 distance from another
 /// vector.
 #[derive(Debug, Copy, Clone, PartialEq)]
-struct VectorHeader {
+struct PrimaryVectorHeader {
     l2_norm: f32,
     lower: f32,
     upper: f32,
     component_sum: u32,
 }
 
-impl VectorHeader {
+impl PrimaryVectorHeader {
     /// Encoded buffer size.
     const LEN: usize = 16;
 
+    #[inline]
     fn split_output_buf(buf: &mut [u8]) -> Option<(&mut [u8], &mut [u8])> {
         buf.split_at_mut_checked(Self::LEN)
     }
 
+    #[inline]
     fn serialize(&self, header_bytes: &mut [u8]) {
         let header = header_bytes.as_chunks_mut::<4>().0;
         header[0] = self.l2_norm.to_le_bytes();
@@ -152,6 +154,7 @@ impl VectorHeader {
         header[3] = self.component_sum.to_le_bytes();
     }
 
+    #[inline]
     fn deserialize(raw: &[u8]) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
         let header_entries = header_bytes.as_chunks::<4>().0;
@@ -167,9 +170,9 @@ impl VectorHeader {
     }
 }
 
-impl From<VectorStats> for VectorHeader {
+impl From<VectorStats> for PrimaryVectorHeader {
     fn from(value: VectorStats) -> Self {
-        VectorHeader {
+        Self {
             l2_norm: value.l2_norm_sq.sqrt(),
             lower: value.min,
             upper: value.max,
@@ -195,7 +198,7 @@ const LAMBDA: f32 = 0.1;
 ///
 /// There may be a parallel residual vector that can be composed with this one to increase accuracy.
 struct PrimaryVector<'a, const B: usize> {
-    header: VectorHeader,
+    header: PrimaryVectorHeader,
     delta: f32,
     vector: &'a [u8],
     inst: InstructionSet,
@@ -208,11 +211,11 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
 
-        let (header, vector) = VectorHeader::deserialize(encoded)?;
+        let (header, vector) = PrimaryVectorHeader::deserialize(encoded)?;
         Some(Self::with_header(header, vector))
     }
 
-    fn with_header(header: VectorHeader, vector: &'a [u8]) -> Self {
+    fn with_header(header: PrimaryVectorHeader, vector: &'a [u8]) -> Self {
         let delta = (header.upper - header.lower) / ((1 << B) - 1) as f32;
         Self {
             header,
@@ -275,7 +278,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
 
-        let (header, vector) = VectorHeader::deserialize(encoded)?;
+        let (header, vector) = PrimaryVectorHeader::deserialize(encoded)?;
         let split = packing::two_vector_split(vector.len() - std::mem::size_of::<f32>(), B1, B2);
         let (primary_vector, residual) = vector.split_at(split);
         let (residual_header_bytes, residual_vector) =
@@ -336,9 +339,9 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
         };
 
         let stats = VectorStats::from(vector);
-        let mut header = VectorHeader::from(stats);
+        let mut header = PrimaryVectorHeader::from(stats);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
-        let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
+        let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
         header.component_sum = match self.0 {
             InstructionSet::Scalar => scalar::lvq1_quantize_and_pack::<B>(
                 vector,
@@ -367,7 +370,7 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        VectorHeader::LEN + packing::byte_len(dimensions, B)
+        PrimaryVectorHeader::LEN + packing::byte_len(dimensions, B)
     }
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
@@ -381,7 +384,7 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
-        (byte_len - VectorHeader::LEN) * 8 / B
+        (byte_len - PrimaryVectorHeader::LEN) * 8 / B
     }
 }
 
@@ -421,7 +424,7 @@ impl<const B1: usize, const B2: usize> Default for TwoLevelVectorCoder<B1, B2> {
 impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1, B2> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let stats = VectorStats::from(vector);
-        let mut header = VectorHeader::from(stats);
+        let mut header = PrimaryVectorHeader::from(stats);
         // NB: this interval optimization reduces loss for the primary vector, but this loss
         // reduction can make the residual vector more lossy if we derive the delta from the primary
         // interval as described in the LVQ paper. Compute and store a residual delta that is large
@@ -440,7 +443,7 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         .expect("3 values input");
         (header.lower, header.upper) = interval;
 
-        let (header_bytes, vector_bytes) = VectorHeader::split_output_buf(out).unwrap();
+        let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
         let split =
             packing::two_vector_split(vector_bytes.len() - std::mem::size_of::<f32>(), B1, B2);
         let (primary, residual_bytes) = vector_bytes.split_at_mut(split);
@@ -481,7 +484,7 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        VectorHeader::LEN
+        PrimaryVectorHeader::LEN
             + packing::byte_len(dimensions, B1)
             + std::mem::size_of::<f32>()
             + packing::byte_len(dimensions, B2)
@@ -498,7 +501,8 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
-        let len_no_corrective_terms = byte_len - VectorHeader::LEN - std::mem::size_of::<f32>();
+        let len_no_corrective_terms =
+            byte_len - PrimaryVectorHeader::LEN - std::mem::size_of::<f32>();
         let split = packing::two_vector_split(len_no_corrective_terms, B1, B2);
         let dim1 = split * 8 / B1;
         let dim2 = (len_no_corrective_terms - split) * 8 / B2;
@@ -774,11 +778,11 @@ mod test {
     use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
 
     use super::{
-        F32VectorCoder, PrimaryVector, PrimaryVectorCoder, TwoLevelVector, TwoLevelVectorCoder,
-        VectorHeader,
+        F32VectorCoder, PrimaryVector, PrimaryVectorCoder, PrimaryVectorHeader, TwoLevelVector,
+        TwoLevelVectorCoder,
     };
 
-    impl AbsDiffEq for VectorHeader {
+    impl AbsDiffEq for PrimaryVectorHeader {
         type Epsilon = f32;
 
         fn default_epsilon() -> Self::Epsilon {
@@ -820,7 +824,7 @@ mod test {
         );
         assert_abs_diff_eq!(
             lvq.header,
-            VectorHeader {
+            PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
@@ -871,7 +875,7 @@ mod test {
         );
         assert_abs_diff_eq!(
             lvq.header,
-            VectorHeader {
+            PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
@@ -922,7 +926,7 @@ mod test {
         );
         assert_abs_diff_eq!(
             lvq.header,
-            VectorHeader {
+            PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
@@ -976,7 +980,7 @@ mod test {
         );
         assert_abs_diff_eq!(
             lvq.primary.header,
-            VectorHeader {
+            PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
@@ -1030,7 +1034,7 @@ mod test {
         );
         assert_abs_diff_eq!(
             lvq.primary.header,
-            VectorHeader {
+            PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
@@ -1089,7 +1093,7 @@ mod test {
         );
         assert_abs_diff_eq!(
             lvq.primary.header,
-            VectorHeader {
+            PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
@@ -1148,7 +1152,7 @@ mod test {
         );
         assert_abs_diff_eq!(
             lvq.primary.header,
-            VectorHeader {
+            PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,

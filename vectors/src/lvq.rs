@@ -231,13 +231,6 @@ struct VectorTerms {
     component_sum: u32,
 }
 
-fn correct_dot_uint(dot: u32, dim: usize, a: &VectorTerms, b: &VectorTerms) -> f32 {
-    dot as f32 * a.delta * b.delta
-        + a.component_sum as f32 * a.delta * b.lower
-        + b.component_sum as f32 * b.delta * a.lower
-        + a.lower * b.lower * dim as f32
-}
-
 const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
     (-0.798, 0.798),
     (-1.493, 1.493),
@@ -255,6 +248,31 @@ const LAMBDA: f32 = 0.1;
 struct EncodedVector<'a> {
     terms: VectorTerms,
     data: &'a [u8],
+}
+
+/// Compute an unnormalized dot product beween two vectors encoded with the same bits/dimension..
+fn dot_unnormalized_uint_symmetric<const B: usize>(
+    inst: InstructionSet,
+    dim: usize,
+    a: &EncodedVector<'_>,
+    b: &EncodedVector<'_>,
+) -> f32 {
+    let dot = match inst {
+        InstructionSet::Scalar => scalar::dot_u8::<B>(a.data, b.data),
+        #[cfg(target_arch = "aarch64")]
+        InstructionSet::Neon => aarch64::dot_u8::<B>(a.data, b.data),
+        #[cfg(target_arch = "x86_64")]
+        InstructionSet::Avx512 => unsafe { x86_64::dot_u8::<B>(a.data, b.data) },
+    };
+    correct_dot_uint(dot, dim, &a.terms, &b.terms)
+}
+
+/// Correct the dot product of two integer vectors using the stored vector terms.
+fn correct_dot_uint(dot: u32, dim: usize, a: &VectorTerms, b: &VectorTerms) -> f32 {
+    dot as f32 * a.delta * b.delta
+        + a.component_sum as f32 * a.delta * b.lower
+        + b.component_sum as f32 * b.delta * a.lower
+        + a.lower * b.lower * dim as f32
 }
 
 /// An LVQ1 coded primary vector.
@@ -297,10 +315,6 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         self.l2_norm.into()
     }
 
-    fn terms(&self) -> &VectorTerms {
-        &self.v.terms
-    }
-
     fn dim(&self) -> usize {
         (self.v.data.len() * 8).div_ceil(B)
     }
@@ -308,17 +322,6 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
     fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
         packing::unpack_iter::<B>(self.v.data)
             .map(|q| q as f32 * self.v.terms.delta + self.v.terms.lower)
-    }
-
-    fn dot_unnormalized(&self, other: &Self) -> f64 {
-        let dot_quantized = match self.inst {
-            InstructionSet::Scalar => scalar::dot_u8::<B>(self.v.data, other.v.data),
-            #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::dot_u8::<B>(self.v.data, other.v.data),
-            #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe { x86_64::dot_u8::<B>(self.v.data, other.v.data) },
-        };
-        correct_dot_uint(dot_quantized, self.dim(), &self.terms(), &other.terms()).into()
     }
 
     fn f32_dot_unnormalized(&self, query: &[f32]) -> f64 {
@@ -578,11 +581,11 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct PrimaryDistance<const B: usize>(VectorSimilarity);
+pub struct PrimaryDistance<const B: usize>(VectorSimilarity, InstructionSet);
 
 impl<const B: usize> PrimaryDistance<B> {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity)
+        Self(similarity, InstructionSet::default())
     }
 }
 
@@ -592,7 +595,7 @@ impl<const B: usize> VectorDistance for PrimaryDistance<B> {
         let doc = PrimaryVector::<B>::new(doc).unwrap();
         dot_unnormalized_to_distance(
             self.0,
-            query.dot_unnormalized(&doc),
+            dot_unnormalized_uint_symmetric::<B>(self.1, query.dim(), &query.v, &doc.v).into(),
             (query.l2_norm(), doc.l2_norm()),
         )
     }
@@ -704,23 +707,42 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for TwoLevelQueryDist
 pub struct FastTwoLevelQueryDistance<const B1: usize, const B2: usize> {
     similarity: VectorSimilarity,
     query: Vec<u8>,
+    dim: usize,
+    l2_norm: f64,
+    terms: VectorTerms,
+    inst: InstructionSet,
 }
 
 impl<const B1: usize, const B2: usize> FastTwoLevelQueryDistance<B1, B2> {
     pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
         let query = PrimaryVectorCoder::<B1>::default().encode(query);
-        Self { similarity, query }
+        let vec = PrimaryVector::<B1>::new(&query).unwrap();
+        let dim = query.len();
+        let l2_norm = vec.l2_norm();
+        let terms = vec.v.terms;
+        Self {
+            similarity,
+            query,
+            dim,
+            l2_norm,
+            terms,
+            inst: InstructionSet::default(),
+        }
     }
 }
 
 impl<const B1: usize, const B2: usize> QueryVectorDistance for FastTwoLevelQueryDistance<B1, B2> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        let query = PrimaryVector::<B1>::new(&self.query).unwrap();
+        let query = EncodedVector {
+            terms: self.terms,
+            data: &self.query[PrimaryVectorHeader::LEN..],
+        };
         let doc = TwoLevelVector::<B1, B2>::new(vector).unwrap();
         dot_unnormalized_to_distance(
             self.similarity,
-            query.dot_unnormalized(&doc.primary),
-            (query.l2_norm(), doc.l2_norm()),
+            dot_unnormalized_uint_symmetric::<B1>(self.inst, self.dim, &query, &doc.primary.v)
+                .into(),
+            (self.l2_norm, doc.l2_norm()),
         )
     }
 }

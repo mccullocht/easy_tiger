@@ -514,13 +514,59 @@ pub unsafe fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
     super::scalar::lvq2_dot_unnormalized::<B1, B2>(a, b)
 }
 
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,avx")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,avx,avx512vnni")]
 #[inline]
 pub unsafe fn lvq2_multi_dot_unnormalized<const B1: usize, const B2: usize>(
     a: &TwoLevelVector<'_, B1, B2>,
     b: &TwoLevelVector<'_, B1, B2>,
 ) -> (u32, u32, u32, u32) {
-    super::scalar::lvq2_multi_dot_unnormalized::<B1, B2>(a, b)
+    match (B1, B2) {
+        (8, 8) => {
+            let zero = _mm512_set1_epi8(0);
+            let mut ap_bp = _mm512_set1_epi32(0);
+            let mut ap_br = _mm512_set1_epi32(0);
+            let mut ar_bp = _mm512_set1_epi32(0);
+            let mut ar_br = _mm512_set1_epi32(0);
+            for ((ap, ar), (bp, br)) in a
+                .primary
+                .vector
+                .chunks(64)
+                .zip(a.vector.chunks(64))
+                .zip(b.primary.vector.chunks(64).zip(b.vector.chunks(64)))
+            {
+                let mask = u64::MAX >> (64 - ap.len());
+                let apv_full = _mm512_maskz_loadu_epi8(mask, ap.as_ptr() as *const i8);
+                let arv_full = _mm512_maskz_loadu_epi8(mask, ar.as_ptr() as *const i8);
+                let bpv_full = _mm512_maskz_loadu_epi8(mask, bp.as_ptr() as *const i8);
+                let brv_full = _mm512_maskz_loadu_epi8(mask, br.as_ptr() as *const i8);
+
+                let apv_lo = _mm512_unpacklo_epi8(apv_full, zero);
+                let bpv_lo = _mm512_unpacklo_epi8(bpv_full, zero);
+                ap_bp = _mm512_dpwssd_epi32(ap_bp, apv_lo, bpv_lo);
+                let arv_lo = _mm512_unpacklo_epi8(arv_full, zero);
+                ar_bp = _mm512_dpwssd_epi32(ar_bp, arv_lo, bpv_lo);
+                let brv_lo = _mm512_unpacklo_epi8(brv_full, zero);
+                ap_br = _mm512_dpwssd_epi32(ap_br, apv_lo, brv_lo);
+                ar_br = _mm512_dpwssd_epi32(ar_br, arv_lo, brv_lo);
+
+                let apv_hi = _mm512_unpackhi_epi8(apv_full, zero);
+                let bpv_hi = _mm512_unpackhi_epi8(bpv_full, zero);
+                ap_bp = _mm512_dpwssd_epi32(ap_bp, apv_hi, bpv_hi);
+                let arv_hi = _mm512_unpackhi_epi8(arv_full, zero);
+                ar_bp = _mm512_dpwssd_epi32(ar_bp, arv_hi, bpv_hi);
+                let brv_hi = _mm512_unpackhi_epi8(brv_full, zero);
+                ap_br = _mm512_dpwssd_epi32(ap_br, apv_hi, brv_hi);
+                ar_br = _mm512_dpwssd_epi32(ar_br, arv_hi, brv_hi);
+            }
+            (
+                _mm512_reduce_add_epi32(ap_bp) as u32,
+                _mm512_reduce_add_epi32(ap_br) as u32,
+                _mm512_reduce_add_epi32(ar_bp) as u32,
+                _mm512_reduce_add_epi32(ar_br) as u32,
+            )
+        }
+        _ => super::scalar::lvq2_multi_dot_unnormalized::<B1, B2>(a, b),
+    }
 }
 
 #[target_feature(enable = "avx512f")]

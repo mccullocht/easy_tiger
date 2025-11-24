@@ -178,6 +178,38 @@ impl From<VectorStats> for PrimaryVectorHeader {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+struct ResidualVectorHeader {
+    interval: f32,
+    component_sum: u32,
+}
+
+impl ResidualVectorHeader {
+    const LEN: usize = 8;
+
+    fn split_output_buf(buf: &mut [u8]) -> Option<(&mut [u8], &mut [u8])> {
+        buf.split_at_mut_checked(Self::LEN)
+    }
+
+    fn serialize(&self, header_bytes: &mut [u8]) {
+        let header = header_bytes.as_chunks_mut::<4>().0;
+        header[0] = self.interval.to_le_bytes();
+        header[1] = self.component_sum.to_le_bytes();
+    }
+
+    fn deserialize(raw: &[u8]) -> Option<(Self, &[u8])> {
+        let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
+        let header_entries = header_bytes.as_chunks::<4>().0;
+        Some((
+            Self {
+                interval: f32::from_le_bytes(header_entries[0]),
+                component_sum: u32::from_le_bytes(header_entries[1]),
+            },
+            vector_bytes,
+        ))
+    }
+}
+
 const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
     (-0.798, 0.798),
     (-1.493, 1.493),
@@ -266,6 +298,7 @@ struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
     vector: &'a [u8],
     delta: f32,
     lower: f32,
+    component_sum: u32,
 }
 
 impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
@@ -275,13 +308,12 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
 
-        let (header, vector) = PrimaryVectorHeader::deserialize(encoded)?;
-        let split = packing::two_vector_split(vector.len() - std::mem::size_of::<f32>(), B1, B2);
+        let (primary_header, vector) = PrimaryVectorHeader::deserialize(encoded)?;
+        let split = packing::two_vector_split(vector.len() - ResidualVectorHeader::LEN, B1, B2);
         let (primary_vector, residual) = vector.split_at(split);
-        let (residual_header_bytes, residual_vector) =
-            residual.split_at(std::mem::size_of::<f32>());
-        let primary = PrimaryVector::<'_, B1>::with_header(header, primary_vector);
-        let interval = f32::from_le_bytes(residual_header_bytes.try_into().unwrap());
+        let (residual_header, residual_vector) = ResidualVectorHeader::deserialize(residual)?;
+        let primary = PrimaryVector::<'_, B1>::with_header(primary_header, primary_vector);
+        let interval = residual_header.interval;
         let delta = interval / ((1 << B2) - 1) as f32;
         let lower = -interval / 2.0;
         Some(Self {
@@ -289,6 +321,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
             vector: residual_vector,
             delta,
             lower,
+            component_sum: residual_header.component_sum,
         })
     }
 
@@ -421,7 +454,7 @@ impl<const B1: usize, const B2: usize> Default for TwoLevelVectorCoder<B1, B2> {
 impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1, B2> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let stats = VectorStats::from(vector);
-        let mut header = PrimaryVectorHeader::from(stats);
+        let mut primary_header = PrimaryVectorHeader::from(stats);
         // NB: this interval optimization reduces loss for the primary vector, but this loss
         // reduction can make the residual vector more lossy if we derive the delta from the primary
         // interval as described in the LVQ paper. Compute and store a residual delta that is large
@@ -432,26 +465,30 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
         // values we may need to encode based on the gap between the initial and optimized interval.
         let residual_interval = [
             (interval.1 - interval.0) / ((1 << B1) - 1) as f32,
-            (header.lower.abs() - interval.0.abs()) * 2.0,
-            (header.upper.abs() - interval.1.abs()) * 2.0,
+            (primary_header.lower.abs() - interval.0.abs()) * 2.0,
+            (primary_header.upper.abs() - interval.1.abs()) * 2.0,
         ]
         .into_iter()
         .max_by(f32::total_cmp)
         .expect("3 values input");
-        (header.lower, header.upper) = interval;
+        (primary_header.lower, primary_header.upper) = interval;
 
-        let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
+        let (primary_header_bytes, vector_bytes) =
+            PrimaryVectorHeader::split_output_buf(out).unwrap();
         let split =
-            packing::two_vector_split(vector_bytes.len() - std::mem::size_of::<f32>(), B1, B2);
+            packing::two_vector_split(vector_bytes.len() - ResidualVectorHeader::LEN, B1, B2);
         let (primary, residual_bytes) = vector_bytes.split_at_mut(split);
         let (residual_header_bytes, residual) =
-            residual_bytes.split_at_mut(std::mem::size_of::<f32>());
-        residual_header_bytes.copy_from_slice(residual_interval.to_le_bytes().as_slice());
-        header.component_sum = match self.0 {
+            ResidualVectorHeader::split_output_buf(residual_bytes).unwrap();
+        let mut residual_header = ResidualVectorHeader {
+            interval: residual_interval,
+            component_sum: 0,
+        };
+        (primary_header.component_sum, residual_header.component_sum) = match self.0 {
             InstructionSet::Scalar => scalar::lvq2_quantize_and_pack::<B1, B2>(
                 vector,
-                header.lower,
-                header.upper,
+                primary_header.lower,
+                primary_header.upper,
                 primary,
                 residual_interval,
                 residual,
@@ -459,8 +496,8 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::lvq2_quantize_and_pack::<B1, B2>(
                 vector,
-                header.lower,
-                header.upper,
+                primary_header.lower,
+                primary_header.upper,
                 primary,
                 residual_interval,
                 residual,
@@ -469,21 +506,22 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
             InstructionSet::Avx512 => unsafe {
                 x86_64::lvq2_quantize_and_pack::<B1, B2>(
                     vector,
-                    header.lower,
-                    header.upper,
+                    primary_header.lower,
+                    primary_header.upper,
                     primary,
                     residual_interval,
                     residual,
                 )
             },
         };
-        header.serialize(header_bytes);
+        primary_header.serialize(primary_header_bytes);
+        residual_header.serialize(residual_header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
         PrimaryVectorHeader::LEN
             + packing::byte_len(dimensions, B1)
-            + std::mem::size_of::<f32>()
+            + ResidualVectorHeader::LEN
             + packing::byte_len(dimensions, B2)
     }
 
@@ -499,7 +537,7 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
 
     fn dimensions(&self, byte_len: usize) -> usize {
         let len_no_corrective_terms =
-            byte_len - PrimaryVectorHeader::LEN - std::mem::size_of::<f32>();
+            byte_len - PrimaryVectorHeader::LEN - ResidualVectorHeader::LEN;
         let split = packing::two_vector_split(len_no_corrective_terms, B1, B2);
         let dim1 = split * 8 / B1;
         let dim2 = (len_no_corrective_terms - split) * 8 / B2;

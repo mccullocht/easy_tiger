@@ -292,7 +292,7 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     let tail_split = v.len() & !15;
     let (head_primary, tail_primary) = primary.split_at_mut(packing::byte_len(tail_split, B1));
     let (head_residual, tail_residual) = residual.split_at_mut(packing::byte_len(tail_split, B2));
-    let component_sum = if tail_split > 0 {
+    let (primary_component_sum, residual_component_sum) = if tail_split > 0 {
         unsafe {
             let lowerv = vdupq_n_f32(lower);
             let upperv = vdupq_n_f32(upper);
@@ -301,7 +301,8 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
             let res_lowerv = vdupq_n_f32(res_lower);
             let res_upperv = vdupq_n_f32(res_upper);
             let res_delta_inv = vdupq_n_f32(res_delta_inv);
-            let mut component_sumv = 0u32;
+            let mut primary_component_sumv = 0u32;
+            let mut residual_component_sumv = 0u32;
             for i in (0..tail_split).step_by(16) {
                 // Load and quantize 16 values, primary and residual
                 let a = vld1q_f32(v.as_ptr().add(i));
@@ -364,11 +365,13 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
                 };
 
                 // Reduce to a single byte per dimension and pack.
+                let rabcd = pack_to_byte(ra, rb, rc, rd);
+                residual_component_sumv += u32::from(vaddlvq_u8(rabcd));
                 match B2 {
-                    1 => pack1(i, pack_to_byte(ra, rb, rc, rd), head_residual),
-                    2 => pack2(i, pack_to_byte(ra, rb, rc, rd), head_residual),
-                    4 => pack4(i, pack_to_byte(ra, rb, rc, rd), head_residual),
-                    8 => pack8(i, pack_to_byte(ra, rb, rc, rd), head_residual),
+                    1 => pack1(i, rabcd, head_residual),
+                    2 => pack2(i, rabcd, head_residual),
+                    4 => pack4(i, rabcd, head_residual),
+                    8 => pack8(i, rabcd, head_residual),
                     12 => {
                         pack12(i, ra, rb, head_residual);
                         pack12(i + 8, rc, rd, head_residual);
@@ -384,17 +387,17 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     };
 
     if tail_split < v.len() {
-        component_sum
-            + super::scalar::lvq2_quantize_and_pack::<B1, B2>(
-                &v[tail_split..],
-                lower,
-                upper,
-                tail_primary,
-                residual_interval,
-                tail_residual,
-            )
+        let (p, r) = super::scalar::lvq2_quantize_and_pack::<B1, B2>(
+            &v[tail_split..],
+            lower,
+            upper,
+            tail_primary,
+            residual_interval,
+            tail_residual,
+        );
+        (primary_component_sum + p, residual_component_sumv + r)
     } else {
-        component_sum
+        (primary_component_sum, residual_component_sumv)
     }
 }
 

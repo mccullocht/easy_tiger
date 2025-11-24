@@ -687,7 +687,7 @@ mod packing {
     /// REQUIRES: B1 must be in 1..=8 and B1 % 8 == 0
     /// REQUIRES: B2 must be in 1..=8 and B2 % 8 == 0
     pub fn pack_iter2<const B1: usize, const B2: usize>(
-        it: impl ExactSizeIterator<Item = (u8, u16)>,
+        it: impl ExactSizeIterator<Item = (u8, u8)>,
         primary: &mut [u8],
         residual: &mut [u8],
     ) {
@@ -695,32 +695,19 @@ mod packing {
         let dims_per_byte2 = 8 / B2;
         for (i, (q, r)) in it.enumerate() {
             primary[i / dims_per_byte1] |= q << ((i % dims_per_byte1) * B1);
-            match B2 {
-                1..=8 => residual[i / dims_per_byte2] |= (r as u8) << ((i % dims_per_byte2) * B2),
-                12 => {
-                    let b1 = i * 3 / 2;
-                    if i % 2 == 0 {
-                        residual[b1..b1 + 2].copy_from_slice(&r.to_le_bytes());
-                    } else {
-                        residual[b1] |= (r as u8 & 0xf) << 4;
-                        residual[b1 + 1] = (r >> 4) as u8;
-                    }
-                }
-                16 => residual[i * 2..i * 2 + 2].copy_from_slice(&r.to_le_bytes()),
-                _ => unimplemented!(),
-            }
+            residual[i / dims_per_byte2] |= (r as u8) << ((i % dims_per_byte2) * B2);
         }
     }
 
     pub struct UnpackIter<'a, const B: usize> {
         inner: std::slice::Iter<'a, u8>,
-        buf: u32,
+        buf: u8,
         nbuf: usize,
     }
 
     impl<'a, const B: usize> UnpackIter<'a, B> {
-        const MASK: u32 = (1 << B) - 1;
-        const BIT_CHECK: () = { assert!(B <= 16) };
+        const MASK: u8 = u8::MAX >> (8 - B);
+        const BIT_CHECK: () = { assert!(B == 1 || B == 4 || B == 8) };
 
         fn new(packed: &'a [u8]) -> Self {
             #[allow(clippy::let_unit_value)]
@@ -734,18 +721,19 @@ mod packing {
     }
 
     impl<'a, const B: usize> Iterator for UnpackIter<'a, B> {
-        type Item = u16;
+        type Item = u8;
 
         fn next(&mut self) -> Option<Self::Item> {
             while self.nbuf < B {
-                self.buf |= u32::from(*self.inner.next()?) << self.nbuf;
+                self.buf = *self.inner.next()?;
                 self.nbuf += 8;
             }
 
+            // XXX this is busted
             let v = self.buf & Self::MASK;
             self.buf >>= B;
             self.nbuf -= B;
-            Some(v as u16)
+            Some(v as u8)
         }
 
         fn nth(&mut self, n: usize) -> Option<Self::Item> {
@@ -755,7 +743,7 @@ mod packing {
                 self.nbuf = 0;
                 let skip_bytes = skip_bits / 8;
                 skip_bits -= skip_bytes * 8;
-                self.buf = u32::from(*self.inner.nth(skip_bytes)?);
+                self.buf = *self.inner.nth(skip_bytes)?;
             }
 
             self.buf >>= skip_bits;
@@ -773,7 +761,7 @@ mod packing {
 
     /// Iterate over the value in each dimension where each dimension is `B` bits in `packed`
     /// REQUIRES: B must be in 1..=8 and B % 8 == 0
-    pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u16> + '_ {
+    pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u8> + '_ {
         UnpackIter::<B>::new(packed)
     }
 }
@@ -809,13 +797,13 @@ mod test {
         -0.273, 0.539, -0.731, 0.436, 0.913, 0.694, 0.202,
     ];
 
-    fn unpack_primary<const B: usize>(vector: &PrimaryVector<'_, B>) -> Vec<u16> {
+    fn unpack_primary<const B: usize>(vector: &PrimaryVector<'_, B>) -> Vec<u8> {
         super::packing::unpack_iter::<B>(vector.vector).collect()
     }
 
     fn unpack_residual<const B1: usize, const B2: usize>(
         vector: &TwoLevelVector<'_, B1, B2>,
-    ) -> Vec<u16> {
+    ) -> Vec<u8> {
         super::packing::unpack_iter::<B2>(vector.vector).collect()
     }
 

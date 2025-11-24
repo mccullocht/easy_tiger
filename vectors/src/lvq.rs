@@ -224,6 +224,20 @@ impl ResidualVectorHeader {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+struct VectorTerms {
+    lower: f32,
+    delta: f32,
+    component_sum: u32,
+}
+
+fn correct_dot_uint(dot: u32, dim: usize, a: &VectorTerms, b: &VectorTerms) -> f32 {
+    dot as f32 * a.delta * b.delta
+        + a.component_sum as f32 * a.delta * b.lower
+        + b.component_sum as f32 * b.delta * a.lower
+        + a.lower * b.lower * dim as f32
+}
+
 const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
     (-0.798, 0.798),
     (-1.493, 1.493),
@@ -272,6 +286,18 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         self.header.l2_norm.into()
     }
 
+    fn terms(&self) -> VectorTerms {
+        VectorTerms {
+            lower: self.header.lower,
+            delta: self.delta,
+            component_sum: self.header.component_sum,
+        }
+    }
+
+    fn dim(&self) -> usize {
+        (self.vector.len() * 8).div_ceil(B)
+    }
+
     fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
         packing::unpack_iter::<B>(self.vector).map(|q| q as f32 * self.delta + self.header.lower)
     }
@@ -284,14 +310,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe { x86_64::dot_u8::<B>(self.vector, other.vector) },
         };
-        let sdelta = f64::from(self.delta);
-        let slower = f64::from(self.header.lower);
-        let odelta = f64::from(other.delta);
-        let olower = f64::from(other.header.lower);
-        dot_quantized as f64 * sdelta * odelta
-            + self.header.component_sum as f64 * sdelta * olower
-            + other.header.component_sum as f64 * odelta * slower
-            + slower * olower * (self.vector.len() * 8).div_ceil(B) as f64
+        correct_dot_uint(dot_quantized, self.dim(), &self.terms(), &other.terms()).into()
     }
 
     fn f32_dot_unnormalized(&self, query: &[f32]) -> f64 {

@@ -540,8 +540,8 @@ impl LVQ2F32Converter {
     ) -> Self {
         Self {
             l1: LVQ1F32Converter::from_vector(&vector.primary),
-            delta: vdupq_n_f32(vector.delta),
-            lower: vdupq_n_f32(vector.lower),
+            delta: vdupq_n_f32(vector.residual.terms.delta),
+            lower: vdupq_n_f32(vector.residual.terms.lower),
         }
     }
 
@@ -599,14 +599,14 @@ pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
     let dim = if B1 > B2 {
         (a.primary.v.data.len() * 8).div_ceil(B1)
     } else {
-        (a.vector.len() * 8).div_ceil(B2)
+        (a.residual.data.len() * 8).div_ceil(B2)
     };
     let tail_split = dim & !7;
 
     let (a_l1_head, _) = a.primary.v.data.split_at(packing::byte_len(tail_split, B1));
-    let (a_l2_head, _) = a.vector.split_at(packing::byte_len(tail_split, B2));
+    let (a_l2_head, _) = a.residual.data.split_at(packing::byte_len(tail_split, B2));
     let (b_l1_head, _) = b.primary.v.data.split_at(packing::byte_len(tail_split, B1));
-    let (b_l2_head, _) = b.vector.split_at(packing::byte_len(tail_split, B2));
+    let (b_l2_head, _) = b.residual.data.split_at(packing::byte_len(tail_split, B2));
 
     let pdot = if !a_l1_head.is_empty() {
         unsafe {
@@ -658,7 +658,10 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
         .v
         .data
         .split_at(packing::byte_len(tail_split, B1));
-    let (doc_l2_head, _) = doc.vector.split_at(packing::byte_len(tail_split, B2));
+    let (doc_l2_head, _) = doc
+        .residual
+        .data
+        .split_at(packing::byte_len(tail_split, B2));
 
     let pdot = if !doc_l1_head.is_empty() {
         unsafe {

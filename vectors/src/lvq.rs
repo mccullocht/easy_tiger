@@ -336,9 +336,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
 
 struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
     primary: PrimaryVector<'a, B1>,
-    vector: &'a [u8],
-    delta: f32,
-    lower: f32,
+    residual: EncodedVector<'a>,
 }
 
 impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
@@ -353,14 +351,15 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         let split = packing::two_vector_split(vector_bytes.len(), B1, B2);
         let (primary_vector, residual_vector) = vector_bytes.split_at(split);
         let primary = PrimaryVector::<'_, B1>::with_header(primary_header, primary_vector);
-        let delta = residual_header.magnitude / ((1 << B2) - 1) as f32;
-        let lower = -residual_header.magnitude / 2.0;
-        Some(Self {
-            primary,
-            vector: residual_vector,
-            delta,
-            lower,
-        })
+        let residual = EncodedVector {
+            terms: VectorTerms {
+                lower: -residual_header.magnitude / 2.0,
+                delta: residual_header.magnitude / ((1 << B2) - 1) as f32,
+                component_sum: residual_header.component_sum,
+            },
+            data: residual_vector,
+        };
+        Some(Self { primary, residual })
     }
 
     pub fn l2_norm(&self) -> f64 {
@@ -371,7 +370,8 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         self.primary
             .f32_iter()
             .zip(
-                packing::unpack_iter::<B2>(self.vector).map(|r| r as f32 * self.delta + self.lower),
+                packing::unpack_iter::<B2>(self.residual.data)
+                    .map(|r| r as f32 * self.residual.terms.delta + self.residual.terms.lower),
             )
             .map(|(q, r)| q + r)
     }
@@ -878,7 +878,7 @@ mod test {
     fn unpack_residual<const B1: usize, const B2: usize>(
         vector: &TwoLevelVector<'_, B1, B2>,
     ) -> Vec<u8> {
-        super::packing::unpack_iter::<B2>(vector.vector).collect()
+        super::packing::unpack_iter::<B2>(vector.residual.data).collect()
     }
 
     #[test]

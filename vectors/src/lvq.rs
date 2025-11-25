@@ -724,12 +724,15 @@ mod packing {
         type Item = u8;
 
         fn next(&mut self) -> Option<Self::Item> {
-            while self.nbuf < B {
-                self.buf = *self.inner.next()?;
-                self.nbuf += 8;
+            if B == 8 {
+                return self.inner.next().copied();
             }
 
-            // XXX this is busted
+            if self.nbuf == 0 {
+                self.buf = *self.inner.next()?;
+                self.nbuf = 8;
+            }
+
             let v = self.buf & Self::MASK;
             self.buf >>= B;
             self.nbuf -= B;

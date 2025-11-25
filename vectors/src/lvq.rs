@@ -695,7 +695,7 @@ mod packing {
         let dims_per_byte2 = 8 / B2;
         for (i, (q, r)) in it.enumerate() {
             primary[i / dims_per_byte1] |= q << ((i % dims_per_byte1) * B1);
-            residual[i / dims_per_byte2] |= (r as u8) << ((i % dims_per_byte2) * B2);
+            residual[i / dims_per_byte2] |= r << ((i % dims_per_byte2) * B2);
         }
     }
 
@@ -736,7 +736,7 @@ mod packing {
             let v = self.buf & Self::MASK;
             self.buf >>= B;
             self.nbuf -= B;
-            Some(v as u8)
+            Some(v)
         }
 
         fn nth(&mut self, n: usize) -> Option<Self::Item> {

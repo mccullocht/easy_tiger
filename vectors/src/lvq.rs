@@ -672,8 +672,7 @@ impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelDistance<B1, B
             }
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                // TODO: AVX512 implementation
-                scalar::dot_residual_u8::<B1, B2>(qv.0.data, qv.1.data, dv.0.data, dv.1.data)
+                x86_64::dot_residual_u8::<B1, B2>(qv.0.data, qv.1.data, dv.0.data, dv.1.data)
             },
         };
         let dim = query.dim();

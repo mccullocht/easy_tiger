@@ -592,61 +592,6 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVec
     .into()
 }
 
-pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
-    a: &TwoLevelVector<'_, B1, B2>,
-    b: &TwoLevelVector<'_, B1, B2>,
-) -> f64 {
-    let dim = if B1 > B2 {
-        (a.primary.v.data.len() * 8).div_ceil(B1)
-    } else {
-        (a.residual.data.len() * 8).div_ceil(B2)
-    };
-    let tail_split = dim & !7;
-
-    let (a_l1_head, _) = a.primary.v.data.split_at(packing::byte_len(tail_split, B1));
-    let (a_l2_head, _) = a.residual.data.split_at(packing::byte_len(tail_split, B2));
-    let (b_l1_head, _) = b.primary.v.data.split_at(packing::byte_len(tail_split, B1));
-    let (b_l2_head, _) = b.residual.data.split_at(packing::byte_len(tail_split, B2));
-
-    let pdot = if !a_l1_head.is_empty() {
-        unsafe {
-            let a_converter = LVQ2F32Converter::from_vector(a);
-            let b_converter = LVQ2F32Converter::from_vector(b);
-
-            let mut dot = vdupq_n_f32(0.0);
-            for i in (0..tail_split).step_by(8) {
-                let a = unpack_lvq2::<B1, B2>(i, a_l1_head, a_l2_head);
-                let b = unpack_lvq2::<B1, B2>(i, b_l1_head, b_l2_head);
-                dot = vfmaq_f32(
-                    dot,
-                    a_converter.unpacked_to_f32(a.0),
-                    b_converter.unpacked_to_f32(b.0),
-                );
-                dot = vfmaq_f32(
-                    dot,
-                    a_converter.unpacked_to_f32(a.1),
-                    b_converter.unpacked_to_f32(b.1),
-                );
-            }
-            vaddvq_f32(dot)
-        }
-    } else {
-        0.0
-    };
-
-    if tail_split < dim {
-        pdot + a
-            .f32_iter()
-            .skip(tail_split)
-            .zip(b.f32_iter().skip(tail_split))
-            .map(|(a, b)| a * b)
-            .sum::<f32>()
-    } else {
-        pdot
-    }
-    .into()
-}
-
 pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     query: &[f32],
     doc: &TwoLevelVector<'_, B1, B2>,

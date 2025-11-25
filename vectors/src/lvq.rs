@@ -354,6 +354,12 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         self.primary.l2_norm()
     }
 
+    pub fn dim(&self) -> usize {
+        self.primary
+            .dim()
+            .min((self.residual.data.len() * 8).div_ceil(B2))
+    }
+
     fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
         self.primary
             .f32_iter()
@@ -631,11 +637,11 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TwoLevelDistance<const B1: usize, const B2: usize>(VectorSimilarity, InstructionSet);
+pub struct TwoLevelDistance<const B1: usize, const B2: usize>(VectorSimilarity);
 
 impl<const B1: usize, const B2: usize> TwoLevelDistance<B1, B2> {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity, InstructionSet::default())
+        Self(similarity)
     }
 }
 
@@ -643,16 +649,26 @@ impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelDistance<B1, B
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = TwoLevelVector::<B1, B2>::new(query).unwrap();
         let doc = TwoLevelVector::<B1, B2>::new(doc).unwrap();
-        let dot = match self.1 {
-            InstructionSet::Scalar => scalar::lvq2_dot_unnormalized::<B1, B2>(&query, &doc),
-            #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::lvq2_dot_unnormalized::<B1, B2>(&query, &doc),
-            #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::lvq2_dot_unnormalized::<B1, B2>(&query, &doc)
-            },
-        };
-        dot_unnormalized_to_distance(self.0, dot, (query.l2_norm(), doc.l2_norm()))
+        let (qp_dp, qp_dr, qr_dp, qr_dr) = packing::unpack_iter::<B1>(query.primary.v.data)
+            .zip(packing::unpack_iter::<B2>(query.residual.data))
+            .zip(
+                packing::unpack_iter::<B1>(doc.primary.v.data)
+                    .zip(packing::unpack_iter::<B2>(doc.residual.data)),
+            )
+            .fold((0u32, 0u32, 0u32, 0u32), |acc, ((qp, qr), (dp, dr))| {
+                (
+                    acc.0 + qp as u32 * dp as u32,
+                    acc.1 + qp as u32 * dr as u32,
+                    acc.2 + qr as u32 * dp as u32,
+                    acc.3 + qr as u32 * dr as u32,
+                )
+            });
+        let dim = query.dim();
+        let dot = correct_dot_uint(qp_dp, dim, &query.primary.v.terms, &doc.primary.v.terms)
+            + correct_dot_uint(qp_dr, dim, &query.primary.v.terms, &doc.residual.terms)
+            + correct_dot_uint(qr_dp, dim, &query.residual.terms, &doc.primary.v.terms)
+            + correct_dot_uint(qr_dr, dim, &query.residual.terms, &doc.residual.terms);
+        dot_unnormalized_to_distance(self.0, dot.into(), (query.l2_norm(), doc.l2_norm()))
     }
 }
 

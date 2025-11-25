@@ -183,18 +183,6 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVec
 }
 
 #[inline]
-pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
-    a: &TwoLevelVector<'_, B1, B2>,
-    b: &TwoLevelVector<'_, B1, B2>,
-) -> f64 {
-    a.f32_iter()
-        .zip(b.f32_iter())
-        .map(|(a, b)| a * b)
-        .sum::<f32>()
-        .into()
-}
-
-#[inline]
 pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     query: &[f32],
     doc: &TwoLevelVector<'_, B1, B2>,

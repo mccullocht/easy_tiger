@@ -4,8 +4,8 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::bulk::{BulkLoadBuilder, Options},
-    vamana::graph::{GraphConfig, GraphLayout, GraphSearchParams},
     vamana::wt::TableGraphVectorIndex,
+    vamana::{GraphConfig, GraphLayout, GraphSearchParams},
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, Result, Session};

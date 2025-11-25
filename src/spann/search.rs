@@ -16,8 +16,8 @@ use wt_mdb::{Result, Session};
 use crate::{
     spann::{centroid_stats::CentroidStats, PostingKey, SessionIndexReader, TableIndex},
     vamana::{
-        graph::{GraphSearchParams, GraphVectorIndexReader},
         search::{GraphSearchStats, GraphSearcher},
+        GraphSearchParams, GraphVectorIndexReader,
     },
     Neighbor,
 };

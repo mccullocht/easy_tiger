@@ -5,13 +5,13 @@ use std::{
     ops::{Add, AddAssign},
 };
 
-use super::graph::{
-    Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
-};
+use super::{Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex};
 use crate::Neighbor;
 
 use vectors::QueryVectorDistance;
 use wt_mdb::{Error, Result};
+
+const MAX_EXHAUSTIVE_SEARCH_LEN: usize = 1_000;
 
 #[derive(Debug, Copy, Clone, Default)]
 pub struct GraphSearchStats {
@@ -189,35 +189,45 @@ impl GraphSearcher {
 
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
-        if let Some(epr) = graph.entry_point() {
-            let entry_point = epr?;
-            let entry_vector = nav
-                .get(entry_point)
-                .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates
-                .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)));
-            self.seen.insert(entry_point);
-        }
-
-        while let Some(best_candidate) = self.candidates.next_unvisited() {
-            self.visited += 1;
-            let vertex_id = best_candidate.neighbor().vertex();
-            let node = graph
-                .get_vertex(vertex_id)
-                .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            if filter_predicate(vertex_id) {
-                best_candidate.visit();
-            } else {
-                best_candidate.remove();
+        if nav.estimated_len()? < MAX_EXHAUSTIVE_SEARCH_LEN {
+            nav.scan_all(|vertex_id, vector| {
+                if filter_predicate(vertex_id) {
+                    self.candidates
+                        .add_unvisited(Neighbor::new(vertex_id, nav_query.distance(vector)));
+                    self.visited += 1;
+                }
+            })?;
+        } else {
+            if let Some(epr) = graph.entry_point() {
+                let entry_point = epr?;
+                let entry_vector = nav
+                    .get(entry_point)
+                    .unwrap_or(Err(Error::not_found_error()))?;
+                self.candidates
+                    .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)));
+                self.seen.insert(entry_point);
             }
 
-            for edge in node.edges() {
-                if !self.seen.insert(edge) {
-                    continue;
+            while let Some(best_candidate) = self.candidates.next_unvisited() {
+                self.visited += 1;
+                let vertex_id = best_candidate.neighbor().vertex();
+                let node = graph
+                    .get_vertex(vertex_id)
+                    .unwrap_or_else(|| Err(Error::not_found_error()))?;
+                if filter_predicate(vertex_id) {
+                    best_candidate.visit();
+                } else {
+                    best_candidate.remove();
                 }
-                let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
-                self.candidates
-                    .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)));
+
+                for edge in node.edges() {
+                    if !self.seen.insert(edge) {
+                        continue;
+                    }
+                    let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
+                    self.candidates
+                        .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)));
+                }
             }
         }
 
@@ -373,7 +383,7 @@ mod test {
     use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
     use wt_mdb::Result;
 
-    use crate::vamana::graph::{
+    use crate::vamana::{
         Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
     };
     use crate::Neighbor;
@@ -560,6 +570,10 @@ mod test {
             self.0.config.similarity
         }
 
+        fn estimated_len(&mut self) -> Result<usize> {
+            Ok(self.0.data.len())
+        }
+
         fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
             self.0.data.get(vertex_id as usize).map(|v| {
                 Ok(match self.1 {
@@ -567,6 +581,19 @@ mod test {
                     TestVectorStoreType::Rerank => bytemuck::cast_slice(v.vector.as_ref()),
                 })
             })
+        }
+
+        fn scan_all(&mut self, mut cb: impl FnMut(i64, &[u8])) -> Result<()> {
+            for (i, v) in self.0.data.iter().enumerate() {
+                cb(
+                    i as i64,
+                    match self.1 {
+                        TestVectorStoreType::Nav => v.nav_vector.as_ref(),
+                        TestVectorStoreType::Rerank => bytemuck::cast_slice(v.vector.as_ref()),
+                    },
+                );
+            }
+            Ok(())
         }
     }
 

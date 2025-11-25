@@ -452,11 +452,11 @@ pub unsafe fn lvq1_f32_dot_unnormalized<const B: usize>(
     query: &[f32],
     doc: &PrimaryVector<'_, B>,
 ) -> f64 {
-    let delta = _mm512_set1_ps(doc.delta);
-    let lower = _mm512_set1_ps(doc.header.lower);
+    let delta = _mm512_set1_ps(doc.v.terms.delta);
+    let lower = _mm512_set1_ps(doc.v.terms.lower);
     let chunk_size = (B * 16).div_ceil(8);
     let mut dot = _mm512_set1_ps(0.0);
-    for (q, d) in query.chunks(16).zip(doc.vector.chunks(chunk_size)) {
+    for (q, d) in query.chunks(16).zip(doc.v.data.chunks(chunk_size)) {
         let mask = u16::MAX >> (16 - q.len());
         let qv = _mm512_maskz_loadu_ps(mask, q.as_ptr());
         let qpv = _mm512_maskz_cvtepu32_ps(mask, unpack::<B>(d));
@@ -482,18 +482,19 @@ pub unsafe fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     doc: &TwoLevelVector<'_, B1, B2>,
 ) -> f64 {
     let p_chunk_size = (B1 * 16).div_ceil(8);
-    let p_delta = _mm512_set1_ps(doc.primary.delta);
-    let p_lower = _mm512_set1_ps(doc.primary.header.lower);
+    let p_delta = _mm512_set1_ps(doc.primary.v.terms.delta);
+    let p_lower = _mm512_set1_ps(doc.primary.v.terms.lower);
     let r_chunk_size = (B2 * 16).div_ceil(8);
-    let r_delta = _mm512_set1_ps(doc.delta);
-    let r_lower = _mm512_set1_ps(doc.lower);
+    let r_delta = _mm512_set1_ps(doc.residual.terms.delta);
+    let r_lower = _mm512_set1_ps(doc.residual.terms.lower);
 
     let mut dot = _mm512_set1_ps(0.0);
     for (q, (p, r)) in query.chunks(16).zip(
         doc.primary
-            .vector
+            .v
+            .data
             .chunks(p_chunk_size)
-            .zip(doc.vector.chunks(r_chunk_size)),
+            .zip(doc.residual.data.chunks(r_chunk_size)),
     ) {
         let qmask = u16::MAX >> (16 - q.len());
         let qv = _mm512_maskz_loadu_ps(qmask, q.as_ptr());

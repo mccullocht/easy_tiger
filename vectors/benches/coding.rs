@@ -60,8 +60,6 @@ fn lvq_benchmarks(c: &mut Criterion) {
         F32VectorCoding::LVQ1x4,
         F32VectorCoding::LVQ1x8,
         F32VectorCoding::LVQ2x1x8,
-        F32VectorCoding::LVQ2x1x12,
-        F32VectorCoding::LVQ2x1x16,
         F32VectorCoding::LVQ2x4x4,
         F32VectorCoding::LVQ2x4x8,
         F32VectorCoding::LVQ2x8x8,

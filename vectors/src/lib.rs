@@ -162,10 +162,6 @@ pub enum F32VectorCoding {
     LVQ1x8,
     /// LVQ two-level; 1 bit primary 8 bits residual
     LVQ2x1x8,
-    /// LVQ two-level; 1 bit primary 12 bits residual
-    LVQ2x1x12,
-    /// LVQ two-level; 1 bit primary 16 bits residual
-    LVQ2x1x16,
     /// LVQ two-level; 4 bits primary 4 bits residual
     LVQ2x4x4,
     /// LVQ two-level; 4 bits primary 8 bits residual
@@ -188,8 +184,6 @@ impl F32VectorCoding {
             Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::<4>::default()),
             Self::LVQ1x8 => Box::new(lvq::PrimaryVectorCoder::<8>::default()),
             Self::LVQ2x1x8 => Box::new(lvq::TwoLevelVectorCoder::<1, 8>::default()),
-            Self::LVQ2x1x12 => Box::new(lvq::TwoLevelVectorCoder::<1, 12>::default()),
-            Self::LVQ2x1x16 => Box::new(lvq::TwoLevelVectorCoder::<1, 16>::default()),
             Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::<4, 4>::default()),
             Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::<4, 8>::default()),
             Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::<8, 8>::default()),
@@ -218,8 +212,6 @@ impl F32VectorCoding {
             (Self::LVQ1x4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
             (Self::LVQ1x8, _) => Box::new(lvq::PrimaryDistance::<8>::new(similarity)),
             (Self::LVQ2x1x8, _) => Box::new(lvq::TwoLevelDistance::<1, 8>::new(similarity)),
-            (Self::LVQ2x1x12, _) => Box::new(lvq::TwoLevelDistance::<1, 12>::new(similarity)),
-            (Self::LVQ2x1x16, _) => Box::new(lvq::TwoLevelDistance::<1, 16>::new(similarity)),
             (Self::LVQ2x4x4, _) => Box::new(lvq::TwoLevelDistance::<4, 4>::new(similarity)),
             (Self::LVQ2x4x8, _) => Box::new(lvq::TwoLevelDistance::<4, 8>::new(similarity)),
             (Self::LVQ2x8x8, _) => Box::new(lvq::TwoLevelDistance::<8, 8>::new(similarity)),
@@ -272,14 +264,6 @@ impl F32VectorCoding {
                 query.into(),
             )),
             (_, F32VectorCoding::LVQ2x1x8) => Box::new(lvq::TwoLevelQueryDistance::<1, 8>::new(
-                similarity,
-                query.into(),
-            )),
-            (_, F32VectorCoding::LVQ2x1x12) => Box::new(lvq::TwoLevelQueryDistance::<1, 12>::new(
-                similarity,
-                query.into(),
-            )),
-            (_, F32VectorCoding::LVQ2x1x16) => Box::new(lvq::TwoLevelQueryDistance::<1, 16>::new(
                 similarity,
                 query.into(),
             )),
@@ -340,12 +324,6 @@ impl F32VectorCoding {
             ))),
             F32VectorCoding::LVQ2x1x8 => Some(Box::new(
                 lvq::FastTwoLevelQueryDistance::<1, 8>::new(similarity, query),
-            )),
-            F32VectorCoding::LVQ2x1x12 => Some(Box::new(
-                lvq::FastTwoLevelQueryDistance::<1, 12>::new(similarity, query),
-            )),
-            F32VectorCoding::LVQ2x1x16 => Some(Box::new(
-                lvq::FastTwoLevelQueryDistance::<1, 16>::new(similarity, query),
             )),
             F32VectorCoding::LVQ2x4x4 => Some(Box::new(
                 lvq::FastTwoLevelQueryDistance::<4, 4>::new(similarity, query),
@@ -412,12 +390,6 @@ impl F32VectorCoding {
             (_, F32VectorCoding::LVQ2x1x8) => {
                 quantized_qvd!(lvq::TwoLevelDistance::<1, 8>::new(similarity), query)
             }
-            (_, F32VectorCoding::LVQ2x1x12) => {
-                quantized_qvd!(lvq::TwoLevelDistance::<1, 12>::new(similarity), query)
-            }
-            (_, F32VectorCoding::LVQ2x1x16) => {
-                quantized_qvd!(lvq::TwoLevelDistance::<1, 16>::new(similarity), query)
-            }
             (_, F32VectorCoding::LVQ2x4x4) => {
                 quantized_qvd!(lvq::TwoLevelDistance::<4, 4>::new(similarity), query)
             }
@@ -447,8 +419,6 @@ impl FromStr for F32VectorCoding {
             "lvq1x4" => Ok(Self::LVQ1x4),
             "lvq1x8" => Ok(Self::LVQ1x8),
             "lvq2x1x8" => Ok(Self::LVQ2x1x8),
-            "lvq2x1x12" => Ok(Self::LVQ2x1x12),
-            "lvq2x1x16" => Ok(Self::LVQ2x1x16),
             "lvq2x4x4" => Ok(Self::LVQ2x4x4),
             "lvq2x4x8" => Ok(Self::LVQ2x4x8),
             "lvq2x8x8" => Ok(Self::LVQ2x8x8),
@@ -470,8 +440,6 @@ impl std::fmt::Display for F32VectorCoding {
             Self::LVQ1x4 => write!(f, "lvq1x4"),
             Self::LVQ1x8 => write!(f, "lvq1x8"),
             Self::LVQ2x1x8 => write!(f, "lvq2x1x8"),
-            Self::LVQ2x1x12 => write!(f, "lvq2x1x12"),
-            Self::LVQ2x1x16 => write!(f, "lvq2x1x16"),
             Self::LVQ2x4x4 => write!(f, "lvq2x4x4"),
             Self::LVQ2x4x8 => write!(f, "lvq2x4x8"),
             Self::LVQ2x8x8 => write!(f, "lvq2x8x8"),
@@ -842,38 +810,6 @@ mod test {
         }
     }
 
-    #[test]
-    fn lvq2x1x12_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ2x1x12, i, &a, &b, 0.0001);
-            query_distance_compare(Dot, F32VectorCoding::LVQ2x1x12, i, &a, &b, 0.0001);
-        }
-    }
-
-    #[test]
-    fn lvq2x1x12_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, F32VectorCoding::LVQ2x1x12, i, &a, &b, 0.0001);
-            query_distance_compare(Euclidean, F32VectorCoding::LVQ2x1x12, i, &a, &b, 0.0001);
-        }
-    }
-
-    #[test]
-    fn lvq2x1x16_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
-            query_distance_compare(Dot, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
-        }
-    }
-
-    #[test]
-    fn lvq2x1x16_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
-            query_distance_compare(Euclidean, F32VectorCoding::LVQ2x1x16, i, &a, &b, 0.0001);
-        }
-    }
-
     macro_rules! lvq_coding_simd_test {
         ($name:ident, $coder:ty) => {
             #[test]
@@ -905,8 +841,6 @@ mod test {
     lvq_coding_simd_test!(lvq1x4_coding_simd, PrimaryVectorCoder::<4>);
     lvq_coding_simd_test!(lvq1x8_coding_simd, PrimaryVectorCoder::<8>);
     lvq_coding_simd_test!(lvq2x1x8_coding_simd, TwoLevelVectorCoder::<1, 8>);
-    lvq_coding_simd_test!(lvq2x1x12_coding_simd, TwoLevelVectorCoder::<1, 12>);
-    lvq_coding_simd_test!(lvq2x1x16_coding_simd, TwoLevelVectorCoder::<1, 16>);
     lvq_coding_simd_test!(lvq2x4x4_coding_simd, TwoLevelVectorCoder::<4, 4>);
     lvq_coding_simd_test!(lvq2x4x8_coding_simd, TwoLevelVectorCoder::<4, 8>);
     lvq_coding_simd_test!(lvq2x8x8_coding_simd, TwoLevelVectorCoder::<8, 8>);

@@ -466,6 +466,13 @@ unsafe fn pack8(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
 unsafe extern "C" {
     unsafe fn et_lvq_dot_u4(a: *const u8, b: *const u8, len: usize) -> u32;
     unsafe fn et_lvq_dot_u8(a: *const u8, b: *const u8, len: usize) -> u32;
+    unsafe fn et_lvq2_dot_u1_u8(
+        ap: *const u8,
+        ar: *const u8,
+        bp: *const u8,
+        br: *const u8,
+        len: usize,
+    ) -> super::LVQ2Dot;
     unsafe fn et_lvq2_dot_u4_u4(
         ap: *const u8,
         ar: *const u8,
@@ -527,6 +534,9 @@ pub fn dot_residual_u8<const B1: usize, const B2: usize>(
     br: &[u8],
 ) -> super::LVQ2Dot {
     match (B1, B2) {
+        (1, 8) => unsafe {
+            et_lvq2_dot_u1_u8(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ar.len())
+        },
         (4, 4) => unsafe {
             et_lvq2_dot_u4_u4(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ap.len())
         },

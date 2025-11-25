@@ -102,6 +102,60 @@ struct LVQ2Dot {
   uint32_t ar_dot_br;
 };
 
+inline HIDDEN uint16_t load_u16_le(const uint8_t* ptr) {
+  return (uint16_t)ptr[0] | (uint16_t)ptr[1] << 8;
+}
+
+inline HIDDEN uint8x16_t unpack1(uint16_t v) {
+  uint8x16_t broadcast = vreinterpretq_u8_u16(vdupq_n_u16(v));
+  uint8x16_t shuffle_mask = vld1q_u8(((uint8_t[]){0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1}));
+  uint8x16_t shuffled = vqtbl1q_u8(broadcast, shuffle_mask);
+  uint8x16_t shift_mask = vld1q_s8(((int8_t[]){0, -1, -2, -3, -4, -5, -6, -7, 0, -1, -2, -3, -4, -5, -6, -7}));
+  uint8x16_t shifted = vshlq_s8(shuffled, shift_mask);
+  uint8x16_t mask = vdupq_n_u8(1);
+  return vandq_u8(shifted, mask);
+}
+
+__attribute__((target("+dotprod"))) EXPORT struct LVQ2Dot
+et_lvq2_dot_u1_u8(const uint8_t* ap, const uint8_t* ar, const uint8_t* bp, const uint8_t* br, size_t len) {
+  uint32x4_t ap_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ap_dot_br = vdupq_n_u32(0);
+  uint32x4_t ar_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ar_dot_br = vdupq_n_u32(0);
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 16) {
+    // XXX this wrong.
+    // load and broadcast 16 bits, shuffle into [8x0, 8x1], shl [0, -1, ..., -7, 0, -1, ...], mask 1
+    uint8x16_t apv = unpack1(load_u16_le(ap + i / 8));
+    uint8x16_t arv = vld1q_u8(ar + i);
+    uint8x16_t bpv = unpack1(load_u16_le(bp + i / 8));
+    uint8x16_t brv = vld1q_u8(br + i);
+    ap_dot_bp = vdotq_u32(ap_dot_bp, apv, bpv);
+    ap_dot_br = vdotq_u32(ap_dot_br, apv, brv);
+    ar_dot_bp = vdotq_u32(ar_dot_bp, arv, bpv);
+    ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
+  }
+
+  struct LVQ2Dot result = {
+    .ap_dot_bp = vaddvq_u32(ap_dot_bp),
+    .ap_dot_br = vaddvq_u32(ap_dot_br),
+    .ar_dot_bp = vaddvq_u32(ar_dot_bp),
+    .ar_dot_br = vaddvq_u32(ar_dot_br),
+  };
+  for (size_t i = len16; i < len; i++) {
+    uint32_t apv = (ap[i / 8] >> (i % 8)) & 1;
+    uint32_t arv = ar[i];
+    uint32_t bpv = (bp[i / 8] >> (i % 8)) & 1;
+    uint32_t brv = br[i];
+    result.ap_dot_bp += apv * bpv;
+    result.ap_dot_br += apv * brv;
+    result.ar_dot_bp += arv * bpv;
+    result.ar_dot_br += arv * brv;
+  }
+
+  return result;
+}
+
 __attribute__((target("+dotprod"))) EXPORT struct LVQ2Dot
 et_lvq2_dot_u4_u4(const uint8_t* ap, const uint8_t* ar, const uint8_t* bp, const uint8_t* br, size_t len) {
   uint32x4_t ap_dot_bp = vdupq_n_u32(0);

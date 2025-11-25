@@ -170,6 +170,28 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
 }
 
 #[inline]
+pub fn dot_residual_u8<const B1: usize, const B2: usize>(
+    ap: &[u8],
+    ar: &[u8],
+    bp: &[u8],
+    br: &[u8],
+) -> super::LVQ2Dot {
+    super::packing::unpack_iter::<B1>(ap)
+        .zip(super::packing::unpack_iter::<B2>(ar))
+        .zip(super::packing::unpack_iter::<B1>(bp).zip(super::packing::unpack_iter::<B2>(br)))
+        .fold(
+            super::LVQ2Dot::default(),
+            |mut acc, ((ap, ar), (bp, br))| {
+                acc.ap_dot_bp += ap as u32 * bp as u32;
+                acc.ap_dot_br += ap as u32 * br as u32;
+                acc.ar_dot_bp += ar as u32 * bp as u32;
+                acc.ar_dot_br += ar as u32 * br as u32;
+                acc
+            },
+        )
+}
+
+#[inline]
 pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
     query
         .iter()

@@ -466,9 +466,16 @@ unsafe fn pack8(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
 unsafe extern "C" {
     unsafe fn et_lvq_dot_u4(a: *const u8, b: *const u8, len: usize) -> u32;
     unsafe fn et_lvq_dot_u8(a: *const u8, b: *const u8, len: usize) -> u32;
+    unsafe fn et_lvq2_dot_u8_u8(
+        ap: *const u8,
+        ar: *const u8,
+        bp: *const u8,
+        br: *const u8,
+        len: usize,
+    ) -> super::LVQ2Dot;
 }
 
-#[inline(never)]
+#[inline]
 pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     match B {
         1 => unsafe {
@@ -502,6 +509,21 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
         4 => unsafe { et_lvq_dot_u4(a.as_ptr(), b.as_ptr(), a.len()) },
         8 => unsafe { et_lvq_dot_u8(a.as_ptr(), b.as_ptr(), a.len()) },
         _ => unimplemented!(),
+    }
+}
+
+#[inline]
+pub fn dot_residual_u8<const B1: usize, const B2: usize>(
+    ap: &[u8],
+    ar: &[u8],
+    bp: &[u8],
+    br: &[u8],
+) -> super::LVQ2Dot {
+    match (B1, B2) {
+        (8, 8) => unsafe {
+            et_lvq2_dot_u8_u8(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ap.len())
+        },
+        _ => super::scalar::dot_residual_u8::<B1, B2>(ap, ar, bp, br),
     }
 }
 

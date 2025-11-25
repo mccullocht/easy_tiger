@@ -636,12 +636,22 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
     }
 }
 
+/// The four components of an LVQ2 dot product.
+#[derive(Debug, Default, Clone, Copy)]
+#[repr(C)]
+struct LVQ2Dot {
+    ap_dot_bp: u32,
+    ap_dot_br: u32,
+    ar_dot_bp: u32,
+    ar_dot_br: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
-pub struct TwoLevelDistance<const B1: usize, const B2: usize>(VectorSimilarity);
+pub struct TwoLevelDistance<const B1: usize, const B2: usize>(VectorSimilarity, InstructionSet);
 
 impl<const B1: usize, const B2: usize> TwoLevelDistance<B1, B2> {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity)
+        Self(similarity, InstructionSet::default())
     }
 }
 
@@ -649,25 +659,28 @@ impl<const B1: usize, const B2: usize> VectorDistance for TwoLevelDistance<B1, B
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = TwoLevelVector::<B1, B2>::new(query).unwrap();
         let doc = TwoLevelVector::<B1, B2>::new(doc).unwrap();
-        let (qp_dp, qp_dr, qr_dp, qr_dr) = packing::unpack_iter::<B1>(query.primary.v.data)
-            .zip(packing::unpack_iter::<B2>(query.residual.data))
-            .zip(
-                packing::unpack_iter::<B1>(doc.primary.v.data)
-                    .zip(packing::unpack_iter::<B2>(doc.residual.data)),
-            )
-            .fold((0u32, 0u32, 0u32, 0u32), |acc, ((qp, qr), (dp, dr))| {
-                (
-                    acc.0 + qp as u32 * dp as u32,
-                    acc.1 + qp as u32 * dr as u32,
-                    acc.2 + qr as u32 * dp as u32,
-                    acc.3 + qr as u32 * dr as u32,
-                )
-            });
+
+        let qv = (query.primary.v, query.residual);
+        let dv = (doc.primary.v, doc.residual);
+        let lvq2_dot = match self.1 {
+            InstructionSet::Scalar => {
+                scalar::dot_residual_u8::<B1, B2>(qv.0.data, qv.1.data, dv.0.data, dv.1.data)
+            }
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => {
+                aarch64::dot_residual_u8::<B1, B2>(qv.0.data, qv.1.data, dv.0.data, dv.1.data)
+            }
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                // TODO: AVX512 implementation
+                scalar::dot_residual_u8::<B1, B2>(qv.0.data, qv.1.data, dv.0.data, dv.1.data)
+            },
+        };
         let dim = query.dim();
-        let dot = correct_dot_uint(qp_dp, dim, &query.primary.v.terms, &doc.primary.v.terms)
-            + correct_dot_uint(qp_dr, dim, &query.primary.v.terms, &doc.residual.terms)
-            + correct_dot_uint(qr_dp, dim, &query.residual.terms, &doc.primary.v.terms)
-            + correct_dot_uint(qr_dr, dim, &query.residual.terms, &doc.residual.terms);
+        let dot = correct_dot_uint(lvq2_dot.ap_dot_bp, dim, &qv.0.terms, &dv.0.terms)
+            + correct_dot_uint(lvq2_dot.ap_dot_br, dim, &qv.0.terms, &dv.1.terms)
+            + correct_dot_uint(lvq2_dot.ar_dot_bp, dim, &qv.1.terms, &dv.0.terms)
+            + correct_dot_uint(lvq2_dot.ar_dot_br, dim, &qv.1.terms, &dv.1.terms);
         dot_unnormalized_to_distance(self.0, dot.into(), (query.l2_norm(), doc.l2_norm()))
     }
 }

@@ -2,27 +2,22 @@
 
 use std::arch::x86_64::{
     __m512, __m512i, _MM_FROUND_NO_EXC, _MM_FROUND_TRUNC, _mm_add_ps, _mm_and_si128,
-    _mm_andnot_si128, _mm_broadcastd_epi32, _mm_bsrli_si128, _mm_cmpeq_epi8, _mm_cvtps_pd,
-    _mm_cvtsd_f64, _mm_fmadd_pd, _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps,
-    _mm_loadu_epi8, _mm_loadu_epi32, _mm_loadu_epi64, _mm_mask_storeu_epi8, _mm_maskz_loadu_epi8,
-    _mm_mul_pd, _mm_mul_ps, _mm_or_si128, _mm_set1_epi8, _mm_set1_epi16, _mm_set1_epi64x,
-    _mm_set1_pd, _mm_set1_ps, _mm_shuffle_epi8, _mm_sllv_epi64, _mm_srli_epi64, _mm_srlv_epi32,
-    _mm_sub_ps, _mm_unpacklo_epi8, _mm256_add_ps, _mm256_and_si256, _mm256_broadcastsi128_si256,
+    _mm_andnot_si128, _mm_bsrli_si128, _mm_cmpeq_epi8, _mm_cvtps_pd, _mm_cvtsd_f64, _mm_fmadd_pd,
+    _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps, _mm_loadu_epi8,
+    _mm_loadu_epi64, _mm_mask_storeu_epi8, _mm_maskz_loadu_epi8, _mm_mul_pd, _mm_mul_ps,
+    _mm_or_si128, _mm_set1_epi8, _mm_set1_epi16, _mm_set1_epi64x, _mm_set1_pd, _mm_set1_ps,
+    _mm_shuffle_epi8, _mm_sllv_epi64, _mm_srli_epi64, _mm_sub_ps, _mm_unpacklo_epi8, _mm256_add_ps,
     _mm256_castps256_ps128, _mm256_cvtepi8_epi16, _mm256_cvtepi16_epi8, _mm256_cvtepu8_epi16,
-    _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_loadu_epi8, _mm256_loadu_epi16,
-    _mm256_loadu_epi32, _mm256_mask_storeu_epi8, _mm256_mask_storeu_epi16,
-    _mm256_maskz_loadu_epi16, _mm256_mul_ps, _mm256_or_si256, _mm256_permutevar8x32_epi32,
-    _mm256_permutexvar_epi32, _mm256_set1_epi16, _mm256_set1_epi32, _mm256_set1_ps,
-    _mm256_shuffle_epi8, _mm256_sllv_epi16, _mm256_srlv_epi16, _mm256_sub_ps, _mm512_add_epi32,
-    _mm512_add_ps, _mm512_and_epi32, _mm512_and_si512, _mm512_castps512_ps256,
-    _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi16, _mm512_cvtepu16_epi32, _mm512_cvtepu32_ps,
-    _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32, _mm512_extractf32x8_ps,
-    _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_add_ps,
-    _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32, _mm512_maskz_loadu_epi8,
-    _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps, _mm512_popcnt_epi32,
-    _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps,
-    _mm512_roundscale_ps, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_srli_epi64,
-    _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_loadu_epi16, _mm256_mul_ps, _mm256_set1_ps,
+    _mm256_sllv_epi16, _mm256_sub_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32,
+    _mm512_and_si512, _mm512_castps512_ps256, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi16,
+    _mm512_cvtepu32_ps, _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32,
+    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_mask_mul_ps,
+    _mm512_mask_sub_ps, _mm512_maskz_add_ps, _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32,
+    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
+    _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps,
+    _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set1_epi8, _mm512_set1_epi32,
+    _mm512_set1_ps, _mm512_srli_epi64, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
@@ -344,11 +339,8 @@ pub unsafe fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
 unsafe fn pack<const N: usize>(v: __m512i, out: &mut [u8]) {
     match N {
         1 => pack1(v, out),
-        2 => todo!("allowed but unused"),
         4 => pack4(v, out),
         8 => pack8(v, out),
-        12 => pack12(v, out),
-        16 => pack16(v, out),
         _ => unimplemented!(),
     }
 }
@@ -394,37 +386,6 @@ unsafe fn pack8(v: __m512i, out: &mut [u8]) {
         out.as_mut_ptr() as *mut i8,
         u16::MAX >> (16 - out.len()),
         _mm256_cvtepi16_epi8(_mm512_cvtepi32_epi16(v)),
-    );
-}
-
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2")]
-#[inline]
-unsafe fn pack12(v: __m512i, out: &mut [u8]) {
-    let mut p = _mm512_cvtepi32_epi16(v);
-    // shift all the odd lanes left by 4.
-    p = _mm256_sllv_epi16(p, _mm256_set1_epi32(0x0004_0000));
-    // shuffle the even lanes into byte pattern where they are separated by one byte instead of two.
-    let e_shuffle =
-        _mm_loadu_epi8([0i8, 1, -1, 4, 5, -1, 8, 9, -1, 12, 13, -1, -1, -1, -1, -1].as_ptr());
-    let e = _mm256_shuffle_epi8(p, _mm256_broadcastsi128_si256(e_shuffle));
-    // shuffle the odd lanes similarly but leave an empty 1 byte prefix.
-    let o_shuffle =
-        _mm_loadu_epi8([-1i8, 2, 3, -1, 6, 7, -1, 10, 11, -1, 14, 15, -1, -1, -1, -1].as_ptr());
-    let o = _mm256_shuffle_epi8(p, _mm256_broadcastsi128_si256(o_shuffle));
-
-    // Now we have 2 128 bit lanes where the value is packed in the bottom 96 bits of each.
-    let mut m = _mm256_or_si256(e, o);
-    m = _mm256_permutexvar_epi32(_mm256_loadu_epi32([0i32, 1, 2, 4, 5, 6, 0, 0].as_ptr()), m);
-    _mm256_mask_storeu_epi8(out.as_mut_ptr() as *mut i8, u32::MAX >> (32 - out.len()), m);
-}
-
-#[target_feature(enable = "avx512f,avx512bw,avx512vl")]
-#[inline]
-unsafe fn pack16(v: __m512i, out: &mut [u8]) {
-    _mm256_mask_storeu_epi16(
-        out.as_mut_ptr() as *mut i16,
-        u16::MAX >> (16 - (out.len() / 2)),
-        _mm512_cvtepi32_epi16(v),
     );
 }
 
@@ -548,11 +509,8 @@ pub unsafe fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
 unsafe fn unpack<const N: usize>(bytes: &[u8]) -> __m512i {
     match N {
         1 => unpack1(bytes),
-        2 => unpack2(bytes),
         4 => unpack4(bytes),
         8 => unpack8(bytes),
-        12 => unpack12(bytes),
-        16 => unpack16(bytes),
         _ => unimplemented!(),
     }
 }
@@ -565,22 +523,6 @@ unsafe fn unpack1(bytes: &[u8]) -> __m512i {
     v = _mm_and_si128(v, _mm_set1_epi64x(0x80402010_08040201u64 as i64));
     v = _mm_cmpeq_epi8(v, _mm_set1_epi8(0));
     v = _mm_andnot_si128(v, _mm_set1_epi8(1));
-    _mm512_cvtepi16_epi32(_mm256_cvtepi8_epi16(v))
-}
-
-#[target_feature(enable = "avx512f,avx512bw,avx2,avx512vl")]
-#[inline]
-unsafe fn unpack2(bytes: &[u8]) -> __m512i {
-    let mut v = _mm_maskz_loadu_epi8((1 << bytes.len()) - 1, bytes.as_ptr() as *const i8);
-    // To read 16 dimensions we won't load any more than 32 bits, so broadcast and we can arrange
-    // such that neighboring dimensions appear in every 4th lane (e.g. 0, 4, 8, 12, 1, ...).
-    v = _mm_broadcastd_epi32(v);
-    v = _mm_srlv_epi32(v, _mm_loadu_epi32([0i32, 2, 4, 6].as_ptr()));
-    v = _mm_and_si128(v, _mm_set1_epi8(0x3));
-    v = _mm_shuffle_epi8(
-        v,
-        _mm_loadu_epi8([0i8, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15].as_ptr()),
-    );
     _mm512_cvtepi16_epi32(_mm256_cvtepi8_epi16(v))
 }
 
@@ -599,38 +541,4 @@ unsafe fn unpack4(bytes: &[u8]) -> __m512i {
 unsafe fn unpack8(bytes: &[u8]) -> __m512i {
     let v = _mm_maskz_loadu_epi8(u16::MAX >> (16 - bytes.len()), bytes.as_ptr() as *const i8);
     _mm512_cvtepi16_epi32(_mm256_cvtepu8_epi16(v))
-}
-
-#[target_feature(enable = "avx512f,avx512bw,avx2,avx512vl")]
-unsafe fn unpack12(bytes: &[u8]) -> __m512i {
-    // This should load no more than 24 bytes. Most instructions operate in 128 bit lanes so we will
-    // permute the input to place the low 12 bytes in the first 128-bit lane and the rest in the second.
-    let mut v = _mm256_maskz_loadu_epi16(
-        u16::MAX >> ((32 - bytes.len()) / 2),
-        bytes.as_ptr() as *const i16,
-    );
-    v = _mm256_permutevar8x32_epi32(v, _mm256_loadu_epi32([0i32, 1, 2, 7, 3, 4, 5, 7].as_ptr()));
-    v = _mm256_shuffle_epi8(
-        v,
-        _mm256_loadu_epi8(
-            [
-                0i8, 1, 1, 2, 3, 4, 4, 5, 6, 7, 7, 8, 9, 10, 10, 11, 0, 1, 1, 2, 3, 4, 4, 5, 6, 7,
-                7, 8, 9, 10, 10, 11,
-            ]
-            .as_ptr(),
-        ),
-    );
-    v = _mm256_srlv_epi16(v, _mm256_set1_epi32(0x0004_0000));
-    v = _mm256_and_si256(v, _mm256_set1_epi16(0xfff));
-    _mm512_cvtepi16_epi32(v)
-}
-
-#[target_feature(enable = "avx512f,avx512bw,avx2")]
-#[inline]
-unsafe fn unpack16(bytes: &[u8]) -> __m512i {
-    let v = _mm256_maskz_loadu_epi16(
-        u16::MAX >> ((32 - bytes.len()) / 2),
-        bytes.as_ptr() as *const i16,
-    );
-    _mm512_cvtepu16_epi32(v)
 }

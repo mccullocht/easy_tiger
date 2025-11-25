@@ -521,6 +521,48 @@ pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
             }
             dot.into_lvq2_dot()
         }
+        (4, 8) => {
+            let nibble_mask = _mm512_set1_epi8(0xf);
+            let zero = _mm512_set1_epi8(0);
+            let mut dot = LVQ2Dot512::new();
+            for ((ap, ar), (bp, br)) in ap
+                .chunks(32)
+                .zip(ar.chunks(64))
+                .zip(bp.chunks(32).zip(br.chunks(64)))
+            {
+                // We're loading 64 _dimensions_ at a time so load 32 bytes from primary vectors.
+                let mask4 = u64::MAX >> (64 - ap.len());
+                let mask8 = u64::MAX >> (64 - ar.len());
+                let apv_raw = _mm512_maskz_loadu_epi8(mask4, ap.as_ptr() as *const i8);
+                let arv = _mm512_maskz_loadu_epi8(mask8, ar.as_ptr() as *const i8);
+                let bpv_raw = _mm512_maskz_loadu_epi8(mask4, bp.as_ptr() as *const i8);
+                let brv = _mm512_maskz_loadu_epi8(mask8, br.as_ptr() as *const i8);
+
+                // Unpack primary vectors by interleaving input nibbles.
+                let apv = _mm512_unpacklo_epi8(
+                    _mm512_and_si512(apv_raw, nibble_mask),
+                    _mm512_and_si512(_mm512_srli_epi64::<4>(apv_raw), nibble_mask),
+                );
+                let bpv = _mm512_unpacklo_epi8(
+                    _mm512_and_si512(bpv_raw, nibble_mask),
+                    _mm512_and_si512(_mm512_srli_epi64::<4>(bpv_raw), nibble_mask),
+                );
+
+                // Perform byte doc product for anything involving primary vectors. Note that the
+                // second arg is treated as *signed* so it must be the primary/nibble vector.
+                dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, apv, bpv);
+                dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, brv, apv);
+                dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, arv, bpv);
+                // 8 bit dot product must be done with a 16-bit instruction due to signed-ness.
+                let arv_lo = _mm512_unpacklo_epi8(arv, zero);
+                let brv_lo = _mm512_unpacklo_epi8(brv, zero);
+                dot.ar_dot_br = _mm512_dpwssd_epi32(dot.ar_dot_br, arv_lo, brv_lo);
+                let arv_hi = _mm512_unpackhi_epi8(arv, zero);
+                let brv_hi = _mm512_unpackhi_epi8(brv, zero);
+                dot.ar_dot_br = _mm512_dpwssd_epi32(dot.ar_dot_br, arv_hi, brv_hi);
+            }
+            dot.into_lvq2_dot()
+        }
         (8, 8) => {
             let zero = _mm512_set1_epi8(0);
             let mut dot = LVQ2Dot512::new();

@@ -4,15 +4,15 @@
 
 use std::arch::aarch64::{
     float32x4_t, uint8x16_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32, vaddq_f64, vaddq_u16,
-    vaddvq_f32, vaddvq_u16, vaddvq_u64, vand_u8, vand_u32, vandq_u8, vcntq_u8, vcombine_u8,
-    vcombine_u32, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32,
-    vdup_n_u8, vdup_n_u32, vdupq_n_f32, vdupq_n_f64, vdupq_n_u16, vextq_f64, vfmaq_f32, vfmaq_f64,
-    vget_low_f32, vget_low_u16, vgetq_lane_f64, vld1_s8, vld1_s32, vld1_u8, vld1q_f32, vld1q_s8,
-    vld1q_s16, vld1q_s32, vld1q_s64, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32,
-    vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
-    vmulq_f32, vmulq_f64, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8, vreinterpretq_u8_u32,
-    vreinterpretq_u32_u8, vrndaq_f32, vshl_u8, vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64,
-    vst1q_u8, vsubq_f32, vsubq_f64,
+    vaddvq_f32, vaddvq_u16, vaddvq_u32, vaddvq_u64, vand_u8, vand_u32, vandq_u8, vcntq_u8,
+    vcombine_u8, vcombine_u32, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32,
+    vdivq_f32, vdup_n_u8, vdup_n_u32, vdupq_n_f32, vdupq_n_f64, vdupq_n_u16, vextq_f64, vfmaq_f32,
+    vfmaq_f64, vget_low_f32, vget_low_u16, vgetq_lane_f64, vld1_s8, vld1_s32, vld1_u8, vld1q_f32,
+    vld1q_s8, vld1q_s16, vld1q_s32, vld1q_s64, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32,
+    vminvq_f32, vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32, vmovn_u16,
+    vmovn_u32, vmulq_f32, vmulq_f64, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8,
+    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshl_u8, vshl_u32, vshlq_u8, vshlq_u16,
+    vshlq_u32, vshlq_u64, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats, packing};

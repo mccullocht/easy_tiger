@@ -480,6 +480,13 @@ unsafe extern "C" {
         br: *const u8,
         len: usize,
     ) -> super::LVQ2Dot;
+    unsafe fn et_lvq2_dot_u4_u8(
+        ap: *const u8,
+        ar: *const u8,
+        bp: *const u8,
+        br: *const u8,
+        len: usize,
+    ) -> super::LVQ2Dot;
     unsafe fn et_lvq2_dot_u8_u8(
         ap: *const u8,
         ar: *const u8,
@@ -539,6 +546,9 @@ pub fn dot_residual_u8<const B1: usize, const B2: usize>(
         },
         (4, 4) => unsafe {
             et_lvq2_dot_u4_u4(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ap.len())
+        },
+        (4, 8) => unsafe {
+            et_lvq2_dot_u4_u8(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ar.len())
         },
         (8, 8) => unsafe {
             et_lvq2_dot_u8_u8(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ap.len())

@@ -103,6 +103,56 @@ struct LVQ2Dot {
 };
 
 __attribute__((target("+dotprod"))) EXPORT struct LVQ2Dot
+et_lvq2_dot_u4_u4(const uint8_t* ap, const uint8_t* ar, const uint8_t* bp, const uint8_t* br, size_t len) {
+  uint32x4_t ap_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ap_dot_br = vdupq_n_u32(0);
+  uint32x4_t ar_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ar_dot_br = vdupq_n_u32(0);
+  uint8x16_t nibble_mask = vdupq_n_u8(0xf);
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 16) {
+    uint8x16_t apv = vld1q_u8(ap + i);
+    uint8x16_t arv = vld1q_u8(ar + i);
+    uint8x16_t bpv = vld1q_u8(bp + i);
+    uint8x16_t brv = vld1q_u8(br + i);
+
+    ap_dot_bp = vdotq_u32(ap_dot_bp, vandq_u8(apv, nibble_mask), vandq_u8(bpv, nibble_mask));
+    ap_dot_br = vdotq_u32(ap_dot_br, vandq_u8(apv, nibble_mask), vandq_u8(brv, nibble_mask));
+    ar_dot_bp = vdotq_u32(ar_dot_bp, vandq_u8(arv, nibble_mask), vandq_u8(bpv, nibble_mask));
+    ar_dot_br = vdotq_u32(ar_dot_br, vandq_u8(arv, nibble_mask), vandq_u8(brv, nibble_mask));
+
+    apv = vshrq_n_u8(apv, 4);
+    arv = vshrq_n_u8(arv, 4);
+    bpv = vshrq_n_u8(bpv, 4);
+    brv = vshrq_n_u8(brv, 4);
+
+    ap_dot_bp = vdotq_u32(ap_dot_bp, vandq_u8(apv, nibble_mask), vandq_u8(bpv, nibble_mask));
+    ap_dot_br = vdotq_u32(ap_dot_br, vandq_u8(apv, nibble_mask), vandq_u8(brv, nibble_mask));
+    ar_dot_bp = vdotq_u32(ar_dot_bp, vandq_u8(arv, nibble_mask), vandq_u8(bpv, nibble_mask));
+    ar_dot_br = vdotq_u32(ar_dot_br, vandq_u8(arv, nibble_mask), vandq_u8(brv, nibble_mask));
+  }
+
+  struct LVQ2Dot result = {
+    .ap_dot_bp = vaddvq_u32(ap_dot_bp),
+    .ap_dot_br = vaddvq_u32(ap_dot_br),
+    .ar_dot_bp = vaddvq_u32(ar_dot_bp),
+    .ar_dot_br = vaddvq_u32(ar_dot_br),
+  };
+  for (size_t i = len16; i < len; i++) {
+    uint32_t apd = ap[i];
+    uint32_t ard = ar[i];
+    uint32_t bpd = bp[i];
+    uint32_t brd = br[i];
+    result.ap_dot_bp += (apd & 0xf) * (bpd & 0xf) + ((apd >> 4) & 0xf) * ((bpd >> 4) & 0xf);
+    result.ap_dot_br += (apd & 0xf) * (brd & 0xf) + ((apd >> 4) & 0xf) * ((brd >> 4) & 0xf);
+    result.ar_dot_bp += (ard & 0xf) * (bpd & 0xf) + ((ard >> 4) & 0xf) * ((bpd >> 4) & 0xf);
+    result.ar_dot_br += (ard & 0xf) * (brd & 0xf) + ((ard >> 4) & 0xf) * ((brd >> 4) & 0xf);
+  }
+
+  return result;
+}
+
+__attribute__((target("+dotprod"))) EXPORT struct LVQ2Dot
 et_lvq2_dot_u8_u8(const uint8_t* ap, const uint8_t* ar, const uint8_t* bp, const uint8_t* br, size_t len) {
   uint32x4_t ap_dot_bp = vdupq_n_u32(0);
   uint32x4_t ap_dot_br = vdupq_n_u32(0);

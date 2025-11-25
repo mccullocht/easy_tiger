@@ -10,14 +10,16 @@ use std::arch::x86_64::{
     _mm256_castps256_ps128, _mm256_cvtepi8_epi16, _mm256_cvtepi16_epi8, _mm256_cvtepu8_epi16,
     _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_loadu_epi16, _mm256_mul_ps, _mm256_set1_ps,
     _mm256_sllv_epi16, _mm256_sub_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32,
-    _mm512_and_si512, _mm512_castps512_ps256, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi16,
-    _mm512_cvtepu32_ps, _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32,
-    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_mask_mul_ps,
-    _mm512_mask_sub_ps, _mm512_maskz_add_ps, _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32,
-    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
-    _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps,
-    _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set1_epi8, _mm512_set1_epi32,
-    _mm512_set1_ps, _mm512_srli_epi64, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm512_and_si512, _mm512_castps512_ps256, _mm512_cmpgt_epu8_mask, _mm512_cvtepi16_epi32,
+    _mm512_cvtepi32_epi16, _mm512_cvtepu32_ps, _mm512_div_ps, _mm512_dpbusd_epi32,
+    _mm512_dpwssd_epi32, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8,
+    _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_add_ps,
+    _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32, _mm512_maskz_loadu_epi8,
+    _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_movm_epi8, _mm512_mul_ps,
+    _mm512_permutexvar_epi8, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
+    _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set1_epi8,
+    _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps, _mm512_srli_epi64, _mm512_sub_ps,
+    _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
 use super::{LAMBDA, LVQ2Dot, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
@@ -478,6 +480,27 @@ impl LVQ2Dot512 {
     }
 }
 
+#[rustfmt::skip]
+const EXPAND_U1_MASK: [i8; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    2, 2, 2, 2, 2, 2, 2, 2,
+    3, 3, 3, 3, 3, 3, 3, 3,
+    4, 4, 4, 4, 4, 4, 4, 4,
+    5, 5, 5, 5, 5, 5, 5, 5,
+    6, 6, 6, 6, 6, 6, 6, 6,
+    7, 7, 7, 7, 7, 7, 7, 7,
+];
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
+#[inline]
+unsafe fn expand_u1(v: __m512i) -> __m512i {
+    let expanded = _mm512_permutexvar_epi8(_mm512_loadu_epi8(EXPAND_U1_MASK.as_ptr()), v);
+    let masked = _mm512_and_si512(expanded, _mm512_set1_epi64(0x80402010_08040201u64 as i64));
+    let cmp = _mm512_movm_epi8(_mm512_cmpgt_epu8_mask(masked, _mm512_set1_epi8(0)));
+    _mm512_and_si512(cmp, _mm512_set1_epi8(1))
+}
+
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni")]
 #[inline]
 pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
@@ -487,6 +510,37 @@ pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
     br: &[u8],
 ) -> LVQ2Dot {
     match (B1, B2) {
+        (1, 8) => {
+            let zero = _mm512_set1_epi8(0);
+            let mut dot = LVQ2Dot512::new();
+            for ((ap, ar), (bp, br)) in ap
+                .chunks(8)
+                .zip(ar.chunks(64))
+                .zip(bp.chunks(8).zip(br.chunks(64)))
+            {
+                // We're loading 64 _dimensions_ at a time so load 8 bytes from primary vectors.
+                let mask1 = u64::MAX >> (64 - ap.len());
+                let mask8 = u64::MAX >> (64 - ar.len());
+                let apv = expand_u1(_mm512_maskz_loadu_epi8(mask1, ap.as_ptr() as *const i8));
+                let arv = _mm512_maskz_loadu_epi8(mask8, ar.as_ptr() as *const i8);
+                let bpv = expand_u1(_mm512_maskz_loadu_epi8(mask1, bp.as_ptr() as *const i8));
+                let brv = _mm512_maskz_loadu_epi8(mask8, br.as_ptr() as *const i8);
+
+                // Perform byte doc product for anything involving primary vectors. Note that the
+                // second arg is treated as *signed* so it must be the primary/nibble vector.
+                dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, apv, bpv);
+                dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, brv, apv);
+                dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, arv, bpv);
+                // 8 bit dot product must be done with a 16-bit instruction due to signed-ness.
+                let arv_lo = _mm512_unpacklo_epi8(arv, zero);
+                let brv_lo = _mm512_unpacklo_epi8(brv, zero);
+                dot.ar_dot_br = _mm512_dpwssd_epi32(dot.ar_dot_br, arv_lo, brv_lo);
+                let arv_hi = _mm512_unpackhi_epi8(arv, zero);
+                let brv_hi = _mm512_unpackhi_epi8(brv, zero);
+                dot.ar_dot_br = _mm512_dpwssd_epi32(dot.ar_dot_br, arv_hi, brv_hi);
+            }
+            dot.into_lvq2_dot()
+        }
         (4, 4) => {
             let nibble_mask = _mm512_set1_epi8(0xf);
             let mut dot = LVQ2Dot512::new();

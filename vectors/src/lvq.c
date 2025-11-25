@@ -110,8 +110,8 @@ inline HIDDEN uint8x16_t unpack1(uint16_t v) {
   uint8x16_t broadcast = vreinterpretq_u8_u16(vdupq_n_u16(v));
   uint8x16_t shuffle_mask = vld1q_u8(((uint8_t[]){0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1}));
   uint8x16_t shuffled = vqtbl1q_u8(broadcast, shuffle_mask);
-  uint8x16_t shift_mask = vld1q_s8(((int8_t[]){0, -1, -2, -3, -4, -5, -6, -7, 0, -1, -2, -3, -4, -5, -6, -7}));
-  uint8x16_t shifted = vshlq_s8(shuffled, shift_mask);
+  int8x16_t shift_mask = vld1q_s8(((int8_t[]){0, -1, -2, -3, -4, -5, -6, -7, 0, -1, -2, -3, -4, -5, -6, -7}));
+  uint8x16_t shifted = vshlq_u8(shuffled, shift_mask);
   uint8x16_t mask = vdupq_n_u8(1);
   return vandq_u8(shifted, mask);
 }
@@ -209,11 +209,11 @@ inline HIDDEN uint8x16x2_t unpack_u4_u8(const uint8_t *ptr) {
   uint8x16_t mask = vdupq_n_u8(0xf);
   uint8x16_t evens = vandq_u8(v, mask);
   uint8x16_t odds = vandq_u8(vshrq_n_u8(v, 4), mask);
-  return (uint8x16x2_t){vzip1q_u8(evens, odds), vzip2q_u8(evens, odds)};
+  return (uint8x16x2_t){{vzip1q_u8(evens, odds), vzip2q_u8(evens, odds)}};
 }
 
 inline HIDDEN uint8x16x2_t load_u8x2(const uint8_t *ptr) {
-  return (uint8x16x2_t){vld1q_u8(ptr), vld1q_u8(ptr + 16)};
+  return (uint8x16x2_t){{vld1q_u8(ptr), vld1q_u8(ptr + 16)}};
 }
 
 __attribute__((target("+dotprod"))) EXPORT struct LVQ2Dot

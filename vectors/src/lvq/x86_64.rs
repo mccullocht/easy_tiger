@@ -20,7 +20,7 @@ use std::arch::x86_64::{
     _mm512_set1_ps, _mm512_srli_epi64, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
+use super::{LAMBDA, LVQ2Dot, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
 
 /// For an input vector `v` where all values are non-negative, round each value with ties (e.g. 0.5)
 /// rounding away from zero.
@@ -447,6 +447,37 @@ pub unsafe fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     }
 }
 
+struct LVQ2Dot512 {
+    ap_dot_bp: __m512i,
+    ap_dot_br: __m512i,
+    ar_dot_bp: __m512i,
+    ar_dot_br: __m512i,
+}
+
+impl LVQ2Dot512 {
+    #[target_feature(enable = "avx512f")]
+    #[inline]
+    unsafe fn new() -> Self {
+        Self {
+            ap_dot_bp: _mm512_set1_epi32(0),
+            ap_dot_br: _mm512_set1_epi32(0),
+            ar_dot_bp: _mm512_set1_epi32(0),
+            ar_dot_br: _mm512_set1_epi32(0),
+        }
+    }
+
+    #[target_feature(enable = "avx512f")]
+    #[inline]
+    unsafe fn into_lvq2_dot(self) -> LVQ2Dot {
+        LVQ2Dot {
+            ap_dot_bp: _mm512_reduce_add_epi32(self.ap_dot_bp) as u32,
+            ap_dot_br: _mm512_reduce_add_epi32(self.ap_dot_br) as u32,
+            ar_dot_bp: _mm512_reduce_add_epi32(self.ar_dot_bp) as u32,
+            ar_dot_br: _mm512_reduce_add_epi32(self.ar_dot_br) as u32,
+        }
+    }
+}
+
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni")]
 #[inline]
 pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
@@ -454,14 +485,11 @@ pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
     ar: &[u8],
     bp: &[u8],
     br: &[u8],
-) -> super::LVQ2Dot {
+) -> LVQ2Dot {
     match (B1, B2) {
         (4, 4) => {
             let nibble_mask = _mm512_set1_epi8(0xf);
-            let mut ap_dot_bp = _mm512_set1_epi32(0);
-            let mut ap_dot_br = _mm512_set1_epi32(0);
-            let mut ar_dot_bp = _mm512_set1_epi32(0);
-            let mut ar_dot_br = _mm512_set1_epi32(0);
+            let mut dot = LVQ2Dot512::new();
             for ((ap, ar), (bp, br)) in ap
                 .chunks(64)
                 .zip(ar.chunks(64))
@@ -475,36 +503,27 @@ pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
 
                 let apv_lo = _mm512_and_si512(apv, nibble_mask);
                 let bpv_lo = _mm512_and_si512(bpv, nibble_mask);
-                ap_dot_bp = _mm512_dpbusd_epi32(ap_dot_bp, apv_lo, bpv_lo);
+                dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, apv_lo, bpv_lo);
                 let brv_lo = _mm512_and_si512(brv, nibble_mask);
-                ap_dot_br = _mm512_dpbusd_epi32(ap_dot_br, apv_lo, brv_lo);
+                dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, apv_lo, brv_lo);
                 let arv_lo = _mm512_and_si512(arv, nibble_mask);
-                ar_dot_bp = _mm512_dpbusd_epi32(ar_dot_bp, arv_lo, bpv_lo);
-                ar_dot_br = _mm512_dpbusd_epi32(ar_dot_br, arv_lo, brv_lo);
+                dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, arv_lo, bpv_lo);
+                dot.ar_dot_br = _mm512_dpbusd_epi32(dot.ar_dot_br, arv_lo, brv_lo);
 
                 let apv_hi = _mm512_and_si512(_mm512_srli_epi64::<4>(apv), nibble_mask);
                 let bpv_hi = _mm512_and_si512(_mm512_srli_epi64::<4>(bpv), nibble_mask);
-                ap_dot_bp = _mm512_dpbusd_epi32(ap_dot_bp, apv_hi, bpv_hi);
+                dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, apv_hi, bpv_hi);
                 let brv_hi = _mm512_and_si512(_mm512_srli_epi64::<4>(brv), nibble_mask);
-                ap_dot_br = _mm512_dpbusd_epi32(ap_dot_br, apv_hi, brv_hi);
+                dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, apv_hi, brv_hi);
                 let arv_hi = _mm512_and_si512(_mm512_srli_epi64::<4>(arv), nibble_mask);
-                ar_dot_bp = _mm512_dpbusd_epi32(ar_dot_bp, arv_hi, bpv_hi);
-                ar_dot_br = _mm512_dpbusd_epi32(ar_dot_br, arv_hi, brv_hi);
+                dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, arv_hi, bpv_hi);
+                dot.ar_dot_br = _mm512_dpbusd_epi32(dot.ar_dot_br, arv_hi, brv_hi);
             }
-
-            super::LVQ2Dot {
-                ap_dot_bp: _mm512_reduce_add_epi32(ap_dot_bp) as u32,
-                ap_dot_br: _mm512_reduce_add_epi32(ap_dot_br) as u32,
-                ar_dot_bp: _mm512_reduce_add_epi32(ar_dot_bp) as u32,
-                ar_dot_br: _mm512_reduce_add_epi32(ar_dot_br) as u32,
-            }
+            dot.into_lvq2_dot()
         }
         (8, 8) => {
             let zero = _mm512_set1_epi8(0);
-            let mut ap_dot_bp = _mm512_set1_epi32(0);
-            let mut ap_dot_br = _mm512_set1_epi32(0);
-            let mut ar_dot_bp = _mm512_set1_epi32(0);
-            let mut ar_dot_br = _mm512_set1_epi32(0);
+            let mut dot = LVQ2Dot512::new();
             for ((ap, ar), (bp, br)) in ap
                 .chunks(64)
                 .zip(ar.chunks(64))
@@ -518,29 +537,23 @@ pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
 
                 let apv_lo = _mm512_unpacklo_epi8(apv, zero);
                 let bpv_lo = _mm512_unpacklo_epi8(bpv, zero);
-                ap_dot_bp = _mm512_dpwssd_epi32(ap_dot_bp, apv_lo, bpv_lo);
+                dot.ap_dot_bp = _mm512_dpwssd_epi32(dot.ap_dot_bp, apv_lo, bpv_lo);
                 let brv_lo = _mm512_unpacklo_epi8(brv, zero);
-                ap_dot_br = _mm512_dpwssd_epi32(ap_dot_br, apv_lo, brv_lo);
+                dot.ap_dot_br = _mm512_dpwssd_epi32(dot.ap_dot_br, apv_lo, brv_lo);
                 let arv_lo = _mm512_unpacklo_epi8(arv, zero);
-                ar_dot_bp = _mm512_dpwssd_epi32(ar_dot_bp, arv_lo, bpv_lo);
-                ar_dot_br = _mm512_dpwssd_epi32(ar_dot_br, arv_lo, brv_lo);
+                dot.ar_dot_bp = _mm512_dpwssd_epi32(dot.ar_dot_bp, arv_lo, bpv_lo);
+                dot.ar_dot_br = _mm512_dpwssd_epi32(dot.ar_dot_br, arv_lo, brv_lo);
 
                 let apv_hi = _mm512_unpackhi_epi8(apv, zero);
                 let bpv_hi = _mm512_unpackhi_epi8(bpv, zero);
-                ap_dot_bp = _mm512_dpwssd_epi32(ap_dot_bp, apv_hi, bpv_hi);
+                dot.ap_dot_bp = _mm512_dpwssd_epi32(dot.ap_dot_bp, apv_hi, bpv_hi);
                 let brv_hi = _mm512_unpackhi_epi8(brv, zero);
-                ap_dot_br = _mm512_dpwssd_epi32(ap_dot_br, apv_hi, brv_hi);
+                dot.ap_dot_br = _mm512_dpwssd_epi32(dot.ap_dot_br, apv_hi, brv_hi);
                 let arv_hi = _mm512_unpackhi_epi8(arv, zero);
-                ar_dot_bp = _mm512_dpwssd_epi32(ar_dot_bp, arv_hi, bpv_hi);
-                ar_dot_br = _mm512_dpwssd_epi32(ar_dot_br, arv_hi, brv_hi);
+                dot.ar_dot_bp = _mm512_dpwssd_epi32(dot.ar_dot_bp, arv_hi, bpv_hi);
+                dot.ar_dot_br = _mm512_dpwssd_epi32(dot.ar_dot_br, arv_hi, brv_hi);
             }
-
-            super::LVQ2Dot {
-                ap_dot_bp: _mm512_reduce_add_epi32(ap_dot_bp) as u32,
-                ap_dot_br: _mm512_reduce_add_epi32(ap_dot_br) as u32,
-                ar_dot_bp: _mm512_reduce_add_epi32(ar_dot_bp) as u32,
-                ar_dot_br: _mm512_reduce_add_epi32(ar_dot_br) as u32,
-            }
+            dot.into_lvq2_dot()
         }
         _ => super::scalar::dot_residual_u8::<B1, B2>(ap, ar, bp, br),
     }

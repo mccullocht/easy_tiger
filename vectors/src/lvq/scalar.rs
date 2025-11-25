@@ -126,27 +126,29 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     primary: &mut [u8],
     residual_interval: f32,
     residual: &mut [u8],
-) -> u32 {
+) -> (u32, u32) {
     let delta = (upper - lower) / ((1 << B1) - 1) as f32;
     let delta_inv = ((1 << B1) - 1) as f32 / (upper - lower);
     let res_lower = -residual_interval / 2.0;
     let res_upper = residual_interval / 2.0;
     let res_delta_inv = ((1 << B2) - 1) as f32 / residual_interval;
-    let mut component_sum = 0u32;
+    let mut p_component_sum = 0u32;
+    let mut r_component_sum = 0u32;
     super::packing::pack_iter2::<B1, B2>(
         v.iter().copied().map(|x| {
             let q = ((x.clamp(lower, upper) - lower) * delta_inv).round() as u8;
-            component_sum += u32::from(q);
+            p_component_sum += u32::from(q);
             // After producing the primary value, calculate the error produced and quantize that
             // value based on the delta between primary items.
             let res = x - (q as f32).mul_add(delta, lower);
             let r = ((res.clamp(res_lower, res_upper) - res_lower) * res_delta_inv).round() as u8;
+            r_component_sum += u32::from(r);
             (q, r)
         }),
         primary,
         residual,
     );
-    component_sum
+    (p_component_sum, r_component_sum)
 }
 
 #[inline]
@@ -168,26 +170,36 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
 }
 
 #[inline]
+pub fn dot_residual_u8<const B1: usize, const B2: usize>(
+    ap: &[u8],
+    ar: &[u8],
+    bp: &[u8],
+    br: &[u8],
+) -> super::LVQ2Dot {
+    super::packing::unpack_iter::<B1>(ap)
+        .zip(super::packing::unpack_iter::<B2>(ar))
+        .zip(super::packing::unpack_iter::<B1>(bp).zip(super::packing::unpack_iter::<B2>(br)))
+        .fold(
+            super::LVQ2Dot::default(),
+            |mut acc, ((ap, ar), (bp, br))| {
+                acc.ap_dot_bp += ap as u32 * bp as u32;
+                acc.ap_dot_br += ap as u32 * br as u32;
+                acc.ar_dot_bp += ar as u32 * bp as u32;
+                acc.ar_dot_br += ar as u32 * br as u32;
+                acc
+            },
+        )
+}
+
+#[inline]
 pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
     query
         .iter()
         .zip(
-            super::packing::unpack_iter::<B>(doc.vector)
-                .map(|q| q as f32 * doc.delta + doc.header.lower),
+            super::packing::unpack_iter::<B>(doc.v.data)
+                .map(|q| q as f32 * doc.v.terms.delta + doc.v.terms.lower),
         )
         .map(|(q, d)| *q * d)
-        .sum::<f32>()
-        .into()
-}
-
-#[inline]
-pub fn lvq2_dot_unnormalized<const B1: usize, const B2: usize>(
-    a: &TwoLevelVector<'_, B1, B2>,
-    b: &TwoLevelVector<'_, B1, B2>,
-) -> f64 {
-    a.f32_iter()
-        .zip(b.f32_iter())
-        .map(|(a, b)| a * b)
         .sum::<f32>()
         .into()
 }

@@ -34,7 +34,7 @@ pub struct IndexConfig {
     pub rerank_format: Option<F32VectorCoding>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum ReplicaSelectionAlgorithm {
     /// Select replicas using relative neighbor graph edge pruning.
     RNG,

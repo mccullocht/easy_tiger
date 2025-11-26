@@ -1,6 +1,7 @@
 mod bulk_load;
 mod centroid_stats;
 mod drop_index;
+mod rebalance;
 mod search;
 mod verify_primary_assignments;
 
@@ -12,6 +13,7 @@ use crate::wt_args::WiredTigerArgs;
 use bulk_load::{bulk_load, BulkLoadArgs};
 use centroid_stats::centroid_stats;
 use drop_index::drop_index;
+use rebalance::{rebalance, RebalanceArgs};
 use search::{search, SearchArgs};
 use verify_primary_assignments::{verify_primary_assignments, VerifyPrimaryAssignmentsArgs};
 
@@ -32,6 +34,8 @@ pub enum Command {
     Search(SearchArgs),
     /// Print centroid assignment statistics.
     CentroidStats,
+    /// Rebalance the SPANN index.
+    Rebalance(RebalanceArgs),
     /// Remove an existing index.
     DropIndex,
     /// Verify that the primary assignment of each vector is to its closest centroid.
@@ -46,6 +50,7 @@ pub fn spann_command(args: SpannArgs) -> io::Result<()> {
         Command::BulkLoad(args) => bulk_load(connection, index_name, args),
         Command::Search(args) => search(connection, index_name, args),
         Command::CentroidStats => centroid_stats(connection, index_name),
+        Command::Rebalance(args) => rebalance(connection, index_name, args),
         Command::DropIndex => drop_index(connection, index_name),
         Command::VerifyPrimaryAssignments(args) => {
             verify_primary_assignments(connection, index_name, args)

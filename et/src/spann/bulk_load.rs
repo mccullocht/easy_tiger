@@ -175,10 +175,17 @@ pub fn bulk_load(
             &index_vectors,
             args.head_min_centroid_len..=args.head_max_centroid_len,
             32,
+<<<<<<< HEAD
             8192, // batch size
             &Params {
                 iters: 100,
                 epsilon: 0.0001,
+=======
+            2000, // batch size
+            &Params {
+                iters: 100,
+                epsilon: 0.00001,
+>>>>>>> b6a288b (smush for integrating)
                 ..Params::default()
             },
             &mut rng,

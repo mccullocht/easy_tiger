@@ -299,6 +299,106 @@ fn prune_iterative_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
 
 type CentroidsAndAssignments = (VecVectorStore<f32>, Vec<(usize, f64)>);
 
+<<<<<<< HEAD
+=======
+/// Build a binary partition of the vectors between two centroids.
+///
+/// Split the dataset in half and produce two centroids, then measure the distance for each vector
+/// to both centroids and the weight of vectors to each centroid. Terminate if the centroids would
+/// produce two clusters of at least min_cluster_size, otherwise split the dataset into a new
+/// grouping and try again.
+///
+/// Returns a vector store containing a "left" and a "right" centroid along with cluster assignment.
+/// Note that these cluster assignments may not match the results of compute_assignments().
+pub fn bp_vectors<V: VectorStore<Elem = f32> + Send + Sync>(
+    dataset: &V,
+    max_iters: usize,
+    min_cluster_size: usize,
+) -> Result<CentroidsAndAssignments, CentroidsAndAssignments> {
+    let acceptable_split = min_cluster_size..=(dataset.len() - min_cluster_size);
+    assert!(!acceptable_split.is_empty());
+
+    let split = dataset.len() / 2;
+    let mut left_vectors = SubsetViewVectorStore::new(dataset, (0..split).collect());
+    let mut right_vectors = SubsetViewVectorStore::new(dataset, (split..dataset.len()).collect());
+
+    let mut centroids = VecVectorStore::with_capacity(dataset.elem_stride(), 2);
+    centroids.push(&vec![0.0; dataset.elem_stride()]);
+    centroids.push(&vec![0.0; dataset.elem_stride()]);
+    let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
+    let mut prev_inertia = dataset.len();
+    let l2_dist = vectors::EuclideanDistance::default();
+    for _ in 0..max_iters {
+        bp_update_centroid(&left_vectors, &mut centroids[0]);
+        bp_update_centroid(&right_vectors, &mut centroids[1]);
+        distances.par_iter_mut().enumerate().for_each(|(i, d)| {
+            let ldist = l2_dist.distance_f32(&dataset[i], &centroids[0]);
+            let rdist = l2_dist.distance_f32(&dataset[i], &centroids[1]);
+            *d = (i, ldist, rdist, ldist - rdist)
+        });
+        distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
+        let split_point = distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
+        let inertia = split.abs_diff(split_point);
+        // We may terminate if the partition sizes are acceptable and we aren't improving the split.
+        if acceptable_split.contains(&split_point) && (inertia == 0 || prev_inertia <= inertia) {
+            break;
+        }
+
+        prev_inertia = inertia;
+        left_vectors =
+            SubsetViewVectorStore::new(dataset, distances[..split].iter().map(|d| d.0).collect());
+        right_vectors =
+            SubsetViewVectorStore::new(dataset, distances[split..].iter().map(|d| d.0).collect());
+    }
+
+    let mut split_point = distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
+    let converged = acceptable_split.contains(&split_point);
+    if !converged {
+        split_point = split_point
+            .max(*acceptable_split.start())
+            .min(*acceptable_split.end());
+        assert!(acceptable_split.contains(&split_point));
+    }
+
+    left_vectors = SubsetViewVectorStore::new(
+        dataset,
+        distances[..split_point].iter().map(|x| x.0).collect(),
+    );
+    bp_update_centroid(&left_vectors, &mut centroids[0]);
+    right_vectors = SubsetViewVectorStore::new(
+        dataset,
+        distances[split_point..].iter().map(|x| x.0).collect(),
+    );
+    bp_update_centroid(&right_vectors, &mut centroids[1]);
+
+    let mut assignments = vec![(0, 0.0); dataset.len()];
+    for i in left_vectors.into_subset().into_iter() {
+        assignments[i] = (0, l2_dist.distance_f32(&centroids[0], &dataset[i]));
+    }
+    for i in right_vectors.into_subset().into_iter() {
+        assignments[i] = (1, l2_dist.distance_f32(&centroids[1], &dataset[i]));
+    }
+
+    if converged {
+        Ok((centroids, assignments))
+    } else {
+        Err((centroids, assignments))
+    }
+}
+
+fn bp_update_centroid<V: VectorStore<Elem = f32>>(dataset: &V, centroid: &mut [f32]) {
+    centroid.fill(0.0);
+    for v in dataset.iter() {
+        for (d, o) in v.iter().zip(centroid.iter_mut()) {
+            *o += *d;
+        }
+    }
+    for d in centroid.iter_mut() {
+        *d /= dataset.len() as f32;
+    }
+}
+
+>>>>>>> b6a288b (smush for integrating)
 /// Compute batch k-means over `training_data`. `k` clusters will be produced and each batch will
 /// contain exactly `batch_size` sample vectors.
 ///

@@ -291,6 +291,7 @@ pub fn rebalance(
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
     let session = connection.open_session()?;
     let mut rng = Xoshiro128PlusPlus::seed_from_u64(args.seed);
+    let commit = args.commit;
 
     let mut rebalancer = Rebalancer::new(index, session, args.into());
     rebalancer.session().begin_transaction(None)?;
@@ -365,6 +366,10 @@ pub fn rebalance(
     let stats = rebalancer.centroid_stats()?;
     let summary = rebalancer.summary(&stats);
     print_balance_summary(&summary);
+
+    if commit {
+        rebalancer.session().commit_transaction(None)?;
+    }
 
     Ok(())
 }

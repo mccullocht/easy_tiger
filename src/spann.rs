@@ -208,9 +208,14 @@ impl TableIndex {
         Ok(())
     }
 
-    // XXX not public
+    // XXX !public
     pub fn postings_table_name(&self) -> &str {
         &self.table_names.postings
+    }
+
+    // XXX !public
+    pub fn centroids_table_name(&self) -> &str {
+        &self.table_names.centroids
     }
 
     fn head_name(index_name: &str) -> String {
@@ -223,14 +228,15 @@ impl TableIndex {
 /// Serialized posting keys should result in entries ordered by centroid_id and then record_id,
 /// allowing each centroid to be read as a contiguous range.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-// XXX no pub!
+// XXX !pub
 pub struct PostingKey {
-    centroid_id: u32,
-    record_id: i64,
+    pub centroid_id: u32,
+    pub record_id: i64,
 }
 
 impl PostingKey {
-    fn new(centroid_id: u32, record_id: i64) -> Self {
+    // XXX !pub
+    pub fn new(centroid_id: u32, record_id: i64) -> Self {
         Self {
             centroid_id,
             record_id,

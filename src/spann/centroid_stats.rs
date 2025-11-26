@@ -17,6 +17,7 @@ impl CentroidCounts {
     }
 }
 
+// XXX this could be backed by a much smaller table with centroid_id => (primary,secondary) count.
 /// Tracks occupancy statistics for centroids.
 #[derive(Debug, Clone)]
 pub struct CentroidStats(Vec<Option<CentroidCounts>>);

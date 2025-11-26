@@ -53,6 +53,11 @@ impl IndexMutator {
         self.reader.session()
     }
 
+    /// Obtain a reference to the [`SessionGraphVectorIndexReader`] used for read access.
+    pub fn reader(&self) -> &SessionGraphVectorIndexReader {
+        &self.reader
+    }
+
     /// Insert a vertex for `vector`. Returns the assigned id.
     pub fn insert(&mut self, vector: &[f32]) -> Result<i64> {
         // A freshly initialized table might will have the metadata key but no entry point.

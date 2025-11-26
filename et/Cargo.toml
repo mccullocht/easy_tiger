@@ -16,6 +16,7 @@ rand_xoshiro = "0.7.0"
 rayon = "1.10.0"
 stable_deref_trait = "1.2.0"
 thread_local = "1.1.8"
+tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 vectors = { path = "../vectors" }
 wt_mdb = { path = "../wt_mdb" }

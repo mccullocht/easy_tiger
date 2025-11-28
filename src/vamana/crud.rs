@@ -281,9 +281,20 @@ impl IndexMutator {
             }
         }
 
-        // Insert the top 50% of edges outgoing from each vertex to the target vertex. Insertions
-        // are symmetric to retain the undirected property of the graph. Duplicates will be ignored.
+        // Take the list of scored edges and truncate to 50% of max_edges, then filter out all of
+        // the edges that already exist in the graph based on vertex_data. The rest we will attempt
+        // to insert symmetrically to maintain an undirected graph.
         let relink_edges = self.reader.config().max_edges.get().max(2) / 2;
+        for (current_edges, scored_edges) in vertex_data
+            .iter()
+            .map(|(_, _, e)| e)
+            .zip(edge_scores.iter_mut())
+        {
+            scored_edges.sort_unstable();
+            scored_edges.truncate(relink_edges);
+            scored_edges.retain(|n| !current_edges.contains(&n.vertex()));
+        }
+
         let mut pruned_edges = vec![];
         for (src_vertex_id, mut edge_scores) in
             vertex_data.iter().map(|v| v.0).zip(edge_scores.into_iter())

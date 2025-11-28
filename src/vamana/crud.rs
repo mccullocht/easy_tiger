@@ -122,6 +122,7 @@ impl IndexMutator {
         Ok(())
     }
 
+    /// returns true if the edge already exists or was inserted successfully.
     fn insert_edge(
         &self,
         graph: &mut impl Graph,
@@ -130,36 +131,19 @@ impl IndexMutator {
         src_vertex_id: i64,
         dst_vertex_id: i64,
         pruned_edges: &mut Vec<(i64, i64)>,
-    ) -> Result<()> {
-        self.insert_edges(
-            graph,
-            vectors,
-            distance_fn,
-            src_vertex_id,
-            &[dst_vertex_id],
-            pruned_edges,
-        )
-    }
-
-    fn insert_edges(
-        &self,
-        graph: &mut impl Graph,
-        vectors: &mut impl GraphVectorStore,
-        distance_fn: &dyn VectorDistance,
-        src_vertex_id: i64,
-        dst_vertex_ids: &[i64],
-        pruned_edges: &mut Vec<(i64, i64)>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let vertex = graph
             .get_vertex(src_vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?;
-        let mut edges = vertex
-            .edges()
-            .chain(dst_vertex_ids.iter().copied())
-            .collect::<Vec<_>>();
+        let mut edges = vertex.edges().collect::<Vec<_>>();
+        if edges.contains(&dst_vertex_id) {
+            return Ok(true); // edge already exists.
+        }
+        edges.push(dst_vertex_id);
         edges.sort_unstable();
-        edges.dedup();
-        if edges.len() > self.reader.config().max_edges.get() {
+        let inserted = if edges.len() <= self.reader.config().max_edges.get() {
+            true
+        } else {
             let src_vector = vectors
                 .get(src_vertex_id)
                 .expect("row exists")
@@ -187,8 +171,10 @@ impl IndexMutator {
             }
             edges.clear();
             edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
-        }
+            edges.contains(&dst_vertex_id)
+        };
         self.set_graph_edges(src_vertex_id, edges)
+            .map(|()| inserted)
     }
 
     fn remove_edge(
@@ -295,27 +281,39 @@ impl IndexMutator {
             }
         }
 
-        // Insert the top 25% of edges outgoing from each vertex to the target vertex. Insertions
+        // Insert the top 50% of edges outgoing from each vertex to the target vertex. Insertions
         // are symmetric to retain the undirected property of the graph. Duplicates will be ignored.
-        let relink_edges = self.reader.config().max_edges.get().max(4) / 4;
+        let relink_edges = self.reader.config().max_edges.get().max(2) / 2;
         let mut pruned_edges = vec![];
         for (src_vertex_id, mut edge_scores) in
             vertex_data.iter().map(|v| v.0).zip(edge_scores.into_iter())
         {
             edge_scores.sort_unstable();
-            let dst_vertex_ids = edge_scores
+            for dst_vertex_id in edge_scores
                 .into_iter()
                 .take(relink_edges)
                 .map(|n| n.vertex())
-                .collect::<Vec<_>>();
-            self.insert_edges(
-                graph,
-                vectors,
-                distance_fn,
-                src_vertex_id,
-                &dst_vertex_ids,
-                &mut pruned_edges,
-            )?;
+            {
+                // Insert edge symmetrically. If the first edge insertion succeeds and the symmetric
+                // edge insertion fails, then remove the edge to ensure the graph is undirected.
+                if self.insert_edge(
+                    graph,
+                    vectors,
+                    distance_fn,
+                    src_vertex_id,
+                    dst_vertex_id,
+                    &mut pruned_edges,
+                )? && !self.insert_edge(
+                    graph,
+                    vectors,
+                    distance_fn,
+                    dst_vertex_id,
+                    src_vertex_id,
+                    &mut pruned_edges,
+                )? {
+                    self.remove_edge(graph, src_vertex_id, dst_vertex_id)?;
+                }
+            }
 
             // Remove all back edges removed by the insertions above.
             for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
@@ -567,11 +565,6 @@ mod tests {
         Ok(())
     }
 
-    // XXX
-    // The input data for this test is not very realistic so the pruning is _heavy_ and the
-    // resulting graph is not well connected. Maybe add a feature to the mutator or pruning in
-    // general that tries to keep as many edges as possible?
-    #[ignore]
     #[test]
     fn update() -> Result<()> {
         let fixture = Fixture::default();

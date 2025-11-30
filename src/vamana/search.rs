@@ -369,8 +369,9 @@ impl<'a> VisitCandidateGuard<'a> {
 mod test {
     use std::num::NonZero;
 
+    use rustix::io::Errno;
     use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
-    use wt_mdb::Result;
+    use wt_mdb::{Error, Result};
 
     use crate::vamana::{Graph, GraphConfig, GraphLayout, GraphVectorIndex, GraphVectorStore};
     use crate::Neighbor;
@@ -535,6 +536,22 @@ mod test {
             } else {
                 None
             }
+        }
+
+        fn set_entry_point(&mut self, _: i64) -> Result<()> {
+            Err(Error::Errno(Errno::NOTSUP))
+        }
+
+        fn remove_entry_point(&mut self) -> Result<()> {
+            Err(Error::Errno(Errno::NOTSUP))
+        }
+
+        fn set_edges(&mut self, _: i64, _: impl Into<Vec<i64>>) -> Result<()> {
+            Err(Error::Errno(Errno::NOTSUP))
+        }
+
+        fn remove_vertex(&mut self, _: i64) -> Result<Vec<i64>> {
+            Err(Error::Errno(Errno::NOTSUP))
         }
     }
 

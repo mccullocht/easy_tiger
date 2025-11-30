@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::vamana::{
     prune_edges,
     search::GraphSearcher,
-    wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY},
+    wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
     EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndex, GraphVectorStore,
 };
 use crate::Neighbor;
@@ -84,7 +84,7 @@ impl IndexMutator {
         );
         candidate_edges.truncate(selected_len);
 
-        self.reader.graph()?.set(
+        self.reader.graph()?.set_edges(
             vertex_id,
             candidate_edges
                 .iter()
@@ -195,18 +195,13 @@ impl IndexMutator {
         let mut vectors = self.reader.high_fidelity_vectors()?;
         let distance_fn = vectors.new_distance_function();
 
-        let (vector, edges) = graph
-            .edges(vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))
-            .map(|edges| {
-                vectors
-                    .get(vertex_id)
-                    .expect("row exists")
-                    .map(|vec| (vec.to_vec(), edges.collect::<Vec<_>>()))
-            })??;
-
+        // XXX
         // TODO: unified graph index writer trait to handles removal and other mutations.
-        graph.remove(vertex_id)?;
+        let edges = graph.remove_vertex(vertex_id)?;
+        let vector = vectors
+            .get(vertex_id)
+            .expect("row exists")
+            .map(|v| v.to_vec())?;
         self.reader.nav_vectors()?.remove(vertex_id)?;
         if let Some(vectors) = self.reader.rerank_vectors() {
             vectors?.remove(vertex_id)?;
@@ -252,7 +247,7 @@ impl IndexMutator {
             if let Some(ep_neighbor) = neighbors.first() {
                 graph.set_entry_point(ep_neighbor.vertex())?
             } else {
-                graph.remove(ENTRY_POINT_KEY)?
+                graph.remove_entry_point()?
             }
         }
 
@@ -340,7 +335,7 @@ impl IndexMutator {
 
     fn set_graph_edges(&self, vertex_id: i64, edges: Vec<i64>) -> Result<()> {
         match self.reader.config().layout {
-            GraphLayout::Split => self.reader.graph()?.set(vertex_id, edges),
+            GraphLayout::Split => self.reader.graph()?.set_edges(vertex_id, edges),
         }
     }
 }

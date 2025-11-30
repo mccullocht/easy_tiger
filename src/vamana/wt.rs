@@ -70,24 +70,6 @@ impl<'a> CursorGraph<'a> {
     pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
         Self(cursor)
     }
-
-    pub(crate) fn set_entry_point(&mut self, entry_point: i64) -> Result<()> {
-        self.0.set(ENTRY_POINT_KEY, &entry_point.to_le_bytes())
-    }
-
-    pub(crate) fn set(&mut self, vertex_id: i64, edges: impl Into<Vec<i64>>) -> Result<()> {
-        self.0.set(vertex_id, &encode_graph_vertex(edges.into()))
-    }
-
-    pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
-        self.0.remove(vertex_id).or_else(|e| {
-            if e == Error::not_found_error() {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
-    }
 }
 
 impl Graph for CursorGraph<'_> {
@@ -104,6 +86,25 @@ impl Graph for CursorGraph<'_> {
     fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {
         let r = unsafe { self.0.seek_exact_unsafe(vertex_id) }?;
         Some(r.map(|d| Leb128EdgeIterator { data: d, prev: 0 }))
+    }
+
+    fn set_entry_point(&mut self, vertex_id: i64) -> Result<()> {
+        self.0.set(ENTRY_POINT_KEY, &vertex_id.to_le_bytes())
+    }
+
+    fn remove_entry_point(&mut self) -> Result<()> {
+        self.0.remove(ENTRY_POINT_KEY)
+    }
+
+    fn set_edges(&mut self, vertex_id: i64, edges: impl Into<Vec<i64>>) -> Result<()> {
+        self.0.set(vertex_id, &encode_graph_vertex(edges.into()))
+    }
+
+    fn remove_vertex(&mut self, vertex_id: i64) -> Result<Vec<i64>> {
+        self.edges(vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))
+            .map(|e| e.collect::<Vec<_>>())
+            .and_then(|e| self.0.remove(vertex_id).map(|_| e))
     }
 }
 

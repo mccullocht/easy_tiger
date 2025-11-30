@@ -119,6 +119,38 @@ pub trait Graph {
 
     /// Access the edges of the vertex. These may be returned in an arbitrary order.
     fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>>;
+
+    /// Set the entry point of the graph.
+    ///
+    /// The caller is responsible for ensuring that the named `vertex_id` exists in the graph.
+    ///
+    /// Returns a NOTSUP error if the graph does not support mutation.
+    fn set_entry_point(&mut self, vertex_id: i64) -> Result<()>;
+
+    /// Remove the entry point from the graph.
+    ///
+    /// The caller is responsible for ensuring that the graph is empty when the entry point is
+    /// removed or this will create search/reachability issues.
+    ///
+    /// Returns a NOTSUP error if the graph does not support mutation.
+    /// May return a NOT_FOUND error if the graph is empty.
+    fn remove_entry_point(&mut self) -> Result<()>;
+
+    /// Set the outbound edges from `vertex_id`.
+    ///
+    /// The caller is responsible for ensuring that the listed edges point to vertexes that exist
+    /// as well as maintaining the undirected property of the graph.
+    ///
+    /// Returns a NOTSUP error if the graph does not support mutation.
+    fn set_edges(&mut self, vertex_id: i64, edges: impl Into<Vec<i64>>) -> Result<()>;
+
+    /// Rmoves the vertex and returns the outbound edges associated with it.
+    ///
+    /// Returns a NOTSUP error if the graph does not support mutation.
+    /// May return a NOT_FOUND error if the vertex does not exist.
+    fn remove_vertex(&mut self, vertex_id: i64) -> Result<Vec<i64>>;
+
+    // XXX add a method to get the next available vertex id.
 }
 
 /// Vector store for known vector formats accessible by a record id.

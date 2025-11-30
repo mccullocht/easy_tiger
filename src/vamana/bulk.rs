@@ -23,9 +23,10 @@ use std::{
 use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
+use rustix::io::Errno;
 use thread_local::ThreadLocal;
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{options::CreateOptionsBuilder, Connection, Result, Session};
+use wt_mdb::{options::CreateOptionsBuilder, Connection, Error, Result, Session};
 
 use crate::{
     graph_clustering,
@@ -716,6 +717,22 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
         } else {
             None
         }
+    }
+
+    fn set_entry_point(&mut self, _: i64) -> Result<()> {
+        Err(Error::Errno(Errno::NOTSUP))
+    }
+
+    fn remove_entry_point(&mut self) -> Result<()> {
+        Err(Error::Errno(Errno::NOTSUP))
+    }
+
+    fn set_edges(&mut self, _: i64, _: impl Into<Vec<i64>>) -> Result<()> {
+        Err(Error::Errno(Errno::NOTSUP))
+    }
+
+    fn remove_vertex(&mut self, _: i64) -> Result<Vec<i64>> {
+        Err(Error::Errno(Errno::NOTSUP))
     }
 }
 

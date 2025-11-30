@@ -14,7 +14,7 @@ use wt_mdb::{
     Connection, Error, RecordCursorGuard, Result, Session,
 };
 
-use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore, GraphVertex};
+use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore};
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
@@ -43,30 +43,6 @@ pub fn read_app_metadata(session: &Session, table_name: &str) -> Option<Result<S
         Ok(m) => Some(Ok(m)),
         Err(e) if e == Error::not_found_error() => None,
         Err(e) => Some(Err(e)),
-    }
-}
-
-/// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
-// TODO: perhaps instead of returning this wrapper we should just return an iterator?
-pub struct CursorGraphVertex<'a>(&'a [u8]);
-
-impl<'a> CursorGraphVertex<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self(data)
-    }
-}
-
-impl GraphVertex for CursorGraphVertex<'_> {
-    type EdgeIterator<'c>
-        = Leb128EdgeIterator<'c>
-    where
-        Self: 'c;
-
-    fn edges(&self) -> Self::EdgeIterator<'_> {
-        Leb128EdgeIterator {
-            data: self.0,
-            prev: 0,
-        }
     }
 }
 
@@ -119,19 +95,10 @@ impl Graph for CursorGraph<'_> {
         = Leb128EdgeIterator<'c>
     where
         Self: 'c;
-    type Vertex<'c>
-        = CursorGraphVertex<'c>
-    where
-        Self: 'c;
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let result = unsafe { self.0.seek_exact_unsafe(ENTRY_POINT_KEY)? };
         Some(result.map(|r| i64::from_le_bytes(r.try_into().expect("8 bytes"))))
-    }
-
-    fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-        let r = unsafe { self.0.seek_exact_unsafe(vertex_id)? };
-        Some(r.map(CursorGraphVertex::new))
     }
 
     fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {

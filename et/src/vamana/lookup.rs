@@ -3,7 +3,7 @@ use std::{io, sync::Arc};
 use clap::Args;
 use easy_tiger::vamana::{
     wt::{CursorGraph, TableGraphVectorIndex},
-    {Graph, GraphVertex},
+    Graph,
 };
 use wt_mdb::Connection;
 
@@ -22,15 +22,15 @@ pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -
     let index = TableGraphVectorIndex::from_db(&connection, index_name)?;
     let session = connection.open_session()?;
     let mut graph = CursorGraph::new(session.get_record_cursor(index.graph_table_name())?);
-    match graph.get_vertex(args.id) {
+    match graph.edges(args.id) {
         None => {
             println!("Not found!");
         }
         Some(result) => match result {
             Err(e) => println!("Error: {e}"),
-            Ok(v) => {
+            Ok(edges) => {
                 if args.edges {
-                    println!("{:?}", v.edges().collect::<Vec<_>>());
+                    println!("{:?}", edges.collect::<Vec<_>>());
                 }
             }
         },

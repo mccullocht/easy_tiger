@@ -5,7 +5,7 @@ use std::{
     ops::{Add, AddAssign},
 };
 
-use super::{Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore, GraphVertex};
+use super::{Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore};
 use crate::Neighbor;
 
 use vectors::QueryVectorDistance;
@@ -200,16 +200,17 @@ impl GraphSearcher {
         while let Some(best_candidate) = self.candidates.next_unvisited() {
             self.visited += 1;
             let vertex_id = best_candidate.neighbor().vertex();
-            let node = graph
-                .get_vertex(vertex_id)
-                .unwrap_or_else(|| Err(Error::not_found_error()))?;
             if filter_predicate(vertex_id) {
                 best_candidate.visit();
             } else {
                 best_candidate.remove();
             }
 
-            for edge in node.edges() {
+            for edge in graph
+                .edges(vertex_id)
+                .unwrap_or(Err(Error::not_found_error()))?
+                .collect::<Vec<_>>()
+            {
                 if !self.seen.insert(edge) {
                     continue;
                 }
@@ -371,9 +372,7 @@ mod test {
     use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
     use wt_mdb::Result;
 
-    use crate::vamana::{
-        Graph, GraphConfig, GraphLayout, GraphVectorIndex, GraphVectorStore, GraphVertex,
-    };
+    use crate::vamana::{Graph, GraphConfig, GraphLayout, GraphVectorIndex, GraphVectorStore};
     use crate::Neighbor;
 
     use super::{GraphSearchParams, GraphSearcher};
@@ -521,22 +520,10 @@ mod test {
             = std::iter::Copied<std::slice::Iter<'c, i64>>
         where
             Self: 'c;
-        type Vertex<'c>
-            = TestGraphVertex<'c>
-        where
-            Self: 'c;
 
         fn entry_point(&mut self) -> Option<Result<i64>> {
             if !self.0.data.is_empty() {
                 Some(Ok(0))
-            } else {
-                None
-            }
-        }
-
-        fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
-                Some(Ok(TestGraphVertex(&self.0.data[vertex_id as usize])))
             } else {
                 None
             }
@@ -577,19 +564,6 @@ mod test {
                     TestVectorStoreType::Rerank => bytemuck::cast_slice(v.vector.as_ref()),
                 })
             })
-        }
-    }
-
-    pub struct TestGraphVertex<'a>(&'a TestVector);
-
-    impl GraphVertex for TestGraphVertex<'_> {
-        type EdgeIterator<'c>
-            = std::iter::Copied<std::slice::Iter<'c, i64>>
-        where
-            Self: 'c;
-
-        fn edges(&self) -> Self::EdgeIterator<'_> {
-            self.0.edges.iter().copied()
         }
     }
 

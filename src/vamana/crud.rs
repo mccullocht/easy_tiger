@@ -5,7 +5,7 @@ use crate::vamana::{
     prune_edges,
     search::GraphSearcher,
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY},
-    EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndex, GraphVectorStore, GraphVertex,
+    EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndex, GraphVectorStore,
 };
 use crate::Neighbor;
 use vectors::{F32VectorCoder, VectorDistance};
@@ -130,10 +130,10 @@ impl IndexMutator {
         dst_vertex_id: i64,
         pruned_edges: &mut Vec<(i64, i64)>,
     ) -> Result<bool> {
-        let vertex = graph
-            .get_vertex(src_vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))?;
-        let mut edges = vertex.edges().collect::<Vec<_>>();
+        let mut edges = graph
+            .edges(src_vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?
+            .collect::<Vec<_>>();
         if edges.contains(&dst_vertex_id) {
             return Ok(true); // edge already exists.
         }
@@ -181,10 +181,11 @@ impl IndexMutator {
         src_vertex_id: i64,
         dst_vertex_id: i64,
     ) -> Result<()> {
-        let vertex = graph
-            .get_vertex(src_vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))?;
-        let edges = vertex.edges().filter(|v| *v != dst_vertex_id).collect();
+        let edges = graph
+            .edges(src_vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?
+            .filter(|v| *v != dst_vertex_id)
+            .collect::<Vec<_>>();
         self.set_graph_edges(src_vertex_id, edges)
     }
 
@@ -195,13 +196,13 @@ impl IndexMutator {
         let distance_fn = vectors.new_distance_function();
 
         let (vector, edges) = graph
-            .get_vertex(vertex_id)
+            .edges(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))
-            .map(|v| {
+            .map(|edges| {
                 vectors
                     .get(vertex_id)
                     .expect("row exists")
-                    .map(|vec| (vec.to_vec(), v.edges().collect::<Vec<_>>()))
+                    .map(|vec| (vec.to_vec(), edges.collect::<Vec<_>>()))
             })??;
 
         // TODO: unified graph index writer trait to handles removal and other mutations.
@@ -220,16 +221,12 @@ impl IndexMutator {
             .into_iter()
             .map(|e| {
                 graph
-                    .get_vertex(e)
+                    .edges(e)
                     .unwrap_or(Err(Error::not_found_error()))
-                    .map(|v| {
+                    .map(|edges| {
                         let vector = vectors.get(e).expect("row exists").map(|rv| rv.to_vec());
                         vector.map(|rv| {
-                            (
-                                e,
-                                rv,
-                                v.edges().filter(|d| *d != vertex_id).collect::<Vec<_>>(),
-                            )
+                            (e, rv, edges.filter(|d| *d != vertex_id).collect::<Vec<_>>())
                         })
                     })
             })
@@ -358,7 +355,7 @@ mod tests {
     use crate::vamana::{
         search::GraphSearcher,
         wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
-        Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndex, GraphVertex,
+        Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndex,
     };
 
     use super::IndexMutator;
@@ -485,8 +482,10 @@ mod tests {
 
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
-        let vertex = graph.get_vertex(vertex_ids[0]).unwrap()?;
-        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 2, 3, 5]);
+        assert_eq!(
+            graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>(),
+            &[1, 2, 3, 5]
+        );
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
         Ok(())
@@ -526,15 +525,19 @@ mod tests {
 
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
-        let vertex = graph.get_vertex(vertex_ids[0]).unwrap()?;
-        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[1, 2, 3, 5]);
+        assert_eq!(
+            graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>(),
+            &[1, 2, 3, 5]
+        );
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
         fixture.new_mutator().delete(1)?;
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
-        let vertex = graph.get_vertex(vertex_ids[0]).unwrap()?;
-        assert_eq!(vertex.edges().collect::<Vec<_>>(), &[2, 3, 5]);
+        assert_eq!(
+            graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>(),
+            &[2, 3, 5]
+        );
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 2, 3, 5, 4]));
 
         Ok(())

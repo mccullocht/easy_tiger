@@ -34,7 +34,7 @@ use crate::{
     vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     vamana::{
         prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
-        GraphVectorIndex, GraphVectorStore, GraphVertex,
+        GraphVectorIndex, GraphVectorStore,
     },
     Neighbor,
 };
@@ -698,10 +698,6 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
         = BulkNodeEdgesIterator<'c>
     where
         Self: 'c;
-    type Vertex<'c>
-        = BulkLoadGraphVertex<'c, D>
-    where
-        Self: 'c;
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let vertex = self.0.entry_vertex.load(atomic::Ordering::Relaxed);
@@ -712,13 +708,6 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
         }
     }
 
-    fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-        Some(Ok(BulkLoadGraphVertex {
-            builder: self.0,
-            vertex_id,
-        }))
-    }
-
     fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {
         if vertex_id >= 0 && (vertex_id as usize) < self.0.graph.len() {
             Some(Ok(BulkNodeEdgesIterator::new(
@@ -727,22 +716,6 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
         } else {
             None
         }
-    }
-}
-
-struct BulkLoadGraphVertex<'a, D> {
-    builder: &'a BulkLoadBuilder<D>,
-    vertex_id: i64,
-}
-
-impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
-    type EdgeIterator<'c>
-        = BulkNodeEdgesIterator<'c>
-    where
-        Self: 'c;
-
-    fn edges(&self) -> Self::EdgeIterator<'_> {
-        BulkNodeEdgesIterator::new(self.builder.graph[self.vertex_id as usize].read().unwrap())
     }
 }
 

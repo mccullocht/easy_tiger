@@ -88,6 +88,10 @@ impl Graph for CursorGraph<'_> {
         Some(r.map(|d| Leb128EdgeIterator { data: d, prev: 0 }))
     }
 
+    fn estimated_vertex_count(&mut self) -> Result<usize> {
+        todo!()
+    }
+
     fn set_entry_point(&mut self, vertex_id: i64) -> Result<()> {
         self.0.set(ENTRY_POINT_KEY, &vertex_id.to_le_bytes())
     }
@@ -105,6 +109,11 @@ impl Graph for CursorGraph<'_> {
             .unwrap_or(Err(Error::not_found_error()))
             .map(|e| e.collect::<Vec<_>>())
             .and_then(|e| self.0.remove(vertex_id).map(|_| e))
+    }
+
+    fn next_available_vertex_id(&mut self) -> Result<i64> {
+        // TODO: re-use ids belonging to deleted vertices.
+        self.0.largest_key().unwrap_or(Ok(-1)).map(|v| v + 1)
     }
 }
 

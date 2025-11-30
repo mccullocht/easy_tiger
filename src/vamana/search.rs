@@ -538,6 +538,10 @@ mod test {
             }
         }
 
+        fn estimated_vertex_count(&mut self) -> Result<usize> {
+            Ok(self.0.data.len())
+        }
+
         fn set_entry_point(&mut self, _: i64) -> Result<()> {
             Err(Error::Errno(Errno::NOTSUP))
         }
@@ -551,6 +555,10 @@ mod test {
         }
 
         fn remove_vertex(&mut self, _: i64) -> Result<Vec<i64>> {
+            Err(Error::Errno(Errno::NOTSUP))
+        }
+
+        fn next_available_vertex_id(&mut self) -> Result<i64> {
             Err(Error::Errno(Errno::NOTSUP))
         }
     }

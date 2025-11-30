@@ -120,6 +120,9 @@ pub trait Graph {
     /// Access the edges of the vertex. These may be returned in an arbitrary order.
     fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>>;
 
+    /// Return an estimate of the number of vertices in the graph.
+    fn estimated_vertex_count(&mut self) -> Result<usize>;
+
     /// Set the entry point of the graph.
     ///
     /// The caller is responsible for ensuring that the named `vertex_id` exists in the graph.
@@ -150,7 +153,11 @@ pub trait Graph {
     /// May return a NOT_FOUND error if the vertex does not exist.
     fn remove_vertex(&mut self, vertex_id: i64) -> Result<Vec<i64>>;
 
-    // XXX add a method to get the next available vertex id.
+    /// Returns the next available vertex id.
+    ///
+    /// This vertex id is guaranteed to be unused but may not be sequentially assigned.
+    /// Returns a NOTSUP error if the graph does not support mutation.
+    fn next_available_vertex_id(&mut self) -> Result<i64>;
 }
 
 /// Vector store for known vector formats accessible by a record id.
@@ -172,7 +179,8 @@ pub trait GraphVectorStore {
     }
 
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.
-    // TODO: consider removing this method as it is _unsafe_ in the event of a rollback.
+    // TODO: consider replacing this method as it is unsafe in the event of a rollback.
+    // The replacement would accept a closure to transform the vector reference in place.
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>>;
 
     /// Set the contents of the vector at vertex.

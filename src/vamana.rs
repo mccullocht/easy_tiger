@@ -2,7 +2,6 @@
 //!
 
 pub mod bulk;
-pub mod crud;
 pub mod mutate;
 pub mod search;
 pub mod wt;

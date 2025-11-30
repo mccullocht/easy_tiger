@@ -158,8 +158,6 @@ impl GraphMutator {
         let mut vectors = index.high_fidelity_vectors()?;
         let distance_fn = vectors.new_distance_function();
 
-        // XXX
-        // TODO: unified graph index writer trait to handles removal and other mutations.
         let edges = graph.remove_vertex(vertex_id)?;
         let vector = vectors
             .get(vertex_id)

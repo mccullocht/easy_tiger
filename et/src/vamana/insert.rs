@@ -3,8 +3,10 @@ use std::{fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
-    vamana::crud::IndexMutator,
-    vamana::wt::TableGraphVectorIndex,
+    vamana::{
+        mutate::GraphMutator,
+        wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
+    },
 };
 use indicatif::ProgressIterator;
 use wt_mdb::{Connection, Result};
@@ -27,15 +29,16 @@ pub struct InsertArgs {
 }
 
 fn insert_all<'a>(
-    mutator: &mut IndexMutator,
+    wt_index: &SessionGraphVectorIndex,
     vectors: impl ExactSizeIterator<Item = &'a [f32]>,
 ) -> Result<Vec<Range<i64>>> {
     let mut keys: Vec<Range<i64>> = vec![];
     // I could probably write this as a fold but it seems annoying.
     let progress = progress_bar(vectors.len(), "");
+    let mut mutator = GraphMutator::new();
     for vector in vectors.progress_with(progress) {
-        mutator.session().begin_transaction(None)?;
-        let key = mutator.insert(vector)?;
+        wt_index.session().begin_transaction(None)?;
+        let key = mutator.insert(vector, wt_index)?;
         if let Some(r) = keys.last_mut() {
             if r.end == key {
                 r.end = key + 1;
@@ -45,7 +48,7 @@ fn insert_all<'a>(
         } else {
             keys.push(key..(key + 1))
         }
-        mutator.session().commit_transaction(None)?;
+        wt_index.session().commit_transaction(None)?;
     }
     Ok(keys)
 }
@@ -57,10 +60,9 @@ pub fn insert(connection: Arc<Connection>, index_name: &str, args: InsertArgs) -
         index.config().dimensions,
     )?;
 
-    let session = connection.open_session()?;
-    let mut mutator = IndexMutator::new(index, session);
+    let wt_index = SessionGraphVectorIndex::new(index, connection.open_session()?);
     match insert_all(
-        &mut mutator,
+        &wt_index,
         vectors
             .iter()
             .skip(args.offset)

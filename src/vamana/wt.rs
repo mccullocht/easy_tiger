@@ -14,9 +14,7 @@ use wt_mdb::{
     Connection, Error, RecordCursorGuard, Result, Session,
 };
 
-use crate::vamana::graph::{
-    Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
-};
+use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore};
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
@@ -48,30 +46,6 @@ pub fn read_app_metadata(session: &Session, table_name: &str) -> Option<Result<S
     }
 }
 
-/// Implementation of GraphVertex that reads from an encoded value in a WiredTiger record table.
-// TODO: perhaps instead of returning this wrapper we should just return an iterator?
-pub struct CursorGraphVertex<'a>(&'a [u8]);
-
-impl<'a> CursorGraphVertex<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self(data)
-    }
-}
-
-impl GraphVertex for CursorGraphVertex<'_> {
-    type EdgeIterator<'c>
-        = Leb128EdgeIterator<'c>
-    where
-        Self: 'c;
-
-    fn edges(&self) -> Self::EdgeIterator<'_> {
-        Leb128EdgeIterator {
-            data: self.0,
-            prev: 0,
-        }
-    }
-}
-
 /// Iterator over edge data in a graph backed by WiredTiger.
 /// Create by calling `CursorGraphNode.edges()`.
 pub struct Leb128EdgeIterator<'a> {
@@ -96,29 +70,11 @@ impl<'a> CursorGraph<'a> {
     pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
         Self(cursor)
     }
-
-    pub(crate) fn set_entry_point(&mut self, entry_point: i64) -> Result<()> {
-        self.0.set(ENTRY_POINT_KEY, &entry_point.to_le_bytes())
-    }
-
-    pub(crate) fn set(&mut self, vertex_id: i64, edges: impl Into<Vec<i64>>) -> Result<()> {
-        self.0.set(vertex_id, &encode_graph_vertex(edges.into()))
-    }
-
-    pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
-        self.0.remove(vertex_id).or_else(|e| {
-            if e == Error::not_found_error() {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
-    }
 }
 
 impl Graph for CursorGraph<'_> {
-    type Vertex<'c>
-        = CursorGraphVertex<'c>
+    type EdgeIterator<'c>
+        = Leb128EdgeIterator<'c>
     where
         Self: 'c;
 
@@ -127,9 +83,37 @@ impl Graph for CursorGraph<'_> {
         Some(result.map(|r| i64::from_le_bytes(r.try_into().expect("8 bytes"))))
     }
 
-    fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-        let r = unsafe { self.0.seek_exact_unsafe(vertex_id)? };
-        Some(r.map(CursorGraphVertex::new))
+    fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {
+        let r = unsafe { self.0.seek_exact_unsafe(vertex_id) }?;
+        Some(r.map(|d| Leb128EdgeIterator { data: d, prev: 0 }))
+    }
+
+    fn estimated_vertex_count(&mut self) -> Result<usize> {
+        todo!()
+    }
+
+    fn set_entry_point(&mut self, vertex_id: i64) -> Result<()> {
+        self.0.set(ENTRY_POINT_KEY, &vertex_id.to_le_bytes())
+    }
+
+    fn remove_entry_point(&mut self) -> Result<()> {
+        self.0.remove(ENTRY_POINT_KEY)
+    }
+
+    fn set_edges(&mut self, vertex_id: i64, edges: impl Into<Vec<i64>>) -> Result<()> {
+        self.0.set(vertex_id, &encode_graph_vertex(edges.into()))
+    }
+
+    fn remove_vertex(&mut self, vertex_id: i64) -> Result<Vec<i64>> {
+        self.edges(vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))
+            .map(|e| e.collect::<Vec<_>>())
+            .and_then(|e| self.0.remove(vertex_id).map(|_| e))
+    }
+
+    fn next_available_vertex_id(&mut self) -> Result<i64> {
+        // TODO: re-use ids belonging to deleted vertices.
+        self.0.largest_key().unwrap_or(Ok(-1)).map(|v| v + 1)
     }
 }
 
@@ -152,20 +136,6 @@ impl<'a> CursorVectorStore<'a> {
             format,
         }
     }
-
-    pub(crate) fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()> {
-        self.inner.set(vertex_id, vector.as_ref())
-    }
-
-    pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
-        self.inner.remove(vertex_id).or_else(|e| {
-            if e == Error::not_found_error() {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
-    }
 }
 
 impl GraphVectorStore for CursorVectorStore<'_> {
@@ -179,6 +149,18 @@ impl GraphVectorStore for CursorVectorStore<'_> {
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
         Some(unsafe { self.inner.seek_exact_unsafe(vertex_id)? })
+    }
+
+    fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()> {
+        self.inner.set(vertex_id, vector.as_ref())
+    }
+
+    fn remove(&mut self, vertex_id: i64) -> Result<Vec<u8>> {
+        let vector = self
+            .inner
+            .seek_exact(vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?;
+        self.inner.remove(vertex_id).map(|()| vector)
     }
 }
 
@@ -330,13 +312,13 @@ impl TableGraphVectorIndex {
     }
 }
 
-/// A `GraphVectorIndexReader` implementation that operates entirely on a WiredTiger graph.
-pub struct SessionGraphVectorIndexReader {
+/// A `GraphVectorIndex` implementation that operates on a WiredTiger store.
+pub struct SessionGraphVectorIndex {
     index: Arc<TableGraphVectorIndex>,
     session: Session,
 }
 
-impl SessionGraphVectorIndexReader {
+impl SessionGraphVectorIndex {
     /// Create a new `TableGraphVectorIndex` given a named index and a session to access that data.
     pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
         Self { index, session }
@@ -358,7 +340,7 @@ impl SessionGraphVectorIndexReader {
     }
 }
 
-impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
+impl GraphVectorIndex for SessionGraphVectorIndex {
     type Graph<'a>
         = CursorGraph<'a>
     where

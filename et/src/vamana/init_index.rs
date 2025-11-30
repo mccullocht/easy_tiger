@@ -2,8 +2,8 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    vamana::graph::{GraphConfig, GraphLayout, GraphSearchParams},
     vamana::wt::TableGraphVectorIndex,
+    vamana::{GraphConfig, GraphLayout, GraphSearchParams},
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;

@@ -19,9 +19,9 @@ use wt_mdb::{
 
 use crate::{
     input::{VecVectorStore, VectorStore},
-    vamana::graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore},
     vamana::search::GraphSearcher,
-    vamana::wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
+    vamana::wt::{read_app_metadata, SessionGraphVectorIndex, TableGraphVectorIndex},
+    vamana::{GraphConfig, GraphSearchParams, GraphVectorIndex, GraphVectorStore},
     Neighbor,
 };
 
@@ -275,7 +275,7 @@ pub struct SessionIndexWriter {
     posting_coder: Box<dyn F32VectorCoder>,
     raw_coder: Option<Box<dyn F32VectorCoder>>,
 
-    head_reader: SessionGraphVectorIndexReader,
+    head_reader: SessionGraphVectorIndex,
     head_searcher: GraphSearcher,
 }
 
@@ -290,7 +290,7 @@ impl SessionIndexWriter {
             .config()
             .rerank_format
             .map(|t| t.new_coder(index.head_config().config().similarity));
-        let head_reader = SessionGraphVectorIndexReader::new(index.head.clone(), session);
+        let head_reader = SessionGraphVectorIndex::new(index.head.clone(), session);
         let head_searcher = GraphSearcher::new(index.config.head_search_params);
         Self {
             index,
@@ -309,7 +309,7 @@ impl SessionIndexWriter {
     pub fn upsert(&mut self, record_id: i64, vector: &[f32]) -> Result<Vec<u32>> {
         let candidates = self
             .head_searcher
-            .search(vector.as_ref(), &mut self.head_reader)?;
+            .search(vector.as_ref(), &self.head_reader)?;
         let centroid_ids = select_centroids(
             self.index.config.replica_selection,
             self.index.config.replica_count,
@@ -418,7 +418,7 @@ fn select_centroids(
     replica_count: usize,
     candidates: Vec<Neighbor>,
     vector: &[f32],
-    head_reader: &impl GraphVectorIndexReader,
+    head_reader: &impl GraphVectorIndex,
     distance_fn: &dyn VectorDistance,
 ) -> Result<Vec<u32>> {
     assert!(
@@ -443,7 +443,7 @@ fn select_centroids(
 fn select_centroids_rng(
     replica_count: usize,
     candidates: Vec<Neighbor>,
-    head_reader: &impl GraphVectorIndexReader,
+    head_reader: &impl GraphVectorIndex,
     distance_fn: &dyn VectorDistance,
 ) -> Result<Vec<u32>> {
     assert!(!candidates.is_empty());
@@ -483,7 +483,7 @@ fn select_centroids_soar(
     replica_count: usize,
     candidates: Vec<Neighbor>,
     vector: &[f32],
-    head_reader: &impl GraphVectorIndexReader,
+    head_reader: &impl GraphVectorIndex,
 ) -> Result<Vec<u32>> {
     assert!(!candidates.is_empty());
     let mut vectors = head_reader.high_fidelity_vectors()?;
@@ -524,12 +524,12 @@ fn select_centroids_soar(
 
 pub struct SessionIndexReader {
     index: Arc<TableIndex>,
-    head_reader: SessionGraphVectorIndexReader,
+    head_reader: SessionGraphVectorIndex,
 }
 
 impl SessionIndexReader {
     pub fn new(index: &Arc<TableIndex>, session: Session) -> Self {
-        let head_reader = SessionGraphVectorIndexReader::new(index.head_config().clone(), session);
+        let head_reader = SessionGraphVectorIndex::new(index.head_config().clone(), session);
         Self {
             index: index.clone(),
             head_reader,

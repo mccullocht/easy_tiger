@@ -11,9 +11,9 @@ use std::{
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
-    vamana::graph::GraphSearchParams,
     vamana::search::{GraphSearchStats, GraphSearcher},
-    vamana::wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
+    vamana::wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
+    vamana::GraphSearchParams,
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;
@@ -188,7 +188,7 @@ fn search_phase<Q: Send + Sync>(
 }
 
 struct SearcherState {
-    reader: SessionGraphVectorIndexReader,
+    reader: SessionGraphVectorIndex,
     searcher: GraphSearcher,
 }
 
@@ -199,7 +199,7 @@ impl SearcherState {
         search_params: GraphSearchParams,
     ) -> io::Result<Self> {
         Ok(Self {
-            reader: SessionGraphVectorIndexReader::new(index.clone(), connection.open_session()?),
+            reader: SessionGraphVectorIndex::new(index.clone(), connection.open_session()?),
             searcher: GraphSearcher::new(search_params),
         })
     }

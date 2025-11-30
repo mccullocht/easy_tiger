@@ -23,19 +23,20 @@ use std::{
 use crossbeam_skiplist::SkipSet;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
+use rustix::io::Errno;
 use thread_local::ThreadLocal;
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{options::CreateOptionsBuilder, Connection, Result, Session};
+use wt_mdb::{options::CreateOptionsBuilder, Connection, Error, Result, Session};
 
 use crate::{
     graph_clustering,
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
-    vamana::graph::{
-        prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
-        GraphVectorIndexReader, GraphVectorStore, GraphVertex,
-    },
     vamana::search::GraphSearcher,
     vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
+    vamana::{
+        prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
+        GraphVectorIndex, GraphVectorStore,
+    },
     Neighbor,
 };
 
@@ -642,7 +643,7 @@ impl Drop for SessionGuard<'_> {
 
 struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Session);
 
-impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
+impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
     for BulkLoadGraphVectorIndexReader<'_, '_, D>
 {
     type Graph<'b>
@@ -694,8 +695,8 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
 struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>);
 
 impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
-    type Vertex<'c>
-        = BulkLoadGraphVertex<'c, D>
+    type EdgeIterator<'c>
+        = BulkNodeEdgesIterator<'c>
     where
         Self: 'c;
 
@@ -708,27 +709,38 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
         }
     }
 
-    fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
-        Some(Ok(BulkLoadGraphVertex {
-            builder: self.0,
-            vertex_id,
-        }))
+    fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {
+        if vertex_id >= 0 && (vertex_id as usize) < self.0.graph.len() {
+            Some(Ok(BulkNodeEdgesIterator::new(
+                self.0.graph[vertex_id as usize].read().unwrap(),
+            )))
+        } else {
+            None
+        }
     }
-}
 
-struct BulkLoadGraphVertex<'a, D> {
-    builder: &'a BulkLoadBuilder<D>,
-    vertex_id: i64,
-}
+    fn estimated_vertex_count(&mut self) -> Result<usize> {
+        Ok(self.0.graph.len())
+    }
 
-impl<D: Send + Sync> GraphVertex for BulkLoadGraphVertex<'_, D> {
-    type EdgeIterator<'c>
-        = BulkNodeEdgesIterator<'c>
-    where
-        Self: 'c;
+    fn set_entry_point(&mut self, _: i64) -> Result<()> {
+        Err(Error::Errno(Errno::NOTSUP))
+    }
 
-    fn edges(&self) -> Self::EdgeIterator<'_> {
-        BulkNodeEdgesIterator::new(self.builder.graph[self.vertex_id as usize].read().unwrap())
+    fn remove_entry_point(&mut self) -> Result<()> {
+        Err(Error::Errno(Errno::NOTSUP))
+    }
+
+    fn set_edges(&mut self, _: i64, _: impl Into<Vec<i64>>) -> Result<()> {
+        Err(Error::Errno(Errno::NOTSUP))
+    }
+
+    fn remove_vertex(&mut self, _: i64) -> Result<Vec<i64>> {
+        Err(Error::Errno(Errno::NOTSUP))
+    }
+
+    fn next_available_vertex_id(&mut self) -> Result<i64> {
+        Err(Error::Errno(Errno::NOTSUP))
     }
 }
 
@@ -790,5 +802,13 @@ impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
                 }
             }
         }
+    }
+
+    fn set(&mut self, _: i64, _: impl AsRef<[u8]>) -> Result<()> {
+        Err(Error::Errno(Errno::NOTSUP))
+    }
+
+    fn remove(&mut self, _: i64) -> Result<Vec<u8>> {
+        Err(Error::Errno(Errno::NOTSUP))
     }
 }

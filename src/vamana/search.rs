@@ -5,9 +5,7 @@ use std::{
     ops::{Add, AddAssign},
 };
 
-use super::graph::{
-    Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
-};
+use super::{Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore};
 use crate::Neighbor;
 
 use vectors::QueryVectorDistance;
@@ -78,7 +76,7 @@ impl GraphSearcher {
     pub fn search(
         &mut self,
         query: &[f32],
-        reader: &mut impl GraphVectorIndexReader,
+        reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         self.search_internal(query, |_| true, reader)
@@ -93,7 +91,7 @@ impl GraphSearcher {
         &mut self,
         query: &[f32],
         filter_predicate: impl FnMut(i64) -> bool,
-        reader: &mut impl GraphVectorIndexReader,
+        reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         self.search_internal(query, filter_predicate, reader)
@@ -103,7 +101,7 @@ impl GraphSearcher {
     pub fn search_for_insert(
         &mut self,
         vertex_id: i64,
-        reader: &mut impl GraphVectorIndexReader,
+        reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         // Insertions may be concurrent and there could already be backlinks to this vertex in the graph.
@@ -153,7 +151,7 @@ impl GraphSearcher {
         &mut self,
         query: &[f32],
         filter_predicate: impl FnMut(i64) -> bool,
-        reader: &mut impl GraphVectorIndexReader,
+        reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         let nav_query = reader
             .config()
@@ -181,7 +179,7 @@ impl GraphSearcher {
         nav_query: &dyn QueryVectorDistance,
         mut filter_predicate: impl FnMut(i64) -> bool,
         rerank_query: Option<&dyn QueryVectorDistance>,
-        reader: &mut impl GraphVectorIndexReader,
+        reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         // TODO: come up with a better way of managing re-used state.
         self.candidates.clear();
@@ -202,16 +200,17 @@ impl GraphSearcher {
         while let Some(best_candidate) = self.candidates.next_unvisited() {
             self.visited += 1;
             let vertex_id = best_candidate.neighbor().vertex();
-            let node = graph
-                .get_vertex(vertex_id)
-                .unwrap_or_else(|| Err(Error::not_found_error()))?;
             if filter_predicate(vertex_id) {
                 best_candidate.visit();
             } else {
                 best_candidate.remove();
             }
 
-            for edge in node.edges() {
+            for edge in graph
+                .edges(vertex_id)
+                .unwrap_or(Err(Error::not_found_error()))?
+                .collect::<Vec<_>>()
+            {
                 if !self.seen.insert(edge) {
                     continue;
                 }
@@ -370,12 +369,11 @@ impl<'a> VisitCandidateGuard<'a> {
 mod test {
     use std::num::NonZero;
 
+    use rustix::io::Errno;
     use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
-    use wt_mdb::Result;
+    use wt_mdb::{Error, Result};
 
-    use crate::vamana::graph::{
-        Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
-    };
+    use crate::vamana::{Graph, GraphConfig, GraphLayout, GraphVectorIndex, GraphVectorStore};
     use crate::Neighbor;
 
     use super::{GraphSearchParams, GraphSearcher};
@@ -488,7 +486,7 @@ mod test {
     #[derive(Debug)]
     pub struct TestGraphVectorIndexReader<'a>(&'a TestGraphVectorIndex);
 
-    impl GraphVectorIndexReader for TestGraphVectorIndexReader<'_> {
+    impl GraphVectorIndex for TestGraphVectorIndexReader<'_> {
         type Graph<'b>
             = TestGraphAccess<'b>
         where
@@ -519,8 +517,8 @@ mod test {
     pub struct TestGraphAccess<'a>(&'a TestGraphVectorIndex);
 
     impl Graph for TestGraphAccess<'_> {
-        type Vertex<'c>
-            = TestGraphVertex<'c>
+        type EdgeIterator<'c>
+            = std::iter::Copied<std::slice::Iter<'c, i64>>
         where
             Self: 'c;
 
@@ -532,12 +530,36 @@ mod test {
             }
         }
 
-        fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
+        fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {
             if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
-                Some(Ok(TestGraphVertex(&self.0.data[vertex_id as usize])))
+                Some(Ok(self.0.data[vertex_id as usize].edges.iter().copied()))
             } else {
                 None
             }
+        }
+
+        fn estimated_vertex_count(&mut self) -> Result<usize> {
+            Ok(self.0.data.len())
+        }
+
+        fn set_entry_point(&mut self, _: i64) -> Result<()> {
+            Err(Error::Errno(Errno::NOTSUP))
+        }
+
+        fn remove_entry_point(&mut self) -> Result<()> {
+            Err(Error::Errno(Errno::NOTSUP))
+        }
+
+        fn set_edges(&mut self, _: i64, _: impl Into<Vec<i64>>) -> Result<()> {
+            Err(Error::Errno(Errno::NOTSUP))
+        }
+
+        fn remove_vertex(&mut self, _: i64) -> Result<Vec<i64>> {
+            Err(Error::Errno(Errno::NOTSUP))
+        }
+
+        fn next_available_vertex_id(&mut self) -> Result<i64> {
+            Err(Error::Errno(Errno::NOTSUP))
         }
     }
 
@@ -568,18 +590,13 @@ mod test {
                 })
             })
         }
-    }
 
-    pub struct TestGraphVertex<'a>(&'a TestVector);
+        fn set(&mut self, _: i64, _: impl AsRef<[u8]>) -> Result<()> {
+            Err(Error::Errno(Errno::NOTSUP))
+        }
 
-    impl GraphVertex for TestGraphVertex<'_> {
-        type EdgeIterator<'c>
-            = std::iter::Copied<std::slice::Iter<'c, i64>>
-        where
-            Self: 'c;
-
-        fn edges(&self) -> Self::EdgeIterator<'_> {
-            self.0.edges.iter().copied()
+        fn remove(&mut self, _: i64) -> Result<Vec<u8>> {
+            Err(Error::Errno(Errno::NOTSUP))
         }
     }
 

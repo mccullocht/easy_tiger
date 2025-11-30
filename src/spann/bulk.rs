@@ -4,7 +4,7 @@ use crate::{
     input::VectorStore,
     spann::{select_centroids, PostingKey, TableIndex},
     vamana::search::GraphSearcher,
-    vamana::wt::SessionGraphVectorIndexReader,
+    vamana::wt::SessionGraphVectorIndex,
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
@@ -30,7 +30,7 @@ pub fn assign_to_centroids(
         .map(|i| {
             let mut head_reader = tl_head_reader
                 .get_or_try(|| {
-                    Ok::<_, wt_mdb::Error>(RefCell::new(SessionGraphVectorIndexReader::new(
+                    Ok::<_, wt_mdb::Error>(RefCell::new(SessionGraphVectorIndex::new(
                         Arc::clone(&index.head),
                         connection.open_session()?,
                     )))

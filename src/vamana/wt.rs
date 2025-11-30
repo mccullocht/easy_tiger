@@ -312,13 +312,13 @@ impl TableGraphVectorIndex {
     }
 }
 
-/// A `GraphVectorIndexReader` implementation that operates entirely on a WiredTiger graph.
-pub struct SessionGraphVectorIndexReader {
+/// A `GraphVectorIndex` implementation that operates on a WiredTiger store.
+pub struct SessionGraphVectorIndex {
     index: Arc<TableGraphVectorIndex>,
     session: Session,
 }
 
-impl SessionGraphVectorIndexReader {
+impl SessionGraphVectorIndex {
     /// Create a new `TableGraphVectorIndex` given a named index and a session to access that data.
     pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
         Self { index, session }
@@ -340,7 +340,7 @@ impl SessionGraphVectorIndexReader {
     }
 }
 
-impl GraphVectorIndex for SessionGraphVectorIndexReader {
+impl GraphVectorIndex for SessionGraphVectorIndex {
     type Graph<'a>
         = CursorGraph<'a>
     where

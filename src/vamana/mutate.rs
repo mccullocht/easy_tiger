@@ -313,7 +313,7 @@ mod tests {
 
     use crate::vamana::{
         search::GraphSearcher,
-        wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
+        wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
         Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndex,
     };
 
@@ -322,8 +322,7 @@ mod tests {
     struct Fixture {
         index: Arc<TableGraphVectorIndex>,
         conn: Arc<Connection>,
-        // XXX fix the name
-        wt_index: SessionGraphVectorIndexReader,
+        wt_index: SessionGraphVectorIndex,
         _dir: tempfile::TempDir,
     }
 
@@ -335,11 +334,8 @@ mod tests {
             }
         }
 
-        fn new_reader(&self) -> SessionGraphVectorIndexReader {
-            SessionGraphVectorIndexReader::new(
-                self.index.clone(),
-                self.conn.open_session().unwrap(),
-            )
+        fn new_reader(&self) -> SessionGraphVectorIndex {
+            SessionGraphVectorIndex::new(self.index.clone(), self.conn.open_session().unwrap())
         }
 
         fn insert_many(&self, vectors: &[[f32; 2]]) -> Result<Vec<i64>> {
@@ -384,7 +380,7 @@ mod tests {
                 .unwrap(),
             );
             let wt_index =
-                SessionGraphVectorIndexReader::new(index.clone(), conn.open_session().unwrap());
+                SessionGraphVectorIndex::new(index.clone(), conn.open_session().unwrap());
             Self {
                 _dir: dir,
                 conn,

@@ -5,7 +5,7 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
         mutate::GraphMutator,
-        wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
+        wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
     },
 };
 use indicatif::ProgressIterator;
@@ -29,7 +29,7 @@ pub struct InsertArgs {
 }
 
 fn insert_all<'a>(
-    wt_index: &SessionGraphVectorIndexReader,
+    wt_index: &SessionGraphVectorIndex,
     vectors: impl ExactSizeIterator<Item = &'a [f32]>,
 ) -> Result<Vec<Range<i64>>> {
     let mut keys: Vec<Range<i64>> = vec![];
@@ -60,7 +60,7 @@ pub fn insert(connection: Arc<Connection>, index_name: &str, args: InsertArgs) -
         index.config().dimensions,
     )?;
 
-    let wt_index = SessionGraphVectorIndexReader::new(index, connection.open_session()?);
+    let wt_index = SessionGraphVectorIndex::new(index, connection.open_session()?);
     match insert_all(
         &wt_index,
         vectors

@@ -2,12 +2,10 @@
 use std::sync::Arc;
 
 use crate::vamana::{
-    graph::{
-        prune_edges, EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndex,
-        GraphVectorStore, GraphVertex,
-    },
+    prune_edges,
     search::GraphSearcher,
     wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex, ENTRY_POINT_KEY},
+    EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndex, GraphVectorStore, GraphVertex,
 };
 use crate::Neighbor;
 use vectors::{F32VectorCoder, VectorDistance};
@@ -358,11 +356,9 @@ mod tests {
     use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
 
     use crate::vamana::{
-        graph::{
-            Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndex, GraphVertex,
-        },
         search::GraphSearcher,
         wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
+        Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndex, GraphVertex,
     };
 
     use super::IndexMutator;

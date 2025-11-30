@@ -11,9 +11,9 @@ use std::{
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
-    vamana::graph::GraphSearchParams,
     vamana::search::{GraphSearchStats, GraphSearcher},
     vamana::wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
+    vamana::GraphSearchParams,
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;

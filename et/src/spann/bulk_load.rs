@@ -12,7 +12,7 @@ use easy_tiger::{
     },
     vamana::{
         bulk::{self, BulkLoadBuilder},
-        graph::{GraphConfig, GraphLayout, GraphSearchParams},
+        {GraphConfig, GraphLayout, GraphSearchParams},
     },
 };
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};

@@ -19,7 +19,7 @@ use easy_tiger::{
         },
         SessionIndexReader, TableIndex,
     },
-    vamana::graph::GraphSearchParams,
+    vamana::GraphSearchParams,
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;

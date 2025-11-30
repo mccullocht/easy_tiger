@@ -2,8 +2,8 @@ use std::{io, sync::Arc};
 
 use clap::Args;
 use easy_tiger::vamana::{
-    graph::{Graph, GraphVertex},
     wt::{CursorGraph, TableGraphVectorIndex},
+    {Graph, GraphVertex},
 };
 use wt_mdb::Connection;
 

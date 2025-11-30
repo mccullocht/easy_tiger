@@ -19,9 +19,9 @@ use wt_mdb::{
 
 use crate::{
     input::{VecVectorStore, VectorStore},
-    vamana::graph::{GraphConfig, GraphSearchParams, GraphVectorIndex, GraphVectorStore},
     vamana::search::GraphSearcher,
     vamana::wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
+    vamana::{GraphConfig, GraphSearchParams, GraphVectorIndex, GraphVectorStore},
     Neighbor,
 };
 

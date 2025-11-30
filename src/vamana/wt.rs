@@ -14,7 +14,7 @@ use wt_mdb::{
     Connection, Error, RecordCursorGuard, Result, Session,
 };
 
-use crate::vamana::graph::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore, GraphVertex};
+use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore, GraphVertex};
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;

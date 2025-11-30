@@ -115,18 +115,14 @@ impl IndexMutator {
             )?;
         }
 
-        // TODO: group and bulk delete if there are common src_vertex_id.
         for (src_vertex_id, dst_vertex_id) in pruned_edges {
-            let vertex = graph
-                .get_vertex(src_vertex_id)
-                .unwrap_or(Err(Error::not_found_error()))?;
-            let edges = vertex.edges().filter(|v| *v != dst_vertex_id).collect();
-            self.set_graph_edges(src_vertex_id, edges)?;
+            self.remove_edge(&mut graph, src_vertex_id, dst_vertex_id)?;
         }
 
         Ok(())
     }
 
+    /// returns true if the edge already exists or was inserted successfully.
     fn insert_edge(
         &self,
         graph: &mut impl Graph,
@@ -135,19 +131,23 @@ impl IndexMutator {
         src_vertex_id: i64,
         dst_vertex_id: i64,
         pruned_edges: &mut Vec<(i64, i64)>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let vertex = graph
             .get_vertex(src_vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?;
-        let mut edges = std::iter::once(dst_vertex_id)
-            .chain(vertex.edges().filter(|v| *v != dst_vertex_id))
-            .collect::<Vec<_>>();
-        // TODO: try to avoid copying the vector.
-        let src_vector = vectors
-            .get(src_vertex_id)
-            .expect("row exists")
-            .map(|v| v.to_vec())?;
-        if edges.len() >= self.reader.config().max_edges.get() {
+        let mut edges = vertex.edges().collect::<Vec<_>>();
+        if edges.contains(&dst_vertex_id) {
+            return Ok(true); // edge already exists.
+        }
+        edges.push(dst_vertex_id);
+        edges.sort_unstable();
+        let inserted = if edges.len() <= self.reader.config().max_edges.get() {
+            true
+        } else {
+            let src_vector = vectors
+                .get(src_vertex_id)
+                .expect("row exists")
+                .map(|v| v.to_vec())?;
             let mut neighbors = edges
                 .iter()
                 .map(|e| {
@@ -171,7 +171,22 @@ impl IndexMutator {
             }
             edges.clear();
             edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
-        }
+            edges.contains(&dst_vertex_id)
+        };
+        self.set_graph_edges(src_vertex_id, edges)
+            .map(|()| inserted)
+    }
+
+    fn remove_edge(
+        &self,
+        graph: &mut impl Graph,
+        src_vertex_id: i64,
+        dst_vertex_id: i64,
+    ) -> Result<()> {
+        let vertex = graph
+            .get_vertex(src_vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?;
+        let edges = vertex.edges().filter(|v| *v != dst_vertex_id).collect();
         self.set_graph_edges(src_vertex_id, edges)
     }
 
@@ -197,10 +212,13 @@ impl IndexMutator {
         if let Some(vectors) = self.reader.rerank_vectors() {
             vectors?.remove(vertex_id)?;
         }
+        for e in edges.iter() {
+            self.remove_edge(&mut graph, *e, vertex_id)?;
+        }
 
         // Cache information about each vertex linked to vertex_id.
         // Remove any links back to vertex_id.
-        let mut vertex_data = edges
+        let vertex_data = edges
             .into_iter()
             .map(|e| {
                 graph
@@ -220,7 +238,12 @@ impl IndexMutator {
             .collect::<Result<Result<Vec<_>>>>()??;
 
         // Create links between edges of the deleted node if needed.
-        self.cross_link_peer_vertices(&mut vertex_data, distance_fn.as_ref())?;
+        self.cross_link_peer_vertices(
+            &mut graph,
+            &mut vectors,
+            &vertex_data,
+            distance_fn.as_ref(),
+        )?;
 
         // Oh no, we've deleted the entry point! Find the closes point amongst the
         // edges of this node to use as a new one. So long as at least one vector is in
@@ -238,53 +261,74 @@ impl IndexMutator {
             }
         }
 
-        // Write all the mutated nodes back to WT.
-        for (vertex_id, _, edges) in vertex_data {
-            self.set_graph_edges(vertex_id, edges)?;
-        }
-
         Ok(())
     }
 
     fn cross_link_peer_vertices(
         &self,
-        vertex_data: &mut [(i64, Vec<u8>, Vec<i64>)],
+        graph: &mut impl Graph,
+        vectors: &mut impl GraphVectorStore,
+        vertex_data: &[(i64, Vec<u8>, Vec<i64>)],
         distance_fn: &dyn VectorDistance,
     ) -> Result<()> {
-        // Score all pairs of vectors among the passed vertices.
-        let mut candidate_links = vertex_data
-            .iter()
-            .enumerate()
-            .flat_map(|(src, (_, src_vector, src_edges))| {
-                vertex_data
-                    .iter()
-                    .enumerate()
-                    .skip(src + 1)
-                    .filter_map(|(dst, (dst_vertex, dst_vector, _))| {
-                        if !src_edges.contains(dst_vertex) {
-                            Some((src, dst, distance_fn.distance(src_vector, dst_vector)))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+        // Compute the distance between each pair of edges and insert symmetrical links.
+        let mut edge_scores = vec![vec![]; vertex_data.len()];
+        for (i, (src_vertex_id, src_vector, _)) in vertex_data.iter().enumerate() {
+            for (j, (dst_vertex_id, dst_vector, _)) in vertex_data.iter().enumerate().skip(i + 1) {
+                let dist = distance_fn.distance(src_vector, dst_vector);
+                edge_scores[i].push(Neighbor::new(*dst_vertex_id, dist));
+                edge_scores[j].push(Neighbor::new(*src_vertex_id, dist));
+            }
+        }
 
-        // Sort candidate links in order by distance, then apply all that fit --
-        // that is inserting the edge into both vertices does not exceed max_edges.
-        candidate_links.sort_by(|a, b| {
-            a.2.total_cmp(&b.2)
-                .then_with(|| a.0.cmp(&b.0))
-                .then_with(|| a.1.cmp(&b.1))
-        });
-        let max_edges = self.reader.config().max_edges.get();
-        for (src, dst, _) in candidate_links {
-            if vertex_data[src].2.len() < max_edges && vertex_data[dst].2.len() < max_edges {
-                let src_id = vertex_data[src].0;
-                let dst_id = vertex_data[dst].0;
-                vertex_data[src].2.push(dst_id);
-                vertex_data[dst].2.push(src_id);
+        // Take the list of scored edges and truncate to 50% of max_edges, then filter out all of
+        // the edges that already exist in the graph based on vertex_data. The rest we will attempt
+        // to insert symmetrically to maintain an undirected graph.
+        let relink_edges = self.reader.config().max_edges.get().max(2) / 2;
+        for (current_edges, scored_edges) in vertex_data
+            .iter()
+            .map(|(_, _, e)| e)
+            .zip(edge_scores.iter_mut())
+        {
+            scored_edges.sort_unstable();
+            scored_edges.truncate(relink_edges);
+            scored_edges.retain(|n| !current_edges.contains(&n.vertex()));
+        }
+
+        let mut pruned_edges = vec![];
+        for (src_vertex_id, mut edge_scores) in
+            vertex_data.iter().map(|v| v.0).zip(edge_scores.into_iter())
+        {
+            edge_scores.sort_unstable();
+            for dst_vertex_id in edge_scores
+                .into_iter()
+                .take(relink_edges)
+                .map(|n| n.vertex())
+            {
+                // Insert edge symmetrically. If the first edge insertion succeeds and the symmetric
+                // edge insertion fails, then remove the edge to ensure the graph is undirected.
+                if self.insert_edge(
+                    graph,
+                    vectors,
+                    distance_fn,
+                    src_vertex_id,
+                    dst_vertex_id,
+                    &mut pruned_edges,
+                )? && !self.insert_edge(
+                    graph,
+                    vectors,
+                    distance_fn,
+                    dst_vertex_id,
+                    src_vertex_id,
+                    &mut pruned_edges,
+                )? {
+                    self.remove_edge(graph, src_vertex_id, dst_vertex_id)?;
+                }
+            }
+
+            // Remove all back edges removed by the insertions above.
+            for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
+                self.remove_edge(graph, src_vertex_id, dst_vertex_id)?;
             }
         }
 

@@ -110,19 +110,27 @@ pub trait GraphVectorIndex {
 
 /// A Vamana graph.
 pub trait Graph {
+    // XXX remove
     type Vertex<'c>: GraphVertex
     where
         Self: 'c;
+    type EdgeIterator<'a>: Iterator<Item = i64>
+    where
+        Self: 'a;
 
     /// Return the graph entry point, or None if the graph is empty.
     fn entry_point(&mut self) -> Option<Result<i64>>;
 
     /// Get the contents of a single vertex.
     fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>>;
+
+    /// Access the edges of the vertex. These may be returned in an arbitrary order.
+    fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>>;
 }
 
 /// A node in the Vamana graph.
 // TODO: consider eliminating this trait
+// XXX remove
 pub trait GraphVertex {
     type EdgeIterator<'a>: Iterator<Item = i64>
     where

@@ -517,6 +517,10 @@ mod test {
     pub struct TestGraphAccess<'a>(&'a TestGraphVectorIndex);
 
     impl Graph for TestGraphAccess<'_> {
+        type EdgeIterator<'c>
+            = std::iter::Copied<std::slice::Iter<'c, i64>>
+        where
+            Self: 'c;
         type Vertex<'c>
             = TestGraphVertex<'c>
         where
@@ -533,6 +537,14 @@ mod test {
         fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
             if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
                 Some(Ok(TestGraphVertex(&self.0.data[vertex_id as usize])))
+            } else {
+                None
+            }
+        }
+
+        fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {
+            if vertex_id >= 0 && (vertex_id as usize) < self.0.data.len() {
+                Some(Ok(self.0.data[vertex_id as usize].edges.iter().copied()))
             } else {
                 None
             }

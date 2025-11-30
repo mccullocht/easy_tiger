@@ -115,6 +115,10 @@ impl<'a> CursorGraph<'a> {
 }
 
 impl Graph for CursorGraph<'_> {
+    type EdgeIterator<'c>
+        = Leb128EdgeIterator<'c>
+    where
+        Self: 'c;
     type Vertex<'c>
         = CursorGraphVertex<'c>
     where
@@ -128,6 +132,11 @@ impl Graph for CursorGraph<'_> {
     fn get_vertex(&mut self, vertex_id: i64) -> Option<Result<Self::Vertex<'_>>> {
         let r = unsafe { self.0.seek_exact_unsafe(vertex_id)? };
         Some(r.map(CursorGraphVertex::new))
+    }
+
+    fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {
+        let r = unsafe { self.0.seek_exact_unsafe(vertex_id) }?;
+        Some(r.map(|d| Leb128EdgeIterator { data: d, prev: 0 }))
     }
 }
 

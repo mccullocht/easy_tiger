@@ -694,6 +694,10 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
 struct BulkLoadBuilderGraph<'a, D: Send>(&'a BulkLoadBuilder<D>);
 
 impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
+    type EdgeIterator<'c>
+        = BulkNodeEdgesIterator<'c>
+    where
+        Self: 'c;
     type Vertex<'c>
         = BulkLoadGraphVertex<'c, D>
     where
@@ -713,6 +717,16 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
             builder: self.0,
             vertex_id,
         }))
+    }
+
+    fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {
+        if vertex_id >= 0 && (vertex_id as usize) < self.0.graph.len() {
+            Some(Ok(BulkNodeEdgesIterator::new(
+                self.0.graph[vertex_id as usize].read().unwrap(),
+            )))
+        } else {
+            None
+        }
     }
 }
 

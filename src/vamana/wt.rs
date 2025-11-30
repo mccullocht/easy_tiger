@@ -14,9 +14,7 @@ use wt_mdb::{
     Connection, Error, RecordCursorGuard, Result, Session,
 };
 
-use crate::vamana::graph::{
-    Graph, GraphConfig, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
-};
+use crate::vamana::graph::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore, GraphVertex};
 
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
@@ -358,7 +356,7 @@ impl SessionGraphVectorIndexReader {
     }
 }
 
-impl GraphVectorIndexReader for SessionGraphVectorIndexReader {
+impl GraphVectorIndex for SessionGraphVectorIndexReader {
     type Graph<'a>
         = CursorGraph<'a>
     where

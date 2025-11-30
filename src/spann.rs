@@ -19,7 +19,7 @@ use wt_mdb::{
 
 use crate::{
     input::{VecVectorStore, VectorStore},
-    vamana::graph::{GraphConfig, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore},
+    vamana::graph::{GraphConfig, GraphSearchParams, GraphVectorIndex, GraphVectorStore},
     vamana::search::GraphSearcher,
     vamana::wt::{read_app_metadata, SessionGraphVectorIndexReader, TableGraphVectorIndex},
     Neighbor,
@@ -418,7 +418,7 @@ fn select_centroids(
     replica_count: usize,
     candidates: Vec<Neighbor>,
     vector: &[f32],
-    head_reader: &impl GraphVectorIndexReader,
+    head_reader: &impl GraphVectorIndex,
     distance_fn: &dyn VectorDistance,
 ) -> Result<Vec<u32>> {
     assert!(
@@ -443,7 +443,7 @@ fn select_centroids(
 fn select_centroids_rng(
     replica_count: usize,
     candidates: Vec<Neighbor>,
-    head_reader: &impl GraphVectorIndexReader,
+    head_reader: &impl GraphVectorIndex,
     distance_fn: &dyn VectorDistance,
 ) -> Result<Vec<u32>> {
     assert!(!candidates.is_empty());
@@ -483,7 +483,7 @@ fn select_centroids_soar(
     replica_count: usize,
     candidates: Vec<Neighbor>,
     vector: &[f32],
-    head_reader: &impl GraphVectorIndexReader,
+    head_reader: &impl GraphVectorIndex,
 ) -> Result<Vec<u32>> {
     assert!(!candidates.is_empty());
     let mut vectors = head_reader.high_fidelity_vectors()?;

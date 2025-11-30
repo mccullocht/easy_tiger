@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::vamana::{
     graph::{
-        prune_edges, EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndexReader,
+        prune_edges, EdgeSetDistanceComputer, Graph, GraphLayout, GraphVectorIndex,
         GraphVectorStore, GraphVertex,
     },
     search::GraphSearcher,
@@ -359,7 +359,7 @@ mod tests {
 
     use crate::vamana::{
         graph::{
-            Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndexReader, GraphVertex,
+            Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndex, GraphVertex,
         },
         search::GraphSearcher,
         wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},

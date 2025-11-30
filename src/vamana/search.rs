@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::graph::{
-    Graph, GraphSearchParams, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
+    Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore, GraphVertex,
 };
 use crate::Neighbor;
 
@@ -78,7 +78,7 @@ impl GraphSearcher {
     pub fn search(
         &mut self,
         query: &[f32],
-        reader: &mut impl GraphVectorIndexReader,
+        reader: &mut impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         self.search_internal(query, |_| true, reader)
@@ -93,7 +93,7 @@ impl GraphSearcher {
         &mut self,
         query: &[f32],
         filter_predicate: impl FnMut(i64) -> bool,
-        reader: &mut impl GraphVectorIndexReader,
+        reader: &mut impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         self.search_internal(query, filter_predicate, reader)
@@ -103,7 +103,7 @@ impl GraphSearcher {
     pub fn search_for_insert(
         &mut self,
         vertex_id: i64,
-        reader: &mut impl GraphVectorIndexReader,
+        reader: &mut impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         // Insertions may be concurrent and there could already be backlinks to this vertex in the graph.
@@ -153,7 +153,7 @@ impl GraphSearcher {
         &mut self,
         query: &[f32],
         filter_predicate: impl FnMut(i64) -> bool,
-        reader: &mut impl GraphVectorIndexReader,
+        reader: &mut impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         let nav_query = reader
             .config()
@@ -181,7 +181,7 @@ impl GraphSearcher {
         nav_query: &dyn QueryVectorDistance,
         mut filter_predicate: impl FnMut(i64) -> bool,
         rerank_query: Option<&dyn QueryVectorDistance>,
-        reader: &mut impl GraphVectorIndexReader,
+        reader: &mut impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         // TODO: come up with a better way of managing re-used state.
         self.candidates.clear();
@@ -374,7 +374,7 @@ mod test {
     use wt_mdb::Result;
 
     use crate::vamana::graph::{
-        Graph, GraphConfig, GraphLayout, GraphVectorIndexReader, GraphVectorStore, GraphVertex,
+        Graph, GraphConfig, GraphLayout, GraphVectorIndex, GraphVectorStore, GraphVertex,
     };
     use crate::Neighbor;
 
@@ -488,7 +488,7 @@ mod test {
     #[derive(Debug)]
     pub struct TestGraphVectorIndexReader<'a>(&'a TestGraphVectorIndex);
 
-    impl GraphVectorIndexReader for TestGraphVectorIndexReader<'_> {
+    impl GraphVectorIndex for TestGraphVectorIndexReader<'_> {
         type Graph<'b>
             = TestGraphAccess<'b>
         where

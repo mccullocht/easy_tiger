@@ -32,7 +32,7 @@ use crate::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     vamana::graph::{
         prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
-        GraphVectorIndexReader, GraphVectorStore, GraphVertex,
+        GraphVectorIndex, GraphVectorStore, GraphVertex,
     },
     vamana::search::GraphSearcher,
     vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
@@ -642,7 +642,7 @@ impl Drop for SessionGuard<'_> {
 
 struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Session);
 
-impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndexReader
+impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
     for BulkLoadGraphVectorIndexReader<'_, '_, D>
 {
     type Graph<'b>

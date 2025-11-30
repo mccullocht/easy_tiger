@@ -24,14 +24,12 @@ pub struct GraphSearchParams {
 
 /// Describes how fields within the vector index are laid out -- split completely or with some
 /// colocated fields.
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum GraphLayout {
     /// Each field appears in its own table.
     #[default]
     Split,
 }
-
 
 impl FromStr for GraphLayout {
     type Err = io::Error;
@@ -76,8 +74,8 @@ pub struct GraphConfig {
     pub index_search_params: GraphSearchParams,
 }
 
-/// `GraphVectorIndexReader` is used to generate objects for graph navigation.
-pub trait GraphVectorIndexReader {
+/// `GraphVectorIndex` is used to generate objects for graph navigation and mutation.
+pub trait GraphVectorIndex {
     type Graph<'a>: Graph + 'a
     where
         Self: 'a;
@@ -167,7 +165,7 @@ pub struct EdgeSetDistanceComputer {
 }
 
 impl EdgeSetDistanceComputer {
-    pub fn new<R: GraphVectorIndexReader>(reader: &R, edges: &[Neighbor]) -> Result<Self> {
+    pub fn new<R: GraphVectorIndex>(reader: &R, edges: &[Neighbor]) -> Result<Self> {
         if reader.config().index_search_params.num_rerank > 0 {
             Self::from_store_and_edges(
                 &mut reader

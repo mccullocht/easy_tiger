@@ -127,20 +127,6 @@ impl<'a> CursorVectorStore<'a> {
             format,
         }
     }
-
-    pub(crate) fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()> {
-        self.inner.set(vertex_id, vector.as_ref())
-    }
-
-    pub(crate) fn remove(&mut self, vertex_id: i64) -> Result<()> {
-        self.inner.remove(vertex_id).or_else(|e| {
-            if e == Error::not_found_error() {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
-    }
 }
 
 impl GraphVectorStore for CursorVectorStore<'_> {
@@ -154,6 +140,18 @@ impl GraphVectorStore for CursorVectorStore<'_> {
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
         Some(unsafe { self.inner.seek_exact_unsafe(vertex_id)? })
+    }
+
+    fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()> {
+        self.inner.set(vertex_id, vector.as_ref())
+    }
+
+    fn remove(&mut self, vertex_id: i64) -> Result<Vec<u8>> {
+        let vector = self
+            .inner
+            .seek_exact(vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?;
+        self.inner.remove(vertex_id).map(|()| vector)
     }
 }
 

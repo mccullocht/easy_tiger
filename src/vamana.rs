@@ -175,6 +175,17 @@ pub trait GraphVectorStore {
     // TODO: consider removing this method as it is _unsafe_ in the event of a rollback.
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>>;
 
+    /// Set the contents of the vector at vertex.
+    ///
+    /// Returns a NOTSUP error if the graph does not support mutation.
+    fn set(&mut self, vertex_id: i64, vector: impl AsRef<[u8]>) -> Result<()>;
+
+    /// Remove the vector at vertex and returns its contents.
+    ///
+    /// Returns a NOTSUP error if the graph does not support mutation.
+    /// May return a NOT_FOUND error if the vertex does not exist.
+    fn remove(&mut self, vertex_id: i64) -> Result<Vec<u8>>;
+
     // TODO: extract many vectors into VecVectorStore.
     // TODO: method to turn self into a QueryVectorDistance wrapper.
 }

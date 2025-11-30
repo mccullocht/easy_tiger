@@ -795,4 +795,12 @@ impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
             }
         }
     }
+
+    fn set(&mut self, _: i64, _: impl AsRef<[u8]>) -> Result<()> {
+        Err(Error::Errno(Errno::NOTSUP))
+    }
+
+    fn remove(&mut self, _: i64) -> Result<Vec<u8>> {
+        Err(Error::Errno(Errno::NOTSUP))
+    }
 }

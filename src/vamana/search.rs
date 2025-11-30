@@ -76,7 +76,7 @@ impl GraphSearcher {
     pub fn search(
         &mut self,
         query: &[f32],
-        reader: &mut impl GraphVectorIndex,
+        reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         self.search_internal(query, |_| true, reader)
@@ -91,7 +91,7 @@ impl GraphSearcher {
         &mut self,
         query: &[f32],
         filter_predicate: impl FnMut(i64) -> bool,
-        reader: &mut impl GraphVectorIndex,
+        reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         self.search_internal(query, filter_predicate, reader)
@@ -101,7 +101,7 @@ impl GraphSearcher {
     pub fn search_for_insert(
         &mut self,
         vertex_id: i64,
-        reader: &mut impl GraphVectorIndex,
+        reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
         // Insertions may be concurrent and there could already be backlinks to this vertex in the graph.
@@ -151,7 +151,7 @@ impl GraphSearcher {
         &mut self,
         query: &[f32],
         filter_predicate: impl FnMut(i64) -> bool,
-        reader: &mut impl GraphVectorIndex,
+        reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         let nav_query = reader
             .config()
@@ -179,7 +179,7 @@ impl GraphSearcher {
         nav_query: &dyn QueryVectorDistance,
         mut filter_predicate: impl FnMut(i64) -> bool,
         rerank_query: Option<&dyn QueryVectorDistance>,
-        reader: &mut impl GraphVectorIndex,
+        reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         // TODO: come up with a better way of managing re-used state.
         self.candidates.clear();

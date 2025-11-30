@@ -1,0 +1,558 @@
+//! Tools for mutating a vamana graph vector index.
+use crate::vamana::{
+    prune_edges, search::GraphSearcher, EdgeSetDistanceComputer, Graph, GraphVectorIndex,
+    GraphVectorStore,
+};
+use crate::Neighbor;
+use vectors::VectorDistance;
+use wt_mdb::{Error, Result};
+
+/// Perform mutations on a graph vector index.
+pub struct GraphMutator {}
+
+impl GraphMutator {
+    /// Create a new mutator.
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    /// Insert a vertex for `vector`. Returns the assigned id.
+    pub fn insert(&mut self, vector: &[f32], index: &impl GraphVectorIndex) -> Result<i64> {
+        // A freshly initialized table might will have the metadata key but no entry point.
+        let vertex_id = index.graph()?.next_available_vertex_id()?;
+        self.insert_internal(vertex_id, vector, index)
+            .map(|_| vertex_id)
+    }
+
+    fn insert_internal(
+        &mut self,
+        vertex_id: i64,
+        vector: &[f32],
+        index: &impl GraphVectorIndex,
+    ) -> Result<()> {
+        // TODO: make this an error instead of panicking.
+        assert_eq!(index.config().dimensions.get(), vector.len());
+
+        let mut searcher = GraphSearcher::new(index.config().index_search_params);
+        let mut candidate_edges = searcher.search(vector, index)?;
+        let mut graph = index.graph()?;
+        if candidate_edges.is_empty() {
+            graph.set_entry_point(vertex_id)?;
+        }
+
+        let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &candidate_edges)?;
+        let selected_len = prune_edges(
+            &mut candidate_edges,
+            index.config().max_edges,
+            edge_set_distance_computer,
+        );
+        candidate_edges.truncate(selected_len);
+
+        graph.set_edges(
+            vertex_id,
+            candidate_edges
+                .iter()
+                .map(|n| n.vertex())
+                .collect::<Vec<_>>(),
+        )?;
+        let mut nav_vectors = index.nav_vectors()?;
+        nav_vectors.set(vertex_id, nav_vectors.new_coder().encode(vector))?;
+        if let Some(vectors) = index.rerank_vectors() {
+            let mut vectors = vectors?;
+            vectors.set(vertex_id, vectors.new_coder().encode(vector))?;
+        }
+
+        let mut vectors = index.high_fidelity_vectors()?;
+        let distance_fn = vectors.new_distance_function();
+        let mut pruned_edges = vec![];
+        for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
+            self.insert_edge(
+                index,
+                &mut graph,
+                &mut vectors,
+                distance_fn.as_ref(),
+                src_vertex_id,
+                vertex_id,
+                &mut pruned_edges,
+            )?;
+        }
+
+        for (src_vertex_id, dst_vertex_id) in pruned_edges {
+            self.remove_edge(&mut graph, src_vertex_id, dst_vertex_id)?;
+        }
+
+        Ok(())
+    }
+
+    /// returns true if the edge already exists or was inserted successfully.
+    fn insert_edge(
+        &self,
+        index: &impl GraphVectorIndex,
+        graph: &mut impl Graph,
+        vectors: &mut impl GraphVectorStore,
+        distance_fn: &dyn VectorDistance,
+        src_vertex_id: i64,
+        dst_vertex_id: i64,
+        pruned_edges: &mut Vec<(i64, i64)>,
+    ) -> Result<bool> {
+        let mut edges = graph
+            .edges(src_vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?
+            .collect::<Vec<_>>();
+        if edges.contains(&dst_vertex_id) {
+            return Ok(true); // edge already exists.
+        }
+        edges.push(dst_vertex_id);
+        edges.sort_unstable();
+        let inserted = if edges.len() <= index.config().max_edges.get() {
+            true
+        } else {
+            let src_vector = vectors
+                .get(src_vertex_id)
+                .expect("row exists")
+                .map(|v| v.to_vec())?;
+            let mut neighbors = edges
+                .iter()
+                .map(|e| {
+                    vectors
+                        .get(*e)
+                        .unwrap_or(Err(Error::not_found_error()))
+                        .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, dst)))
+                })
+                .collect::<Result<Vec<Neighbor>>>()?;
+            neighbors.sort();
+            let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &neighbors)?;
+            let selected_len = prune_edges(
+                &mut neighbors,
+                index.config().max_edges,
+                edge_set_distance_computer,
+            );
+            // Ensure the graph is undirected by removing links from pruned edges back to this node.
+            for v in neighbors.iter().skip(selected_len).map(Neighbor::vertex) {
+                pruned_edges.push((v, src_vertex_id))
+            }
+            edges.clear();
+            edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
+            edges.contains(&dst_vertex_id)
+        };
+        graph.set_edges(src_vertex_id, edges).map(|()| inserted)
+    }
+
+    fn remove_edge(
+        &self,
+        graph: &mut impl Graph,
+        src_vertex_id: i64,
+        dst_vertex_id: i64,
+    ) -> Result<()> {
+        let edges = graph
+            .edges(src_vertex_id)
+            .unwrap_or(Err(Error::not_found_error()))?
+            .filter(|v| *v != dst_vertex_id)
+            .collect::<Vec<_>>();
+        graph.set_edges(src_vertex_id, edges)
+    }
+
+    /// Delete `vertex_id`, removing both the vertex and any incoming edges.
+    pub fn delete(&mut self, vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
+        let mut graph = index.graph()?;
+        let mut vectors = index.high_fidelity_vectors()?;
+        let distance_fn = vectors.new_distance_function();
+
+        // XXX
+        // TODO: unified graph index writer trait to handles removal and other mutations.
+        let edges = graph.remove_vertex(vertex_id)?;
+        let vector = vectors
+            .get(vertex_id)
+            .expect("row exists")
+            .map(|v| v.to_vec())?;
+        index.nav_vectors()?.remove(vertex_id)?;
+        if let Some(vectors) = index.rerank_vectors() {
+            vectors?.remove(vertex_id)?;
+        }
+        for e in edges.iter() {
+            self.remove_edge(&mut graph, *e, vertex_id)?;
+        }
+
+        // Cache information about each vertex linked to vertex_id.
+        // Remove any links back to vertex_id.
+        let vertex_data = edges
+            .into_iter()
+            .map(|e| {
+                graph
+                    .edges(e)
+                    .unwrap_or(Err(Error::not_found_error()))
+                    .map(|edges| {
+                        let vector = vectors.get(e).expect("row exists").map(|rv| rv.to_vec());
+                        vector.map(|rv| {
+                            (e, rv, edges.filter(|d| *d != vertex_id).collect::<Vec<_>>())
+                        })
+                    })
+            })
+            .collect::<Result<Result<Vec<_>>>>()??;
+
+        // Create links between edges of the deleted node if needed.
+        self.cross_link_peer_vertices(
+            index,
+            &mut graph,
+            &mut vectors,
+            &vertex_data,
+            distance_fn.as_ref(),
+        )?;
+
+        // Oh no, we've deleted the entry point! Find the closes point amongst the
+        // edges of this node to use as a new one. So long as at least one vector is in
+        // the index it will be safe to unwrap() entry_point() here.
+        if graph.entry_point().unwrap()? == vertex_id {
+            let mut neighbors = vertex_data
+                .iter()
+                .map(|(id, vec, _)| Neighbor::new(*id, distance_fn.distance(&vector, vec)))
+                .collect::<Vec<_>>();
+            neighbors.sort();
+            if let Some(ep_neighbor) = neighbors.first() {
+                graph.set_entry_point(ep_neighbor.vertex())?
+            } else {
+                graph.remove_entry_point()?
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cross_link_peer_vertices(
+        &self,
+        index: &impl GraphVectorIndex,
+        graph: &mut impl Graph,
+        vectors: &mut impl GraphVectorStore,
+        vertex_data: &[(i64, Vec<u8>, Vec<i64>)],
+        distance_fn: &dyn VectorDistance,
+    ) -> Result<()> {
+        // Compute the distance between each pair of edges and insert symmetrical links.
+        let mut edge_scores = vec![vec![]; vertex_data.len()];
+        for (i, (src_vertex_id, src_vector, _)) in vertex_data.iter().enumerate() {
+            for (j, (dst_vertex_id, dst_vector, _)) in vertex_data.iter().enumerate().skip(i + 1) {
+                let dist = distance_fn.distance(src_vector, dst_vector);
+                edge_scores[i].push(Neighbor::new(*dst_vertex_id, dist));
+                edge_scores[j].push(Neighbor::new(*src_vertex_id, dist));
+            }
+        }
+
+        // Take the list of scored edges and truncate to 50% of max_edges, then filter out all of
+        // the edges that already exist in the graph based on vertex_data. The rest we will attempt
+        // to insert symmetrically to maintain an undirected graph.
+        let relink_edges = index.config().max_edges.get().max(2) / 2;
+        for (current_edges, scored_edges) in vertex_data
+            .iter()
+            .map(|(_, _, e)| e)
+            .zip(edge_scores.iter_mut())
+        {
+            scored_edges.sort_unstable();
+            scored_edges.truncate(relink_edges);
+            scored_edges.retain(|n| !current_edges.contains(&n.vertex()));
+        }
+
+        let mut pruned_edges = vec![];
+        for (src_vertex_id, mut edge_scores) in
+            vertex_data.iter().map(|v| v.0).zip(edge_scores.into_iter())
+        {
+            edge_scores.sort_unstable();
+            for dst_vertex_id in edge_scores
+                .into_iter()
+                .take(relink_edges)
+                .map(|n| n.vertex())
+            {
+                // Insert edge symmetrically. If the first edge insertion succeeds and the symmetric
+                // edge insertion fails, then remove the edge to ensure the graph is undirected.
+                if self.insert_edge(
+                    index,
+                    graph,
+                    vectors,
+                    distance_fn,
+                    src_vertex_id,
+                    dst_vertex_id,
+                    &mut pruned_edges,
+                )? && !self.insert_edge(
+                    index,
+                    graph,
+                    vectors,
+                    distance_fn,
+                    dst_vertex_id,
+                    src_vertex_id,
+                    &mut pruned_edges,
+                )? {
+                    self.remove_edge(graph, src_vertex_id, dst_vertex_id)?;
+                }
+            }
+
+            // Remove all back edges removed by the insertions above.
+            for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
+                self.remove_edge(graph, src_vertex_id, dst_vertex_id)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update the contents of `vertex_id` with `vector`.
+    pub fn update(
+        &mut self,
+        vertex_id: i64,
+        vector: &[f32],
+        index: &impl GraphVectorIndex,
+    ) -> Result<()> {
+        // TODO: a non-trivial implementation might perform the search like during insert
+        // and skip edge updates if the edge set is identical or nearly identical.
+        self.delete(vertex_id, index)?;
+        self.insert_internal(vertex_id, vector, index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{num::NonZero, sync::Arc};
+
+    use vectors::{F32VectorCoding, VectorSimilarity};
+    use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
+
+    use crate::vamana::{
+        search::GraphSearcher,
+        wt::{SessionGraphVectorIndexReader, TableGraphVectorIndex},
+        Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndex,
+    };
+
+    use super::GraphMutator;
+
+    struct Fixture {
+        index: Arc<TableGraphVectorIndex>,
+        conn: Arc<Connection>,
+        // XXX fix the name
+        wt_index: SessionGraphVectorIndexReader,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Fixture {
+        fn search_params() -> GraphSearchParams {
+            GraphSearchParams {
+                beam_width: NonZero::new(16).unwrap(),
+                num_rerank: 16,
+            }
+        }
+
+        fn new_reader(&self) -> SessionGraphVectorIndexReader {
+            SessionGraphVectorIndexReader::new(
+                self.index.clone(),
+                self.conn.open_session().unwrap(),
+            )
+        }
+
+        fn insert_many(&self, vectors: &[[f32; 2]]) -> Result<Vec<i64>> {
+            let mut mutator = GraphMutator::new();
+            vectors
+                .iter()
+                .map(|v| mutator.insert(v.as_ref(), &self.wt_index))
+                .collect::<Result<Vec<_>>>()
+        }
+
+        fn search(&self, query: &[f32]) -> Result<Vec<i64>> {
+            let mut searcher = GraphSearcher::new(Self::search_params());
+            let mut reader = self.new_reader();
+            searcher
+                .search(query, &mut reader)
+                .map(|neighbors| neighbors.into_iter().map(|n| n.vertex()).collect())
+        }
+    }
+
+    impl Default for Fixture {
+        fn default() -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let conn = Connection::open(
+                dir.path().to_str().unwrap(),
+                Some(ConnectionOptionsBuilder::default().create().into()),
+            )
+            .unwrap();
+            let index = Arc::new(
+                TableGraphVectorIndex::init_index(
+                    &conn,
+                    GraphConfig {
+                        dimensions: NonZero::new(2).unwrap(),
+                        similarity: VectorSimilarity::Euclidean,
+                        nav_format: F32VectorCoding::BinaryQuantized,
+                        rerank_format: Some(F32VectorCoding::F32),
+                        layout: GraphLayout::Split,
+                        max_edges: NonZero::new(4).unwrap(),
+                        index_search_params: Self::search_params(),
+                    },
+                    "test",
+                )
+                .unwrap(),
+            );
+            let wt_index =
+                SessionGraphVectorIndexReader::new(index.clone(), conn.open_session().unwrap());
+            Self {
+                _dir: dir,
+                conn,
+                index,
+                wt_index,
+            }
+        }
+    }
+
+    #[test]
+    fn empty_graph() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let mut reader = fixture.new_reader();
+        assert_eq!(reader.graph()?.entry_point(), None);
+        let mut searcher = GraphSearcher::new(Fixture::search_params());
+        assert_eq!(searcher.search(&[0.5, -0.5], &mut reader), Ok(vec![]));
+        Ok(())
+    }
+
+    #[test]
+    fn insert_one() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let mut mutator = GraphMutator::new();
+        let id = mutator.insert(&[0.0, 0.0], &fixture.wt_index)?;
+        assert_eq!(id, 0);
+        assert_eq!(fixture.new_reader().graph()?.entry_point(), Some(Ok(id)));
+        assert_eq!(fixture.search(&[1.0, 1.0]), Ok(vec![id]));
+        Ok(())
+    }
+
+    #[test]
+    fn insert_two() -> Result<()> {
+        let fixture = Fixture::default();
+
+        fixture.insert_many(&[[0.0, 0.0], [0.5, 0.5]])?;
+        assert_eq!(fixture.search(&[1.0, 1.0]), Ok(vec![1, 0]));
+        Ok(())
+    }
+
+    // Insert enough vectors that we have to prune the edge list for the entry point.
+    #[test]
+    fn insert_to_prune() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let vertex_ids = fixture.insert_many(&[
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.1],
+            [0.1, -0.1],
+            [-0.2, -0.2],
+            [-0.1, -0.1],
+        ])?;
+
+        let reader = &fixture.wt_index;
+        let mut graph = reader.graph()?;
+        assert_eq!(
+            graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>(),
+            &[1, 2, 3, 5]
+        );
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_one() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let vertex_ids = fixture.insert_many(&[[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])?;
+        GraphMutator::new().delete(vertex_ids[1], &fixture.wt_index)?;
+        assert_eq!(
+            fixture.search(&[0.0, 0.0])?,
+            vertex_ids
+                .iter()
+                .copied()
+                .filter(|i| *i != vertex_ids[1])
+                .collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
+
+    // Delete an edge
+    #[test]
+    fn delete_relink() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let vertex_ids = fixture.insert_many(&[
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.1],
+            [0.1, -0.1],
+            [-0.2, -0.2],
+            [-0.1, -0.1],
+        ])?;
+
+        let reader = fixture.new_reader();
+        let mut graph = reader.graph()?;
+        assert_eq!(
+            graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>(),
+            &[1, 2, 3, 5]
+        );
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
+
+        GraphMutator::new().delete(1, &fixture.wt_index)?;
+        let reader = fixture.new_reader();
+        let mut graph = reader.graph()?;
+        assert_eq!(
+            graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>(),
+            &[2, 3, 5]
+        );
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 2, 3, 5, 4]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_entry_point() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let mut mutator = GraphMutator::new();
+        let entry_id = mutator.insert(&[0.0, 0.0], &fixture.wt_index)?;
+        let next_entry_id = mutator.insert(&[0.5, 0.5], &fixture.wt_index)?;
+        mutator.insert(&[1.0, 1.0], &fixture.wt_index)?;
+
+        mutator.delete(entry_id, &fixture.wt_index)?;
+        assert_eq!(
+            fixture.new_reader().graph()?.entry_point(),
+            Some(Ok(next_entry_id))
+        );
+        assert_eq!(fixture.search(&[0.0, 0.0])?, vec![1, 2]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn delete_only_point() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let mut mutator = GraphMutator::new();
+        let id = mutator.insert(&[0.0, 0.0], &fixture.wt_index)?;
+        assert_eq!(fixture.search(&[0.0, 0.0])?, vec![id]);
+        mutator.delete(id, &fixture.wt_index)?;
+        assert_eq!(fixture.search(&[0.0, 0.0])?, Vec::<i64>::new());
+
+        Ok(())
+    }
+
+    #[test]
+    fn update() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let vertex_ids = fixture.insert_many(&[
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.1],
+            [0.1, -0.1],
+            [-0.2, -0.2],
+            [-0.1, -0.1],
+        ])?;
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
+        GraphMutator::new().update(vertex_ids[0], &[1.0, 1.0], &fixture.wt_index)?;
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![1, 2, 3, 5, 4, 0]));
+
+        Ok(())
+    }
+}

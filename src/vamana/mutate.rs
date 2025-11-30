@@ -8,12 +8,12 @@ use vectors::VectorDistance;
 use wt_mdb::{Error, Result};
 
 /// Perform mutations on a graph vector index.
-pub struct GraphMutator {}
+pub struct GraphMutator;
 
 impl GraphMutator {
     /// Create a new mutator.
     pub fn new() -> Self {
-        Self {}
+        Self
     }
 
     /// Insert a vertex for `vector`. Returns the assigned id.
@@ -85,6 +85,7 @@ impl GraphMutator {
     }
 
     /// returns true if the edge already exists or was inserted successfully.
+    #[allow(clippy::too_many_arguments)]
     fn insert_edge(
         &self,
         index: &impl GraphVectorIndex,
@@ -301,6 +302,12 @@ impl GraphMutator {
         // and skip edge updates if the edge set is identical or nearly identical.
         self.delete(vertex_id, index)?;
         self.insert_internal(vertex_id, vector, index)
+    }
+}
+
+impl Default for GraphMutator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

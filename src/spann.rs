@@ -309,7 +309,7 @@ impl SessionIndexWriter {
     pub fn upsert(&mut self, record_id: i64, vector: &[f32]) -> Result<Vec<u32>> {
         let candidates = self
             .head_searcher
-            .search(vector.as_ref(), &mut self.head_reader)?;
+            .search(vector.as_ref(), &self.head_reader)?;
         let centroid_ids = select_centroids(
             self.index.config.replica_selection,
             self.index.config.replica_count,

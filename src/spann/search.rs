@@ -204,7 +204,7 @@ impl Searcher {
     ) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 
-        let mut centroids = self.head_searcher.search(query, &mut reader.head_reader)?;
+        let mut centroids = self.head_searcher.search(query, &reader.head_reader)?;
         self.stats.head = self.head_searcher.stats();
         if centroids.is_empty() {
             return Ok(vec![]);

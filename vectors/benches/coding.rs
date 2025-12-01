@@ -26,6 +26,13 @@ fn benchmark_coding(
     c.bench_function(&id, |b| {
         b.iter(|| coder.encode_to(&vector, std::hint::black_box(&mut out)))
     });
+
+    if similarity.unwrap_or(VectorSimilarity::Dot) == VectorSimilarity::Dot {
+        let mut decoded = vec![0f32; vector.len()];
+        c.bench_function(&format!("{format}/decode"), |b| {
+            b.iter(|| coder.decode_to(&out, std::hint::black_box(&mut decoded)))
+        });
+    }
 }
 
 fn float32_benchmarks(c: &mut Criterion) {

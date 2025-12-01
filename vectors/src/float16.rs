@@ -45,6 +45,7 @@ impl Default for InstructionSet {
 #[cfg(target_arch = "aarch64")]
 unsafe extern "C" {
     unsafe fn et_serialize_f16(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
+    unsafe fn et_deserialize_f16(v: *const u16, len: usize, out: *mut f32);
 
     unsafe fn et_dot_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
     unsafe fn et_dot_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
@@ -137,8 +138,26 @@ impl F32VectorCoder for VectorCoder {
     }
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
-        for (d, o) in f16_iter(encoded).zip(out.iter_mut()) {
-            *o = d.to_f32();
+        match self.1 {
+            InstructionSet::Scalar => {
+                for (d, o) in f16_iter(encoded).zip(out.iter_mut()) {
+                    *o = d.to_f32();
+                }
+            }
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => unsafe {
+                et_deserialize_f16(
+                    encoded.as_ptr() as *const u16,
+                    encoded.len() / 2,
+                    out.as_mut_ptr(),
+                )
+            },
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::AvxF16c => unsafe {
+                for (d, o) in f16_iter(encoded).zip(out.iter_mut()) {
+                    *o = d.to_f32();
+                }
+            },
         }
     }
 

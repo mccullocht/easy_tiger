@@ -422,6 +422,41 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     }
 }
 
+pub fn lvq2_decode<const B1: usize, const B2: usize>(
+    v: &TwoLevelVector<'_, B1, B2>,
+    out: &mut [f32],
+) {
+    let tail_split = out.len() & !7;
+
+    let (in_l1_head, _) = v.primary.v.data.split_at(packing::byte_len(tail_split, B1));
+    let (in_l2_head, _) = v.residual.data.split_at(packing::byte_len(tail_split, B2));
+    let (out_head, out_tail) = out.split_at_mut(tail_split);
+
+    if !in_l1_head.is_empty() {
+        unsafe {
+            let converter = LVQ2F32Converter::from_vector(v);
+            for i in (0..tail_split).step_by(8) {
+                let d = unpack_lvq2::<B1, B2>(i, in_l1_head, in_l2_head);
+                vst1q_f32(out_head.as_mut_ptr().add(i), converter.unpacked_to_f32(d.0));
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 4),
+                    converter.unpacked_to_f32(d.1),
+                );
+            }
+        }
+    }
+
+    if !out_tail.is_empty() {
+        for (d, o) in v
+            .f32_iter()
+            .skip(tail_split)
+            .zip(out_tail.iter_mut().skip(tail_split))
+        {
+            *o = d;
+        }
+    }
+}
+
 #[inline(always)]
 unsafe fn quantize4(
     v: float32x4_t,

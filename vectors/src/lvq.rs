@@ -364,8 +364,9 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         self.primary
             .f32_iter()
             .zip(
-                packing::unpack_iter::<B2>(self.residual.data)
-                    .map(|r| r as f32 * self.residual.terms.delta + self.residual.terms.lower),
+                packing::unpack_iter::<B2>(self.residual.data).map(|r| {
+                    (r as f32).mul_add(self.residual.terms.delta, self.residual.terms.lower)
+                }),
             )
             .map(|(q, r)| q + r)
     }
@@ -556,12 +557,14 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
     }
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
-        for (d, o) in TwoLevelVector::<B1, B2>::new(encoded)
-            .expect("valid vector")
-            .f32_iter()
-            .zip(out.iter_mut())
-        {
-            *o = d;
+        let v = TwoLevelVector::<B1, B2>::new(encoded).expect("valid vector");
+        match self.0 {
+            InstructionSet::Scalar => scalar::lvq2_decode::<B1, B2>(&v, out),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::lvq2_decode::<B1, B2>(&v, out),
+            #[cfg(target_arch = "x86_64")]
+            // XXX FIXME
+            InstructionSet::Avx512 => unsafe { scalar::lvq2_decode::<B1, B2>(&v, out) },
         }
     }
 

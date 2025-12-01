@@ -318,7 +318,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
 
     fn f32_iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
         packing::unpack_iter::<B>(self.v.data)
-            .map(|q| q as f32 * self.v.terms.delta + self.v.terms.lower)
+            .map(|q| (q as f32).mul_add(self.v.terms.delta, self.v.terms.lower))
     }
 }
 
@@ -431,12 +431,16 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
     }
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
-        for (d, o) in PrimaryVector::<B>::new(encoded)
-            .expect("valid vector")
-            .f32_iter()
-            .zip(out.iter_mut())
-        {
-            *o = d;
+        let v = PrimaryVector::<B>::new(encoded).expect("valid vector");
+        match self.0 {
+            InstructionSet::Scalar => scalar::lvq1_decode::<B>(&v, out),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::lvq1_decode::<B>(&v, out),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                // XXX FIXME
+                scalar::lvq1_decode_avx512::<B>(&v, out)
+            },
         }
     }
 

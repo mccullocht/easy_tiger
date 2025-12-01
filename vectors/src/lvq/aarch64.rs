@@ -12,7 +12,7 @@ use std::arch::aarch64::{
     vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
     vmulq_f32, vmulq_f64, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8, vreinterpretq_u8_u32,
     vreinterpretq_u32_u8, vrndaq_f32, vshl_u8, vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64,
-    vst1q_u8, vsubq_f32, vsubq_f64,
+    vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats, packing};
@@ -269,6 +269,37 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
             + super::scalar::lvq1_quantize_and_pack::<B>(&v[tail_split..], lower, upper, tail)
     } else {
         component_sum
+    }
+}
+
+pub fn lvq1_decode<const B: usize>(v: &PrimaryVector<B>, out: &mut [f32]) {
+    let tail_split = out.len() & !7;
+    let (in_head, in_tail) = v.v.data.split_at(packing::byte_len(tail_split, B));
+    let (out_head, out_tail) = out.split_at_mut(tail_split);
+
+    // TODO: consider unrolling more, since up to 4 independent accumulators seems to help.
+    if !in_head.is_empty() {
+        unsafe {
+            let converter = LVQ1F32Converter::from_vector(v);
+            for i in (0..tail_split).step_by(8) {
+                let d = unpack::<B>(i, in_head);
+                vst1q_f32(out_head.as_mut_ptr().add(i), converter.unpacked_to_f32(d.0));
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 4),
+                    converter.unpacked_to_f32(d.1),
+                );
+            }
+        }
+    }
+
+    if !in_tail.is_empty() {
+        for (d, o) in v
+            .f32_iter()
+            .skip(tail_split)
+            .zip(out_tail.iter_mut().skip(tail_split))
+        {
+            *o = d;
+        }
     }
 }
 

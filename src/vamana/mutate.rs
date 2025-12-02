@@ -321,7 +321,7 @@ mod tests {
     use crate::vamana::{
         search::GraphSearcher,
         wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
-        Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndex,
+        Graph, GraphConfig, GraphSearchParams, GraphVectorIndex,
     };
 
     use super::GraphMutator;
@@ -378,7 +378,6 @@ mod tests {
                         similarity: VectorSimilarity::Euclidean,
                         nav_format: F32VectorCoding::BinaryQuantized,
                         rerank_format: Some(F32VectorCoding::F32),
-                        layout: GraphLayout::Split,
                         max_edges: NonZero::new(4).unwrap(),
                         index_search_params: Self::search_params(),
                     },

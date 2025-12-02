@@ -6,7 +6,7 @@ pub mod mutate;
 pub mod search;
 pub mod wt;
 
-use std::{collections::BTreeSet, io, num::NonZero, str::FromStr};
+use std::{collections::BTreeSet, num::NonZero};
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -23,29 +23,6 @@ pub struct GraphSearchParams {
     pub beam_width: NonZero<usize>,
     /// Number of results to re-rank using the vectors in the graph.
     pub num_rerank: usize,
-}
-
-/// Describes how fields within the vector index are laid out -- split completely or with some
-/// colocated fields.
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub enum GraphLayout {
-    /// Each field appears in its own table.
-    #[default]
-    Split,
-}
-
-impl FromStr for GraphLayout {
-    type Err = io::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "split" => Ok(Self::Split),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Unknown graph layout {s}"),
-            )),
-        }
-    }
 }
 
 /// Configuration describing graph shape and construction. Used to read and mutate the graph.
@@ -70,7 +47,6 @@ pub struct GraphConfig {
     /// ~O(num_candidates) query distances. If this format is quantized you should typically choose
     /// a high fidelity quantization function.
     pub rerank_format: Option<F32VectorCoding>,
-    pub layout: GraphLayout,
     /// Maximum number of edges at each vertex.
     pub max_edges: NonZero<usize>,
     /// Search parameters to use during graph construction.

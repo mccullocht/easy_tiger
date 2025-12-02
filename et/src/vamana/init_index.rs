@@ -3,7 +3,7 @@ use std::{io, num::NonZero, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     vamana::wt::TableGraphVectorIndex,
-    vamana::{GraphConfig, GraphLayout, GraphSearchParams},
+    vamana::{GraphConfig, GraphSearchParams},
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;
@@ -24,10 +24,6 @@ pub struct InitIndexArgs {
     /// Vector coding to use for rerank vectors.
     #[arg(long, value_enum, default_value = "f32")]
     rerank_format: Option<F32VectorCoding>,
-
-    /// Physical layout used for graph.
-    #[arg(long, value_enum, default_value = "split")]
-    layout: GraphLayout,
 
     /// Maximum number of edges for any vertex.
     #[arg(long, default_value = "64")]
@@ -76,7 +72,6 @@ pub fn init_index(
             similarity: args.similarity,
             nav_format: args.nav_format,
             rerank_format: args.rerank_format,
-            layout: args.layout,
             max_edges: args.max_edges,
             index_search_params: GraphSearchParams {
                 beam_width: args.edge_candidates,

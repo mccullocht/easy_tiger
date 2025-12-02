@@ -5,7 +5,7 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::bulk::{BulkLoadBuilder, Options},
     vamana::wt::TableGraphVectorIndex,
-    vamana::{GraphConfig, GraphLayout, GraphSearchParams},
+    vamana::{GraphConfig, GraphSearchParams},
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, Result, Session};
@@ -31,9 +31,6 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     rerank_format: Option<F32VectorCoding>,
 
-    /// Physical layout used for graph.
-    #[arg(long, value_enum, default_value = "split")]
-    layout: GraphLayout,
     /// If true, load all quantized vectors into a trivial memory store for bulk loading.
     /// This can be significantly faster than reading these values from WiredTiger.
     #[arg(long, default_value_t = true)]
@@ -87,7 +84,6 @@ pub fn bulk_load(
         similarity: args.similarity,
         nav_format: args.nav_format,
         rerank_format: args.rerank_format,
-        layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,

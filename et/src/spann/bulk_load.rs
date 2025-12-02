@@ -12,7 +12,7 @@ use easy_tiger::{
     },
     vamana::{
         bulk::{self, BulkLoadBuilder},
-        {GraphConfig, GraphLayout, GraphSearchParams},
+        {GraphConfig, GraphSearchParams},
     },
 };
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
@@ -38,10 +38,6 @@ pub struct BulkLoadArgs {
     /// Encoding used for rerank vectors in the head index.
     #[arg(long)]
     head_rerank_format: Option<F32VectorCoding>,
-
-    /// Physical layout used for the head graph.
-    #[arg(long, value_enum, default_value = "split")]
-    layout: GraphLayout,
 
     /// Maximum number of edges for any vertex.
     #[arg(short, long, default_value = "32")]
@@ -135,7 +131,6 @@ pub fn bulk_load(
         similarity: args.similarity,
         nav_format: args.head_nav_format,
         rerank_format: args.head_rerank_format,
-        layout: args.layout,
         max_edges: args.max_edges,
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,

@@ -25,6 +25,40 @@ pub struct GraphSearchParams {
     pub num_rerank: usize,
 }
 
+/// Configuration describing edge pruning policy for a graph index.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct EdgePruningConfig {
+    /// Number of edges to keep for each vertex.
+    pub max_edges: NonZero<usize>,
+    /// Maximum alpha value to use for edge pruning.
+    ///
+    /// Larger values result in retain longer edges while still saying below `max_edges`.
+    ///
+    /// Must be >= 1.0. Default value is 1.2.
+    pub max_alpha: f64,
+    /// Alpha value scaling factor.
+    ///
+    /// This is the rate at which we scale from an alpha value of 1.0 up to `max_alpha`. Slowly
+    /// scaling up the alpha value gives preference to shorter edges, but may result in more
+    /// iterations in pruning.
+    ///
+    /// Must be >= 1.0. Default value is 1.2.
+    pub alpha_scale: f64,
+}
+
+impl EdgePruningConfig {
+    pub const DEFAULT_MAX_ALPHA: f64 = 1.2;
+    pub const DEFAULT_ALPHA_SCALE: f64 = 1.2;
+
+    pub fn new(max_edges: NonZero<usize>) -> Self {
+        Self {
+            max_edges,
+            max_alpha: Self::DEFAULT_MAX_ALPHA,
+            alpha_scale: Self::DEFAULT_ALPHA_SCALE,
+        }
+    }
+}
+
 /// Configuration describing graph shape and construction. Used to read and mutate the graph.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct GraphConfig {
@@ -47,9 +81,13 @@ pub struct GraphConfig {
     /// ~O(num_candidates) query distances. If this format is quantized you should typically choose
     /// a high fidelity quantization function.
     pub rerank_format: Option<F32VectorCoding>,
-    /// Maximum number of edges at each vertex.
-    pub max_edges: NonZero<usize>,
+    /// Edge pruning configuration.
+    ///
+    /// This controls how many edges are placed on each vertex and how they are selected.
+    pub pruning: EdgePruningConfig,
     /// Search parameters to use during graph construction.
+    ///
+    /// This dictates the set of candidate edges provided to pruning.
     pub index_search_params: GraphSearchParams,
 }
 

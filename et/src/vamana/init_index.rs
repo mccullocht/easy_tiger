@@ -1,9 +1,8 @@
 use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
-use easy_tiger::{
-    vamana::wt::TableGraphVectorIndex,
-    vamana::{GraphConfig, GraphSearchParams},
+use easy_tiger::vamana::{
+    wt::TableGraphVectorIndex, EdgePruningConfig, GraphConfig, GraphSearchParams,
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;
@@ -72,7 +71,7 @@ pub fn init_index(
             similarity: args.similarity,
             nav_format: args.nav_format,
             rerank_format: args.rerank_format,
-            max_edges: args.max_edges,
+            pruning: EdgePruningConfig::new(args.max_edges),
             index_search_params: GraphSearchParams {
                 beam_width: args.edge_candidates,
                 num_rerank: args

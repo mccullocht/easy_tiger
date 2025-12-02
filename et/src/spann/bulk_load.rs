@@ -12,7 +12,7 @@ use easy_tiger::{
     },
     vamana::{
         bulk::{self, BulkLoadBuilder},
-        {GraphConfig, GraphSearchParams},
+        EdgePruningConfig, GraphConfig, GraphSearchParams,
     },
 };
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
@@ -131,7 +131,7 @@ pub fn bulk_load(
         similarity: args.similarity,
         nav_format: args.head_nav_format,
         rerank_format: args.head_rerank_format,
-        max_edges: args.max_edges,
+        pruning: EdgePruningConfig::new(args.max_edges),
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,
             num_rerank: args

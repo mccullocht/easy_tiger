@@ -3,9 +3,11 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
-    vamana::bulk::{BulkLoadBuilder, Options},
-    vamana::wt::TableGraphVectorIndex,
-    vamana::{GraphConfig, GraphSearchParams},
+    vamana::{
+        bulk::{BulkLoadBuilder, Options},
+        wt::TableGraphVectorIndex,
+        EdgePruningConfig, GraphConfig, GraphSearchParams,
+    },
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, Result, Session};
@@ -84,7 +86,7 @@ pub fn bulk_load(
         similarity: args.similarity,
         nav_format: args.nav_format,
         rerank_format: args.rerank_format,
-        max_edges: args.max_edges,
+        pruning: EdgePruningConfig::new(args.max_edges),
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,
             num_rerank: args

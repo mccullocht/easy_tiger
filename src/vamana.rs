@@ -278,7 +278,8 @@ fn select_pruned_edges(
     // TODO: replace with a fixed length bitset
     let mut selected = BTreeSet::new();
     selected.insert(0); // we always keep the first node.
-    for alpha in [1.0, 1.2] {
+    let mut alpha = 1.0;
+    while alpha <= config.max_alpha {
         for (i, e) in edges.iter().enumerate().skip(1) {
             if selected.contains(&i) {
                 continue;
@@ -299,6 +300,8 @@ fn select_pruned_edges(
         if selected.len() >= config.max_edges.get() {
             break;
         }
+
+        alpha *= config.alpha_scale;
     }
 
     selected

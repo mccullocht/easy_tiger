@@ -131,6 +131,7 @@ pub fn bulk_load(
         similarity: args.similarity,
         nav_format: args.head_nav_format,
         rerank_format: args.head_rerank_format,
+        // XXX alpha config flags.
         pruning: EdgePruningConfig::new(args.max_edges),
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,

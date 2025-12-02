@@ -262,10 +262,9 @@ impl EdgeSetDistanceComputer {
 /// `graph` is used to access vectors and `distance_fn` is used to compare vectors when making pruning
 /// decisions.
 /// REQUIRES: `edges.is_sorted()`.
-// TODO: alpha value(s) should be tuneable.
 fn select_pruned_edges(
     edges: &[Neighbor],
-    max_edges: NonZero<usize>,
+    config: &EdgePruningConfig,
     edge_distance_computer: EdgeSetDistanceComputer,
 ) -> BTreeSet<usize> {
     if edges.is_empty() {
@@ -273,6 +272,8 @@ fn select_pruned_edges(
     }
 
     debug_assert!(edges.is_sorted());
+
+    // XXX use alpha value.
 
     // TODO: replace with a fixed length bitset
     let mut selected = BTreeSet::new();
@@ -289,13 +290,13 @@ fn select_pruned_edges(
                 .any(|s| edge_distance_computer.distance(i, *s) < e.distance * alpha)
             {
                 selected.insert(i);
-                if selected.len() >= max_edges.get() {
+                if selected.len() >= config.max_edges.get() {
                     break;
                 }
             }
         }
 
-        if selected.len() >= max_edges.get() {
+        if selected.len() >= config.max_edges.get() {
             break;
         }
     }
@@ -306,13 +307,12 @@ fn select_pruned_edges(
 /// Prune `edges` down to at most `max_edges`. Use `graph` and `distance_fn` to inform this decision.
 /// Returns a split point: all edges before that point are selected, all after are to be dropped.
 /// REQUIRES: `edges.is_sorted()`.
-// TODO: alpha value(s) should be tuneable.
 fn prune_edges(
     edges: &mut [Neighbor],
-    max_edges: NonZero<usize>,
+    config: &EdgePruningConfig,
     edge_distance_computer: EdgeSetDistanceComputer,
 ) -> usize {
-    let selected = select_pruned_edges(edges, max_edges, edge_distance_computer);
+    let selected = select_pruned_edges(edges, config, edge_distance_computer);
     // Partition edges into selected and unselected.
     for (i, j) in selected.iter().enumerate() {
         edges.swap(i, *j);

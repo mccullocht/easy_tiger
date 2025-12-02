@@ -457,8 +457,7 @@ where
         let edge_set_distance_computer = EdgeSetDistanceComputer::new(reader, &candidates)?;
         let split = prune_edges(
             &mut candidates,
-            // XXX pass whole config to pruning function.
-            self.index.config().pruning.max_edges,
+            &self.index.config().pruning,
             edge_set_distance_computer,
         );
         candidates.truncate(split);
@@ -539,10 +538,10 @@ where
         apply_mu: &Mutex<T>,
     ) -> Result<()> {
         // Get the set of edges to prune while only holding a read lock on the vertex.
-        let max_edges = self.index.config().pruning.max_edges;
+        let config = &self.index.config().pruning;
         let pruned_edges = {
             let v = self.graph[vertex].read().unwrap();
-            if v.len() > max_edges.get() {
+            if v.len() > config.max_edges.get() {
                 // We copy the contents of the graph because they need to be sorted to prune.
                 let mut edges = v.clone();
                 drop(v);
@@ -550,7 +549,7 @@ where
                 edges.sort_unstable();
                 let selected = select_pruned_edges(
                     &edges,
-                    max_edges,
+                    config,
                     EdgeSetDistanceComputer::new(reader, &edges)?,
                 );
                 edges
@@ -577,7 +576,7 @@ where
         let _a = apply_mu.lock().unwrap();
         for e in pruned_edges.into_iter().rev() {
             let (mut iv, mut ev) = self.lock_edge(vertex, e as usize);
-            if iv.len() > max_edges.get() || ev.len() > max_edges.get() {
+            if iv.len() > config.max_edges.get() || ev.len() > config.max_edges.get() {
                 iv.retain(|n| n.vertex() != e);
                 ev.retain(|n| n.vertex() != vertex as i64);
             }

@@ -43,8 +43,7 @@ impl GraphMutator {
         let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &candidate_edges)?;
         let selected_len = prune_edges(
             &mut candidate_edges,
-            // XXX pass whole config to pruning function.
-            index.config().pruning.max_edges,
+            &index.config().pruning,
             edge_set_distance_computer,
         );
         candidate_edges.truncate(selected_len);
@@ -126,8 +125,7 @@ impl GraphMutator {
             let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &neighbors)?;
             let selected_len = prune_edges(
                 &mut neighbors,
-                // XXX pass whole config to pruning function.
-                index.config().pruning.max_edges,
+                &index.config().pruning,
                 edge_set_distance_computer,
             );
             // Ensure the graph is undirected by removing links from pruned edges back to this node.

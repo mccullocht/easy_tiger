@@ -71,6 +71,7 @@ pub fn init_index(
             similarity: args.similarity,
             nav_format: args.nav_format,
             rerank_format: args.rerank_format,
+            // XXX alpha config flags.
             pruning: EdgePruningConfig::new(args.max_edges),
             index_search_params: GraphSearchParams {
                 beam_width: args.edge_candidates,

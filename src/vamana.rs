@@ -273,12 +273,26 @@ fn select_pruned_edges(
 
     debug_assert!(edges.is_sorted());
 
+    // selected = []
+    // for (xq, dist_qp) in edges:
+    //   add = true
+    //   for (xr, dist_rp) in selected:
+    //     if alpha * dist_rp < dist(xq, xr):
+    //       add = false
+    //       break
+    //   if add:
+    //     selected.append((xq, dist_qp))
+    //   if len(selected) >= max_edges:
+    //     break
+
     // TODO: replace with a fixed length bitset
     let mut selected = BTreeSet::new();
     selected.insert(0); // we always keep the first node.
     let mut alpha = 1.0;
+    let mut iters = 0;
     while alpha <= config.max_alpha {
-        for (i, e) in edges.iter().enumerate().skip(1) {
+        iters += 1;
+        for (i, _) in edges.iter().enumerate().skip(1) {
             if selected.contains(&i) {
                 continue;
             }
@@ -288,9 +302,8 @@ fn select_pruned_edges(
             // if the btree is a map then it's pretty easy to view this.
             let select = !selected
                 .iter()
-                .take_while(|&&s| s < i)
-                //                .any(|&s| alpha * e.distance < edge_distance_computer.distance(i, s));
-                .any(|&s| edge_distance_computer.distance(i, s) < alpha * e.distance);
+                .take_while(|&&j| j < i)
+                .any(|&j| alpha * edges[j].distance < edge_distance_computer.distance(i, j));
             if select {
                 selected.insert(i);
                 if selected.len() >= config.max_edges.get() {
@@ -300,11 +313,14 @@ fn select_pruned_edges(
         }
 
         if selected.len() >= config.max_edges.get() {
+            iters = 2;
             break;
         }
 
         alpha *= config.alpha_scale;
     }
+
+    assert_eq!(iters, 2);
 
     selected
 }

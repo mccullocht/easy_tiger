@@ -6,13 +6,14 @@ mod insert;
 mod lookup;
 mod search;
 
-use std::io;
+use std::{io, num::NonZero};
 
 use clap::{Args, Subcommand};
 
 use bulk_load::{bulk_load, BulkLoadArgs};
 use delete::{delete, DeleteArgs};
 use drop_index::drop_index;
+use easy_tiger::vamana::EdgePruningConfig;
 use init_index::{init_index, InitIndexArgs};
 use insert::{insert, InsertArgs};
 use lookup::{lookup, LookupArgs};
@@ -27,6 +28,34 @@ pub struct VamanaArgs {
 
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Args)]
+pub struct EdgePruningArgs {
+    /// Maximum number of edges for any vertex.
+    #[arg(short, long, default_value = "32")]
+    max_edges: NonZero<usize>,
+    /// Maximum alpha value used to prune edges. Large values keep more edges.
+    ///
+    /// Must be >= 1.0.
+    #[arg(long, default_value_t = 1.2)]
+    max_alpha: f64,
+    /// Alpha value scaling factor.
+    ///
+    /// This value is multiplied by the current alpha value (starting at 1.0) until max_alpha is
+    /// exceeded. Lower values will trigger fewer iterations. Must be >= 1.0.
+    #[arg(long, default_value_t = 1.2)]
+    alpha_scale: f64,
+}
+
+impl From<EdgePruningArgs> for EdgePruningConfig {
+    fn from(value: EdgePruningArgs) -> Self {
+        Self {
+            max_edges: value.max_edges,
+            max_alpha: value.max_alpha,
+            alpha_scale: value.alpha_scale,
+        }
+    }
 }
 
 #[derive(Subcommand)]

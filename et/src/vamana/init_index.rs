@@ -1,11 +1,11 @@
 use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
-use easy_tiger::vamana::{
-    wt::TableGraphVectorIndex, EdgePruningConfig, GraphConfig, GraphSearchParams,
-};
+use easy_tiger::vamana::{wt::TableGraphVectorIndex, GraphConfig, GraphSearchParams};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;
+
+use crate::vamana::EdgePruningArgs;
 
 use super::drop_index::drop_index;
 
@@ -40,20 +40,8 @@ pub struct InitIndexArgs {
     #[arg(long)]
     rerank_edges: Option<usize>,
 
-    /// Maximum number of edges for any vertex.
-    #[arg(long, default_value = "64")]
-    max_edges: NonZero<usize>,
-    /// Maximum alpha value used to prune edges. Large values keep more edges.
-    ///
-    /// Must be >= 1.0.
-    #[arg(long, default_value_t = 1.2)]
-    max_alpha: f64,
-    /// Alpha value scaling factor.
-    ///
-    /// This value is multiplied by the current alpha value (starting at 1.0) until max_alpha is
-    /// exceeded. Lower values will trigger fewer iterations. Must be >= 1.0.
-    #[arg(long, default_value_t = 1.2)]
-    alpha_scale: f64,
+    #[command(flatten)]
+    pruning: EdgePruningArgs,
 
     /// If true, drop the named index if it exists and re-initialize.
     ///
@@ -83,11 +71,7 @@ pub fn init_index(
             similarity: args.similarity,
             nav_format: args.nav_format,
             rerank_format: args.rerank_format,
-            pruning: EdgePruningConfig {
-                max_edges: args.max_edges,
-                max_alpha: args.max_alpha,
-                alpha_scale: args.alpha_scale,
-            },
+            pruning: args.pruning.into(),
             index_search_params: GraphSearchParams {
                 beam_width: args.edge_candidates,
                 num_rerank: args

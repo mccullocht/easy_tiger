@@ -6,14 +6,17 @@ use easy_tiger::{
     vamana::{
         bulk::{BulkLoadBuilder, Options},
         wt::TableGraphVectorIndex,
-        EdgePruningConfig, GraphConfig, GraphSearchParams,
+        GraphConfig, GraphSearchParams,
     },
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, Result, Session};
 use wt_sys::{WT_STAT_CONN_CACHE_BYTES_READ, WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
 
-use crate::{ui::progress_bar, vamana::drop_index::drop_index};
+use crate::{
+    ui::progress_bar,
+    vamana::{drop_index::drop_index, EdgePruningArgs},
+};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -59,20 +62,8 @@ pub struct BulkLoadArgs {
     #[arg(short, long)]
     rerank_edges: Option<usize>,
 
-    /// Maximum number of edges for any vertex.
-    #[arg(short, long, default_value = "32")]
-    max_edges: NonZero<usize>,
-    /// Maximum alpha value used to prune edges. Large values keep more edges.
-    ///
-    /// Must be >= 1.0.
-    #[arg(long, default_value_t = 1.2)]
-    max_alpha: f64,
-    /// Alpha value scaling factor.
-    ///
-    /// This value is multiplied by the current alpha value (starting at 1.0) until max_alpha is
-    /// exceeded. Lower values will trigger fewer iterations. Must be >= 1.0.
-    #[arg(long, default_value_t = 1.2)]
-    alpha_scale: f64,
+    #[command(flatten)]
+    pruning: EdgePruningArgs,
 
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value = "false")]
@@ -98,11 +89,7 @@ pub fn bulk_load(
         similarity: args.similarity,
         nav_format: args.nav_format,
         rerank_format: args.rerank_format,
-        pruning: EdgePruningConfig {
-            max_edges: args.max_edges,
-            max_alpha: args.max_alpha,
-            alpha_scale: args.alpha_scale,
-        },
+        pruning: args.pruning.into(),
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,
             num_rerank: args

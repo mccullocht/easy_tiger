@@ -12,14 +12,17 @@ use easy_tiger::{
     },
     vamana::{
         bulk::{self, BulkLoadBuilder},
-        EdgePruningConfig, GraphConfig, GraphSearchParams,
+        GraphConfig, GraphSearchParams,
     },
 };
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{options::DropOptionsBuilder, Connection};
 
-use crate::ui::{progress_bar, progress_spinner};
+use crate::{
+    ui::{progress_bar, progress_spinner},
+    vamana::EdgePruningArgs,
+};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -52,20 +55,8 @@ pub struct BulkLoadArgs {
     #[arg(short, long)]
     rerank_edges: Option<usize>,
 
-    /// Maximum number of edges for any vertex.
-    #[arg(long, default_value = "64")]
-    max_edges: NonZero<usize>,
-    /// Maximum alpha value used to prune edges. Large values keep more edges.
-    ///
-    /// Must be >= 1.0.
-    #[arg(long, default_value_t = 1.2)]
-    max_alpha: f64,
-    /// Alpha value scaling factor.
-    ///
-    /// This value is multiplied by the current alpha value (starting at 1.0) until max_alpha is
-    /// exceeded. Lower values will trigger fewer iterations. Must be >= 1.0.
-    #[arg(long, default_value_t = 1.2)]
-    alpha_scale: f64,
+    #[command(flatten)]
+    pruning: EdgePruningArgs,
 
     /// Minimum number of vectors that should map to each head centroid.
     #[arg(long, default_value_t = 64)]
@@ -142,11 +133,7 @@ pub fn bulk_load(
         similarity: args.similarity,
         nav_format: args.head_nav_format,
         rerank_format: args.head_rerank_format,
-        pruning: EdgePruningConfig {
-            max_edges: args.max_edges,
-            max_alpha: args.max_alpha,
-            alpha_scale: args.alpha_scale,
-        },
+        pruning: args.pruning.into(),
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,
             num_rerank: args

@@ -273,8 +273,6 @@ fn select_pruned_edges(
 
     debug_assert!(edges.is_sorted());
 
-    // XXX use alpha value.
-
     // TODO: replace with a fixed length bitset
     let mut selected = BTreeSet::new();
     selected.insert(0); // we always keep the first node.
@@ -285,11 +283,15 @@ fn select_pruned_edges(
                 continue;
             }
 
-            if !selected
+            // XXX e.distance is the distance between the vertex and e, but the value multiplied by
+            // alpha is supposed to be the distance between the vertex and the node examined in selection.
+            // if the btree is a map then it's pretty easy to view this.
+            let select = !selected
                 .iter()
-                .take_while(|s| **s < i)
-                .any(|s| edge_distance_computer.distance(i, *s) < e.distance * alpha)
-            {
+                .take_while(|&&s| s < i)
+                //                .any(|&s| alpha * e.distance < edge_distance_computer.distance(i, s));
+                .any(|&s| edge_distance_computer.distance(i, s) < alpha * e.distance);
+            if select {
                 selected.insert(i);
                 if selected.len() >= config.max_edges.get() {
                     break;

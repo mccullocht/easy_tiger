@@ -24,9 +24,6 @@ pub struct InitIndexArgs {
     #[arg(long, value_enum, default_value = "f32")]
     rerank_format: Option<F32VectorCoding>,
 
-    /// Maximum number of edges for any vertex.
-    #[arg(long, default_value = "64")]
-    max_edges: NonZero<usize>,
     /// Number of edges to search for when indexing a vertex.
     ///
     /// Larger values make indexing more expensive but may also produce a larger, more
@@ -42,6 +39,21 @@ pub struct InitIndexArgs {
     /// the value of edge_candidates.
     #[arg(long)]
     rerank_edges: Option<usize>,
+
+    /// Maximum number of edges for any vertex.
+    #[arg(long, default_value = "64")]
+    max_edges: NonZero<usize>,
+    /// Maximum alpha value used to prune edges. Large values keep more edges.
+    ///
+    /// Must be >= 1.0.
+    #[arg(long, default_value_t = 1.2)]
+    max_alpha: f64,
+    /// Alpha value scaling factor.
+    ///
+    /// This value is multiplied by the current alpha value (starting at 1.0) until max_alpha is
+    /// exceeded. Lower values will trigger fewer iterations. Must be >= 1.0.
+    #[arg(long, default_value_t = 1.2)]
+    alpha_scale: f64,
 
     /// If true, drop the named index if it exists and re-initialize.
     ///
@@ -71,8 +83,11 @@ pub fn init_index(
             similarity: args.similarity,
             nav_format: args.nav_format,
             rerank_format: args.rerank_format,
-            // XXX alpha config flags.
-            pruning: EdgePruningConfig::new(args.max_edges),
+            pruning: EdgePruningConfig {
+                max_edges: args.max_edges,
+                max_alpha: args.max_alpha,
+                alpha_scale: args.alpha_scale,
+            },
             index_search_params: GraphSearchParams {
                 beam_width: args.edge_candidates,
                 num_rerank: args

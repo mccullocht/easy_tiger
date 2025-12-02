@@ -12,14 +12,17 @@ use easy_tiger::{
     },
     vamana::{
         bulk::{self, BulkLoadBuilder},
-        {GraphConfig, GraphLayout, GraphSearchParams},
+        GraphConfig, GraphSearchParams,
     },
 };
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{options::DropOptionsBuilder, Connection};
 
-use crate::ui::{progress_bar, progress_spinner};
+use crate::{
+    ui::{progress_bar, progress_spinner},
+    vamana::EdgePruningArgs,
+};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -38,14 +41,6 @@ pub struct BulkLoadArgs {
     /// Encoding used for rerank vectors in the head index.
     #[arg(long)]
     head_rerank_format: Option<F32VectorCoding>,
-
-    /// Physical layout used for the head graph.
-    #[arg(long, value_enum, default_value = "split")]
-    layout: GraphLayout,
-
-    /// Maximum number of edges for any vertex.
-    #[arg(short, long, default_value = "32")]
-    max_edges: NonZero<usize>,
     /// Number of edges to search for when indexing a vertex.
     ///
     /// Larger values make indexing more expensive but may also produce a larger, more
@@ -59,6 +54,9 @@ pub struct BulkLoadArgs {
     /// the value of edge_candidates.
     #[arg(short, long)]
     rerank_edges: Option<usize>,
+
+    #[command(flatten)]
+    pruning: EdgePruningArgs,
 
     /// Minimum number of vectors that should map to each head centroid.
     #[arg(long, default_value_t = 64)]
@@ -135,8 +133,7 @@ pub fn bulk_load(
         similarity: args.similarity,
         nav_format: args.head_nav_format,
         rerank_format: args.head_rerank_format,
-        layout: args.layout,
-        max_edges: args.max_edges,
+        pruning: args.pruning.into(),
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,
             num_rerank: args

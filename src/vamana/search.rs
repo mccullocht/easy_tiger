@@ -373,7 +373,9 @@ mod test {
     use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
     use wt_mdb::{Error, Result};
 
-    use crate::vamana::{Graph, GraphConfig, GraphLayout, GraphVectorIndex, GraphVectorStore};
+    use crate::vamana::{
+        EdgePruningConfig, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
+    };
     use crate::Neighbor;
 
     use super::{GraphSearchParams, GraphSearcher};
@@ -423,8 +425,7 @@ mod test {
                 similarity: VectorSimilarity::Euclidean,
                 nav_format: F32VectorCoding::BinaryQuantized,
                 rerank_format: Some(F32VectorCoding::F32),
-                layout: GraphLayout::Split,
-                max_edges,
+                pruning: EdgePruningConfig::new(max_edges),
                 index_search_params: GraphSearchParams {
                     beam_width: NonZero::new(usize::MAX).unwrap(),
                     num_rerank: usize::MAX,

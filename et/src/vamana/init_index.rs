@@ -1,12 +1,11 @@
 use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
-use easy_tiger::{
-    vamana::wt::TableGraphVectorIndex,
-    vamana::{GraphConfig, GraphLayout, GraphSearchParams},
-};
+use easy_tiger::vamana::{wt::TableGraphVectorIndex, GraphConfig, GraphSearchParams};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;
+
+use crate::vamana::EdgePruningArgs;
 
 use super::drop_index::drop_index;
 
@@ -25,13 +24,6 @@ pub struct InitIndexArgs {
     #[arg(long, value_enum, default_value = "f32")]
     rerank_format: Option<F32VectorCoding>,
 
-    /// Physical layout used for graph.
-    #[arg(long, value_enum, default_value = "split")]
-    layout: GraphLayout,
-
-    /// Maximum number of edges for any vertex.
-    #[arg(long, default_value = "64")]
-    max_edges: NonZero<usize>,
     /// Number of edges to search for when indexing a vertex.
     ///
     /// Larger values make indexing more expensive but may also produce a larger, more
@@ -47,6 +39,9 @@ pub struct InitIndexArgs {
     /// the value of edge_candidates.
     #[arg(long)]
     rerank_edges: Option<usize>,
+
+    #[command(flatten)]
+    pruning: EdgePruningArgs,
 
     /// If true, drop the named index if it exists and re-initialize.
     ///
@@ -76,8 +71,7 @@ pub fn init_index(
             similarity: args.similarity,
             nav_format: args.nav_format,
             rerank_format: args.rerank_format,
-            layout: args.layout,
-            max_edges: args.max_edges,
+            pruning: args.pruning.into(),
             index_search_params: GraphSearchParams {
                 beam_width: args.edge_candidates,
                 num_rerank: args

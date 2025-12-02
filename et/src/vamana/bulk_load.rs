@@ -3,15 +3,20 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
-    vamana::bulk::{BulkLoadBuilder, Options},
-    vamana::wt::TableGraphVectorIndex,
-    vamana::{GraphConfig, GraphLayout, GraphSearchParams},
+    vamana::{
+        bulk::{BulkLoadBuilder, Options},
+        wt::TableGraphVectorIndex,
+        GraphConfig, GraphSearchParams,
+    },
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, Result, Session};
 use wt_sys::{WT_STAT_CONN_CACHE_BYTES_READ, WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
 
-use crate::{ui::progress_bar, vamana::drop_index::drop_index};
+use crate::{
+    ui::progress_bar,
+    vamana::{drop_index::drop_index, EdgePruningArgs},
+};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -31,9 +36,6 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     rerank_format: Option<F32VectorCoding>,
 
-    /// Physical layout used for graph.
-    #[arg(long, value_enum, default_value = "split")]
-    layout: GraphLayout,
     /// If true, load all quantized vectors into a trivial memory store for bulk loading.
     /// This can be significantly faster than reading these values from WiredTiger.
     #[arg(long, default_value_t = true)]
@@ -44,9 +46,6 @@ pub struct BulkLoadArgs {
     #[arg(long, default_value_t = false)]
     cluster_ordered_insert: bool,
 
-    /// Maximum number of edges for any vertex.
-    #[arg(short, long, default_value = "32")]
-    max_edges: NonZero<usize>,
     /// Number of edges to search for when indexing a vertex.
     ///
     /// Larger values make indexing more expensive but may also produce a larger, more
@@ -62,6 +61,9 @@ pub struct BulkLoadArgs {
     /// the value of edge_candidates.
     #[arg(short, long)]
     rerank_edges: Option<usize>,
+
+    #[command(flatten)]
+    pruning: EdgePruningArgs,
 
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value = "false")]
@@ -87,8 +89,7 @@ pub fn bulk_load(
         similarity: args.similarity,
         nav_format: args.nav_format,
         rerank_format: args.rerank_format,
-        layout: args.layout,
-        max_edges: args.max_edges,
+        pruning: args.pruning.into(),
         index_search_params: GraphSearchParams {
             beam_width: args.edge_candidates,
             num_rerank: args

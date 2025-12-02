@@ -43,7 +43,7 @@ impl GraphMutator {
         let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &candidate_edges)?;
         let selected_len = prune_edges(
             &mut candidate_edges,
-            index.config().max_edges,
+            &index.config().pruning,
             edge_set_distance_computer,
         );
         candidate_edges.truncate(selected_len);
@@ -105,7 +105,7 @@ impl GraphMutator {
         }
         edges.push(dst_vertex_id);
         edges.sort_unstable();
-        let inserted = if edges.len() <= index.config().max_edges.get() {
+        let inserted = if edges.len() <= index.config().pruning.max_edges.get() {
             true
         } else {
             let src_vector = vectors
@@ -125,7 +125,7 @@ impl GraphMutator {
             let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &neighbors)?;
             let selected_len = prune_edges(
                 &mut neighbors,
-                index.config().max_edges,
+                &index.config().pruning,
                 edge_set_distance_computer,
             );
             // Ensure the graph is undirected by removing links from pruned edges back to this node.
@@ -238,7 +238,7 @@ impl GraphMutator {
         // Take the list of scored edges and truncate to 50% of max_edges, then filter out all of
         // the edges that already exist in the graph based on vertex_data. The rest we will attempt
         // to insert symmetrically to maintain an undirected graph.
-        let relink_edges = index.config().max_edges.get().max(2) / 2;
+        let relink_edges = index.config().pruning.max_edges.get().max(2) / 2;
         for (current_edges, scored_edges) in vertex_data
             .iter()
             .map(|(_, _, e)| e)
@@ -321,7 +321,7 @@ mod tests {
     use crate::vamana::{
         search::GraphSearcher,
         wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
-        Graph, GraphConfig, GraphLayout, GraphSearchParams, GraphVectorIndex,
+        EdgePruningConfig, Graph, GraphConfig, GraphSearchParams, GraphVectorIndex,
     };
 
     use super::GraphMutator;
@@ -378,8 +378,7 @@ mod tests {
                         similarity: VectorSimilarity::Euclidean,
                         nav_format: F32VectorCoding::BinaryQuantized,
                         rerank_format: Some(F32VectorCoding::F32),
-                        layout: GraphLayout::Split,
-                        max_edges: NonZero::new(4).unwrap(),
+                        pruning: EdgePruningConfig::new(NonZero::new(4).unwrap()),
                         index_search_params: Self::search_params(),
                     },
                     "test",

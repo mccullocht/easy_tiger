@@ -273,54 +273,33 @@ fn select_pruned_edges(
 
     debug_assert!(edges.is_sorted());
 
-    // selected = []
-    // for (xq, dist_qp) in edges:
-    //   add = true
-    //   for (xr, dist_rp) in selected:
-    //     if alpha * dist_rp < dist(xq, xr):
-    //       add = false
-    //       break
-    //   if add:
-    //     selected.append((xq, dist_qp))
-    //   if len(selected) >= max_edges:
-    //     break
-
     // TODO: replace with a fixed length bitset
     let mut selected = BTreeSet::new();
     selected.insert(0); // we always keep the first node.
     let mut alpha = 1.0;
-    let mut iters = 0;
     while alpha <= config.max_alpha {
-        iters += 1;
-        for (i, _) in edges.iter().enumerate().skip(1) {
-            if selected.contains(&i) {
+        for i in 1..edges.len() {
+            if selected.contains(&i)
+                || selected
+                    .iter()
+                    .take_while(|&&j| j < i)
+                    .any(|&j| edges[j].distance / edge_distance_computer.distance(i, j) > alpha)
+            {
                 continue;
             }
 
-            // XXX e.distance is the distance between the vertex and e, but the value multiplied by
-            // alpha is supposed to be the distance between the vertex and the node examined in selection.
-            // if the btree is a map then it's pretty easy to view this.
-            let select = !selected
-                .iter()
-                .take_while(|&&j| j < i)
-                .any(|&j| alpha * edges[j].distance < edge_distance_computer.distance(i, j));
-            if select {
-                selected.insert(i);
-                if selected.len() >= config.max_edges.get() {
-                    break;
-                }
+            selected.insert(i);
+            if selected.len() >= config.max_edges.get() {
+                break;
             }
         }
 
         if selected.len() >= config.max_edges.get() {
-            iters = 2;
             break;
         }
 
         alpha *= config.alpha_scale;
     }
-
-    assert_eq!(iters, 2);
 
     selected
 }

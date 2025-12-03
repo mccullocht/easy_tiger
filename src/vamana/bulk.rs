@@ -305,12 +305,16 @@ where
                 loop {
                     let mut entry_point = apply_mu.lock().unwrap();
 
-                    edges.retain(|e| {
+                    edges.retain(|&e| {
                         let (mut iv, mut ev) = self.lock_edge(v, e.vertex() as usize);
                         if iv.len() == iv.capacity() || ev.len() == ev.capacity() {
                             true
                         } else {
-                            iv.push(*e);
+                            // Another concurrent search may have added this edge already, so skip
+                            // it if that is the case.
+                            if !iv.contains(&e) {
+                                iv.push(e);
+                            }
                             let backedge = Neighbor::new(v as i64, e.distance());
                             if !ev.contains(&backedge) {
                                 ev.push(backedge);

@@ -66,7 +66,7 @@ impl GraphMutator {
         let distance_fn = vectors.new_distance_function();
         let mut pruned_edges = vec![];
         for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
-            self.insert_edge(
+            let edges = self.insert_edge_directed(
                 index,
                 &mut graph,
                 &mut vectors,
@@ -75,18 +75,22 @@ impl GraphMutator {
                 vertex_id,
                 &mut pruned_edges,
             )?;
-        }
+            graph.set_edges(src_vertex_id, edges)?;
 
-        for (src_vertex_id, dst_vertex_id) in pruned_edges {
-            self.remove_edge(&mut graph, src_vertex_id, dst_vertex_id)?;
+            for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
+                self.remove_edge(&mut graph, src_vertex_id, dst_vertex_id)?;
+            }
         }
 
         Ok(())
     }
 
-    /// returns true if the edge already exists or was inserted successfully.
+    /// Returns the edge set after inserting the directed edge.
+    ///
+    /// May fill `pruned_edges` with any back edges that need to be removed to maintain an
+    /// undirected graph.
     #[allow(clippy::too_many_arguments)]
-    fn insert_edge(
+    fn insert_edge_directed(
         &self,
         index: &impl GraphVectorIndex,
         graph: &mut impl Graph,
@@ -95,48 +99,46 @@ impl GraphMutator {
         src_vertex_id: i64,
         dst_vertex_id: i64,
         pruned_edges: &mut Vec<(i64, i64)>,
-    ) -> Result<bool> {
+    ) -> Result<Vec<i64>> {
         let mut edges = graph
             .edges(src_vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
             .collect::<Vec<_>>();
         if edges.contains(&dst_vertex_id) {
-            return Ok(true); // edge already exists.
+            return Ok(edges); // edge already exists.
         }
         edges.push(dst_vertex_id);
-        edges.sort_unstable();
-        let inserted = if edges.len() <= index.config().pruning.max_edges.get() {
-            true
-        } else {
-            let src_vector = vectors
-                .get(src_vertex_id)
-                .expect("row exists")
-                .map(|v| v.to_vec())?;
-            let mut neighbors = edges
-                .iter()
-                .map(|e| {
-                    vectors
-                        .get(*e)
-                        .unwrap_or(Err(Error::not_found_error()))
-                        .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, dst)))
-                })
-                .collect::<Result<Vec<Neighbor>>>()?;
-            neighbors.sort_unstable();
-            let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &neighbors)?;
-            let selected_len = prune_edges(
-                &mut neighbors,
-                &index.config().pruning,
-                edge_set_distance_computer,
-            );
-            // Ensure the graph is undirected by removing links from pruned edges back to this node.
-            for v in neighbors.iter().skip(selected_len).map(Neighbor::vertex) {
-                pruned_edges.push((v, src_vertex_id))
-            }
-            edges.clear();
-            edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
-            edges.contains(&dst_vertex_id)
-        };
-        graph.set_edges(src_vertex_id, edges).map(|()| inserted)
+        if edges.len() <= index.config().pruning.max_edges.get() {
+            return Ok(edges);
+        }
+
+        let src_vector = vectors
+            .get(src_vertex_id)
+            .expect("row exists")
+            .map(|v| v.to_vec())?;
+        let mut neighbors = edges
+            .iter()
+            .map(|e| {
+                vectors
+                    .get(*e)
+                    .unwrap_or(Err(Error::not_found_error()))
+                    .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, dst)))
+            })
+            .collect::<Result<Vec<Neighbor>>>()?;
+        neighbors.sort();
+        let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &neighbors)?;
+        let selected_len = prune_edges(
+            &mut neighbors,
+            &index.config().pruning,
+            edge_set_distance_computer,
+        );
+        // Ensure the graph is undirected by removing links from pruned edges back to this node.
+        for v in neighbors.iter().skip(selected_len).map(Neighbor::vertex) {
+            pruned_edges.push((v, src_vertex_id))
+        }
+        edges.clear();
+        edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
+        Ok(edges)
     }
 
     fn remove_edge(
@@ -250,39 +252,40 @@ impl GraphMutator {
         }
 
         let mut pruned_edges = vec![];
-        for (src_vertex_id, mut edge_scores) in
-            vertex_data.iter().map(|v| v.0).zip(edge_scores.into_iter())
+        for (src_vertex_id, dst_vertex_id) in vertex_data
+            .iter()
+            .flat_map(|v| std::iter::repeat(v.0).zip(v.2.iter().copied()))
         {
-            edge_scores.sort_unstable();
-            for dst_vertex_id in edge_scores
-                .into_iter()
-                .take(relink_edges)
-                .map(|n| n.vertex())
-            {
-                // Insert edge symmetrically. If the first edge insertion succeeds and the symmetric
-                // edge insertion fails, then remove the edge to ensure the graph is undirected.
-                if self.insert_edge(
-                    index,
-                    graph,
-                    vectors,
-                    distance_fn,
-                    src_vertex_id,
-                    dst_vertex_id,
-                    &mut pruned_edges,
-                )? && !self.insert_edge(
-                    index,
-                    graph,
-                    vectors,
-                    distance_fn,
-                    dst_vertex_id,
-                    src_vertex_id,
-                    &mut pruned_edges,
-                )? {
-                    self.remove_edge(graph, src_vertex_id, dst_vertex_id)?;
-                }
+            // Insert edge symmetrically to maintain an undirected graph.
+            let src_edges = self.insert_edge_directed(
+                index,
+                graph,
+                vectors,
+                distance_fn,
+                src_vertex_id,
+                dst_vertex_id,
+                &mut pruned_edges,
+            )?;
+            let dst_edges = self.insert_edge_directed(
+                index,
+                graph,
+                vectors,
+                distance_fn,
+                dst_vertex_id,
+                src_vertex_id,
+                &mut pruned_edges,
+            )?;
+
+            // If the edge was not inserted in both directions, then do not commit any of the
+            // changes that were made here.
+            if !src_edges.contains(&dst_vertex_id) || !dst_edges.contains(&src_vertex_id) {
+                pruned_edges.clear();
+                continue;
             }
 
-            // Remove all back edges removed by the insertions above.
+            // Apply the changes to src and dst vertexes and remove any pruned edges.
+            graph.set_edges(src_vertex_id, src_edges)?;
+            graph.set_edges(dst_vertex_id, dst_edges)?;
             for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
                 self.remove_edge(graph, src_vertex_id, dst_vertex_id)?;
             }

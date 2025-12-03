@@ -240,7 +240,8 @@ impl GraphMutator {
         let mut pruned_edges = vec![];
         for (src_vertex_id, dst_vertex_id) in vertex_data
             .iter()
-            .flat_map(|v| std::iter::repeat(v.0).zip(v.2.iter().copied()))
+            .zip(edge_scores.into_iter())
+            .flat_map(|(v, e)| std::iter::repeat(v.0).zip(e.into_iter().map(|n| n.vertex())))
         {
             // Insert edge symmetrically to maintain an undirected graph.
             let src_edges = Self::insert_edge_directed(

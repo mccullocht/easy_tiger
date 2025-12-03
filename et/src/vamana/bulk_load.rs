@@ -111,7 +111,6 @@ pub fn bulk_load(
         f32_vectors,
         Options {
             memory_quantized_vectors: args.memory_quantized_vectors,
-            cluster_ordered_insert: args.cluster_ordered_insert,
         },
         limit,
     );

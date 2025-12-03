@@ -11,21 +11,14 @@ use wt_mdb::{Error, Result};
 pub struct GraphMutator;
 
 impl GraphMutator {
-    /// Create a new mutator.
-    pub fn new() -> Self {
-        Self
-    }
-
     /// Insert a vertex for `vector`. Returns the assigned id.
-    pub fn insert(&mut self, vector: &[f32], index: &impl GraphVectorIndex) -> Result<i64> {
+    pub fn insert(vector: &[f32], index: &impl GraphVectorIndex) -> Result<i64> {
         // A freshly initialized table might will have the metadata key but no entry point.
         let vertex_id = index.graph()?.next_available_vertex_id()?;
-        self.insert_internal(vertex_id, vector, index)
-            .map(|_| vertex_id)
+        Self::insert_internal(vertex_id, vector, index).map(|_| vertex_id)
     }
 
     fn insert_internal(
-        &mut self,
         vertex_id: i64,
         vector: &[f32],
         index: &impl GraphVectorIndex,
@@ -66,7 +59,7 @@ impl GraphMutator {
         let distance_fn = vectors.new_distance_function();
         let mut pruned_edges = vec![];
         for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
-            let edges = self.insert_edge_directed(
+            let edges = Self::insert_edge_directed(
                 index,
                 &mut graph,
                 &mut vectors,
@@ -78,7 +71,7 @@ impl GraphMutator {
             graph.set_edges(src_vertex_id, edges)?;
 
             for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
-                self.remove_edge(&mut graph, src_vertex_id, dst_vertex_id)?;
+                Self::remove_edge(&mut graph, src_vertex_id, dst_vertex_id)?;
             }
         }
 
@@ -91,7 +84,6 @@ impl GraphMutator {
     /// undirected graph.
     #[allow(clippy::too_many_arguments)]
     fn insert_edge_directed(
-        &self,
         index: &impl GraphVectorIndex,
         graph: &mut impl Graph,
         vectors: &mut impl GraphVectorStore,
@@ -141,12 +133,7 @@ impl GraphMutator {
         Ok(edges)
     }
 
-    fn remove_edge(
-        &self,
-        graph: &mut impl Graph,
-        src_vertex_id: i64,
-        dst_vertex_id: i64,
-    ) -> Result<()> {
+    fn remove_edge(graph: &mut impl Graph, src_vertex_id: i64, dst_vertex_id: i64) -> Result<()> {
         let edges = graph
             .edges(src_vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
@@ -156,7 +143,7 @@ impl GraphMutator {
     }
 
     /// Delete `vertex_id`, removing both the vertex and any incoming edges.
-    pub fn delete(&mut self, vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
+    pub fn delete(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
         let mut graph = index.graph()?;
         let mut vectors = index.high_fidelity_vectors()?;
         let distance_fn = vectors.new_distance_function();
@@ -171,7 +158,7 @@ impl GraphMutator {
             vectors?.remove(vertex_id)?;
         }
         for e in edges.iter() {
-            self.remove_edge(&mut graph, *e, vertex_id)?;
+            Self::remove_edge(&mut graph, *e, vertex_id)?;
         }
 
         // Cache information about each vertex linked to vertex_id.
@@ -192,7 +179,7 @@ impl GraphMutator {
             .collect::<Result<Result<Vec<_>>>>()??;
 
         // Create links between edges of the deleted node if needed.
-        self.cross_link_peer_vertices(
+        Self::cross_link_peer_vertices(
             index,
             &mut graph,
             &mut vectors,
@@ -220,7 +207,6 @@ impl GraphMutator {
     }
 
     fn cross_link_peer_vertices(
-        &self,
         index: &impl GraphVectorIndex,
         graph: &mut impl Graph,
         vectors: &mut impl GraphVectorStore,
@@ -257,7 +243,7 @@ impl GraphMutator {
             .flat_map(|v| std::iter::repeat(v.0).zip(v.2.iter().copied()))
         {
             // Insert edge symmetrically to maintain an undirected graph.
-            let src_edges = self.insert_edge_directed(
+            let src_edges = Self::insert_edge_directed(
                 index,
                 graph,
                 vectors,
@@ -266,7 +252,7 @@ impl GraphMutator {
                 dst_vertex_id,
                 &mut pruned_edges,
             )?;
-            let dst_edges = self.insert_edge_directed(
+            let dst_edges = Self::insert_edge_directed(
                 index,
                 graph,
                 vectors,
@@ -287,7 +273,7 @@ impl GraphMutator {
             graph.set_edges(src_vertex_id, src_edges)?;
             graph.set_edges(dst_vertex_id, dst_edges)?;
             for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
-                self.remove_edge(graph, src_vertex_id, dst_vertex_id)?;
+                Self::remove_edge(graph, src_vertex_id, dst_vertex_id)?;
             }
         }
 
@@ -295,22 +281,9 @@ impl GraphMutator {
     }
 
     /// Update the contents of `vertex_id` with `vector`.
-    pub fn update(
-        &mut self,
-        vertex_id: i64,
-        vector: &[f32],
-        index: &impl GraphVectorIndex,
-    ) -> Result<()> {
-        // TODO: a non-trivial implementation might perform the search like during insert
-        // and skip edge updates if the edge set is identical or nearly identical.
-        self.delete(vertex_id, index)?;
-        self.insert_internal(vertex_id, vector, index)
-    }
-}
-
-impl Default for GraphMutator {
-    fn default() -> Self {
-        Self::new()
+    pub fn update(vertex_id: i64, vector: &[f32], index: &impl GraphVectorIndex) -> Result<()> {
+        Self::delete(vertex_id, index)?;
+        Self::insert_internal(vertex_id, vector, index)
     }
 }
 
@@ -349,10 +322,9 @@ mod tests {
         }
 
         fn insert_many(&self, vectors: &[[f32; 2]]) -> Result<Vec<i64>> {
-            let mut mutator = GraphMutator::new();
             vectors
                 .iter()
-                .map(|v| mutator.insert(v.as_ref(), &self.wt_index))
+                .map(|v| GraphMutator::insert(v.as_ref(), &self.wt_index))
                 .collect::<Result<Vec<_>>>()
         }
 
@@ -414,8 +386,7 @@ mod tests {
     fn insert_one() -> Result<()> {
         let fixture = Fixture::default();
 
-        let mut mutator = GraphMutator::new();
-        let id = mutator.insert(&[0.0, 0.0], &fixture.wt_index)?;
+        let id = GraphMutator::insert(&[0.0, 0.0], &fixture.wt_index)?;
         assert_eq!(id, 0);
         assert_eq!(fixture.new_reader().graph()?.entry_point(), Some(Ok(id)));
         assert_eq!(fixture.search(&[1.0, 1.0]), Ok(vec![id]));
@@ -461,7 +432,7 @@ mod tests {
         let fixture = Fixture::default();
 
         let vertex_ids = fixture.insert_many(&[[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])?;
-        GraphMutator::new().delete(vertex_ids[1], &fixture.wt_index)?;
+        GraphMutator::delete(vertex_ids[1], &fixture.wt_index)?;
         assert_eq!(
             fixture.search(&[0.0, 0.0])?,
             vertex_ids
@@ -496,7 +467,7 @@ mod tests {
         );
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
-        GraphMutator::new().delete(1, &fixture.wt_index)?;
+        GraphMutator::delete(1, &fixture.wt_index)?;
         let reader = fixture.new_reader();
         let mut graph = reader.graph()?;
         assert_eq!(
@@ -512,12 +483,11 @@ mod tests {
     fn delete_entry_point() -> Result<()> {
         let fixture = Fixture::default();
 
-        let mut mutator = GraphMutator::new();
-        let entry_id = mutator.insert(&[0.0, 0.0], &fixture.wt_index)?;
-        let next_entry_id = mutator.insert(&[0.5, 0.5], &fixture.wt_index)?;
-        mutator.insert(&[1.0, 1.0], &fixture.wt_index)?;
+        let entry_id = GraphMutator::insert(&[0.0, 0.0], &fixture.wt_index)?;
+        let next_entry_id = GraphMutator::insert(&[0.5, 0.5], &fixture.wt_index)?;
+        GraphMutator::insert(&[1.0, 1.0], &fixture.wt_index)?;
 
-        mutator.delete(entry_id, &fixture.wt_index)?;
+        GraphMutator::delete(entry_id, &fixture.wt_index)?;
         assert_eq!(
             fixture.new_reader().graph()?.entry_point(),
             Some(Ok(next_entry_id))
@@ -531,10 +501,9 @@ mod tests {
     fn delete_only_point() -> Result<()> {
         let fixture = Fixture::default();
 
-        let mut mutator = GraphMutator::new();
-        let id = mutator.insert(&[0.0, 0.0], &fixture.wt_index)?;
+        let id = GraphMutator::insert(&[0.0, 0.0], &fixture.wt_index)?;
         assert_eq!(fixture.search(&[0.0, 0.0])?, vec![id]);
-        mutator.delete(id, &fixture.wt_index)?;
+        GraphMutator::delete(id, &fixture.wt_index)?;
         assert_eq!(fixture.search(&[0.0, 0.0])?, Vec::<i64>::new());
 
         Ok(())
@@ -553,7 +522,7 @@ mod tests {
             [-0.1, -0.1],
         ])?;
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
-        GraphMutator::new().update(vertex_ids[0], &[1.0, 1.0], &fixture.wt_index)?;
+        GraphMutator::update(vertex_ids[0], &[1.0, 1.0], &fixture.wt_index)?;
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![1, 2, 3, 5, 4, 0]));
 
         Ok(())

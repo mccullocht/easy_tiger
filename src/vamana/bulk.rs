@@ -29,8 +29,7 @@ use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{options::CreateOptionsBuilder, Connection, Error, Result, Session};
 
 use crate::{
-    graph_clustering,
-    input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
+    input::{DerefVectorStore, VectorStore},
     vamana::search::GraphSearcher,
     vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     vamana::{
@@ -68,10 +67,7 @@ pub struct Options {
 
 #[derive(Debug, Copy, Clone)]
 pub enum BulkLoadPhase {
-    // TODO: combine vector loading phases now that bulk_load APIs have been refactored to allow
-    // this in a useful/meaningful way.
     LoadVectors,
-    ClusterVectors,
     BuildGraph,
     CleanupGraph,
     LoadGraph,
@@ -81,7 +77,6 @@ impl BulkLoadPhase {
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::LoadVectors => "load vectors",
-            Self::ClusterVectors => "cluster vectors",
             Self::BuildGraph => "build graph",
             Self::CleanupGraph => "cleanup graph",
             Self::LoadGraph => "load graph",
@@ -149,16 +144,12 @@ where
     /// Phases to be executed by the builder.
     /// This can vary depending on the options.
     pub fn phases(&self) -> Vec<BulkLoadPhase> {
-        let mut phases = vec![BulkLoadPhase::LoadVectors];
-        if self.options.cluster_ordered_insert {
-            phases.push(BulkLoadPhase::ClusterVectors);
-        }
-        phases.extend_from_slice(&[
+        vec![
+            BulkLoadPhase::LoadVectors,
             BulkLoadPhase::BuildGraph,
             BulkLoadPhase::CleanupGraph,
             BulkLoadPhase::LoadGraph,
-        ]);
-        phases
+        ]
     }
 
     /// Total number of vectors to process. Useful for status reporting.
@@ -174,7 +165,6 @@ where
     {
         match phase {
             BulkLoadPhase::LoadVectors => self.load_vectors(progress),
-            BulkLoadPhase::ClusterVectors => self.cluster_vectors(progress),
             BulkLoadPhase::BuildGraph => self.insert_all(progress),
             BulkLoadPhase::CleanupGraph => self.cleanup(progress),
             BulkLoadPhase::LoadGraph => {
@@ -249,24 +239,6 @@ where
             .unwrap_or(self.index.nav_table())
             .new_coder()
             .encode(&centroid);
-        Ok(())
-    }
-
-    fn cluster_vectors<P: Fn(u64) + Send + Sync>(&mut self, progress: P) -> Result<()> {
-        // TODO: this should accept a random number generator
-        let subset = SubsetViewVectorStore::new(&self.vectors, (0..self.limit).collect());
-        self.clustered_order = Some(graph_clustering::cluster_for_reordering(
-            &subset,
-            self.index.config().pruning.max_edges.get(),
-            &crate::kmeans::Params {
-                iters: 100,
-                init_iters: 10,
-                epsilon: 0.01,
-                ..Default::default()
-            },
-            &mut rand::rng(),
-            progress,
-        ));
         Ok(())
     }
 

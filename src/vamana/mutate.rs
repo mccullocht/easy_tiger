@@ -121,7 +121,7 @@ impl GraphMutator {
                         .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, dst)))
                 })
                 .collect::<Result<Vec<Neighbor>>>()?;
-            neighbors.sort();
+            neighbors.sort_unstable();
             let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &neighbors)?;
             let selected_len = prune_edges(
                 &mut neighbors,
@@ -206,7 +206,7 @@ impl GraphMutator {
                 .iter()
                 .map(|(id, vec, _)| Neighbor::new(*id, distance_fn.distance(&vector, vec)))
                 .collect::<Vec<_>>();
-            neighbors.sort();
+            neighbors.sort_unstable();
             if let Some(ep_neighbor) = neighbors.first() {
                 graph.set_entry_point(ep_neighbor.vertex())?
             } else {

@@ -144,6 +144,8 @@ pub fn bulk_load(
     let spann_config = IndexConfig {
         replica_count: args.replica_count.get(),
         replica_selection: args.replica_selection,
+        min_centroid_len: args.head_min_centroid_len,
+        max_centroid_len: args.head_max_centroid_len,
         head_search_params: GraphSearchParams {
             beam_width: args.head_edge_candidates,
             num_rerank: args

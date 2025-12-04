@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
-        mutate::GraphMutator,
+        mutate::insert_vector,
         wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
     },
 };
@@ -37,7 +37,7 @@ fn insert_all<'a>(
     let progress = progress_bar(vectors.len(), "");
     for vector in vectors.progress_with(progress) {
         wt_index.session().begin_transaction(None)?;
-        let key = GraphMutator::insert(vector, wt_index)?;
+        let key = insert_vector(vector, wt_index)?;
         if let Some(r) = keys.last_mut() {
             if r.end == key {
                 r.end = key + 1;

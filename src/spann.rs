@@ -25,12 +25,30 @@ use crate::{
     Neighbor,
 };
 
+/// Configuration for the SPANN index.
 #[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct IndexConfig {
-    pub replica_count: usize,
-    pub replica_selection: ReplicaSelectionAlgorithm,
+    /// Parameters used to search the head index when selecting centroids.
     pub head_search_params: GraphSearchParams,
+    /// Vector coding used for each posting vector.
     pub posting_coder: F32VectorCoding,
+    /// Minimum centroid length in vectors.
+    ///
+    /// Centroids with fewer vectors will be removed from the index and their vectors will be
+    /// reassigned to other centroids.
+    pub min_centroid_len: usize,
+    /// Maximum centroid length in vectors.
+    ///
+    /// Centroids with more vectors than this will be split into 2 centroids and their vectors will
+    /// be reassigned to other centroids. Vectors in nearby centroids may also be reassigned.
+    pub max_centroid_len: usize,
+    /// Number of posting replicas to write each vector to. Must be non-negative.
+    pub replica_count: usize,
+    /// Algorithm to select posting replicas from candidate centroids.
+    ///
+    /// If `replica_count` is one, only the closest centroid is selected.
+    pub replica_selection: ReplicaSelectionAlgorithm,
+    /// If set, build a vector id keyed vector table in this format for re-ranking results.
     pub rerank_format: Option<F32VectorCoding>,
 }
 

@@ -45,7 +45,7 @@ pub struct BulkLoadArgs {
     ///
     /// Larger values make indexing more expensive but may also produce a larger, more
     /// saturated graph that has higher recall.
-    #[arg(short, long, default_value = "128")]
+    #[arg(short, long, default_value_t = NonZero::new(128).unwrap())]
     edge_candidates: NonZero<usize>,
     /// Number of edge candidates to rerank. Defaults to edge_candidates.
     ///
@@ -59,11 +59,11 @@ pub struct BulkLoadArgs {
     pruning: EdgePruningArgs,
 
     /// Minimum number of vectors that should map to each head centroid.
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 192)]
     head_min_centroid_len: usize,
     /// Maximum number of vectors that should map to each head centroid.
     /// This should be at least 2x --head-min-centroid-len.
-    #[arg(long, default_value_t = 192)]
+    #[arg(long, default_value_t = 512)]
     head_max_centroid_len: usize,
 
     /// Number of edge candidates when searching head table for centroid ids during insertion.
@@ -76,12 +76,8 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     head_rerank_edges: Option<usize>,
 
-    /// If false replace each head centroid with a representative mediod.
-    #[arg(long, default_value_t = false)]
-    head_use_means: bool,
-
     /// Maximum number of replica centroids to assign each vector to.
-    #[arg(long)]
+    #[arg(long, default_value_t = NonZero::new(1).unwrap())]
     replica_count: NonZero<usize>,
 
     /// Replica selection algorithm to use.
@@ -148,6 +144,8 @@ pub fn bulk_load(
     let spann_config = IndexConfig {
         replica_count: args.replica_count.get(),
         replica_selection: args.replica_selection,
+        min_centroid_len: args.head_min_centroid_len,
+        max_centroid_len: args.head_max_centroid_len,
         head_search_params: GraphSearchParams {
             beam_width: args.head_edge_candidates,
             num_rerank: args
@@ -173,34 +171,19 @@ pub fn bulk_load(
     let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).collect());
     let centroids = {
         let progress = progress_spinner("clustering head");
-        let (mut centroids, assignments) = iterative_balanced_kmeans(
+        let (centroids, _) = iterative_balanced_kmeans(
             &index_vectors,
             args.head_min_centroid_len..=args.head_max_centroid_len,
             32,
-            1000, // batch size
+            8192, // batch size
             &Params {
                 iters: 100,
-                epsilon: 0.01,
+                epsilon: 0.0001,
                 ..Params::default()
             },
             &mut rng,
             |x| progress.inc(x),
         );
-
-        if !args.head_use_means {
-            let mediods = assignments.into_iter().enumerate().fold(
-                vec![(usize::MAX, f64::MAX); centroids.len()],
-                |mut m, (i, (c, d))| {
-                    if d < m[c].1 {
-                        m[c] = (i, d);
-                    }
-                    m
-                },
-            );
-            for (i, c) in mediods.into_iter().map(|(c, _)| c).enumerate() {
-                centroids[i].copy_from_slice(&index_vectors[c]);
-            }
-        }
 
         centroids
     };

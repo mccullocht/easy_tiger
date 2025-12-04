@@ -266,7 +266,7 @@ impl Searcher {
         }
 
         let format = reader
-            .head_reader
+            .index()
             .config()
             .rerank_format
             .expect("rerank format is set");

@@ -58,10 +58,13 @@ pub fn delete_vector(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()
         distance_fn.as_ref(),
     )?;
 
-    // Oh no, we've deleted the entry point! Find the closes point amongst the
-    // edges of this node to use as a new one. So long as at least one vector is in
-    // the index it will be safe to unwrap() entry_point() here.
-    if graph.entry_point().unwrap()? == vertex_id {
+    // Oh no, we've deleted the entry point! Find the closest point amongst the edges of this node
+    // to use as a new entry point.
+    if graph
+        .entry_point()
+        .expect("there was at least one vertex")?
+        == vertex_id
+    {
         let mut neighbors = vertex_data
             .iter()
             .map(|(id, vec, _)| Neighbor::new(*id, distance_fn.distance(&vector, vec)))
@@ -221,7 +224,7 @@ fn remove_edge_directed(
     graph.set_edges(src_vertex_id, edges)
 }
 
-/// Cross link vertices from a a deleted vertex.
+/// Cross link vertices from a deleted vertex.
 ///
 /// vertex_data is a list of (vertex_id, vector, edges) for each vertex that was linked to the
 /// deleted vertex. This method will score each pair of edges and re-insert the top edges that are

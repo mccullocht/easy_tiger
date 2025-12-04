@@ -15,6 +15,8 @@ use easy_tiger::{
 use tracing::warn;
 use wt_mdb::{session::TransactionGuard, Connection, Error, Result, Session, TypedCursor};
 
+use crate::ui::progress_spinner;
+
 // TODO: almost all of these arguments belong in the index config.
 #[derive(Args)]
 pub struct RebalanceArgs {
@@ -80,10 +82,6 @@ pub struct Rebalancer {
     head_index: SessionGraphVectorIndex,
 }
 
-// XXX I hate the structure of this w.r.t. transactions. If I make any method mutable I can't use
-// a transaction guard. Ideally the transaction guard would also take a mutable reference to the
-// Session so like much much worse. The alternative is that the rebalancer can't take a session and
-// I have to pass one to every single method which is awful.
 impl Rebalancer {
     fn new(index: Arc<TableIndex>, session: Session) -> Self {
         assert_eq!(
@@ -234,6 +232,7 @@ impl Rebalancer {
 
         // Write the new centroids back into the index.
         upsert_vector(centroid_id as i64, &centroids[0], &self.head_index)?;
+        upsert_vector(next_centroid_id as i64, &centroids[1], &self.head_index)?;
 
         // XXX for vectors in centroids near the original centroid (how many?) we should attempt
         // to reassign each vector to the new centroids. from the paper:
@@ -290,35 +289,54 @@ pub fn rebalance(
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
     let session = connection.open_session()?;
-    let commit = args.commit;
 
     let rebalancer = Rebalancer::new(index, session);
-    let txn_guard = TransactionGuard::new(rebalancer.session(), None)?;
-    let stats = rebalancer.centroid_stats()?;
-    let summary = rebalancer.summary(&stats);
-    print_balance_summary(&summary);
+    let progress = if args.commit {
+        Some(progress_spinner("rebalancing"))
+    } else {
+        None
+    };
+    for _ in 0..args.iterations.get() {
+        let txn_guard = TransactionGuard::new(rebalancer.session(), None)?;
+        let stats = rebalancer.centroid_stats()?;
+        let summary = rebalancer.summary(&stats);
 
-    match (summary.below_exemplar, summary.above_exemplar) {
-        (None, None) => {
-            println!("No centroid to rebalance!");
-            return Ok(());
+        if let Some(ref progress) = progress {
+            progress.set_message(format!(
+                "rebalancing {}/{} {:.2}%",
+                summary.in_bounds,
+                summary.total_clusters(),
+                summary.in_policy_fraction() * 100.0
+            ));
         }
-        (Some((to_merge, count)), _) => {
-            println!("Merging centroid {to_merge} with {count} vectors");
-            rebalancer.merge_centroid(to_merge)?;
+
+        match (summary.below_exemplar, summary.above_exemplar) {
+            (None, None) => {
+                break;
+            }
+            (Some((to_merge, count)), _) => {
+                rebalancer.merge_centroid(to_merge)?;
+            }
+            (_, Some((to_split, count))) => {
+                rebalancer
+                    .split_centroid(to_split, stats.available_centroid_ids().next().unwrap())?;
+            }
         }
-        (_, Some((to_split, count))) => {
-            println!("Splitting centroid {to_split} with {count} vectors");
-            rebalancer.split_centroid(to_split, stats.available_centroid_ids().next().unwrap())?;
+
+        if progress.is_some() {
+            txn_guard.commit(None)?;
+        } else {
+            break; // only ever one iteration if not committing.
         }
     }
 
+    if let Some(progress) = progress {
+        progress.finish_using_style();
+    }
     let stats = rebalancer.centroid_stats()?;
     let summary = rebalancer.summary(&stats);
-    print_balance_summary(&summary);
-
-    if commit {
-        txn_guard.commit(None)?;
+    if summary.in_policy_fraction() < 1.0 {
+        print_balance_summary(&summary);
     }
 
     Ok(())

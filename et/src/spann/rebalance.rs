@@ -187,10 +187,6 @@ impl Rebalancer {
             }
         };
 
-        // XXX for vectors in the original centroid, if they are closer to the original centroid
-        // than the new centroids then we need to query-and-reassign. from the paper:
-        //   D(v, c0) <= D(v, ci) where i in [1,2]
-
         // Extract the original centroid vector from the head index and delete original centroid.
         let mut head_vectors = self.head_index.high_fidelity_vectors()?;
         let head_coder = head_vectors.new_coder();
@@ -204,6 +200,15 @@ impl Rebalancer {
         // For each vector if it is closer to the original centroid than either of the new centroids
         // then query the whole index to select a new assignment. Otherwise assign it to the closest
         // of the two new centroids.
+        let mut params = self.index.config().head_search_params;
+        // TODO: figure out if nearby update beam width needs to be configurable.
+        // TODO: write a tool that figures out how many vectors are not assigned to the nearest
+        // centroid.
+        params.beam_width = NonZero::new(64).unwrap();
+        let mut searcher = GraphSearcher::new(params);
+        let nearby_clusters = searcher.search(&original_centroid, &self.head_index)?;
+
+        searcher = GraphSearcher::new(self.index.config().head_search_params);
         let c0_dist_fn = posting_format.query_vector_distance_f32(original_centroid, similarity);
         let c1_dist_fn = posting_format.query_vector_distance_f32(&centroids[0], similarity);
         let c2_dist_fn = posting_format.query_vector_distance_f32(&centroids[1], similarity);
@@ -211,7 +216,6 @@ impl Rebalancer {
             .head_index
             .session()
             .get_record_cursor(&self.index.centroids_table_name())?;
-        let mut searcher = GraphSearcher::new(self.index.config().head_search_params);
         for (record_id, vector) in vectors {
             let c0_dist = c0_dist_fn.distance(&vector);
             let c1_dist = c1_dist_fn.distance(&vector);
@@ -230,16 +234,46 @@ impl Rebalancer {
             centroid_cursor.set(record_id, &new_centroid_id.to_le_bytes())?;
         }
 
+        // For a list of nearby centroids, examine all vectors and reassign them if they are closer
+        // to one of the new centroids than they are to the current centroid.
+        let mut update_posting_cursor = self
+            .head_index
+            .session()
+            .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(self.index.postings_table_name())?;
+        for nearby_centroid_id in nearby_clusters.into_iter().map(|n| n.vertex() as u32) {
+            let nearby_centroid = head_coder.decode(
+                head_vectors
+                    .get(nearby_centroid_id as i64)
+                    .unwrap_or(Err(Error::not_found_error()))?,
+            );
+            let c0_dist_fn = posting_format.query_vector_distance_f32(nearby_centroid, similarity);
+
+            posting_cursor.set_bounds(PostingKey::centroid_range(nearby_centroid_id))?;
+            // SAFETY: memory remains valid because this path does not commit or rollback txns.
+            while let Some(r) = unsafe { posting_cursor.next_unsafe() } {
+                let (key, vector) = r?;
+                let c0_dist = c0_dist_fn.distance(&vector);
+                let c1_dist = c1_dist_fn.distance(&vector);
+                let c2_dist = c2_dist_fn.distance(&vector);
+
+                let assigned_centroid_id = if c1_dist < c0_dist {
+                    centroid_id as u32
+                } else if c2_dist < c0_dist {
+                    next_centroid_id as u32
+                } else {
+                    continue;
+                };
+
+                let new_key = PostingKey::new(assigned_centroid_id, key.record_id);
+                update_posting_cursor.remove(key)?;
+                update_posting_cursor.set(new_key, &vector)?;
+                centroid_cursor.set(key.record_id, &assigned_centroid_id.to_le_bytes())?;
+            }
+        }
+
         // Write the new centroids back into the index.
         upsert_vector(centroid_id as i64, &centroids[0], &self.head_index)?;
         upsert_vector(next_centroid_id as i64, &centroids[1], &self.head_index)?;
-
-        // XXX for vectors in centroids near the original centroid (how many?) we should attempt
-        // to reassign each vector to the new centroids. from the paper:
-        //   D(v, ci) <= D(v, c0) where i in [1,2]
-        // This is weird because it feels like you could just, ya know, compute the distance and
-        // reassign without faffing about too much. SPANN chooses the number of centroids with a
-        // fixed value but I wonder if I could do something similar to the query vector count.
 
         Ok(())
     }
@@ -251,10 +285,7 @@ impl Rebalancer {
         cursor: &mut TypedCursor<'_, PostingKey, Vec<u8>>,
     ) -> Result<Vec<(i64, Vec<u8>)>> {
         let mut vectors = vec![];
-        cursor.set_bounds(
-            PostingKey::for_centroid(centroid_id as u32)
-                ..PostingKey::for_centroid(centroid_id as u32 + 1),
-        )?;
+        cursor.set_bounds(PostingKey::centroid_range(centroid_id as u32))?;
         while let Some(r) = cursor.next() {
             let (key, vector) = r?;
             vectors.push((key.record_id, vector));
@@ -303,7 +334,7 @@ pub fn rebalance(
 
         if let Some(ref progress) = progress {
             progress.set_message(format!(
-                "rebalancing {}/{} {:.2}%",
+                "rebalancing {}/{} {:.2}% clusters in policy",
                 summary.in_bounds,
                 summary.total_clusters(),
                 summary.in_policy_fraction() * 100.0
@@ -314,23 +345,32 @@ pub fn rebalance(
             (None, None) => {
                 break;
             }
-            (Some((to_merge, count)), _) => {
+            (Some((to_merge, _)), _) => {
                 rebalancer.merge_centroid(to_merge)?;
             }
-            (_, Some((to_split, count))) => {
+            (_, Some((to_split, _))) => {
                 rebalancer
                     .split_centroid(to_split, stats.available_centroid_ids().next().unwrap())?;
             }
         }
 
-        if progress.is_some() {
+        if let Some(ref progress) = progress {
             txn_guard.commit(None)?;
+            progress.inc(1);
         } else {
             break; // only ever one iteration if not committing.
         }
     }
 
     if let Some(progress) = progress {
+        let stats = rebalancer.centroid_stats()?;
+        let summary = rebalancer.summary(&stats);
+        progress.set_message(format!(
+            "rebalancing {}/{} {:.2}% clusters in policy",
+            summary.in_bounds,
+            summary.total_clusters(),
+            summary.in_policy_fraction() * 100.0
+        ));
         progress.finish_using_style();
     }
     let stats = rebalancer.centroid_stats()?;

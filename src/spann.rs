@@ -7,7 +7,7 @@ pub mod bulk;
 pub mod centroid_stats;
 pub mod search;
 
-use std::{io, sync::Arc};
+use std::{io, ops::Range, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding, VectorDistance};
@@ -267,6 +267,11 @@ impl PostingKey {
             centroid_id,
             record_id: 0,
         }
+    }
+
+    // XXX !pub
+    pub fn centroid_range(centroid_id: u32) -> Range<Self> {
+        Self::for_centroid(centroid_id)..Self::for_centroid(centroid_id + 1)
     }
 }
 

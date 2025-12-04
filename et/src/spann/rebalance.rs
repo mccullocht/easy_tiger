@@ -4,30 +4,20 @@ use clap::Args;
 use easy_tiger::{
     input::VecVectorStore,
     kmeans,
-    spann::{centroid_stats::CentroidStats, PostingKey, ReplicaSelectionAlgorithm, TableIndex},
+    spann::{centroid_stats::CentroidStats, PostingKey, TableIndex},
     vamana::{
-        mutate::GraphMutator, search::GraphSearcher, wt::SessionGraphVectorIndex, GraphVectorIndex,
-        GraphVectorStore,
+        mutate::{delete_vector, upsert_vector},
+        search::GraphSearcher,
+        wt::SessionGraphVectorIndex,
+        GraphVectorIndex, GraphVectorStore,
     },
 };
 use tracing::warn;
-use wt_mdb::{Connection, Error, Result, Session, TypedCursor};
+use wt_mdb::{session::TransactionGuard, Connection, Error, Result, Session, TypedCursor};
 
 // TODO: almost all of these arguments belong in the index config.
 #[derive(Args)]
 pub struct RebalanceArgs {
-    /// Minimum number of vectors that should map to each centroid.
-    #[arg(long)]
-    min_centroid_len: NonZero<usize>,
-    /// Maximum number of vectors that should map to each centroid.
-    #[arg(long)]
-    max_centroid_len: NonZero<usize>,
-    /// Number of replica centroids to assign each vector to.
-    #[arg(long)]
-    replica_count: NonZero<usize>,
-    /// Replica selection algorithm to use.
-    #[arg(long, default_value_t = ReplicaSelectionAlgorithm::SOAR)]
-    replica_selection: ReplicaSelectionAlgorithm,
     /// Number of rebalancing iterations to perform.
     #[arg(long, default_value_t = NonZero::new(1).unwrap())]
     iterations: NonZero<usize>,
@@ -85,38 +75,9 @@ impl BalanceSummary {
     }
 }
 
-// TODO: all of this belongs in the index config.
-struct RebalancingPolicy {
-    min_centroid_len: usize,
-    max_centroid_len: usize,
-    #[allow(unused)]
-    replica_count: usize,
-    #[allow(unused)]
-    replica_selection: ReplicaSelectionAlgorithm,
-}
-
-impl RebalancingPolicy {
-    fn centroid_len(&self) -> RangeInclusive<usize> {
-        self.min_centroid_len..=self.max_centroid_len
-    }
-}
-
-impl From<RebalanceArgs> for RebalancingPolicy {
-    fn from(args: RebalanceArgs) -> Self {
-        Self {
-            min_centroid_len: args.min_centroid_len.get(),
-            max_centroid_len: args.max_centroid_len.get(),
-            replica_count: args.replica_count.get(),
-            replica_selection: args.replica_selection,
-        }
-    }
-}
-
 pub struct Rebalancer {
     index: Arc<TableIndex>,
-    policy: RebalancingPolicy,
     head_index: SessionGraphVectorIndex,
-    head_mutator: GraphMutator,
 }
 
 // XXX I hate the structure of this w.r.t. transactions. If I make any method mutable I can't use
@@ -124,14 +85,14 @@ pub struct Rebalancer {
 // Session so like much much worse. The alternative is that the rebalancer can't take a session and
 // I have to pass one to every single method which is awful.
 impl Rebalancer {
-    fn new(index: Arc<TableIndex>, session: Session, policy: RebalancingPolicy) -> Self {
+    fn new(index: Arc<TableIndex>, session: Session) -> Self {
+        assert_eq!(
+            index.config().replica_count,
+            1,
+            "rebalance only implemented for replica count 1"
+        );
         let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
-        Self {
-            index,
-            policy,
-            head_index,
-            head_mutator: GraphMutator::new(),
-        }
+        Self { index, head_index }
     }
 
     fn session(&self) -> &Session {
@@ -143,11 +104,15 @@ impl Rebalancer {
     }
 
     fn summary(&self, stats: &CentroidStats) -> BalanceSummary {
-        BalanceSummary::new(stats, self.policy.centroid_len())
+        BalanceSummary::new(stats, self.centroid_len_range())
+    }
+
+    fn centroid_len_range(&self) -> RangeInclusive<usize> {
+        self.index.config().min_centroid_len..=self.index.config().max_centroid_len
     }
 
     // Remove `centroid_id` and merge each of its vectors into the next closest centroid.
-    fn merge_centroid(&mut self, centroid_id: usize) -> Result<()> {
+    fn merge_centroid(&self, centroid_id: usize) -> Result<()> {
         // Collect all of the vectors for the centroid to merge.
         let mut posting_cursor = self
             .head_index
@@ -156,8 +121,7 @@ impl Rebalancer {
         let vectors = self.drain_centroid(centroid_id, &mut posting_cursor)?;
 
         // Remove the centroid from the graph.
-        self.head_mutator
-            .delete(centroid_id as i64, &self.head_index)?;
+        delete_vector(centroid_id as i64, &self.head_index)?;
 
         // If the centroid is already empty then there is nothing to do.
         if vectors.is_empty() {
@@ -165,8 +129,6 @@ impl Rebalancer {
         }
 
         // XXX logic below needs to be shared with the index writer.
-        assert_eq!(self.policy.replica_count, 1);
-
         // Query the head index for each vector and assign a new centroid.
         let coder = self
             .index
@@ -194,7 +156,7 @@ impl Rebalancer {
         Ok(())
     }
 
-    fn split_centroid(&mut self, centroid_id: usize, next_centroid_id: usize) -> Result<()> {
+    fn split_centroid(&self, centroid_id: usize, next_centroid_id: usize) -> Result<()> {
         let mut posting_cursor = self
             .head_index
             .session()
@@ -215,14 +177,17 @@ impl Rebalancer {
         }
         posting_cursor.reset()?;
 
-        let centroids =
-            match kmeans::bp_vectors(&clustering_vectors, 100, self.policy.min_centroid_len) {
-                Ok(r) => r.0,
-                Err(r) => {
-                    warn!("split_centroid: binary partition of {centroid_id} failed to converge!");
-                    r.0
-                }
-            };
+        let centroids = match kmeans::binary_partition(
+            &clustering_vectors,
+            100,
+            self.index.config().min_centroid_len,
+        ) {
+            Ok(r) => r.0,
+            Err(r) => {
+                warn!("split_centroid: binary partition of {centroid_id} failed to converge!");
+                r.0
+            }
+        };
 
         // XXX for vectors in the original centroid, if they are closer to the original centroid
         // than the new centroids then we need to query-and-reassign. from the paper:
@@ -236,8 +201,7 @@ impl Rebalancer {
                 .get(centroid_id as i64)
                 .unwrap_or(Err(Error::not_found_error()))?,
         );
-        self.head_mutator
-            .delete(centroid_id as i64, &self.head_index)?;
+        delete_vector(centroid_id as i64, &self.head_index)?;
 
         // For each vector if it is closer to the original centroid than either of the new centroids
         // then query the whole index to select a new assignment. Otherwise assign it to the closest
@@ -269,10 +233,7 @@ impl Rebalancer {
         }
 
         // Write the new centroids back into the index.
-        self.head_mutator
-            .update(centroid_id as i64, &centroids[0], &self.head_index)?;
-        self.head_mutator
-            .update(next_centroid_id as i64, &centroids[1], &self.head_index)?;
+        upsert_vector(centroid_id as i64, &centroids[0], &self.head_index)?;
 
         // XXX for vectors in centroids near the original centroid (how many?) we should attempt
         // to reassign each vector to the new centroids. from the paper:
@@ -329,11 +290,10 @@ pub fn rebalance(
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
     let session = connection.open_session()?;
-    // XXX let mut rng = Xoshiro128PlusPlus::seed_from_u64(args.seed);
     let commit = args.commit;
 
-    let mut rebalancer = Rebalancer::new(index, session, args.into());
-    rebalancer.session().begin_transaction(None)?;
+    let rebalancer = Rebalancer::new(index, session);
+    let txn_guard = TransactionGuard::new(rebalancer.session(), None)?;
     let stats = rebalancer.centroid_stats()?;
     let summary = rebalancer.summary(&stats);
     print_balance_summary(&summary);
@@ -358,7 +318,7 @@ pub fn rebalance(
     print_balance_summary(&summary);
 
     if commit {
-        rebalancer.session().commit_transaction(None)?;
+        txn_guard.commit(None)?;
     }
 
     Ok(())

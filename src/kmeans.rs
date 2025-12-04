@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 use rand::seq::index;
 use rand::{distr::weighted::WeightedIndex, prelude::*};
 use rayon::prelude::*;
-use tracing::debug;
+use tracing::warn;
 use vectors::{EuclideanDistance, F32VectorDistance};
 
 use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
@@ -79,7 +79,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
     let mut centroids = match batch_kmeans(dataset, max_k, batch_size, params, rng) {
         Ok(c) => c,
         Err(c) => {
-            debug!("iterative_balanced_kmeans initial partitioning failed to converge!");
+            warn!("iterative_balanced_kmeans initial partitioning failed to converge!");
             c
         }
     };
@@ -144,7 +144,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                 ) {
                     Ok(r) => r,
                     Err(r) => {
-                        debug!("iterative_balanced_kmeans bp_vector partition failed to converge!");
+                        warn!("iterative_balanced_kmeans binary_partition failed to converge!");
                         r
                     }
                 },
@@ -158,7 +158,7 @@ pub fn iterative_balanced_kmeans<V: VectorStore<Elem = f32> + Send + Sync>(
                     ) {
                         Ok(c) => c,
                         Err(e) => {
-                            debug!(
+                            warn!(
                                     "iterative_balanced_kmeans batch_kmeans partition failed to converge!"
                                 );
                             e
@@ -239,7 +239,7 @@ fn prune_iterative_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
         let (centroids, assignments) = match binary_partition(vectors, iters, min_centroid_size) {
             Ok(r) => r,
             Err(r) => {
-                debug!("iterative_balanced_kmeans prune_iterative_centroids bp_vector partition failed to converge!");
+                warn!("iterative_balanced_kmeans prune_iterative_centroids binary_partition failed to converge!");
                 r
             }
         };

@@ -1,4 +1,5 @@
 mod compute_neighbors;
+mod mongodump;
 mod neighbor_util;
 mod quantization;
 mod recall;
@@ -12,6 +13,7 @@ use std::io::{self};
 
 use clap::{command, Parser, Subcommand};
 use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
+use mongodump::{mongodump_command, MongodumpArgs};
 use quantization::{quantization, QuantizationArgs};
 use spann::{spann_command, SpannArgs};
 use vamana::{vamana_command, VamanaArgs};
@@ -33,6 +35,8 @@ enum Commands {
     ComputeNeighbors(ComputeNeighborsArgs),
     /// Quantization related utilities.
     Quantization(QuantizationArgs),
+    /// Read and inspect mongodump archives.
+    Mongodump(MongodumpArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -44,5 +48,6 @@ fn main() -> io::Result<()> {
         Commands::Vamana(args) => vamana_command(args),
         Commands::ComputeNeighbors(args) => compute_neighbors(args),
         Commands::Quantization(args) => quantization(args),
+        Commands::Mongodump(args) => mongodump_command(args),
     }
 }

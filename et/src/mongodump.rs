@@ -1,3 +1,4 @@
+mod parser;
 mod read;
 
 use std::io;
@@ -22,4 +23,3 @@ pub fn mongodump_command(args: MongodumpArgs) -> io::Result<()> {
         MongodumpCommands::Read(args) => read_archive(args),
     }
 }
-

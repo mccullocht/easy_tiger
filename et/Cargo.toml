@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bson = "2.13"
+bson = "3.1.0"
 bytemuck = "1.23.1"
 clap = { version = "4.5.20", features = ["derive"] }
 crossbeam-utils = "0.8.21"

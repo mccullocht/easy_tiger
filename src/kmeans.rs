@@ -594,6 +594,7 @@ enum VectorSource {
     Buffer,
 }
 
+// XXX docos.
 pub fn hierarchical_kmeans(
     dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
     params: &HierarchicalKMeansParams,
@@ -649,10 +650,13 @@ pub fn hierarchical_kmeans(
         };
 
         progress(1);
-        let centroid_vectors = assignments.iter().fold(vec![vec![]], |mut cv, a| {
-            cv[a.0].push(a.0);
-            cv
-        });
+        let centroid_vectors = assignments.iter().enumerate().fold(
+            vec![vec![]; iter_centroids.len()],
+            |mut cv, (i, &(c, _))| {
+                cv[c].push(i);
+                cv
+            },
+        );
         for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
             if subset.len() <= params.max_cluster_len {
                 centroids.push(centroid);

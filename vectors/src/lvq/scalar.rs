@@ -119,6 +119,12 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
     component_sum
 }
 
+pub fn lvq1_decode<const B: usize>(v: &PrimaryVector<B>, out: &mut [f32]) {
+    for (d, o) in v.f32_iter().zip(out.iter_mut()) {
+        *o = d;
+    }
+}
+
 pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     v: &[f32],
     lower: f32,
@@ -149,6 +155,12 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
         residual,
     );
     (p_component_sum, r_component_sum)
+}
+
+pub fn lvq2_decode<const B1: usize, const B2: usize>(v: &TwoLevelVector<B1, B2>, out: &mut [f32]) {
+    for (d, o) in v.f32_iter().zip(out.iter_mut()) {
+        *o = d;
+    }
 }
 
 #[inline]

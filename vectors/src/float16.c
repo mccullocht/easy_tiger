@@ -36,6 +36,28 @@ __attribute__((target("+fp16"))) EXPORT void et_serialize_f16(
   }
 }
 
+__attribute__((target("+fp16"))) EXPORT void et_deserialize_f16(
+    const __fp16* v, size_t len, float* out) {
+  size_t tail_split = len & ~7;
+  for (size_t i = 0; i < tail_split; i += 8) {
+    float16x8_t in = vld1q_f16(v + i);
+    vst1q_f32(out + i, vcvt_f32_f16(vget_low_f16(in)));
+    vst1q_f32(out + i + 4, vcvt_f32_f16(vget_high_f16(in)));
+  }
+
+  if (tail_split < len) {
+    __fp16 tail_in[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (size_t i = tail_split; i < len; i++) {
+      tail_in[i - tail_split] = v[i];
+    }
+    float16x8_t in = vld1q_f16(&tail_in[0]);
+    float tail_out[8];
+    vst1q_f32(tail_out, vcvt_f32_f16(vget_low_f16(in)));
+    vst1q_f32(tail_out + 4, vcvt_f32_f16(vget_high_f16(in)));
+    memcpy(out + tail_split, &tail_out[0], (len - tail_split) * sizeof(float));
+  }
+}
+
 // It's faster to fill out a full 4 value tail entry than it is
 // to convert and compute one element at a time.
 __attribute__((target("+fp16"))) HIDDEN float16x4_t
@@ -250,6 +272,28 @@ __attribute__((target("avx,f16c"))) EXPORT void et_serialize_f16_avx512(
     uint8_t vo[16];
     _mm_storeu_si128((__m128i*)vo, vh);
     memcpy(out + tail_split * 2, vo, (len - tail_split) * 2);
+  }
+}
+
+__attribute__((target("avx,f16c"))) EXPORT void et_deserialize_f16_avx512(
+    const uint16_t* v, size_t len, float* out) {
+  size_t tail_split = len & ~7;
+  for (size_t i = 0; i < tail_split; i += 8) {
+    __m128i vh = _mm_loadu_si128((const __m128i*)(v + i));
+    __m256 vs = _mm256_cvtph_ps(vh);
+    _mm256_storeu_ps(out + i, vs);
+  }
+
+  if (tail_split < len) {
+    uint16_t tail_in[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (size_t i = tail_split; i < len; i++) {
+      tail_in[i - tail_split] = v[i];
+    }
+    __m128i vh = _mm_loadu_si128((const __m128i*)(tail_in));
+    __m256 vs = _mm256_cvtph_ps(vh);
+    float tail_out[8];
+    _mm256_storeu_ps(tail_out, vs);
+    memcpy(out + tail_split, &tail_out[0], (len - tail_split) * sizeof(float));
   }
 }
 

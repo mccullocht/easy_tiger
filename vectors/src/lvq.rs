@@ -438,10 +438,7 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::lvq1_decode::<B>(&v, out),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                // XXX FIXME
-                scalar::lvq1_decode::<B>(&v, out)
-            },
+            InstructionSet::Avx512 => unsafe { x86_64::lvq1_decode_avx512::<B>(&v, out) },
         }
     }
 

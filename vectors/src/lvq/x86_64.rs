@@ -13,13 +13,13 @@ use std::arch::x86_64::{
     _mm512_and_si512, _mm512_castps512_ps256, _mm512_cmpgt_epu8_mask, _mm512_cvtepi16_epi32,
     _mm512_cvtepi32_epi16, _mm512_cvtepu32_ps, _mm512_div_ps, _mm512_dpbusd_epi32,
     _mm512_dpwssd_epi32, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8,
-    _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_add_ps,
-    _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32, _mm512_maskz_loadu_epi8,
-    _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_movm_epi8, _mm512_mul_ps,
-    _mm512_permutexvar_epi8, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
-    _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set1_epi8,
-    _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps, _mm512_srli_epi64, _mm512_sub_ps,
-    _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_storeu_ps, _mm512_mask_sub_ps,
+    _mm512_maskz_add_ps, _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32,
+    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_movm_epi8,
+    _mm512_mul_ps, _mm512_permutexvar_epi8, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
+    _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
+    _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps, _mm512_srli_epi64,
+    _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
 use super::{LAMBDA, LVQ2Dot, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
@@ -286,6 +286,18 @@ pub unsafe fn lvq1_quantize_and_pack_avx512<const B: usize>(
         pack::<B>(q, o);
     }
     _mm512_reduce_add_epi32(component_sum) as u32
+}
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vl")]
+pub unsafe fn lvq1_decode_avx512<const B: usize>(v: &PrimaryVector<B>, out: &mut [f32]) {
+    let chunk_size = (B * 16).div_ceil(8);
+    let lower = _mm512_set1_ps(v.v.terms.lower);
+    let delta = _mm512_set1_ps(v.v.terms.delta);
+    for (c, o) in v.v.data.chunks(chunk_size).zip(out.chunks_mut(16)) {
+        let q = unpack::<B>(c);
+        let v = _mm512_fmadd_ps(_mm512_cvtepu32_ps(q), delta, lower);
+        _mm512_mask_storeu_ps(o.as_mut_ptr(), u16::MAX >> (16 - o.len()), v);
+    }
 }
 
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,avx")]

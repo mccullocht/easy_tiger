@@ -358,6 +358,49 @@ fn initialize_batch_centroids<V: VectorStore<Elem = f32> + Send + Sync>(
         .0
 }
 
+// XXX docos
+pub fn kmeans(
+    training_data: &(impl VectorStore<Elem = f32> + Send + Sync),
+    k: usize,
+    params: &Params,
+    rng: &mut impl Rng,
+) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
+    let mut centroids =
+        initialize_centroids(training_data, training_data, k, params.initialization, rng).0;
+    let mut next_centroids = centroids.clone();
+    for _ in 0..params.iters {
+        let assignments = compute_assignments(training_data, &centroids);
+
+        // Use assignments to compute new updated centroids.
+        let mut centroid_counts = vec![0usize; centroids.len()];
+        for (i, (c, _)) in assignments.iter().enumerate() {
+            if centroid_counts[*c] == 0 {
+                next_centroids[*c].fill(0.0);
+            }
+            centroid_counts[*c] += 1;
+            for (vd, cd) in training_data[i].iter().zip(next_centroids[*c].iter_mut()) {
+                *cd += (*vd - *cd) / centroid_counts[*c] as f32;
+            }
+        }
+
+        // If any centroid has no assigned vectors, replace it with a random vector.
+        for (i, _) in centroid_counts.iter().enumerate().filter(|&(_, c)| *c == 0) {
+            next_centroids[i]
+                .copy_from_slice(&training_data[rng.random_range(0..training_data.len())]);
+        }
+
+        // If no centroid has moved more than epsilon, terminate.
+        if compute_centroid_distance_max(&centroids, &next_centroids) < params.epsilon {
+            return Ok(centroids);
+        }
+
+        // Update centroids.
+        std::mem::swap(&mut centroids, &mut next_centroids);
+    }
+
+    Err(centroids)
+}
+
 fn initialize_centroids<
     D: VectorStore<Elem = f32> + Send + Sync,
     T: VectorStore<Elem = f32> + Send + Sync,

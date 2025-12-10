@@ -561,7 +561,7 @@ impl<const B1: usize, const B2: usize> F32VectorCoder for TwoLevelVectorCoder<B1
             InstructionSet::Neon => aarch64::lvq2_decode::<B1, B2>(&v, out),
             #[cfg(target_arch = "x86_64")]
             // XXX FIXME
-            InstructionSet::Avx512 => unsafe { scalar::lvq2_decode::<B1, B2>(&v, out) },
+            InstructionSet::Avx512 => unsafe { x86_64::lvq2_decode_avx512::<B1, B2>(&v, out) },
         }
     }
 

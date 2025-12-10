@@ -49,9 +49,7 @@ where
         if !vectorp.is_aligned() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "input vector data not aligned to element width {elem_width}"
-                ),
+                format!("input vector data not aligned to element width {elem_width}"),
             ));
         }
         if !data.len().is_multiple_of(elem_width * stride.get()) {
@@ -139,6 +137,10 @@ impl<E: Clone> VecVectorStore<E> {
 
     pub fn capacity(&self) -> usize {
         self.data.capacity() / self.elem_stride
+    }
+
+    pub fn iter_mut(&mut self) -> impl ExactSizeIterator<Item = &mut [E]> {
+        self.data.chunks_mut(self.elem_stride)
     }
 
     fn index_range(&self, index: usize) -> Range<usize> {

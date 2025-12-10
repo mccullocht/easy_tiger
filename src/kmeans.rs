@@ -1,5 +1,6 @@
 //! An implementation of k-means algorithms for clustering vectors.
 
+use std::collections::VecDeque;
 use std::iter::Cycle;
 use std::ops::RangeInclusive;
 
@@ -559,4 +560,169 @@ fn compute_centroids(
         }
     }
     centroids
+}
+
+// XXX hierarchical k-means
+// I want to think about when vectors are on the heap vs off-heap.
+// * if > 100k vectors, then sample and copy into in-memory buffer for clustering.
+//   this is disposable -- when we being next clustering job we can drop this.
+// * when vector count drops below 100k, copy into in-memory buffer. we want to recurse down this
+//   path as much as possible until we're below the target count.
+// In all cases we maintain ~100k vectors in an in-memory buffer.
+// I'm not planning to produce assignments -- that will happen afterward.
+//
+// buffer: VecVectorStore<f32>,
+// sampled: bool,
+
+pub struct HierarchicalKMeansParams {
+    /// Maximum number of partitions at each level in the hierarchy.
+    pub max_k: usize,
+    /// Maximum number of vectors per cluster. Any cluster larger than this will be partitioned.
+    pub max_cluster_len: usize,
+    /// Number of vectors to buffer at once.
+    ///
+    /// For any input larger than buffer_len we may sample vectors into the buffer to perform
+    /// clustering, extrapolating the results to the full dataset.
+    pub buffer_len: usize,
+    /// K-means parameters.
+    pub params: Params,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum VectorSource {
+    Dataset,
+    Buffer,
+}
+
+// XXX docos.
+pub fn hierarchical_kmeans(
+    dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+    params: &HierarchicalKMeansParams,
+    rng: &mut impl Rng,
+    progress: impl Fn(u64),
+) -> VecVectorStore<f32> {
+    let mut buffer = VecVectorStore::with_capacity(dataset.elem_stride(), params.buffer_len);
+    let mut centroids = VecVectorStore::new(dataset.elem_stride());
+    let mut queue: VecDeque<(VectorSource, Vec<usize>)> = VecDeque::new();
+    queue.push_back((VectorSource::Dataset, (0..dataset.len()).collect()));
+
+    while let Some((source, subset)) = queue.pop_front() {
+        let (iter_centroids, assignments) = match source {
+            VectorSource::Dataset => {
+                if subset.len() <= params.buffer_len {
+                    // Buffer this subset and do any clustering below this point on the buffer only.
+                    buffer.clear();
+                    for i in &subset {
+                        buffer.push(&dataset[*i]);
+                    }
+                    queue.push_front((VectorSource::Buffer, (0..subset.len()).collect()));
+                    progress(1);
+                    continue;
+                }
+
+                // Cluster on a sample of no more than buffer_len vectors.
+                let cluster_dataset = SubsetViewVectorStore::new(
+                    dataset,
+                    index::sample(rng, subset.len(), params.buffer_len).into_vec(),
+                );
+                let c = hkmeans_unwrap(
+                    kmeans(&cluster_dataset, params.max_k, &params.params, rng),
+                    dataset.len(),
+                    true,
+                );
+                progress(1);
+                // Assign globally on the full dataset to build the hierarchy.
+                let assign_dataset = SubsetViewVectorStore::new(dataset, subset);
+                let a = compute_assignments(&assign_dataset, &c);
+                (c, a)
+            }
+            VectorSource::Buffer => {
+                // Limit k based on the size of the input subset, then cluster and assign on all of
+                // the vectors in the subset.
+                let k = subset.len().div_ceil(params.max_cluster_len);
+                let subset = SubsetViewVectorStore::new(&buffer, subset);
+                let c =
+                    hkmeans_unwrap(kmeans(&subset, k, &params.params, rng), subset.len(), false);
+                progress(1);
+                let a = compute_assignments(&subset, &c);
+                (c, a)
+            }
+        };
+
+        progress(1);
+        let centroid_vectors = assignments.iter().enumerate().fold(
+            vec![vec![]; iter_centroids.len()],
+            |mut cv, (i, &(c, _))| {
+                cv[c].push(i);
+                cv
+            },
+        );
+        for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
+            if subset.len() <= params.max_cluster_len {
+                centroids.push(centroid);
+                continue;
+            }
+
+            queue.push_front((source, subset));
+        }
+    }
+
+    centroids
+}
+
+fn hkmeans_unwrap(
+    r: Result<VecVectorStore<f32>, VecVectorStore<f32>>,
+    len: usize,
+    sampled: bool,
+) -> VecVectorStore<f32> {
+    match r {
+        Ok(c) => c,
+        Err(c) => {
+            warn!("hierarchical_kmeans iteration failed to converge! len={len} sampled={sampled}");
+            c
+        }
+    }
+}
+
+// XXX docos
+pub fn kmeans(
+    training_data: &(impl VectorStore<Elem = f32> + Send + Sync),
+    k: usize,
+    params: &Params,
+    rng: &mut impl Rng,
+) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
+    let mut centroids =
+        initialize_centroids(training_data, training_data, k, params.initialization, rng).0;
+    let mut next_centroids = centroids.clone();
+    for _ in 0..params.iters {
+        let assignments = compute_assignments(training_data, &centroids);
+
+        // Use assignments to compute new updated centroids.
+        let mut centroid_counts = vec![0usize; centroids.len()];
+        for (i, (c, _)) in assignments.iter().enumerate() {
+            if centroid_counts[*c] == 0 {
+                next_centroids[*c].fill(0.0);
+            }
+            centroid_counts[*c] += 1;
+            for (vd, cd) in training_data[i].iter().zip(next_centroids[*c].iter_mut()) {
+                *cd += (*vd - *cd) / centroid_counts[*c] as f32;
+            }
+        }
+
+        // If any centroid has no assigned vectors, replace it with a random vector.
+        for (i, _) in centroid_counts.iter().enumerate().filter(|&(_, c)| *c == 0) {
+            next_centroids[i]
+                .copy_from_slice(&training_data[rng.random_range(0..training_data.len())]);
+        }
+
+        // If no centroid has moved more than epsilon, terminate.
+        if compute_centroid_distance_max(&centroids, &next_centroids) < params.epsilon {
+            return Ok(centroids);
+        }
+
+        // Update centroids.
+        std::mem::swap(&mut centroids, &mut next_centroids);
+    }
+
+    Err(centroids)
 }

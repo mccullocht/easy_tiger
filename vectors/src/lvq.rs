@@ -440,7 +440,7 @@ impl<const B: usize> F32VectorCoder for PrimaryVectorCoder<B> {
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
                 // XXX FIXME
-                scalar::lvq1_decode_avx512::<B>(&v, out)
+                scalar::lvq1_decode::<B>(&v, out)
             },
         }
     }

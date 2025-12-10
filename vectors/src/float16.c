@@ -275,6 +275,28 @@ __attribute__((target("avx,f16c"))) EXPORT void et_serialize_f16_avx512(
   }
 }
 
+__attribute__((target("avx,f16c"))) EXPORT void et_deserialize_f16_avx512(
+    const uint16_t* v, size_t len, float* out) {
+  size_t tail_split = len & ~7;
+  for (size_t i = 0; i < tail_split; i += 8) {
+    __m128i vh = _mm_loadu_si128((const __m128i*)(v + i));
+    __m256 vs = _mm256_cvtph_ps(vh);
+    _mm256_storeu_ps(out + i, vs);
+  }
+
+  if (tail_split < len) {
+    uint16_t tail_in[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (size_t i = tail_split; i < len; i++) {
+      tail_in[i - tail_split] = v[i];
+    }
+    __m128i vh = _mm_loadu_si128((const __m128i*)(tail_in));
+    __m256 vs = _mm256_cvtph_ps(vh);
+    float tail_out[8];
+    _mm256_storeu_ps(tail_out, vs);
+    memcpy(out + tail_split, &tail_out[0], (len - tail_split) * sizeof(float));
+  }
+}
+
 __attribute__((target("avx,f16c"))) HIDDEN __m256
 load_f16x8_tail(const uint16_t* v, size_t len) {
   uint16_t r[8] = {0, 0, 0, 0, 0, 0, 0, 0};

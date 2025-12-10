@@ -58,6 +58,7 @@ unsafe extern "C" {
 #[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
     unsafe fn et_serialize_f16_avx512(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
+    unsafe fn et_deserialize_f16_avx512(v: *const u16, len: usize, out: *mut f32);
 
     unsafe fn et_dot_f16_f16_avx512(a: *const u16, b: *const u16, len: usize) -> f32;
     unsafe fn et_dot_f32_f16_avx512(a: *const f32, b: *const u16, len: usize) -> f32;
@@ -154,9 +155,11 @@ impl F32VectorCoder for VectorCoder {
             },
             #[cfg(target_arch = "x86_64")]
             InstructionSet::AvxF16c => unsafe {
-                for (d, o) in f16_iter(encoded).zip(out.iter_mut()) {
-                    *o = d.to_f32();
-                }
+                et_deserialize_f16_avx512(
+                    encoded.as_ptr() as *const u16,
+                    encoded.len() / 2,
+                    out.as_mut_ptr(),
+                )
             },
         }
     }

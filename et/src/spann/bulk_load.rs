@@ -3,7 +3,7 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
-    kmeans::{hierarchical_kmeans, iterative_balanced_kmeans, HierarchicalKMeansParams, Params},
+    kmeans::{hierarchical_kmeans, HierarchicalKMeansParams, Params},
     spann::{
         bulk::{
             assign_to_centroids, bulk_load_centroids, bulk_load_postings, bulk_load_raw_vectors,
@@ -115,6 +115,7 @@ pub fn bulk_load(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
         args.dimensions,
     )?;
+    f32_vectors.data().advise(memmap2::Advice::Random)?;
 
     if args.drop_tables {
         TableIndex::drop_tables(
@@ -176,7 +177,7 @@ pub fn bulk_load(
             &HierarchicalKMeansParams {
                 max_k: 32,
                 max_cluster_len: args.head_max_centroid_len,
-                buffer_len: 8192,
+                buffer_len: 128 << 10,
                 params: Params {
                     iters: 100,
                     epsilon: 0.0001,

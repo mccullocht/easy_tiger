@@ -73,6 +73,10 @@ where
             len,
         })
     }
+
+    pub fn data(&self) -> &D {
+        &self.data
+    }
 }
 
 impl<E, D> VectorStore for DerefVectorStore<E, D> {

@@ -616,7 +616,6 @@ pub fn hierarchical_kmeans(
                         buffer.push(&dataset[*i]);
                     }
                     queue.push_front((VectorSource::Buffer, (0..subset.len()).collect()));
-                    progress(1);
                     continue;
                 }
 
@@ -630,7 +629,6 @@ pub fn hierarchical_kmeans(
                     dataset.len(),
                     true,
                 );
-                progress(1);
                 // Assign globally on the full dataset to build the hierarchy.
                 let assign_dataset = SubsetViewVectorStore::new(dataset, subset);
                 let a = compute_assignments(&assign_dataset, &c);
@@ -643,13 +641,11 @@ pub fn hierarchical_kmeans(
                 let subset = SubsetViewVectorStore::new(&buffer, subset);
                 let c =
                     hkmeans_unwrap(kmeans(&subset, k, &params.params, rng), subset.len(), false);
-                progress(1);
                 let a = compute_assignments(&subset, &c);
                 (c, a)
             }
         };
 
-        progress(1);
         let centroid_vectors = assignments.iter().enumerate().fold(
             vec![vec![]; iter_centroids.len()],
             |mut cv, (i, &(c, _))| {
@@ -660,6 +656,7 @@ pub fn hierarchical_kmeans(
         for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
             if subset.len() <= params.max_cluster_len {
                 if !subset.is_empty() {
+                    progress(1);
                     centroids.push(centroid);
                 }
                 continue;

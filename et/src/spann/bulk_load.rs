@@ -3,7 +3,7 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
-    kmeans::{iterative_balanced_kmeans, Params},
+    kmeans::{hierarchical_kmeans, HierarchicalKMeansParams, Params},
     spann::{
         bulk::{
             assign_to_centroids, bulk_load_centroids, bulk_load_postings, bulk_load_raw_vectors,
@@ -57,6 +57,13 @@ pub struct BulkLoadArgs {
 
     #[command(flatten)]
     pruning: EdgePruningArgs,
+
+    /// Number of vectors to buffer at once when clustering.
+    ///
+    /// Lower values reduce memory usage but may increase clustering time and cause greater cluster
+    /// size imbalance. The default value will result in buffering 1GB of of 2048d vectors.
+    #[arg(long, default_value_t = NonZero::new(128 << 10).unwrap())]
+    cluster_buffer_len: NonZero<usize>,
 
     /// Minimum number of vectors that should map to each head centroid.
     #[arg(long, default_value_t = 192)]
@@ -115,6 +122,7 @@ pub fn bulk_load(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
         args.dimensions,
     )?;
+    f32_vectors.data().advise(memmap2::Advice::Random)?;
 
     if args.drop_tables {
         TableIndex::drop_tables(
@@ -171,21 +179,20 @@ pub fn bulk_load(
     let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).collect());
     let centroids = {
         let progress = progress_spinner("clustering head");
-        let (centroids, _) = iterative_balanced_kmeans(
+        hierarchical_kmeans(
             &index_vectors,
-            args.head_min_centroid_len..=args.head_max_centroid_len,
-            32,
-            8192, // batch size
-            &Params {
-                iters: 100,
-                epsilon: 0.0001,
-                ..Params::default()
+            &HierarchicalKMeansParams {
+                cluster_size: args.head_min_centroid_len..=args.head_max_centroid_len,
+                buffer_len: args.cluster_buffer_len.get(),
+                params: Params {
+                    iters: 100,
+                    epsilon: 0.0001,
+                    ..Params::default()
+                },
             },
             &mut rng,
             |x| progress.inc(x),
-        );
-
-        centroids
+        )
     };
     let centroids_len = centroids.len();
 

@@ -59,6 +59,9 @@ pub struct BulkLoadArgs {
     pruning: EdgePruningArgs,
 
     /// Number of vectors to buffer at once when clustering.
+    ///
+    /// Lower values reduce memory usage but may increase clustering time and cause greater cluster
+    /// size imbalance. The default value will result in buffering 1GB of of 2048d vectors.
     #[arg(long, default_value_t = NonZero::new(128 << 10).unwrap())]
     cluster_buffer_len: NonZero<usize>,
 

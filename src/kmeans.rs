@@ -231,6 +231,9 @@ pub struct HierarchicalKMeansParams {
     ///
     /// For any input larger than buffer_len we may sample vectors into the buffer to perform
     /// clustering, extrapolating the results to the full dataset.
+    ///
+    /// Larger values increase memory usage but may reduce clustering time and produce more balanced
+    /// clusters.
     pub buffer_len: usize,
     /// K-means parameters.
     pub params: Params,

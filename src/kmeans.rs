@@ -562,6 +562,8 @@ fn compute_centroids(
 }
 
 /// Parameters for hierarchical k-means clustering.
+// XXX add min_cluster_len or make it a range
+// XXX remove max_k -- derive from buffer_len and max_cluster_len
 pub struct HierarchicalKMeansParams {
     /// Maximum number of partitions at each level in the hierarchy.
     // XXX should I instead use max_cluster_len and buffer_len?
@@ -651,6 +653,10 @@ pub fn hierarchical_kmeans(
                 cv
             },
         );
+
+        // XXX this should prune centroids below a certain sizebut slightly differently:
+        // * do not attempt to prune if there are only two clusters.
+        // * do up to min_cluster_len vectors at a time.
         for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
             if subset.len() <= params.max_cluster_len {
                 if !subset.is_empty() {
@@ -700,6 +706,8 @@ pub fn kmeans(
         let assignments = compute_assignments(training_data, &centroids);
 
         // Use assignments to compute new updated centroids.
+        // This could benefit from parallelization/offloading to rayon, but there's no obvious
+        // way to do so without using/allocating more memory.
         let mut centroid_counts = vec![0usize; centroids.len()];
         for (i, (c, _)) in assignments.iter().enumerate() {
             if centroid_counts[*c] == 0 {
@@ -707,14 +715,20 @@ pub fn kmeans(
             }
             centroid_counts[*c] += 1;
             for (vd, cd) in training_data[i].iter().zip(next_centroids[*c].iter_mut()) {
-                *cd += (*vd - *cd) / centroid_counts[*c] as f32;
+                *cd += *vd;
             }
         }
 
-        // If any centroid has no assigned vectors, replace it with a random vector.
-        for (i, _) in centroid_counts.iter().enumerate().filter(|&(_, c)| *c == 0) {
-            next_centroids[i]
-                .copy_from_slice(&training_data[rng.random_range(0..training_data.len())]);
+        for (count, centroid) in centroid_counts.iter().zip(next_centroids.iter_mut()) {
+            if *count == 0 {
+                // Pick a random vector to replace the centroid that isn't receiving assignments.
+                centroid.copy_from_slice(&training_data[rng.random_range(0..training_data.len())]);
+            } else {
+                let recip = 1.0 / *count as f32;
+                for cd in centroid.iter_mut() {
+                    *cd *= recip;
+                }
+            }
         }
 
         // If no centroid has moved more than epsilon, terminate.

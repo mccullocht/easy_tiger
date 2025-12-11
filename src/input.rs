@@ -115,7 +115,7 @@ pub struct VecVectorStore<E: 'static> {
     elem_stride: usize,
 }
 
-impl<E: Clone> VecVectorStore<E> {
+impl<E: Copy> VecVectorStore<E> {
     pub fn new(elem_stride: usize) -> Self {
         Self {
             data: vec![],
@@ -143,6 +143,17 @@ impl<E: Clone> VecVectorStore<E> {
         self.data.capacity() / self.elem_stride
     }
 
+    pub fn truncate(&mut self, len: usize) {
+        self.data.truncate(len * self.elem_stride);
+    }
+
+    pub fn swap_remove(&mut self, index: usize) {
+        let src = self.index_range(self.len() - 1);
+        let dst = self.index_range(index).start;
+        self.data.copy_within(src, dst);
+        self.truncate(self.len() - 1);
+    }
+
     pub fn iter_mut(&mut self) -> impl ExactSizeIterator<Item = &mut [E]> {
         self.data.chunks_mut(self.elem_stride)
     }
@@ -153,7 +164,7 @@ impl<E: Clone> VecVectorStore<E> {
     }
 }
 
-impl<E: Clone> VectorStore for VecVectorStore<E> {
+impl<E: Copy> VectorStore for VecVectorStore<E> {
     type Elem = E;
 
     fn elem_stride(&self) -> usize {
@@ -173,7 +184,7 @@ impl<E: Clone> VectorStore for VecVectorStore<E> {
     }
 }
 
-impl<E: Clone> Index<usize> for VecVectorStore<E> {
+impl<E: Copy> Index<usize> for VecVectorStore<E> {
     type Output = [E];
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -181,7 +192,7 @@ impl<E: Clone> Index<usize> for VecVectorStore<E> {
     }
 }
 
-impl<E: Clone> IndexMut<usize> for VecVectorStore<E> {
+impl<E: Copy> IndexMut<usize> for VecVectorStore<E> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         let r = self.index_range(index);
         &mut self.data[r]

@@ -269,7 +269,7 @@ pub fn hierarchical_kmeans(
     queue.push_back((VectorSource::Dataset, (0..dataset.len()).collect()));
 
     while let Some((source, subset)) = queue.pop_front() {
-        let (iter_centroids, assignments) = match source {
+        let (iter_centroids, centroid_vectors) = match source {
             VectorSource::Dataset => {
                 if subset.len() <= params.buffer_len {
                     // Buffer this subset and do any clustering below this point on the buffer only.
@@ -299,7 +299,7 @@ pub fn hierarchical_kmeans(
                 // Assign globally on the full dataset to build the hierarchy.
                 let assign_dataset = SubsetViewVectorStore::new(dataset, subset);
                 let a = compute_assignments(&assign_dataset, &c);
-                (c, a)
+                prune_centroids(&assign_dataset, c, a, *params.cluster_size.start())
             }
             VectorSource::Buffer => {
                 // Limit k based on the size of the input subset, then cluster and assign on all of
@@ -316,31 +316,20 @@ pub fn hierarchical_kmeans(
                     false,
                 );
                 let a = compute_assignments(&subset, &c);
-                (c, a)
+                prune_centroids(&subset, c, a, *params.cluster_size.start())
             }
         };
-
-        let centroid_vectors = assignments.iter().enumerate().fold(
-            vec![vec![]; iter_centroids.len()],
-            |mut cv, (i, &(c, _))| {
-                cv[c].push(i);
-                cv
-            },
-        );
 
         // XXX this should prune centroids below a certain sizebut slightly differently:
         // * do not attempt to prune if there are only two clusters.
         // * do up to min_cluster_len vectors at a time.
         for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
-            if subset.len() < *params.cluster_size.start() {
-                if !subset.is_empty() {
-                    progress(1);
-                    centroids.push(centroid);
-                }
-                continue;
+            if subset.len() <= *params.cluster_size.end() {
+                centroids.push(centroid);
+                progress(1);
+            } else {
+                queue.push_front((source, subset));
             }
-
-            queue.push_front((source, subset));
         }
     }
 
@@ -413,4 +402,45 @@ pub fn kmeans(
     }
 
     Err(centroids)
+}
+
+/// Prune under-sized centroids.
+// XXX I think I can move assignments into this function too.
+fn prune_centroids(
+    dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+    mut centroids: VecVectorStore<f32>,
+    assignments: Vec<(usize, f64)>,
+    min_cluster_len: usize,
+) -> (VecVectorStore<f32>, Vec<Vec<usize>>) {
+    let mut centroid_vectors = assignments.iter().enumerate().fold(
+        vec![vec![]; centroids.len()],
+        |mut cv, (i, &(c, _))| {
+            cv[c].push(i);
+            cv
+        },
+    );
+
+    while let Some((centroid, vectors)) = centroid_vectors
+        .iter_mut()
+        .enumerate()
+        .min_by_key(|(_, c)| c.len())
+    {
+        // If all the centroids are large enough or there are only two centroids left, terminate.
+        if vectors.len() >= min_cluster_len || centroids.len() == 2 {
+            break;
+        }
+
+        // Remove the identified centroid from all related data structures.
+        let merge_vectors = centroid_vectors.swap_remove(centroid);
+        centroids.swap_remove(centroid);
+
+        // Reassign all of the vectors to the other centroid.
+        let merged_subset = SubsetViewVectorStore::new(dataset, merge_vectors);
+        let assignments = compute_assignments(&merged_subset, &centroids);
+        for (i, (c, _)) in assignments.iter().enumerate() {
+            centroid_vectors[*c].push(merged_subset.original_index(i));
+        }
+    }
+
+    (centroids, centroid_vectors)
 }

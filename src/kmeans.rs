@@ -285,7 +285,7 @@ pub fn hierarchical_kmeans(
                     dataset,
                     index::sample(rng, subset.len(), params.buffer_len).into_vec(),
                 );
-                let c = hkmeans_unwrap(
+                let centroids = hkmeans_unwrap(
                     kmeans(
                         &cluster_dataset,
                         cluster_dataset.len().div_ceil(*params.cluster_size.end()),
@@ -295,16 +295,15 @@ pub fn hierarchical_kmeans(
                     dataset.len(),
                     true,
                 );
-                // Assign globally on the full dataset to build the hierarchy.
+                // Assign the global subset to the centroids and prune.
                 let assign_dataset = SubsetViewVectorStore::new(dataset, subset);
-                let a = compute_assignments(&assign_dataset, &c);
-                prune_centroids(&assign_dataset, c, a, *params.cluster_size.start())
+                prune_centroids(&assign_dataset, centroids, *params.cluster_size.start())
             }
             VectorSource::Buffer => {
                 // Limit k based on the size of the input subset, then cluster and assign on all of
                 // the vectors in the subset.
                 let subset = SubsetViewVectorStore::new(&buffer, subset);
-                let c = hkmeans_unwrap(
+                let centroids = hkmeans_unwrap(
                     kmeans(
                         &subset,
                         subset.len().div_ceil(*params.cluster_size.end()),
@@ -314,14 +313,10 @@ pub fn hierarchical_kmeans(
                     subset.len(),
                     false,
                 );
-                let a = compute_assignments(&subset, &c);
-                prune_centroids(&subset, c, a, *params.cluster_size.start())
+                prune_centroids(&subset, centroids, *params.cluster_size.start())
             }
         };
 
-        // XXX this should prune centroids below a certain sizebut slightly differently:
-        // * do not attempt to prune if there are only two clusters.
-        // * do up to min_cluster_len vectors at a time.
         for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
             if subset.len() <= *params.cluster_size.end() {
                 centroids.push(centroid);
@@ -331,6 +326,8 @@ pub fn hierarchical_kmeans(
             }
         }
     }
+
+    // TODO: consider performing global rebalancing to bring assignments to cluster_size policy.
 
     centroids
 }
@@ -404,13 +401,12 @@ pub fn kmeans(
 }
 
 /// Prune under-sized centroids.
-// XXX I think I can move assignments into this function too.
 fn prune_centroids(
     dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
     mut centroids: VecVectorStore<f32>,
-    assignments: Vec<(usize, f64)>,
     min_cluster_len: usize,
 ) -> (VecVectorStore<f32>, Vec<Vec<usize>>) {
+    let assignments = compute_assignments(dataset, &centroids);
     let mut centroid_vectors = assignments.iter().enumerate().fold(
         vec![vec![]; centroids.len()],
         |mut cv, (i, &(c, _))| {

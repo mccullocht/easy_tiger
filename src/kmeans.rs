@@ -380,7 +380,7 @@ fn initialize_centroids<
         InitializationMethod::KMeansPlusPlus => {
             centroids.push(&dataset[rng.random_range(0..dataset.len())]);
             let mut assignments = compute_assignments(training_data, &centroids);
-            let l2_dist = EuclideanDistance::default();
+            let l2_dist = EuclideanDistance::get();
             while centroids.len() < k {
                 let index = WeightedIndex::new(assignments.iter().map(|a| a.1))
                     .unwrap()
@@ -411,7 +411,7 @@ pub fn compute_assignments<
     dataset: &V,
     centroids: &C,
 ) -> Vec<(usize, f64)> {
-    let l2_dist = EuclideanDistance::default();
+    let l2_dist = EuclideanDistance::get();
     (0..dataset.len())
         .into_par_iter()
         .map(|i| {
@@ -434,7 +434,7 @@ fn compute_centroid_distance_max<
     old: &C,
     new: &D,
 ) -> f64 {
-    let l2_dist = vectors::EuclideanDistance::default();
+    let l2_dist = EuclideanDistance::get();
     (0..old.len())
         .map(|i| l2_dist.distance_f32(&old[i], &new[i]))
         .max_by(|a, b| a.total_cmp(b))
@@ -494,7 +494,7 @@ pub fn binary_partition(
     let mut assignments = vec![(1usize, f64::MAX); dataset.len()];
     assignments[half..].fill((0, f64::MAX));
 
-    let dist_fn = vectors::EuclideanDistance::default();
+    let dist_fn = EuclideanDistance::get();
     let mut centroids = compute_centroids(dataset, &assignments);
     let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
     let mut prev_inertia = dataset.len();

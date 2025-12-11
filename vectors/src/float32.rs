@@ -5,7 +5,7 @@
 //! For Cosine similarity the vector will be normalized during encoding. When scoring float vectors
 //! we will assume the vectors are unnormalized.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::OnceLock};
 
 use crate::{
     F32VectorCoder, F32VectorDistance, QueryVectorDistance as QueryVectorDistanceT, VectorDistance,
@@ -335,9 +335,18 @@ impl F32VectorCoder for VectorCoder {
     }
 }
 
+static L2_DIST: OnceLock<EuclideanDistance> = OnceLock::new();
+
 /// Computes a score based on l2 distance.
 #[derive(Debug, Copy, Clone, Default)]
 pub struct EuclideanDistance(InstructionSet);
+
+impl EuclideanDistance {
+    /// Returns a static instance of euclidean distance.
+    pub fn get() -> &'static EuclideanDistance {
+        L2_DIST.get_or_init(|| EuclideanDistance::default())
+    }
+}
 
 impl VectorDistance for EuclideanDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
@@ -355,9 +364,18 @@ impl F32VectorDistance for EuclideanDistance {
     }
 }
 
+static DOT_DIST: OnceLock<DotProductDistance> = OnceLock::new();
+
 /// Computes a score based on the dot product.
 #[derive(Debug, Copy, Clone, Default)]
 pub struct DotProductDistance(InstructionSet);
+
+impl DotProductDistance {
+    /// Returns a static instance of dot product distance.
+    pub fn get() -> &'static DotProductDistance {
+        DOT_DIST.get_or_init(|| DotProductDistance::default())
+    }
+}
 
 impl VectorDistance for DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
@@ -378,8 +396,17 @@ impl F32VectorDistance for DotProductDistance {
     }
 }
 
+static COS_DIST: OnceLock<CosineDistance> = OnceLock::new();
+
 #[derive(Debug, Default, Copy, Clone)]
 pub struct CosineDistance(DotProductDistance);
+
+impl CosineDistance {
+    /// Returns a static instance of cosine distance.
+    pub fn get() -> &'static CosineDistance {
+        COS_DIST.get_or_init(|| CosineDistance::default())
+    }
+}
 
 impl VectorDistance for CosineDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {

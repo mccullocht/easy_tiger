@@ -1,6 +1,7 @@
 //! An implementation of k-means algorithms for clustering vectors.
 
 use std::collections::VecDeque;
+use std::ops::RangeInclusive;
 
 use rand::seq::index;
 use rand::{distr::weighted::WeightedIndex, prelude::*};
@@ -220,8 +221,13 @@ fn compute_centroids(
 /// Parameters for hierarchical k-means clustering.
 // XXX add min_cluster_len or make it a range
 pub struct HierarchicalKMeansParams {
-    /// Maximum number of vectors per cluster. Any cluster larger than this will be partitioned.
-    pub max_cluster_len: usize,
+    /// Minimum and maximum number of vectors per cluster.
+    ///
+    /// This is _best effort_; hierarchical k-means does not guarantee these sizes will be met in
+    /// the output but will use these bounds locally within the clustering hierarchy.
+    ///
+    /// Smaller clusters will be merged out; larger clusters will be split.
+    pub cluster_size: RangeInclusive<usize>,
     /// Number of vectors to buffer at once.
     ///
     /// For any input larger than buffer_len we may sample vectors into the buffer to perform
@@ -283,7 +289,7 @@ pub fn hierarchical_kmeans(
                 let c = hkmeans_unwrap(
                     kmeans(
                         &cluster_dataset,
-                        cluster_dataset.len().div_ceil(params.max_cluster_len),
+                        cluster_dataset.len().div_ceil(*params.cluster_size.end()),
                         &params.params,
                         rng,
                     ),
@@ -302,7 +308,7 @@ pub fn hierarchical_kmeans(
                 let c = hkmeans_unwrap(
                     kmeans(
                         &subset,
-                        subset.len().div_ceil(params.max_cluster_len),
+                        subset.len().div_ceil(*params.cluster_size.end()),
                         &params.params,
                         rng,
                     ),
@@ -326,7 +332,7 @@ pub fn hierarchical_kmeans(
         // * do not attempt to prune if there are only two clusters.
         // * do up to min_cluster_len vectors at a time.
         for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
-            if subset.len() <= params.max_cluster_len {
+            if subset.len() < *params.cluster_size.start() {
                 if !subset.is_empty() {
                     progress(1);
                     centroids.push(centroid);

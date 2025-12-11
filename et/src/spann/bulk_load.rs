@@ -175,7 +175,7 @@ pub fn bulk_load(
         hierarchical_kmeans(
             &index_vectors,
             &HierarchicalKMeansParams {
-                max_cluster_len: args.head_max_centroid_len,
+                cluster_size: args.head_min_centroid_len..=args.head_max_centroid_len,
                 // XXX this should be tunable.
                 buffer_len: 32 << 10,
                 params: Params {

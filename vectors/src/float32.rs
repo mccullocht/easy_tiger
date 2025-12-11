@@ -344,7 +344,7 @@ pub struct EuclideanDistance(InstructionSet);
 impl EuclideanDistance {
     /// Returns a static instance of euclidean distance.
     pub fn get() -> &'static EuclideanDistance {
-        L2_DIST.get_or_init(|| EuclideanDistance::default())
+        L2_DIST.get_or_init(EuclideanDistance::default)
     }
 }
 
@@ -373,7 +373,7 @@ pub struct DotProductDistance(InstructionSet);
 impl DotProductDistance {
     /// Returns a static instance of dot product distance.
     pub fn get() -> &'static DotProductDistance {
-        DOT_DIST.get_or_init(|| DotProductDistance::default())
+        DOT_DIST.get_or_init(DotProductDistance::default)
     }
 }
 
@@ -404,7 +404,7 @@ pub struct CosineDistance(DotProductDistance);
 impl CosineDistance {
     /// Returns a static instance of cosine distance.
     pub fn get() -> &'static CosineDistance {
-        COS_DIST.get_or_init(|| CosineDistance::default())
+        COS_DIST.get_or_init(CosineDistance::default)
     }
 }
 

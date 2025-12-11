@@ -659,7 +659,9 @@ pub fn hierarchical_kmeans(
         );
         for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
             if subset.len() <= params.max_cluster_len {
-                centroids.push(centroid);
+                if !subset.is_empty() {
+                    centroids.push(centroid);
+                }
                 continue;
             }
 

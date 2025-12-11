@@ -177,7 +177,8 @@ pub fn bulk_load(
             &HierarchicalKMeansParams {
                 max_k: 32,
                 max_cluster_len: args.head_max_centroid_len,
-                buffer_len: 128 << 10,
+                // XXX this should be tunable.
+                buffer_len: 32 << 10,
                 params: Params {
                     iters: 100,
                     epsilon: 0.0001,

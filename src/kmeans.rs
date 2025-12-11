@@ -219,7 +219,6 @@ fn compute_centroids(
 }
 
 /// Parameters for hierarchical k-means clustering.
-// XXX add min_cluster_len or make it a range
 pub struct HierarchicalKMeansParams {
     /// Minimum and maximum number of vectors per cluster.
     ///

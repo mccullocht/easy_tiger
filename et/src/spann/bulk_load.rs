@@ -58,6 +58,10 @@ pub struct BulkLoadArgs {
     #[command(flatten)]
     pruning: EdgePruningArgs,
 
+    /// Number of vectors to buffer at once when clustering.
+    #[arg(long, default_value_t = NonZero::new(128 << 10).unwrap())]
+    cluster_buffer_len: NonZero<usize>,
+
     /// Minimum number of vectors that should map to each head centroid.
     #[arg(long, default_value_t = 192)]
     head_min_centroid_len: usize,
@@ -176,8 +180,7 @@ pub fn bulk_load(
             &index_vectors,
             &HierarchicalKMeansParams {
                 cluster_size: args.head_min_centroid_len..=args.head_max_centroid_len,
-                // XXX this should be tunable.
-                buffer_len: 32 << 10,
+                buffer_len: args.cluster_buffer_len.get(),
                 params: Params {
                     iters: 100,
                     epsilon: 0.0001,

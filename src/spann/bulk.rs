@@ -112,10 +112,21 @@ pub fn bulk_load_postings(
                 .app_metadata(&serde_json::to_string(&index.config).unwrap()),
         ),
     )?;
-    for pk in posting_keys {
-        let quantized = coder.encode(&vectors[pk.record_id as usize]);
-        bulk_cursor.insert(pk, &quantized)?;
-        progress(1);
+    // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
+    // this will also allow us to parallelize IO.
+    let mut encoded_buffer =
+        vec![vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())]; 1024];
+    for batch in posting_keys.chunks(1024) {
+        encoded_buffer
+            .par_iter_mut()
+            .zip(batch)
+            .for_each(|(buf, pk)| {
+                coder.encode_to(&vectors[pk.record_id as usize], buf);
+            });
+        for (pk, buf) in batch.iter().zip(encoded_buffer.iter()) {
+            bulk_cursor.insert(*pk, buf)?;
+        }
+        progress(batch.len() as u64);
     }
     Ok(())
 }

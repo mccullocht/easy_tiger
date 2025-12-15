@@ -45,8 +45,6 @@ impl Default for Params {
     }
 }
 
-type CentroidsAndAssignments = (VecVectorStore<f32>, Vec<(usize, f64)>);
-
 fn initialize_centroids<
     D: VectorStore<Elem = f32> + Send + Sync,
     T: VectorStore<Elem = f32> + Send + Sync,
@@ -92,7 +90,7 @@ fn initialize_centroids<
 }
 
 /// For each input vector compute the closest centroid and the distance to that centroid.
-pub fn compute_assignments<
+fn compute_assignments<
     V: VectorStore<Elem = f32> + Send + Sync,
     C: VectorStore<Elem = f32> + Send + Sync,
 >(
@@ -123,8 +121,9 @@ fn compute_centroid_distance_max<
     new: &D,
 ) -> f64 {
     let l2_dist = EuclideanDistance::get();
-    (0..old.len())
-        .map(|i| l2_dist.distance_f32(&old[i], &new[i]))
+    old.iter()
+        .zip(new.iter())
+        .map(|(a, b)| l2_dist.distance_f32(a, b))
         .max_by(|a, b| a.total_cmp(b))
         .expect("non-zero k")
 }
@@ -143,79 +142,129 @@ pub fn binary_partition(
     dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
     max_iters: usize,
     min_cluster_size: usize,
-) -> Result<CentroidsAndAssignments, CentroidsAndAssignments> {
-    let acceptable_split = min_cluster_size..=(dataset.len() - min_cluster_size);
-    assert!(!acceptable_split.is_empty());
-
-    let half = dataset.len() / 2;
-    let mut assignments = vec![(1usize, f64::MAX); dataset.len()];
-    assignments[half..].fill((0, f64::MAX));
-
-    let dist_fn = EuclideanDistance::get();
-    let mut centroids = compute_centroids(dataset, &assignments);
-    let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
-    let mut prev_inertia = dataset.len();
-    let mut converged = false;
-    for _ in 0..max_iters {
-        distances.par_iter_mut().enumerate().for_each(|(i, d)| {
-            let ldist = dist_fn.distance_f32(&centroids[0], &dataset[i]);
-            let rdist = dist_fn.distance_f32(&centroids[1], &dataset[i]);
-            *d = (i, ldist, rdist, ldist - rdist)
-        });
-        distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
-        let split_point = distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
-        let inertia = half.abs_diff(split_point);
-        // We may terminate if the partition sizes are acceptable and we aren't improving the split.
-        if acceptable_split.contains(&split_point) && (inertia == 0 || prev_inertia <= inertia) {
-            converged = true;
-            for (i, d) in distances.iter().enumerate() {
-                assignments[d.0] = if i < split_point { (0, d.1) } else { (1, d.2) };
-            }
-            break;
-        }
-
-        prev_inertia = inertia;
-        // Split evenly rather than using split_point. Using split_point may reinforce bias and
-        // cause us to go further away from the the target split rather than converging.
-        for (i, d) in distances.iter().enumerate() {
-            assignments[d.0] = if i < half { (0, d.1) } else { (1, d.2) };
-        }
-        centroids = compute_centroids(dataset, &assignments);
-    }
-
-    if converged {
-        Ok((centroids, assignments))
-    } else {
-        Err((centroids, assignments))
-    }
+) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
+    let init_centroids = bp::simple_init(dataset);
+    bp::bp_loop(dataset, init_centroids, max_iters, min_cluster_size)
 }
 
-fn compute_centroids(
-    dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
-    assignments: &[(usize, f64)],
-) -> VecVectorStore<f32> {
-    let mut centroids: VecVectorStore<f32> =
-        VecVectorStore::with_capacity(dataset.elem_stride(), 2);
-    centroids.push(&vec![0.0; dataset.elem_stride()]);
-    centroids.push(&vec![0.0; dataset.elem_stride()]);
-    let mut counts = [0usize; 2];
-    for (vector, i) in dataset.iter().zip(assignments.iter().map(|x| x.0)) {
-        let centroid = &mut centroids[i];
-        counts[i] += 1;
-        for (d, o) in vector.iter().zip(centroid.iter_mut()) {
-            *o += *d;
+mod bp {
+    use rand::{distr::weighted::WeightedIndex, prelude::*};
+    use rayon::prelude::*;
+    use vectors::{EuclideanDistance, F32VectorDistance};
+
+    use crate::{
+        input::{VecVectorStore, VectorStore},
+        kmeans::compute_assignments,
+    };
+
+    /// Run binary partitioning for up to `max_iters` iterations starting from `init_centroids`.
+    pub fn bp_loop(
+        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+        init_centroids: VecVectorStore<f32>,
+        max_iters: usize,
+        min_cluster_size: usize,
+    ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
+        let acceptable_split = min_cluster_size..=(dataset.len() - min_cluster_size);
+        assert!(!acceptable_split.is_empty());
+
+        let half = dataset.len() / 2;
+        let dist_fn = EuclideanDistance::get();
+        let mut centroids = init_centroids;
+        let mut assignments = vec![0usize; dataset.len()];
+        let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
+        let mut prev_inertia = dataset.len();
+        let mut converged = false;
+        for _ in 0..max_iters {
+            distances.par_iter_mut().enumerate().for_each(|(i, d)| {
+                let ldist = dist_fn.distance_f32(&centroids[0], &dataset[i]);
+                let rdist = dist_fn.distance_f32(&centroids[1], &dataset[i]);
+                *d = (i, ldist, rdist, ldist - rdist)
+            });
+            distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
+            let split_point = distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
+            let inertia = half.abs_diff(split_point);
+            // We may terminate if the partition sizes are acceptable and we aren't improving the split.
+            if acceptable_split.contains(&split_point) && (inertia == 0 || prev_inertia <= inertia)
+            {
+                converged = true;
+                break;
+            }
+
+            // TODO: if inertia stops changing consider terminating early without converging.
+
+            prev_inertia = inertia;
+            // Split evenly rather than using split_point. Using split_point may reinforce bias and
+            // cause us to go further away from the the target split rather than converging.
+            for (i, d) in distances.iter().enumerate() {
+                assignments[d.0] = if i < half { 0 } else { 1 };
+            }
+            centroids = compute_centroids(dataset, &assignments);
+        }
+
+        if converged {
+            Ok(centroids)
+        } else {
+            Err(centroids)
         }
     }
-    for i in 0..2 {
-        if counts[i] == 0 {
-            continue;
-        }
-        let count = counts[i] as f32;
-        for d in centroids[i].iter_mut() {
-            *d /= count;
-        }
+
+    /// Simple centroid initialization: split the dataset in half and compute two means.
+    pub fn simple_init(
+        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+    ) -> VecVectorStore<f32> {
+        let half = dataset.len() / 2;
+        let mut assignments = vec![0usize; dataset.len()];
+        assignments[half..].fill(1);
+        compute_centroids(dataset, &assignments)
     }
-    centroids
+
+    /// K-means++ style centroid initialization: choose a random point as the first centroid, then
+    /// choose a second point weighted by distance to the first centroid.
+    pub fn kmeanspp_init(
+        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+        rng: &mut impl Rng,
+    ) -> VecVectorStore<f32> {
+        let mut centroids = VecVectorStore::with_capacity(dataset.elem_stride(), 2);
+        centroids.push(&dataset[rng.random_range(0..dataset.len())]);
+        let assignments = compute_assignments(dataset, &centroids);
+        let index = WeightedIndex::new(assignments.iter().map(|a| a.1))
+            .unwrap()
+            .sample(rng);
+        centroids.push(&dataset[index]);
+        centroids
+    }
+
+    // TODO: consider choosing the point farthest from the mean vector as the first centroid and
+    // then using k-means++ to choose the second centroid.
+
+    /// Compute two new centroids from the dataset given assignments.
+    pub fn compute_centroids(
+        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+        assignments: &[usize],
+    ) -> VecVectorStore<f32> {
+        let mut centroids: VecVectorStore<f32> =
+            VecVectorStore::with_capacity(dataset.elem_stride(), 2);
+        centroids.push(&vec![0.0; dataset.elem_stride()]);
+        centroids.push(&vec![0.0; dataset.elem_stride()]);
+        let mut counts = [0usize; 2];
+        for (vector, i) in dataset.iter().zip(assignments.iter().copied()) {
+            let centroid = &mut centroids[i];
+            counts[i] += 1;
+            for (d, o) in vector.iter().zip(centroid.iter_mut()) {
+                *o += *d;
+            }
+        }
+        for i in 0..2 {
+            if counts[i] == 0 {
+                continue;
+            }
+            let count = counts[i] as f32;
+            for d in centroids[i].iter_mut() {
+                *d /= count;
+            }
+        }
+        centroids
+    }
 }
 
 /// Parameters for hierarchical k-means clustering.
@@ -235,14 +284,17 @@ pub struct HierarchicalKMeansParams {
     /// Larger values increase memory usage but may reduce clustering time and produce more balanced
     /// clusters.
     pub buffer_len: usize,
+    /// Number of threads to use for clustering.
+    ///
+    /// After initial clustering the resulting centroids will be partitioned among this many threads
+    /// to parallelize high level clustering work. This results in memory usage proportional to
+    /// `buffer_len`. This work is still performed on rayon threads as are other clustering related
+    /// workloads (namely vector -> centroid assignment).
+    ///
+    /// Larger values may reduce clustering time by better overlapping IO and compute.
+    pub num_threads: usize,
     /// K-means parameters.
     pub params: Params,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum VectorSource {
-    Dataset,
-    Buffer,
 }
 
 /// Cluster the input data set using hierarchical k-means.
@@ -262,75 +314,135 @@ enum VectorSource {
 pub fn hierarchical_kmeans(
     dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
     params: &HierarchicalKMeansParams,
-    rng: &mut impl Rng,
-    progress: impl Fn(u64),
+    rng: &mut (impl Rng + Clone + Send + Sync),
+    progress: impl Fn(u64) + Send + Sync,
 ) -> VecVectorStore<f32> {
+    // Partition the dataset into initial centroids.
+    let (_, initial_partitions) = if dataset.len() <= params.buffer_len {
+        hkmeans_step(dataset, dataset, params, rng)
+    } else {
+        let mut buffer = VecVectorStore::with_capacity(dataset.elem_stride(), params.buffer_len);
+        for i in index::sample(rng, dataset.len(), params.buffer_len) {
+            buffer.push(&dataset[i]);
+        }
+        hkmeans_step(&buffer, dataset, params, rng)
+    };
+
+    // Divide the generated centroids into groups and dispatch to separate threads.
+    let chunks = initial_partitions.len().div_ceil(params.num_threads);
+    let mut centroid_sets = initial_partitions
+        .into_par_iter()
+        .chunks(chunks)
+        .map(|centroids| {
+            let mut rng = rng.clone();
+            hkmeans_group(dataset, params, centroids, &mut rng, &progress)
+        })
+        .collect::<Vec<_>>();
+
+    let mut centroids = VecVectorStore::new(dataset.elem_stride());
+    for set in centroid_sets.drain(..) {
+        for c in set.iter() {
+            centroids.push(c);
+        }
+    }
+
+    // TODO: consider performing global rebalancing to bring assignments to cluster_size policy.
+
+    centroids
+}
+
+/// Run a single step of hierarchical k-means.
+///
+/// Accepts a set of training data that is used to cluster and the whole data set for assignment.
+/// These may be different data sets if the input is large enough.
+///
+/// Returns a set of centroids and the subsets of `assign_data` that are assigned to each centroid.
+fn hkmeans_step(
+    training_data: &(impl VectorStore<Elem = f32> + Send + Sync),
+    assign_data: &(impl VectorStore<Elem = f32> + Send + Sync),
+    params: &HierarchicalKMeansParams,
+    rng: &mut impl Rng,
+) -> (VecVectorStore<f32>, Vec<Vec<usize>>) {
+    let centroids = hkmeans_unwrap(
+        match training_data.len().div_ceil(*params.cluster_size.end()) {
+            2 => bp::bp_loop(
+                training_data,
+                bp::kmeanspp_init(training_data, rng),
+                params.params.iters,
+                *params.cluster_size.start(),
+            ),
+            _ => kmeans(
+                training_data,
+                training_data.len().div_ceil(*params.cluster_size.end()),
+                &params.params,
+                rng,
+            ),
+        },
+        assign_data.len(),
+        training_data.len() < assign_data.len(),
+    );
+    prune_centroids(assign_data, centroids, *params.cluster_size.start())
+}
+
+fn hkmeans_group(
+    dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+    params: &HierarchicalKMeansParams,
+    subsets: Vec<Vec<usize>>,
+    rng: &mut impl Rng,
+    progress: impl Fn(u64) + Send + Sync,
+) -> VecVectorStore<f32> {
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    enum VectorSource {
+        Dataset,
+        Buffer,
+    }
+
     let mut buffer = VecVectorStore::with_capacity(dataset.elem_stride(), params.buffer_len);
     let mut centroids = VecVectorStore::new(dataset.elem_stride());
-    let mut queue: VecDeque<(VectorSource, Vec<usize>)> = VecDeque::new();
-    queue.push_back((VectorSource::Dataset, (0..dataset.len()).collect()));
+    let mut queue = subsets
+        .into_iter()
+        .map(|subset| (VectorSource::Dataset, subset))
+        .collect::<VecDeque<_>>();
 
-    while let Some((source, subset)) = queue.pop_front() {
+    while let Some((mut source, mut subset)) = queue.pop_front() {
+        if source == VectorSource::Dataset && subset.len() <= params.buffer_len {
+            buffer.clear();
+            // Buffer this subset and do any clustering below this point on the buffer only.
+            for i in &subset {
+                buffer.push(&dataset[*i]);
+            }
+            subset = (0..subset.len()).collect();
+            source = VectorSource::Buffer;
+        }
+
         let (iter_centroids, centroid_vectors) = match source {
             VectorSource::Dataset => {
-                if subset.len() <= params.buffer_len {
-                    // Buffer this subset and do any clustering below this point on the buffer only.
-                    buffer.clear();
-                    for i in &subset {
-                        buffer.push(&dataset[*i]);
-                    }
-                    queue.push_front((VectorSource::Buffer, (0..subset.len()).collect()));
-                    continue;
+                // Cluster on a buffered sample of vectors; assign on the full subset.
+                buffer.clear();
+                for i in index::sample(rng, subset.len(), params.buffer_len) {
+                    buffer.push(&dataset[subset[i]]);
                 }
 
-                // Cluster on a sample of no more than buffer_len vectors.
-                let cluster_dataset = SubsetViewVectorStore::new(
-                    dataset,
-                    index::sample(rng, subset.len(), params.buffer_len).into_vec(),
-                );
-                let centroids = hkmeans_unwrap(
-                    kmeans(
-                        &cluster_dataset,
-                        cluster_dataset.len().div_ceil(*params.cluster_size.end()),
-                        &params.params,
-                        rng,
-                    ),
-                    dataset.len(),
-                    true,
-                );
-                // Assign the global subset to the centroids and prune.
                 let assign_dataset = SubsetViewVectorStore::new(dataset, subset);
-                prune_centroids(&assign_dataset, centroids, *params.cluster_size.start())
+                hkmeans_step(&buffer, &assign_dataset, params, rng)
             }
             VectorSource::Buffer => {
                 // Limit k based on the size of the input subset, then cluster and assign on all of
                 // the vectors in the subset.
                 let subset = SubsetViewVectorStore::new(&buffer, subset);
-                let centroids = hkmeans_unwrap(
-                    kmeans(
-                        &subset,
-                        subset.len().div_ceil(*params.cluster_size.end()),
-                        &params.params,
-                        rng,
-                    ),
-                    subset.len(),
-                    false,
-                );
-                prune_centroids(&subset, centroids, *params.cluster_size.start())
+                hkmeans_step(&subset, &subset, params, rng)
             }
         };
 
         for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
             if subset.len() <= *params.cluster_size.end() {
                 centroids.push(centroid);
-                progress(1);
+                progress(subset.len() as u64);
             } else {
                 queue.push_front((source, subset));
             }
         }
     }
-
-    // TODO: consider performing global rebalancing to bring assignments to cluster_size policy.
 
     centroids
 }

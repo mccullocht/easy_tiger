@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
+use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc, time::Duration};
 
 use clap::Args;
 use easy_tiger::{
@@ -19,10 +19,7 @@ use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{options::DropOptionsBuilder, Connection};
 
-use crate::{
-    ui::{progress_bar, progress_spinner},
-    vamana::EdgePruningArgs,
-};
+use crate::{ui::progress_bar, vamana::EdgePruningArgs};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -64,6 +61,13 @@ pub struct BulkLoadArgs {
     /// size imbalance. The default value will result in buffering 1GB of of 2048d vectors.
     #[arg(long, default_value_t = NonZero::new(128 << 10).unwrap())]
     cluster_buffer_len: NonZero<usize>,
+
+    /// Number of threads to use to parallelize clustering work.
+    ///
+    /// The initial coarse-grained clusters will be divided among this many threads for futher
+    /// clustering, resulting in --cluster-buf-len * --cluster-threads memory usage.
+    #[arg(long, default_value_t = NonZero::new(4).unwrap())]
+    cluster_threads: NonZero<usize>,
 
     /// Minimum number of vectors that should map to each head centroid.
     #[arg(long, default_value_t = 192)]
@@ -178,12 +182,16 @@ pub fn bulk_load(
     let limit = args.limit.unwrap_or(f32_vectors.len());
     let index_vectors = SubsetViewVectorStore::new(&f32_vectors, (0..limit).collect());
     let centroids = {
-        let progress = progress_spinner("clustering head");
+        // This operation increments when a centroid is emitted with the number of vectors assigned
+        // to that centroid. This occurs sporadically, particularly at the beginning.
+        let progress = progress_bar(limit, "clustering head");
+        progress.enable_steady_tick(Duration::from_millis(100));
         hierarchical_kmeans(
             &index_vectors,
             &HierarchicalKMeansParams {
                 cluster_size: args.head_min_centroid_len..=args.head_max_centroid_len,
                 buffer_len: args.cluster_buffer_len.get(),
+                num_threads: args.cluster_threads.get(),
                 params: Params {
                     iters: 100,
                     epsilon: 0.0001,

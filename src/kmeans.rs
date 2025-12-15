@@ -215,8 +215,7 @@ mod bp {
         let half = dataset.len() / 2;
         let mut assignments = vec![0usize; dataset.len()];
         assignments[half..].fill(1);
-        let centroids = compute_centroids(dataset, &assignments);
-        centroids
+        compute_centroids(dataset, &assignments)
     }
 
     /// K-means++ style centroid initialization: choose a random point as the first centroid, then

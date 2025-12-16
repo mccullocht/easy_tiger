@@ -102,7 +102,7 @@ impl CentroidStats {
             .get_or_create_typed_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats)?;
         let centroid_len = cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
         let mut counts = vec![None; centroid_len];
-        while let Some(r) = cursor.next() {
+        for r in cursor {
             let (id, cc) = r?;
             counts[id as usize] = Some(cc);
         }

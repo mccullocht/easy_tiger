@@ -7,6 +7,7 @@ use easy_tiger::{
     spann::{
         bulk::{
             assign_to_centroids, bulk_load_centroids, bulk_load_postings, bulk_load_raw_vectors,
+            load_centroid_stats,
         },
         IndexConfig, ReplicaSelectionAlgorithm, TableIndex,
     },
@@ -237,6 +238,13 @@ pub fn bulk_load(
     {
         let progress = progress_bar(limit, "tail load centroids");
         bulk_load_centroids(index.as_ref(), &session, &centroid_assignments, |i| {
+            progress.inc(i)
+        })?;
+    }
+
+    {
+        let progress = progress_bar(centroids_len, "tail load centroid stats");
+        load_centroid_stats(index.as_ref(), &session, &centroid_assignments, |i| {
             progress.inc(i)
         })?;
     }

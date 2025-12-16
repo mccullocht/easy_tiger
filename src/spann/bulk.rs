@@ -2,9 +2,8 @@ use std::{cell::RefCell, ops::DerefMut, sync::Arc};
 
 use crate::{
     input::VectorStore,
-    spann::{select_centroids, PostingKey, TableIndex},
-    vamana::search::GraphSearcher,
-    vamana::wt::SessionGraphVectorIndex,
+    spann::{centroid_stats::CentroidCounts, select_centroids, PostingKey, TableIndex},
+    vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
@@ -73,6 +72,45 @@ pub fn bulk_load_centroids(
         bulk_cursor.insert(record_id as i64, &centroid_buf)?;
         progress(1);
     }
+    Ok(())
+}
+
+// XXX fix the other names.
+
+/// Bulk load centroid statistics into a stats table.
+///
+/// This creates a table mapping each centroid ID to the count of primary and secondary
+/// assigned vectors for efficient statistics queries.
+pub fn load_centroid_stats(
+    index: &TableIndex,
+    session: &Session,
+    centroid_assignments: &[Vec<u32>],
+    progress: impl Fn(u64) + Send + Sync,
+) -> Result<()> {
+    use std::collections::HashMap;
+
+    // Count primary and secondary assignments for each centroid
+    let mut stats: HashMap<u32, CentroidCounts> = HashMap::new();
+
+    for centroids in centroid_assignments {
+        if let Some(&primary_id) = centroids.first() {
+            stats.entry(primary_id).or_default().primary += 1;
+
+            for &secondary_id in centroids.iter().skip(1) {
+                stats.entry(secondary_id).or_default().secondary += 1;
+            }
+        }
+    }
+
+    // Bulk load the stats
+    let mut bulk_cursor = session
+        .new_bulk_load_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats, None)?;
+
+    for (centroid_id, counts) in stats {
+        bulk_cursor.insert(centroid_id, counts)?;
+        progress(1);
+    }
+
     Ok(())
 }
 

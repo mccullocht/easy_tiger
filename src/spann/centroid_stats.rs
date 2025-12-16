@@ -1,4 +1,7 @@
-use wt_mdb::{Result, Session};
+use wt_mdb::{
+    session::{FormatString, Formatted},
+    Result, Session,
+};
 
 use crate::spann::TableIndex;
 
@@ -14,6 +17,31 @@ impl CentroidCounts {
     /// Sum of primary and secondary assignments.
     pub fn total(&self) -> u32 {
         self.primary + self.secondary
+    }
+}
+
+impl Formatted for CentroidCounts {
+    const FORMAT: FormatString = FormatString::new(c"u");
+
+    type Ref<'a> = Self;
+
+    fn to_formatted_ref(&self) -> Self::Ref<'_> {
+        *self
+    }
+
+    fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
+        packed.resize(8, 0);
+        let packed_entries = packed.as_chunks_mut::<4>().0;
+        packed_entries[0] = value.primary.to_le_bytes();
+        packed_entries[1] = value.secondary.to_le_bytes();
+        Ok(())
+    }
+
+    fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+        Ok(Self {
+            primary: u32::from_le_bytes(packed[0..4].try_into().unwrap()),
+            secondary: u32::from_le_bytes(packed[4..8].try_into().unwrap()),
+        })
     }
 }
 

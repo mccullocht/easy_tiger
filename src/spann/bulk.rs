@@ -102,6 +102,8 @@ pub fn load_centroid_stats(
         }
     }
 
+    let mut stats = stats.into_iter().collect::<Vec<_>>();
+    stats.sort_by_key(|(id, _)| *id);
     // Bulk load the stats
     let mut bulk_cursor = session
         .new_bulk_load_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats, None)?;

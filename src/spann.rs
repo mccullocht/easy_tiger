@@ -120,6 +120,7 @@ impl TableNames {
         [
             self.postings.as_str(),
             self.centroids.as_str(),
+            self.centroid_stats.as_str(),
             self.raw_vectors.as_str(),
         ]
         .into_iter()

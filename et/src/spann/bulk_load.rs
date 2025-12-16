@@ -6,7 +6,8 @@ use easy_tiger::{
     kmeans::{hierarchical_kmeans, HierarchicalKMeansParams, Params},
     spann::{
         bulk::{
-            assign_to_centroids, bulk_load_centroids, bulk_load_postings, bulk_load_raw_vectors,
+            assign_to_centroids, load_centroid_stats, load_centroids, load_postings,
+            load_raw_vectors,
         },
         IndexConfig, ReplicaSelectionAlgorithm, TableIndex,
     },
@@ -223,7 +224,7 @@ pub fn bulk_load(
     let session = connection.open_session()?;
     if index.config().rerank_format.is_some() {
         let progress = progress_bar(limit, "tail load raw vectors");
-        bulk_load_raw_vectors(index.as_ref(), &session, &f32_vectors, limit, |i| {
+        load_raw_vectors(index.as_ref(), &session, &f32_vectors, limit, |i| {
             progress.inc(i)
         })?
     }
@@ -236,7 +237,14 @@ pub fn bulk_load(
     };
     {
         let progress = progress_bar(limit, "tail load centroids");
-        bulk_load_centroids(index.as_ref(), &session, &centroid_assignments, |i| {
+        load_centroids(index.as_ref(), &session, &centroid_assignments, |i| {
+            progress.inc(i)
+        })?;
+    }
+
+    {
+        let progress = progress_bar(centroids_len, "tail load centroid stats");
+        load_centroid_stats(index.as_ref(), &session, &centroid_assignments, |i| {
             progress.inc(i)
         })?;
     }
@@ -244,7 +252,7 @@ pub fn bulk_load(
     {
         let posting_count = centroid_assignments.iter().map(|c| c.len()).sum::<usize>();
         let progress = progress_bar(posting_count, "tail load postings");
-        bulk_load_postings(
+        load_postings(
             index.as_ref(),
             &session,
             &centroid_assignments,

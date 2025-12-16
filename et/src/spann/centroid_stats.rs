@@ -7,7 +7,7 @@ use wt_mdb::Connection;
 pub fn centroid_stats(connection: Arc<Connection>, index_name: &str) -> io::Result<()> {
     let index = TableIndex::from_db(&connection, index_name)?;
     let session = connection.open_session()?;
-    let stats = CentroidStats::from_index(&session, &index)?;
+    let stats = CentroidStats::from_index_stats(&session, &index)?;
 
     println!("Head contains {} centroids", stats.centroid_count());
     println!("{} tail posting entries", stats.vector_count());

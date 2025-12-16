@@ -2,9 +2,8 @@ use std::{cell::RefCell, ops::DerefMut, sync::Arc};
 
 use crate::{
     input::VectorStore,
-    spann::{select_centroids, PostingKey, TableIndex},
-    vamana::search::GraphSearcher,
-    vamana::wt::SessionGraphVectorIndex,
+    spann::{centroid_stats::CentroidCounts, select_centroids, PostingKey, TableIndex},
+    vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
@@ -55,7 +54,7 @@ pub fn assign_to_centroids(
 }
 
 /// Load all centroid assignments into a record id keyed table.
-pub fn bulk_load_centroids(
+pub fn load_centroids(
     index: &TableIndex,
     session: &Session,
     centroid_assignments: &[Vec<u32>],
@@ -76,13 +75,52 @@ pub fn bulk_load_centroids(
     Ok(())
 }
 
+/// Bulk load centroid statistics into a stats table.
+///
+/// This creates a table mapping each centroid ID to the count of primary and secondary
+/// assigned vectors for efficient statistics queries.
+pub fn load_centroid_stats(
+    index: &TableIndex,
+    session: &Session,
+    centroid_assignments: &[Vec<u32>],
+    progress: impl Fn(u64) + Send + Sync,
+) -> Result<()> {
+    use std::collections::HashMap;
+
+    // Count primary and secondary assignments for each centroid
+    let mut stats: HashMap<u32, CentroidCounts> = HashMap::new();
+
+    for centroids in centroid_assignments {
+        if let Some(&primary_id) = centroids.first() {
+            stats.entry(primary_id).or_default().primary += 1;
+
+            for &secondary_id in centroids.iter().skip(1) {
+                stats.entry(secondary_id).or_default().secondary += 1;
+            }
+        }
+    }
+
+    let mut stats = stats.into_iter().collect::<Vec<_>>();
+    stats.sort_by_key(|(id, _)| *id);
+    // Bulk load the stats
+    let mut bulk_cursor = session
+        .new_bulk_load_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats, None)?;
+
+    for (centroid_id, counts) in stats {
+        bulk_cursor.insert(centroid_id, counts)?;
+        progress(1);
+    }
+
+    Ok(())
+}
+
 /// Bulk load entries for each of the posting keys into the database.
 ///
 /// This runs in a single thread, reading the vector for each posting, quantizing it, and uploading
 /// it into a table. Bulk upload ensures that all posting entries belonging to each centroid appear
 /// contiguously on disk, whereas iterative insertion may "split up" a centroid as it splits leaf
 /// pages. Bulk uploading also avoids checkpointing.
-pub fn bulk_load_postings(
+pub fn load_postings(
     index: &TableIndex,
     session: &Session,
     centroid_assignments: &[Vec<u32>],
@@ -132,7 +170,7 @@ pub fn bulk_load_postings(
 }
 
 /// Bulk load raw vector data into the raw vectors table for re-ranking.
-pub fn bulk_load_raw_vectors(
+pub fn load_raw_vectors(
     index: &TableIndex,
     session: &Session,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),

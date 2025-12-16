@@ -94,6 +94,9 @@ struct TableNames {
     // This table is necessary when deleting a vector to locate rows posting rows to delete.
     // It may also be useful for determining matching centroids in a filtered search.
     centroids: String,
+    // Table that maps centroid_id -> (primary_count, secondary_count).
+    // These pre-aggregated statistics are used to balance the index and influence search.
+    centroid_stats: String,
     // Table that maps record_id -> raw vector.
     // This is used for re-scoring after a SPANN search.
     raw_vectors: String,
@@ -104,6 +107,7 @@ impl TableNames {
         TableNames {
             postings: format!("{index_name}.postings"),
             centroids: format!("{index_name}.centroids"),
+            centroid_stats: format!("{index_name}.centroid_stats"),
             raw_vectors: format!("{index_name}.raw_vectors"),
         }
     }
@@ -116,6 +120,7 @@ impl TableNames {
         [
             self.postings.as_str(),
             self.centroids.as_str(),
+            self.centroid_stats.as_str(),
             self.raw_vectors.as_str(),
         ]
         .into_iter()

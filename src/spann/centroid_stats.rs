@@ -1,4 +1,7 @@
-use wt_mdb::{Result, Session};
+use wt_mdb::{
+    session::{FormatString, Formatted},
+    Result, Session,
+};
 
 use crate::spann::TableIndex;
 
@@ -17,15 +20,43 @@ impl CentroidCounts {
     }
 }
 
+impl Formatted for CentroidCounts {
+    const FORMAT: FormatString = FormatString::new(c"u");
+
+    type Ref<'a> = Self;
+
+    fn to_formatted_ref(&self) -> Self::Ref<'_> {
+        *self
+    }
+
+    fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
+        packed.resize(8, 0);
+        let packed_entries = packed.as_chunks_mut::<4>().0;
+        packed_entries[0] = value.primary.to_le_bytes();
+        packed_entries[1] = value.secondary.to_le_bytes();
+        Ok(())
+    }
+
+    fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+        Ok(Self {
+            primary: u32::from_le_bytes(packed[0..4].try_into().unwrap()),
+            secondary: u32::from_le_bytes(packed[4..8].try_into().unwrap()),
+        })
+    }
+}
+
 /// Tracks occupancy statistics for centroids.
 #[derive(Debug, Clone)]
 pub struct CentroidStats(Vec<Option<CentroidCounts>>);
 
 impl CentroidStats {
-    /// Generate statistics from the index, using `session` to read the data.
+    /// Compute centroid statistics from per-vector assignments.
+    ///
+    /// This does not validate the assignments themselves to avoid reading posting data, but it does
+    /// require a full scan of the centroids table. Callers should prefer `from_index_stats`.
     ///
     /// Callers should open a transaction for this sequence of reads.
-    pub fn from_index(session: &Session, index: &TableIndex) -> Result<Self> {
+    pub fn from_centroid_assignments(session: &Session, index: &TableIndex) -> Result<Self> {
         let mut head_cursor = session.get_record_cursor(index.head.graph_table_name())?;
         let centroid_len = head_cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
 
@@ -57,6 +88,24 @@ impl CentroidStats {
             }
         }
 
+        Ok(Self(counts))
+    }
+
+    /// Read centroid assignments from the pre-computed stats table.
+    ///
+    /// This does not validate the assignments in the centroids or postings tables to avoid reading
+    /// a large amount of data.
+    ///
+    /// Callers should open a transaction for this sequence of reads.
+    pub fn from_index_stats(session: &Session, index: &TableIndex) -> Result<Self> {
+        let mut cursor = session
+            .get_or_create_typed_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats)?;
+        let centroid_len = cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
+        let mut counts = vec![None; centroid_len];
+        for r in cursor {
+            let (id, cc) = r?;
+            counts[id as usize] = Some(cc);
+        }
         Ok(Self(counts))
     }
 

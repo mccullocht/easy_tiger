@@ -54,7 +54,7 @@ pub fn assign_to_centroids(
 }
 
 /// Load all centroid assignments into a record id keyed table.
-pub fn bulk_load_centroids(
+pub fn load_centroids(
     index: &TableIndex,
     session: &Session,
     centroid_assignments: &[Vec<u32>],
@@ -74,8 +74,6 @@ pub fn bulk_load_centroids(
     }
     Ok(())
 }
-
-// XXX fix the other names.
 
 /// Bulk load centroid statistics into a stats table.
 ///
@@ -122,7 +120,7 @@ pub fn load_centroid_stats(
 /// it into a table. Bulk upload ensures that all posting entries belonging to each centroid appear
 /// contiguously on disk, whereas iterative insertion may "split up" a centroid as it splits leaf
 /// pages. Bulk uploading also avoids checkpointing.
-pub fn bulk_load_postings(
+pub fn load_postings(
     index: &TableIndex,
     session: &Session,
     centroid_assignments: &[Vec<u32>],
@@ -172,7 +170,7 @@ pub fn bulk_load_postings(
 }
 
 /// Bulk load raw vector data into the raw vectors table for re-ranking.
-pub fn bulk_load_raw_vectors(
+pub fn load_raw_vectors(
     index: &TableIndex,
     session: &Session,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),

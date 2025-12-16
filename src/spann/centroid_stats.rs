@@ -50,10 +50,13 @@ impl Formatted for CentroidCounts {
 pub struct CentroidStats(Vec<Option<CentroidCounts>>);
 
 impl CentroidStats {
-    /// Generate statistics from the index, using `session` to read the data.
+    /// Compute centroid statistics from per-vector assignments.
+    ///
+    /// This does not validate the assignments themselves to avoid reading posting data, but it does
+    /// require a full scan of the centroids table. Callers should prefer `from_index_stats`.
     ///
     /// Callers should open a transaction for this sequence of reads.
-    pub fn from_index(session: &Session, index: &TableIndex) -> Result<Self> {
+    pub fn from_centroid_assignments(session: &Session, index: &TableIndex) -> Result<Self> {
         let mut head_cursor = session.get_record_cursor(index.head.graph_table_name())?;
         let centroid_len = head_cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
 
@@ -85,6 +88,24 @@ impl CentroidStats {
             }
         }
 
+        Ok(Self(counts))
+    }
+
+    /// Read centroid assignments from the pre-computed stats table.
+    ///
+    /// This does not validate the assignments in the centroids or postings tables to avoid reading
+    /// a large amount of data.
+    ///
+    /// Callers should open a transaction for this sequence of reads.
+    pub fn from_index_stats(session: &Session, index: &TableIndex) -> Result<Self> {
+        let mut cursor = session
+            .get_or_create_typed_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats)?;
+        let centroid_len = cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
+        let mut counts = vec![None; centroid_len];
+        while let Some(r) = cursor.next() {
+            let (id, cc) = r?;
+            counts[id as usize] = Some(cc);
+        }
         Ok(Self(counts))
     }
 

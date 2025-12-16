@@ -90,7 +90,7 @@ impl CentroidSelector {
         match algorithm {
             CentroidSelectorAlgorithm::TopN(n) => Ok(Self::TopN(n)),
             CentroidSelectorAlgorithm::VectorCount(n) => {
-                let stats = CentroidStats::from_index(session, index)?;
+                let stats = CentroidStats::from_index_stats(session, index)?;
                 Ok(Self::VectorCount { count: n, stats })
             }
         }

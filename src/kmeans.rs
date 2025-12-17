@@ -147,9 +147,25 @@ pub fn binary_partition(
     bp::bp_loop(dataset, init_centroids, max_iters, min_cluster_size)
 }
 
+pub fn bp_kmeans_pp(
+    dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+    max_iters: usize,
+    min_cluster_size: usize,
+    rng: &mut impl Rng,
+) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
+    let init_centroids = bp::kmeanspp_init(dataset, rng);
+    bp::bp_loop(dataset, init_centroids, max_iters, min_cluster_size)
+}
+
 mod bp {
+    use std::{
+        fs::File,
+        io::{BufWriter, Write},
+    };
+
     use rand::{distr::weighted::WeightedIndex, prelude::*};
     use rayon::prelude::*;
+    use tracing::warn;
     use vectors::{EuclideanDistance, F32VectorDistance};
 
     use crate::{
@@ -204,6 +220,13 @@ mod bp {
         if converged {
             Ok(centroids)
         } else {
+            let mut f = BufWriter::new(File::create("/tmp/bp-failed.fvecs").unwrap());
+            for v in dataset.iter() {
+                for d in v {
+                    f.write_all(&d.to_le_bytes()).unwrap();
+                }
+            }
+            warn!("binary_partition iteration failed to converge!");
             Err(centroids)
         }
     }

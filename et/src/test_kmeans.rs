@@ -9,6 +9,7 @@ use easy_tiger::kmeans::bp_kmeans_pp;
 use memmap2::Mmap;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro128PlusPlus;
+use vectors::{EuclideanDistance, F32VectorDistance};
 
 #[derive(Args)]
 pub struct TestKmeansArgs {
@@ -44,17 +45,30 @@ pub fn test_kmeans(args: TestKmeansArgs) -> io::Result<()> {
 
     let mut rng = Xoshiro128PlusPlus::seed_from_u64(args.seed);
 
-    match bp_kmeans_pp(&store, args.max_iters, args.min_cluster_size, &mut rng) {
+    let centroids = match bp_kmeans_pp(&store, args.max_iters, args.min_cluster_size, &mut rng) {
         Ok(centroids) => {
             println!("BP K-means converged. {} centroids found.", centroids.len());
+            centroids
         }
         Err(centroids) => {
             println!(
                 "BP K-means failed to converge! {} centroids found.",
                 centroids.len()
             );
+            centroids
         }
-    }
+    };
+
+    let dist_fn = EuclideanDistance::get();
+    let distance = store
+        .iter()
+        .map(|v| {
+            dist_fn
+                .distance_f32(&centroids[0], v)
+                .min(dist_fn.distance_f32(&centroids[1], v))
+        })
+        .sum::<f64>();
+    println!("Distance: {}", distance);
 
     Ok(())
 }

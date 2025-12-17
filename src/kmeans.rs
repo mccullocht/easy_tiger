@@ -182,6 +182,7 @@ mod bp {
     ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
         let acceptable_split = min_cluster_size..=(dataset.len() - min_cluster_size);
         assert!(!acceptable_split.is_empty());
+        println!("acceptable_split {acceptable_split:?}");
 
         let half = dataset.len() / 2;
         let dist_fn = EuclideanDistance::get();
@@ -190,7 +191,8 @@ mod bp {
         let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
         let mut prev_inertia = dataset.len();
         let mut converged = false;
-        for _ in 0..max_iters {
+        let mut repeat_inertia = 0;
+        for it in 0..max_iters {
             distances.par_iter_mut().enumerate().for_each(|(i, d)| {
                 let ldist = dist_fn.distance_f32(&centroids[0], &dataset[i]);
                 let rdist = dist_fn.distance_f32(&centroids[1], &dataset[i]);
@@ -199,6 +201,7 @@ mod bp {
             distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
             let split_point = distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
             let inertia = half.abs_diff(split_point);
+            println!("bp_loop iteration {it:2} split_point {split_point:3} inertia {inertia:3}");
             // We may terminate if the partition sizes are acceptable and we aren't improving the split.
             if acceptable_split.contains(&split_point) && (inertia == 0 || prev_inertia <= inertia)
             {
@@ -206,13 +209,31 @@ mod bp {
                 break;
             }
 
-            // TODO: if inertia stops changing consider terminating early without converging.
+            // If inertia remains unchanged we want to pull toward the center by flipping the split.
+            let centroid_split = if inertia == prev_inertia {
+                repeat_inertia += 1;
+                let x = if split_point < half {
+                    half + repeat_inertia
+                } else {
+                    half - repeat_inertia
+                };
+                println!(
+                    "  inertia=0 split_point {split_point:3} half {half:3} centroid_split {x:3}"
+                );
+                x
+            } else {
+                repeat_inertia = 0;
+                half
+            };
 
             prev_inertia = inertia;
+            // XXX consider using split_point instead but ensure that we move at least one vector
+            // towards the center in each iteration.
+
             // Split evenly rather than using split_point. Using split_point may reinforce bias and
             // cause us to go further away from the the target split rather than converging.
             for (i, d) in distances.iter().enumerate() {
-                assignments[d.0] = if i < half { 0 } else { 1 };
+                assignments[d.0] = if i < centroid_split { 0 } else { 1 };
             }
             centroids = compute_centroids(dataset, &assignments);
         }
@@ -220,6 +241,7 @@ mod bp {
         if converged {
             Ok(centroids)
         } else {
+            /* XXX
             let mut f = BufWriter::new(File::create("/tmp/bp-failed.fvecs").unwrap());
             for v in dataset.iter() {
                 for d in v {
@@ -227,6 +249,7 @@ mod bp {
                 }
             }
             warn!("binary_partition iteration failed to converge!");
+            */
             Err(centroids)
         }
     }
@@ -248,12 +271,14 @@ mod bp {
         rng: &mut impl Rng,
     ) -> VecVectorStore<f32> {
         let mut centroids = VecVectorStore::with_capacity(dataset.elem_stride(), 2);
-        centroids.push(&dataset[rng.random_range(0..dataset.len())]);
+        let first_index = rng.random_range(0..dataset.len());
+        centroids.push(&dataset[first_index]);
         let assignments = compute_assignments(dataset, &centroids);
-        let index = WeightedIndex::new(assignments.iter().map(|a| a.1))
+        let second_index = WeightedIndex::new(assignments.iter().map(|a| a.1))
             .unwrap()
             .sample(rng);
-        centroids.push(&dataset[index]);
+        centroids.push(&dataset[second_index]);
+        println!("Selected {} and {}", first_index, second_index);
         centroids
     }
 

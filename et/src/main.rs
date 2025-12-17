@@ -3,6 +3,7 @@ mod neighbor_util;
 mod quantization;
 mod recall;
 mod spann;
+mod test_kmeans;
 mod ui;
 mod vamana;
 mod wt_args;
@@ -14,6 +15,7 @@ use clap::{command, Parser, Subcommand};
 use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
 use quantization::{quantization, QuantizationArgs};
 use spann::{spann_command, SpannArgs};
+use test_kmeans::{test_kmeans, TestKmeansArgs};
 use vamana::{vamana_command, VamanaArgs};
 
 #[derive(Parser)]
@@ -33,6 +35,8 @@ enum Commands {
     ComputeNeighbors(ComputeNeighborsArgs),
     /// Quantization related utilities.
     Quantization(QuantizationArgs),
+    /// Run BP K-Means on a vector file.
+    TestKmeans(TestKmeansArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -44,5 +48,6 @@ fn main() -> io::Result<()> {
         Commands::Vamana(args) => vamana_command(args),
         Commands::ComputeNeighbors(args) => compute_neighbors(args),
         Commands::Quantization(args) => quantization(args),
+        Commands::TestKmeans(args) => test_kmeans(args),
     }
 }

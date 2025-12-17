@@ -128,158 +128,221 @@ fn compute_centroid_distance_max<
         .expect("non-zero k")
 }
 
-/// Split the dataset into two partitions with two representative centroids.
-///
-/// This functions aims to split the dataset into two partitions of at least `min_cluster_size`
-/// vectors, with a goal of splitting the dataset as evenly as possible. On each iteration the
-/// two centroids are updated, vectors are assigned to the closest centroid, and an inertia value
-/// is computed. If the centroids are of `min_cluster_size` and inertia is positive we continue
-/// iterating otherwise we terminate and use the last computed centroids and assignments.
-///
-/// Returns a vector store containing a "left" and a "right" centroid along with cluster assignment.
-/// Note that these cluster assignments may not match the results of compute_assignments().
-pub fn binary_partition(
-    dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
-    max_iters: usize,
-    min_cluster_size: usize,
-) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
-    let init_centroids = bp::simple_init(dataset);
-    bp::bp_loop(dataset, init_centroids, max_iters, min_cluster_size)
-}
-
 pub fn bp_kmeans_pp(
     dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
     max_iters: usize,
     min_cluster_size: usize,
     rng: &mut impl Rng,
 ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
-    let init_centroids = bp::kmeanspp_init(dataset, rng);
-    bp::bp_loop(dataset, init_centroids, max_iters, min_cluster_size)
+    let init_centroids = bp::kmeanspp_init(
+        dataset,
+        min_cluster_size..=(dataset.len() - min_cluster_size),
+        rng,
+    );
+    bp::bp_loop2(dataset, init_centroids, max_iters, min_cluster_size)
 }
 
 mod bp {
-    use std::{
-        fs::File,
-        io::{BufWriter, Write},
-    };
+    use std::{cmp::Ordering, ops::RangeInclusive};
 
     use rand::{distr::weighted::WeightedIndex, prelude::*};
     use rayon::prelude::*;
-    use tracing::warn;
     use vectors::{EuclideanDistance, F32VectorDistance};
 
-    use crate::{
-        input::{VecVectorStore, VectorStore},
-        kmeans::compute_assignments,
-    };
+    use crate::input::{VecVectorStore, VectorStore};
 
-    /// Run binary partitioning for up to `max_iters` iterations starting from `init_centroids`.
-    pub fn bp_loop(
+    /// Container for the dataset and reusable buffers for certain operations.
+    pub struct IterState<'v, V> {
+        dataset: &'v V,
+        distances: Vec<(usize, f64, f64, f64)>,
+        assignments: Vec<usize>,
+    }
+
+    impl<'v, V: VectorStore<Elem = f32> + Send + Sync> IterState<'v, V> {
+        fn new(dataset: &'v V) -> Self {
+            Self {
+                dataset,
+                distances: vec![(0usize, 0.0, 0.0, 0.0); dataset.len()],
+                assignments: vec![0usize; dataset.len()],
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct Candidate {
+        centroids: VecVectorStore<f32>,
+        split: usize,
+        distance_sum: f64,
+    }
+
+    impl Candidate {
+        fn new(
+            centroids: VecVectorStore<f32>,
+            state: &mut IterState<'_, impl VectorStore<Elem = f32> + Send + Sync>,
+        ) -> Self {
+            let mut candidate = Self {
+                centroids,
+                split: 0,
+                distance_sum: 0.0,
+            };
+            candidate.update_split(state);
+            candidate
+        }
+
+        fn from_sampled_vectors(
+            first: usize,
+            second: usize,
+            state: &mut IterState<'_, impl VectorStore<Elem = f32> + Send + Sync>,
+        ) -> Self {
+            // Take two sampled points from the dataset to use as initial centroids.
+            let mut centroids = VecVectorStore::with_capacity(state.dataset.elem_stride(), 2);
+            centroids.push(&state.dataset[first]);
+            centroids.push(&state.dataset[second]);
+            // Compute the initial split point, then update centroids and recompute the split.
+            // This is essentially a single iteration of bp_loop compute actual mean vectors.
+            let mut candidate = Self::new(centroids, state);
+            candidate.update_centroids(candidate.split, state);
+            candidate
+        }
+
+        fn update_centroids(
+            &mut self,
+            target_split: usize,
+            state: &mut IterState<'_, impl VectorStore<Elem = f32> + Send + Sync>,
+        ) {
+            for (i, &(idx, _, _, _)) in state.distances.iter().enumerate() {
+                state.assignments[idx] = if i < target_split { 0 } else { 1 };
+            }
+            self.centroids = compute_centroids(state.dataset, &state.assignments);
+            self.update_split(state);
+        }
+
+        fn update_split(
+            &mut self,
+            state: &mut IterState<'_, impl VectorStore<Elem = f32> + Send + Sync>,
+        ) {
+            let dist_fn = EuclideanDistance::get();
+            state
+                .distances
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, d)| {
+                    let ldist = dist_fn.distance_f32(&self.centroids[0], &state.dataset[i]);
+                    let rdist = dist_fn.distance_f32(&self.centroids[1], &state.dataset[i]);
+                    *d = (i, ldist, rdist, ldist - rdist)
+                });
+            state
+                .distances
+                .sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
+            self.split = state.distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
+            self.distance_sum = state.distances[..self.split]
+                .iter()
+                .map(|d| d.1)
+                .sum::<f64>()
+                + state.distances[self.split..]
+                    .iter()
+                    .map(|d| d.2)
+                    .sum::<f64>();
+        }
+    }
+
+    // XXX rename
+    pub fn bp_loop2(
         dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
-        init_centroids: VecVectorStore<f32>,
+        init_candidate: Candidate,
         max_iters: usize,
         min_cluster_size: usize,
     ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
         let acceptable_split = min_cluster_size..=(dataset.len() - min_cluster_size);
         assert!(!acceptable_split.is_empty());
-        println!("acceptable_split {acceptable_split:?}");
-
         let half = dataset.len() / 2;
-        let dist_fn = EuclideanDistance::get();
-        let mut centroids = init_centroids;
-        let mut assignments = vec![0usize; dataset.len()];
-        let mut distances = vec![(0usize, 0.0, 0.0, 0.0); dataset.len()];
-        let mut prev_inertia = dataset.len();
+
+        let mut state = IterState::new(dataset);
+        let mut current_candidate = init_candidate;
+        let mut next_candidate = current_candidate.clone();
         let mut converged = false;
-        let mut repeat_inertia = 0;
+        let mut adjustment_mult = 1;
         for it in 0..max_iters {
-            distances.par_iter_mut().enumerate().for_each(|(i, d)| {
-                let ldist = dist_fn.distance_f32(&centroids[0], &dataset[i]);
-                let rdist = dist_fn.distance_f32(&centroids[1], &dataset[i]);
-                *d = (i, ldist, rdist, ldist - rdist)
-            });
-            distances.sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
-            let split_point = distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
-            let inertia = half.abs_diff(split_point);
-            println!("bp_loop iteration {it:2} split_point {split_point:3} inertia {inertia:3}");
-            // We may terminate if the partition sizes are acceptable and we aren't improving the split.
-            if acceptable_split.contains(&split_point) && (inertia == 0 || prev_inertia <= inertia)
-            {
+            let split_adjustment =
+                (half.abs_diff(current_candidate.split) / 10 * adjustment_mult).max(1);
+            // XXX there is risk here that adjustment_mult will pick a split that either exceeds the
+            // lower of upper bound values of target_split (potentially underflowing).
+            let target_split = if current_candidate.split < half {
+                current_candidate.split + split_adjustment
+            } else {
+                current_candidate.split - split_adjustment
+            };
+            next_candidate.update_centroids(target_split, &mut state);
+
+            let current_balance = half.abs_diff(current_candidate.split);
+            let next_balance = half.abs_diff(next_candidate.split);
+            println!(
+                "bp_loop2 iteration {it:2} current (split {:3}, balance {current_balance:3}) nc (split {}, balance {next_balance:3}) target_split {target_split:3} split_adjustment {split_adjustment}",
+                current_candidate.split, next_candidate.split
+            );
+            if next_balance < current_balance {
+                std::mem::swap(&mut current_candidate, &mut next_candidate);
+                adjustment_mult = 1;
+            } else if acceptable_split.contains(&current_candidate.split) {
                 converged = true;
                 break;
-            }
-
-            // If inertia remains unchanged we want to pull toward the center by flipping the split.
-            let centroid_split = if inertia == prev_inertia {
-                repeat_inertia += 1;
-                let x = if split_point < half {
-                    half + repeat_inertia
-                } else {
-                    half - repeat_inertia
-                };
-                println!(
-                    "  inertia=0 split_point {split_point:3} half {half:3} centroid_split {x:3}"
-                );
-                x
             } else {
-                repeat_inertia = 0;
-                half
-            };
-
-            prev_inertia = inertia;
-            // XXX consider using split_point instead but ensure that we move at least one vector
-            // towards the center in each iteration.
-
-            // Split evenly rather than using split_point. Using split_point may reinforce bias and
-            // cause us to go further away from the the target split rather than converging.
-            for (i, d) in distances.iter().enumerate() {
-                assignments[d.0] = if i < centroid_split { 0 } else { 1 };
+                // Try harder to fix the split by taking elements from the "far" side of the split.
+                // This improves the odds of convergence but also indicates that we probably chose
+                // poor initial centroids.
+                adjustment_mult *= 2;
             }
-            centroids = compute_centroids(dataset, &assignments);
         }
 
         if converged {
-            Ok(centroids)
+            Ok(current_candidate.centroids)
         } else {
-            /* XXX
-            let mut f = BufWriter::new(File::create("/tmp/bp-failed.fvecs").unwrap());
-            for v in dataset.iter() {
-                for d in v {
-                    f.write_all(&d.to_le_bytes()).unwrap();
-                }
-            }
-            warn!("binary_partition iteration failed to converge!");
-            */
-            Err(centroids)
+            Err(current_candidate.centroids)
         }
-    }
-
-    /// Simple centroid initialization: split the dataset in half and compute two means.
-    pub fn simple_init(
-        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
-    ) -> VecVectorStore<f32> {
-        let half = dataset.len() / 2;
-        let mut assignments = vec![0usize; dataset.len()];
-        assignments[half..].fill(1);
-        compute_centroids(dataset, &assignments)
     }
 
     /// K-means++ style centroid initialization: choose a random point as the first centroid, then
     /// choose a second point weighted by distance to the first centroid.
     pub fn kmeanspp_init(
         dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+        acceptable_split: RangeInclusive<usize>,
         rng: &mut impl Rng,
-    ) -> VecVectorStore<f32> {
-        let mut centroids = VecVectorStore::with_capacity(dataset.elem_stride(), 2);
-        let first_index = rng.random_range(0..dataset.len());
-        centroids.push(&dataset[first_index]);
-        let assignments = compute_assignments(dataset, &centroids);
-        let second_index = WeightedIndex::new(assignments.iter().map(|a| a.1))
+    ) -> Candidate {
+        let mut state = IterState::new(dataset);
+        (0..10)
+            .map(|_| kmeanspp_candidate(dataset, &mut state, rng))
+            .min_by(|a, b| {
+                let aok = acceptable_split.contains(&a.split);
+                let bok = acceptable_split.contains(&b.split);
+                if aok == bok {
+                    a.distance_sum.total_cmp(&b.distance_sum)
+                } else if aok {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            })
+            .unwrap()
+    }
+
+    fn kmeanspp_candidate(
+        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+        state: &mut IterState<'_, impl VectorStore<Elem = f32> + Send + Sync>,
+        rng: &mut impl Rng,
+    ) -> Candidate {
+        // Select a centroid at random, then select a second centroid at random but weighted by
+        // distance to the first centroid to prefer something farther away.
+        let first = rng.random_range(0..dataset.len());
+        let dist_fn = EuclideanDistance::get();
+        let distances = (0..dataset.len())
+            .into_par_iter()
+            .map(|i| dist_fn.distance_f32(&dataset[i], &dataset[first]))
+            .collect::<Vec<_>>();
+        let second = WeightedIndex::new(distances.iter().copied())
             .unwrap()
             .sample(rng);
-        centroids.push(&dataset[second_index]);
-        println!("Selected {} and {}", first_index, second_index);
-        centroids
+        let c = Candidate::from_sampled_vectors(first, second, state);
+        c
     }
 
     // TODO: consider choosing the point farthest from the mean vector as the first centroid and
@@ -411,11 +474,13 @@ fn hkmeans_step(
     params: &HierarchicalKMeansParams,
     rng: &mut impl Rng,
 ) -> (VecVectorStore<f32>, Vec<Vec<usize>>) {
+    let acceptable_split =
+        *params.cluster_size.start()..=(training_data.len() - *params.cluster_size.start());
     let centroids = hkmeans_unwrap(
         match training_data.len().div_ceil(*params.cluster_size.end()) {
-            2 => bp::bp_loop(
+            2 => bp::bp_loop2(
                 training_data,
-                bp::kmeanspp_init(training_data, rng),
+                bp::kmeanspp_init(training_data, acceptable_split, rng),
                 params.params.iters,
                 *params.cluster_size.start(),
             ),

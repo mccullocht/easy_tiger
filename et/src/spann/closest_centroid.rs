@@ -35,8 +35,13 @@ pub fn closest_centroid(
 
     // XXX as written this does not work correctly for secondary assignments.
     let mut have_input = true;
+    let mut batch = Vec::with_capacity(args.batch_size);
+    let coder = index
+        .config
+        .posting_coder
+        .new_coder(index.head_config().config().similarity);
     while have_input {
-        let mut batch = Vec::with_capacity(args.batch_size);
+        batch.clear();
         for _ in 0..args.batch_size {
             match postings_cursor.next() {
                 Some(Ok((key, value))) => {
@@ -57,24 +62,18 @@ pub fn closest_centroid(
         let batch_len = batch.len();
         let batch_correct_count = batch
             .par_iter()
+            .by_uniform_blocks(batch_len.div_ceil(rayon::current_num_threads()))
             .map_init(
                 || {
                     let session = connection.open_session().expect("failed to open session");
                     let searcher = GraphSearcher::new(index.config.head_search_params);
-                    (SessionIndexReader::new(&index, session), searcher)
+                    let buffer = vec![0.0f32; coder.dimensions(batch[0].1.len())];
+                    (SessionIndexReader::new(&index, session), searcher, buffer)
                 },
-                |(reader, searcher), (assigned_centroid, vector_bytes)| {
-                    // Decode vector
-                    // Optimization: Coder creation is cheap-ish?
-                    let coder = index
-                        .config
-                        .posting_coder
-                        .new_coder(index.head_config().config().similarity);
-
-                    let vector = coder.decode(vector_bytes);
+                |(reader, searcher, ref mut vector), (assigned_centroid, vector_bytes)| {
+                    coder.decode_to(&vector_bytes, vector);
 
                     // Search head
-                    // searcher needs to be mutable.
                     let results = searcher
                         .search(&vector, reader.head_reader())
                         .expect("search failed");

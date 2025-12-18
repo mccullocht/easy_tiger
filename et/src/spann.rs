@@ -1,5 +1,6 @@
 mod bulk_load;
 mod centroid_stats;
+mod closest_centroid;
 mod drop_index;
 mod search;
 
@@ -9,6 +10,7 @@ use clap::{Args, Subcommand};
 
 use bulk_load::{bulk_load, BulkLoadArgs};
 use centroid_stats::centroid_stats;
+use closest_centroid::{closest_centroid, ClosestCentroidArgs};
 use drop_index::drop_index;
 use search::{search, SearchArgs};
 
@@ -33,6 +35,8 @@ pub enum Command {
     CentroidStats,
     /// Remove an existing index.
     DropIndex,
+    /// Verify centroid assignments.
+    ClosestCentroid(ClosestCentroidArgs),
 }
 
 pub fn spann_command(args: SpannArgs) -> io::Result<()> {
@@ -44,6 +48,7 @@ pub fn spann_command(args: SpannArgs) -> io::Result<()> {
         Command::Search(args) => search(connection, index_name, args),
         Command::CentroidStats => centroid_stats(connection, index_name),
         Command::DropIndex => drop_index(connection, index_name),
+        Command::ClosestCentroid(args) => closest_centroid(connection, index_name, args),
     }?;
     session.checkpoint()?;
     Ok(())

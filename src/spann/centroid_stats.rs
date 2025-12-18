@@ -116,7 +116,9 @@ impl CentroidStats {
 
     /// Return the number of vector -> centroid assignments.
     pub fn vector_count(&self) -> usize {
-        self.assignment_counts_iter().map(|(_, c)| c).sum::<u32>() as usize
+        self.assignment_counts_iter()
+            .map(|(_, c)| c as usize)
+            .sum::<usize>()
     }
 
     /// Iterate over a list of centroid identifiers and the number of assigned vectors for each.

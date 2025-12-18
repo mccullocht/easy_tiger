@@ -1,11 +1,8 @@
-use std::{
-    io,
-    sync::{atomic::AtomicUsize, Arc},
-};
+use std::{io, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    spann::{PostingKey, SessionIndexReader, TableIndex},
+    spann::{centroid_stats::CentroidStats, PostingKey, SessionIndexReader, TableIndex},
     vamana::search::GraphSearcher,
 };
 use rayon::prelude::*;
@@ -29,13 +26,16 @@ pub fn closest_centroid(
     let session = connection.open_session()?;
     let mut postings_cursor =
         session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(&index.table_names.postings)?;
+    let stats = CentroidStats::from_index_stats(&session, &index)?;
 
-    let total = AtomicUsize::new(0);
-    let correct = AtomicUsize::new(0);
+    let mut total = 0;
+    let mut correct = 0;
 
-    let progress = progress_bar(0, "scanning postings");
+    let progress = progress_bar(stats.vector_count(), "scanning postings");
 
-    loop {
+    // XXX as written this does not work correctly for secondary assignments.
+    let mut have_input = true;
+    while have_input {
         let mut batch = Vec::with_capacity(args.batch_size);
         for _ in 0..args.batch_size {
             match postings_cursor.next() {
@@ -43,7 +43,10 @@ pub fn closest_centroid(
                     batch.push((key.centroid_id, value));
                 }
                 Some(Err(e)) => return Err(e.into()),
-                None => break,
+                None => {
+                    have_input = false;
+                    break;
+                }
             }
         }
 
@@ -76,12 +79,11 @@ pub fn closest_centroid(
                         .search(&vector, reader.head_reader())
                         .expect("search failed");
 
-                    if let Some(best) = results.first() {
-                        if best.vertex() as u32 == *assigned_centroid {
-                            1
-                        } else {
-                            0
-                        }
+                    if results
+                        .first()
+                        .is_some_and(|n| n.vertex() as u32 == *assigned_centroid)
+                    {
+                        1
                     } else {
                         0
                     }
@@ -89,23 +91,17 @@ pub fn closest_centroid(
             )
             .sum::<usize>();
 
-        correct.fetch_add(batch_correct_count, std::sync::atomic::Ordering::Relaxed);
-        total.fetch_add(batch_len, std::sync::atomic::Ordering::Relaxed);
+        correct += batch_correct_count;
+        total += batch_len;
         progress.inc(batch_len as u64);
     }
 
     progress.finish();
 
-    let total_val = total.load(std::sync::atomic::Ordering::SeqCst);
-    let correct_val = correct.load(std::sync::atomic::Ordering::SeqCst);
-
-    println!("Total vectors checked: {}", total_val);
-    println!("Correctly assigned to closest centroid: {}", correct_val);
-    if total_val > 0 {
-        println!(
-            "Accuracy: {:.2}%",
-            (correct_val as f64 / total_val as f64) * 100.0
-        );
+    println!("Total vectors checked: {total}");
+    println!("Correctly assigned to closest centroid: {correct}");
+    if total > 0 {
+        println!("Accuracy: {:.2}%", (correct as f64 / total as f64) * 100.0);
     }
 
     Ok(())

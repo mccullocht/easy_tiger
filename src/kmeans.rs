@@ -10,6 +10,7 @@ use tracing::warn;
 use vectors::{EuclideanDistance, F32VectorDistance};
 
 use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
+use crate::kmeans::bp::IterState;
 
 /// Centroid initialization method for k-means partitioning.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -134,9 +135,10 @@ pub fn bp_kmeans_pp(
     min_cluster_size: usize,
     rng: &mut impl Rng,
 ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
+    let mut state = IterState::new(dataset);
     let init_centroids = bp::kmeanspp_init(
-        dataset,
         min_cluster_size..=(dataset.len() - min_cluster_size),
+        &mut state,
         rng,
     );
     bp::bp_loop2(dataset, init_centroids, max_iters, min_cluster_size)
@@ -159,7 +161,7 @@ mod bp {
     }
 
     impl<'v, V: VectorStore<Elem = f32> + Send + Sync> IterState<'v, V> {
-        fn new(dataset: &'v V) -> Self {
+        pub fn new(dataset: &'v V) -> Self {
             Self {
                 dataset,
                 distances: vec![(0usize, 0.0, 0.0, 0.0); dataset.len()],
@@ -262,7 +264,7 @@ mod bp {
         let mut next_candidate = current_candidate.clone();
         let mut converged = false;
         let mut adjustment_mult = 1;
-        for it in 0..max_iters {
+        for _ in 0..max_iters {
             let split_adjustment =
                 (half.abs_diff(current_candidate.split) / 10 * adjustment_mult).max(1);
             // XXX there is risk here that adjustment_mult will pick a split that either exceeds the
@@ -276,10 +278,6 @@ mod bp {
 
             let current_balance = half.abs_diff(current_candidate.split);
             let next_balance = half.abs_diff(next_candidate.split);
-            println!(
-                "bp_loop2 iteration {it:2} current (split {:3}, balance {current_balance:3}) nc (split {}, balance {next_balance:3}) target_split {target_split:3} split_adjustment {split_adjustment}",
-                current_candidate.split, next_candidate.split
-            );
             if next_balance < current_balance {
                 std::mem::swap(&mut current_candidate, &mut next_candidate);
                 adjustment_mult = 1;
@@ -304,13 +302,25 @@ mod bp {
     /// K-means++ style centroid initialization: choose a random point as the first centroid, then
     /// choose a second point weighted by distance to the first centroid.
     pub fn kmeanspp_init(
-        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
         acceptable_split: RangeInclusive<usize>,
+        state: &mut IterState<'_, impl VectorStore<Elem = f32> + Send + Sync>,
         rng: &mut impl Rng,
     ) -> Candidate {
-        let mut state = IterState::new(dataset);
         (0..10)
-            .map(|_| kmeanspp_candidate(dataset, &mut state, rng))
+            .map(|_| {
+                // Select a centroid at random, then select a second centroid at random but weighted by
+                // distance to the first centroid to prefer something farther away.
+                let first = rng.random_range(0..state.dataset.len());
+                let dist_fn = EuclideanDistance::get();
+                let distances = (0..state.dataset.len())
+                    .into_par_iter()
+                    .map(|i| dist_fn.distance_f32(&state.dataset[i], &state.dataset[first]))
+                    .collect::<Vec<_>>();
+                let second = WeightedIndex::new(distances.iter().copied())
+                    .unwrap()
+                    .sample(rng);
+                Candidate::from_sampled_vectors(first, second, state)
+            })
             .min_by(|a, b| {
                 let aok = acceptable_split.contains(&a.split);
                 let bok = acceptable_split.contains(&b.split);
@@ -324,29 +334,6 @@ mod bp {
             })
             .unwrap()
     }
-
-    fn kmeanspp_candidate(
-        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
-        state: &mut IterState<'_, impl VectorStore<Elem = f32> + Send + Sync>,
-        rng: &mut impl Rng,
-    ) -> Candidate {
-        // Select a centroid at random, then select a second centroid at random but weighted by
-        // distance to the first centroid to prefer something farther away.
-        let first = rng.random_range(0..dataset.len());
-        let dist_fn = EuclideanDistance::get();
-        let distances = (0..dataset.len())
-            .into_par_iter()
-            .map(|i| dist_fn.distance_f32(&dataset[i], &dataset[first]))
-            .collect::<Vec<_>>();
-        let second = WeightedIndex::new(distances.iter().copied())
-            .unwrap()
-            .sample(rng);
-        let c = Candidate::from_sampled_vectors(first, second, state);
-        c
-    }
-
-    // TODO: consider choosing the point farthest from the mean vector as the first centroid and
-    // then using k-means++ to choose the second centroid.
 
     /// Compute two new centroids from the dataset given assignments.
     pub fn compute_centroids(
@@ -478,12 +465,15 @@ fn hkmeans_step(
         *params.cluster_size.start()..=(training_data.len() - *params.cluster_size.start());
     let centroids = hkmeans_unwrap(
         match training_data.len().div_ceil(*params.cluster_size.end()) {
-            2 => bp::bp_loop2(
-                training_data,
-                bp::kmeanspp_init(training_data, acceptable_split, rng),
-                params.params.iters,
-                *params.cluster_size.start(),
-            ),
+            2 => {
+                let mut state = IterState::new(training_data);
+                bp::bp_loop2(
+                    training_data,
+                    bp::kmeanspp_init(acceptable_split, &mut state, rng),
+                    params.params.iters,
+                    *params.cluster_size.start(),
+                )
+            }
             _ => kmeans(
                 training_data,
                 training_data.len().div_ceil(*params.cluster_size.end()),

@@ -54,9 +54,9 @@ impl Patience {
         let ratio =
             self.candidates_added as f64 / (self.candidates_added + candidates_added) as f64;
         self.candidates_added += candidates_added;
-        if ratio >= self.params.threshold {
+        if ratio >= self.params.saturation_threshold {
             self.saturation_count += 1;
-            if self.saturation_count >= self.params.max_iters {
+            if self.saturation_count >= self.params.patience_count {
                 return true;
             }
         } else {
@@ -220,7 +220,7 @@ impl GraphSearcher {
     ) -> Result<Vec<Neighbor>> {
         // TODO: come up with a better way of managing re-used state.
         self.candidates.clear();
-        self.patience.as_mut().map(|p| p.clear());
+        if let Some(p) = self.patience.as_mut() { p.clear() }
         self.visited = 0;
 
         let mut graph = reader.graph()?;

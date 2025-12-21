@@ -36,12 +36,14 @@ pub struct GraphSearchParams {
 /// See https://cs.uwaterloo.ca/~jimmylin/publications/978-3-031-88714-7_39.pdf
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct PatienceParams {
-    /// Termination threshold. When the ratio of successfully added results to total results falls
-    /// below this threshold, we may terminate the search after `max_iters`.
-    pub threshold: f64,
-    /// Maximum number of iterations where impact is below `threshold` before we terminate.
-    // XXX rename to saturation_count.
-    pub max_iters: usize,
+    /// Saturation threshold. This is the ratio of total queued results before the round to total
+    /// queue results after the round. This controls how much the results need to be impacted by
+    /// each round of results added before we consider terminating.
+    pub saturation_threshold: f64,
+    /// Number of consecutive rounds we will be "patient" with impact below `saturation_threshold`.
+    /// Patience count is reset by rounds above `saturation_threshold`, but once `patience_count`
+    /// low impact rounds have occurred the search will be terminated.
+    pub patience_count: usize,
 }
 
 /// Configuration describing edge pruning policy for a graph index.

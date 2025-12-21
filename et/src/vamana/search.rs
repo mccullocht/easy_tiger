@@ -72,8 +72,8 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     );
     let record_limit = args.record_limit.map(|l| l as i64).unwrap_or(i64::MAX);
     let patience = args.patience_saturation_count.map(|c| PatienceParams {
-        threshold: args.patience_threshold,
-        max_iters: c,
+        saturation_threshold: args.patience_threshold,
+        patience_count: c,
     });
     let search_params = GraphSearchParams {
         beam_width: args.candidates,

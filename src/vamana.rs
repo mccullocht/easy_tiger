@@ -29,7 +29,7 @@ pub struct GraphSearchParams {
 
 /// Parameters for patience-based search termination.
 ///
-/// Rather than waiting for termination based on the beam width and the quality of the queue
+/// Rather than waiting for termination based on the beam width and the quality of candidates
 /// relative to the worst result, we instead measure the impact of the results added during each
 /// round of graph search and terminate when the impact falls below a threshold.
 ///
@@ -38,9 +38,10 @@ pub struct GraphSearchParams {
 pub struct PatienceParams {
     /// Termination threshold. When the ratio of successfully added results to total results falls
     /// below this threshold, we may terminate the search after `max_iters`.
-    threshold: f64,
+    pub threshold: f64,
     /// Maximum number of iterations where impact is below `threshold` before we terminate.
-    max_iters: usize,
+    // XXX rename to saturation_count.
+    pub max_iters: usize,
 }
 
 /// Configuration describing edge pruning policy for a graph index.

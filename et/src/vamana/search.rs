@@ -11,9 +11,11 @@ use std::{
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
-    vamana::search::{GraphSearchStats, GraphSearcher},
-    vamana::wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
-    vamana::GraphSearchParams,
+    vamana::{
+        search::{GraphSearchStats, GraphSearcher},
+        wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
+        GraphSearchParams, PatienceParams,
+    },
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;
@@ -43,6 +45,12 @@ pub struct SearchArgs {
     #[arg(long)]
     record_limit: Option<usize>,
 
+    // XXX patience params need to be shared.
+    #[arg(long, default_value_t = 0.995)]
+    patience_threshold: f64,
+    #[arg(long)]
+    patience_saturation_count: Option<usize>,
+
     #[command(flatten)]
     recall: RecallArgs,
 
@@ -63,10 +71,14 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         args.limit.unwrap_or(query_vectors.len()),
     );
     let record_limit = args.record_limit.map(|l| l as i64).unwrap_or(i64::MAX);
+    let patience = args.patience_saturation_count.map(|c| PatienceParams {
+        threshold: args.patience_threshold,
+        max_iters: c,
+    });
     let search_params = GraphSearchParams {
         beam_width: args.candidates,
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
-        patience: None, // XXX must be settable.
+        patience,
     };
     let recall_computer = RecallComputer::from_args(args.recall, index.config().similarity)?;
     if let Some(computer) = recall_computer.as_ref() {

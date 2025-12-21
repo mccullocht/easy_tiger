@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore};
-use crate::Neighbor;
+use crate::{vamana::PatienceParams, Neighbor};
 
 use vectors::QueryVectorDistance;
 use wt_mdb::{Error, Result};
@@ -36,9 +36,40 @@ impl AddAssign for GraphSearchStats {
     }
 }
 
+struct Patience {
+    params: PatienceParams,
+    candidates_added: usize,
+    saturation_count: usize,
+}
+
+impl Patience {
+    fn clear(&mut self) {
+        self.candidates_added = 0;
+        self.saturation_count = 0;
+    }
+
+    /// Update state with the number of candidates added in the most recent round.
+    /// Returns true if patience has been exceeded.
+    fn update(&mut self, candidates_added: usize) -> bool {
+        let ratio =
+            self.candidates_added as f64 / (self.candidates_added + candidates_added) as f64;
+        self.candidates_added += candidates_added;
+        if ratio >= self.params.threshold {
+            self.saturation_count += 1;
+            if self.saturation_count >= self.params.max_iters {
+                return true;
+            }
+        } else {
+            self.saturation_count = 0;
+        }
+        false
+    }
+}
+
 /// Helper to search a Vamana graph.
 pub struct GraphSearcher {
     params: GraphSearchParams,
+    patience: Option<Patience>,
 
     candidates: CandidateList,
     seen: HashSet<i64>, // TODO: use a more efficient hash function (ahash?)
@@ -48,8 +79,14 @@ pub struct GraphSearcher {
 impl GraphSearcher {
     /// Create a new, reusable graph searcher.
     pub fn new(params: GraphSearchParams) -> Self {
+        let patience = params.patience.map(|p| Patience {
+            params: p,
+            candidates_added: 0,
+            saturation_count: 0,
+        });
         Self {
             params,
+            patience,
             candidates: CandidateList::new(params.beam_width.get()),
             seen: HashSet::new(),
             visited: 0,
@@ -183,6 +220,7 @@ impl GraphSearcher {
     ) -> Result<Vec<Neighbor>> {
         // TODO: come up with a better way of managing re-used state.
         self.candidates.clear();
+        self.patience.as_mut().map(|p| p.clear());
         self.visited = 0;
 
         let mut graph = reader.graph()?;
@@ -206,6 +244,7 @@ impl GraphSearcher {
                 best_candidate.remove();
             }
 
+            let mut added = 0;
             for edge in graph
                 .edges(vertex_id)
                 .unwrap_or(Err(Error::not_found_error()))?
@@ -215,8 +254,21 @@ impl GraphSearcher {
                     continue;
                 }
                 let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
-                self.candidates
-                    .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)));
+                if self
+                    .candidates
+                    .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)))
+                {
+                    added += 1;
+                }
+            }
+
+            if self
+                .patience
+                .as_mut()
+                .map(|p| p.update(added))
+                .unwrap_or(false)
+            {
+                break;
             }
         }
 
@@ -283,12 +335,12 @@ impl CandidateList {
     ///
     /// This maintains the list at a length <= capacity so the neighbor may not be inserted _or_ it
     /// may cause another neighbor to be dropped.
-    fn add_unvisited(&mut self, neighbor: Neighbor) {
+    fn add_unvisited(&mut self, neighbor: Neighbor) -> bool {
         // If the queue is full and the candidate is not competitive then drop it.
         if self.candidates.len() >= self.candidates.capacity()
             && neighbor >= self.candidates.last().unwrap().neighbor
         {
-            return;
+            return false;
         }
 
         if let Some(insert_idx) = self
@@ -301,6 +353,9 @@ impl CandidateList {
             }
             self.candidates.insert(insert_idx, neighbor.into());
             self.next_unvisited = std::cmp::min(self.next_unvisited, insert_idx);
+            true
+        } else {
+            false
         }
     }
 
@@ -347,7 +402,7 @@ impl<'a> VisitCandidateGuard<'a> {
         self.update_next_unvisited(self.index + 1)
     }
 
-    /// Rmove this candidate from the list. May happen if filter check is not passed.
+    /// Remove this candidate from the list. May happen if filter check is not passed.
     fn remove(mut self) {
         self.list.candidates.remove(self.index);
         self.update_next_unvisited(self.index);

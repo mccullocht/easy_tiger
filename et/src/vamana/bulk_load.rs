@@ -6,7 +6,7 @@ use easy_tiger::{
     vamana::{
         bulk::{BulkLoadBuilder, Options},
         wt::TableGraphVectorIndex,
-        GraphConfig, GraphSearchParams,
+        GraphConfig, GraphSearchParams, PatienceParams,
     },
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
@@ -40,11 +40,6 @@ pub struct BulkLoadArgs {
     /// This can be significantly faster than reading these values from WiredTiger.
     #[arg(long, default_value_t = true)]
     memory_quantized_vectors: bool,
-    /// If true, cluster the input data set to choose insertion order. This improves locality
-    /// during the insertion step, yielding higher cache hit rates and graph build times, at the
-    /// expense of a compute intensive k-means clustering step.
-    #[arg(long, default_value_t = false)]
-    cluster_ordered_insert: bool,
 
     /// Number of edges to search for when indexing a vertex.
     ///
@@ -61,6 +56,14 @@ pub struct BulkLoadArgs {
     /// the value of edge_candidates.
     #[arg(short, long)]
     rerank_edges: Option<usize>,
+    /// Patience threshold to use during edge candidate generation.
+    #[arg(long, default_value_t = 0.995)]
+    patience_saturation_threshold: f64,
+    /// Patience count to use during edge candidate generation.
+    ///
+    /// If left unset, patience is not used to early terminate edge candidate generation search.
+    #[arg(long)]
+    patience_saturation_count: Option<usize>,
 
     #[command(flatten)]
     pruning: EdgePruningArgs,
@@ -96,7 +99,10 @@ pub fn bulk_load(
                 .rerank_format
                 .map(|_| args.rerank_edges.unwrap_or(args.edge_candidates.get()))
                 .unwrap_or(0),
-            patience: None, // XXX must be settable
+            patience: args.patience_saturation_count.map(|c| PatienceParams {
+                saturation_threshold: args.patience_saturation_threshold,
+                patience_count: c,
+            }),
         },
     };
     if args.drop_tables {

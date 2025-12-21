@@ -45,9 +45,8 @@ pub struct SearchArgs {
     #[arg(long)]
     record_limit: Option<usize>,
 
-    // XXX patience params need to be shared.
     #[arg(long, default_value_t = 0.995)]
-    patience_threshold: f64,
+    patience_saturation_threshold: f64,
     #[arg(long)]
     patience_saturation_count: Option<usize>,
 
@@ -72,7 +71,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     );
     let record_limit = args.record_limit.map(|l| l as i64).unwrap_or(i64::MAX);
     let patience = args.patience_saturation_count.map(|c| PatienceParams {
-        saturation_threshold: args.patience_threshold,
+        saturation_threshold: args.patience_saturation_threshold,
         patience_count: c,
     });
     let search_params = GraphSearchParams {

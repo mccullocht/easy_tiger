@@ -1,7 +1,9 @@
 use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
-use easy_tiger::vamana::{wt::TableGraphVectorIndex, GraphConfig, GraphSearchParams};
+use easy_tiger::vamana::{
+    wt::TableGraphVectorIndex, GraphConfig, GraphSearchParams, PatienceParams,
+};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;
 
@@ -39,6 +41,14 @@ pub struct InitIndexArgs {
     /// the value of edge_candidates.
     #[arg(long)]
     rerank_edges: Option<usize>,
+    /// Patience threshold to use during edge candidate generation.
+    #[arg(long, default_value_t = 0.995)]
+    patience_saturation_threshold: f64,
+    /// Patience count to use during edge candidate generation.
+    ///
+    /// If left unset, patience is not used to early terminate edge candidate generation search.
+    #[arg(long)]
+    patience_saturation_count: Option<usize>,
 
     #[command(flatten)]
     pruning: EdgePruningArgs,
@@ -78,7 +88,10 @@ pub fn init_index(
                     .rerank_format
                     .map(|_| args.rerank_edges.unwrap_or(args.edge_candidates.get()))
                     .unwrap_or(0),
-                patience: None, // XXX must be settable.
+                patience: args.patience_saturation_count.map(|c| PatienceParams {
+                    saturation_threshold: args.patience_saturation_threshold,
+                    patience_count: c,
+                }),
             },
         },
         index_name,

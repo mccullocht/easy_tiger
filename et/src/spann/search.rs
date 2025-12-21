@@ -19,7 +19,7 @@ use easy_tiger::{
         },
         SessionIndexReader, TableIndex,
     },
-    vamana::GraphSearchParams,
+    vamana::{GraphSearchParams, PatienceParams},
 };
 use memmap2::Mmap;
 use wt_mdb::Connection;
@@ -43,6 +43,19 @@ pub struct SearchArgs {
     /// If the head index does not have a rerank format, this is ignored.
     #[arg(long)]
     head_rerank_budget: Option<usize>,
+    /// Patience saturation threshold.
+    ///
+    /// During each search round fewer than this fraction of candidates must change. If this
+    /// threshold is exceeded --patience-saturation-count consecutive times then the search will be
+    /// terminated.
+    #[arg(long, default_value_t = 0.995)]
+    head_patience_saturation_threshold: f64,
+    /// Patience saturation count.
+    ///
+    /// If unset, patience early termination will not be used.
+    #[arg(long)]
+    head_patience_saturation_count: Option<usize>,
+
     /// The algorithm to use to select centroids to search postings of.
     /// top_n:<value> will select the closest <value> centroids by distance up to --head-candidates.
     /// vector_count:<value> will select centroids to score at least <value> vectors.
@@ -87,7 +100,10 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             num_rerank: args
                 .head_rerank_budget
                 .unwrap_or(args.head_candidates.get()),
-            patience: None, // XXX must be settable.
+            patience: args.head_patience_saturation_count.map(|c| PatienceParams {
+                saturation_threshold: args.head_patience_saturation_threshold,
+                patience_count: c,
+            }),
         },
         centroid_selector,
         limit: args.posting_candidates,

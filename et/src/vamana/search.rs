@@ -45,8 +45,16 @@ pub struct SearchArgs {
     #[arg(long)]
     record_limit: Option<usize>,
 
+    /// Patience saturation threshold.
+    ///
+    /// During each search round fewer than this fraction of candidates must change. If this
+    /// threshold is exceeded --patience-saturation-count consecutive times then the search will be
+    /// terminated.
     #[arg(long, default_value_t = 0.995)]
     patience_saturation_threshold: f64,
+    /// Patience saturation count.
+    ///
+    /// If unset, patience early termination will not be used.
     #[arg(long)]
     patience_saturation_count: Option<usize>,
 

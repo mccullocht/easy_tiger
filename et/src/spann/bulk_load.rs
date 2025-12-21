@@ -13,7 +13,7 @@ use easy_tiger::{
     },
     vamana::{
         bulk::{self, BulkLoadBuilder},
-        GraphConfig, GraphSearchParams,
+        GraphConfig, GraphSearchParams, PatienceParams,
     },
 };
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
@@ -82,11 +82,22 @@ pub struct BulkLoadArgs {
     /// This should be at least as many as --replica-count
     #[arg(long)]
     head_edge_candidates: NonZero<usize>,
-
     /// Number of vectors to re-rank when searching head table for centroid ids during insertion.
     /// If unset, re-ranks all edge candidates.
     #[arg(long)]
     head_rerank_edges: Option<usize>,
+    /// Patience saturation threshold.
+    ///
+    /// During each search round fewer than this fraction of candidates must change. If this
+    /// threshold is exceeded --patience-saturation-count consecutive times then the search will be
+    /// terminated.
+    #[arg(long, default_value_t = 0.995)]
+    head_patience_saturation_threshold: f64,
+    /// Patience saturation count.
+    ///
+    /// If unset, patience early termination will not be used.
+    #[arg(long)]
+    head_patience_saturation_count: Option<usize>,
 
     /// Maximum number of replica centroids to assign each vector to.
     #[arg(long, default_value_t = NonZero::new(1).unwrap())]
@@ -152,6 +163,10 @@ pub fn bulk_load(
                         .unwrap_or_else(|| args.edge_candidates.get())
                 })
                 .unwrap_or(0),
+            patience: args.head_patience_saturation_count.map(|c| PatienceParams {
+                saturation_threshold: args.head_patience_saturation_threshold,
+                patience_count: c,
+            }),
         },
     };
     let spann_config = IndexConfig {
@@ -168,6 +183,7 @@ pub fn bulk_load(
                         .unwrap_or(args.head_edge_candidates.get())
                 })
                 .unwrap_or(0),
+            patience: None,
         },
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,

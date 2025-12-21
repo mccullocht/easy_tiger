@@ -23,6 +23,27 @@ pub struct GraphSearchParams {
     pub beam_width: NonZero<usize>,
     /// Number of results to re-rank using the vectors in the graph.
     pub num_rerank: usize,
+    /// Parameters for patience-based search termination.
+    pub patience: Option<PatienceParams>,
+}
+
+/// Parameters for patience-based search termination.
+///
+/// Rather than waiting for termination based on the beam width and the quality of candidates
+/// relative to the worst result, we instead measure the impact of the results added during each
+/// round of graph search and terminate when the impact falls below a threshold.
+///
+/// See https://cs.uwaterloo.ca/~jimmylin/publications/978-3-031-88714-7_39.pdf
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct PatienceParams {
+    /// Saturation threshold. This is the ratio of total queued results before the round to total
+    /// queue results after the round. This controls how much the results need to be impacted by
+    /// each round of results added before we consider terminating.
+    pub saturation_threshold: f64,
+    /// Number of consecutive rounds we will be "patient" with impact below `saturation_threshold`.
+    /// Patience count is reset by rounds above `saturation_threshold`, but once `patience_count`
+    /// low impact rounds have occurred the search will be terminated.
+    pub patience_count: usize,
 }
 
 /// Configuration describing edge pruning policy for a graph index.

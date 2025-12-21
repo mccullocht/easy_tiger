@@ -330,6 +330,7 @@ mod tests {
             GraphSearchParams {
                 beam_width: NonZero::new(16).unwrap(),
                 num_rerank: 16,
+                patience: None,
             }
         }
 

@@ -429,6 +429,7 @@ mod test {
                 index_search_params: GraphSearchParams {
                     beam_width: NonZero::new(usize::MAX).unwrap(),
                     num_rerank: usize::MAX,
+                    patience: None,
                 },
             };
             Self { data: rep, config }
@@ -630,6 +631,7 @@ mod test {
         let mut searcher = GraphSearcher::new(GraphSearchParams {
             beam_width: NonZero::new(4).unwrap(),
             num_rerank: 0,
+            patience: None,
         });
         assert_eq!(
             searcher
@@ -650,6 +652,7 @@ mod test {
         let mut searcher = GraphSearcher::new(GraphSearchParams {
             beam_width: NonZero::new(4).unwrap(),
             num_rerank: 4,
+            patience: None,
         });
         assert_eq!(
             normalize_scores(
@@ -674,6 +677,7 @@ mod test {
         let mut searcher = GraphSearcher::new(GraphSearchParams {
             beam_width: NonZero::new(4).unwrap(),
             num_rerank: 4,
+            patience: None,
         });
         assert_eq!(
             searcher

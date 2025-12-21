@@ -78,6 +78,7 @@ pub fn init_index(
                     .rerank_format
                     .map(|_| args.rerank_edges.unwrap_or(args.edge_candidates.get()))
                     .unwrap_or(0),
+                patience: None, // XXX must be settable.
             },
         },
         index_name,

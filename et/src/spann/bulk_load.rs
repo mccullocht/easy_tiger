@@ -152,6 +152,7 @@ pub fn bulk_load(
                         .unwrap_or_else(|| args.edge_candidates.get())
                 })
                 .unwrap_or(0),
+            patience: None, // XXX must be settable.
         },
     };
     let spann_config = IndexConfig {
@@ -168,6 +169,7 @@ pub fn bulk_load(
                         .unwrap_or(args.head_edge_candidates.get())
                 })
                 .unwrap_or(0),
+            patience: None,
         },
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,

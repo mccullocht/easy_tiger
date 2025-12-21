@@ -87,6 +87,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             num_rerank: args
                 .head_rerank_budget
                 .unwrap_or(args.head_candidates.get()),
+            patience: None, // XXX must be settable.
         },
         centroid_selector,
         limit: args.posting_candidates,

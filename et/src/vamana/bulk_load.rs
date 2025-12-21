@@ -96,6 +96,7 @@ pub fn bulk_load(
                 .rerank_format
                 .map(|_| args.rerank_edges.unwrap_or(args.edge_candidates.get()))
                 .unwrap_or(0),
+            patience: None, // XXX must be settable
         },
     };
     if args.drop_tables {

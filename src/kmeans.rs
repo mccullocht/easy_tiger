@@ -129,7 +129,15 @@ fn compute_centroid_distance_max<
         .expect("non-zero k")
 }
 
-pub fn bp_kmeans_pp(
+/// Partition the dataset into two clusters of at least `min_cluster_size` vectors.
+///
+/// Initialization is based on k-means++ where we begin with a random vectors and select a second
+/// vector weighted on distances to the first. Initialization is run multiple times and the most
+/// balanced and "closest" initialization is selected. During iteration the centroids are updated
+/// based on the split between the two clusters with a preference to push towards the middle.
+///
+/// Returns the centroid vectors, these are return as an error if partitioning doesn't converge.
+pub fn balanced_binary_partition(
     dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
     max_iters: usize,
     min_cluster_size: usize,
@@ -456,19 +464,14 @@ fn hkmeans_step(
     params: &HierarchicalKMeansParams,
     rng: &mut impl Rng,
 ) -> (VecVectorStore<f32>, Vec<Vec<usize>>) {
-    let acceptable_split =
-        *params.cluster_size.start()..=(training_data.len() - *params.cluster_size.start());
     let centroids = hkmeans_unwrap(
         match training_data.len().div_ceil(*params.cluster_size.end()) {
-            2 => {
-                let mut state = IterState::new(training_data);
-                bp::bp_loop2(
-                    training_data,
-                    bp::kmeanspp_init(acceptable_split, &mut state, rng),
-                    params.params.iters,
-                    *params.cluster_size.start(),
-                )
-            }
+            2 => balanced_binary_partition(
+                training_data,
+                params.params.iters,
+                *params.cluster_size.start(),
+                rng,
+            ),
             _ => kmeans(
                 training_data,
                 training_data.len().div_ceil(*params.cluster_size.end()),

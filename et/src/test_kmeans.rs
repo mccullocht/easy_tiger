@@ -4,8 +4,10 @@ use std::num::NonZero;
 use std::path::PathBuf;
 
 use clap::Args;
-use easy_tiger::input::{DerefVectorStore, VectorStore};
-use easy_tiger::kmeans::bp_kmeans_pp;
+use easy_tiger::{
+    input::{DerefVectorStore, VectorStore},
+    kmeans::balanced_binary_partition,
+};
 use memmap2::Mmap;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro128PlusPlus;
@@ -45,19 +47,20 @@ pub fn test_kmeans(args: TestKmeansArgs) -> io::Result<()> {
 
     let mut rng = Xoshiro128PlusPlus::seed_from_u64(args.seed);
 
-    let centroids = match bp_kmeans_pp(&store, args.max_iters, args.min_cluster_size, &mut rng) {
-        Ok(centroids) => {
-            println!("BP K-means converged. {} centroids found.", centroids.len());
-            centroids
-        }
-        Err(centroids) => {
-            println!(
-                "BP K-means failed to converge! {} centroids found.",
-                centroids.len()
-            );
-            centroids
-        }
-    };
+    let centroids =
+        match balanced_binary_partition(&store, args.max_iters, args.min_cluster_size, &mut rng) {
+            Ok(centroids) => {
+                println!("BP K-means converged. {} centroids found.", centroids.len());
+                centroids
+            }
+            Err(centroids) => {
+                println!(
+                    "BP K-means failed to converge! {} centroids found.",
+                    centroids.len()
+                );
+                centroids
+            }
+        };
 
     let dist_fn = EuclideanDistance::get();
     let distance = store

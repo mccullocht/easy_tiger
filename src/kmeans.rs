@@ -10,7 +10,6 @@ use tracing::warn;
 use vectors::{EuclideanDistance, F32VectorDistance};
 
 use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
-use crate::kmeans::bp::IterState;
 
 /// Centroid initialization method for k-means partitioning.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -143,23 +142,94 @@ pub fn balanced_binary_partition(
     min_cluster_size: usize,
     rng: &mut impl Rng,
 ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
-    let mut state = IterState::new(dataset);
-    let init_centroids = bp::kmeanspp_init(
+    bp::bp(
+        dataset,
         min_cluster_size..=(dataset.len() - min_cluster_size),
-        &mut state,
+        max_iters,
         rng,
-    );
-    bp::bp_loop2(dataset, init_centroids, max_iters, min_cluster_size)
+    )
 }
 
 mod bp {
-    use std::{cmp::Ordering, ops::RangeInclusive};
+    use std::ops::RangeInclusive;
 
     use rand::{distr::weighted::WeightedIndex, prelude::*};
     use rayon::prelude::*;
     use vectors::{EuclideanDistance, F32VectorDistance};
 
     use crate::input::{VecVectorStore, VectorStore};
+
+    pub fn bp(
+        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
+        acceptable_split: RangeInclusive<usize>,
+        max_iters: usize,
+        rng: &mut impl Rng,
+    ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
+        assert!(!acceptable_split.is_empty());
+        let half = dataset.len() / 2;
+        let mut state = IterState::new(dataset);
+        let mut current_candidate = (0..10)
+            .map(|_| {
+                // Select a centroid at random, then select a second centroid at random but weighted
+                // by distance to the first centroid to prefer something farther away.
+                let first = rng.random_range(0..state.dataset.len());
+                let dist_fn = EuclideanDistance::get();
+                let distances = (0..state.dataset.len())
+                    .into_par_iter()
+                    .map(|i| dist_fn.distance_f32(&state.dataset[i], &state.dataset[first]))
+                    .collect::<Vec<_>>();
+                let second = WeightedIndex::new(distances.iter().copied())
+                    .unwrap()
+                    .sample(rng);
+                Candidate::from_sampled_vectors(first, second, &mut state)
+            })
+            .min_by(|a, b| {
+                // Prefer candidates within the acceptable split range, then prefer candidates with
+                // smaller distances to the centroids.
+                acceptable_split
+                    .contains(&a.split)
+                    .cmp(&acceptable_split.contains(&b.split))
+                    .then_with(|| a.distance_sum.total_cmp(&b.distance_sum))
+            })
+            .unwrap();
+        let mut next_candidate = current_candidate.clone();
+        let mut converged = false;
+        let mut adjustment_mult = 1;
+
+        for _ in 0..max_iters {
+            let split_adjustment =
+                (half.abs_diff(current_candidate.split) / 10 * adjustment_mult).max(1);
+            // XXX there is risk here that adjustment_mult will pick a split that either exceeds the
+            // lower of upper bound values of target_split (potentially underflowing).
+            let target_split = if current_candidate.split < half {
+                current_candidate.split + split_adjustment
+            } else {
+                current_candidate.split - split_adjustment
+            };
+            next_candidate.update_centroids(target_split, &mut state);
+
+            let current_balance = half.abs_diff(current_candidate.split);
+            let next_balance = half.abs_diff(next_candidate.split);
+            if next_balance < current_balance {
+                std::mem::swap(&mut current_candidate, &mut next_candidate);
+                adjustment_mult = 1;
+            } else if acceptable_split.contains(&current_candidate.split) {
+                converged = true;
+                break;
+            } else {
+                // Try harder to fix the split by taking elements from the "far" side of the split.
+                // This improves the odds of convergence but also indicates that we probably chose
+                // poor initial centroids.
+                adjustment_mult *= 2;
+            }
+        }
+
+        if converged {
+            Ok(current_candidate.centroids)
+        } else {
+            Err(current_candidate.centroids)
+        }
+    }
 
     /// Container for the dataset and reusable buffers for certain operations.
     pub struct IterState<'v, V> {
@@ -278,93 +348,6 @@ mod bp {
                     .map(|d| d.2)
                     .sum::<f64>();
         }
-    }
-
-    // XXX rename
-    pub fn bp_loop2(
-        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
-        init_candidate: Candidate,
-        max_iters: usize,
-        min_cluster_size: usize,
-    ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
-        let acceptable_split = min_cluster_size..=(dataset.len() - min_cluster_size);
-        assert!(!acceptable_split.is_empty());
-        let half = dataset.len() / 2;
-
-        let mut state = IterState::new(dataset);
-        let mut current_candidate = init_candidate;
-        let mut next_candidate = current_candidate.clone();
-        let mut converged = false;
-        let mut adjustment_mult = 1;
-        for _ in 0..max_iters {
-            let split_adjustment =
-                (half.abs_diff(current_candidate.split) / 10 * adjustment_mult).max(1);
-            // XXX there is risk here that adjustment_mult will pick a split that either exceeds the
-            // lower of upper bound values of target_split (potentially underflowing).
-            let target_split = if current_candidate.split < half {
-                current_candidate.split + split_adjustment
-            } else {
-                current_candidate.split - split_adjustment
-            };
-            next_candidate.update_centroids(target_split, &mut state);
-
-            let current_balance = half.abs_diff(current_candidate.split);
-            let next_balance = half.abs_diff(next_candidate.split);
-            if next_balance < current_balance {
-                std::mem::swap(&mut current_candidate, &mut next_candidate);
-                adjustment_mult = 1;
-            } else if acceptable_split.contains(&current_candidate.split) {
-                converged = true;
-                break;
-            } else {
-                // Try harder to fix the split by taking elements from the "far" side of the split.
-                // This improves the odds of convergence but also indicates that we probably chose
-                // poor initial centroids.
-                adjustment_mult *= 2;
-            }
-        }
-
-        if converged {
-            Ok(current_candidate.centroids)
-        } else {
-            Err(current_candidate.centroids)
-        }
-    }
-
-    /// K-means++ style centroid initialization: choose a random point as the first centroid, then
-    /// choose a second point weighted by distance to the first centroid.
-    pub fn kmeanspp_init(
-        acceptable_split: RangeInclusive<usize>,
-        state: &mut IterState<'_, impl VectorStore<Elem = f32> + Send + Sync>,
-        rng: &mut impl Rng,
-    ) -> Candidate {
-        (0..10)
-            .map(|_| {
-                // Select a centroid at random, then select a second centroid at random but weighted by
-                // distance to the first centroid to prefer something farther away.
-                let first = rng.random_range(0..state.dataset.len());
-                let dist_fn = EuclideanDistance::get();
-                let distances = (0..state.dataset.len())
-                    .into_par_iter()
-                    .map(|i| dist_fn.distance_f32(&state.dataset[i], &state.dataset[first]))
-                    .collect::<Vec<_>>();
-                let second = WeightedIndex::new(distances.iter().copied())
-                    .unwrap()
-                    .sample(rng);
-                Candidate::from_sampled_vectors(first, second, state)
-            })
-            .min_by(|a, b| {
-                let aok = acceptable_split.contains(&a.split);
-                let bok = acceptable_split.contains(&b.split);
-                if aok == bok {
-                    a.distance_sum.total_cmp(&b.distance_sum)
-                } else if aok {
-                    Ordering::Less
-                } else {
-                    Ordering::Greater
-                }
-            })
-            .unwrap()
     }
 }
 

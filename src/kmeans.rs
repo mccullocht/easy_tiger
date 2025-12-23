@@ -199,12 +199,12 @@ mod bp {
         for _ in 0..max_iters {
             let split_adjustment =
                 (half.abs_diff(current_candidate.split) / 10 * adjustment_mult).max(1);
-            // XXX there is risk here that adjustment_mult will pick a split that either exceeds the
-            // lower of upper bound values of target_split (potentially underflowing).
+            // Adjust the split using a potentially scaling adjustment. The adjustment must leave at
+            // least once vector in each cluster.
             let target_split = if current_candidate.split < half {
-                current_candidate.split + split_adjustment
+                (current_candidate.split + split_adjustment).max(dataset.len() - 1)
             } else {
-                current_candidate.split - split_adjustment
+                current_candidate.split - split_adjustment.min(current_candidate.split - 1)
             };
             next_candidate.update_centroids(target_split, &mut state);
 

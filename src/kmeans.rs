@@ -215,7 +215,31 @@ mod bp {
             for (i, &(idx, _, _, _)) in state.distances.iter().enumerate() {
                 state.assignments[idx] = if i < target_split { 0 } else { 1 };
             }
-            self.centroids = compute_centroids(state.dataset, &state.assignments);
+            self.centroids = {
+                let assignments: &[usize] = &state.assignments;
+                let mut centroids: VecVectorStore<f32> =
+                    VecVectorStore::with_capacity(state.dataset.elem_stride(), 2);
+                centroids.push(&vec![0.0; state.dataset.elem_stride()]);
+                centroids.push(&vec![0.0; state.dataset.elem_stride()]);
+                let mut counts = [0usize; 2];
+                for (vector, i) in state.dataset.iter().zip(assignments.iter().copied()) {
+                    let centroid = &mut centroids[i];
+                    counts[i] += 1;
+                    for (d, o) in vector.iter().zip(centroid.iter_mut()) {
+                        *o += *d;
+                    }
+                }
+                for i in 0..2 {
+                    if counts[i] == 0 {
+                        continue;
+                    }
+                    let count = counts[i] as f32;
+                    for d in centroids[i].iter_mut() {
+                        *d /= count;
+                    }
+                }
+                centroids
+            };
             self.update_split(state);
         }
 
@@ -333,35 +357,6 @@ mod bp {
                 }
             })
             .unwrap()
-    }
-
-    /// Compute two new centroids from the dataset given assignments.
-    pub fn compute_centroids(
-        dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
-        assignments: &[usize],
-    ) -> VecVectorStore<f32> {
-        let mut centroids: VecVectorStore<f32> =
-            VecVectorStore::with_capacity(dataset.elem_stride(), 2);
-        centroids.push(&vec![0.0; dataset.elem_stride()]);
-        centroids.push(&vec![0.0; dataset.elem_stride()]);
-        let mut counts = [0usize; 2];
-        for (vector, i) in dataset.iter().zip(assignments.iter().copied()) {
-            let centroid = &mut centroids[i];
-            counts[i] += 1;
-            for (d, o) in vector.iter().zip(centroid.iter_mut()) {
-                *o += *d;
-            }
-        }
-        for i in 0..2 {
-            if counts[i] == 0 {
-                continue;
-            }
-            let count = counts[i] as f32;
-            for d in centroids[i].iter_mut() {
-                *d /= count;
-            }
-        }
-        centroids
     }
 }
 

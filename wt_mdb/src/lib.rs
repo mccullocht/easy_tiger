@@ -174,7 +174,7 @@ mod test {
     use tempfile::TempDir;
 
     use crate::{
-        connection::Connection,
+        connection::{Connection, QueryGlobalTimestampType, SetGlobalTimestampType},
         options::{
             ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
             Statistics,
@@ -556,7 +556,7 @@ mod test {
     struct RecordTableFixture {
         table_name: String,
         session: Session,
-        _connection: Arc<Connection>,
+        connection: Arc<Connection>,
         _dir: TempDir,
     }
 
@@ -575,7 +575,7 @@ mod test {
             Self {
                 table_name: table_name.to_string(),
                 session,
-                _connection: connection,
+                connection,
                 _dir: dir,
             }
         }
@@ -683,7 +683,7 @@ mod test {
     }
 
     #[test]
-    fn query_timestamp() -> Result<()> {
+    fn query_transaction_timestamp() -> Result<()> {
         let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
         assert_eq!(fixture.session.query_timestamp(QueryTimestamp::Read), Ok(0));
         assert_eq!(
@@ -715,6 +715,57 @@ mod test {
         fixture.session.reset()?;
         assert_eq!(
             fixture.session.query_timestamp(QueryTimestamp::Commit),
+            Ok(1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn query_global_timestamp() -> Result<()> {
+        let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
+
+        for tt in [
+            QueryGlobalTimestampType::AllDurable,
+            QueryGlobalTimestampType::BackupCheckpoint,
+            QueryGlobalTimestampType::LastCheckpoint,
+            QueryGlobalTimestampType::Oldest,
+            QueryGlobalTimestampType::OldestReader,
+            QueryGlobalTimestampType::Pinned,
+            QueryGlobalTimestampType::Recovery,
+            QueryGlobalTimestampType::Stable,
+        ] {
+            assert_eq!(fixture.connection.query_timestamp(tt), Ok(0));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn set_global_timestamp() -> Result<()> {
+        let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
+        fixture.session.begin_transaction(None)?;
+        let mut cursor = fixture.open_cursor()?;
+        cursor.set(1, b"a")?;
+        fixture
+            .session
+            .set_transaction_timestamp(TransactionTimestampType::Commit, 1)?;
+        fixture.session.commit_transaction(None)?;
+
+        fixture
+            .connection
+            .set_timestamp(SetGlobalTimestampType::Stable, 1)?;
+        assert_eq!(
+            fixture
+                .connection
+                .query_timestamp(QueryGlobalTimestampType::Stable),
+            Ok(1)
+        );
+        fixture
+            .connection
+            .set_timestamp(SetGlobalTimestampType::Oldest, 1)?;
+        assert_eq!(
+            fixture
+                .connection
+                .query_timestamp(QueryGlobalTimestampType::Oldest),
             Ok(1)
         );
         Ok(())

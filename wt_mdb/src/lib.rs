@@ -179,7 +179,7 @@ mod test {
             ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
             Statistics,
         },
-        session::{Formatted, QueryTimestamp, TransactionGuard},
+        session::{Formatted, QueryTimestamp, TransactionGuard, TransactionTimestampType},
         Error, RecordCursor, Result, Session, WiredTigerError,
     };
 
@@ -697,6 +697,25 @@ mod test {
         assert_eq!(
             fixture.session.query_timestamp(QueryTimestamp::Prepare),
             Ok(0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn set_transaction_timestamp() -> Result<()> {
+        let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
+        fixture.session.begin_transaction(None)?;
+        let mut cursor = fixture.open_cursor()?;
+        cursor.set(1, b"a")?;
+        fixture
+            .session
+            .set_transaction_timestamp(TransactionTimestampType::Commit, 1)?;
+        fixture.session.commit_transaction(None)?;
+
+        fixture.session.reset()?;
+        assert_eq!(
+            fixture.session.query_timestamp(QueryTimestamp::Commit),
+            Ok(1)
         );
         Ok(())
     }

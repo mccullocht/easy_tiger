@@ -122,6 +122,28 @@ impl QueryTimestamp {
     }
 }
 
+/// Types of timestamps that may be set on a transaction.
+///
+/// These timestamps can be set in between operations on the transaction, so it is possible for
+/// callers to use different timestamps for different parts of the transaction.
+pub enum TransactionTimestampType {
+    Commit,
+    Durable,
+    Prepare,
+    Read,
+}
+
+impl TransactionTimestampType {
+    fn txn_type(&self) -> wt_sys::WT_TS_TXN_TYPE {
+        match self {
+            Self::Commit => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_COMMIT,
+            Self::Durable => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_DURABLE,
+            Self::Prepare => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_PREPARE,
+            Self::Read => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_READ,
+        }
+    }
+}
+
 /// A WiredTiger session.
 ///
 /// `Session`s are used to create cursors to view and mutate data and manage transaction state.
@@ -320,6 +342,29 @@ impl Session {
     /// but otherwise behavior is unspecified.
     pub fn begin_transaction(&self, options: Option<&BeginTransactionOptions>) -> Result<()> {
         unsafe { wt_call!(self.ptr, begin_transaction, options.as_config_ptr()) }
+    }
+
+    /// Set the transaction timestamp for the current transaction.
+    ///
+    /// This should be called on a session with an active transaction. This may be called in the
+    /// during a transaction to use a different commit timestamp for different parts of the
+    /// transaction. For non-commit timestamps rules may vary.
+    ///
+    /// Timestamps are bound in part/ by global state; consult WiredTiger documentation for more
+    /// information.
+    pub fn set_transaction_timestamp(
+        &self,
+        txn_type: TransactionTimestampType,
+        timestamp: u64,
+    ) -> Result<()> {
+        unsafe {
+            wt_call!(
+                self.ptr,
+                timestamp_transaction_uint,
+                txn_type.txn_type(),
+                timestamp
+            )
+        }
     }
 
     /// Commit the current transaction.

@@ -103,6 +103,25 @@ impl Drop for InnerCursor {
 
 unsafe impl Send for InnerCursor {}
 
+/// Used to select the type of query timestamp to read from the session.
+pub enum QueryTimestamp {
+    Commit,
+    FirstCommit,
+    Prepare,
+    Read,
+}
+
+impl QueryTimestamp {
+    fn config_str(&self) -> &'static CStr {
+        match self {
+            Self::Commit => c"get=commit",
+            Self::FirstCommit => c"get=first_commit",
+            Self::Prepare => c"get=prepare",
+            Self::Read => c"get=read",
+        }
+    }
+}
+
 /// A WiredTiger session.
 ///
 /// `Session`s are used to create cursors to view and mutate data and manage transaction state.
@@ -367,6 +386,28 @@ impl Session {
     /// Checkpoint the database.
     pub fn checkpoint(&self) -> Result<()> {
         unsafe { wt_call!(self.ptr, checkpoint, std::ptr::null()) }
+    }
+
+    /// Query the session for transaction timestamp state. Callers may select one of the types of
+    /// timestamps to query. Returns a 64-bit unsigned timestamp.
+    pub fn query_timestamp(&self, timestamp: QueryTimestamp) -> Result<u64> {
+        let mut buf = [0u8; 17];
+        unsafe {
+            wt_call!(
+                self.ptr,
+                query_timestamp,
+                buf.as_mut_ptr() as *mut c_char,
+                timestamp.config_str().as_ptr()
+            )
+        }?;
+        Ok(u64::from_str_radix(
+            CStr::from_bytes_until_nul(&buf)
+                .expect("null terminated")
+                .to_str()
+                .expect("valid utf8"),
+            16,
+        )
+        .expect("valid hex string"))
     }
 
     /// Reset this session, which also resets any outstanding cursors.

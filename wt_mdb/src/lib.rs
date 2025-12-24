@@ -179,7 +179,7 @@ mod test {
             ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
             Statistics,
         },
-        session::{Formatted, TransactionGuard},
+        session::{Formatted, QueryTimestamp, TransactionGuard},
         Error, RecordCursor, Result, Session, WiredTigerError,
     };
 
@@ -678,6 +678,25 @@ mod test {
         assert_eq!(
             cursor.collect::<Result<Vec<_>>>()?,
             data.into_iter().filter(|(k, _)| *k < 0).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn query_timestamp() -> Result<()> {
+        let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
+        assert_eq!(fixture.session.query_timestamp(QueryTimestamp::Read), Ok(0));
+        assert_eq!(
+            fixture.session.query_timestamp(QueryTimestamp::Commit),
+            Ok(0)
+        );
+        assert_eq!(
+            fixture.session.query_timestamp(QueryTimestamp::FirstCommit),
+            Ok(0)
+        );
+        assert_eq!(
+            fixture.session.query_timestamp(QueryTimestamp::Prepare),
+            Ok(0)
         );
         Ok(())
     }

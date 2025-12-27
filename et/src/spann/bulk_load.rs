@@ -18,7 +18,7 @@ use easy_tiger::{
 };
 use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{options::DropOptionsBuilder, Connection};
+use wt_mdb::{session::DropOptionsBuilder, Connection};
 
 use crate::{ui::progress_bar, vamana::EdgePruningArgs};
 

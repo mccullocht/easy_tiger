@@ -10,7 +10,7 @@ use rustix::io::Errno;
 use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity};
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
-    options::{CreateOptionsBuilder, DropOptions},
+    session::{CreateOptionsBuilder, DropOptions},
     Connection, Error, RecordCursorGuard, Result, Session,
 };
 

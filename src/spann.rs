@@ -12,8 +12,7 @@ use std::{io, sync::Arc};
 use serde::{Deserialize, Serialize};
 use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding, VectorDistance};
 use wt_mdb::{
-    options::{CreateOptionsBuilder, DropOptions},
-    session::{FormatString, Formatted},
+    session::{CreateOptionsBuilder, DropOptions, FormatString, Formatted},
     Connection, Error, RecordCursorGuard, Result, Session, TypedCursorGuard,
 };
 

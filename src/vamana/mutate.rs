@@ -309,7 +309,7 @@ mod tests {
     use std::{num::NonZero, sync::Arc};
 
     use vectors::{F32VectorCoding, VectorSimilarity};
-    use wt_mdb::{options::ConnectionOptionsBuilder, Connection, Result};
+    use wt_mdb::{Connection, Result};
 
     use crate::vamana::{
         mutate::{delete_vector, insert_vector, upsert_vector},
@@ -359,7 +359,11 @@ mod tests {
             let dir = tempfile::TempDir::new().unwrap();
             let conn = Connection::open(
                 dir.path().to_str().unwrap(),
-                Some(ConnectionOptionsBuilder::default().create().into()),
+                Some(
+                    wt_mdb::connection::OptionsBuilder::default()
+                        .create()
+                        .into(),
+                ),
             )
             .unwrap();
             let index = Arc::new(

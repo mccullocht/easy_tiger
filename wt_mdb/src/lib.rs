@@ -183,8 +183,7 @@ where
 {
     fn as_config_string(&self) -> Option<&CStr> {
         self.as_ref()
-            .map(ConfigurationString::as_config_string)
-            .flatten()
+            .and_then(ConfigurationString::as_config_string)
     }
 }
 

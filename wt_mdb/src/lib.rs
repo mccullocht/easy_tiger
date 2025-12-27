@@ -7,8 +7,7 @@
 //! Unlike the general-purpose WiredTiger library, this library only allows tables
 //! that are keyed by `i64` with byte array payloads.
 pub mod config;
-mod connection;
-pub mod options;
+pub mod connection;
 pub mod session;
 
 use rustix::io::Errno;
@@ -18,6 +17,7 @@ use std::ffi::{c_char, CStr};
 use std::io;
 use std::io::ErrorKind;
 use std::num::NonZero;
+use std::str::FromStr;
 
 /// WiredTiger specific error codes.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -188,6 +188,58 @@ where
     }
 }
 
+/// Level of statistics gathering.
+///
+/// This is set on both the connection and when accessing stats cursors.
+/// Note that the level for a stats cursor must be less than the connection level
+/// or an error may occur.
+#[derive(Debug, PartialEq, Eq, Default)]
+pub enum Statistics {
+    /// Collect no stats.
+    #[default]
+    None,
+    /// Collect stats that are fast/cheap to collect.
+    Fast,
+    /// Collect all known stats, even if they are expensive.
+    All,
+}
+
+impl Statistics {
+    pub(crate) fn to_config_string_clause(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            opt => Some(format!("statistics=({opt})")),
+        }
+    }
+}
+
+impl std::fmt::Display for Statistics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::None => "none",
+                Self::Fast => "fast",
+                Self::All => "all",
+            }
+        )
+    }
+}
+
+impl FromStr for Statistics {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "fast" => Ok(Self::Fast),
+            "all" => Ok(Self::All),
+            _ => Err(format!("Unknown statistics type {s}")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::{io::ErrorKind, sync::Arc};
@@ -197,18 +249,15 @@ mod test {
 
     use crate::{
         connection::{Connection, QueryGlobalTimestampType, SetGlobalTimestampType},
-        options::{
-            ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
-            Statistics,
-        },
         session::{
-            Formatted, QueryTransactionTimestampType, SetTransactionTimestampType, TransactionGuard,
+            CreateOptions, CreateOptionsBuilder, Formatted, QueryTransactionTimestampType,
+            SetTransactionTimestampType, TransactionGuard,
         },
-        Error, RecordCursor, Result, Session, WiredTigerError,
+        Error, RecordCursor, Result, Session, Statistics, WiredTigerError,
     };
 
-    fn conn_options() -> Option<ConnectionOptions> {
-        Some(ConnectionOptionsBuilder::default().create().into())
+    fn conn_options() -> Option<crate::connection::Options> {
+        Some(crate::connection::OptionsBuilder::default().create().into())
     }
 
     fn index_table_options() -> Option<CreateOptions> {
@@ -514,7 +563,7 @@ mod test {
         let conn = Connection::open(
             tmpdir.path().to_str().unwrap(),
             Some(
-                ConnectionOptionsBuilder::default()
+                crate::connection::OptionsBuilder::default()
                     .create()
                     .statistics(Statistics::Fast)
                     .into(),

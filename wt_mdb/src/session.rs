@@ -12,11 +12,7 @@ use std::{
 use tracing::error;
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
 
-use crate::{
-    connection::Connection,
-    options::{CreateOptions, CreateOptionsBuilder, DropOptions, Statistics},
-    wt_call, ConfigurationString, Error, Result,
-};
+use crate::{connection::Connection, wt_call, ConfigurationString, Error, Result, Statistics};
 
 pub use format::{pack1, pack2, pack3, unpack1, unpack2, unpack3, FormatString, Formatted};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
@@ -138,6 +134,111 @@ impl SetTransactionTimestampType {
             Self::Prepare => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_PREPARE,
             Self::Read => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_READ,
         }
+    }
+}
+
+/// An options builder for creating a table, column group, index, or file in WiredTiger.
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+pub struct CreateOptionsBuilder {
+    key_format: FormatString,
+    value_format: FormatString,
+    app_metadata: Option<String>,
+}
+
+impl Default for CreateOptionsBuilder {
+    fn default() -> Self {
+        Self {
+            key_format: FormatString::new(c"q"),
+            value_format: FormatString::new(c"u"),
+            app_metadata: None,
+        }
+    }
+}
+
+impl CreateOptionsBuilder {
+    /// Set the format for the key.
+    pub fn key_format<K: Formatted>(mut self) -> Self {
+        self.key_format = K::FORMAT;
+        self
+    }
+
+    /// Set the format for the value.
+    pub fn value_format<V: Formatted>(mut self) -> Self {
+        self.value_format = V::FORMAT;
+        self
+    }
+
+    /// Attach metadata that can be read from the metadata table as the value for this table.
+    pub fn app_metadata(mut self, metadata: &str) -> Self {
+        assert!(
+            !metadata.as_bytes().contains(&0),
+            "metadata may not contain a NULL character"
+        );
+        self.app_metadata = Some(metadata.to_owned());
+        self
+    }
+}
+
+/// Options when creating a table, column group, index, or file in WiredTiger.
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+pub struct CreateOptions(CString);
+
+impl Default for CreateOptions {
+    fn default() -> Self {
+        CreateOptionsBuilder::default().into()
+    }
+}
+
+impl From<CreateOptionsBuilder> for CreateOptions {
+    fn from(value: CreateOptionsBuilder) -> Self {
+        let mut parts = vec![
+            format!("key_format={}", value.key_format.format_str()),
+            format!("value_format={}", value.value_format.format_str()),
+        ];
+        if let Some(metadata) = value.app_metadata {
+            parts.push(format!("app_metadata={metadata}"));
+        }
+        Self(CString::new(parts.join(",")).expect("no nulls"))
+    }
+}
+
+impl ConfigurationString for CreateOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        Some(self.0.as_c_str())
+    }
+}
+
+/// An options builder for dropping a table, column group, index, or file in WiredTiger.
+#[derive(Default)]
+pub struct DropOptionsBuilder {
+    force: bool,
+}
+
+impl DropOptionsBuilder {
+    /// If set, return success even if the object does not exist.
+    pub fn set_force(mut self) -> Self {
+        self.force = true;
+        self
+    }
+}
+
+/// Options for dropping a table, column group, index, or file in WiredTiger.
+#[derive(Default, Debug, Clone)]
+pub struct DropOptions(Option<CString>);
+
+impl From<DropOptionsBuilder> for DropOptions {
+    fn from(value: DropOptionsBuilder) -> Self {
+        DropOptions(if value.force {
+            Some(CString::from(c"force=true"))
+        } else {
+            None
+        })
+    }
+}
+
+impl ConfigurationString for DropOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.0.as_deref()
     }
 }
 

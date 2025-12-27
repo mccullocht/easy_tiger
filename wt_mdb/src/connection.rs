@@ -1,9 +1,9 @@
 use crate::{
-    make_result, options::ConnectionOptions, session::Session, wt_call, ConfigurationString, Error,
-    Result,
+    make_result, session::Session, wt_call, ConfigurationString, Error, Result, Statistics,
 };
 use std::{
     ffi::{CStr, CString},
+    num::NonZero,
     ptr::{self, NonNull},
     sync::Arc,
 };
@@ -56,6 +56,86 @@ impl QueryGlobalTimestampType {
     }
 }
 
+/// Builder for options when connecting to a WiredTiger database.
+#[derive(Default)]
+pub struct OptionsBuilder {
+    create: bool,
+    cache_size_mb: Option<NonZero<usize>>,
+    statistics: Statistics,
+    checkpoint_log_size: usize,
+    checkpoint_wait_seconds: usize,
+}
+
+impl OptionsBuilder {
+    /// If set, create the database if it does not exist.
+    pub fn create(mut self) -> Self {
+        self.create = true;
+        self
+    }
+
+    /// Maximum heap memory to allocate for the cache, in MB.
+    pub fn cache_size_mb(mut self, size: NonZero<usize>) -> Self {
+        self.cache_size_mb = Some(size);
+        self
+    }
+
+    /// Configure statistics collection.
+    pub fn statistics(mut self, statistics: Statistics) -> Self {
+        self.statistics = statistics;
+        self
+    }
+
+    /// If non-zero, write a checkpoint every N bytes.
+    pub fn checkpoint_log_size(mut self, log_size: usize) -> Self {
+        self.checkpoint_log_size = log_size;
+        self
+    }
+
+    /// If non-zero, write a checkpoint every N seconds.
+    pub fn checkpoint_wait_seconds(mut self, wait_seconds: usize) -> Self {
+        self.checkpoint_wait_seconds = wait_seconds;
+        self
+    }
+}
+
+/// Options when connecting to a WiredTiger database.
+#[derive(Debug, Default)]
+pub struct Options(Option<CString>);
+
+impl From<OptionsBuilder> for Options {
+    fn from(value: OptionsBuilder) -> Self {
+        let mut options = Vec::new();
+        if value.create {
+            options.push("create".to_string())
+        }
+        if let Some(cache_size) = value.cache_size_mb {
+            options.push(format!("cache_size={}", cache_size.get() << 20));
+        }
+        if let Some(clause) = value.statistics.to_config_string_clause() {
+            options.push(clause);
+        }
+        if value.checkpoint_log_size > 0 || value.checkpoint_wait_seconds > 0 {
+            options.push(format!(
+                "checkpoint=(log_size={},wait={})",
+                value.checkpoint_log_size, value.checkpoint_wait_seconds
+            ))
+        }
+        if options.is_empty() {
+            Self(None)
+        } else {
+            Self(Some(
+                CString::new(options.join(",")).expect("options does not contain null"),
+            ))
+        }
+    }
+}
+
+impl ConfigurationString for Options {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.0.as_deref()
+    }
+}
+
 /// A connection to a WiredTiger database.
 ///
 /// There is typically only one connection per database per process.
@@ -64,7 +144,7 @@ pub struct Connection(NonNull<WT_CONNECTION>);
 
 impl Connection {
     /// Open a new `Connection` to a WiredTiger database.
-    pub fn open(filename: &str, options: Option<ConnectionOptions>) -> Result<Arc<Self>> {
+    pub fn open(filename: &str, options: Option<Options>) -> Result<Arc<Self>> {
         let mut connp: *mut WT_CONNECTION = ptr::null_mut();
         let dbpath = CString::new(filename).unwrap();
         make_result(

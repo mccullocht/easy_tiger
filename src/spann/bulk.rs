@@ -7,7 +7,7 @@ use crate::{
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{options::CreateOptionsBuilder, Connection, Result, Session};
+use wt_mdb::{session::CreateOptionsBuilder, Connection, Result, Session};
 
 /// Assign all the vectors to one or more centroids in the head index. This performs the same search
 /// and pruning as [`super::SessionIndexWriter`] does.

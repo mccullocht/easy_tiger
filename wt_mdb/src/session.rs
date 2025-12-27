@@ -12,14 +12,7 @@ use std::{
 use tracing::error;
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
 
-use crate::{
-    connection::Connection,
-    options::{
-        BeginTransactionOptions, CommitTransactionOptions, ConfigurationString, CreateOptions,
-        CreateOptionsBuilder, DropOptions, RollbackTransactionOptions, Statistics,
-    },
-    wt_call, Error, Result,
-};
+use crate::{connection::Connection, wt_call, ConfigurationString, Error, Result, Statistics};
 
 pub use format::{pack1, pack2, pack3, unpack1, unpack2, unpack3, FormatString, Formatted};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
@@ -102,6 +95,301 @@ impl Drop for InnerCursor {
 }
 
 unsafe impl Send for InnerCursor {}
+
+/// Used to select the type of query timestamp to read from the session.
+pub enum QueryTransactionTimestampType {
+    Commit,
+    FirstCommit,
+    Prepare,
+    Read,
+}
+
+impl QueryTransactionTimestampType {
+    fn config_str(&self) -> &'static CStr {
+        match self {
+            Self::Commit => c"get=commit",
+            Self::FirstCommit => c"get=first_commit",
+            Self::Prepare => c"get=prepare",
+            Self::Read => c"get=read",
+        }
+    }
+}
+
+/// Types of timestamps that may be set on a transaction.
+///
+/// These timestamps can be set in between operations on the transaction, so it is possible for
+/// callers to use different timestamps for different parts of the transaction.
+pub enum SetTransactionTimestampType {
+    Commit,
+    Durable,
+    Prepare,
+    Read,
+}
+
+impl SetTransactionTimestampType {
+    fn txn_type(&self) -> wt_sys::WT_TS_TXN_TYPE {
+        match self {
+            Self::Commit => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_COMMIT,
+            Self::Durable => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_DURABLE,
+            Self::Prepare => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_PREPARE,
+            Self::Read => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_READ,
+        }
+    }
+}
+
+/// An options builder for creating a table, column group, index, or file in WiredTiger.
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+pub struct CreateOptionsBuilder {
+    key_format: FormatString,
+    value_format: FormatString,
+    app_metadata: Option<String>,
+}
+
+impl Default for CreateOptionsBuilder {
+    fn default() -> Self {
+        Self {
+            key_format: FormatString::new(c"q"),
+            value_format: FormatString::new(c"u"),
+            app_metadata: None,
+        }
+    }
+}
+
+impl CreateOptionsBuilder {
+    /// Set the format for the key.
+    pub fn key_format<K: Formatted>(mut self) -> Self {
+        self.key_format = K::FORMAT;
+        self
+    }
+
+    /// Set the format for the value.
+    pub fn value_format<V: Formatted>(mut self) -> Self {
+        self.value_format = V::FORMAT;
+        self
+    }
+
+    /// Attach metadata that can be read from the metadata table as the value for this table.
+    pub fn app_metadata(mut self, metadata: &str) -> Self {
+        assert!(
+            !metadata.as_bytes().contains(&0),
+            "metadata may not contain a NULL character"
+        );
+        self.app_metadata = Some(metadata.to_owned());
+        self
+    }
+}
+
+/// Options when creating a table, column group, index, or file in WiredTiger.
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+pub struct CreateOptions(CString);
+
+impl Default for CreateOptions {
+    fn default() -> Self {
+        CreateOptionsBuilder::default().into()
+    }
+}
+
+impl From<CreateOptionsBuilder> for CreateOptions {
+    fn from(value: CreateOptionsBuilder) -> Self {
+        let mut parts = vec![
+            format!("key_format={}", value.key_format.format_str()),
+            format!("value_format={}", value.value_format.format_str()),
+        ];
+        if let Some(metadata) = value.app_metadata {
+            parts.push(format!("app_metadata={metadata}"));
+        }
+        Self(CString::new(parts.join(",")).expect("no nulls"))
+    }
+}
+
+impl ConfigurationString for CreateOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        Some(self.0.as_c_str())
+    }
+}
+
+/// An options builder for dropping a table, column group, index, or file in WiredTiger.
+#[derive(Default)]
+pub struct DropOptionsBuilder {
+    force: bool,
+}
+
+impl DropOptionsBuilder {
+    /// If set, return success even if the object does not exist.
+    pub fn set_force(mut self) -> Self {
+        self.force = true;
+        self
+    }
+}
+
+/// Options for dropping a table, column group, index, or file in WiredTiger.
+#[derive(Default, Debug, Clone)]
+pub struct DropOptions(Option<CString>);
+
+impl From<DropOptionsBuilder> for DropOptions {
+    fn from(value: DropOptionsBuilder) -> Self {
+        DropOptions(if value.force {
+            Some(CString::from(c"force=true"))
+        } else {
+            None
+        })
+    }
+}
+
+impl ConfigurationString for DropOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.0.as_deref()
+    }
+}
+
+/// Options builder when beginning a WiredTiger transaction.
+#[derive(Default)]
+pub struct BeginTransactionOptionsBuilder {
+    name: Option<String>,
+    read_timestamp: Option<u64>,
+}
+
+impl BeginTransactionOptionsBuilder {
+    /// Set the name of the transaction, for debugging purposes.
+    pub fn set_name(mut self, name: &str) -> Self {
+        self.name = Some(name.to_owned());
+        self
+    }
+
+    /// Set the read timestamp for the transaction.
+    ///
+    /// Note that the read timestamp may only be set once per transaction; if it is set here then
+    /// subsequent calls to set_transaction_timestamp for the read timestamp will fail.
+    pub fn set_read_timestamp(mut self, ts: u64) -> Self {
+        self.read_timestamp = Some(ts);
+        self
+    }
+}
+
+/// Options when beginning a new transaction.
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
+pub struct BeginTransactionOptions {
+    options: Option<CString>,
+    read_timestamp: Option<u64>,
+}
+
+impl BeginTransactionOptions {
+    pub fn with_read_timestamp(ts: u64) -> Self {
+        Self {
+            options: None,
+            read_timestamp: Some(ts),
+        }
+    }
+}
+
+impl From<BeginTransactionOptionsBuilder> for BeginTransactionOptions {
+    fn from(value: BeginTransactionOptionsBuilder) -> Self {
+        Self {
+            options: value
+                .name
+                .map(|n| CString::new(format!("name={n}")).expect("name has no nulls")),
+            read_timestamp: value.read_timestamp,
+        }
+    }
+}
+
+impl ConfigurationString for BeginTransactionOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.options.as_deref()
+    }
+}
+
+/// Options build for commit_transaction() operations.
+#[derive(Default)]
+pub struct CommitTransactionOptionsBuilder {
+    commit_timestamp: Option<u64>,
+    operation_timeout_ms: Option<u32>,
+}
+
+impl CommitTransactionOptionsBuilder {
+    /// Set the commit timestamp for the transaction.
+    pub fn set_commit_timestamp(mut self, ts: u64) -> Self {
+        self.commit_timestamp = Some(ts);
+        self
+    }
+
+    /// When set to a non-zero value acts a requested time limit for the operations in ms.
+    /// This is not a guarantee -- the operation may still take longer than the timeout.
+    /// If the limit is reached the operation may be rolled back.
+    pub fn operation_timeout_ms(mut self, timeout: Option<u32>) -> Self {
+        self.operation_timeout_ms = timeout;
+        self
+    }
+}
+
+/// Options for commit_transaction() operations.
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
+pub struct CommitTransactionOptions {
+    options: Option<CString>,
+    commit_timestamp: Option<u64>,
+}
+
+impl CommitTransactionOptions {
+    pub fn with_commit_timestamp(ts: u64) -> Self {
+        Self {
+            options: None,
+            commit_timestamp: Some(ts),
+        }
+    }
+}
+
+impl From<CommitTransactionOptionsBuilder> for CommitTransactionOptions {
+    fn from(value: CommitTransactionOptionsBuilder) -> Self {
+        Self {
+            options: value
+                .operation_timeout_ms
+                .map(|t| CString::new(format!("operation_timeout_ms={t}")).expect("no nulls")),
+            commit_timestamp: value.commit_timestamp,
+        }
+    }
+}
+
+impl ConfigurationString for CommitTransactionOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.options.as_deref()
+    }
+}
+
+/// Options build for rollback_transaction() operations.
+#[derive(Default)]
+pub struct RollbackTransactionOptionsBuilder {
+    operation_timeout_ms: Option<u32>,
+}
+
+impl RollbackTransactionOptionsBuilder {
+    /// When set to a non-zero value acts a requested time limit for the operations in ms.
+    /// This is not a guarantee -- the operation may still take longer than the timeout.
+    /// If the limit is reached the operation may be rolled back.
+    pub fn operation_timeout_ms(mut self, timeout: Option<u32>) -> Self {
+        self.operation_timeout_ms = timeout;
+        self
+    }
+}
+
+/// Options for rollback_transaction() operations.
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
+pub struct RollbackTransactionOptions(Option<CString>);
+
+impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
+    fn from(value: RollbackTransactionOptionsBuilder) -> Self {
+        Self(
+            value
+                .operation_timeout_ms
+                .map(|t| CString::new(format!("operation_timeout_ms={t}")).expect("no nulls")),
+        )
+    }
+}
+
+impl ConfigurationString for RollbackTransactionOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.0.as_deref()
+    }
+}
 
 /// A WiredTiger session.
 ///
@@ -291,6 +579,14 @@ impl Session {
         TypedCursor::new(inner, self)
     }
 
+    /// Open a new transaction on this session with options.
+    pub fn transaction(
+        &self,
+        options: Option<BeginTransactionOptions>,
+    ) -> Result<TransactionGuard<'_>> {
+        TransactionGuard::new(self, options)
+    }
+
     /// Starts a transaction in this session.
     ///
     /// The transaction remains active until `commit_transaction` or `rollback_transaction` are called.
@@ -299,8 +595,12 @@ impl Session {
     ///
     /// This may not be called on a session with an active transaction or an error will be returned (EINVAL)
     /// but otherwise behavior is unspecified.
-    pub fn begin_transaction(&self, options: Option<&BeginTransactionOptions>) -> Result<()> {
-        unsafe { wt_call!(self.ptr, begin_transaction, options.as_config_ptr()) }
+    pub fn begin_transaction(&self, options: Option<BeginTransactionOptions>) -> Result<()> {
+        unsafe { wt_call!(self.ptr, begin_transaction, options.as_config_ptr()) }?;
+        if let Some(ts) = options.and_then(|o| o.read_timestamp) {
+            self.set_transaction_timestamp(SetTransactionTimestampType::Read, ts)?;
+        }
+        Ok(())
     }
 
     /// Commit the current transaction.
@@ -310,7 +610,10 @@ impl Session {
     ///
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
-    pub fn commit_transaction(&self, options: Option<&CommitTransactionOptions>) -> Result<()> {
+    pub fn commit_transaction(&self, options: Option<CommitTransactionOptions>) -> Result<()> {
+        if let Some(ts) = options.as_ref().and_then(|o| o.commit_timestamp) {
+            self.set_transaction_timestamp(SetTransactionTimestampType::Commit, ts)?;
+        }
         unsafe { wt_call!(self.ptr, commit_transaction, options.as_config_ptr()) }
     }
 
@@ -320,8 +623,32 @@ impl Session {
     ///
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
-    pub fn rollback_transaction(&self, options: Option<&RollbackTransactionOptions>) -> Result<()> {
+    pub fn rollback_transaction(&self, options: Option<RollbackTransactionOptions>) -> Result<()> {
         unsafe { wt_call!(self.ptr, rollback_transaction, options.as_config_ptr()) }
+    }
+
+    /// Set the transaction timestamp for the current transaction.
+    ///
+    /// This should be called on a session with an active transaction. This may be called in the
+    /// during a transaction to use a different commit timestamp for different parts of the
+    /// transaction. For read timestamps this may only be called once per transaction, including
+    /// any read timestamp set when the transaction begins.
+    ///
+    /// Timestamps are bound in part by global state; consult WiredTiger documentation for more
+    /// information.
+    pub fn set_transaction_timestamp(
+        &self,
+        txn_type: SetTransactionTimestampType,
+        timestamp: u64,
+    ) -> Result<()> {
+        unsafe {
+            wt_call!(
+                self.ptr,
+                timestamp_transaction_uint,
+                txn_type.txn_type(),
+                timestamp
+            )
+        }
     }
 
     /// Create a new table `table_name` and bulk load input from `iter` with key format `K` and
@@ -367,6 +694,31 @@ impl Session {
     /// Checkpoint the database.
     pub fn checkpoint(&self) -> Result<()> {
         unsafe { wt_call!(self.ptr, checkpoint, std::ptr::null()) }
+    }
+
+    /// Query the session for transaction timestamp state. Callers may select one of the types of
+    /// timestamps to query. Returns a 64-bit unsigned timestamp.
+    pub fn query_transaction_timestamp(
+        &self,
+        timestamp: QueryTransactionTimestampType,
+    ) -> Result<u64> {
+        let mut buf = [0u8; 17];
+        unsafe {
+            wt_call!(
+                self.ptr,
+                query_timestamp,
+                buf.as_mut_ptr() as *mut c_char,
+                timestamp.config_str().as_ptr()
+            )
+        }?;
+        Ok(u64::from_str_radix(
+            CStr::from_bytes_until_nul(&buf)
+                .expect("null terminated")
+                .to_str()
+                .expect("valid utf8"),
+            16,
+        )
+        .expect("valid hex string"))
     }
 
     /// Reset this session, which also resets any outstanding cursors.
@@ -489,13 +841,13 @@ pub struct TransactionGuard<'a>(TxnState<'a>);
 
 impl<'a> TransactionGuard<'a> {
     /// Create a new transaction in `session`, with any specified `options`.
-    pub fn new(session: &'a Session, options: Option<&BeginTransactionOptions>) -> Result<Self> {
+    pub fn new(session: &'a Session, options: Option<BeginTransactionOptions>) -> Result<Self> {
         session.begin_transaction(options)?;
         Ok(Self(TxnState::Open(session)))
     }
 
     /// Commit this transaction with any specified `options`.
-    pub fn commit(mut self, options: Option<&CommitTransactionOptions>) -> Result<()> {
+    pub fn commit(mut self, options: Option<CommitTransactionOptions>) -> Result<()> {
         if let TxnState::Open(session) = self.0 {
             self.0 = TxnState::Closed;
             session.commit_transaction(options)?;
@@ -507,7 +859,7 @@ impl<'a> TransactionGuard<'a> {
     ///
     /// Note that dropping the guard will also rollback the transaction, although you may not specify
     /// any options in that case.
-    pub fn rollback(mut self, options: Option<&RollbackTransactionOptions>) -> Result<()> {
+    pub fn rollback(mut self, options: Option<RollbackTransactionOptions>) -> Result<()> {
         if let TxnState::Open(session) = self.0 {
             self.0 = TxnState::Closed;
             session.rollback_transaction(options)?;

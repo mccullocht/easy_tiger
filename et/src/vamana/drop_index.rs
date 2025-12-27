@@ -1,7 +1,7 @@
 use std::{io, sync::Arc};
 
 use easy_tiger::vamana::wt::TableGraphVectorIndex;
-use wt_mdb::{options::DropOptionsBuilder, Connection};
+use wt_mdb::{session::DropOptionsBuilder, Connection};
 
 pub fn drop_index(connection: Arc<Connection>, index_name: &str) -> io::Result<()> {
     let session = connection.open_session()?;

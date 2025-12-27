@@ -148,7 +148,7 @@ struct WiredTigerStats {
 
 /// Count lookup calls and read IOs. This can be used to estimate cache hit rate.
 fn wired_tiger_stats(session: &Session) -> Result<WiredTigerStats> {
-    let mut stat_cursor = session.new_stats_cursor(wt_mdb::options::Statistics::Fast, None)?;
+    let mut stat_cursor = session.new_stats_cursor(wt_mdb::Statistics::Fast, None)?;
     Ok(WiredTigerStats {
         search_calls: stat_cursor
             .seek_exact(WT_STAT_CONN_CURSOR_SEARCH as i32)

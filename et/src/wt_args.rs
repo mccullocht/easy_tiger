@@ -1,10 +1,7 @@
 use std::{num::NonZero, sync::Arc};
 
 use clap::Args;
-use wt_mdb::{
-    options::{ConnectionOptionsBuilder, Statistics},
-    Connection, Result,
-};
+use wt_mdb::{connection::OptionsBuilder, Connection, Result, Statistics};
 
 #[derive(Args)]
 pub struct WiredTigerArgs {
@@ -26,7 +23,7 @@ pub struct WiredTigerArgs {
 impl WiredTigerArgs {
     pub fn open_connection(&self) -> Result<Arc<Connection>> {
         // TODO: Connection.filename should accept &Path. This will likely be very annoying to plumb to CString.
-        let mut connection_options = ConnectionOptionsBuilder::default()
+        let mut connection_options = OptionsBuilder::default()
             .cache_size_mb(self.wiredtiger_cache_size_mb)
             .statistics(Statistics::Fast)
             .checkpoint_log_size(128 << 20);

@@ -7,17 +7,17 @@
 //! Unlike the general-purpose WiredTiger library, this library only allows tables
 //! that are keyed by `i64` with byte array payloads.
 pub mod config;
-mod connection;
-pub mod options;
+pub mod connection;
 pub mod session;
 
 use rustix::io::Errno;
 use wt_sys::wiredtiger_strerror;
 
-use std::ffi::CStr;
+use std::ffi::{c_char, CStr};
 use std::io;
 use std::io::ErrorKind;
 use std::num::NonZero;
+use std::str::FromStr;
 
 /// WiredTiger specific error codes.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -166,6 +166,79 @@ macro_rules! wt_call {
 
 use wt_call;
 
+/// Trait for types that can be used as a configuration string.
+pub(crate) trait ConfigurationString {
+    fn as_config_string(&self) -> Option<&CStr>;
+
+    fn as_config_ptr(&self) -> *const c_char {
+        self.as_config_string()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null())
+    }
+}
+
+impl<C> ConfigurationString for Option<C>
+where
+    C: ConfigurationString,
+{
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.as_ref()
+            .and_then(ConfigurationString::as_config_string)
+    }
+}
+
+/// Level of statistics gathering.
+///
+/// This is set on both the connection and when accessing stats cursors.
+/// Note that the level for a stats cursor must be less than the connection level
+/// or an error may occur.
+#[derive(Debug, PartialEq, Eq, Default)]
+pub enum Statistics {
+    /// Collect no stats.
+    #[default]
+    None,
+    /// Collect stats that are fast/cheap to collect.
+    Fast,
+    /// Collect all known stats, even if they are expensive.
+    All,
+}
+
+impl Statistics {
+    pub(crate) fn to_config_string_clause(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            opt => Some(format!("statistics=({opt})")),
+        }
+    }
+}
+
+impl std::fmt::Display for Statistics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::None => "none",
+                Self::Fast => "fast",
+                Self::All => "all",
+            }
+        )
+    }
+}
+
+impl FromStr for Statistics {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "fast" => Ok(Self::Fast),
+            "all" => Ok(Self::All),
+            _ => Err(format!("Unknown statistics type {s}")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::{io::ErrorKind, sync::Arc};
@@ -174,17 +247,16 @@ mod test {
     use tempfile::TempDir;
 
     use crate::{
-        connection::Connection,
-        options::{
-            ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
-            Statistics,
+        connection::{Connection, QueryGlobalTimestampType, SetGlobalTimestampType},
+        session::{
+            CreateOptions, CreateOptionsBuilder, Formatted, QueryTransactionTimestampType,
+            SetTransactionTimestampType, TransactionGuard,
         },
-        session::{Formatted, TransactionGuard},
-        Error, RecordCursor, Result, Session, WiredTigerError,
+        Error, RecordCursor, Result, Session, Statistics, WiredTigerError,
     };
 
-    fn conn_options() -> Option<ConnectionOptions> {
-        Some(ConnectionOptionsBuilder::default().create().into())
+    fn conn_options() -> Option<crate::connection::Options> {
+        Some(crate::connection::OptionsBuilder::default().create().into())
     }
 
     fn index_table_options() -> Option<CreateOptions> {
@@ -490,7 +562,7 @@ mod test {
         let conn = Connection::open(
             tmpdir.path().to_str().unwrap(),
             Some(
-                ConnectionOptionsBuilder::default()
+                crate::connection::OptionsBuilder::default()
                     .create()
                     .statistics(Statistics::Fast)
                     .into(),
@@ -556,7 +628,7 @@ mod test {
     struct RecordTableFixture {
         table_name: String,
         session: Session,
-        _connection: Arc<Connection>,
+        connection: Arc<Connection>,
         _dir: TempDir,
     }
 
@@ -575,7 +647,7 @@ mod test {
             Self {
                 table_name: table_name.to_string(),
                 session,
-                _connection: connection,
+                connection,
                 _dir: dir,
             }
         }
@@ -678,6 +750,115 @@ mod test {
         assert_eq!(
             cursor.collect::<Result<Vec<_>>>()?,
             data.into_iter().filter(|(k, _)| *k < 0).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn query_transaction_timestamp() -> Result<()> {
+        let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
+        assert_eq!(
+            fixture
+                .session
+                .query_transaction_timestamp(QueryTransactionTimestampType::Read),
+            Ok(0)
+        );
+        assert_eq!(
+            fixture
+                .session
+                .query_transaction_timestamp(QueryTransactionTimestampType::Commit),
+            Ok(0)
+        );
+        assert_eq!(
+            fixture
+                .session
+                .query_transaction_timestamp(QueryTransactionTimestampType::FirstCommit),
+            Ok(0)
+        );
+        assert_eq!(
+            fixture
+                .session
+                .query_transaction_timestamp(QueryTransactionTimestampType::Prepare),
+            Ok(0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn set_transaction_timestamp() -> Result<()> {
+        let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
+        fixture.session.begin_transaction(None)?;
+        let mut cursor = fixture.open_cursor()?;
+        cursor.set(1, b"a")?;
+        fixture
+            .session
+            .set_transaction_timestamp(SetTransactionTimestampType::Commit, 1)?;
+        fixture.session.commit_transaction(None)?;
+
+        fixture.session.reset()?;
+        assert_eq!(
+            fixture
+                .session
+                .query_transaction_timestamp(QueryTransactionTimestampType::Commit),
+            Ok(1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn query_global_timestamp() -> Result<()> {
+        let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
+
+        for tt in [
+            QueryGlobalTimestampType::AllDurable,
+            QueryGlobalTimestampType::BackupCheckpoint,
+            QueryGlobalTimestampType::LastCheckpoint,
+            QueryGlobalTimestampType::Oldest,
+            QueryGlobalTimestampType::OldestReader,
+            QueryGlobalTimestampType::Pinned,
+            QueryGlobalTimestampType::Recovery,
+            QueryGlobalTimestampType::Stable,
+        ] {
+            assert_eq!(fixture.connection.query_timestamp(tt), Ok(0));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn set_global_timestamp() -> Result<()> {
+        let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
+        fixture.session.begin_transaction(None)?;
+        let mut cursor = fixture.open_cursor()?;
+        cursor.set(1, b"a")?;
+        fixture
+            .session
+            .set_transaction_timestamp(SetTransactionTimestampType::Commit, 1)?;
+        fixture.session.commit_transaction(None)?;
+
+        fixture
+            .connection
+            .set_timestamp(SetGlobalTimestampType::Stable, 1)?;
+        assert_eq!(
+            fixture
+                .connection
+                .query_timestamp(QueryGlobalTimestampType::Stable),
+            Ok(1)
+        );
+        fixture
+            .connection
+            .set_timestamp(SetGlobalTimestampType::Oldest, 1)?;
+        assert_eq!(
+            fixture
+                .connection
+                .query_timestamp(QueryGlobalTimestampType::Oldest),
+            Ok(1)
+        );
+
+        assert_eq!(
+            fixture
+                .connection
+                .query_timestamp(QueryGlobalTimestampType::AllDurable),
+            Ok(1)
         );
         Ok(())
     }

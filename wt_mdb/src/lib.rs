@@ -179,7 +179,9 @@ mod test {
             ConnectionOptions, ConnectionOptionsBuilder, CreateOptions, CreateOptionsBuilder,
             Statistics,
         },
-        session::{Formatted, QueryTimestamp, TransactionGuard, TransactionTimestampType},
+        session::{
+            Formatted, QueryTransactionTimestampType, SetTransactionTimestampType, TransactionGuard,
+        },
         Error, RecordCursor, Result, Session, WiredTigerError,
     };
 
@@ -685,17 +687,28 @@ mod test {
     #[test]
     fn query_transaction_timestamp() -> Result<()> {
         let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
-        assert_eq!(fixture.session.query_timestamp(QueryTimestamp::Read), Ok(0));
         assert_eq!(
-            fixture.session.query_timestamp(QueryTimestamp::Commit),
+            fixture
+                .session
+                .query_transaction_timestamp(QueryTransactionTimestampType::Read),
             Ok(0)
         );
         assert_eq!(
-            fixture.session.query_timestamp(QueryTimestamp::FirstCommit),
+            fixture
+                .session
+                .query_transaction_timestamp(QueryTransactionTimestampType::Commit),
             Ok(0)
         );
         assert_eq!(
-            fixture.session.query_timestamp(QueryTimestamp::Prepare),
+            fixture
+                .session
+                .query_transaction_timestamp(QueryTransactionTimestampType::FirstCommit),
+            Ok(0)
+        );
+        assert_eq!(
+            fixture
+                .session
+                .query_transaction_timestamp(QueryTransactionTimestampType::Prepare),
             Ok(0)
         );
         Ok(())
@@ -709,12 +722,14 @@ mod test {
         cursor.set(1, b"a")?;
         fixture
             .session
-            .set_transaction_timestamp(TransactionTimestampType::Commit, 1)?;
+            .set_transaction_timestamp(SetTransactionTimestampType::Commit, 1)?;
         fixture.session.commit_transaction(None)?;
 
         fixture.session.reset()?;
         assert_eq!(
-            fixture.session.query_timestamp(QueryTimestamp::Commit),
+            fixture
+                .session
+                .query_transaction_timestamp(QueryTransactionTimestampType::Commit),
             Ok(1)
         );
         Ok(())
@@ -747,7 +762,7 @@ mod test {
         cursor.set(1, b"a")?;
         fixture
             .session
-            .set_transaction_timestamp(TransactionTimestampType::Commit, 1)?;
+            .set_transaction_timestamp(SetTransactionTimestampType::Commit, 1)?;
         fixture.session.commit_transaction(None)?;
 
         fixture
@@ -766,6 +781,13 @@ mod test {
             fixture
                 .connection
                 .query_timestamp(QueryGlobalTimestampType::Oldest),
+            Ok(1)
+        );
+
+        assert_eq!(
+            fixture
+                .connection
+                .query_timestamp(QueryGlobalTimestampType::AllDurable),
             Ok(1)
         );
         Ok(())

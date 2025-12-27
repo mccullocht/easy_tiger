@@ -72,8 +72,7 @@ impl ConnectionOptionsBuilder {
 /// This is set on both the connection and when accessing stats cursors.
 /// Note that the level for a stats cursor must be less than the connection level
 /// or an error may occur.
-#[derive(Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub enum Statistics {
     /// Collect no stats.
     #[default]
@@ -92,7 +91,6 @@ impl Statistics {
         }
     }
 }
-
 
 impl std::fmt::Display for Statistics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

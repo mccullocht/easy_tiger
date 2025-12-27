@@ -104,14 +104,14 @@ impl Drop for InnerCursor {
 unsafe impl Send for InnerCursor {}
 
 /// Used to select the type of query timestamp to read from the session.
-pub enum QueryTimestamp {
+pub enum QueryTransactionTimestampType {
     Commit,
     FirstCommit,
     Prepare,
     Read,
 }
 
-impl QueryTimestamp {
+impl QueryTransactionTimestampType {
     fn config_str(&self) -> &'static CStr {
         match self {
             Self::Commit => c"get=commit",
@@ -126,14 +126,14 @@ impl QueryTimestamp {
 ///
 /// These timestamps can be set in between operations on the transaction, so it is possible for
 /// callers to use different timestamps for different parts of the transaction.
-pub enum TransactionTimestampType {
+pub enum SetTransactionTimestampType {
     Commit,
     Durable,
     Prepare,
     Read,
 }
 
-impl TransactionTimestampType {
+impl SetTransactionTimestampType {
     fn txn_type(&self) -> wt_sys::WT_TS_TXN_TYPE {
         match self {
             Self::Commit => wt_sys::WT_TS_TXN_TYPE_WT_TS_TXN_TYPE_COMMIT,
@@ -354,7 +354,7 @@ impl Session {
     /// information.
     pub fn set_transaction_timestamp(
         &self,
-        txn_type: TransactionTimestampType,
+        txn_type: SetTransactionTimestampType,
         timestamp: u64,
     ) -> Result<()> {
         unsafe {
@@ -435,7 +435,10 @@ impl Session {
 
     /// Query the session for transaction timestamp state. Callers may select one of the types of
     /// timestamps to query. Returns a 64-bit unsigned timestamp.
-    pub fn query_timestamp(&self, timestamp: QueryTimestamp) -> Result<u64> {
+    pub fn query_transaction_timestamp(
+        &self,
+        timestamp: QueryTransactionTimestampType,
+    ) -> Result<u64> {
         let mut buf = [0u8; 17];
         unsafe {
             wt_call!(

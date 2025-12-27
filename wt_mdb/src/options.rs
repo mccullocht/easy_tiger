@@ -1,29 +1,13 @@
 use std::{
-    ffi::{c_char, CStr, CString},
+    ffi::{CStr, CString},
     num::NonZero,
     str::FromStr,
 };
 
-use crate::session::{FormatString, Formatted};
-
-pub(crate) trait ConfigurationString {
-    fn as_config_string(&self) -> Option<&CStr>;
-
-    fn as_config_ptr(&self) -> *const c_char {
-        self.as_config_string()
-            .map(|c| c.as_ptr())
-            .unwrap_or(std::ptr::null())
-    }
-}
-
-impl<C> ConfigurationString for Option<&C>
-where
-    C: ConfigurationString,
-{
-    fn as_config_string(&self) -> Option<&CStr> {
-        self.map(ConfigurationString::as_config_string).flatten()
-    }
-}
+use crate::{
+    session::{FormatString, Formatted},
+    ConfigurationString,
+};
 
 /// Builder for options when connecting to a WiredTiger database.
 #[derive(Default)]
@@ -257,112 +241,6 @@ impl From<DropOptionsBuilder> for DropOptions {
 }
 
 impl ConfigurationString for DropOptions {
-    fn as_config_string(&self) -> Option<&CStr> {
-        self.0.as_deref()
-    }
-}
-
-/// Options builder when beginning a WiredTiger transaction.
-#[derive(Default)]
-pub struct BeginTransactionOptionsBuilder {
-    name: Option<String>,
-}
-
-impl BeginTransactionOptionsBuilder {
-    /// Set the name of the transaction, for debugging purposes.
-    pub fn set_name(mut self, name: &str) -> Self {
-        self.name = Some(name.to_owned());
-        self
-    }
-}
-
-/// Options when beginning a new transaction.
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
-pub struct BeginTransactionOptions(Option<CString>);
-
-impl From<BeginTransactionOptionsBuilder> for BeginTransactionOptions {
-    fn from(value: BeginTransactionOptionsBuilder) -> Self {
-        Self(
-            value
-                .name
-                .map(|n| CString::new(format!("name={n}")).expect("name has no nulls")),
-        )
-    }
-}
-
-impl ConfigurationString for BeginTransactionOptions {
-    fn as_config_string(&self) -> Option<&CStr> {
-        self.0.as_deref()
-    }
-}
-
-/// Options build for commit_transaction() operations.
-#[derive(Default)]
-pub struct CommitTransactionOptionsBuilder {
-    operation_timeout_ms: Option<u32>,
-}
-
-impl CommitTransactionOptionsBuilder {
-    /// When set to a non-zero value acts a requested time limit for the operations in ms.
-    /// This is not a guarantee -- the operation may still take longer than the timeout.
-    /// If the limit is reached the operation may be rolled back.
-    pub fn operation_timeout_ms(mut self, timeout: Option<u32>) -> Self {
-        self.operation_timeout_ms = timeout;
-        self
-    }
-}
-
-/// Options for commit_transaction() operations.
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
-pub struct CommitTransactionOptions(Option<CString>);
-
-impl From<CommitTransactionOptionsBuilder> for CommitTransactionOptions {
-    fn from(value: CommitTransactionOptionsBuilder) -> Self {
-        Self(
-            value
-                .operation_timeout_ms
-                .map(|t| CString::new(format!("operation_timeout_ms={t}")).expect("no nulls")),
-        )
-    }
-}
-
-impl ConfigurationString for CommitTransactionOptions {
-    fn as_config_string(&self) -> Option<&CStr> {
-        self.0.as_deref()
-    }
-}
-
-/// Options build for rollback_transaction() operations.
-#[derive(Default)]
-pub struct RollbackTransactionOptionsBuilder {
-    operation_timeout_ms: Option<u32>,
-}
-
-impl RollbackTransactionOptionsBuilder {
-    /// When set to a non-zero value acts a requested time limit for the operations in ms.
-    /// This is not a guarantee -- the operation may still take longer than the timeout.
-    /// If the limit is reached the operation may be rolled back.
-    pub fn operation_timeout_ms(mut self, timeout: Option<u32>) -> Self {
-        self.operation_timeout_ms = timeout;
-        self
-    }
-}
-
-/// Options for rollback_transaction() operations.
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Default)]
-pub struct RollbackTransactionOptions(Option<CString>);
-
-impl From<RollbackTransactionOptionsBuilder> for RollbackTransactionOptions {
-    fn from(value: RollbackTransactionOptionsBuilder) -> Self {
-        Self(
-            value
-                .operation_timeout_ms
-                .map(|t| CString::new(format!("operation_timeout_ms={t}")).expect("no nulls")),
-        )
-    }
-}
-
-impl ConfigurationString for RollbackTransactionOptions {
     fn as_config_string(&self) -> Option<&CStr> {
         self.0.as_deref()
     }

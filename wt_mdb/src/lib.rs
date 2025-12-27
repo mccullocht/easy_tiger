@@ -14,7 +14,7 @@ pub mod session;
 use rustix::io::Errno;
 use wt_sys::wiredtiger_strerror;
 
-use std::ffi::CStr;
+use std::ffi::{c_char, CStr};
 use std::io;
 use std::io::ErrorKind;
 use std::num::NonZero;
@@ -165,6 +165,28 @@ macro_rules! wt_call {
 }
 
 use wt_call;
+
+/// Trait for types that can be used as a configuration string.
+pub(crate) trait ConfigurationString {
+    fn as_config_string(&self) -> Option<&CStr>;
+
+    fn as_config_ptr(&self) -> *const c_char {
+        self.as_config_string()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null())
+    }
+}
+
+impl<C> ConfigurationString for Option<C>
+where
+    C: ConfigurationString,
+{
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.as_ref()
+            .map(ConfigurationString::as_config_string)
+            .flatten()
+    }
+}
 
 #[cfg(test)]
 mod test {

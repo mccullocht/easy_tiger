@@ -1,8 +1,6 @@
 use crate::{
-    make_result,
-    options::{ConfigurationString, ConnectionOptions},
-    session::Session,
-    wt_call, Error, Result,
+    make_result, options::ConnectionOptions, session::Session, wt_call, ConfigurationString, Error,
+    Result,
 };
 use std::{
     ffi::{CStr, CString},

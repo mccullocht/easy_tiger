@@ -5,6 +5,7 @@
 
 pub mod bulk;
 pub mod centroid_stats;
+pub mod rebalance;
 pub mod search;
 
 use std::{io, ops::Range, sync::Arc};

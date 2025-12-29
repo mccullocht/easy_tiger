@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     input::VecVectorStore,
     kmeans,
-    spann::{centroid_stats::CentroidStats, PostingKey, TableIndex},
+    spann::{centroid_stats::CentroidStats, rebalance::BalanceSummary, PostingKey, TableIndex},
     vamana::{
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
@@ -33,49 +33,6 @@ pub struct RebalanceArgs {
     /// Use a fixed value for repeatability.
     #[arg(long, default_value_t = 0x7774_7370414E4E)]
     seed: u64,
-}
-
-#[derive(Debug, Default, Copy, Clone)]
-struct BalanceSummary {
-    in_bounds: usize,
-
-    below_bounds: usize,
-    below_exemplar: Option<(usize, usize)>,
-
-    above_bounds: usize,
-    above_exemplar: Option<(usize, usize)>,
-}
-
-impl BalanceSummary {
-    fn new(stats: &CentroidStats, bounds: RangeInclusive<usize>) -> Self {
-        let mut summary = Self::default();
-        for (i, c) in stats.assignment_counts_iter().map(|(i, c)| (i, c as usize)) {
-            if bounds.contains(&c) {
-                summary.in_bounds += 1;
-            } else if c < *bounds.start() {
-                summary.below_bounds += 1;
-                summary.below_exemplar = summary
-                    .below_exemplar
-                    .map(|(j, d)| if c < d { (i, c) } else { (j, d) })
-                    .or(Some((i, c)));
-            } else {
-                summary.above_bounds += 1;
-                summary.above_exemplar = summary
-                    .above_exemplar
-                    .map(|(j, d)| if c > d { (i, c) } else { (j, d) })
-                    .or(Some((i, c)));
-            }
-        }
-        summary
-    }
-
-    fn total_clusters(&self) -> usize {
-        self.in_bounds + self.below_bounds + self.above_bounds
-    }
-
-    fn in_policy_fraction(&self) -> f64 {
-        self.in_bounds as f64 / self.total_clusters() as f64
-    }
 }
 
 pub struct Rebalancer {
@@ -126,6 +83,9 @@ impl Rebalancer {
         if vectors.is_empty() {
             return Ok(());
         }
+
+        // TODO: run the required searches in parallel. This will be awkward to abstract due to how
+        // WiredTiger sessions are used.
 
         // Query the head index for each vector and assign a new centroid.
         let coder = self
@@ -208,12 +168,11 @@ impl Rebalancer {
         // of the two new centroids.
         let mut params = self.index.config().head_search_params;
         // TODO: figure out if nearby update beam width needs to be configurable.
-        // TODO: write a tool that figures out how many vectors are not assigned to the nearest
-        // centroid.
         params.beam_width = NonZero::new(64).unwrap();
         let mut searcher = GraphSearcher::new(params);
         let nearby_clusters = searcher.search(&original_centroid, &self.head_index)?;
 
+        // TODO: perform searches in parallel.
         searcher = GraphSearcher::new(self.index.config().head_search_params);
         let c0_dist_fn = posting_format.query_vector_distance_f32(original_centroid, similarity);
         let c1_dist_fn = posting_format.query_vector_distance_f32(&centroids[0], similarity);
@@ -242,6 +201,7 @@ impl Rebalancer {
 
         // For a list of nearby centroids, examine all vectors and reassign them if they are closer
         // to one of the new centroids than they are to the current centroid.
+        // TODO: process nearby centroids in parallel.
         let mut update_posting_cursor = self
             .head_index
             .session()
@@ -306,16 +266,18 @@ fn print_balance_summary(summary: &BalanceSummary) {
     println!("  total:        {:6}", summary.total_clusters());
     println!(
         "  in bounds:    {:6} {:5.2}%",
-        summary.in_bounds,
+        summary.in_bounds(),
         summary.in_policy_fraction() * 100.0
     );
     println!(
         "  below bounds: {:6} examplar {:?}",
-        summary.below_bounds, summary.below_exemplar
+        summary.below_bounds(),
+        summary.below_exemplar()
     );
     println!(
         "  above bounds: {:6} exemplar {:?}",
-        summary.above_bounds, summary.above_exemplar
+        summary.above_bounds(),
+        summary.above_exemplar()
     );
 }
 
@@ -343,13 +305,13 @@ pub fn rebalance(
         if let Some(ref progress) = progress {
             progress.set_message(format!(
                 "rebalancing {}/{} {:.2}% clusters in policy",
-                summary.in_bounds,
+                summary.in_bounds(),
                 summary.total_clusters(),
                 summary.in_policy_fraction() * 100.0
             ));
         }
 
-        match (summary.below_exemplar, summary.above_exemplar) {
+        match (summary.below_exemplar(), summary.above_exemplar()) {
             (None, None) => {
                 break;
             }
@@ -378,7 +340,7 @@ pub fn rebalance(
         let summary = rebalancer.summary(&stats);
         progress.set_message(format!(
             "rebalancing {}/{} {:.2}% clusters in policy",
-            summary.in_bounds,
+            summary.in_bounds(),
             summary.total_clusters(),
             summary.in_policy_fraction() * 100.0
         ));

@@ -12,6 +12,7 @@ use easy_tiger::{
         GraphVectorIndex, GraphVectorStore,
     },
 };
+use rand::{Rng, SeedableRng};
 use tracing::warn;
 use wt_mdb::{session::TransactionGuard, Connection, Error, Result, Session, TypedCursor};
 
@@ -126,7 +127,6 @@ impl Rebalancer {
             return Ok(());
         }
 
-        // XXX logic below needs to be shared with the index writer.
         // Query the head index for each vector and assign a new centroid.
         let coder = self
             .index
@@ -154,7 +154,12 @@ impl Rebalancer {
         Ok(())
     }
 
-    fn split_centroid(&self, centroid_id: usize, next_centroid_id: usize) -> Result<()> {
+    fn split_centroid(
+        &self,
+        centroid_id: usize,
+        next_centroid_id: usize,
+        rng: &mut impl Rng,
+    ) -> Result<()> {
         let mut posting_cursor = self
             .head_index
             .session()
@@ -175,10 +180,11 @@ impl Rebalancer {
         }
         posting_cursor.reset()?;
 
-        let centroids = match kmeans::binary_partition(
+        let centroids = match kmeans::balanced_binary_partition(
             &clustering_vectors,
             100,
             self.index.config().min_centroid_len,
+            rng,
         ) {
             Ok(r) => r,
             Err(r) => {
@@ -318,8 +324,10 @@ pub fn rebalance(
     index_name: &str,
     args: RebalanceArgs,
 ) -> io::Result<()> {
+    // TODO: store rng state in the index. Requires rand_xoshiro serde feature.
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
     let session = connection.open_session()?;
+    let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(args.seed);
 
     let rebalancer = Rebalancer::new(index, session);
     let progress = if args.commit {
@@ -349,8 +357,11 @@ pub fn rebalance(
                 rebalancer.merge_centroid(to_merge)?;
             }
             (_, Some((to_split, _))) => {
-                rebalancer
-                    .split_centroid(to_split, stats.available_centroid_ids().next().unwrap())?;
+                rebalancer.split_centroid(
+                    to_split,
+                    stats.available_centroid_ids().next().unwrap(),
+                    &mut rng,
+                )?;
             }
         }
 

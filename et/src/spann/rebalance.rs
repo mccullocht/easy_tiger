@@ -106,7 +106,10 @@ impl Rebalancer {
             let candidates = searcher.search(&float_vector, &self.head_index)?;
             assert!(!candidates.is_empty());
             let centroid_id = candidates[0].vertex() as u32;
-            let key = PostingKey::new(centroid_id, record_id);
+            let key = PostingKey {
+                centroid_id,
+                record_id,
+            };
             posting_cursor.set(key, &vector)?;
             centroid_cursor.set(record_id, &centroid_id.to_le_bytes())?;
         }
@@ -194,7 +197,10 @@ impl Rebalancer {
                 next_centroid_id as u32
             };
 
-            let key = PostingKey::new(new_centroid_id as u32, record_id);
+            let key = PostingKey {
+                centroid_id: new_centroid_id as u32,
+                record_id,
+            };
             posting_cursor.set(key, &vector)?;
             centroid_cursor.set(record_id, &new_centroid_id.to_le_bytes())?;
         }
@@ -230,7 +236,10 @@ impl Rebalancer {
                     continue;
                 };
 
-                let new_key = PostingKey::new(assigned_centroid_id, key.record_id);
+                let new_key = PostingKey {
+                    centroid_id: assigned_centroid_id,
+                    record_id: key.record_id,
+                };
                 update_posting_cursor.remove(key)?;
                 update_posting_cursor.set(new_key, &vector)?;
                 centroid_cursor.set(key.record_id, &assigned_centroid_id.to_le_bytes())?;

@@ -131,7 +131,7 @@ pub struct TableIndex {
     // Head vector index containing the centroids.
     head: Arc<TableGraphVectorIndex>,
     pub table_names: TableIndexTableNames,
-    pub config: IndexConfig,
+    config: IndexConfig,
 }
 
 impl TableIndex {
@@ -228,6 +228,10 @@ impl TableIndex {
             session.drop_table(table_name, options.clone())?;
         }
         Ok(())
+    }
+
+    pub fn centroid_assignments_table_name(&self) -> &str {
+        &self.table_names.centroids
     }
 
     fn head_name(index_name: &str) -> String {

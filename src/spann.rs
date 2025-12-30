@@ -85,20 +85,20 @@ impl std::fmt::Display for ReplicaSelectionAlgorithm {
 }
 
 #[derive(Clone)]
-pub struct TableNames {
+struct TableNames {
     // Table that maps (centroid_id,record_id) -> quantized vector.
     // Ranges of this table are searched based on the outcome of searching the head.
-    pub postings: String,
+    postings: String,
     // Table that maps record_id -> centroid_id*.
     // This table is necessary when deleting a vector to locate rows posting rows to delete.
     // It may also be useful for determining matching centroids in a filtered search.
-    pub centroids: String,
+    centroids: String,
     // Table that maps centroid_id -> (primary_count, secondary_count).
     // These pre-aggregated statistics are used to balance the index and influence search.
-    pub centroid_stats: String,
+    centroid_stats: String,
     // Table that maps record_id -> raw vector.
     // This is used for re-scoring after a SPANN search.
-    pub raw_vectors: String,
+    raw_vectors: String,
 }
 
 impl TableNames {

@@ -11,18 +11,17 @@ use wt_mdb::{Connection, Result, Session};
 
 use crate::ui::progress_bar;
 
-// XXX rename to verify assignments or something because it would make more sense.
 #[derive(Args)]
-pub struct ClosestCentroidArgs {
+pub struct VerifyPrimaryAssignmentsArgs {
     /// Batch size for processing posting vectors.
     #[arg(long, default_value_t = 1000)]
     batch_size: usize,
 }
 
-pub fn closest_centroid(
+pub fn verify_primary_assignments(
     connection: Arc<Connection>,
     index_name: &str,
-    args: ClosestCentroidArgs,
+    args: VerifyPrimaryAssignmentsArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
     let session = connection.open_session()?;
@@ -40,7 +39,6 @@ pub fn closest_centroid(
 
     let progress = progress_bar(primary_assignments.len(), "scanning postings");
 
-    // XXX as written this does not work correctly for secondary assignments.
     let mut have_input = true;
     let mut batch = Vec::with_capacity(args.batch_size);
     let coder = index

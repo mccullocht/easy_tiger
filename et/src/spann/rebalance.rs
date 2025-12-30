@@ -1,27 +1,16 @@
-use std::{io, num::NonZero, ops::RangeInclusive, sync::Arc};
+use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    input::VecVectorStore,
-    kmeans,
     spann::{
-        centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
-        rebalance::{merge_centroid, BalanceSummary},
-        CentroidAssignment, PostingKey, TableIndex,
+        centroid_stats::CentroidStats,
+        rebalance::{merge_centroid, split_centroid, BalanceSummary},
+        TableIndex,
     },
-    vamana::{
-        mutate::{delete_vector, upsert_vector},
-        search::GraphSearcher,
-        wt::SessionGraphVectorIndex,
-        GraphVectorIndex, GraphVectorStore,
-    },
+    vamana::wt::SessionGraphVectorIndex,
 };
-use rand::{Rng, SeedableRng};
-use tracing::warn;
-use wt_mdb::{
-    session::{Formatted, TransactionGuard},
-    Connection, Error, Result, Session, TypedCursor,
-};
+use rand::SeedableRng;
+use wt_mdb::{session::TransactionGuard, Connection};
 
 use crate::ui::progress_spinner;
 
@@ -39,202 +28,6 @@ pub struct RebalanceArgs {
     /// Use a fixed value for repeatability.
     #[arg(long, default_value_t = 0x7774_7370414E4E)]
     seed: u64,
-}
-
-pub struct Rebalancer {
-    index: Arc<TableIndex>,
-    head_index: SessionGraphVectorIndex,
-}
-
-impl Rebalancer {
-    fn new(index: Arc<TableIndex>, session: Session) -> Self {
-        assert_eq!(
-            index.config().replica_count,
-            1,
-            "rebalance only implemented for replica count 1"
-        );
-        let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
-        Self { index, head_index }
-    }
-
-    fn session(&self) -> &Session {
-        self.head_index.session()
-    }
-
-    fn centroid_stats(&self) -> Result<CentroidStats> {
-        CentroidStats::from_index_stats(&self.head_index.session(), &self.index)
-    }
-
-    fn summary(&self, stats: &CentroidStats) -> BalanceSummary {
-        BalanceSummary::new(stats, self.centroid_len_range())
-    }
-
-    fn centroid_len_range(&self) -> RangeInclusive<usize> {
-        self.index.config().min_centroid_len..=self.index.config().max_centroid_len
-    }
-
-    fn split_centroid(
-        &self,
-        centroid_id: usize,
-        next_centroid_id: usize,
-        rng: &mut impl Rng,
-    ) -> Result<()> {
-        let mut posting_cursor = self
-            .head_index
-            .session()
-            .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(self.index.postings_table_name())?;
-        let vectors = self.drain_centroid(centroid_id, &mut posting_cursor)?;
-        assert!(!vectors.is_empty());
-
-        // Unpack all of the vectors as floats and split into two clusters.
-        let posting_format = self.index.config().posting_coder;
-        let similarity = self.index.head_config().config().similarity;
-        let posting_coder = posting_format.new_coder(similarity);
-        let mut scratch_vector = vec![0.0f32; self.index.head_config().config().dimensions.get()];
-        let mut clustering_vectors =
-            VecVectorStore::with_capacity(scratch_vector.len(), vectors.len());
-        for (_, vector) in vectors.iter() {
-            posting_coder.decode_to(&vector, &mut scratch_vector);
-            clustering_vectors.push(&scratch_vector);
-        }
-        posting_cursor.reset()?;
-
-        let centroids = match kmeans::balanced_binary_partition(
-            &clustering_vectors,
-            100,
-            self.index.config().min_centroid_len,
-            rng,
-        ) {
-            Ok(r) => r,
-            Err(r) => {
-                warn!("split_centroid: binary partition of {centroid_id} failed to converge!");
-                r
-            }
-        };
-
-        // Extract the original centroid vector from the head index and delete original centroid.
-        let mut head_vectors = self.head_index.high_fidelity_vectors()?;
-        let head_coder = head_vectors.new_coder();
-        let original_centroid = head_coder.decode(
-            head_vectors
-                .get(centroid_id as i64)
-                .unwrap_or(Err(Error::not_found_error()))?,
-        );
-        delete_vector(centroid_id as i64, &self.head_index)?;
-
-        // For each vector if it is closer to the original centroid than either of the new centroids
-        // then query the whole index to select a new assignment. Otherwise assign it to the closest
-        // of the two new centroids.
-        let mut params = self.index.config().head_search_params;
-        // TODO: figure out if nearby update beam width needs to be configurable.
-        params.beam_width = NonZero::new(64).unwrap();
-        let mut searcher = GraphSearcher::new(params);
-        let nearby_clusters = searcher.search(&original_centroid, &self.head_index)?;
-
-        // TODO: perform searches in parallel.
-        searcher = GraphSearcher::new(self.index.config().head_search_params);
-        let mut assignment_updater =
-            CentroidAssignmentUpdater::new(&self.index, self.head_index.session())?;
-        let c0_dist_fn = posting_format.query_vector_distance_f32(original_centroid, similarity);
-        let c1_dist_fn = posting_format.query_vector_distance_f32(&centroids[0], similarity);
-        let c2_dist_fn = posting_format.query_vector_distance_f32(&centroids[1], similarity);
-        for (record_id, vector) in vectors {
-            // TODO: handle replica_count > 1. If this centroid is _not_ the primary for record_id
-            // then we always have to search and generate new candidates. We may also need to move
-            // postings that are not in centroid_id.
-            let c0_dist = c0_dist_fn.distance(&vector);
-            let c1_dist = c1_dist_fn.distance(&vector);
-            let c2_dist = c2_dist_fn.distance(&vector);
-            let new_centroid_id = if c0_dist <= c1_dist && c0_dist <= c2_dist {
-                posting_coder.decode_to(&vector, &mut scratch_vector);
-                searcher.search(&scratch_vector, &self.head_index)?[0].vertex() as u32
-            } else if c1_dist < c2_dist {
-                centroid_id as u32
-            } else {
-                next_centroid_id as u32
-            };
-
-            let key = PostingKey {
-                centroid_id: new_centroid_id as u32,
-                record_id,
-            };
-            posting_cursor.set(key, &vector)?;
-            assignment_updater.update(
-                record_id,
-                CentroidAssignment::new(new_centroid_id, &[]).to_formatted_ref(),
-            )?;
-        }
-
-        // For a list of nearby centroids, examine all vectors and reassign them if they are closer
-        // to one of the new centroids than they are to the current centroid.
-        // TODO: process nearby centroids in parallel.
-        let mut update_posting_cursor = self
-            .head_index
-            .session()
-            .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(self.index.postings_table_name())?;
-        for nearby_centroid_id in nearby_clusters.into_iter().map(|n| n.vertex() as u32) {
-            let nearby_centroid = head_coder.decode(
-                head_vectors
-                    .get(nearby_centroid_id as i64)
-                    .unwrap_or(Err(Error::not_found_error()))?,
-            );
-            let c0_dist_fn = posting_format.query_vector_distance_f32(nearby_centroid, similarity);
-
-            posting_cursor.set_bounds(PostingKey::centroid_range(nearby_centroid_id))?;
-            // SAFETY: memory remains valid because this path does not commit or rollback txns.
-            while let Some(r) = unsafe { posting_cursor.next_unsafe() } {
-                // TODO: handle replica_count > 1. If this is the primary for record_id and the
-                // assignment remains unchanged then we can continue to do nothing. If the primary
-                // changes or this is a secondary assignment then we need to search and generate new
-                // candidates. In any case we may need to move some unexpected postings around.
-                let (key, vector) = r?;
-                let c0_dist = c0_dist_fn.distance(&vector);
-                let c1_dist = c1_dist_fn.distance(&vector);
-                let c2_dist = c2_dist_fn.distance(&vector);
-
-                let assigned_centroid_id = if c1_dist < c0_dist {
-                    centroid_id as u32
-                } else if c2_dist < c0_dist {
-                    next_centroid_id as u32
-                } else {
-                    continue;
-                };
-
-                let new_key = PostingKey {
-                    centroid_id: assigned_centroid_id,
-                    record_id: key.record_id,
-                };
-                update_posting_cursor.remove(key)?;
-                update_posting_cursor.set(new_key, &vector)?;
-                assignment_updater.update(
-                    key.record_id,
-                    CentroidAssignment::new(assigned_centroid_id, &[]).to_formatted_ref(),
-                )?;
-            }
-        }
-
-        // Write the new centroids back into the index.
-        upsert_vector(centroid_id as i64, &centroids[0], &self.head_index)?;
-        upsert_vector(next_centroid_id as i64, &centroids[1], &self.head_index)?;
-
-        assignment_updater.flush()
-    }
-
-    /// Remove all the vectors from `centroid_id` using `cursor` and return them.
-    fn drain_centroid(
-        &self,
-        centroid_id: usize,
-        cursor: &mut TypedCursor<'_, PostingKey, Vec<u8>>,
-    ) -> Result<Vec<(i64, Vec<u8>)>> {
-        let mut vectors = vec![];
-        cursor.set_bounds(PostingKey::centroid_range(centroid_id as u32))?;
-        while let Some(r) = cursor.next() {
-            let (key, vector) = r?;
-            vectors.push((key.record_id, vector));
-            cursor.remove(key)?;
-        }
-        Ok(vectors)
-    }
 }
 
 fn print_balance_summary(summary: &BalanceSummary) {
@@ -264,19 +57,25 @@ pub fn rebalance(
 ) -> io::Result<()> {
     // TODO: store rng state in the index. Requires rand_xoshiro serde feature.
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
+    assert_eq!(
+        index.config().replica_count,
+        1,
+        "rebalance only implemented for replica count 1"
+    );
+
     let session = connection.open_session()?;
+    let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
     let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(args.seed);
 
-    let rebalancer = Rebalancer::new(index, session);
     let progress = if args.commit {
         Some(progress_spinner("rebalancing"))
     } else {
         None
     };
     for _ in 0..args.iterations.get() {
-        let txn_guard = TransactionGuard::new(rebalancer.session(), None)?;
-        let stats = rebalancer.centroid_stats()?;
-        let summary = rebalancer.summary(&stats);
+        let txn_guard = TransactionGuard::new(head_index.session(), None)?;
+        let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
+        let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
 
         if let Some(ref progress) = progress {
             progress.set_message(format!(
@@ -292,10 +91,12 @@ pub fn rebalance(
                 break;
             }
             (Some((to_merge, _)), _) => {
-                merge_centroid(&rebalancer.index, &rebalancer.head_index, to_merge)?;
+                merge_centroid(&index, &head_index, to_merge)?;
             }
             (_, Some((to_split, _))) => {
-                rebalancer.split_centroid(
+                split_centroid(
+                    &index,
+                    &head_index,
                     to_split,
                     stats.available_centroid_ids().next().unwrap(),
                     &mut rng,
@@ -312,8 +113,8 @@ pub fn rebalance(
     }
 
     if let Some(progress) = progress {
-        let stats = rebalancer.centroid_stats()?;
-        let summary = rebalancer.summary(&stats);
+        let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
+        let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
         progress.set_message(format!(
             "rebalancing {}/{} {:.2}% clusters in policy",
             summary.in_bounds(),
@@ -322,8 +123,8 @@ pub fn rebalance(
         ));
         progress.finish_using_style();
     }
-    let stats = rebalancer.centroid_stats()?;
-    let summary = rebalancer.summary(&stats);
+    let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
+    let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
     if summary.in_policy_fraction() < 1.0 {
         print_balance_summary(&summary);
     }

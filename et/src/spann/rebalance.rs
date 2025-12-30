@@ -135,7 +135,6 @@ impl Rebalancer {
         Ok(())
     }
 
-    // XXX none of this updates centroid stats!
     fn split_centroid(
         &self,
         centroid_id: usize,
@@ -184,7 +183,6 @@ impl Rebalancer {
                 .unwrap_or(Err(Error::not_found_error()))?,
         );
         delete_vector(centroid_id as i64, &self.head_index)?;
-        // XXX delete stats for this centroid.
 
         // For each vector if it is closer to the original centroid than either of the new centroids
         // then query the whole index to select a new assignment. Otherwise assign it to the closest
@@ -197,13 +195,11 @@ impl Rebalancer {
 
         // TODO: perform searches in parallel.
         searcher = GraphSearcher::new(self.index.config().head_search_params);
+        let mut assignment_updater =
+            CentroidAssignmentUpdater::new(&self.index, self.head_index.session())?;
         let c0_dist_fn = posting_format.query_vector_distance_f32(original_centroid, similarity);
         let c1_dist_fn = posting_format.query_vector_distance_f32(&centroids[0], similarity);
         let c2_dist_fn = posting_format.query_vector_distance_f32(&centroids[1], similarity);
-        let mut centroid_cursor = self
-            .head_index
-            .session()
-            .get_record_cursor(&self.index.centroids_table_name())?;
         for (record_id, vector) in vectors {
             // TODO: handle replica_count > 1. If this centroid is _not_ the primary for record_id
             // then we always have to search and generate new candidates. We may also need to move
@@ -225,7 +221,10 @@ impl Rebalancer {
                 record_id,
             };
             posting_cursor.set(key, &vector)?;
-            centroid_cursor.set(record_id, &new_centroid_id.to_le_bytes())?;
+            assignment_updater.update(
+                record_id,
+                CentroidAssignment::new(new_centroid_id, &[]).to_formatted_ref(),
+            )?;
         }
 
         // For a list of nearby centroids, examine all vectors and reassign them if they are closer
@@ -269,7 +268,10 @@ impl Rebalancer {
                 };
                 update_posting_cursor.remove(key)?;
                 update_posting_cursor.set(new_key, &vector)?;
-                centroid_cursor.set(key.record_id, &assigned_centroid_id.to_le_bytes())?;
+                assignment_updater.update(
+                    key.record_id,
+                    CentroidAssignment::new(assigned_centroid_id, &[]).to_formatted_ref(),
+                )?;
             }
         }
 
@@ -277,7 +279,7 @@ impl Rebalancer {
         upsert_vector(centroid_id as i64, &centroids[0], &self.head_index)?;
         upsert_vector(next_centroid_id as i64, &centroids[1], &self.head_index)?;
 
-        Ok(())
+        assignment_updater.flush()
     }
 
     /// Remove all the vectors from `centroid_id` using `cursor` and return them.

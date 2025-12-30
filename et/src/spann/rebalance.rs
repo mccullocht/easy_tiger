@@ -68,6 +68,7 @@ impl Rebalancer {
     }
 
     // Remove `centroid_id` and merge each of its vectors into the next closest centroid.
+    // XXX none of this updates centroid stats!
     fn merge_centroid(&self, centroid_id: usize) -> Result<()> {
         // Collect all of the vectors for the centroid to merge.
         let mut posting_cursor = self
@@ -117,6 +118,7 @@ impl Rebalancer {
         Ok(())
     }
 
+    // XXX none of this updates centroid stats!
     fn split_centroid(
         &self,
         centroid_id: usize,

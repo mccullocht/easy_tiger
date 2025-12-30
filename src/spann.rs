@@ -10,6 +10,7 @@ pub mod search;
 
 use std::{io, ops::Range, sync::Arc};
 
+use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use vectors::{soar::SoarQueryVectorDistance, F32VectorCoding, VectorDistance};
 use wt_mdb::{
@@ -297,6 +298,122 @@ impl Formatted for PostingKey {
         } else {
             Err(Error::WiredTiger(wt_mdb::WiredTigerError::Generic))
         }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+enum CentroidAssignmentType {
+    Primary,
+    Secondary,
+}
+
+/// A value in the centroid assignment table.
+///
+/// This maps a record to its primary centroid and any secondary centroids.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CentroidAssignment {
+    primary_id: u32,
+    secondary_ids: Vec<[u8; 4]>,
+}
+
+impl CentroidAssignment {
+    fn new(primary_id: u32, secondary_ids: &[u32]) -> Self {
+        Self {
+            primary_id,
+            secondary_ids: secondary_ids.iter().map(|id| id.to_le_bytes()).collect(),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + '_ {
+        std::iter::once((CentroidAssignmentType::Primary, self.primary_id)).chain(
+            self.secondary_ids
+                .iter()
+                .map(|id| (CentroidAssignmentType::Secondary, u32::from_le_bytes(*id))),
+        )
+    }
+
+    fn update(
+        &mut self,
+        old_centroid_id: u32,
+        new_centroid_id: u32,
+    ) -> Option<CentroidAssignmentType> {
+        if self.primary_id == old_centroid_id {
+            self.primary_id = new_centroid_id;
+            return Some(CentroidAssignmentType::Primary);
+        }
+        self.secondary_ids.iter_mut().find_map(|id| {
+            if u32::from_le_bytes(*id) == old_centroid_id {
+                *id = new_centroid_id.to_le_bytes();
+                Some(CentroidAssignmentType::Secondary)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+impl Formatted for CentroidAssignment {
+    const FORMAT: FormatString = FormatString::new(c"u");
+
+    type Ref<'a> = CentroidAssignmentRef<'a>;
+
+    #[inline(always)]
+    fn to_formatted_ref(&self) -> Self::Ref<'_> {
+        CentroidAssignmentRef {
+            primary_id: self.primary_id,
+            secondary_ids: &self.secondary_ids,
+        }
+    }
+
+    #[inline(always)]
+    fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
+        packed.resize(value.len() * std::mem::size_of::<u32>(), 0);
+        packed[..4].copy_from_slice(&value.primary_id.to_le_bytes());
+        for (i, o) in value.secondary_ids.iter().zip(
+            packed[4..]
+                .as_chunks_mut::<{ std::mem::size_of::<u32>() }>()
+                .0
+                .iter_mut(),
+        ) {
+            *o = *i;
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+        if !packed.len().is_multiple_of(std::mem::size_of::<u32>()) || packed.is_empty() {
+            return Err(Error::Errno(Errno::INVAL));
+        }
+
+        let ids = packed.as_chunks::<{ std::mem::size_of::<u32>() }>().0;
+        let primary_id = u32::from_le_bytes(ids[0]);
+        let secondary_ids: &[[u8; 4]] = &ids[1..];
+        Ok(CentroidAssignmentRef {
+            primary_id,
+            secondary_ids,
+        })
+    }
+}
+
+impl From<CentroidAssignmentRef<'_>> for CentroidAssignment {
+    fn from(value: CentroidAssignmentRef<'_>) -> Self {
+        Self {
+            primary_id: value.primary_id,
+            secondary_ids: value.secondary_ids.to_vec(),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct CentroidAssignmentRef<'a> {
+    primary_id: u32,
+    secondary_ids: &'a [[u8; 4]],
+}
+
+impl CentroidAssignmentRef<'_> {
+    fn len(&self) -> usize {
+        1 + self.secondary_ids.len()
     }
 }
 

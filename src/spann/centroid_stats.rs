@@ -1,9 +1,12 @@
+use std::collections::{hash_map::Entry, HashMap};
+use tracing::error;
+
 use wt_mdb::{
     session::{FormatString, Formatted},
-    Result, Session,
+    Error, Result, Session, TypedCursorGuard,
 };
 
-use crate::spann::TableIndex;
+use crate::spann::{CentroidAssignment, CentroidAssignmentType, TableIndex};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CentroidCounts {
@@ -159,4 +162,139 @@ impl CentroidStats {
             .map(|(i, _)| i)
             .chain(self.0.len()..)
     }
+}
+
+// XXX states to represent initial assignment (record_id + N centroids) or complete deletion (record_id).
+// XXX this might fix some corner cases.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CentroidAssignmentUpdate {
+    /// Insert a new vector with its assigned centroids.
+    Insert {
+        record_id: i64,
+        primary_id: u32,
+        secondary_ids: Vec<u32>,
+    },
+    /// Delete a vector.
+    Delete(i64),
+    /// Update the assignment of a vector from an old centroid to a new centroid.
+    ///
+    /// The assignment may be a primary or secondary assignment.
+    Update {
+        record_id: i64,
+        old_centroid_id: u32,
+        new_centroid_id: u32,
+    },
+}
+
+struct CentroidStatsCache<'a> {
+    cursor: TypedCursorGuard<'a, u32, CentroidCounts>,
+    cache: HashMap<u32, CentroidCounts>,
+}
+
+impl<'a> CentroidStatsCache<'a> {
+    fn new(cursor: TypedCursorGuard<'a, u32, CentroidCounts>) -> Self {
+        Self {
+            cursor,
+            cache: HashMap::new(),
+        }
+    }
+
+    fn increment_count(&mut self, id: u32, ctype: CentroidAssignmentType) -> Result<()> {
+        let counts = self.get_counts(id)?;
+        match ctype {
+            CentroidAssignmentType::Primary => counts.primary += 1,
+            CentroidAssignmentType::Secondary => counts.secondary += 1,
+        };
+        Ok(())
+    }
+
+    fn decrement_count(&mut self, id: u32, ctype: CentroidAssignmentType) -> Result<()> {
+        let counts = self.get_counts(id)?;
+        match ctype {
+            CentroidAssignmentType::Primary => counts.primary -= 1,
+            CentroidAssignmentType::Secondary => counts.secondary -= 1,
+        };
+        Ok(())
+    }
+
+    fn get_counts(&mut self, id: u32) -> Result<&'_ mut CentroidCounts> {
+        let e = match self.cache.entry(id) {
+            Entry::Occupied(e) => e,
+            Entry::Vacant(e) => {
+                let cursor_counts = self
+                    .cursor
+                    .seek_exact(id)
+                    .unwrap_or(Err(Error::not_found_error()))?;
+                e.insert_entry(cursor_counts)
+            }
+        };
+        Ok(e.into_mut())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        for (id, counts) in self.cache.drain() {
+            self.cursor.set(id, counts)?;
+        }
+        Ok(())
+    }
+}
+
+/// Given a list of centroid reassignments, update centroid assignment data and statistics.
+pub fn update_centroid_metadata(
+    index: &TableIndex,
+    session: &Session,
+    assignments: &[CentroidAssignmentUpdate],
+) -> Result<()> {
+    let mut assignment_cursor = session
+        .get_or_create_typed_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
+    let mut stats = CentroidStatsCache::new(
+        session
+            .get_or_create_typed_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats)?,
+    );
+    for a in assignments {
+        match a {
+            CentroidAssignmentUpdate::Insert {
+                record_id,
+                primary_id,
+                secondary_ids,
+            } => {
+                if let Some(_existing_assignment) = assignment_cursor.seek_exact(*record_id) {
+                    error!("attempted to insert duplicate record id {}", record_id);
+                    return Err(Error::WiredTiger(wt_mdb::WiredTigerError::DuplicateKey));
+                }
+                let assignment = CentroidAssignment::new(*primary_id, secondary_ids);
+                // XXX set() could accept Into<FormattedRef>.
+                assignment_cursor.set(*record_id, assignment.to_formatted_ref())?;
+                for (assignment_type, centroid_id) in assignment.iter() {
+                    stats.increment_count(centroid_id, assignment_type)?;
+                }
+            }
+            CentroidAssignmentUpdate::Delete(record_id) => {
+                let existing_assignment = assignment_cursor
+                    .seek_exact(*record_id)
+                    .unwrap_or(Err(Error::not_found_error()))?;
+                for (assignment_type, centroid_id) in existing_assignment.iter() {
+                    stats.decrement_count(centroid_id, assignment_type)?;
+                }
+                assignment_cursor.remove(*record_id)?;
+            }
+            CentroidAssignmentUpdate::Update {
+                record_id,
+                old_centroid_id,
+                new_centroid_id,
+            } => {
+                let mut existing_assignment = assignment_cursor
+                    .seek_exact(*record_id)
+                    .unwrap_or(Err(Error::not_found_error()))?;
+                let ctype = existing_assignment
+                    .update(*old_centroid_id, *new_centroid_id)
+                    .ok_or(Error::not_found_error())?;
+                assignment_cursor.set(*record_id, existing_assignment.to_formatted_ref())?;
+                stats.decrement_count(*old_centroid_id, ctype)?;
+                stats.increment_count(*new_centroid_id, ctype)?;
+            }
+        }
+    }
+
+    stats.flush()
 }

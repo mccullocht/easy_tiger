@@ -8,11 +8,15 @@ pub mod centroid_stats;
 pub mod rebalance;
 pub mod search;
 
-use std::{io, ops::Range, sync::Arc};
+use std::{
+    io,
+    ops::{Range, RangeInclusive},
+    sync::Arc,
+};
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
-use vectors::{soar::SoarQueryVectorDistance, F32VectorCoding, VectorDistance};
+use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding, VectorDistance};
 use wt_mdb::{
     session::{CreateOptionsBuilder, DropOptions, FormatString, Formatted},
     Connection, Error, Result, Session,
@@ -50,6 +54,13 @@ pub struct IndexConfig {
     pub replica_selection: ReplicaSelectionAlgorithm,
     /// If set, build a vector id keyed vector table in this format for re-ranking results.
     pub rerank_format: Option<F32VectorCoding>,
+}
+
+impl IndexConfig {
+    /// Range of minimum and maximum centroid lengths.
+    pub fn centroid_len_range(&self) -> RangeInclusive<usize> {
+        self.min_centroid_len..=self.max_centroid_len
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -142,6 +153,12 @@ impl TableIndex {
 
     pub fn config(&self) -> &IndexConfig {
         &self.config
+    }
+
+    pub fn new_posting_coder(&self) -> Box<dyn F32VectorCoder> {
+        self.config
+            .posting_coder
+            .new_coder(self.head_config().config().similarity)
     }
 
     pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {

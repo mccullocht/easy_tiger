@@ -5,8 +5,8 @@ use easy_tiger::{
     input::VecVectorStore,
     kmeans,
     spann::{
-        centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
-        rebalance::BalanceSummary,
+        centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
+        rebalance::{merge_centroid, BalanceSummary},
         CentroidAssignment, PostingKey, TableIndex,
     },
     vamana::{
@@ -71,68 +71,6 @@ impl Rebalancer {
 
     fn centroid_len_range(&self) -> RangeInclusive<usize> {
         self.index.config().min_centroid_len..=self.index.config().max_centroid_len
-    }
-
-    // Remove `centroid_id` and merge each of its vectors into the next closest centroid.
-    fn merge_centroid(&self, centroid_id: usize) -> Result<()> {
-        // Collect all of the vectors for the centroid to merge.
-        let mut posting_cursor = self
-            .head_index
-            .session()
-            .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(self.index.postings_table_name())?;
-        let vectors = self.drain_centroid(centroid_id, &mut posting_cursor)?;
-
-        // Remove the centroid from the graph.
-        delete_vector(centroid_id as i64, &self.head_index)?;
-
-        // If the centroid is already empty then there is nothing to do.
-        if vectors.is_empty() {
-            return Ok(());
-        }
-
-        // TODO: run the required searches in parallel. WiredTiger sessions will make it challenging
-        // to abstract this away from the storage engine.
-
-        // Query the head index for each vector and assign a new centroid.
-        let coder = self
-            .index
-            .config()
-            .posting_coder
-            .new_coder(self.index.head_config().config().similarity);
-        let mut float_vector =
-            vec![0.0f32; coder.dimensions(self.index.head_config().config().dimensions.get())];
-        let mut searcher = GraphSearcher::new(self.index.config().head_search_params);
-        let mut assignment_updater =
-            CentroidAssignmentUpdater::new(&self.index, self.head_index.session())?;
-        posting_cursor.reset()?;
-        for (record_id, vector) in vectors {
-            coder.decode_to(&vector, &mut float_vector);
-            // TODO: seed the search with the existing assignments for this record; reduce budget.
-            let candidates = searcher.search(&float_vector, &self.head_index)?;
-            assert!(!candidates.is_empty());
-            // TODO: handle replica_count > 1. This is still a search but we may have to move
-            // postings that are not in centroid_id.
-            let new_centroid_id = candidates[0].vertex() as u32;
-            assignment_updater.update(
-                record_id,
-                CentroidAssignment::new(new_centroid_id, &[]).to_formatted_ref(),
-            )?;
-            let key = PostingKey {
-                centroid_id: new_centroid_id,
-                record_id,
-            };
-            posting_cursor.set(key, &vector)?;
-        }
-
-        assignment_updater.flush()?;
-        self.head_index
-            .session()
-            .get_or_create_typed_cursor::<u32, CentroidCounts>(
-                &self.index.centroid_stats_table_name(),
-            )?
-            .remove(centroid_id as u32)?;
-
-        Ok(())
     }
 
     fn split_centroid(
@@ -354,7 +292,7 @@ pub fn rebalance(
                 break;
             }
             (Some((to_merge, _)), _) => {
-                rebalancer.merge_centroid(to_merge)?;
+                merge_centroid(&rebalancer.index, &rebalancer.head_index, to_merge)?;
             }
             (_, Some((to_split, _))) => {
                 rebalancer.split_centroid(

@@ -32,7 +32,7 @@ pub fn verify_primary_assignments(
         .peekable();
 
     let mut postings_cursor =
-        session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(&index.table_names.postings)?;
+        session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(&index.postings_table_name())?;
 
     let mut total = 0;
     let mut correct = 0;

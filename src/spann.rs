@@ -85,7 +85,7 @@ impl std::fmt::Display for ReplicaSelectionAlgorithm {
 }
 
 #[derive(Clone)]
-pub struct TableIndexTableNames {
+pub struct TableNames {
     // Table that maps (centroid_id,record_id) -> quantized vector.
     // Ranges of this table are searched based on the outcome of searching the head.
     pub postings: String,
@@ -101,9 +101,9 @@ pub struct TableIndexTableNames {
     pub raw_vectors: String,
 }
 
-impl TableIndexTableNames {
+impl TableNames {
     fn from_index_name(index_name: &str) -> Self {
-        TableIndexTableNames {
+        Self {
             postings: format!("{index_name}.postings"),
             centroids: format!("{index_name}.centroids"),
             centroid_stats: format!("{index_name}.centroid_stats"),
@@ -130,7 +130,7 @@ impl TableIndexTableNames {
 pub struct TableIndex {
     // Head vector index containing the centroids.
     head: Arc<TableGraphVectorIndex>,
-    pub table_names: TableIndexTableNames,
+    table_names: TableNames,
     config: IndexConfig,
 }
 
@@ -149,7 +149,7 @@ impl TableIndex {
             &Self::head_name(index_name),
         )?);
 
-        let table_names = TableIndexTableNames::from_index_name(index_name);
+        let table_names = TableNames::from_index_name(index_name);
         let session = connection.open_session()?;
         let config: IndexConfig = serde_json::from_str(
             &read_app_metadata(&session, &table_names.postings)
@@ -172,7 +172,7 @@ impl TableIndex {
         );
         Self {
             head,
-            table_names: TableIndexTableNames::from_index_name(index_name),
+            table_names: TableNames::from_index_name(index_name),
             config: spann_config,
         }
     }
@@ -188,7 +188,7 @@ impl TableIndex {
             head_config,
             &Self::head_name(index_name),
         )?);
-        let table_names = TableIndexTableNames::from_index_name(index_name);
+        let table_names = TableNames::from_index_name(index_name);
         let session = connection.open_session()?;
         for table_name in table_names.record_table_names() {
             session.create_table(
@@ -224,7 +224,7 @@ impl TableIndex {
         options: &Option<DropOptions>,
     ) -> Result<()> {
         TableGraphVectorIndex::drop_tables(session, &Self::head_name(index_name), options)?;
-        for table_name in TableIndexTableNames::from_index_name(index_name).all_names() {
+        for table_name in TableNames::from_index_name(index_name).all_names() {
             session.drop_table(table_name, options.clone())?;
         }
         Ok(())
@@ -232,6 +232,10 @@ impl TableIndex {
 
     pub fn centroid_assignments_table_name(&self) -> &str {
         &self.table_names.centroids
+    }
+
+    pub fn postings_table_name(&self) -> &str {
+        &self.table_names.postings
     }
 
     fn head_name(index_name: &str) -> String {

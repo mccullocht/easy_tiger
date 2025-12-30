@@ -4,7 +4,11 @@ use clap::Args;
 use easy_tiger::{
     input::VecVectorStore,
     kmeans,
-    spann::{centroid_stats::CentroidStats, rebalance::BalanceSummary, PostingKey, TableIndex},
+    spann::{
+        centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
+        rebalance::BalanceSummary,
+        CentroidAssignment, PostingKey, TableIndex,
+    },
     vamana::{
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
@@ -14,11 +18,13 @@ use easy_tiger::{
 };
 use rand::{Rng, SeedableRng};
 use tracing::warn;
-use wt_mdb::{session::TransactionGuard, Connection, Error, Result, Session, TypedCursor};
+use wt_mdb::{
+    session::{Formatted, TransactionGuard},
+    Connection, Error, Result, Session, TypedCursor,
+};
 
 use crate::ui::progress_spinner;
 
-// TODO: almost all of these arguments belong in the index config.
 #[derive(Args)]
 pub struct RebalanceArgs {
     /// Number of rebalancing iterations to perform.
@@ -68,7 +74,6 @@ impl Rebalancer {
     }
 
     // Remove `centroid_id` and merge each of its vectors into the next closest centroid.
-    // XXX none of this updates centroid stats!
     fn merge_centroid(&self, centroid_id: usize) -> Result<()> {
         // Collect all of the vectors for the centroid to merge.
         let mut posting_cursor = self
@@ -85,8 +90,8 @@ impl Rebalancer {
             return Ok(());
         }
 
-        // TODO: run the required searches in parallel. This will be awkward to abstract due to how
-        // WiredTiger sessions are used.
+        // TODO: run the required searches in parallel. WiredTiger sessions will make it challenging
+        // to abstract this away from the storage engine.
 
         // Query the head index for each vector and assign a new centroid.
         let coder = self
@@ -97,23 +102,35 @@ impl Rebalancer {
         let mut float_vector =
             vec![0.0f32; coder.dimensions(self.index.head_config().config().dimensions.get())];
         let mut searcher = GraphSearcher::new(self.index.config().head_search_params);
+        let mut assignment_updater =
+            CentroidAssignmentUpdater::new(&self.index, self.head_index.session())?;
         posting_cursor.reset()?;
-        let mut centroid_cursor = self
-            .head_index
-            .session()
-            .get_record_cursor(&self.index.centroids_table_name())?;
         for (record_id, vector) in vectors {
             coder.decode_to(&vector, &mut float_vector);
+            // TODO: seed the search with the existing assignments for this record; reduce budget.
             let candidates = searcher.search(&float_vector, &self.head_index)?;
             assert!(!candidates.is_empty());
-            let centroid_id = candidates[0].vertex() as u32;
+            // TODO: handle replica_count > 1. This is still a search but we may have to move
+            // postings that are not in centroid_id.
+            let new_centroid_id = candidates[0].vertex() as u32;
+            assignment_updater.update(
+                record_id,
+                CentroidAssignment::new(new_centroid_id, &[]).to_formatted_ref(),
+            )?;
             let key = PostingKey {
-                centroid_id,
+                centroid_id: new_centroid_id,
                 record_id,
             };
             posting_cursor.set(key, &vector)?;
-            centroid_cursor.set(record_id, &centroid_id.to_le_bytes())?;
         }
+
+        assignment_updater.flush()?;
+        self.head_index
+            .session()
+            .get_or_create_typed_cursor::<u32, CentroidCounts>(
+                &self.index.centroid_stats_table_name(),
+            )?
+            .remove(centroid_id as u32)?;
 
         Ok(())
     }
@@ -167,6 +184,7 @@ impl Rebalancer {
                 .unwrap_or(Err(Error::not_found_error()))?,
         );
         delete_vector(centroid_id as i64, &self.head_index)?;
+        // XXX delete stats for this centroid.
 
         // For each vector if it is closer to the original centroid than either of the new centroids
         // then query the whole index to select a new assignment. Otherwise assign it to the closest
@@ -187,6 +205,9 @@ impl Rebalancer {
             .session()
             .get_record_cursor(&self.index.centroids_table_name())?;
         for (record_id, vector) in vectors {
+            // TODO: handle replica_count > 1. If this centroid is _not_ the primary for record_id
+            // then we always have to search and generate new candidates. We may also need to move
+            // postings that are not in centroid_id.
             let c0_dist = c0_dist_fn.distance(&vector);
             let c1_dist = c1_dist_fn.distance(&vector);
             let c2_dist = c2_dist_fn.distance(&vector);
@@ -225,6 +246,10 @@ impl Rebalancer {
             posting_cursor.set_bounds(PostingKey::centroid_range(nearby_centroid_id))?;
             // SAFETY: memory remains valid because this path does not commit or rollback txns.
             while let Some(r) = unsafe { posting_cursor.next_unsafe() } {
+                // TODO: handle replica_count > 1. If this is the primary for record_id and the
+                // assignment remains unchanged then we can continue to do nothing. If the primary
+                // changes or this is a secondary assignment then we need to search and generate new
+                // candidates. In any case we may need to move some unexpected postings around.
                 let (key, vector) = r?;
                 let c0_dist = c0_dist_fn.distance(&vector);
                 let c1_dist = c1_dist_fn.distance(&vector);

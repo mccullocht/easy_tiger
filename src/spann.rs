@@ -239,6 +239,11 @@ impl TableIndex {
         &self.table_names.postings
     }
 
+    // XXX !public
+    pub fn centroid_stats_table_name(&self) -> &str {
+        &self.table_names.centroid_stats
+    }
+
     fn head_name(index_name: &str) -> String {
         format!("{index_name}.head")
     }
@@ -317,7 +322,8 @@ pub struct CentroidAssignment {
 }
 
 impl CentroidAssignment {
-    fn new(primary_id: u32, secondary_ids: &[u32]) -> Self {
+    // XXX !pub
+    pub fn new(primary_id: u32, secondary_ids: &[u32]) -> Self {
         Self {
             primary_id,
             secondary_ids: secondary_ids.iter().map(|id| id.to_le_bytes()).collect(),
@@ -325,30 +331,7 @@ impl CentroidAssignment {
     }
 
     fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + '_ {
-        std::iter::once((CentroidAssignmentType::Primary, self.primary_id)).chain(
-            self.secondary_ids
-                .iter()
-                .map(|id| (CentroidAssignmentType::Secondary, u32::from_le_bytes(*id))),
-        )
-    }
-
-    fn update(
-        &mut self,
-        old_centroid_id: u32,
-        new_centroid_id: u32,
-    ) -> Option<CentroidAssignmentType> {
-        if self.primary_id == old_centroid_id {
-            self.primary_id = new_centroid_id;
-            return Some(CentroidAssignmentType::Primary);
-        }
-        self.secondary_ids.iter_mut().find_map(|id| {
-            if u32::from_le_bytes(*id) == old_centroid_id {
-                *id = new_centroid_id.to_le_bytes();
-                Some(CentroidAssignmentType::Secondary)
-            } else {
-                None
-            }
-        })
+        self.to_formatted_ref().iter()
     }
 }
 
@@ -411,9 +394,17 @@ pub struct CentroidAssignmentRef<'a> {
     secondary_ids: &'a [[u8; 4]],
 }
 
-impl CentroidAssignmentRef<'_> {
+impl<'a> CentroidAssignmentRef<'a> {
     fn len(&self) -> usize {
         1 + self.secondary_ids.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + 'a {
+        std::iter::once((CentroidAssignmentType::Primary, self.primary_id)).chain(
+            self.secondary_ids
+                .iter()
+                .map(|id| (CentroidAssignmentType::Secondary, u32::from_le_bytes(*id))),
+        )
     }
 }
 

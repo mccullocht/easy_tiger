@@ -6,7 +6,7 @@ use wt_mdb::{
     Error, Result, Session, TypedCursorGuard,
 };
 
-use crate::spann::{CentroidAssignment, CentroidAssignmentType, TableIndex};
+use crate::spann::{CentroidAssignment, CentroidAssignmentRef, CentroidAssignmentType, TableIndex};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CentroidCounts {
@@ -164,26 +164,94 @@ impl CentroidStats {
     }
 }
 
-// XXX states to represent initial assignment (record_id + N centroids) or complete deletion (record_id).
-// XXX this might fix some corner cases.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum CentroidAssignmentUpdate {
-    /// Insert a new vector with its assigned centroids.
-    Insert {
-        record_id: i64,
-        primary_id: u32,
-        secondary_ids: Vec<u32>,
-    },
-    /// Delete a vector.
-    Delete(i64),
-    /// Update the assignment of a vector from an old centroid to a new centroid.
+pub struct CentroidAssignmentUpdater<'a> {
+    assignments_cursor: TypedCursorGuard<'a, i64, CentroidAssignment>,
+    stats: CentroidStatsCache<'a>,
+}
+
+impl<'a> CentroidAssignmentUpdater<'a> {
+    /// Create a new updater for `index` using `session` for WT access.
+    pub fn new(index: &TableIndex, session: &'a Session) -> Result<Self> {
+        let assignments_cursor = session
+            .get_or_create_typed_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
+        let stats =
+            CentroidStatsCache::new(session.get_or_create_typed_cursor::<u32, CentroidCounts>(
+                &index.table_names.centroid_stats,
+            )?);
+        Ok(Self {
+            assignments_cursor,
+            stats,
+        })
+    }
+
+    /// Insert centroid assignments for a new record.
     ///
-    /// The assignment may be a primary or secondary assignment.
-    Update {
+    /// Returns a DuplicateKey error if the record already exists.
+    pub fn insert(&mut self, record_id: i64, assignments: CentroidAssignmentRef<'_>) -> Result<()> {
+        if let Some(_existing_assignment) = self.assignments_cursor.seek_exact(record_id) {
+            error!("attempted to insert duplicate record id {}", record_id);
+            return Err(Error::WiredTiger(wt_mdb::WiredTigerError::DuplicateKey));
+        }
+        self.assignments_cursor.set(record_id, assignments)?;
+        for (assignment_type, centroid_id) in assignments.iter() {
+            self.stats.increment_count(centroid_id, assignment_type)?;
+        }
+        Ok(())
+    }
+
+    /// Delete centroid assignments for an existing record.
+    ///
+    /// Returns a NotFound error if the record does not exist.
+    pub fn delete(&mut self, record_id: i64) -> Result<CentroidAssignment> {
+        let existing_assignment = self
+            .assignments_cursor
+            .seek_exact(record_id)
+            .unwrap_or(Err(Error::not_found_error()))?;
+        for (assignment_type, centroid_id) in existing_assignment.iter() {
+            self.stats.decrement_count(centroid_id, assignment_type)?;
+        }
+        self.assignments_cursor.remove(record_id)?;
+        Ok(existing_assignment)
+    }
+
+    /// Update centroid assignments for an existing record, returning the previous assignments.
+    ///
+    /// Returns a NotFound error if the record does not exist.
+    pub fn update(
+        &mut self,
         record_id: i64,
-        old_centroid_id: u32,
-        new_centroid_id: u32,
-    },
+        assignments: CentroidAssignmentRef<'_>,
+    ) -> Result<CentroidAssignment> {
+        let existing_assignment = self
+            .assignments_cursor
+            .seek_exact(record_id)
+            .unwrap_or(Err(Error::not_found_error()))?;
+        for (assignment_type, centroid_id) in existing_assignment.iter() {
+            self.stats.decrement_count(centroid_id, assignment_type)?;
+        }
+        for (assignment_type, centroid_id) in assignments.iter() {
+            self.stats.increment_count(centroid_id, assignment_type)?;
+        }
+        self.assignments_cursor
+            .set(record_id, assignments)
+            .map(|()| existing_assignment)
+    }
+
+    /// Flush buffered stats updates back to the database.
+    ///
+    /// Dropping the updater will also flush any buffered updates, but prefer this method to allow
+    /// observation of any errors.
+    pub fn flush(&mut self) -> Result<()> {
+        self.stats.flush()
+    }
+}
+
+impl Drop for CentroidAssignmentUpdater<'_> {
+    fn drop(&mut self) {
+        if let Err(e) = self.flush() {
+            error!("Error flushing centroid assignment stats: {e}")
+        }
+    }
 }
 
 struct CentroidStatsCache<'a> {
@@ -224,7 +292,7 @@ impl<'a> CentroidStatsCache<'a> {
                 let cursor_counts = self
                     .cursor
                     .seek_exact(id)
-                    .unwrap_or(Err(Error::not_found_error()))?;
+                    .unwrap_or(Ok(CentroidCounts::default()))?;
                 e.insert_entry(cursor_counts)
             }
         };
@@ -237,64 +305,4 @@ impl<'a> CentroidStatsCache<'a> {
         }
         Ok(())
     }
-}
-
-/// Given a list of centroid reassignments, update centroid assignment data and statistics.
-pub fn update_centroid_metadata(
-    index: &TableIndex,
-    session: &Session,
-    assignments: &[CentroidAssignmentUpdate],
-) -> Result<()> {
-    let mut assignment_cursor = session
-        .get_or_create_typed_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
-    let mut stats = CentroidStatsCache::new(
-        session
-            .get_or_create_typed_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats)?,
-    );
-    for a in assignments {
-        match a {
-            CentroidAssignmentUpdate::Insert {
-                record_id,
-                primary_id,
-                secondary_ids,
-            } => {
-                if let Some(_existing_assignment) = assignment_cursor.seek_exact(*record_id) {
-                    error!("attempted to insert duplicate record id {}", record_id);
-                    return Err(Error::WiredTiger(wt_mdb::WiredTigerError::DuplicateKey));
-                }
-                let assignment = CentroidAssignment::new(*primary_id, secondary_ids);
-                // XXX set() could accept Into<FormattedRef>.
-                assignment_cursor.set(*record_id, assignment.to_formatted_ref())?;
-                for (assignment_type, centroid_id) in assignment.iter() {
-                    stats.increment_count(centroid_id, assignment_type)?;
-                }
-            }
-            CentroidAssignmentUpdate::Delete(record_id) => {
-                let existing_assignment = assignment_cursor
-                    .seek_exact(*record_id)
-                    .unwrap_or(Err(Error::not_found_error()))?;
-                for (assignment_type, centroid_id) in existing_assignment.iter() {
-                    stats.decrement_count(centroid_id, assignment_type)?;
-                }
-                assignment_cursor.remove(*record_id)?;
-            }
-            CentroidAssignmentUpdate::Update {
-                record_id,
-                old_centroid_id,
-                new_centroid_id,
-            } => {
-                let mut existing_assignment = assignment_cursor
-                    .seek_exact(*record_id)
-                    .unwrap_or(Err(Error::not_found_error()))?;
-                let ctype = existing_assignment
-                    .update(*old_centroid_id, *new_centroid_id)
-                    .ok_or(Error::not_found_error())?;
-                assignment_cursor.set(*record_id, existing_assignment.to_formatted_ref())?;
-                stats.decrement_count(*old_centroid_id, ctype)?;
-                stats.increment_count(*new_centroid_id, ctype)?;
-            }
-        }
-    }
-
-    stats.flush()
 }

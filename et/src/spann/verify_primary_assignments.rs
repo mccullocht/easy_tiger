@@ -135,7 +135,10 @@ fn read_primary_assignments(
         let (key, value) = r?;
         let (centroid_ids, tail) = value.as_chunks::<{ std::mem::size_of::<u32>() }>();
         assert!(!centroid_ids.is_empty() && tail.is_empty());
-        assignments.push(PostingKey::new(u32::from_le_bytes(centroid_ids[0]), key));
+        assignments.push(PostingKey {
+            centroid_id: u32::from_le_bytes(centroid_ids[0]),
+            record_id: key,
+        });
     }
     assignments.par_sort_unstable();
     Ok(assignments)

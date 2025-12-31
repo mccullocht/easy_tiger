@@ -1,9 +1,12 @@
+use std::collections::{hash_map::Entry, HashMap};
+use tracing::error;
+
 use wt_mdb::{
     session::{FormatString, Formatted},
-    Result, Session,
+    Error, Result, Session, TypedCursorGuard,
 };
 
-use crate::spann::TableIndex;
+use crate::spann::{CentroidAssignment, CentroidAssignmentRef, CentroidAssignmentType, TableIndex};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CentroidCounts {
@@ -158,5 +161,148 @@ impl CentroidStats {
             .filter(|(_, c)| c.is_none())
             .map(|(i, _)| i)
             .chain(self.0.len()..)
+    }
+}
+
+pub struct CentroidAssignmentUpdater<'a> {
+    assignments_cursor: TypedCursorGuard<'a, i64, CentroidAssignment>,
+    stats: CentroidStatsCache<'a>,
+}
+
+impl<'a> CentroidAssignmentUpdater<'a> {
+    /// Create a new updater for `index` using `session` for WT access.
+    pub fn new(index: &TableIndex, session: &'a Session) -> Result<Self> {
+        let assignments_cursor = session
+            .get_or_create_typed_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
+        let stats =
+            CentroidStatsCache::new(session.get_or_create_typed_cursor::<u32, CentroidCounts>(
+                &index.table_names.centroid_stats,
+            )?);
+        Ok(Self {
+            assignments_cursor,
+            stats,
+        })
+    }
+
+    /// Insert centroid assignments for a new record.
+    ///
+    /// Returns a DuplicateKey error if the record already exists.
+    pub fn insert(&mut self, record_id: i64, assignments: CentroidAssignmentRef<'_>) -> Result<()> {
+        if let Some(_existing_assignment) = self.assignments_cursor.seek_exact(record_id) {
+            error!("attempted to insert duplicate record id {}", record_id);
+            return Err(Error::WiredTiger(wt_mdb::WiredTigerError::DuplicateKey));
+        }
+        self.assignments_cursor.set(record_id, assignments)?;
+        for (assignment_type, centroid_id) in assignments.iter() {
+            self.stats.increment_count(centroid_id, assignment_type)?;
+        }
+        Ok(())
+    }
+
+    /// Delete centroid assignments for an existing record.
+    ///
+    /// Returns a NotFound error if the record does not exist.
+    pub fn delete(&mut self, record_id: i64) -> Result<CentroidAssignment> {
+        let existing_assignment = self
+            .assignments_cursor
+            .seek_exact(record_id)
+            .unwrap_or(Err(Error::not_found_error()))?;
+        for (assignment_type, centroid_id) in existing_assignment.iter() {
+            self.stats.decrement_count(centroid_id, assignment_type)?;
+        }
+        self.assignments_cursor.remove(record_id)?;
+        Ok(existing_assignment)
+    }
+
+    /// Update centroid assignments for an existing record, returning the previous assignments.
+    ///
+    /// Returns a NotFound error if the record does not exist.
+    pub fn update(
+        &mut self,
+        record_id: i64,
+        assignments: CentroidAssignmentRef<'_>,
+    ) -> Result<CentroidAssignment> {
+        let existing_assignment = self
+            .assignments_cursor
+            .seek_exact(record_id)
+            .unwrap_or(Err(Error::not_found_error()))?;
+        for (assignment_type, centroid_id) in existing_assignment.iter() {
+            self.stats.decrement_count(centroid_id, assignment_type)?;
+        }
+        for (assignment_type, centroid_id) in assignments.iter() {
+            self.stats.increment_count(centroid_id, assignment_type)?;
+        }
+        self.assignments_cursor
+            .set(record_id, assignments)
+            .map(|()| existing_assignment)
+    }
+
+    /// Flush buffered stats updates back to the database.
+    ///
+    /// Dropping the updater will also flush any buffered updates, but prefer this method to allow
+    /// observation of any errors.
+    pub fn flush(&mut self) -> Result<()> {
+        self.stats.flush()
+    }
+}
+
+impl Drop for CentroidAssignmentUpdater<'_> {
+    fn drop(&mut self) {
+        if let Err(e) = self.flush() {
+            error!("Error flushing centroid assignment stats: {e}")
+        }
+    }
+}
+
+struct CentroidStatsCache<'a> {
+    cursor: TypedCursorGuard<'a, u32, CentroidCounts>,
+    cache: HashMap<u32, CentroidCounts>,
+}
+
+impl<'a> CentroidStatsCache<'a> {
+    fn new(cursor: TypedCursorGuard<'a, u32, CentroidCounts>) -> Self {
+        Self {
+            cursor,
+            cache: HashMap::new(),
+        }
+    }
+
+    fn increment_count(&mut self, id: u32, ctype: CentroidAssignmentType) -> Result<()> {
+        let counts = self.get_counts(id)?;
+        match ctype {
+            CentroidAssignmentType::Primary => counts.primary += 1,
+            CentroidAssignmentType::Secondary => counts.secondary += 1,
+        };
+        Ok(())
+    }
+
+    fn decrement_count(&mut self, id: u32, ctype: CentroidAssignmentType) -> Result<()> {
+        let counts = self.get_counts(id)?;
+        match ctype {
+            CentroidAssignmentType::Primary => counts.primary -= 1,
+            CentroidAssignmentType::Secondary => counts.secondary -= 1,
+        };
+        Ok(())
+    }
+
+    fn get_counts(&mut self, id: u32) -> Result<&'_ mut CentroidCounts> {
+        let e = match self.cache.entry(id) {
+            Entry::Occupied(e) => e,
+            Entry::Vacant(e) => {
+                let cursor_counts = self
+                    .cursor
+                    .seek_exact(id)
+                    .unwrap_or(Ok(CentroidCounts::default()))?;
+                e.insert_entry(cursor_counts)
+            }
+        };
+        Ok(e.into_mut())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        for (id, counts) in self.cache.drain() {
+            self.cursor.set(id, counts)?;
+        }
+        Ok(())
     }
 }

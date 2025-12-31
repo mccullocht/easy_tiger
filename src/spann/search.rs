@@ -228,9 +228,7 @@ impl Searcher {
                 .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
                     &reader.index().table_names.postings,
                 )?;
-            cursor.set_bounds(
-                PostingKey::for_centroid(centroid_id)..PostingKey::for_centroid(centroid_id + 1),
-            )?;
+            cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
             while let Some(r) = unsafe { cursor.next_unsafe() } {
                 self.stats.posting_vectors_read += 1;
                 let (record_id, vector) = match r {

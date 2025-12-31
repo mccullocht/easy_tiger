@@ -256,7 +256,6 @@ impl TableIndex {
         &self.table_names.postings
     }
 
-    // XXX !public
     pub fn centroid_stats_table_name(&self) -> &str {
         &self.table_names.centroid_stats
     }
@@ -339,8 +338,7 @@ pub struct CentroidAssignment {
 }
 
 impl CentroidAssignment {
-    // XXX !pub
-    pub fn new(primary_id: u32, secondary_ids: &[u32]) -> Self {
+    fn new(primary_id: u32, secondary_ids: &[u32]) -> Self {
         Self {
             primary_id,
             secondary_ids: secondary_ids.iter().map(|id| id.to_le_bytes()).collect(),

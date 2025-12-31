@@ -5,7 +5,7 @@ use tracing::warn;
 use wt_mdb::{session::Formatted, Error, Result, TypedCursor};
 
 use crate::{
-    input::VecVectorStore,
+    input::{VecVectorStore, VectorStore},
     kmeans,
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
@@ -125,7 +125,13 @@ pub fn split_centroid(
     ) {
         Ok(r) => r,
         Err(r) => {
-            warn!("split_centroid: binary partition of {centroid_id} failed to converge!");
+            if clustering_vectors
+                .len()
+                .div_ceil(index.config.max_centroid_len)
+                <= 2
+            {
+                warn!("split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!", vectors.len());
+            }
             r
         }
     };

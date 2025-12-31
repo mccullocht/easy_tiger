@@ -5,7 +5,7 @@ use tracing::warn;
 use wt_mdb::{session::Formatted, Error, Result, TypedCursor};
 
 use crate::{
-    input::{VecVectorStore, VectorStore},
+    input::VecVectorStore,
     kmeans,
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},

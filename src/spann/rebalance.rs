@@ -125,13 +125,7 @@ pub fn split_centroid(
     ) {
         Ok(r) => r,
         Err(r) => {
-            if clustering_vectors
-                .len()
-                .div_ceil(index.config.max_centroid_len)
-                <= 2
-            {
-                warn!("split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!", vectors.len());
-            }
+            warn!("split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!", vectors.len());
             r
         }
     };

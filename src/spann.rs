@@ -103,7 +103,7 @@ struct TableNames {
 
 impl TableNames {
     fn from_index_name(index_name: &str) -> Self {
-        TableNames {
+        Self {
             postings: format!("{index_name}.postings"),
             centroids: format!("{index_name}.centroids"),
             centroid_stats: format!("{index_name}.centroid_stats"),
@@ -230,6 +230,14 @@ impl TableIndex {
         Ok(())
     }
 
+    pub fn centroid_assignments_table_name(&self) -> &str {
+        &self.table_names.centroids
+    }
+
+    pub fn postings_table_name(&self) -> &str {
+        &self.table_names.postings
+    }
+
     fn head_name(index_name: &str) -> String {
         format!("{index_name}.head")
     }
@@ -240,20 +248,20 @@ impl TableIndex {
 /// Serialized posting keys should result in entries ordered by centroid_id and then record_id,
 /// allowing each centroid to be read as a contiguous range.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct PostingKey {
-    centroid_id: u32,
-    record_id: i64,
+pub struct PostingKey {
+    pub centroid_id: u32,
+    pub record_id: i64,
 }
 
 impl PostingKey {
-    fn new(centroid_id: u32, record_id: i64) -> Self {
+    pub fn new(centroid_id: u32, record_id: i64) -> Self {
         Self {
             centroid_id,
             record_id,
         }
     }
 
-    fn for_centroid(centroid_id: u32) -> Self {
+    pub fn for_centroid(centroid_id: u32) -> Self {
         Self {
             centroid_id,
             record_id: 0,
@@ -564,5 +572,9 @@ impl SessionIndexReader {
 
     pub fn index(&self) -> &TableIndex {
         self.index.as_ref()
+    }
+
+    pub fn head_reader(&self) -> &SessionGraphVectorIndex {
+        &self.head_reader
     }
 }

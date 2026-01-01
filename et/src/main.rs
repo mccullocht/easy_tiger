@@ -14,6 +14,8 @@ use clap::{command, Parser, Subcommand};
 use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
 use quantization::{quantization, QuantizationArgs};
 use spann::{spann_command, SpannArgs};
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::EnvFilter;
 use vamana::{vamana_command, VamanaArgs};
 
 #[derive(Parser)]
@@ -36,7 +38,13 @@ enum Commands {
 }
 
 fn main() -> io::Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
 
     let cli = Cli::parse();
     match cli.command {

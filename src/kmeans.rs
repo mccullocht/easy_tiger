@@ -168,8 +168,15 @@ mod bp {
         assert!(!acceptable_split.is_empty());
         let half = dataset.len() / 2;
         let mut state = IterState::new(dataset);
-        let mut current_candidate = (0..10)
-            .map(|_| {
+        let mut num_acceptable = 0;
+        let mut current_candidate = (0..max_iters)
+            .map_while(|_| {
+                // Stop if we have 3 acceptable candidates. This bounds the amount of work in
+                // candidate initialization when max_iters is large.
+                if num_acceptable >= 3 {
+                    return None;
+                }
+
                 // Select a centroid at random, then select a second centroid at random but weighted
                 // by distance to the first centroid to prefer something farther away.
                 let first = rng.random_range(0..state.dataset.len());
@@ -181,7 +188,11 @@ mod bp {
                 let second = WeightedIndex::new(distances.iter().copied())
                     .unwrap()
                     .sample(rng);
-                Candidate::from_sampled_vectors(first, second, &mut state)
+                let c = Candidate::from_sampled_vectors(first, second, &mut state);
+                if acceptable_split.contains(&c.split) {
+                    num_acceptable += 1;
+                }
+                Some(c)
             })
             .min_by(|a, b| {
                 // Prefer candidates within the acceptable split range, then prefer candidates with
@@ -189,6 +200,7 @@ mod bp {
                 acceptable_split
                     .contains(&a.split)
                     .cmp(&acceptable_split.contains(&b.split))
+                    .reverse()
                     .then_with(|| a.distance_sum.total_cmp(&b.distance_sum))
             })
             .unwrap();

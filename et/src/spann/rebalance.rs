@@ -1,6 +1,6 @@
 use std::{io, num::NonZero, sync::Arc};
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use easy_tiger::{
     spann::{
         centroid_stats::CentroidStats,
@@ -24,10 +24,25 @@ pub struct RebalanceArgs {
     #[arg(long, default_value_t = false)]
     commit: bool,
 
+    /// Mode to use for rebalancing.
+    #[arg(long, value_enum, default_value_t = RebalanceMode::All)]
+    mode: RebalanceMode,
+
     /// Random seed used for clustering computations.
     /// Use a fixed value for repeatability.
     #[arg(long, default_value_t = 0x7774_7370414E4E)]
     seed: u64,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, Default)]
+enum RebalanceMode {
+    /// Perform both merge and split operations.
+    #[default]
+    All,
+    /// Only perform merge operations.
+    MergeOnly,
+    /// Only perform split operations.
+    SplitOnly,
 }
 
 fn print_balance_summary(summary: &BalanceSummary) {
@@ -86,21 +101,43 @@ pub fn rebalance(
             ));
         }
 
-        match (summary.below_exemplar(), summary.above_exemplar()) {
-            (None, None) => {
-                break;
+        match args.mode {
+            RebalanceMode::All => match (summary.below_exemplar(), summary.above_exemplar()) {
+                (None, None) => {
+                    break;
+                }
+                (Some((to_merge, _)), _) => {
+                    merge_centroid(&index, &head_index, to_merge)?;
+                }
+                (_, Some((to_split, _))) => {
+                    split_centroid(
+                        &index,
+                        &head_index,
+                        to_split,
+                        stats.available_centroid_ids().next().unwrap(),
+                        &mut rng,
+                    )?;
+                }
+            },
+            RebalanceMode::MergeOnly => {
+                if let Some((to_merge, _)) = summary.below_exemplar() {
+                    merge_centroid(&index, &head_index, to_merge)?;
+                } else {
+                    break;
+                }
             }
-            (Some((to_merge, _)), _) => {
-                merge_centroid(&index, &head_index, to_merge)?;
-            }
-            (_, Some((to_split, _))) => {
-                split_centroid(
-                    &index,
-                    &head_index,
-                    to_split,
-                    stats.available_centroid_ids().next().unwrap(),
-                    &mut rng,
-                )?;
+            RebalanceMode::SplitOnly => {
+                if let Some((to_split, _)) = summary.above_exemplar() {
+                    split_centroid(
+                        &index,
+                        &head_index,
+                        to_split,
+                        stats.available_centroid_ids().next().unwrap(),
+                        &mut rng,
+                    )?;
+                } else {
+                    break;
+                }
             }
         }
 

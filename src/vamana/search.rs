@@ -116,12 +116,13 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, |_| true, reader)
+        self.search_internal(query, |_| true, &[], reader)
     }
 
-    /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
-    /// vertex ids are valid results. The returned results will only include vertices that match `filter_predicate`
-    /// and will assume that for any vertex id that all calls will return the same value.
+    /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate`
+    /// dictating which vertex ids are valid results. The returned results will only include
+    /// vertices that match `filter_predicate` and will assume that for any vertex id that all calls
+    /// will return the same value.
     ///
     /// Returns an approximate list of neighbors matching `filter_predicate` with the highest scores.
     pub fn search_with_filter(
@@ -131,7 +132,54 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, filter_predicate, reader)
+        self.search_internal(query, filter_predicate, &[], reader)
+    }
+
+    /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate`
+    /// dictating which vertex ids are valid results. The returned results will only include
+    /// vertices that match `filter_predicate` and will assume that for any vertex id that all calls
+    /// will return the same value. The seeds will be used as the initial set of candidates rather
+    /// than starting from the graph entry point.
+    ///
+    /// Returns an approximate list of neighbors matching `filter_predicate` with the highest scores.
+    pub fn search_with_filter_and_seeds(
+        &mut self,
+        query: &[f32],
+        filter_predicate: impl FnMut(i64) -> bool,
+        seeds: &[i64],
+        reader: &impl GraphVectorIndex,
+    ) -> Result<Vec<Neighbor>> {
+        self.seen.clear();
+        self.search_internal(query, filter_predicate, seeds, reader)
+    }
+
+    fn search_internal(
+        &mut self,
+        query: &[f32],
+        filter_predicate: impl FnMut(i64) -> bool,
+        seeds: &[i64],
+        reader: &impl GraphVectorIndex,
+    ) -> Result<Vec<Neighbor>> {
+        let nav_query = reader
+            .config()
+            .nav_format
+            .query_vector_distance_f32(query, reader.config().similarity);
+        let rerank_query = if self.params.num_rerank > 0 {
+            reader
+                .config()
+                .rerank_format
+                .map(|f| f.query_vector_distance_f32(query, reader.config().similarity))
+        } else {
+            None
+        };
+
+        self.search_graph_and_rerank(
+            nav_query.as_ref(),
+            filter_predicate,
+            seeds,
+            rerank_query.as_ref().map(|q| q.as_ref()),
+            reader,
+        )
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -179,33 +227,7 @@ impl GraphSearcher {
         self.search_graph_and_rerank(
             nav_query.as_ref(),
             |_| true,
-            rerank_query.as_ref().map(|q| q.as_ref()),
-            reader,
-        )
-    }
-
-    fn search_internal(
-        &mut self,
-        query: &[f32],
-        filter_predicate: impl FnMut(i64) -> bool,
-        reader: &impl GraphVectorIndex,
-    ) -> Result<Vec<Neighbor>> {
-        let nav_query = reader
-            .config()
-            .nav_format
-            .query_vector_distance_f32(query, reader.config().similarity);
-        let rerank_query = if self.params.num_rerank > 0 {
-            reader
-                .config()
-                .rerank_format
-                .map(|f| f.query_vector_distance_f32(query, reader.config().similarity))
-        } else {
-            None
-        };
-
-        self.search_graph_and_rerank(
-            nav_query.as_ref(),
-            filter_predicate,
+            &[],
             rerank_query.as_ref().map(|q| q.as_ref()),
             reader,
         )
@@ -215,24 +237,23 @@ impl GraphSearcher {
         &mut self,
         nav_query: &dyn QueryVectorDistance,
         mut filter_predicate: impl FnMut(i64) -> bool,
+        seeds: &[i64],
         rerank_query: Option<&dyn QueryVectorDistance>,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         // TODO: come up with a better way of managing re-used state.
         self.candidates.clear();
-        if let Some(p) = self.patience.as_mut() { p.clear() }
+        if let Some(p) = self.patience.as_mut() {
+            p.clear()
+        }
         self.visited = 0;
 
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
-        if let Some(epr) = graph.entry_point() {
-            let entry_point = epr?;
-            let entry_vector = nav
-                .get(entry_point)
-                .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates
-                .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)));
-            self.seen.insert(entry_point);
+        if !seeds.is_empty() {
+            self.init_candidates(seeds, &mut nav, nav_query)?;
+        } else if let Some(epr) = graph.entry_point() {
+            self.init_candidates(&[epr?], &mut nav, nav_query)?;
         }
 
         while let Some(best_candidate) = self.candidates.next_unvisited() {
@@ -293,6 +314,23 @@ impl GraphSearcher {
         } else {
             Ok(self.candidates.iter().map(|c| c.neighbor).collect())
         }
+    }
+
+    fn init_candidates(
+        &mut self,
+        candidates: &[i64],
+        nav: &mut impl GraphVectorStore,
+        nav_query: &dyn QueryVectorDistance,
+    ) -> Result<()> {
+        for candidate in candidates {
+            let vec = nav
+                .get(*candidate)
+                .unwrap_or(Err(Error::not_found_error()))?;
+            self.candidates
+                .add_unvisited(Neighbor::new(*candidate, nav_query.distance(vec)));
+            self.seen.insert(*candidate);
+        }
+        Ok(())
     }
 }
 

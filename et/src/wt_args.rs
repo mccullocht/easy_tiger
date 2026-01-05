@@ -26,7 +26,8 @@ impl WiredTigerArgs {
         let mut connection_options = OptionsBuilder::default()
             .cache_size_mb(self.wiredtiger_cache_size_mb)
             .statistics(Statistics::Fast)
-            .checkpoint_log_size(128 << 20);
+            .checkpoint_log_size(128 << 20)
+            .log(true);
         if self.wiredtiger_create_db {
             connection_options = connection_options.create();
         }

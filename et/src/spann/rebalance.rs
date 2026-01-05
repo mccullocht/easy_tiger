@@ -72,7 +72,7 @@ pub fn rebalance(
     } else {
         None
     };
-    for i in 0..args.iterations.get() {
+    for _ in 0..args.iterations.get() {
         let txn_guard = TransactionGuard::new(head_index.session(), None)?;
         let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
@@ -106,9 +106,6 @@ pub fn rebalance(
 
         if let Some(ref progress) = progress {
             txn_guard.commit(None)?;
-            if i % 128 == 0 {
-                head_index.session().checkpoint()?;
-            }
             progress.inc(1);
         } else {
             break; // only ever one iteration if not committing.

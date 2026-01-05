@@ -64,6 +64,7 @@ pub struct OptionsBuilder {
     statistics: Statistics,
     checkpoint_log_size: usize,
     checkpoint_wait_seconds: usize,
+    log: bool,
 }
 
 impl OptionsBuilder {
@@ -96,6 +97,11 @@ impl OptionsBuilder {
         self.checkpoint_wait_seconds = wait_seconds;
         self
     }
+
+    pub fn log(mut self, enable: bool) -> Self {
+        self.log = enable;
+        self
+    }
 }
 
 /// Options when connecting to a WiredTiger database.
@@ -119,6 +125,9 @@ impl From<OptionsBuilder> for Options {
                 "checkpoint=(log_size={},wait={})",
                 value.checkpoint_log_size, value.checkpoint_wait_seconds
             ))
+        }
+        if value.log {
+            options.push("log=(enabled=true)".to_string());
         }
         if options.is_empty() {
             Self(None)

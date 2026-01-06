@@ -1,106 +1,55 @@
 use std::{io, sync::Arc};
 
-use clap::Args;
 use easy_tiger::{
-    spann::{centroid_stats::CentroidStats, PostingKey, SessionIndexReader, TableIndex},
-    vamana::search::GraphSearcher,
+    input::{VecVectorStore, VectorStore},
+    spann::{centroid_stats::CentroidStats, PostingKey, TableIndex},
+    Neighbor,
 };
 use indicatif::ProgressIterator;
 use rayon::prelude::*;
-use wt_mdb::{Connection, Result, Session};
+use wt_mdb::{session::TransactionGuard, Connection, Error, Result, Session};
 
 use crate::ui::progress_bar;
 
-#[derive(Args)]
-pub struct VerifyPrimaryAssignmentsArgs {
-    /// Batch size for processing posting vectors.
-    #[arg(long, default_value_t = 1000)]
-    batch_size: usize,
-}
-
-pub fn verify_primary_assignments(
-    connection: Arc<Connection>,
-    index_name: &str,
-    args: VerifyPrimaryAssignmentsArgs,
-) -> io::Result<()> {
+pub fn verify_primary_assignments(connection: Arc<Connection>, index_name: &str) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
     let session = connection.open_session()?;
     let stats = CentroidStats::from_index_stats(&session, &index)?;
 
-    let mut primary_assignments = read_primary_assignments(&session, &index, &stats)?
-        .into_iter()
-        .peekable();
+    // Read primary assignments and head vectors. Re-encode the head vectors in the same format as
+    // the postings to make comparisons cheaper since we will be doing this exhaustively.
+    let primary_assignments = read_primary_assignments(&session, &index, &stats)?;
+    let (centroid_ids, head_vectors) = read_head_vectors(&session, &index)?;
+    // Get the list of centroid ids with primary assignments. This will be our unit of parallelism
+    // to avoid high overhead in rayon.
+    let mut primary_centroid_ids = primary_assignments
+        .iter()
+        .map(|p| p.centroid_id)
+        .collect::<Vec<_>>();
+    primary_centroid_ids.dedup();
 
-    let mut postings_cursor =
-        session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(&index.postings_table_name())?;
-
-    let mut total = 0;
-    let mut correct = 0;
-
-    let progress = progress_bar(primary_assignments.len(), "scanning postings");
-
-    let mut have_input = true;
-    let mut batch = Vec::with_capacity(args.batch_size);
-    let coder = index
-        .config()
-        .posting_coder
-        .new_coder(index.head_config().config().similarity);
-    while have_input {
-        batch.clear();
-        while batch.len() < args.batch_size {
-            match postings_cursor.next() {
-                Some(Ok((key, value))) => {
-                    if primary_assignments.next_if_eq(&key).is_some() {
-                        batch.push((key.centroid_id, value));
-                    }
-                }
-                Some(Err(e)) => return Err(e.into()),
-                None => {
-                    have_input = false;
-                    break;
-                }
-            }
-        }
-
-        if batch.is_empty() {
-            break;
-        }
-
-        let batch_len = batch.len();
-        let batch_correct_count = batch
-            .par_iter()
-            .by_uniform_blocks(batch_len.div_ceil(rayon::current_num_threads()))
-            .map_init(
-                || {
-                    let session = connection.open_session().expect("failed to open session");
-                    let searcher = GraphSearcher::new(index.config().head_search_params);
-                    let buffer = vec![0.0f32; coder.dimensions(batch[0].1.len())];
-                    (SessionIndexReader::new(&index, session), searcher, buffer)
-                },
-                |(reader, searcher, ref mut vector), (assigned_centroid, vector_bytes)| {
-                    coder.decode_to(&vector_bytes, vector);
-
-                    // Search head
-                    let results = searcher
-                        .search(&vector, reader.head_reader())
-                        .expect("search failed");
-
-                    if results
-                        .first()
-                        .is_some_and(|n| n.vertex() as u32 == *assigned_centroid)
-                    {
-                        1
-                    } else {
-                        0
-                    }
-                },
-            )
-            .sum::<usize>();
-
-        correct += batch_correct_count;
-        total += batch_len;
-        progress.inc(batch_len as u64);
-    }
+    let progress = progress_bar(primary_assignments.len(), "computing primary assignments");
+    let (correct, total) = primary_centroid_ids
+        .into_par_iter()
+        .map_init(
+            || connection.open_session().expect("failed to open session"),
+            |session, centroid_id| {
+                count_primary_assigned_vectors(
+                    session,
+                    &index,
+                    centroid_id,
+                    &primary_assignments,
+                    &centroid_ids,
+                    &head_vectors,
+                )
+                .inspect(|(_, t)| progress.inc(*t as u64))
+            },
+        )
+        .reduce(
+            || Ok((0, 0)),
+            |a, b| a.and_then(|a| b.and_then(|b| Ok((a.0 + b.0, a.1 + b.1)))),
+        )
+        .expect("failed to count primary assigned vectors");
 
     progress.finish();
 
@@ -142,4 +91,79 @@ fn read_primary_assignments(
     }
     assignments.par_sort_unstable();
     Ok(assignments)
+}
+
+fn read_head_vectors(
+    session: &Session,
+    index: &TableIndex,
+) -> Result<(Vec<u32>, VecVectorStore<u8>)> {
+    let vector_table = index.head_config().high_fidelity_table();
+    let dim = index.head_config().config().dimensions.get();
+    let head_coder = vector_table.new_coder();
+    let posting_coder = index
+        .config()
+        .posting_coder
+        .new_coder(index.head_config().config().similarity);
+
+    let mut cursor = session.get_or_create_typed_cursor::<i64, Vec<u8>>(&vector_table.name())?;
+    let mut f32_buffer = vec![0.0f32; dim];
+    let mut posting_buffer = vec![0u8; posting_coder.byte_len(dim)];
+    let cap = cursor
+        .largest_key()
+        .unwrap_or(Err(Error::not_found_error()))? as usize
+        + 1;
+    let mut centroid_ids = Vec::with_capacity(cap);
+    let mut vectors = VecVectorStore::<u8>::with_capacity(posting_buffer.len(), cap);
+    for r in cursor.progress_with(progress_bar(cap, "read head vectors")) {
+        let (key, value) = r?;
+        head_coder.decode_to(&value, &mut f32_buffer);
+        posting_coder.encode_to(&f32_buffer, &mut posting_buffer);
+        centroid_ids.push(key as u32);
+        vectors.push(&posting_buffer);
+    }
+    Ok((centroid_ids, vectors))
+}
+
+fn count_primary_assigned_vectors(
+    session: &Session,
+    index: &TableIndex,
+    centroid_id: u32,
+    posting_keys: &[PostingKey],
+    head_centroid_ids: &[u32],
+    head_vectors: &VecVectorStore<u8>,
+) -> Result<(usize, usize)> {
+    let posting_keys = &posting_keys[posting_keys.partition_point(|pk| pk.centroid_id < centroid_id)
+        ..posting_keys.partition_point(|pk| pk.centroid_id < centroid_id + 1)];
+    let mut pk_iter = posting_keys.iter().peekable();
+    let _txn_guard = TransactionGuard::new(session, None)?;
+    let mut postings_cursor =
+        session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(&index.postings_table_name())?;
+    postings_cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
+    let dist_fn = index
+        .config()
+        .posting_coder
+        .new_vector_distance(index.head_config().config().similarity);
+
+    let mut correct = 0;
+    let mut total = 0;
+    for r in postings_cursor {
+        let (key, vector) = r?;
+        if pk_iter.next_if_eq(&&key).is_none() {
+            continue;
+        }
+
+        let closest_centroid_id = head_centroid_ids
+            .iter()
+            .zip(head_vectors.iter())
+            .map(|(id, v)| Neighbor::new(*id as i64, dist_fn.distance(&vector, v)))
+            .min()
+            .unwrap()
+            .vertex() as u32;
+
+        if closest_centroid_id == key.centroid_id {
+            correct += 1;
+        }
+        total += 1;
+    }
+    Ok((correct, total))
 }

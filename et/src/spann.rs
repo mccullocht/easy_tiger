@@ -15,7 +15,7 @@ use centroid_stats::centroid_stats;
 use drop_index::drop_index;
 use rebalance::{rebalance, RebalanceArgs};
 use search::{search, SearchArgs};
-use verify_primary_assignments::{verify_primary_assignments, VerifyPrimaryAssignmentsArgs};
+use verify_primary_assignments::verify_primary_assignments;
 
 #[derive(Args)]
 pub struct SpannArgs {
@@ -39,7 +39,7 @@ pub enum Command {
     /// Remove an existing index.
     DropIndex,
     /// Verify that the primary assignment of each vector is to its closest centroid.
-    VerifyPrimaryAssignments(VerifyPrimaryAssignmentsArgs),
+    VerifyPrimaryAssignments,
 }
 
 pub fn spann_command(args: SpannArgs) -> io::Result<()> {
@@ -52,9 +52,7 @@ pub fn spann_command(args: SpannArgs) -> io::Result<()> {
         Command::CentroidStats => centroid_stats(connection, index_name),
         Command::Rebalance(args) => rebalance(connection, index_name, args),
         Command::DropIndex => drop_index(connection, index_name),
-        Command::VerifyPrimaryAssignments(args) => {
-            verify_primary_assignments(connection, index_name, args)
-        }
+        Command::VerifyPrimaryAssignments => verify_primary_assignments(connection, index_name),
     }?;
     session.checkpoint()?;
     Ok(())

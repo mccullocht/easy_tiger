@@ -16,14 +16,17 @@ pub fn verify_primary_assignments(connection: Arc<Connection>, index_name: &str)
     let session = connection.open_session()?;
     let stats = CentroidStats::from_index_stats(&session, &index)?;
 
+    // Read primary assignments and head vectors. Re-encode the head vectors in the same format as
+    // the postings to make comparisons cheaper since we will be doing this exhaustively.
     let primary_assignments = read_primary_assignments(&session, &index, &stats)?;
     let (centroid_ids, head_vectors) = read_head_vectors(&session, &index)?;
+    // Get the list of centroid ids with primary assignments. This will be our unit of parallelism
+    // to avoid high overhead in rayon.
     let mut primary_centroid_ids = primary_assignments
         .iter()
         .map(|p| p.centroid_id)
         .collect::<Vec<_>>();
     primary_centroid_ids.dedup();
-    primary_centroid_ids.truncate(1);
 
     let progress = progress_bar(primary_assignments.len(), "computing primary assignments");
     let (correct, total) = primary_centroid_ids
@@ -104,7 +107,7 @@ fn read_head_vectors(
 
     let mut cursor = session.get_or_create_typed_cursor::<i64, Vec<u8>>(&vector_table.name())?;
     let mut f32_buffer = vec![0.0f32; dim];
-    let mut posting_buffer = vec![0u8; posting_coder.dimensions(dim)];
+    let mut posting_buffer = vec![0u8; posting_coder.byte_len(dim)];
     let cap = cursor
         .largest_key()
         .unwrap_or(Err(Error::not_found_error()))? as usize
@@ -140,10 +143,6 @@ fn count_primary_assigned_vectors(
         .config()
         .posting_coder
         .new_vector_distance(index.head_config().config().similarity);
-    let coder = index
-        .config()
-        .posting_coder
-        .new_coder(index.head_config().config().similarity);
 
     let mut correct = 0;
     let mut total = 0;
@@ -163,23 +162,6 @@ fn count_primary_assigned_vectors(
 
         if closest_centroid_id == key.centroid_id {
             correct += 1;
-        } else {
-            let mut v = vec![0.0f32; index.head_config().config().dimensions.get()];
-            coder.decode_to(&vector, &mut v);
-            // XXX this suggests that my lvq2 distance function is borked.
-            let qdfn = index
-                .config()
-                .posting_coder
-                .query_vector_distance_f32(&v, index.head_config().config().similarity);
-            println!(
-                "expected={} actual={} ({:.6} vs {:.6}) (f32 {:.6} vs {:.6})",
-                key.centroid_id,
-                closest_centroid_id,
-                dist_fn.distance(&vector, &head_vectors[key.centroid_id as usize]),
-                dist_fn.distance(&vector, &head_vectors[closest_centroid_id as usize]),
-                qdfn.distance(&head_vectors[key.centroid_id as usize]),
-                qdfn.distance(&head_vectors[closest_centroid_id as usize]),
-            );
         }
         total += 1;
     }

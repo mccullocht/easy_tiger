@@ -291,6 +291,13 @@ impl PostingKey {
             record_id: 0,
         }
     }
+
+    pub fn with_centroid_id(self, centroid_id: u32) -> Self {
+        Self {
+            centroid_id,
+            ..self
+        }
+    }
 }
 
 impl Formatted for PostingKey {
@@ -357,6 +364,18 @@ impl CentroidAssignment {
 
     fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + '_ {
         self.to_formatted_ref().iter()
+    }
+
+    fn replace(&mut self, old: u32, new: u32) {
+        if self.primary_id == old {
+            self.primary_id = new;
+            return;
+        }
+        for id in self.secondary_ids.iter_mut() {
+            if u32::from_le_bytes(*id) == old {
+                *id = new.to_le_bytes();
+            }
+        }
     }
 }
 

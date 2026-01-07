@@ -6,7 +6,9 @@ use wt_mdb::{
     Error, Result, Session, TypedCursorGuard,
 };
 
-use crate::spann::{CentroidAssignment, CentroidAssignmentRef, CentroidAssignmentType, TableIndex};
+use crate::spann::{
+    CentroidAssignment, CentroidAssignmentRef, CentroidAssignmentType, PostingKey, TableIndex,
+};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CentroidCounts {
@@ -167,6 +169,7 @@ impl CentroidStats {
 pub struct CentroidAssignmentUpdater<'a> {
     assignments_cursor: TypedCursorGuard<'a, i64, CentroidAssignment>,
     stats: CentroidStatsCache<'a>,
+    replica_count: usize,
 }
 
 impl<'a> CentroidAssignmentUpdater<'a> {
@@ -181,7 +184,25 @@ impl<'a> CentroidAssignmentUpdater<'a> {
         Ok(Self {
             assignments_cursor,
             stats,
+            replica_count: index.config().replica_count,
         })
+    }
+
+    /// Returns true if `key` is for the primary assigned for `record_id`.
+    pub fn is_primary(&mut self, key: PostingKey) -> Result<bool> {
+        if self.replica_count <= 1 {
+            return Ok(true);
+        } else {
+            self.assignments_cursor
+                .seek_exact(key.record_id)
+                .map(|r| r.map(|a| a.primary_id == key.centroid_id))
+                .unwrap_or(Ok(false))
+        }
+    }
+
+    /// Read the assignments for `record_id`.
+    pub fn read(&mut self, record_id: i64) -> Option<Result<CentroidAssignment>> {
+        self.assignments_cursor.seek_exact(record_id)
     }
 
     /// Insert centroid assignments for a new record.

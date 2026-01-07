@@ -84,15 +84,20 @@ pub fn rebalance(
             (None, None) => {
                 break;
             }
-            (Some((to_merge, _)), _) => {
-                merge_centroid(&index, &head_index, to_merge)?;
+            (Some((to_merge, len)), _) => {
+                //println!("merge {to_merge}");
+                merge_centroid(&index, &head_index, to_merge, len)?;
             }
-            (_, Some((to_split, _))) => {
+            (_, Some((to_split, len))) => {
+                let mut it = stats.available_centroid_ids();
+                let target_centroid_ids = (it.next().unwrap(), it.next().unwrap());
+                //println!("split {to_split} -> {target_centroid_ids:?}");
                 split_centroid(
                     &index,
                     &head_index,
                     to_split,
-                    stats.available_centroid_ids().next().unwrap(),
+                    target_centroid_ids,
+                    len,
                     &mut rng,
                 )?;
             }

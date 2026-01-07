@@ -57,12 +57,6 @@ pub fn rebalance(
 ) -> io::Result<()> {
     // TODO: store rng state in the index. Requires rand_xoshiro serde feature.
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    assert_eq!(
-        index.config().replica_count,
-        1,
-        "rebalance only implemented for replica count 1"
-    );
-
     let session = connection.open_session()?;
     let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
     let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(args.seed);

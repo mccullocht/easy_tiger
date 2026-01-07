@@ -1,4 +1,4 @@
-use std::{num::NonZero, ops::RangeInclusive};
+use std::{collections::BTreeSet, num::NonZero, ops::RangeInclusive};
 
 use rand::Rng;
 use tracing::warn;
@@ -9,7 +9,7 @@ use crate::{
     kmeans,
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
-        CentroidAssignment, PostingKey, TableIndex,
+        select_centroids, CentroidAssignment, PostingKey, TableIndex,
     },
     vamana::{
         mutate::{delete_vector, upsert_vector},
@@ -19,18 +19,48 @@ use crate::{
     },
 };
 
+fn move_postings(
+    original_key: PostingKey,
+    vector: &[u8],
+    old_assignment: &CentroidAssignment,
+    new_assignment: &CentroidAssignment,
+    posting_cursor: &mut TypedCursor<'_, PostingKey, Vec<u8>>,
+) -> Result<()> {
+    let old_assignment = old_assignment
+        .iter()
+        .map(|(_, id)| id)
+        .collect::<BTreeSet<_>>();
+    let new_assignment = new_assignment
+        .iter()
+        .map(|(_, id)| id)
+        .collect::<BTreeSet<_>>();
+    for to_remove in old_assignment
+        .difference(&new_assignment)
+        .filter(|&&c| c != original_key.centroid_id)
+    {
+        posting_cursor.remove(PostingKey {
+            centroid_id: *to_remove,
+            record_id: original_key.record_id,
+        })?;
+    }
+    for to_add in new_assignment.difference(&old_assignment) {
+        posting_cursor.set(
+            PostingKey {
+                centroid_id: *to_add,
+                record_id: original_key.record_id,
+            },
+            vector,
+        )?;
+    }
+    Ok(())
+}
+
 /// Remove `centroid_id` and merge each of its vectors into the next closest centroid.
 pub fn merge_centroid(
     index: &TableIndex,
     head_index: &SessionGraphVectorIndex,
     centroid_id: usize,
 ) -> Result<()> {
-    assert_eq!(
-        index.config().replica_count,
-        1,
-        "rebalance only implemented for replica count 1"
-    );
-
     // Collect all of the vectors for the centroid to merge.
     let mut posting_cursor = head_index
         .session()
@@ -50,8 +80,7 @@ pub fn merge_centroid(
 
     // Query the head index for each vector and assign a new centroid.
     let coder = index.new_posting_coder();
-    let mut float_vector =
-        vec![0.0f32; coder.dimensions(index.head_config().config().dimensions.get())];
+    let mut float_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
     let mut searcher = GraphSearcher::new(index.config().head_search_params);
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
     posting_cursor.reset()?;
@@ -59,19 +88,25 @@ pub fn merge_centroid(
         coder.decode_to(&vector, &mut float_vector);
         // TODO: seed the search with the existing assignments for this record; reduce budget.
         let candidates = searcher.search(&float_vector, head_index)?;
-        assert!(!candidates.is_empty());
-        // TODO: handle replica_count > 1. This is still a search but we may have to move
-        // postings that are not in centroid_id.
-        let new_centroid_id = candidates[0].vertex() as u32;
-        assignment_updater.update(
-            record_id,
-            CentroidAssignment::new(new_centroid_id, &[]).to_formatted_ref(),
+        let new_assignment = select_centroids(
+            index.config().replica_selection,
+            index.config().replica_count,
+            candidates,
+            &float_vector,
+            head_index,
         )?;
-        let key = PostingKey {
-            centroid_id: new_centroid_id,
-            record_id,
-        };
-        posting_cursor.set(key, &vector)?;
+        let old_assignment =
+            assignment_updater.update(record_id, new_assignment.to_formatted_ref())?;
+        move_postings(
+            PostingKey {
+                centroid_id: centroid_id as u32,
+                record_id,
+            },
+            &vector,
+            &old_assignment,
+            &new_assignment,
+            &mut posting_cursor,
+        )?;
     }
 
     assignment_updater.flush()?;
@@ -156,9 +191,11 @@ pub fn split_centroid(
     let c1_dist_fn = posting_format.query_vector_distance_f32(&centroids[0], similarity);
     let c2_dist_fn = posting_format.query_vector_distance_f32(&centroids[1], similarity);
     for (record_id, vector) in vectors {
-        // TODO: handle replica_count > 1. If this centroid is _not_ the primary for record_id
-        // then we always have to search and generate new candidates. We may also need to move
-        // postings that are not in centroid_id.
+        // TODO: handle replica_count > 1. We must always search in this case:
+        // - A change in primary may affect replica assignments.
+        // - A change in replica requires a new replica candidate. We could use the closest split
+        //   but it would not adhere to our replica selection mechanism.
+        // Assignments must be diffed to generate appropriate deletes and inserts.
         let c0_dist = c0_dist_fn.distance(&vector);
         let c1_dist = c1_dist_fn.distance(&vector);
         let c2_dist = c2_dist_fn.distance(&vector);
@@ -199,10 +236,9 @@ pub fn split_centroid(
         posting_cursor.set_bounds(PostingKey::centroid_range(nearby_centroid_id))?;
         // SAFETY: memory remains valid because this path does not commit or rollback txns.
         while let Some(r) = unsafe { posting_cursor.next_unsafe() } {
-            // TODO: handle replica_count > 1. If this is the primary for record_id and the
-            // assignment remains unchanged then we can continue to do nothing. If the primary
-            // changes or this is a secondary assignment then we need to search and generate new
-            // candidates. In any case we may need to move some unexpected postings around.
+            // TODO: handle replica_count > 1. If this is the primary and it changes we should
+            // search again to generate new candidates. If this is a secondary then we should just
+            // leave it alone.
             let (key, vector) = r?;
             let c0_dist = c0_dist_fn.distance(vector);
             let c1_dist = c1_dist_fn.distance(vector);

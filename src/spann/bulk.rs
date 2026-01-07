@@ -2,12 +2,18 @@ use std::{cell::RefCell, ops::DerefMut, sync::Arc};
 
 use crate::{
     input::VectorStore,
-    spann::{centroid_stats::CentroidCounts, select_centroids, PostingKey, TableIndex},
+    spann::{
+        centroid_stats::CentroidCounts, select_centroids, CentroidAssignment,
+        CentroidAssignmentType, PostingKey, TableIndex,
+    },
     vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{session::CreateOptionsBuilder, Connection, Result, Session};
+use wt_mdb::{
+    session::{CreateOptionsBuilder, Formatted},
+    Connection, Result, Session,
+};
 
 /// Assign all the vectors to one or more centroids in the head index. This performs the same search
 /// and pruning as [`super::SessionIndexWriter`] does.
@@ -17,13 +23,9 @@ pub fn assign_to_centroids(
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     limit: usize,
     progress: impl Fn(u64) + Send + Sync,
-) -> Result<Vec<Vec<u32>>> {
+) -> Result<Vec<CentroidAssignment>> {
     let tl_head_reader = ThreadLocal::new();
     let tl_searcher = ThreadLocal::new();
-    let distance_fn = index
-        .head_config()
-        .high_fidelity_table()
-        .new_distance_function();
     (0..limit)
         .into_par_iter()
         .map(|i| {
@@ -45,7 +47,6 @@ pub fn assign_to_centroids(
                 candidates,
                 &vectors[i],
                 head_reader.deref_mut(),
-                distance_fn.as_ref(),
             );
             progress(1);
             selected
@@ -57,19 +58,13 @@ pub fn assign_to_centroids(
 pub fn load_centroids(
     index: &TableIndex,
     session: &Session,
-    centroid_assignments: &[Vec<u32>],
+    centroid_assignments: &[CentroidAssignment],
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
-    let mut bulk_cursor =
-        session.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.centroids, None)?;
-    let mut centroid_buf =
-        Vec::with_capacity(std::mem::size_of::<u32>() * index.config().replica_count);
+    let mut bulk_cursor = session
+        .new_bulk_load_cursor::<i64, CentroidAssignment>(&index.table_names.centroids, None)?;
     for (record_id, centroids) in centroid_assignments.iter().enumerate() {
-        centroid_buf.clear();
-        for cid in centroids {
-            centroid_buf.extend_from_slice(&cid.to_le_bytes());
-        }
-        bulk_cursor.insert(record_id as i64, &centroid_buf)?;
+        bulk_cursor.insert(record_id as i64, centroids.to_formatted_ref())?;
         progress(1);
     }
     Ok(())
@@ -82,7 +77,7 @@ pub fn load_centroids(
 pub fn load_centroid_stats(
     index: &TableIndex,
     session: &Session,
-    centroid_assignments: &[Vec<u32>],
+    centroid_assignments: &[CentroidAssignment],
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     use std::collections::HashMap;
@@ -91,11 +86,14 @@ pub fn load_centroid_stats(
     let mut stats: HashMap<u32, CentroidCounts> = HashMap::new();
 
     for centroids in centroid_assignments {
-        if let Some(&primary_id) = centroids.first() {
-            stats.entry(primary_id).or_default().primary += 1;
-
-            for &secondary_id in centroids.iter().skip(1) {
-                stats.entry(secondary_id).or_default().secondary += 1;
+        for (assignment_type, centroid_id) in centroids.iter() {
+            match assignment_type {
+                CentroidAssignmentType::Primary => {
+                    stats.entry(centroid_id).or_default().primary += 1;
+                }
+                CentroidAssignmentType::Secondary => {
+                    stats.entry(centroid_id).or_default().secondary += 1;
+                }
             }
         }
     }
@@ -123,7 +121,7 @@ pub fn load_centroid_stats(
 pub fn load_postings(
     index: &TableIndex,
     session: &Session,
-    centroid_assignments: &[Vec<u32>],
+    centroid_assignments: &[CentroidAssignment],
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
@@ -131,8 +129,8 @@ pub fn load_postings(
         .into_par_iter()
         .enumerate()
         .flat_map_iter(|(i, a)| {
-            a.iter().map(move |c| PostingKey {
-                centroid_id: *c,
+            a.iter().map(move |(_, c)| PostingKey {
+                centroid_id: c,
                 record_id: i as i64,
             })
         })

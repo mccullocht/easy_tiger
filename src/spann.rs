@@ -10,22 +10,26 @@ pub mod search;
 
 use std::{
     io,
+    num::NonZero,
     ops::{Range, RangeInclusive},
     sync::Arc,
 };
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
-use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding, VectorDistance};
+use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding};
 use wt_mdb::{
     session::{CreateOptionsBuilder, DropOptions, FormatString, Formatted},
     Connection, Error, Result, Session,
 };
 
 use crate::{
-    input::{VecVectorStore, VectorStore},
-    vamana::wt::{read_app_metadata, SessionGraphVectorIndex, TableGraphVectorIndex},
-    vamana::{GraphConfig, GraphSearchParams, GraphVectorIndex, GraphVectorStore},
+    vamana::{
+        prune_edges,
+        wt::{read_app_metadata, SessionGraphVectorIndex, TableGraphVectorIndex},
+        EdgePruningConfig, EdgeSetDistanceComputer, GraphConfig, GraphSearchParams,
+        GraphVectorIndex, GraphVectorStore,
+    },
     Neighbor,
 };
 
@@ -345,6 +349,12 @@ impl CentroidAssignment {
         }
     }
 
+    // is_empty() makes no sense -- there is always a primary.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.to_formatted_ref().len()
+    }
+
     fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + '_ {
         self.to_formatted_ref().iter()
     }
@@ -429,20 +439,20 @@ fn select_centroids(
     candidates: Vec<Neighbor>,
     vector: &[f32],
     head_reader: &impl GraphVectorIndex,
-    distance_fn: &dyn VectorDistance,
-) -> Result<Vec<u32>> {
+) -> Result<CentroidAssignment> {
     assert!(
         !candidates.is_empty(),
         "at least one candidate is required for replica selection"
     );
+
     if replica_count == 1 {
         // If we aren't selecting multiple replicas then just return the first candidate.
-        return Ok(vec![candidates[0].vertex() as u32]);
+        return Ok(CentroidAssignment::new(candidates[0].vertex() as u32, &[]));
     }
 
     match algorithm {
         ReplicaSelectionAlgorithm::RNG => {
-            select_centroids_rng(replica_count, candidates, head_reader, distance_fn)
+            select_centroids_rng(replica_count, candidates, head_reader)
         }
         ReplicaSelectionAlgorithm::SOAR => {
             select_centroids_soar(replica_count, candidates, vector, head_reader)
@@ -452,41 +462,32 @@ fn select_centroids(
 
 fn select_centroids_rng(
     replica_count: usize,
-    candidates: Vec<Neighbor>,
+    mut candidates: Vec<Neighbor>,
     head_reader: &impl GraphVectorIndex,
-    distance_fn: &dyn VectorDistance,
-) -> Result<Vec<u32>> {
+) -> Result<CentroidAssignment> {
     assert!(!candidates.is_empty());
-    let mut vectors = head_reader.high_fidelity_vectors()?;
-    let coder = vectors.new_coder();
 
-    let mut centroid_ids: Vec<u32> = Vec::with_capacity(replica_count);
-    let mut centroids = VecVectorStore::with_capacity(
-        coder.byte_len(head_reader.config().dimensions.get()),
-        replica_count,
+    let pruning_computer = EdgeSetDistanceComputer::from_store_and_edges(
+        &mut head_reader.high_fidelity_vectors()?,
+        &candidates,
+    )?;
+    let count = prune_edges(
+        &mut candidates,
+        &EdgePruningConfig {
+            max_edges: NonZero::new(replica_count).unwrap(),
+            max_alpha: 1.0,
+            alpha_scale: 1.0,
+        },
+        pruning_computer,
     );
-    for candidate in candidates {
-        if centroid_ids.len() >= replica_count {
-            break;
-        }
-
-        let v = vectors
-            .get(candidate.vertex())
-            .expect("returned vector should exist")?;
-        if !centroids
+    candidates.truncate(count);
+    Ok(CentroidAssignment::new(
+        candidates[0].vertex() as u32,
+        &candidates[1..]
             .iter()
-            .any(|c| distance_fn.distance(c, v) < candidate.distance())
-        {
-            centroid_ids.push(
-                candidate
-                    .vertex()
-                    .try_into()
-                    .expect("centroid_ids <= u32::MAX"),
-            );
-            centroids.push(v);
-        }
-    }
-    Ok(centroid_ids)
+            .map(|n| n.vertex() as u32)
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn select_centroids_soar(
@@ -494,7 +495,7 @@ fn select_centroids_soar(
     candidates: Vec<Neighbor>,
     vector: &[f32],
     head_reader: &impl GraphVectorIndex,
-) -> Result<Vec<u32>> {
+) -> Result<CentroidAssignment> {
     assert!(!candidates.is_empty());
     let mut vectors = head_reader.high_fidelity_vectors()?;
     let coder = vectors.new_coder();
@@ -507,7 +508,7 @@ fn select_centroids_soar(
     let soar_dist = if let Some(dist) = SoarQueryVectorDistance::new(vector, &primary) {
         dist
     } else {
-        return Ok(vec![candidates[0].vertex() as u32]);
+        return Ok(CentroidAssignment::new(candidates[0].vertex() as u32, &[]));
     };
     let mut secondary_centroid_ids = Vec::with_capacity(candidates.len() - 1);
     let mut candidate_vector = vec![0.0f32; primary.len()];
@@ -525,11 +526,14 @@ fn select_centroids_soar(
     }
 
     secondary_centroid_ids.sort_unstable();
-    Ok(std::iter::once(&candidates[0])
-        .chain(secondary_centroid_ids.iter())
-        .take(replica_count)
-        .map(|n| n.vertex() as u32)
-        .collect())
+    Ok(CentroidAssignment::new(
+        candidates[0].vertex() as u32,
+        &secondary_centroid_ids
+            .iter()
+            .take(replica_count - 1)
+            .map(|n| n.vertex() as u32)
+            .collect::<Vec<_>>(),
+    ))
 }
 
 pub struct SessionIndexReader {

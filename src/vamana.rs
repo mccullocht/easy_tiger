@@ -256,7 +256,10 @@ impl EdgeSetDistanceComputer {
         }
     }
 
-    fn from_store_and_edges(store: &mut impl GraphVectorStore, edges: &[Neighbor]) -> Result<Self> {
+    pub(crate) fn from_store_and_edges(
+        store: &mut impl GraphVectorStore,
+        edges: &[Neighbor],
+    ) -> Result<Self> {
         let vectors = edges
             .iter()
             .map(|n| {
@@ -328,7 +331,7 @@ fn select_pruned_edges(
 /// Prune `edges` down to at most `max_edges`. Use `graph` and `distance_fn` to inform this decision.
 /// Returns a split point: all edges before that point are selected, all after are to be dropped.
 /// REQUIRES: `edges.is_sorted()`.
-fn prune_edges(
+pub(crate) fn prune_edges(
     edges: &mut [Neighbor],
     config: &EdgePruningConfig,
     edge_distance_computer: EdgeSetDistanceComputer,

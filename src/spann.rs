@@ -100,20 +100,20 @@ impl std::fmt::Display for ReplicaSelectionAlgorithm {
 }
 
 #[derive(Clone)]
-struct TableNames {
+pub struct TableNames {
     // Table that maps (centroid_id,record_id) -> quantized vector.
     // Ranges of this table are searched based on the outcome of searching the head.
-    postings: String,
+    pub postings: String,
     // Table that maps record_id -> centroid_id*.
     // This table is necessary when deleting a vector to locate rows posting rows to delete.
     // It may also be useful for determining matching centroids in a filtered search.
-    centroids: String,
+    pub centroids: String,
     // Table that maps centroid_id -> (primary_count, secondary_count).
     // These pre-aggregated statistics are used to balance the index and influence search.
-    centroid_stats: String,
+    pub centroid_stats: String,
     // Table that maps record_id -> raw vector.
     // This is used for re-scoring after a SPANN search.
-    raw_vectors: String,
+    pub raw_vectors: String,
 }
 
 impl TableNames {
@@ -144,8 +144,8 @@ impl TableNames {
 #[derive(Clone)]
 pub struct TableIndex {
     // Head vector index containing the centroids.
-    head: Arc<TableGraphVectorIndex>,
-    table_names: TableNames,
+    pub head: Arc<TableGraphVectorIndex>,
+    pub table_names: TableNames,
     config: IndexConfig,
 }
 
@@ -272,6 +272,10 @@ impl TableIndex {
         &self.table_names.centroid_stats
     }
 
+    pub fn raw_vectors_table_name(&self) -> &str {
+        &self.table_names.raw_vectors
+    }
+
     fn head_name(index_name: &str) -> String {
         format!("{index_name}.head")
     }
@@ -350,7 +354,7 @@ pub struct CentroidAssignment {
 }
 
 impl CentroidAssignment {
-    fn new(primary_id: u32, secondary_ids: &[u32]) -> Self {
+    pub fn new(primary_id: u32, secondary_ids: &[u32]) -> Self {
         Self {
             primary_id,
             secondary_ids: secondary_ids.iter().map(|id| id.to_le_bytes()).collect(),

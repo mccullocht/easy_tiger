@@ -52,6 +52,10 @@ pub fn insert_vectors(
     args: InsertVectorsArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
+    assert!(
+        index.config().replica_count == 1,
+        "insert_vectors only implemented for replica count 1"
+    );
 
     let session = connection.open_session()?;
     let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
@@ -90,10 +94,8 @@ pub fn insert_vectors(
         .rerank_format
         .map(|f| f.new_coder(similarity));
 
-    let total_vectors = args.count.get();
     let batch_size = args.batch_size.get();
-
-    let main_progress = progress_bar(total_vectors, "inserting vectors");
+    let main_progress = progress_bar(args.count.get() - args.start, "inserting vectors");
 
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
@@ -216,13 +218,15 @@ fn rebalance(
         }
 
         match (summary.below_exemplar(), summary.above_exemplar()) {
-            (Some((to_merge, _)), _) if summary.total_clusters() > 1 => {
-                progress.set_message(format!("merge {to_merge} ({iter})"));
+            (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
+                progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
                 merge_centroid(&index, &head_index, to_merge)?;
             }
-            (_, Some((to_split, _))) => {
-                progress.set_message(format!("split {to_split} ({iter})"));
-                // split_centroid needs a new centroid ID.
+            (_, Some((to_split, len))) => {
+                progress.set_message(format!("split {to_split} of {len} ({iter})"));
+                // TODO: split_centroid should allow splitting into multiple centroids.
+                // This requires allocating an arbitrary number of ids and accommodating these
+                // additional ids in the split of the centroid and updating of nearby centroids.
                 let next_id = stats.available_centroid_ids().next().unwrap();
                 split_centroid(&index, &head_index, to_split, next_id, rng)?;
             }

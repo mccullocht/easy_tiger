@@ -212,11 +212,6 @@ fn rebalance(
         let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
 
-        // If we are perfectly balanced, stop
-        if summary.below_exemplar().is_none() && summary.above_exemplar().is_none() {
-            break;
-        }
-
         match (summary.below_exemplar(), summary.above_exemplar()) {
             (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
                 progress.set_message(format!("merge {to_merge} of {len} ({iter})"));

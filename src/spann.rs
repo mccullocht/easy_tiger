@@ -24,8 +24,11 @@ use wt_mdb::{
 
 use crate::{
     input::{VecVectorStore, VectorStore},
-    vamana::wt::{read_app_metadata, SessionGraphVectorIndex, TableGraphVectorIndex},
-    vamana::{GraphConfig, GraphSearchParams, GraphVectorIndex, GraphVectorStore},
+    spann::centroid_stats::CentroidCounts,
+    vamana::{
+        wt::{read_app_metadata, SessionGraphVectorIndex, TableGraphVectorIndex},
+        GraphConfig, GraphSearchParams, GraphVectorIndex, GraphVectorStore,
+    },
     Neighbor,
 };
 
@@ -220,6 +223,15 @@ impl TableIndex {
             )?;
         }
         session.create_table(
+            &table_names.centroid_stats,
+            Some(
+                CreateOptionsBuilder::default()
+                    .key_format::<u32>()
+                    .value_format::<CentroidCounts>()
+                    .into(),
+            ),
+        )?;
+        session.create_table(
             &table_names.postings,
             Some(
                 CreateOptionsBuilder::default()
@@ -258,6 +270,10 @@ impl TableIndex {
 
     pub fn centroid_stats_table_name(&self) -> &str {
         &self.table_names.centroid_stats
+    }
+
+    pub fn raw_vectors_table_name(&self) -> &str {
+        &self.table_names.raw_vectors
     }
 
     fn head_name(index_name: &str) -> String {
@@ -323,7 +339,7 @@ impl Formatted for PostingKey {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-enum CentroidAssignmentType {
+pub enum CentroidAssignmentType {
     Primary,
     Secondary,
 }
@@ -338,14 +354,14 @@ pub struct CentroidAssignment {
 }
 
 impl CentroidAssignment {
-    fn new(primary_id: u32, secondary_ids: &[u32]) -> Self {
+    pub fn new(primary_id: u32, secondary_ids: &[u32]) -> Self {
         Self {
             primary_id,
             secondary_ids: secondary_ids.iter().map(|id| id.to_le_bytes()).collect(),
         }
     }
 
-    fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + '_ {
         self.to_formatted_ref().iter()
     }
 }
@@ -410,11 +426,12 @@ pub struct CentroidAssignmentRef<'a> {
 }
 
 impl<'a> CentroidAssignmentRef<'a> {
-    fn len(&self) -> usize {
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
         1 + self.secondary_ids.len()
     }
 
-    fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + 'a {
+    pub fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + 'a {
         std::iter::once((CentroidAssignmentType::Primary, self.primary_id)).chain(
             self.secondary_ids
                 .iter()

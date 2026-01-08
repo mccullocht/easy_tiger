@@ -339,7 +339,7 @@ impl Formatted for PostingKey {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-enum CentroidAssignmentType {
+pub enum CentroidAssignmentType {
     Primary,
     Secondary,
 }
@@ -361,7 +361,7 @@ impl CentroidAssignment {
         }
     }
 
-    fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + '_ {
         self.to_formatted_ref().iter()
     }
 }
@@ -426,11 +426,11 @@ pub struct CentroidAssignmentRef<'a> {
 }
 
 impl<'a> CentroidAssignmentRef<'a> {
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         1 + self.secondary_ids.len()
     }
 
-    fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + 'a {
+    pub fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + 'a {
         std::iter::once((CentroidAssignmentType::Primary, self.primary_id)).chain(
             self.secondary_ids
                 .iter()

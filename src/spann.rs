@@ -426,6 +426,7 @@ pub struct CentroidAssignmentRef<'a> {
 }
 
 impl<'a> CentroidAssignmentRef<'a> {
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         1 + self.secondary_ids.len()
     }

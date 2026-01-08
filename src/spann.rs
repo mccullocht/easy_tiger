@@ -24,8 +24,11 @@ use wt_mdb::{
 
 use crate::{
     input::{VecVectorStore, VectorStore},
-    vamana::wt::{read_app_metadata, SessionGraphVectorIndex, TableGraphVectorIndex},
-    vamana::{GraphConfig, GraphSearchParams, GraphVectorIndex, GraphVectorStore},
+    spann::centroid_stats::CentroidCounts,
+    vamana::{
+        wt::{read_app_metadata, SessionGraphVectorIndex, TableGraphVectorIndex},
+        GraphConfig, GraphSearchParams, GraphVectorIndex, GraphVectorStore,
+    },
     Neighbor,
 };
 
@@ -219,6 +222,15 @@ impl TableIndex {
                 ),
             )?;
         }
+        session.create_table(
+            &table_names.centroid_stats,
+            Some(
+                CreateOptionsBuilder::default()
+                    .key_format::<u32>()
+                    .value_format::<CentroidCounts>()
+                    .into(),
+            ),
+        )?;
         session.create_table(
             &table_names.postings,
             Some(

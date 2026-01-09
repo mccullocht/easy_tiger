@@ -621,131 +621,12 @@ mod test {
         assert_float_near!(f32_dist, query_dist, threshold, index);
     }
 
-    fn test_float_vectors() -> Vec<(Vec<f32>, Vec<f32>)> {
-        // TODO: randomly generate a bunch of vectors for this test.
-        vec![
-            (vec![-1.0f32, 2.5, 0.7, -1.7], vec![-0.6f32, -1.2, 0.4, 0.3]),
-            (
-                vec![
-                    1.22f32, 1.25, 2.37, -2.21, 2.28, -2.8, -0.61, 2.29, -2.56, -0.57, -2.62,
-                    -1.56, 1.92, -0.63, 0.77, -2.86,
-                ],
-                vec![
-                    3.19, 2.91, 0.23, -2.51, -0.76, 1.82, 1.97, 2.19, -0.15, -3.85, -3.14, -0.43,
-                    1.06, -0.05, 2.05, -2.51,
-                ],
-            ),
-            (
-                vec![
-                    -0.99, 0.48, 0.14, -0.03, 0.92, 0.31, 0.08, 0.78, -0.29, -0.47, 0.21, -0.68,
-                    0.41, 0.4, 0.45, 0.99, -0.89, 0.13, 0.71, -0.97, 0.92, -0.82, 0.97, 0.96, 0.51,
-                    -0.44, -0.95, -0.71, -0.87, 0.68, 0.32, 0.6, 0.66, -0.7, -0.36, -0.54, 0.23,
-                    0.34, -0.21, 0.67, -0.17, 0.38, 0.68, 0.73, 0.44, -0.93, 0.28, 0.9, -0.16,
-                    0.03, 0.91, -0.78, -0.82, 0.07, 0.19, -0.55, 0.19, 0.63, 0.69, 0.96, 0.7, 0.42,
-                    -0.06, -0.87,
-                ],
-                vec![
-                    -0.94, 0.96, -0.34, 0.29, -0.36, 0.33, 0.47, -0.91, 0.8, 0.71, 0.09, 0.76,
-                    -0.9, -0.45, 0.73, -0.13, 0.99, 0.41, -0.12, 0.56, 0.33, 0.74, 0.98, -0.01,
-                    1.0, -0.98, -0.28, -0.59, -0.18, -0.32, -0.33, -0.81, -0.99, -0.54, 0.02, 0.92,
-                    0.1, 0.63, -0.58, 0.84, -0.97, -0.36, 0.1, 0.8, -0.19, -0.43, 0.56, -0.6, 0.07,
-                    -0.63, 0.96, 0.74, 0.69, -0.59, 0.25, 0.2, -0.35, -0.07, 0.84, -0.96, -0.39,
-                    -0.36, -0.96, 0.52,
-                ],
-            ),
-            (
-                vec![
-                    -0.62, 0.82, -0.26, -0.02, -0.44, -0.24, 0.41, -0.96, -0.3, -0.66, -0.11, 0.79,
-                    -0.07, -0.53, 0.97, -0.81, 0.87, 0.97, 0.04, 0.15, 0.84, 0.29, -0.31, -0.19,
-                    0.68, 0.57, -0.38, -0.54, -0.09, -0.78, 0.72, 0.32, -0.08, -0.19, 0.38, -0.95,
-                    -0.81, -0.89, -0.13, -0.1, 0.43, -0.41, 0.18, -0.53, 0.11, 0.01, -0.15, -0.11,
-                    -0.36, -0.62, -0.48, -0.64, -0.88, -0.02, -0.48, -0.5, 0.48, -0.57, -0.55,
-                    -0.75, 0.04, 0.4, 0.18, -0.85,
-                ],
-                vec![
-                    -0.84, 0.4, -0.29, -0.07, 0.3, 0.78, -0.85, -0.52, 0.18, 0.12, -0.91, -0.07,
-                    0.65, -0.14, 0.09, 0.43, 0.63, 0.86, 0.78, 0.61, 0.33, 0.15, 0.46, -0.62, 0.14,
-                    -0.63, -0.37, 0.15, 0.84, 0.5, 0.56, -0.5, 0.45, 0.44, 0.96, 0.89, 0.44, -0.64,
-                    0.47, -0.33, -0.66, 0.51, -0.43, -0.29, 0.57, 0.33, -0.46, -0.57, 0.25, 0.9,
-                    0.5, 0.52, 0.44, 0.97, -0.83, -0.3, 0.23, 0.47, 0.96, -0.83, 0.34, 0.77, -0.26,
-                    0.94,
-                ],
-            ),
-            (
-                vec![
-                    -0.11, -0.08, -0.81, 0.64, 0.39, -0.55, 0.35, 0.06, 0.18, -0.29, -0.03, 0.48,
-                    1.0, -0.56, -0.37, -0.99, 0.63, -0.17, 0.64, 0.99, -0.27, 0.06, -0.54, -0.5,
-                    0.57, -0.12, -0.66, 0.0, 0.59, 0.12, -0.1, 0.53, -0.03, -0.96, -0.94, -0.01,
-                    -0.15, -0.8, -0.39, -0.11, 0.42, 0.18, -0.72, 0.65, -0.35, -0.43, -0.75, -0.11,
-                    -1.0, 0.0, -0.03, 0.24, 0.32, 0.56, 0.31, 0.28, 0.58, 0.36, 0.24, -0.52, -0.34,
-                    0.85, -0.34, 0.95,
-                ],
-                vec![
-                    -0.04, 0.63, 0.07, 0.05, 0.14, -0.47, 0.02, -0.76, 0.19, 0.48, 0.37, 0.81,
-                    0.36, -0.99, 0.84, 0.35, 0.41, -0.25, -0.6, 0.85, 0.13, 0.77, 0.08, 0.29, 0.31,
-                    -0.76, -0.13, 0.15, -0.92, 0.79, 0.34, 0.68, 0.77, 0.3, 0.43, 0.72, -0.95,
-                    0.85, -0.97, 0.4, -0.2, 0.53, 0.65, 0.17, -0.43, 0.75, 0.69, 0.82, 0.03, -0.23,
-                    0.12, -0.35, -0.0, -0.3, -0.11, 0.59, -0.64, -0.36, 0.72, -0.29, 0.41, 0.08,
-                    -0.9, 0.18,
-                ],
-            ),
-        ]
-    }
-
     use F32VectorCoding::{
         F16, I4ScaledUniform, I8ScaledUniform, I16ScaledUniform, LVQ1x1, LVQ1x4, LVQ1x8, LVQ2x1x8,
         LVQ2x4x4, LVQ2x4x8, LVQ2x8x8,
     };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
     use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
-
-    #[test]
-    fn i16_scaled_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, I16ScaledUniform, i, &a, &b, 0.001);
-            query_distance_compare(Dot, I16ScaledUniform, i, &a, &b, 0.001);
-        }
-    }
-
-    #[test]
-    fn i16_scaled_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, I16ScaledUniform, i, &a, &b, 0.001);
-            query_distance_compare(Euclidean, I16ScaledUniform, i, &a, &b, 0.001);
-        }
-    }
-
-    #[test]
-    fn i8_scaled_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, I8ScaledUniform, i, &a, &b, 0.01);
-            query_distance_compare(Dot, I8ScaledUniform, i, &a, &b, 0.01);
-        }
-    }
-
-    #[test]
-    fn i8_scaled_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, I8ScaledUniform, i, &a, &b, 0.01);
-            query_distance_compare(Euclidean, I8ScaledUniform, i, &a, &b, 0.01);
-        }
-    }
-
-    #[test]
-    fn i4_scaled_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, I4ScaledUniform, i, &a, &b, 0.10);
-            query_distance_compare(Dot, I4ScaledUniform, i, &a, &b, 0.10);
-        }
-    }
-
-    #[test]
-    fn i4_scaled_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, I4ScaledUniform, i, &a, &b, 0.10);
-            query_distance_compare(Euclidean, I4ScaledUniform, i, &a, &b, 0.10);
-        }
-    }
 
     macro_rules! distance_test {
         ($name:ident, $sim:path, $coder:path, $epsilon:literal) => {
@@ -756,16 +637,13 @@ mod test {
                 let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
                 for i in 0..1024 {
                     let dim = rng.random_range(128..=256);
-                    let a = l2_normalize(
-                        (0..dim)
-                            .map(|_| rng.random_range(-1.0f32..=1.0))
-                            .collect::<Vec<_>>(),
-                    );
-                    let b = l2_normalize(
-                        (0..dim)
-                            .map(|_| rng.random_range(-1.0f32..=1.0))
-                            .collect::<Vec<_>>(),
-                    );
+                    let a = (0..dim)
+                        .map(|_| rng.random_range(-1.0f32..=1.0))
+                        .collect::<Vec<_>>();
+                    let b = (0..dim)
+                        .map(|_| rng.random_range(-1.0f32..=1.0))
+                        .collect::<Vec<_>>();
+
                     distance_compare($sim, $coder, i, &a, &b, $epsilon);
                     query_distance_compare($sim, $coder, i, &a, &b, $epsilon);
                 }
@@ -773,9 +651,9 @@ mod test {
         };
     }
 
-    distance_test!(f16_cosine_dist, Cosine, F16, 0.01);
-    distance_test!(f16_dot_dist, Dot, F16, 0.01);
-    distance_test!(f16_l2_dist, Euclidean, F16, 0.01);
+    distance_test!(f16_cosine_dist, Cosine, F16, 0.001);
+    distance_test!(f16_dot_dist, Dot, F16, 0.001);
+    distance_test!(f16_l2_dist, Euclidean, F16, 0.001);
 
     distance_test!(lvq1x1_dot_dist, Dot, LVQ1x1, 0.4);
     distance_test!(lvq1x1_l2_dist, Euclidean, LVQ1x1, 0.4);
@@ -792,6 +670,13 @@ mod test {
     distance_test!(lvq2x4x8_l2_dist, Euclidean, LVQ2x4x8, 0.001);
     distance_test!(lvq2x8x8_dot_dist, Dot, LVQ2x8x8, 0.001);
     distance_test!(lvq2x8x8_l2_dist, Euclidean, LVQ2x8x8, 0.001);
+
+    distance_test!(i4_scaled_dot_dist, Dot, I4ScaledUniform, 0.1);
+    distance_test!(i4_scaled_l2_dist, Euclidean, I4ScaledUniform, 0.1);
+    distance_test!(i8_scaled_dot_dist, Dot, I8ScaledUniform, 0.01);
+    distance_test!(i8_scaled_l2_dist, Euclidean, I8ScaledUniform, 0.01);
+    distance_test!(i16_scaled_dot_dist, Dot, I16ScaledUniform, 0.001);
+    distance_test!(i16_scaled_l2_dist, Euclidean, I16ScaledUniform, 0.001);
 
     macro_rules! lvq_coding_simd_test {
         ($name:ident, $coder:ty) => {

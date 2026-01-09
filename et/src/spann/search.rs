@@ -114,13 +114,13 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     let recall_computer =
         RecallComputer::from_args(args.recall, index.head_config().config().similarity)?;
     if let Some(computer) = recall_computer.as_ref() {
-        if computer.neighbors_len() != query_vectors.len() {
+        if computer.neighbors_len() < limit {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "neighbors must have the same number of rows as query_vectors ({} vs {})",
                     computer.neighbors_len(),
-                    query_vectors.len()
+                    limit,
                 ),
             ));
         }

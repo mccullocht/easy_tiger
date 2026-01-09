@@ -236,7 +236,7 @@ __attribute__((target("+fp16"))) EXPORT float et_l2_f32_f16(const float* a,
   if (len4 < len) {
     float32x4_t dv =
         vsubq_f32(load_tail_f32x4(a + len4, len - len4),
-                  vcvt_f32_f16(load_tail_f16x4(b + len, len - len4)));
+                  vcvt_f32_f16(load_tail_f16x4(b + len4, len - len4)));
     sum0 = vfmaq_f32(sum0, dv, dv);
   }
 

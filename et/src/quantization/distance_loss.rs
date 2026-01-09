@@ -16,6 +16,9 @@ pub struct DistanceLossArgs {
     /// vector distance implementation.
     #[arg(long)]
     quantize_query: bool,
+    /// Limit on the number of queries. If unset, use all input queries.
+    #[arg(long)]
+    query_limit: Option<usize>,
 
     /// Limit on the number of documents. If unset, use all input vectors as docs.
     #[arg(long)]
@@ -41,6 +44,7 @@ pub fn distance_loss(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         NonZero::new(vectors.elem_stride()).unwrap(),
     )?;
+    let query_limit = args.query_limit.unwrap_or(query_vectors.len());
 
     let center = if args.center {
         Some(super::compute_center(vectors))
@@ -49,7 +53,7 @@ pub fn distance_loss(
     };
 
     let coder = args.format.new_coder(args.similarity);
-    let query_scorers = (0..query_vectors.len())
+    let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
             let mut query = Cow::from(&query_vectors[i]);
@@ -84,7 +88,7 @@ pub fn distance_loss(
                 }
             }
             let doc = Arc::new(coder.encode(&doc_f32));
-            (0..query_vectors.len())
+            (0..query_limit)
                 .into_par_iter()
                 .map(move |q| (q, d, Arc::clone(&doc)))
         })

@@ -774,6 +774,89 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for FastTwoLevelQuery
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct PrimaryTVectorCoder(InstructionSet);
+
+impl PrimaryTVectorCoder {
+    const B: usize = 8;
+
+    #[allow(unused)]
+    pub fn scalar() -> Self {
+        Self(InstructionSet::Scalar)
+    }
+}
+
+impl Default for PrimaryTVectorCoder {
+    fn default() -> Self {
+        Self(InstructionSet::default())
+    }
+}
+
+impl F32VectorCoder for PrimaryTVectorCoder {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let stats = VectorStats::from(vector);
+        let mut header = PrimaryVectorHeader::from(stats);
+        (header.lower, header.upper) = optimize_interval(vector, &stats, Self::B);
+        let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
+        header.component_sum = match self.0 {
+            InstructionSet::Scalar => scalar::tlvq_primary_quantize_and_pack::<{ Self::B }>(
+                vector,
+                header.lower,
+                header.upper,
+                vector_bytes,
+            ),
+            #[cfg(target_arch = "aarch64")]
+            // XXX
+            InstructionSet::Neon => scalar::tlvq_primary_quantize_and_pack::<{ Self::B }>(
+                vector,
+                header.lower,
+                header.upper,
+                vector_bytes,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            // XXX
+            InstructionSet::Avx512 => scalar::tlvq_primary_quantize_and_pack::<{ Self::B }>(
+                vector,
+                header.lower,
+                header.upper,
+                vector_bytes,
+            ),
+        };
+        header.serialize(header_bytes);
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        PrimaryVectorHeader::LEN + packing::tbyte_len::<{ Self::B }>(dimensions)
+    }
+
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        // XXX I can probably replace this with a single function that produces (terms, vector).
+        let (header, vector) = PrimaryVectorHeader::deserialize(encoded).expect("valid header");
+        let terms = VectorTerms {
+            lower: header.lower,
+            delta: (header.upper - header.lower) / ((1 << Self::B) - 1) as f32,
+            component_sum: header.component_sum,
+        };
+        match self.0 {
+            InstructionSet::Scalar => {
+                scalar::tlvq_primary_decode::<{ Self::B }>(terms, vector, out)
+            }
+            #[cfg(target_arch = "aarch64")]
+            // XXX
+            InstructionSet::Neon => scalar::tlvq_primary_decode::<{ Self::B }>(terms, vector, out),
+            #[cfg(target_arch = "x86_64")]
+            // XXX
+            InstructionSet::Avx512 => {
+                scalar::tlvq_primary_decode::<{ Self::B }>(terms, vector, out)
+            }
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        (byte_len - PrimaryVectorHeader::LEN) * 8 / Self::B
+    }
+}
+
 mod packing {
     use std::iter::FusedIterator;
 
@@ -886,6 +969,37 @@ mod packing {
     /// REQUIRES: B must be in 1..=8 and B % 8 == 0
     pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u8> + '_ {
         UnpackIter::<B>::new(packed)
+    }
+
+    pub fn tbyte_len<const B: usize>(dimensions: usize) -> usize {
+        assert_eq!(B, 8);
+        dimensions.next_multiple_of(16)
+    }
+
+    pub fn tpack_iter_primary<const B: usize>(
+        it: impl ExactSizeIterator<Item = u8>,
+        out: &mut [u8],
+    ) {
+        assert_eq!(B, 8);
+        assert_eq!(out.len() % 16, 0);
+        let blocks = out.as_chunks_mut::<16>().0;
+        for (i, q) in it.enumerate() {
+            let block = &mut blocks[i / 16];
+            let w = i / 4;
+            let sw = i % 4;
+            block[w * 4 + sw] = q;
+        }
+    }
+
+    pub fn tunpack_iter<const B: usize>(packed: &[u8]) -> impl Iterator<Item = u8> + '_ {
+        assert_eq!(B, 8);
+        assert_eq!(packed.len() % 16, 0);
+        packed.as_chunks::<16>().0.iter().flat_map(|block| {
+            [
+                block[0], block[4], block[8], block[12], block[1], block[5], block[9], block[13],
+                block[2], block[6], block[10], block[14], block[3], block[7], block[11], block[15],
+            ]
+        })
     }
 }
 

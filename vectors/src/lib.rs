@@ -192,7 +192,7 @@ impl F32VectorCoding {
             Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::<4, 4>::default()),
             Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::<4, 8>::default()),
             Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::<8, 8>::default()),
-            Self::TLVQ8 => todo!("XXX"),
+            Self::TLVQ8 => Box::new(lvq::PrimaryTVectorCoder::default()),
         }
     }
 

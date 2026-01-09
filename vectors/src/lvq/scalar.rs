@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+use crate::lvq::VectorTerms;
+
 use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
@@ -159,6 +161,34 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
 
 pub fn lvq2_decode<const B1: usize, const B2: usize>(v: &TwoLevelVector<B1, B2>, out: &mut [f32]) {
     for (d, o) in v.f32_iter().zip(out.iter_mut()) {
+        *o = d;
+    }
+}
+
+pub fn tlvq_primary_quantize_and_pack<const B: usize>(
+    v: &[f32],
+    lower: f32,
+    upper: f32,
+    out: &mut [u8],
+) -> u32 {
+    let delta_inv = ((1 << B) - 1) as f32 / (upper - lower);
+    let mut component_sum = 0u32;
+    super::packing::tpack_iter_primary::<B>(
+        v.iter().copied().map(|x| {
+            let q = ((x.clamp(lower, upper) - lower) * delta_inv).round() as u8;
+            component_sum += u32::from(q);
+            q
+        }),
+        out,
+    );
+    component_sum
+}
+
+pub fn tlvq_primary_decode<const B: usize>(terms: VectorTerms, vector: &[u8], out: &mut [f32]) {
+    for (d, o) in super::packing::tunpack_iter::<B>(vector)
+        .map(|q| q as f32 * terms.delta + terms.lower)
+        .zip(out.iter_mut())
+    {
         *o = d;
     }
 }

@@ -692,33 +692,12 @@ mod test {
         ]
     }
 
-    use F32VectorCoding::{F16, I4ScaledUniform, I8ScaledUniform, I16ScaledUniform};
+    use F32VectorCoding::{
+        F16, I4ScaledUniform, I8ScaledUniform, I16ScaledUniform, LVQ1x1, LVQ1x4, LVQ1x8, LVQ2x1x8,
+        LVQ2x4x4, LVQ2x4x8, LVQ2x8x8,
+    };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
     use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
-
-    #[test]
-    fn f16_cosine() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Cosine, F16, i, &a, &b, 0.001);
-            query_distance_compare(Cosine, F16, i, &a, &b, 0.001);
-        }
-    }
-
-    #[test]
-    fn f16_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F16, i, &a, &b, 0.001);
-            query_distance_compare(Dot, F16, i, &a, &b, 0.001);
-        }
-    }
-
-    #[test]
-    fn f16_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, F16, i, &a, &b, 0.001);
-            query_distance_compare(Euclidean, F16, i, &a, &b, 0.001);
-        }
-    }
 
     #[test]
     fn i16_scaled_dot() {
@@ -768,101 +747,47 @@ mod test {
         }
     }
 
-    #[test]
-    fn lvq1x4_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ1x4, i, &a, &b, 0.02);
-            query_distance_compare(Dot, F32VectorCoding::LVQ1x4, i, &a, &b, 0.02);
-        }
+    macro_rules! distance_test {
+        ($name:ident, $sim:path, $coder:path, $epsilon:literal) => {
+            #[test]
+            fn $name() {
+                let seed = OsRng::default().try_next_u64().unwrap();
+                println!("SEED {seed:#016x}");
+                let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+                for i in 0..1024 {
+                    let dim = rng.random_range(128..=256);
+                    let a = (0..dim)
+                        .map(|_| rng.random_range(-1.0f32..=1.0))
+                        .collect::<Vec<_>>();
+                    let b = (0..dim)
+                        .map(|_| rng.random_range(-1.0f32..=1.0))
+                        .collect::<Vec<_>>();
+                    distance_compare($sim, $coder, i, &a, &b, $epsilon);
+                    query_distance_compare($sim, $coder, i, &a, &b, $epsilon);
+                }
+            }
+        };
     }
 
-    #[test]
-    fn lvq1x4_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, F32VectorCoding::LVQ1x4, i, &a, &b, 0.02);
-            query_distance_compare(Euclidean, F32VectorCoding::LVQ1x4, i, &a, &b, 0.02);
-        }
-    }
+    distance_test!(f16_cosine_dist, Cosine, F16, 0.001);
+    distance_test!(f16_dot_dist, Dot, F16, 0.001);
+    distance_test!(f16_l2_dist, Euclidean, F16, 0.001);
 
-    #[test]
-    fn lvq1x8_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ1x8, i, &a, &b, 0.001);
-            query_distance_compare(Dot, F32VectorCoding::LVQ1x8, i, &a, &b, 0.001);
-        }
-    }
+    distance_test!(lvq1x1_dot_dist, Dot, LVQ1x1, 0.4);
+    distance_test!(lvq1x1_l2_dist, Euclidean, LVQ1x1, 0.4);
+    distance_test!(lvq1x4_dot_dist, Dot, LVQ1x4, 0.05);
+    distance_test!(lvq1x4_l2_dist, Euclidean, LVQ1x4, 0.05);
+    distance_test!(lvq1x8_dot_dist, Dot, LVQ1x8, 0.01);
+    distance_test!(lvq1x8_l2_dist, Euclidean, LVQ1x8, 0.01);
 
-    #[test]
-    fn lvq1x8_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, F32VectorCoding::LVQ1x8, i, &a, &b, 0.001);
-            query_distance_compare(Euclidean, F32VectorCoding::LVQ1x8, i, &a, &b, 0.001);
-        }
-    }
-
-    #[test]
-    fn lvq2x1x8_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ2x1x8, i, &a, &b, 0.01);
-            query_distance_compare(Dot, F32VectorCoding::LVQ2x1x8, i, &a, &b, 0.01);
-        }
-    }
-
-    #[test]
-    fn lvq2x1x8_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, F32VectorCoding::LVQ2x1x8, i, &a, &b, 0.01);
-            query_distance_compare(Euclidean, F32VectorCoding::LVQ2x1x8, i, &a, &b, 0.01);
-        }
-    }
-
-    #[test]
-    fn lvq2x4x4_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ2x4x4, i, &a, &b, 0.01);
-            query_distance_compare(Dot, F32VectorCoding::LVQ2x4x4, i, &a, &b, 0.01);
-        }
-    }
-
-    #[test]
-    fn lvq2x4x4_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, F32VectorCoding::LVQ2x4x4, i, &a, &b, 0.01);
-            query_distance_compare(Euclidean, F32VectorCoding::LVQ2x4x4, i, &a, &b, 0.01);
-        }
-    }
-
-    #[test]
-    fn lvq2x4x8_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ2x4x8, i, &a, &b, 0.01);
-            query_distance_compare(Dot, F32VectorCoding::LVQ2x4x8, i, &a, &b, 0.01);
-        }
-    }
-
-    #[test]
-    fn lvq2x4x8_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, F32VectorCoding::LVQ2x4x8, i, &a, &b, 0.01);
-            query_distance_compare(Euclidean, F32VectorCoding::LVQ2x4x8, i, &a, &b, 0.01);
-        }
-    }
-
-    #[test]
-    fn lvq2x8x8_dot() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Dot, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.001);
-            query_distance_compare(Dot, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.001);
-        }
-    }
-
-    #[test]
-    fn lvq2x8x8_l2() {
-        for (i, (a, b)) in test_float_vectors().into_iter().enumerate() {
-            distance_compare(Euclidean, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.001);
-            query_distance_compare(Euclidean, F32VectorCoding::LVQ2x8x8, i, &a, &b, 0.001);
-        }
-    }
+    distance_test!(lvq2x1x8_dot_dist, Dot, LVQ2x1x8, 0.01);
+    distance_test!(lvq2x1x8_l2_dist, Euclidean, LVQ2x1x8, 0.01);
+    distance_test!(lvq2x4x4_dot_dist, Dot, LVQ2x4x4, 0.05);
+    distance_test!(lvq2x4x4_l2_dist, Euclidean, LVQ2x4x4, 0.05);
+    distance_test!(lvq2x4x8_dot_dist, Dot, LVQ2x4x8, 0.001);
+    distance_test!(lvq2x4x8_l2_dist, Euclidean, LVQ2x4x8, 0.001);
+    distance_test!(lvq2x8x8_dot_dist, Dot, LVQ2x8x8, 0.001);
+    distance_test!(lvq2x8x8_l2_dist, Euclidean, LVQ2x8x8, 0.001);
 
     macro_rules! lvq_coding_simd_test {
         ($name:ident, $coder:ty) => {

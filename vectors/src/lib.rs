@@ -756,12 +756,16 @@ mod test {
                 let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
                 for i in 0..1024 {
                     let dim = rng.random_range(128..=256);
-                    let a = (0..dim)
-                        .map(|_| rng.random_range(-1.0f32..=1.0))
-                        .collect::<Vec<_>>();
-                    let b = (0..dim)
-                        .map(|_| rng.random_range(-1.0f32..=1.0))
-                        .collect::<Vec<_>>();
+                    let a = l2_normalize(
+                        (0..dim)
+                            .map(|_| rng.random_range(-1.0f32..=1.0))
+                            .collect::<Vec<_>>(),
+                    );
+                    let b = l2_normalize(
+                        (0..dim)
+                            .map(|_| rng.random_range(-1.0f32..=1.0))
+                            .collect::<Vec<_>>(),
+                    );
                     distance_compare($sim, $coder, i, &a, &b, $epsilon);
                     query_distance_compare($sim, $coder, i, &a, &b, $epsilon);
                 }

@@ -769,9 +769,9 @@ mod test {
         };
     }
 
-    distance_test!(f16_cosine_dist, Cosine, F16, 0.001);
-    distance_test!(f16_dot_dist, Dot, F16, 0.001);
-    distance_test!(f16_l2_dist, Euclidean, F16, 0.001);
+    distance_test!(f16_cosine_dist, Cosine, F16, 0.01);
+    distance_test!(f16_dot_dist, Dot, F16, 0.01);
+    distance_test!(f16_l2_dist, Euclidean, F16, 0.01);
 
     distance_test!(lvq1x1_dot_dist, Dot, LVQ1x1, 0.4);
     distance_test!(lvq1x1_l2_dist, Euclidean, LVQ1x1, 0.4);

@@ -168,6 +168,11 @@ pub enum F32VectorCoding {
     LVQ2x4x8,
     /// LVQ one-level; 8 bits primary 8 bits residual
     LVQ2x8x8,
+    /// Turbo LVQ; 8 bit primary.
+    ///
+    /// Turbo LVQ packs 128 bits at a time as 32 bit x 4 values. This optimizes unpacking for
+    /// distance computations.
+    TLVQ8,
 }
 
 impl F32VectorCoding {
@@ -187,6 +192,7 @@ impl F32VectorCoding {
             Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::<4, 4>::default()),
             Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::<4, 8>::default()),
             Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::<8, 8>::default()),
+            Self::TLVQ8 => todo!("XXX"),
         }
     }
 
@@ -215,6 +221,7 @@ impl F32VectorCoding {
             (Self::LVQ2x4x4, _) => Box::new(lvq::TwoLevelDistance::<4, 4>::new(similarity)),
             (Self::LVQ2x4x8, _) => Box::new(lvq::TwoLevelDistance::<4, 8>::new(similarity)),
             (Self::LVQ2x8x8, _) => Box::new(lvq::TwoLevelDistance::<8, 8>::new(similarity)),
+            (Self::TLVQ8, _) => todo!("XXX"),
         }
     }
 
@@ -279,6 +286,7 @@ impl F32VectorCoding {
                 similarity,
                 query.into(),
             )),
+            (_, F32VectorCoding::TLVQ8) => todo!("XXX"),
         }
     }
 
@@ -334,6 +342,7 @@ impl F32VectorCoding {
             F32VectorCoding::LVQ2x8x8 => Some(Box::new(
                 lvq::FastTwoLevelQueryDistance::<8, 8>::new(similarity, query),
             )),
+            F32VectorCoding::TLVQ8 => todo!("XXX"),
         }
     }
 
@@ -399,6 +408,7 @@ impl F32VectorCoding {
             (_, F32VectorCoding::LVQ2x8x8) => {
                 quantized_qvd!(lvq::TwoLevelDistance::<8, 8>::new(similarity), query)
             }
+            (_, F32VectorCoding::TLVQ8) => todo!("XXX"),
         }
     }
 }
@@ -422,6 +432,7 @@ impl FromStr for F32VectorCoding {
             "lvq2x4x4" => Ok(Self::LVQ2x4x4),
             "lvq2x4x8" => Ok(Self::LVQ2x4x8),
             "lvq2x8x8" => Ok(Self::LVQ2x8x8),
+            "tlvq8" => Ok(Self::TLVQ8),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -443,6 +454,7 @@ impl std::fmt::Display for F32VectorCoding {
             Self::LVQ2x4x4 => write!(f, "lvq2x4x4"),
             Self::LVQ2x4x8 => write!(f, "lvq2x4x8"),
             Self::LVQ2x8x8 => write!(f, "lvq2x8x8"),
+            Self::TLVQ8 => write!(f, "tlvq8"),
         }
     }
 }

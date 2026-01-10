@@ -714,51 +714,82 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(
 
 pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     query: &[f32],
+    query_sum: f32,
     doc: &TwoLevelVector<'_, B1, B2>,
 ) -> f64 {
     let tail_split = query.len() & !7;
-
-    let (doc_l1_head, _) = doc
+    let (query_head, query_tail) = query.split_at(tail_split);
+    let (doc_primary_head, doc_primary_tail) = doc
         .primary
         .v
         .data
         .split_at(packing::byte_len(tail_split, B1));
-    let (doc_l2_head, _) = doc
+    let (doc_residual_head, doc_residual_tail) = doc
         .residual
         .data
         .split_at(packing::byte_len(tail_split, B2));
-
-    let pdot = if !doc_l1_head.is_empty() {
+    let (head_pdot, head_rdot) = if !doc_primary_head.is_empty() {
         unsafe {
-            let converter = LVQ2F32Converter::from_vector(doc);
-            let mut dot0 = vdupq_n_f32(0.0);
-            let mut dot1 = vdupq_n_f32(0.0);
+            let mut pdot0 = vdupq_n_f32(0.0);
+            let mut pdot1 = vdupq_n_f32(0.0);
+            let mut rdot0 = vdupq_n_f32(0.0);
+            let mut rdot1 = vdupq_n_f32(0.0);
             for i in (0..tail_split).step_by(8) {
                 let q = (
-                    vld1q_f32(query.as_ptr().add(i)),
-                    vld1q_f32(query.as_ptr().add(i + 4)),
+                    vld1q_f32(query_head.as_ptr().add(i)),
+                    vld1q_f32(query_head.as_ptr().add(i + 4)),
                 );
-                let d = unpack_lvq2::<B1, B2>(i, doc_l1_head, doc_l2_head);
-                dot0 = vfmaq_f32(dot0, q.0, converter.unpacked_to_f32(d.0));
-                dot1 = vfmaq_f32(dot1, q.1, converter.unpacked_to_f32(d.1));
+                let (d0, d1) = unpack_lvq2::<B1, B2>(i, doc_primary_head, doc_residual_head);
+                pdot0 = vfmaq_f32(pdot0, q.0, vcvtq_f32_u32(d0.0));
+                pdot1 = vfmaq_f32(pdot1, q.1, vcvtq_f32_u32(d1.0));
+                rdot0 = vfmaq_f32(rdot0, q.0, vcvtq_f32_u32(d0.1));
+                rdot1 = vfmaq_f32(rdot1, q.1, vcvtq_f32_u32(d1.1));
             }
-            vaddvq_f32(vaddq_f32(dot0, dot1))
+            (
+                vaddvq_f32(vaddq_f32(pdot0, pdot1)),
+                vaddvq_f32(vaddq_f32(rdot0, rdot1)),
+            )
         }
     } else {
-        0.0
+        (0.0, 0.0)
     };
 
-    if tail_split < query.len() {
-        pdot + query
+    let (pdot, rdot) = if tail_split < query.len() {
+        query_tail
             .iter()
-            .skip(tail_split)
-            .zip(doc.f32_iter().skip(tail_split))
-            .map(|(q, d)| *q * d)
-            .sum::<f32>()
+            .zip(
+                packing::unpack_iter::<B1>(doc_primary_tail)
+                    .zip(packing::unpack_iter::<B2>(doc_residual_tail)),
+            )
+            .map(|(q, (dp, dr))| (q * dp as f32, q * dr as f32))
+            .fold((head_pdot, head_rdot), |(sp, sr), (dp, dr)| {
+                (sp + dp, sr + dr)
+            })
     } else {
-        pdot
-    }
-    .into()
+        (head_pdot, head_rdot)
+    };
+
+    (pdot * doc.primary.v.terms.delta
+        + query_sum * doc.primary.v.terms.lower
+        + rdot * doc.residual.terms.delta
+        + query_sum * doc.residual.terms.lower)
+        .into()
+
+    /*
+    let (pdot, rdot) = query
+        .iter()
+        .zip(
+            packing::unpack_iter::<B1>(doc.primary.v.data)
+                .zip(packing::unpack_iter::<B2>(doc.residual.data)),
+        )
+        .map(|(q, (dp, dr))| (q * dp as f32, (q * dr as f32)))
+        .fold((0.0, 0.0), |(sp, sr), (dp, dr)| (sp + dp, sr + dr));
+    (pdot * doc.primary.v.terms.delta
+        + query_sum * doc.primary.v.terms.lower
+        + rdot * doc.residual.terms.delta
+        + query_sum * doc.residual.terms.lower)
+        .into()
+        */
 }
 
 // Unpack 8 values from a vector with N-bit dimensions starting at `start_dim`

@@ -639,7 +639,7 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
             // XXX implement aarch64 solution
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                x86_64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
+                x86_64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), self.query_sum, &vector)
             },
         };
         dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))

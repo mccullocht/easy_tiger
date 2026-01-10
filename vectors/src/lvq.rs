@@ -627,9 +627,8 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = PrimaryVector::<B>::new(vector).unwrap();
         let dot = match self.inst {
-            // XXX implement aarch64 solution
             InstructionSet::Scalar => {
-                scalar::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
+                scalar::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), self.query_sum, &vector)
             }
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::lvq1_f32_dot_unnormalized::<B>(
@@ -726,10 +725,11 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for TwoLevelQueryDist
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TwoLevelVector::<B1, B2>::new(vector).unwrap();
         let dot = match self.inst {
-            // XXX implement aarch64 solution
-            InstructionSet::Scalar => {
-                scalar::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
-            }
+            InstructionSet::Scalar => scalar::lvq2_f32_dot_unnormalized::<B1, B2>(
+                self.query.as_ref(),
+                self.query_sum,
+                &vector,
+            ),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::lvq2_f32_dot_unnormalized::<B1, B2>(
                 self.query.as_ref(),

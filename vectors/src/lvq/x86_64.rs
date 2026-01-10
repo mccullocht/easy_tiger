@@ -14,12 +14,12 @@ use std::arch::x86_64::{
     _mm512_cvtepi32_epi16, _mm512_cvtepu32_ps, _mm512_div_ps, _mm512_dpbusd_epi32,
     _mm512_dpwssd_epi32, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8,
     _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_storeu_ps, _mm512_mask_sub_ps,
-    _mm512_maskz_add_ps, _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32,
-    _mm512_maskz_expand_epi64, _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_ps, _mm512_max_ps,
-    _mm512_min_ps, _mm512_movm_epi8, _mm512_mul_ps, _mm512_permutexvar_epi8, _mm512_popcnt_epi32,
-    _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps,
-    _mm512_roundscale_ps, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps,
-    _mm512_srli_epi64, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32, _mm512_maskz_expand_epi64,
+    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_movm_epi8,
+    _mm512_mul_ps, _mm512_permutexvar_epi8, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
+    _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
+    _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps, _mm512_srli_epi64,
+    _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
 use super::{LAMBDA, LVQ2Dot, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
@@ -724,16 +724,14 @@ pub unsafe fn lvq1_f32_dot_unnormalized<const B: usize>(
 #[inline]
 pub unsafe fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     query: &[f32],
+    query_sum: f32,
     doc: &TwoLevelVector<'_, B1, B2>,
 ) -> f64 {
     let p_chunk_size = (B1 * 16).div_ceil(8);
-    let p_delta = _mm512_set1_ps(doc.primary.v.terms.delta);
-    let p_lower = _mm512_set1_ps(doc.primary.v.terms.lower);
     let r_chunk_size = (B2 * 16).div_ceil(8);
-    let r_delta = _mm512_set1_ps(doc.residual.terms.delta);
-    let r_lower = _mm512_set1_ps(doc.residual.terms.lower);
 
-    let mut dot = _mm512_set1_ps(0.0);
+    let mut p_dot = _mm512_set1_ps(0.0);
+    let mut r_dot = _mm512_set1_ps(0.0);
     for (q, (p, r)) in query.chunks(16).zip(
         doc.primary
             .v
@@ -743,16 +741,16 @@ pub unsafe fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     ) {
         let qmask = u16::MAX >> (16 - q.len());
         let qv = _mm512_maskz_loadu_ps(qmask, q.as_ptr());
-
-        let qpv = unpack::<B1>(p);
-        let pv = _mm512_fmadd_ps(_mm512_cvtepu32_ps(qpv), p_delta, p_lower);
-        let qrv = unpack::<B2>(r);
-        let rv = _mm512_fmadd_ps(_mm512_cvtepu32_ps(qrv), r_delta, r_lower);
-        let dv = _mm512_maskz_add_ps(qmask, pv, rv);
-
-        dot = _mm512_fmadd_ps(qv, dv, dot);
+        p_dot = _mm512_fmadd_ps(qv, _mm512_cvtepu32_ps(unpack::<B1>(p)), p_dot);
+        r_dot = _mm512_fmadd_ps(qv, _mm512_cvtepu32_ps(unpack::<B2>(r)), r_dot);
     }
-    _mm512_reduce_add_ps(dot).into()
+    let p_dot = _mm512_reduce_add_ps(p_dot);
+    let r_dot = _mm512_reduce_add_ps(r_dot);
+    (p_dot * doc.primary.v.terms.delta
+        + query_sum * doc.primary.v.terms.lower
+        + r_dot * doc.residual.terms.delta
+        + query_sum * doc.residual.terms.lower)
+        .into()
 }
 
 #[target_feature(enable = "avx512f")]

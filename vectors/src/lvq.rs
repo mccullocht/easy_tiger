@@ -739,7 +739,11 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for TwoLevelQueryDist
             #[cfg(target_arch = "x86_64")]
             // XXX implement aarch64 solution
             InstructionSet::Avx512 => unsafe {
-                x86_64::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
+                x86_64::lvq2_f32_dot_unnormalized::<B1, B2>(
+                    self.query.as_ref(),
+                    self.query_sum,
+                    &vector,
+                )
             },
         };
         dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))

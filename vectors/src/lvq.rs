@@ -600,6 +600,7 @@ pub struct PrimaryQueryDistance<'a, const B: usize> {
     similarity: VectorSimilarity,
     query: Cow<'a, [f32]>,
     query_l2_norm: f64,
+    query_sum: f32,
     inst: InstructionSet,
 }
 
@@ -610,10 +611,12 @@ impl<'a, const B: usize> PrimaryQueryDistance<'a, B> {
             VectorSimilarity::Dot => 1.0,
             _ => super::l2_norm(&query).into(),
         };
+        let query_sum = query.iter().map(|x| *x).sum::<f32>();
         Self {
             similarity,
             query,
             query_l2_norm,
+            query_sum,
             inst: InstructionSet::default(),
         }
     }
@@ -623,13 +626,17 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = PrimaryVector::<B>::new(vector).unwrap();
         let dot = match self.inst {
+            // XXX implement aarch64 solution
             InstructionSet::Scalar => {
                 scalar::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
             }
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => {
-                aarch64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
-            }
+            InstructionSet::Neon => aarch64::lvq1_f32_dot_unnormalized::<B>(
+                self.query.as_ref(),
+                self.query_sum,
+                &vector,
+            ),
+            // XXX implement aarch64 solution
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
                 x86_64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)

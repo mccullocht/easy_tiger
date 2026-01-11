@@ -801,8 +801,88 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for FastTwoLevelQuery
     }
 }
 
+/// The turbo coder requires that all vector data be packed into 16-byte blocks.
+const TURBO_BLOCK_SIZE: usize = 16;
+
+#[allow(unused)] // XXX
+#[derive(Debug, Copy, Clone)]
+pub struct TurboPrimaryCoder<const B: usize>(InstructionSet);
+
+impl<const B: usize> TurboPrimaryCoder<B> {
+    const B_CHECK: () = { check_primary_bits(B) };
+
+    #[allow(unused)]
+    pub fn scalar() -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+        Self(InstructionSet::Scalar)
+    }
+}
+
+impl<const B: usize> Default for TurboPrimaryCoder<B> {
+    fn default() -> Self {
+        Self(InstructionSet::default())
+    }
+}
+
+impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let stats = VectorStats::from(vector);
+        let mut header = PrimaryVectorHeader::from(stats);
+        (header.lower, header.upper) = optimize_interval(vector, &stats, B);
+        let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
+        let (vector_blocks, vector_rem) = vector_bytes.as_chunks_mut::<TURBO_BLOCK_SIZE>();
+        assert!(vector_rem.is_empty());
+        let mut vector_block_iter = vector_blocks.iter_mut();
+        let mut block_packer = packing::TurboBlockPacker::<B>::new();
+        let delta_inv = ((1 << B) - 1) as f32 / (header.upper - header.lower);
+        header.component_sum = vector
+            .iter()
+            .map(|&v| {
+                let q = ((v.clamp(header.lower, header.upper) - header.lower) * delta_inv).round()
+                    as u8;
+                if block_packer.push(q) {
+                    block_packer.flush(vector_block_iter.next().expect("output large enough"));
+                }
+                u32::from(q)
+            })
+            .sum();
+        if !block_packer.is_empty() {
+            block_packer.flush(vector_block_iter.next().expect("output large enough"));
+        }
+
+        header.serialize(header_bytes);
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        PrimaryVectorHeader::LEN
+            + packing::byte_len(dimensions, B).next_multiple_of(TURBO_BLOCK_SIZE)
+    }
+
+    fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
+        let (header, vector) = PrimaryVectorHeader::deserialize(vector).expect("valid header");
+        let delta = (header.upper - header.lower) / ((1 << B) - 1) as f32;
+        let (vector_blocks, vector_rem) = vector.as_chunks::<TURBO_BLOCK_SIZE>();
+        assert!(vector_rem.is_empty());
+        let block_dim = TURBO_BLOCK_SIZE * 8 / B;
+        for (qblock, oblock) in vector_blocks.iter().zip(out.chunks_mut(block_dim)) {
+            for (q, o) in packing::TurboBlockIter::<B>::new(*qblock).zip(oblock.iter_mut()) {
+                *o = (q as f32).mul_add(delta, header.lower);
+            }
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        let vector_bytes = byte_len - PrimaryVectorHeader::LEN;
+        assert!(vector_bytes % TURBO_BLOCK_SIZE == 0);
+        (vector_bytes * 8) / B
+    }
+}
+
 mod packing {
     use std::iter::FusedIterator;
+
+    use crate::lvq::TURBO_BLOCK_SIZE;
 
     /// The number of bytes required to pack `dimensions` with `bits` per entry.
     pub const fn byte_len(dimensions: usize, bits: usize) -> usize {
@@ -845,7 +925,6 @@ mod packing {
             residual[i / dims_per_byte2] |= r << ((i % dims_per_byte2) * B2);
         }
     }
-
     pub struct UnpackIter<'a, const B: usize> {
         inner: std::slice::Iter<'a, u8>,
         buf: u8,
@@ -914,11 +993,94 @@ mod packing {
     pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u8> + '_ {
         UnpackIter::<B>::new(packed)
     }
+
+    pub struct TurboBlockPacker<const B: usize> {
+        buf: [u8; TURBO_BLOCK_SIZE],
+        nbuf: usize,
+    }
+
+    impl<const B: usize> TurboBlockPacker<B> {
+        pub fn new() -> Self {
+            Self {
+                buf: [0; TURBO_BLOCK_SIZE],
+                nbuf: 0,
+            }
+        }
+
+        /// Push a new value into the buffer, returning true if the buffer is full.
+        pub fn push(&mut self, q: u8) -> bool {
+            assert!(self.nbuf < (TURBO_BLOCK_SIZE * 8) / B);
+            let byte = self.nbuf % TURBO_BLOCK_SIZE;
+            let shift = self.nbuf / TURBO_BLOCK_SIZE * B;
+            self.buf[byte] |= q << shift;
+            self.nbuf += 1;
+            self.nbuf == (TURBO_BLOCK_SIZE * 8) / B
+        }
+
+        /// Flush the contents of the packer to `out` and reset for a new block.
+        pub fn flush(&mut self, out: &mut [u8; TURBO_BLOCK_SIZE]) {
+            *out = self.buf;
+            self.buf = [0; TURBO_BLOCK_SIZE];
+            self.nbuf = 0;
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.nbuf == 0
+        }
+    }
+
+    pub struct TurboBlockIter<const B: usize> {
+        buf: [u8; TURBO_BLOCK_SIZE],
+        pos: usize,
+        shift: usize,
+    }
+
+    impl<const B: usize> TurboBlockIter<B> {
+        const MASK: u8 = u8::MAX >> (8 - B);
+
+        pub fn new(buf: [u8; TURBO_BLOCK_SIZE]) -> Self {
+            Self {
+                buf,
+                pos: 0,
+                shift: 0,
+            }
+        }
+    }
+
+    impl<const B: usize> Iterator for TurboBlockIter<B> {
+        type Item = u8;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.pos == TURBO_BLOCK_SIZE && self.shift == 8 {
+                return None;
+            }
+
+            let v = (self.buf[self.pos] >> self.shift) & Self::MASK;
+            self.pos += 1;
+            if self.pos == TURBO_BLOCK_SIZE {
+                self.pos = 0;
+                self.shift += 1;
+            }
+            Some(v)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let next = self.shift * TURBO_BLOCK_SIZE + self.pos;
+            let remaining = (TURBO_BLOCK_SIZE * 8) / B - next;
+            (remaining, Some(remaining))
+        }
+    }
+
+    impl<const B: usize> FusedIterator for TurboBlockIter<B> {}
+
+    impl<const B: usize> ExactSizeIterator for TurboBlockIter<B> {}
 }
 
 #[cfg(test)]
 mod test {
     use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
+
+    use crate::lvq::TurboPrimaryCoder;
 
     use super::{
         F32VectorCoder, PrimaryVector, PrimaryVectorCoder, PrimaryVectorHeader, TwoLevelVector,
@@ -1327,6 +1489,50 @@ mod test {
             ]
             .as_ref(),
             epsilon = 0.0001
+        );
+    }
+
+    #[test]
+    fn tlvq1() {
+        let coder = TurboPrimaryCoder::<1>::default();
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_abs_diff_eq!(
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            PrimaryVectorHeader {
+                l2_norm: 2.5226507,
+                lower: -0.49564388,
+                upper: 0.70561373,
+                component_sum: 11,
+            }
+        );
+        // NB: vector dimensionality is not a multiple of 8 so we're producting extra dimensions.
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_ref(),
+            [
+                -0.49564388,
+                -0.49564388,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                -0.49564388,
+                -0.49564388,
+                -0.49564388,
+                0.70561373,
+                -0.49564388,
+                -0.49564388,
+                0.70561373,
+                -0.49564388,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                0.70561373
+            ]
+            .as_ref(),
+            epsilon = 0.00001
         );
     }
 }

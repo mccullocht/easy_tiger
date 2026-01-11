@@ -204,27 +204,32 @@ pub fn dot_residual_u8<const B1: usize, const B2: usize>(
 }
 
 #[inline]
-pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
-    query
+pub fn lvq1_f32_dot_unnormalized<const B: usize>(
+    query: &[f32],
+    query_sum: f32,
+    doc: &PrimaryVector<'_, B>,
+) -> f64 {
+    let dot = query
         .iter()
-        .zip(
-            super::packing::unpack_iter::<B>(doc.v.data)
-                .map(|q| q as f32 * doc.v.terms.delta + doc.v.terms.lower),
-        )
-        .map(|(q, d)| *q * d)
-        .sum::<f32>()
-        .into()
+        .zip(super::packing::unpack_iter::<B>(doc.v.data))
+        .map(|(q, d)| *q * d as f32)
+        .sum::<f32>();
+    doc.f32_dot_correction(query_sum, dot).into()
 }
 
 #[inline]
 pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     query: &[f32],
+    query_sum: f32,
     doc: &TwoLevelVector<'_, B1, B2>,
 ) -> f64 {
-    query
+    let (pdot, rdot) = query
         .iter()
-        .zip(doc.f32_iter())
-        .map(|(q, d)| *q * d)
-        .sum::<f32>()
-        .into()
+        .zip(
+            super::packing::unpack_iter::<B1>(doc.primary.v.data)
+                .zip(super::packing::unpack_iter::<B2>(doc.residual.data)),
+        )
+        .map(|(q, (p, r))| (*q * p as f32, *q * r as f32))
+        .fold((0.0, 0.0), |(sp, sr), (dp, dr)| (sp + dp, sr + dr));
+    doc.f32_dot_correction(query_sum, pdot, rdot).into()
 }

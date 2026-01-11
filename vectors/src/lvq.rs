@@ -320,6 +320,10 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         packing::unpack_iter::<B>(self.v.data)
             .map(|q| (q as f32).mul_add(self.v.terms.delta, self.v.terms.lower))
     }
+
+    fn f32_dot_correction(&self, query_sum: f32, dot: f32) -> f32 {
+        dot * self.v.terms.delta + query_sum * self.v.terms.lower
+    }
 }
 
 struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
@@ -369,6 +373,13 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
                 }),
             )
             .map(|(q, r)| q + r)
+    }
+
+    fn f32_dot_correction(&self, query_sum: f32, primary_dot: f32, residual_dot: f32) -> f32 {
+        primary_dot * self.primary.v.terms.delta
+            + query_sum * self.primary.v.terms.lower
+            + residual_dot * self.residual.terms.delta
+            + query_sum * self.residual.terms.lower
     }
 }
 
@@ -600,6 +611,7 @@ pub struct PrimaryQueryDistance<'a, const B: usize> {
     similarity: VectorSimilarity,
     query: Cow<'a, [f32]>,
     query_l2_norm: f64,
+    query_sum: f32,
     inst: InstructionSet,
 }
 
@@ -610,10 +622,12 @@ impl<'a, const B: usize> PrimaryQueryDistance<'a, B> {
             VectorSimilarity::Dot => 1.0,
             _ => super::l2_norm(&query).into(),
         };
+        let query_sum = query.iter().copied().sum::<f32>();
         Self {
             similarity,
             query,
             query_l2_norm,
+            query_sum,
             inst: InstructionSet::default(),
         }
     }
@@ -624,15 +638,17 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
         let vector = PrimaryVector::<B>::new(vector).unwrap();
         let dot = match self.inst {
             InstructionSet::Scalar => {
-                scalar::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
+                scalar::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), self.query_sum, &vector)
             }
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => {
-                aarch64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
-            }
+            InstructionSet::Neon => aarch64::lvq1_f32_dot_unnormalized::<B>(
+                self.query.as_ref(),
+                self.query_sum,
+                &vector,
+            ),
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                x86_64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
+                x86_64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), self.query_sum, &vector)
             },
         };
         dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))
@@ -692,6 +708,7 @@ pub struct TwoLevelQueryDistance<'a, const B1: usize, const B2: usize> {
     similarity: VectorSimilarity,
     query: Cow<'a, [f32]>,
     query_l2_norm: f64,
+    query_sum: f32,
     inst: InstructionSet,
 }
 
@@ -701,10 +718,12 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelQueryDistance<'a, B1, B2> {
             VectorSimilarity::Dot => 1.0,
             _ => super::l2_norm(&query).into(),
         };
+        let query_sum = query.iter().copied().sum::<f32>();
         Self {
             similarity,
             query,
             query_l2_norm,
+            query_sum,
             inst: InstructionSet::default(),
         }
     }
@@ -714,16 +733,24 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for TwoLevelQueryDist
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TwoLevelVector::<B1, B2>::new(vector).unwrap();
         let dot = match self.inst {
-            InstructionSet::Scalar => {
-                scalar::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
-            }
+            InstructionSet::Scalar => scalar::lvq2_f32_dot_unnormalized::<B1, B2>(
+                self.query.as_ref(),
+                self.query_sum,
+                &vector,
+            ),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => {
-                aarch64::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
-            }
+            InstructionSet::Neon => aarch64::lvq2_f32_dot_unnormalized::<B1, B2>(
+                self.query.as_ref(),
+                self.query_sum,
+                &vector,
+            ),
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                x86_64::lvq2_f32_dot_unnormalized::<B1, B2>(self.query.as_ref(), &vector)
+                x86_64::lvq2_f32_dot_unnormalized::<B1, B2>(
+                    self.query.as_ref(),
+                    self.query_sum,
+                    &vector,
+                )
             },
         };
         dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))

@@ -214,8 +214,7 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(
         .zip(super::packing::unpack_iter::<B>(doc.v.data))
         .map(|(q, d)| *q * d as f32)
         .sum::<f32>();
-    // XXX this should be a method on the vector impl
-    (dot * doc.v.terms.delta + query_sum * doc.v.terms.lower).into()
+    doc.f32_dot_correction(query_sum, dot).into()
 }
 
 #[inline]
@@ -232,10 +231,5 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
         )
         .map(|(q, (p, r))| (*q * p as f32, *q * r as f32))
         .fold((0.0, 0.0), |(sp, sr), (dp, dr)| (sp + dp, sr + dr));
-    // XXX this should be a method on the vector impl
-    (pdot * doc.primary.v.terms.delta
-        + query_sum * doc.primary.v.terms.lower
-        + rdot * doc.residual.terms.delta
-        + query_sum * doc.residual.terms.lower)
-        .into()
+    doc.f32_dot_correction(query_sum, pdot, rdot).into()
 }

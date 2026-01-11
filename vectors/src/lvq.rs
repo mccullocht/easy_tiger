@@ -320,6 +320,10 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         packing::unpack_iter::<B>(self.v.data)
             .map(|q| (q as f32).mul_add(self.v.terms.delta, self.v.terms.lower))
     }
+
+    fn f32_dot_correction(&self, query_sum: f32, dot: f32) -> f32 {
+        dot * self.v.terms.delta + query_sum * self.v.terms.lower
+    }
 }
 
 struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
@@ -369,6 +373,13 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
                 }),
             )
             .map(|(q, r)| q + r)
+    }
+
+    fn f32_dot_correction(&self, query_sum: f32, primary_dot: f32, residual_dot: f32) -> f32 {
+        primary_dot * self.primary.v.terms.delta
+            + query_sum * self.primary.v.terms.lower
+            + residual_dot * self.residual.terms.delta
+            + query_sum * self.residual.terms.lower
     }
 }
 
@@ -611,8 +622,7 @@ impl<'a, const B: usize> PrimaryQueryDistance<'a, B> {
             VectorSimilarity::Dot => 1.0,
             _ => super::l2_norm(&query).into(),
         };
-        // XXX figure out if this should be accelerated too.
-        let query_sum = query.iter().map(|x| *x).sum::<f32>();
+        let query_sum = query.iter().copied().sum::<f32>();
         Self {
             similarity,
             query,
@@ -636,7 +646,6 @@ impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
                 self.query_sum,
                 &vector,
             ),
-            // XXX implement aarch64 solution
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
                 x86_64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), self.query_sum, &vector)
@@ -709,8 +718,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelQueryDistance<'a, B1, B2> {
             VectorSimilarity::Dot => 1.0,
             _ => super::l2_norm(&query).into(),
         };
-        // XXX figure out if this should be accelerated too.
-        let query_sum = query.iter().map(|x| *x).sum::<f32>();
+        let query_sum = query.iter().copied().sum::<f32>();
         Self {
             similarity,
             query,
@@ -737,7 +745,6 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for TwoLevelQueryDist
                 &vector,
             ),
             #[cfg(target_arch = "x86_64")]
-            // XXX implement aarch64 solution
             InstructionSet::Avx512 => unsafe {
                 x86_64::lvq2_f32_dot_unnormalized::<B1, B2>(
                     self.query.as_ref(),

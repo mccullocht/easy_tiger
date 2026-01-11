@@ -709,7 +709,7 @@ pub fn lvq1_f32_dot_unnormalized<const B: usize>(
             .zip(packing::unpack_iter::<B>(doc_tail))
             .map(|(q, d)| q * d as f32)
             .sum::<f32>();
-    (dot * doc.v.terms.delta + query_sum * doc.v.terms.lower).into()
+    doc.f32_dot_correction(query_sum, dot).into()
 }
 
 pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
@@ -769,27 +769,7 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
         (head_pdot, head_rdot)
     };
 
-    (pdot * doc.primary.v.terms.delta
-        + query_sum * doc.primary.v.terms.lower
-        + rdot * doc.residual.terms.delta
-        + query_sum * doc.residual.terms.lower)
-        .into()
-
-    /*
-    let (pdot, rdot) = query
-        .iter()
-        .zip(
-            packing::unpack_iter::<B1>(doc.primary.v.data)
-                .zip(packing::unpack_iter::<B2>(doc.residual.data)),
-        )
-        .map(|(q, (dp, dr))| (q * dp as f32, (q * dr as f32)))
-        .fold((0.0, 0.0), |(sp, sr), (dp, dr)| (sp + dp, sr + dr));
-    (pdot * doc.primary.v.terms.delta
-        + query_sum * doc.primary.v.terms.lower
-        + rdot * doc.residual.terms.delta
-        + query_sum * doc.residual.terms.lower)
-        .into()
-        */
+    doc.f32_dot_correction(query_sum, pdot, rdot).into()
 }
 
 // Unpack 8 values from a vector with N-bit dimensions starting at `start_dim`

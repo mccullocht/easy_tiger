@@ -152,9 +152,12 @@ pub fn split_centroid(
     // TODO: perform searches in parallel.
     searcher = GraphSearcher::new(index.config().head_search_params);
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
-    let c0_dist_fn = posting_format.query_vector_distance_f32(original_centroid, similarity);
-    let c1_dist_fn = posting_format.query_vector_distance_f32(&centroids[0], similarity);
-    let c2_dist_fn = posting_format.query_vector_distance_f32(&centroids[1], similarity);
+    let c0_dist_fn = posting_format
+        .query_vector_distance_indexing(posting_coder.encode(&original_centroid), similarity);
+    let c1_dist_fn = posting_format
+        .query_vector_distance_indexing(posting_coder.encode(&centroids[0]), similarity);
+    let c2_dist_fn = posting_format
+        .query_vector_distance_indexing(posting_coder.encode(&centroids[1]), similarity);
     for (record_id, vector) in vectors {
         // TODO: handle replica_count > 1. If this centroid is _not_ the primary for record_id
         // then we always have to search and generate new candidates. We may also need to move
@@ -194,7 +197,8 @@ pub fn split_centroid(
                 .get(nearby_centroid_id as i64)
                 .unwrap_or(Err(Error::not_found_error()))?,
         );
-        let c0_dist_fn = posting_format.query_vector_distance_f32(nearby_centroid, similarity);
+        let c0_dist_fn = posting_format
+            .query_vector_distance_indexing(posting_coder.encode(&nearby_centroid), similarity);
 
         posting_cursor.set_bounds(PostingKey::centroid_range(nearby_centroid_id))?;
         // SAFETY: memory remains valid because this path does not commit or rollback txns.

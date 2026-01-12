@@ -951,12 +951,26 @@ impl<'a, const B: usize> TurboPrimaryQueryDistance<'a, B> {
 impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<'_, B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TurboPrimaryVector::<B>::new(vector);
-        let pdot = self
-            .query
-            .iter()
-            .zip(vector.iter())
-            .map(|(&q, p)| q * p as f32)
-            .sum::<f32>();
+        let pdot = match self.inst {
+            InstructionSet::Scalar => self
+                .query
+                .iter()
+                .zip(vector.iter())
+                .map(|(&q, p)| q * p as f32)
+                .sum::<f32>(),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => {
+                aarch64::tlvq1_f32_dot_unnormalized(self.query.as_ref(), &vector)
+            }
+            #[cfg(target_arch = "x86_64")]
+            // XXX proper impl
+            InstructionSet::Avx512 => self
+                .query
+                .iter()
+                .zip(vector.iter())
+                .map(|(&q, p)| q * p as f32)
+                .sum::<f32>(),
+        };
         let dot = vector.f32_dot_correction(self.query_sum, pdot).into();
         dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))
     }

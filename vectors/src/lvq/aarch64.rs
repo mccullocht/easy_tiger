@@ -4,16 +4,18 @@
 
 use std::arch::aarch64::{
     float32x4_t, uint8x16_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32, vaddq_f64, vaddq_u16,
-    vaddvq_f32, vaddvq_u16, vaddvq_u64, vand_u8, vand_u32, vandq_u8, vcntq_u8, vcombine_u8,
-    vcombine_u32, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32,
-    vdup_n_u8, vdup_n_u32, vdupq_n_f32, vdupq_n_f64, vdupq_n_u16, vextq_f64, vfmaq_f32, vfmaq_f64,
-    vget_low_f32, vget_low_u16, vgetq_lane_f64, vld1_s8, vld1_s32, vld1_u8, vld1q_f32, vld1q_s8,
-    vld1q_s16, vld1q_s32, vld1q_s64, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32,
-    vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
-    vmulq_f32, vmulq_f64, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8, vreinterpretq_u8_u32,
-    vreinterpretq_u32_u8, vrndaq_f32, vshl_u8, vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64,
-    vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
+    vaddvq_f32, vaddvq_u16, vaddvq_u64, vand_u8, vand_u32, vandq_u8, vandq_u32, vcntq_u8,
+    vcombine_u8, vcombine_u32, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32,
+    vdivq_f32, vdup_n_u8, vdup_n_u32, vdupq_n_f32, vdupq_n_f64, vdupq_n_u16, vdupq_n_u32,
+    vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vget_low_u16, vgetq_lane_f64, vld1_s8, vld1_s32,
+    vld1_u8, vld1q_f32, vld1q_s8, vld1q_s16, vld1q_s32, vld1q_s64, vld1q_u8, vmaxq_f32, vmaxvq_f32,
+    vminq_f32, vminvq_f32, vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32,
+    vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8,
+    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshl_u8, vshl_u32, vshlq_u8, vshlq_u16,
+    vshlq_u32, vshlq_u64, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
+
+use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector};
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats, packing};
 
@@ -770,6 +772,70 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     };
 
     doc.f32_dot_correction(query_sum, pdot, rdot).into()
+}
+
+pub fn tlvq1_f32_dot_unnormalized<const B: usize>(
+    query: &[f32],
+    doc: &TurboPrimaryVector<'_, B>,
+) -> f32 {
+    let tail_split = query.len() & !15;
+    let (query_head, _query_tail) = query.split_at(tail_split);
+    let dot = if !query_head.is_empty() {
+        unsafe {
+            let mut dot0 = vdupq_n_f32(0.0);
+            let mut dot1 = vdupq_n_f32(0.0);
+            let mut dot2 = vdupq_n_f32(0.0);
+            let mut dot3 = vdupq_n_f32(0.0);
+            let mask = vdupq_n_u32(u32::from(u8::MAX) >> (8 - B));
+            let mut d = vdupq_n_u32(0);
+            for i in (0..tail_split).step_by(16) {
+                d = if i % (TURBO_BLOCK_SIZE * 8 / B) == 0 {
+                    let x = vld1q_u8(
+                        doc.blocks.as_ptr().add(i / (TURBO_BLOCK_SIZE * 8 / B)) as *const u8
+                    );
+                    // Shuffle the bytes so that a single byte right shift produces the next 4.
+                    vreinterpretq_u32_u8(vqtbl1q_u8(
+                        x,
+                        vld1q_u8([0u8, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15].as_ptr()),
+                    ))
+                } else {
+                    shr_u32::<B>(d)
+                };
+
+                let q0 = vld1q_f32(query_head.as_ptr().add(i));
+                let d0 = vcvtq_f32_u32(vandq_u32(d, mask));
+                dot0 = vfmaq_f32(dot0, q0, d0);
+
+                let q1 = vld1q_f32(query_head.as_ptr().add(i + 4));
+                let d1 = vcvtq_f32_u32(vandq_u32(vshrq_n_u32::<8>(d), mask));
+                dot1 = vfmaq_f32(dot1, q1, d1);
+
+                let q2 = vld1q_f32(query_head.as_ptr().add(i + 8));
+                let d2 = vcvtq_f32_u32(vandq_u32(vshrq_n_u32::<16>(d), mask));
+                dot2 = vfmaq_f32(dot2, q2, d2);
+
+                let q3 = vld1q_f32(query_head.as_ptr().add(i + 12));
+                let d3 = vcvtq_f32_u32(vandq_u32(vshrq_n_u32::<24>(d), mask));
+                dot3 = vfmaq_f32(dot3, q3, d3);
+            }
+            vaddvq_f32(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)))
+        }
+    } else {
+        0.0
+    };
+    // XXX process tail
+    dot
+}
+
+#[inline(always)]
+unsafe fn shr_u32<const N: usize>(v: uint32x4_t) -> uint32x4_t {
+    match N {
+        1 => vshrq_n_u32::<1>(v),
+        2 => vshrq_n_u32::<2>(v),
+        4 => vshrq_n_u32::<4>(v),
+        8 => vshrq_n_u32::<8>(v),
+        _ => unreachable!(),
+    }
 }
 
 // Unpack 8 values from a vector with N-bit dimensions starting at `start_dim`

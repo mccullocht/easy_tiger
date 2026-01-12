@@ -804,6 +804,46 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for FastTwoLevelQuery
 /// The turbo coder requires that all vector data be packed into 16-byte blocks.
 const TURBO_BLOCK_SIZE: usize = 16;
 
+struct TurboPrimaryVector<'a, const B: usize> {
+    // XXX lower is duplicated, not sure if i ever need upper. l2_norm could be compied.
+    header: PrimaryVectorHeader,
+    blocks: &'a [[u8; TURBO_BLOCK_SIZE]],
+    terms: VectorTerms,
+}
+
+impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
+    fn new(data: &'a [u8]) -> Self {
+        let (header, vector_bytes) =
+            PrimaryVectorHeader::deserialize(data).expect("valid primary vector");
+        let terms = VectorTerms {
+            lower: header.lower,
+            delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
+            component_sum: header.component_sum,
+        };
+        let (blocks, rem) = vector_bytes.as_chunks::<TURBO_BLOCK_SIZE>();
+        assert!(rem.is_empty());
+        Self {
+            header,
+            blocks,
+            terms,
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u8> {
+        self.blocks
+            .iter()
+            .flat_map(|block| packing::TurboBlockIter::<B>::new(*block))
+    }
+
+    fn f32_dot_correction(&self, query_sum: f32, dot: f32) -> f32 {
+        dot * self.terms.delta + query_sum * self.terms.lower
+    }
+
+    fn l2_norm(&self) -> f64 {
+        self.header.l2_norm.into()
+    }
+}
+
 #[allow(unused)] // XXX
 #[derive(Debug, Copy, Clone)]
 pub struct TurboPrimaryCoder<const B: usize>(InstructionSet);
@@ -860,6 +900,7 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     }
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
+        // XXX use the vector rep?
         let (header, vector) = PrimaryVectorHeader::deserialize(vector).expect("valid header");
         let delta = (header.upper - header.lower) / ((1 << B) - 1) as f32;
         let (vector_blocks, vector_rem) = vector.as_chunks::<TURBO_BLOCK_SIZE>();
@@ -876,6 +917,48 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
         let vector_bytes = byte_len - PrimaryVectorHeader::LEN;
         assert!(vector_bytes % TURBO_BLOCK_SIZE == 0);
         (vector_bytes * 8) / B
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TurboPrimaryQueryDistance<'a, const B: usize> {
+    similarity: VectorSimilarity,
+    query: Cow<'a, [f32]>,
+    query_l2_norm: f64,
+    query_sum: f32,
+    #[allow(unused)] // XXX
+    inst: InstructionSet,
+}
+
+impl<'a, const B: usize> TurboPrimaryQueryDistance<'a, B> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
+        // For Dot distance we assume the input is l2 normalized.
+        let query_l2_norm = match similarity {
+            VectorSimilarity::Dot => 1.0,
+            _ => super::l2_norm(&query).into(),
+        };
+        let query_sum = query.iter().copied().sum::<f32>();
+        Self {
+            similarity,
+            query,
+            query_l2_norm,
+            query_sum,
+            inst: InstructionSet::default(),
+        }
+    }
+}
+
+impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<'_, B> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = TurboPrimaryVector::<B>::new(vector);
+        let pdot = self
+            .query
+            .iter()
+            .zip(vector.iter())
+            .map(|(&q, p)| q * p as f32)
+            .sum::<f32>();
+        let dot = vector.f32_dot_correction(self.query_sum, pdot).into();
+        dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))
     }
 }
 
@@ -1051,7 +1134,7 @@ mod packing {
         type Item = u8;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if self.pos == TURBO_BLOCK_SIZE && self.shift == 8 {
+            if self.shift == 8 {
                 return None;
             }
 

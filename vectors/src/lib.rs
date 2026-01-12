@@ -218,7 +218,9 @@ impl F32VectorCoding {
             (Self::LVQ2x4x4, _) => Box::new(lvq::TwoLevelDistance::<4, 4>::new(similarity)),
             (Self::LVQ2x4x8, _) => Box::new(lvq::TwoLevelDistance::<4, 8>::new(similarity)),
             (Self::LVQ2x8x8, _) => Box::new(lvq::TwoLevelDistance::<8, 8>::new(similarity)),
-            (Self::TLVQ1, _) => todo!("XXX"),
+            // XXX I believe this is correct because we are unconcerned with the dimension order
+            // in the vectors as long as the encoding is symmetric.
+            (Self::TLVQ1, _) => Box::new(lvq::PrimaryDistance::<1>::new(similarity)),
         }
     }
 
@@ -283,7 +285,10 @@ impl F32VectorCoding {
                 similarity,
                 query.into(),
             )),
-            (_, F32VectorCoding::TLVQ1) => todo!("XXX"),
+            (_, F32VectorCoding::TLVQ1) => Box::new(lvq::TurboPrimaryQueryDistance::<1>::new(
+                similarity,
+                query.into(),
+            )),
         }
     }
 
@@ -339,7 +344,10 @@ impl F32VectorCoding {
             F32VectorCoding::LVQ2x8x8 => Some(Box::new(
                 lvq::FastTwoLevelQueryDistance::<8, 8>::new(similarity, query),
             )),
-            F32VectorCoding::TLVQ1 => todo!("XXX"),
+            F32VectorCoding::TLVQ1 => Some(Box::new(QuantizedQueryVectorDistance::new(
+                lvq::PrimaryDistance::<1>::new(similarity),
+                lvq::TurboPrimaryCoder::<1>::default().encode(query),
+            ))),
         }
     }
 
@@ -405,7 +413,11 @@ impl F32VectorCoding {
             (_, F32VectorCoding::LVQ2x8x8) => {
                 quantized_qvd!(lvq::TwoLevelDistance::<8, 8>::new(similarity), query)
             }
-            (_, F32VectorCoding::TLVQ1) => todo!("XXX"),
+            // XXX again assuming that it's ok because reordering dims does not matter so long as
+            // we are consistent.
+            (_, F32VectorCoding::TLVQ1) => {
+                quantized_qvd!(lvq::PrimaryDistance::<1>::new(similarity), query)
+            }
         }
     }
 }
@@ -632,7 +644,7 @@ mod test {
 
     use F32VectorCoding::{
         F16, I4ScaledUniform, I8ScaledUniform, I16ScaledUniform, LVQ1x1, LVQ1x4, LVQ1x8, LVQ2x1x8,
-        LVQ2x4x4, LVQ2x4x8, LVQ2x8x8,
+        LVQ2x4x4, LVQ2x4x8, LVQ2x8x8, TLVQ1,
     };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
     use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
@@ -686,6 +698,34 @@ mod test {
     distance_test!(i8_scaled_l2_dist, Euclidean, I8ScaledUniform, 0.01);
     distance_test!(i16_scaled_dot_dist, Dot, I16ScaledUniform, 0.001);
     distance_test!(i16_scaled_l2_dist, Euclidean, I16ScaledUniform, 0.001);
+
+    macro_rules! tlvq_distance_test {
+        ($name:ident, $sim:path, $coder:path, $epsilon:literal) => {
+            #[test]
+            fn $name() {
+                let seed = OsRng::default().try_next_u64().unwrap();
+                println!("SEED {seed:#016x}");
+                let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+                for i in 0..1024 {
+                    let dim = rng.random_range(128..=256);
+                    let a = (0..dim)
+                        .map(|_| rng.random_range(-1.0f32..=1.0))
+                        .collect::<Vec<_>>();
+                    let b = (0..dim)
+                        .map(|_| rng.random_range(-1.0f32..=1.0))
+                        .collect::<Vec<_>>();
+
+                    // XXX correction is based on dimensionality, which is estimated. tlvq may be
+                    // way off when the number of bits is 1.
+                    // distance_compare($sim, $coder, i, &a, &b, $epsilon);
+                    query_distance_compare($sim, $coder, i, &a, &b, $epsilon);
+                }
+            }
+        };
+    }
+
+    tlvq_distance_test!(tlvq1_dot_dist, Dot, TLVQ1, 0.4);
+    tlvq_distance_test!(tlvq1_l2_dist, Euclidean, TLVQ1, 0.4);
 
     macro_rules! lvq_coding_simd_test {
         ($name:ident, $coder:ty) => {

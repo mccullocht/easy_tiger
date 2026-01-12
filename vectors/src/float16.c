@@ -91,15 +91,13 @@ __attribute__((target("+fp16"))) EXPORT float et_dot_f16_f16(const __fp16* a,
   for (size_t i = 0; i < len16; i += 16) {
     float16x8_t av16 = vld1q_f16(a + i);
     float16x8_t bv16 = vld1q_f16(b + i);
-    dot0 = vfmaq_f32(dot0, vcvt_f32_f16(vget_low_f16(av16)),
-                     vcvt_f32_f16(vget_low_f16(bv16)));
-    dot1 = vfmaq_f32(dot1, vcvt_high_f32_f16(av16), vcvt_high_f32_f16(bv16));
+    dot0 = vfmlalq_low_f16(dot0, av16, bv16);
+    dot1 = vfmlalq_high_f16(dot1, av16, bv16);
 
     av16 = vld1q_f16(a + i + 8);
     bv16 = vld1q_f16(b + i + 8);
-    dot2 = vfmaq_f32(dot2, vcvt_f32_f16(vget_low_f16(av16)),
-                     vcvt_f32_f16(vget_low_f16(bv16)));
-    dot3 = vfmaq_f32(dot3, vcvt_high_f32_f16(av16), vcvt_high_f32_f16(bv16));
+    dot2 = vfmlalq_low_f16(dot2, av16, bv16);
+    dot3 = vfmlalq_high_f16(dot3, av16, bv16);
   }
 
   dot0 = vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3));
@@ -168,20 +166,16 @@ __attribute__((target("+fp16"))) EXPORT float et_l2_f16_f16(const __fp16* a,
     float16x8_t av16 = vld1q_f16(a + i);
     float16x8_t bv16 = vld1q_f16(b + i);
 
-    float32x4_t dv = vsubq_f32(vcvt_f32_f16(vget_low_f16(av16)),
-                               vcvt_f32_f16(vget_low_f16(bv16)));
-    sum0 = vfmaq_f32(sum0, dv, dv);
-    dv = vsubq_f32(vcvt_high_f32_f16(av16), vcvt_high_f32_f16(bv16));
-    sum1 = vfmaq_f32(sum1, dv, dv);
+    float16x8_t dv = vsubq_f16(av16, bv16);
+    sum0 = vfmlalq_low_f16(sum0, dv, dv);
+    sum1 = vfmlalq_high_f16(sum1, dv, dv);
 
     av16 = vld1q_f16(a + i + 8);
     bv16 = vld1q_f16(b + i + 8);
 
-    dv = vsubq_f32(vcvt_f32_f16(vget_low_f16(av16)),
-                   vcvt_f32_f16(vget_low_f16(bv16)));
-    sum2 = vfmaq_f32(sum2, dv, dv);
-    dv = vsubq_f32(vcvt_high_f32_f16(av16), vcvt_high_f32_f16(bv16));
-    sum3 = vfmaq_f32(sum3, dv, dv);
+    dv = vsubq_f16(av16, bv16);
+    sum2 = vfmlalq_high_f16(sum2, dv, dv);
+    sum3 = vfmlalq_high_f16(sum3, dv, dv);
   }
 
   sum0 = vaddq_f32(vaddq_f32(sum0, sum1), vaddq_f32(sum2, sum3));

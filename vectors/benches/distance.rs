@@ -125,6 +125,7 @@ fn lvq_benchmarks(c: &mut Criterion) {
     query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x4x8, similarities);
     query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x8x8, similarities);
     query_and_doc_benchmarks(c, F32VectorCoding::TLVQ1, similarities);
+    query_and_doc_benchmarks(c, F32VectorCoding::TLVQ8, similarities);
 }
 
 criterion_group!(

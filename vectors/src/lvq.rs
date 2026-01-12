@@ -915,7 +915,7 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
 
     fn dimensions(&self, byte_len: usize) -> usize {
         let vector_bytes = byte_len - PrimaryVectorHeader::LEN;
-        assert!(vector_bytes % TURBO_BLOCK_SIZE == 0);
+        assert!(vector_bytes.is_multiple_of(TURBO_BLOCK_SIZE));
         (vector_bytes * 8) / B
     }
 }
@@ -926,7 +926,6 @@ pub struct TurboPrimaryQueryDistance<'a, const B: usize> {
     query: Cow<'a, [f32]>,
     query_l2_norm: f64,
     query_sum: f32,
-    #[allow(unused)] // XXX
     inst: InstructionSet,
 }
 
@@ -960,6 +959,7 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<'_, B> {
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => {
+                // XXX should be "primary" instead of "1"
                 aarch64::tlvq1_f32_dot_unnormalized(self.query.as_ref(), &vector)
             }
             #[cfg(target_arch = "x86_64")]
@@ -1152,7 +1152,7 @@ mod packing {
             self.pos += 1;
             if self.pos == TURBO_BLOCK_SIZE {
                 self.pos = 0;
-                self.shift += 1;
+                self.shift += B;
             }
             Some(v)
         }

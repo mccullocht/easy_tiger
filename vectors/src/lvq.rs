@@ -963,13 +963,9 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<'_, B> {
                 aarch64::tlvq1_f32_dot_unnormalized(self.query.as_ref(), &vector)
             }
             #[cfg(target_arch = "x86_64")]
-            // XXX proper impl
-            InstructionSet::Avx512 => self
-                .query
-                .iter()
-                .zip(vector.iter())
-                .map(|(&q, p)| q * p as f32)
-                .sum::<f32>(),
+            InstructionSet::Avx512 => unsafe {
+                x86_64::tlvq1_f32_dot_unnormalized_avx512(self.query.as_ref(), &vector)
+            },
         };
         let dot = vector.f32_dot_correction(self.query_sum, pdot).into();
         dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))

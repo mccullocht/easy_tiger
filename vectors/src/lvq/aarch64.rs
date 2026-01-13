@@ -3,19 +3,20 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::arch::aarch64::{
-    float32x4_t, uint8x16_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32, vaddq_f64, vaddq_u16,
-    vaddvq_f32, vaddvq_u16, vaddvq_u64, vand_u8, vand_u32, vandq_u8, vandq_u32, vcntq_u8,
-    vcombine_u8, vcombine_u32, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32,
-    vdivq_f32, vdup_n_u8, vdup_n_u32, vdupq_n_f32, vdupq_n_f64, vdupq_n_u16, vdupq_n_u32,
-    vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vget_low_u16, vgetq_lane_f64, vld1_s8, vld1_s32,
-    vld1_u8, vld1q_f32, vld1q_s8, vld1q_s16, vld1q_s32, vld1q_s64, vld1q_u8, vmaxq_f32, vmaxvq_f32,
-    vminq_f32, vminvq_f32, vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32,
-    vmovn_u16, vmovn_u32, vmulq_f32, vmulq_f64, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8,
+    float32x4_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32,
+    vaddq_f64, vaddq_u16, vaddvq_f32, vaddvq_u16, vaddvq_u64, vand_u8, vand_u32, vandq_u8,
+    vandq_u32, vcntq_u8, vcombine_u8, vcombine_u32, vcvt_f64_f32, vcvt_high_f64_f32,
+    vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdup_n_u8, vdup_n_u32, vdupq_n_f32, vdupq_n_f64,
+    vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64, vfmaq_f32, vfmaq_f64,
+    vget_low_f32, vget_low_u16, vgetq_lane_f64, vld1_s8, vld1_s32, vld1_u8, vld1q_f32, vld1q_s8,
+    vld1q_s16, vld1q_s32, vld1q_s64, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32,
+    vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
+    vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8, vqtbl4q_u8,
     vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshl_u8, vshl_u32, vshlq_u8, vshlq_u16,
     vshlq_u32, vshlq_u64, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
-use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector};
+use crate::lvq::{EncodedVector, TURBO_BLOCK_SIZE, TurboPrimaryVector, scalar};
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats, packing};
 
@@ -224,6 +225,92 @@ fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize)
         e += diff * diff;
     }
     (1.0 - LAMBDA as f64) * xe as f64 * xe as f64 / norm_sq + LAMBDA as f64 * e as f64
+}
+
+pub fn primary_quantize_and_pack<const B: usize>(
+    vector: &[f32],
+    lower: f32,
+    upper: f32,
+    delta_inv: f32,
+    out: &mut [u8],
+) -> u32 {
+    let tail_split = vector.len() & !(packing::block_dim(B) - 1);
+    assert!(tail_split.is_multiple_of(16));
+    let (vector_head, vector_tail) = vector.split_at(tail_split);
+    let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
+    let mut component_sum = 0u32;
+    if !vector_head.is_empty() {
+        unsafe {
+            let lower = vdupq_n_f32(lower);
+            let upper = vdupq_n_f32(upper);
+            let delta_inv = vdupq_n_f32(delta_inv);
+            let shuffle_mask = vld1q_u8(
+                [
+                    0u8, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
+                ]
+                .as_ptr(),
+            );
+            let mut block = 0usize;
+            let mut shift = 0i8;
+            let mut d = vdupq_n_u8(0);
+            for i in (0..tail_split).step_by(16) {
+                let qa = quantize4(
+                    vld1q_f32(vector_head.as_ptr().add(i)),
+                    lower,
+                    upper,
+                    delta_inv,
+                );
+                let qb = quantize4(
+                    vld1q_f32(vector_head.as_ptr().add(i + 4)),
+                    lower,
+                    upper,
+                    delta_inv,
+                );
+                let qc = quantize4(
+                    vld1q_f32(vector_head.as_ptr().add(i + 8)),
+                    lower,
+                    upper,
+                    delta_inv,
+                );
+                let qd = quantize4(
+                    vld1q_f32(vector_head.as_ptr().add(i + 12)),
+                    lower,
+                    upper,
+                    delta_inv,
+                );
+
+                let qabcd = vqtbl4q_u8(
+                    uint8x16x4_t(
+                        vreinterpretq_u8_u32(qa),
+                        vreinterpretq_u8_u32(qb),
+                        vreinterpretq_u8_u32(qc),
+                        vreinterpretq_u8_u32(qd),
+                    ),
+                    shuffle_mask,
+                );
+                component_sum += u32::from(vaddlvq_u8(qabcd));
+
+                d = vorrq_u8(d, vshlq_u8(qabcd, vdupq_n_s8(shift as i8)));
+                shift += B as i8;
+                if shift == 8 {
+                    vst1q_u8(out_head.as_mut_ptr().add(block * 16), d);
+                    d = vdupq_n_u8(0);
+                    shift = 0;
+                    block += 1;
+                }
+            }
+        }
+    }
+
+    if !vector_tail.is_empty() {
+        component_sum +=
+            scalar::primary_quantize_and_pack::<B>(vector_tail, lower, upper, delta_inv, out_tail);
+    }
+    component_sum
+}
+
+pub fn primary_decode<const B: usize>(vector: EncodedVector<'_>, out: &mut [f32]) {
+    todo!()
 }
 
 pub fn lvq1_quantize_and_pack<const B: usize>(

@@ -884,9 +884,8 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
                 delta_inv,
                 vector_bytes,
             ),
-            // XXX implement aarch64
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => scalar::primary_quantize_and_pack::<B>(
+            InstructionSet::Neon => aarch64::primary_quantize_and_pack::<B>(
                 vector,
                 header.lower,
                 header.upper,
@@ -1196,6 +1195,14 @@ mod packing {
     impl<'a, const B: usize> FusedIterator for TurboUnpacker<'a, B> {}
 
     impl<'a, const B: usize> ExactSizeIterator for TurboUnpacker<'a, B> {}
+
+    /// Return the number of dimensions that can be packed into a single block.
+    ///
+    /// So long as `bits` is a power of 2 the returned value will _also_ be a power of 2.
+    /// This is useful for splitting between the head and tail during vector coding tasks.
+    pub const fn block_dim(bits: usize) -> usize {
+        (TURBO_BLOCK_SIZE * 8) / bits
+    }
 }
 
 #[cfg(test)]

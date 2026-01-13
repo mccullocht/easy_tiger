@@ -169,12 +169,20 @@ pub enum F32VectorCoding {
     /// LVQ one-level; 8 bits primary 8 bits residual
     LVQ2x8x8,
     /// Turbo LVQ; 1 bit primary vector.
+    ///
+    /// This encoding is optimized for cases where dimensionality is a multiple of 128.
     TLVQ1,
     /// Turbo LVQ; 2 bit primary vector.
+    ///
+    /// This encoding is optimized for cases where dimensionality is a multiple of 64.
     TLVQ2,
     /// Turbo LVQ; 4 bit primary vector.
+    ///
+    /// This encoding is optimized for cases where dimensionality is a multiple of 32.
     TLVQ4,
     /// Turbo LVQ; 8 bit primary vector.
+    ///
+    /// This encoding is optimized for cases where dimensionality is a multiple of 16.
     TLVQ8,
 }
 

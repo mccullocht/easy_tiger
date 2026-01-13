@@ -231,6 +231,16 @@ struct VectorTerms {
     component_sum: u32,
 }
 
+impl VectorTerms {
+    fn from_primary<const B: usize>(header: PrimaryVectorHeader) -> Self {
+        Self {
+            lower: header.lower,
+            delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
+            component_sum: header.component_sum,
+        }
+    }
+}
+
 const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
     (-0.798, 0.798),
     (-1.493, 1.493),
@@ -805,29 +815,24 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for FastTwoLevelQuery
 const TURBO_BLOCK_SIZE: usize = 16;
 
 struct TurboPrimaryVector<'a, const B: usize> {
-    data: &'a [u8],
-    terms: VectorTerms,
+    rep: EncodedVector<'a>,
     l2_norm: f32,
 }
 
 impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
-    fn new(data: &'a [u8]) -> Self {
-        let (header, vector_bytes) =
-            PrimaryVectorHeader::deserialize(data).expect("valid primary vector");
-        let terms = VectorTerms {
-            lower: header.lower,
-            delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
-            component_sum: header.component_sum,
-        };
-        Self {
-            data: vector_bytes,
-            terms,
+    fn new(data: &'a [u8]) -> Option<Self> {
+        let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
+        Some(Self {
+            rep: EncodedVector {
+                terms: VectorTerms::from_primary::<B>(header),
+                data: vector_bytes,
+            },
             l2_norm: header.l2_norm,
-        }
+        })
     }
 
     fn iter(&self) -> impl ExactSizeIterator<Item = u8> {
-        packing::TurboUnpacker::<B>::new(self.data)
+        packing::TurboUnpacker::<B>::new(self.rep.data)
     }
 
     const fn block_dim_stride(&self) -> usize {
@@ -835,7 +840,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
     }
 
     fn f32_dot_correction(&self, query_sum: f32, dot: f32) -> f32 {
-        dot * self.terms.delta + query_sum * self.terms.lower
+        dot * self.rep.terms.delta + query_sum * self.rep.terms.lower
     }
 
     fn l2_norm(&self) -> f64 {
@@ -843,7 +848,6 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
     }
 }
 
-#[allow(unused)] // XXX
 #[derive(Debug, Copy, Clone)]
 pub struct TurboPrimaryCoder<const B: usize>(InstructionSet);
 
@@ -871,17 +875,34 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
         let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
 
-        let mut packer = packing::TurboPacker::<B>::new(vector_bytes);
         let delta_inv = ((1 << B) - 1) as f32 / (header.upper - header.lower);
-        header.component_sum = vector
-            .iter()
-            .map(|&v| {
-                let q = ((v.clamp(header.lower, header.upper) - header.lower) * delta_inv).round()
-                    as u8;
-                packer.push(q);
-                u32::from(q)
-            })
-            .sum();
+        header.component_sum = match self.0 {
+            InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(
+                vector,
+                header.lower,
+                header.upper,
+                delta_inv,
+                vector_bytes,
+            ),
+            // XXX implement aarch64
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => scalar::primary_quantize_and_pack::<B>(
+                vector,
+                header.lower,
+                header.upper,
+                delta_inv,
+                vector_bytes,
+            ),
+            // XXX implement x86_64
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => scalar::primary_quantize_and_pack::<B>(
+                vector,
+                header.lower,
+                header.upper,
+                delta_inv,
+                vector_bytes,
+            ),
+        };
 
         header.serialize(header_bytes);
     }
@@ -891,12 +912,16 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     }
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
-        // XXX use the vector rep?
-        let (header, vector) = PrimaryVectorHeader::deserialize(vector).expect("valid header");
-        let delta = (header.upper - header.lower) / ((1 << B) - 1) as f32;
-        for (q, o) in packing::TurboUnpacker::<B>::new(vector).zip(out.iter_mut()) {
-            *o = (q as f32).mul_add(delta, header.lower);
-        }
+        let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
+        match self.0 {
+            InstructionSet::Scalar => scalar::primary_decode::<B>(vector.rep, out),
+            // XXX implement aarch64
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => scalar::primary_decode::<B>(vector.rep, out),
+            // XXX implement x86_64
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => scalar::primary_decode::<B>(vector.rep, out),
+        };
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
@@ -934,22 +959,18 @@ impl<'a, const B: usize> TurboPrimaryQueryDistance<'a, B> {
 
 impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<'_, B> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = TurboPrimaryVector::<B>::new(vector);
+        let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
         let pdot = match self.inst {
-            InstructionSet::Scalar => self
-                .query
-                .iter()
-                .zip(vector.iter())
-                .map(|(&q, p)| q * p as f32)
-                .sum::<f32>(),
+            InstructionSet::Scalar => {
+                scalar::tlvq_primary_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
+            }
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => {
-                // XXX should be "primary" instead of "1"
-                aarch64::tlvq1_f32_dot_unnormalized(self.query.as_ref(), &vector)
+                aarch64::tlvq_primary_f32_dot_unnormalized(self.query.as_ref(), &vector)
             }
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                x86_64::tlvq1_f32_dot_unnormalized_avx512(self.query.as_ref(), &vector)
+                x86_64::tlvq_primary_f32_dot_unnormalized_avx512(self.query.as_ref(), &vector)
             },
         };
         let dot = vector.f32_dot_correction(self.query_sum, pdot).into();
@@ -1168,6 +1189,8 @@ mod packing {
             let next = self.block * TURBO_BLOCK_SIZE + self.pos;
             (total - next, Some(total - next))
         }
+
+        // XXX this needs an nth/skip impl.
     }
 
     impl<'a, const B: usize> FusedIterator for TurboUnpacker<'a, B> {}

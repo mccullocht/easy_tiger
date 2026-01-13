@@ -776,7 +776,7 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     doc.f32_dot_correction(query_sum, pdot, rdot).into()
 }
 
-pub fn tlvq1_f32_dot_unnormalized<const B: usize>(
+pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
     query: &[f32],
     doc: &TurboPrimaryVector<'_, B>,
 ) -> f32 {
@@ -794,7 +794,7 @@ pub fn tlvq1_f32_dot_unnormalized<const B: usize>(
                 // XXX when B == 8 we can generate dX by shuffling with 4 different masks.
                 d = if i % (TURBO_BLOCK_SIZE * 8 / B) == 0 {
                     let block = i / (TURBO_BLOCK_SIZE * 8 / B);
-                    let x = vld1q_u8(doc.data.as_ptr().add(block * 16) as *const u8);
+                    let x = vld1q_u8(doc.rep.data.as_ptr().add(block * 16) as *const u8);
                     // Shuffle the bytes so that a single byte right shift+mask produces the next 4.
                     vreinterpretq_u32_u8(vqtbl1q_u8(
                         x,

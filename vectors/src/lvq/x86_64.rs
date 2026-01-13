@@ -760,7 +760,7 @@ pub unsafe fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
 
 #[target_feature(enable = "avx512f,avx512vbmi2")]
 #[inline]
-pub unsafe fn tlvq1_f32_dot_unnormalized_avx512<const B: usize>(
+pub unsafe fn tlvq_primary_f32_dot_unnormalized_avx512<const B: usize>(
     query: &[f32],
     doc: &TurboPrimaryVector<'_, B>,
 ) -> f32 {

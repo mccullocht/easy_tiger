@@ -790,6 +790,7 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
             let mut dot2 = vdupq_n_f32(0.0);
             let mut dot3 = vdupq_n_f32(0.0);
             match B {
+                /* XXX FIXME this is still broken.
                 8 => {
                     let shuffle_masks: [uint8x16_t; 4] = [
                         vld1q_u8(
@@ -832,6 +833,7 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
                         dot3 = vfmaq_f32(dot3, q3, d3);
                     }
                 }
+                */
                 _ => {
                     let mask = vdupq_n_u32(u32::from(u8::MAX) >> (8 - B));
                     let mut d = vdupq_n_u32(0);

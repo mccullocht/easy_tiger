@@ -780,7 +780,7 @@ pub fn tlvq1_f32_dot_unnormalized<const B: usize>(
     query: &[f32],
     doc: &TurboPrimaryVector<'_, B>,
 ) -> f32 {
-    let tail_split = query.len() & !15;
+    let tail_split = query.len() & !(doc.block_stride() - 1);
     let (query_head, query_tail) = query.split_at(tail_split);
     let mut dot = if !query_head.is_empty() {
         unsafe {
@@ -792,9 +792,8 @@ pub fn tlvq1_f32_dot_unnormalized<const B: usize>(
             let mut d = vdupq_n_u32(0);
             for i in (0..tail_split).step_by(16) {
                 d = if i % (TURBO_BLOCK_SIZE * 8 / B) == 0 {
-                    let x = vld1q_u8(
-                        doc.blocks.as_ptr().add(i / (TURBO_BLOCK_SIZE * 8 / B)) as *const u8
-                    );
+                    let block = i / (TURBO_BLOCK_SIZE * 8 / B);
+                    let x = vld1q_u8(doc.data.as_ptr().add(block * 16) as *const u8);
                     // Shuffle the bytes so that a single byte right shift+mask produces the next 4.
                     vreinterpretq_u32_u8(vqtbl1q_u8(
                         x,

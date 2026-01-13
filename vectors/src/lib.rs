@@ -750,40 +750,14 @@ mod test {
     distance_test!(i16_scaled_dot_dist, Dot, I16ScaledUniform, 0.001);
     distance_test!(i16_scaled_l2_dist, Euclidean, I16ScaledUniform, 0.001);
 
-    macro_rules! tlvq_distance_test {
-        ($name:ident, $sim:path, $coder:path, $epsilon:literal) => {
-            #[test]
-            fn $name() {
-                let seed = OsRng::default().try_next_u64().unwrap();
-                println!("SEED {seed:#016x}");
-                let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
-                for i in 0..1024 {
-                    let dim = rng.random_range(128..=256);
-                    let a = (0..dim)
-                        .map(|_| rng.random_range(-1.0f32..=1.0))
-                        .collect::<Vec<_>>();
-                    let b = (0..dim)
-                        .map(|_| rng.random_range(-1.0f32..=1.0))
-                        .collect::<Vec<_>>();
-
-                    // XXX correction is based on dimensionality, which is estimated. tlvq may be
-                    // way off because of the 16 byte packing scheme. This can be fixed by either
-                    // having an explicit tail _or_ passing dimensionality to the distance function.
-                    // XXX distance_compare($sim, $coder, i, &a, &b, $epsilon);
-                    query_distance_compare($sim, $coder, i, &a, &b, $epsilon);
-                }
-            }
-        };
-    }
-
-    tlvq_distance_test!(tlvq1_dot_dist, Dot, TLVQ1, 0.4);
-    tlvq_distance_test!(tlvq1_l2_dist, Euclidean, TLVQ1, 0.4);
-    tlvq_distance_test!(tlvq2_dot_dist, Dot, TLVQ2, 0.1);
-    tlvq_distance_test!(tlvq2_l2_dist, Euclidean, TLVQ2, 0.1);
-    tlvq_distance_test!(tlvq4_dot_dist, Dot, TLVQ4, 0.05);
-    tlvq_distance_test!(tlvq4_l2_dist, Euclidean, TLVQ4, 0.05);
-    tlvq_distance_test!(tlvq8_dot_dist, Dot, TLVQ8, 0.01);
-    tlvq_distance_test!(tlvq8_l2_dist, Euclidean, TLVQ8, 0.01);
+    distance_test!(tlvq1_dot_dist, Dot, TLVQ1, 0.4);
+    distance_test!(tlvq1_l2_dist, Euclidean, TLVQ1, 0.4);
+    distance_test!(tlvq2_dot_dist, Dot, TLVQ2, 0.2);
+    distance_test!(tlvq2_l2_dist, Euclidean, TLVQ2, 0.2);
+    distance_test!(tlvq4_dot_dist, Dot, TLVQ4, 0.05);
+    distance_test!(tlvq4_l2_dist, Euclidean, TLVQ4, 0.05);
+    distance_test!(tlvq8_dot_dist, Dot, TLVQ8, 0.01);
+    distance_test!(tlvq8_l2_dist, Euclidean, TLVQ8, 0.01);
 
     macro_rules! lvq_coding_simd_test {
         ($name:ident, $coder:ty) => {

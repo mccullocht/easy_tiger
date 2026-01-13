@@ -807,7 +807,7 @@ const TURBO_BLOCK_SIZE: usize = 16;
 struct TurboPrimaryVector<'a, const B: usize> {
     // XXX lower is duplicated, not sure if i ever need upper. l2_norm could be compied.
     header: PrimaryVectorHeader,
-    blocks: &'a [[u8; TURBO_BLOCK_SIZE]],
+    data: &'a [u8],
     terms: VectorTerms,
 }
 
@@ -820,19 +820,19 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
             component_sum: header.component_sum,
         };
-        let (blocks, rem) = vector_bytes.as_chunks::<TURBO_BLOCK_SIZE>();
-        assert!(rem.is_empty());
         Self {
             header,
-            blocks,
+            data: vector_bytes,
             terms,
         }
     }
 
-    fn iter(&self) -> impl Iterator<Item = u8> {
-        self.blocks
-            .iter()
-            .flat_map(|block| packing::TurboBlockIter::<B>::new(*block))
+    fn iter(&self) -> impl ExactSizeIterator<Item = u8> {
+        packing::TurboUnpacker::<B>::new(self.data)
+    }
+
+    const fn block_stride(&self) -> usize {
+        TURBO_BLOCK_SIZE * 8 / B
     }
 
     fn f32_dot_correction(&self, query_sum: f32, dot: f32) -> f32 {
@@ -871,51 +871,37 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
         let mut header = PrimaryVectorHeader::from(stats);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
         let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
-        let (vector_blocks, vector_rem) = vector_bytes.as_chunks_mut::<TURBO_BLOCK_SIZE>();
-        assert!(vector_rem.is_empty());
-        let mut vector_block_iter = vector_blocks.iter_mut();
-        let mut block_packer = packing::TurboBlockPacker::<B>::new();
+
+        let mut packer = packing::TurboPacker::<B>::new(vector_bytes);
         let delta_inv = ((1 << B) - 1) as f32 / (header.upper - header.lower);
         header.component_sum = vector
             .iter()
             .map(|&v| {
                 let q = ((v.clamp(header.lower, header.upper) - header.lower) * delta_inv).round()
                     as u8;
-                if block_packer.push(q) {
-                    block_packer.flush(vector_block_iter.next().expect("output large enough"));
-                }
+                packer.push(q);
                 u32::from(q)
             })
             .sum();
-        if !block_packer.is_empty() {
-            block_packer.flush(vector_block_iter.next().expect("output large enough"));
-        }
 
         header.serialize(header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        PrimaryVectorHeader::LEN
-            + packing::byte_len(dimensions, B).next_multiple_of(TURBO_BLOCK_SIZE)
+        PrimaryVectorHeader::LEN + packing::byte_len(dimensions, B)
     }
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
         // XXX use the vector rep?
         let (header, vector) = PrimaryVectorHeader::deserialize(vector).expect("valid header");
         let delta = (header.upper - header.lower) / ((1 << B) - 1) as f32;
-        let (vector_blocks, vector_rem) = vector.as_chunks::<TURBO_BLOCK_SIZE>();
-        assert!(vector_rem.is_empty());
-        let block_dim = TURBO_BLOCK_SIZE * 8 / B;
-        for (qblock, oblock) in vector_blocks.iter().zip(out.chunks_mut(block_dim)) {
-            for (q, o) in packing::TurboBlockIter::<B>::new(*qblock).zip(oblock.iter_mut()) {
-                *o = (q as f32).mul_add(delta, header.lower);
-            }
+        for (q, o) in packing::TurboUnpacker::<B>::new(vector).zip(out.iter_mut()) {
+            *o = (q as f32).mul_add(delta, header.lower);
         }
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
         let vector_bytes = byte_len - PrimaryVectorHeader::LEN;
-        assert!(vector_bytes.is_multiple_of(TURBO_BLOCK_SIZE));
         (vector_bytes * 8) / B
     }
 }
@@ -960,6 +946,7 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<'_, B> {
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => {
                 // XXX should be "primary" instead of "1"
+                // XXX the scalar version works but this...does not.
                 aarch64::tlvq1_f32_dot_unnormalized(self.query.as_ref(), &vector)
             }
             #[cfg(target_arch = "x86_64")]
@@ -1087,86 +1074,107 @@ mod packing {
         UnpackIter::<B>::new(packed)
     }
 
-    pub struct TurboBlockPacker<const B: usize> {
-        buf: [u8; TURBO_BLOCK_SIZE],
+    pub struct TurboPacker<'a, const B: usize> {
+        blocks: &'a mut [[u8; TURBO_BLOCK_SIZE]],
+        tail: &'a mut [u8],
+        block: usize,
         nbuf: usize,
     }
 
-    impl<const B: usize> TurboBlockPacker<B> {
-        pub fn new() -> Self {
+    impl<'a, const B: usize> TurboPacker<'a, B> {
+        pub fn new(vector_bytes: &'a mut [u8]) -> Self {
+            let (blocks, tail) = vector_bytes.as_chunks_mut::<TURBO_BLOCK_SIZE>();
             Self {
-                buf: [0; TURBO_BLOCK_SIZE],
+                blocks,
+                tail,
+                block: 0,
                 nbuf: 0,
             }
         }
 
-        /// Push a new value into the buffer, returning true if the buffer is full.
-        pub fn push(&mut self, q: u8) -> bool {
-            assert!(self.nbuf < (TURBO_BLOCK_SIZE * 8) / B);
-            let byte = self.nbuf % TURBO_BLOCK_SIZE;
-            let shift = self.nbuf / TURBO_BLOCK_SIZE * B;
-            self.buf[byte] |= q << shift;
-            self.nbuf += 1;
-            self.nbuf == (TURBO_BLOCK_SIZE * 8) / B
-        }
-
-        /// Flush the contents of the packer to `out` and reset for a new block.
-        pub fn flush(&mut self, out: &mut [u8; TURBO_BLOCK_SIZE]) {
-            *out = self.buf;
-            self.buf = [0; TURBO_BLOCK_SIZE];
-            self.nbuf = 0;
-        }
-
-        pub fn is_empty(&self) -> bool {
-            self.nbuf == 0
-        }
-    }
-
-    pub struct TurboBlockIter<const B: usize> {
-        buf: [u8; TURBO_BLOCK_SIZE],
-        pos: usize,
-        shift: usize,
-    }
-
-    impl<const B: usize> TurboBlockIter<B> {
-        const MASK: u8 = u8::MAX >> (8 - B);
-
-        pub fn new(buf: [u8; TURBO_BLOCK_SIZE]) -> Self {
-            Self {
-                buf,
-                pos: 0,
-                shift: 0,
+        pub fn push(&mut self, q: u8) {
+            if self.block < self.blocks.len() {
+                let block = &mut self.blocks[self.block];
+                let byte = self.nbuf % TURBO_BLOCK_SIZE;
+                let shift = self.nbuf / TURBO_BLOCK_SIZE * B;
+                block[byte] |= q << shift;
+                self.nbuf += 1;
+                if self.nbuf == (TURBO_BLOCK_SIZE * 8) / B {
+                    self.block += 1;
+                    self.nbuf = 0;
+                }
+            } else {
+                let byte = self.nbuf % self.tail.len();
+                let shift = self.nbuf / self.tail.len() * B;
+                self.tail[byte] |= q << shift;
+                self.nbuf += 1;
+                if self.nbuf == self.tail.len() * 8 / B {
+                    self.block += 1;
+                    self.nbuf = 0;
+                }
             }
         }
     }
 
-    impl<const B: usize> Iterator for TurboBlockIter<B> {
+    pub struct TurboUnpacker<'a, const B: usize> {
+        blocks: &'a [[u8; TURBO_BLOCK_SIZE]],
+        tail: &'a [u8],
+        block: usize,
+        pos: usize,
+    }
+
+    impl<'a, const B: usize> TurboUnpacker<'a, B> {
+        pub fn new(vector_bytes: &'a [u8]) -> Self {
+            let (blocks, tail) = vector_bytes.as_chunks::<TURBO_BLOCK_SIZE>();
+            Self {
+                blocks,
+                tail,
+                block: 0,
+                pos: 0,
+            }
+        }
+    }
+
+    impl<'a, const B: usize> Iterator for TurboUnpacker<'a, B> {
         type Item = u8;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if self.shift == 8 {
-                return None;
+            if self.block < self.blocks.len() {
+                let block = &self.blocks[self.block];
+                let byte = self.pos % TURBO_BLOCK_SIZE;
+                let shift = self.pos / TURBO_BLOCK_SIZE * B;
+                let v = (block[byte] >> shift) & u8::MAX >> (8 - B);
+                self.pos += 1;
+                if self.pos == (TURBO_BLOCK_SIZE * 8) / B {
+                    self.block += 1;
+                    self.pos = 0;
+                }
+                Some(v)
+            } else if !self.tail.is_empty() && self.block == self.blocks.len() {
+                let byte = self.pos % self.tail.len();
+                let shift = self.pos / self.tail.len() * B;
+                let v = (self.tail[byte] >> shift) & u8::MAX >> (8 - B);
+                self.pos += 1;
+                if self.pos == self.tail.len() * 8 / B {
+                    self.block += 1;
+                    self.pos = 0;
+                }
+                Some(v)
+            } else {
+                None
             }
-
-            let v = (self.buf[self.pos] >> self.shift) & Self::MASK;
-            self.pos += 1;
-            if self.pos == TURBO_BLOCK_SIZE {
-                self.pos = 0;
-                self.shift += B;
-            }
-            Some(v)
         }
 
         fn size_hint(&self) -> (usize, Option<usize>) {
-            let next = self.shift * TURBO_BLOCK_SIZE + self.pos;
-            let remaining = (TURBO_BLOCK_SIZE * 8) / B - next;
-            (remaining, Some(remaining))
+            let total = (self.blocks.len() * TURBO_BLOCK_SIZE * 8) / B + self.tail.len() * 8 / B;
+            let next = self.block * TURBO_BLOCK_SIZE + self.pos;
+            (total - next, Some(total - next))
         }
     }
 
-    impl<const B: usize> FusedIterator for TurboBlockIter<B> {}
+    impl<'a, const B: usize> FusedIterator for TurboUnpacker<'a, B> {}
 
-    impl<const B: usize> ExactSizeIterator for TurboBlockIter<B> {}
+    impl<'a, const B: usize> ExactSizeIterator for TurboUnpacker<'a, B> {}
 }
 
 #[cfg(test)]

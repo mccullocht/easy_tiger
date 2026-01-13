@@ -15,17 +15,17 @@ et_lvq_dot_u2(const uint8_t *a, const uint8_t *b, size_t len) {
   uint32x4_t dot1 = vdupq_n_u32(0);
   uint32x4_t dot2 = vdupq_n_u32(0);
   uint32x4_t dot3 = vdupq_n_u32(0);
-  uint8x16_t nibble_mask = vdupq_n_u8(0xf);
+  uint8x16_t dibit_mask = vdupq_n_u8(0x3);
   size_t len16 = len & ~15;
   for (size_t i = 0; i < len16; i += 16) {
     uint8x16_t av = vld1q_u8(a + i);
     uint8x16_t bv = vld1q_u8(b + i);
     dot0 =
-        vdotq_u32(dot0, vandq_u8(av, nibble_mask), vandq_u8(bv, nibble_mask));
-    dot1 = vdotq_u32(dot1, vandq_u8(vshrq_n_u8(av, 2), nibble_mask),
-                     vandq_u8(vshrq_n_u8(bv, 2), nibble_mask));
-    dot2 = vdotq_u32(dot2, vandq_u8(vshrq_n_u8(av, 4), nibble_mask),
-                     vandq_u8(vshrq_n_u8(bv, 4), nibble_mask));
+        vdotq_u32(dot0, vandq_u8(av, dibit_mask), vandq_u8(bv, dibit_mask));
+    dot1 = vdotq_u32(dot1, vandq_u8(vshrq_n_u8(av, 2), dibit_mask),
+                     vandq_u8(vshrq_n_u8(bv, 2), dibit_mask));
+    dot2 = vdotq_u32(dot2, vandq_u8(vshrq_n_u8(av, 4), dibit_mask),
+                     vandq_u8(vshrq_n_u8(bv, 4), dibit_mask));
     dot3 = vdotq_u32(dot3, vshrq_n_u8(av, 6), vshrq_n_u8(bv, 6));
   }
 
@@ -34,7 +34,9 @@ et_lvq_dot_u2(const uint8_t *a, const uint8_t *b, size_t len) {
   for (size_t i = len16; i < len; i++) {
     uint32_t av = a[i];
     uint32_t bv = b[i];
-    dot += (av & 0xf) * (bv & 0xf) + (av >> 4) * (bv >> 4);
+    dot += (av & 0x3) * (bv & 0x3) + ((av >> 2) & 0x3) * ((bv >> 2) & 0x3) +
+           ((av >> 4) & 0x3) * ((bv >> 4) & 0x3) + ((av >> 6) & 0x3) *
+           ((bv >> 6) & 0x3);
   }
 
   return dot;

@@ -532,6 +532,7 @@ unsafe fn pack8(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
 }
 
 unsafe extern "C" {
+    unsafe fn et_lvq_dot_u2(a: *const u8, b: *const u8, len: usize) -> u32;
     unsafe fn et_lvq_dot_u4(a: *const u8, b: *const u8, len: usize) -> u32;
     unsafe fn et_lvq_dot_u8(a: *const u8, b: *const u8, len: usize) -> u32;
     unsafe fn et_lvq2_dot_u1_u8(
@@ -595,6 +596,7 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
             }
             dot
         },
+        2 => unsafe { et_lvq_dot_u2(a.as_ptr(), b.as_ptr(), a.len()) },
         4 => unsafe { et_lvq_dot_u4(a.as_ptr(), b.as_ptr(), a.len()) },
         8 => unsafe { et_lvq_dot_u8(a.as_ptr(), b.as_ptr(), a.len()) },
         _ => unimplemented!(),

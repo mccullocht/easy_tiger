@@ -170,6 +170,10 @@ pub enum F32VectorCoding {
     LVQ2x8x8,
     /// Turbo LVQ; 1 bit primary vector.
     TLVQ1,
+    /// Turbo LVQ; 2 bit primary vector.
+    TLVQ2,
+    /// Turbo LVQ; 4 bit primary vector.
+    TLVQ4,
     /// Turbo LVQ; 8 bit primary vector.
     TLVQ8,
 }
@@ -192,6 +196,8 @@ impl F32VectorCoding {
             Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::<4, 8>::default()),
             Self::LVQ2x8x8 => Box::new(lvq::TwoLevelVectorCoder::<8, 8>::default()),
             Self::TLVQ1 => Box::new(lvq::TurboPrimaryCoder::<1>::default()),
+            Self::TLVQ2 => Box::new(lvq::TurboPrimaryCoder::<2>::default()),
+            Self::TLVQ4 => Box::new(lvq::TurboPrimaryCoder::<4>::default()),
             Self::TLVQ8 => Box::new(lvq::TurboPrimaryCoder::<8>::default()),
         }
     }
@@ -224,6 +230,8 @@ impl F32VectorCoding {
             // XXX I believe this is correct because we are unconcerned with the dimension order
             // in the vectors as long as the encoding is symmetric.
             (Self::TLVQ1, _) => Box::new(lvq::PrimaryDistance::<1>::new(similarity)),
+            (Self::TLVQ2, _) => Box::new(lvq::PrimaryDistance::<2>::new(similarity)),
+            (Self::TLVQ4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
             (Self::TLVQ8, _) => Box::new(lvq::PrimaryDistance::<8>::new(similarity)),
         }
     }
@@ -293,6 +301,14 @@ impl F32VectorCoding {
                 similarity,
                 query.into(),
             )),
+            (_, F32VectorCoding::TLVQ2) => Box::new(lvq::TurboPrimaryQueryDistance::<2>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::TLVQ4) => Box::new(lvq::TurboPrimaryQueryDistance::<4>::new(
+                similarity,
+                query.into(),
+            )),
             (_, F32VectorCoding::TLVQ8) => Box::new(lvq::TurboPrimaryQueryDistance::<8>::new(
                 similarity,
                 query.into(),
@@ -355,6 +371,14 @@ impl F32VectorCoding {
             F32VectorCoding::TLVQ1 => Some(Box::new(QuantizedQueryVectorDistance::new(
                 lvq::PrimaryDistance::<1>::new(similarity),
                 lvq::TurboPrimaryCoder::<1>::default().encode(query),
+            ))),
+            F32VectorCoding::TLVQ2 => Some(Box::new(QuantizedQueryVectorDistance::new(
+                lvq::PrimaryDistance::<2>::new(similarity),
+                lvq::TurboPrimaryCoder::<2>::default().encode(query),
+            ))),
+            F32VectorCoding::TLVQ4 => Some(Box::new(QuantizedQueryVectorDistance::new(
+                lvq::PrimaryDistance::<4>::new(similarity),
+                lvq::TurboPrimaryCoder::<4>::default().encode(query),
             ))),
             F32VectorCoding::TLVQ8 => Some(Box::new(QuantizedQueryVectorDistance::new(
                 lvq::PrimaryDistance::<8>::new(similarity),
@@ -430,6 +454,12 @@ impl F32VectorCoding {
             (_, F32VectorCoding::TLVQ1) => {
                 quantized_qvd!(lvq::PrimaryDistance::<1>::new(similarity), query)
             }
+            (_, F32VectorCoding::TLVQ2) => {
+                quantized_qvd!(lvq::PrimaryDistance::<2>::new(similarity), query)
+            }
+            (_, F32VectorCoding::TLVQ4) => {
+                quantized_qvd!(lvq::PrimaryDistance::<4>::new(similarity), query)
+            }
             (_, F32VectorCoding::TLVQ8) => {
                 quantized_qvd!(lvq::PrimaryDistance::<8>::new(similarity), query)
             }
@@ -457,6 +487,8 @@ impl FromStr for F32VectorCoding {
             "lvq2x4x8" => Ok(Self::LVQ2x4x8),
             "lvq2x8x8" => Ok(Self::LVQ2x8x8),
             "tlvq1" => Ok(Self::TLVQ1),
+            "tlvq2" => Ok(Self::TLVQ2),
+            "tlvq4" => Ok(Self::TLVQ4),
             "tlvq8" => Ok(Self::TLVQ8),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
@@ -480,6 +512,8 @@ impl std::fmt::Display for F32VectorCoding {
             Self::LVQ2x4x8 => write!(f, "lvq2x4x8"),
             Self::LVQ2x8x8 => write!(f, "lvq2x8x8"),
             Self::TLVQ1 => write!(f, "tlvq1"),
+            Self::TLVQ2 => write!(f, "tlvq2"),
+            Self::TLVQ4 => write!(f, "tlvq4"),
             Self::TLVQ8 => write!(f, "tlvq8"),
         }
     }
@@ -661,7 +695,7 @@ mod test {
 
     use F32VectorCoding::{
         F16, I4ScaledUniform, I8ScaledUniform, I16ScaledUniform, LVQ1x1, LVQ1x4, LVQ1x8, LVQ2x1x8,
-        LVQ2x4x4, LVQ2x4x8, LVQ2x8x8, TLVQ1, TLVQ8,
+        LVQ2x4x4, LVQ2x4x8, LVQ2x8x8, TLVQ1, TLVQ2, TLVQ4, TLVQ8,
     };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
     use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
@@ -744,6 +778,10 @@ mod test {
 
     tlvq_distance_test!(tlvq1_dot_dist, Dot, TLVQ1, 0.4);
     tlvq_distance_test!(tlvq1_l2_dist, Euclidean, TLVQ1, 0.4);
+    tlvq_distance_test!(tlvq2_dot_dist, Dot, TLVQ2, 0.1);
+    tlvq_distance_test!(tlvq2_l2_dist, Euclidean, TLVQ2, 0.1);
+    tlvq_distance_test!(tlvq4_dot_dist, Dot, TLVQ4, 0.05);
+    tlvq_distance_test!(tlvq4_l2_dist, Euclidean, TLVQ4, 0.05);
     tlvq_distance_test!(tlvq8_dot_dist, Dot, TLVQ8, 0.01);
     tlvq_distance_test!(tlvq8_l2_dist, Euclidean, TLVQ8, 0.01);
 

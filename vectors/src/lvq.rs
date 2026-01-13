@@ -62,7 +62,7 @@ impl Default for InstructionSet {
     }
 }
 
-const SUPPORTED_PRIMARY_BITS: [usize; 3] = [1, 4, 8];
+const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
 const SUPPORTED_RESIDUAL_BITS: [usize; 2] = [4, 8];
 
 const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {

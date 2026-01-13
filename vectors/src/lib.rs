@@ -227,8 +227,6 @@ impl F32VectorCoding {
             (Self::LVQ2x4x4, _) => Box::new(lvq::TwoLevelDistance::<4, 4>::new(similarity)),
             (Self::LVQ2x4x8, _) => Box::new(lvq::TwoLevelDistance::<4, 8>::new(similarity)),
             (Self::LVQ2x8x8, _) => Box::new(lvq::TwoLevelDistance::<8, 8>::new(similarity)),
-            // XXX I believe this is correct because we are unconcerned with the dimension order
-            // in the vectors as long as the encoding is symmetric.
             (Self::TLVQ1, _) => Box::new(lvq::PrimaryDistance::<1>::new(similarity)),
             (Self::TLVQ2, _) => Box::new(lvq::PrimaryDistance::<2>::new(similarity)),
             (Self::TLVQ4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
@@ -449,8 +447,6 @@ impl F32VectorCoding {
             (_, F32VectorCoding::LVQ2x8x8) => {
                 quantized_qvd!(lvq::TwoLevelDistance::<8, 8>::new(similarity), query)
             }
-            // XXX again assuming that it's ok because reordering dims does not matter so long as
-            // we are consistent.
             (_, F32VectorCoding::TLVQ1) => {
                 quantized_qvd!(lvq::PrimaryDistance::<1>::new(similarity), query)
             }

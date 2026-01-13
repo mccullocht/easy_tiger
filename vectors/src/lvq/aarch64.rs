@@ -780,6 +780,7 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
     query: &[f32],
     doc: &TurboPrimaryVector<'_, B>,
 ) -> f32 {
+    // XXX block_dim_stride should be in packing rather than a member.
     let tail_split = query.len() & !(doc.block_dim_stride() - 1);
     let (query_head, query_tail) = query.split_at(tail_split);
     let mut dot = if !query_head.is_empty() {
@@ -788,37 +789,85 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
             let mut dot1 = vdupq_n_f32(0.0);
             let mut dot2 = vdupq_n_f32(0.0);
             let mut dot3 = vdupq_n_f32(0.0);
-            let mask = vdupq_n_u32(u32::from(u8::MAX) >> (8 - B));
-            let mut d = vdupq_n_u32(0);
-            for i in (0..tail_split).step_by(16) {
-                // XXX when B == 8 we can generate dX by shuffling with 4 different masks.
-                d = if i % (TURBO_BLOCK_SIZE * 8 / B) == 0 {
-                    let block = i / (TURBO_BLOCK_SIZE * 8 / B);
-                    let x = vld1q_u8(doc.rep.data.as_ptr().add(block * 16) as *const u8);
-                    // Shuffle the bytes so that a single byte right shift+mask produces the next 4.
-                    vreinterpretq_u32_u8(vqtbl1q_u8(
-                        x,
-                        vld1q_u8([0u8, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15].as_ptr()),
-                    ))
-                } else {
-                    shr_u32::<B>(d)
-                };
+            match B {
+                8 => {
+                    let shuffle_masks: [uint8x16_t; 4] = [
+                        vld1q_u8(
+                            [0u8, 16, 16, 16, 1, 16, 16, 16, 2, 16, 16, 16, 3, 16, 16, 16].as_ptr(),
+                        ),
+                        vld1q_u8(
+                            [4, 16, 16, 16, 5, 16, 16, 16, 6, 16, 16, 16, 7, 16, 16, 16].as_ptr(),
+                        ),
+                        vld1q_u8(
+                            [8, 16, 16, 16, 9, 16, 16, 16, 10, 16, 16, 16, 11, 16, 16, 16].as_ptr(),
+                        ),
+                        vld1q_u8(
+                            [
+                                12, 16, 16, 16, 13, 16, 16, 16, 15, 16, 16, 16, 15, 16, 16, 16,
+                            ]
+                            .as_ptr(),
+                        ),
+                    ];
+                    for i in (0..tail_split).step_by(16) {
+                        let d = vld1q_u8(doc.rep.data.as_ptr().add(i) as *const u8);
 
-                let q0 = vld1q_f32(query_head.as_ptr().add(i));
-                let d0 = vcvtq_f32_u32(vandq_u32(d, mask));
-                dot0 = vfmaq_f32(dot0, q0, d0);
+                        let q0 = vld1q_f32(query_head.as_ptr().add(i));
+                        let d0 =
+                            vcvtq_f32_u32(vreinterpretq_u32_u8(vqtbl1q_u8(d, shuffle_masks[0])));
+                        dot0 = vfmaq_f32(dot0, q0, d0);
 
-                let q1 = vld1q_f32(query_head.as_ptr().add(i + 4));
-                let d1 = vcvtq_f32_u32(vandq_u32(vshrq_n_u32::<8>(d), mask));
-                dot1 = vfmaq_f32(dot1, q1, d1);
+                        let q1 = vld1q_f32(query_head.as_ptr().add(i + 4));
+                        let d1 =
+                            vcvtq_f32_u32(vreinterpretq_u32_u8(vqtbl1q_u8(d, shuffle_masks[1])));
+                        dot1 = vfmaq_f32(dot1, q1, d1);
 
-                let q2 = vld1q_f32(query_head.as_ptr().add(i + 8));
-                let d2 = vcvtq_f32_u32(vandq_u32(vshrq_n_u32::<16>(d), mask));
-                dot2 = vfmaq_f32(dot2, q2, d2);
+                        let q2 = vld1q_f32(query_head.as_ptr().add(i + 8));
+                        let d2 =
+                            vcvtq_f32_u32(vreinterpretq_u32_u8(vqtbl1q_u8(d, shuffle_masks[2])));
+                        dot2 = vfmaq_f32(dot2, q2, d2);
 
-                let q3 = vld1q_f32(query_head.as_ptr().add(i + 12));
-                let d3 = vcvtq_f32_u32(vandq_u32(vshrq_n_u32::<24>(d), mask));
-                dot3 = vfmaq_f32(dot3, q3, d3);
+                        let q3 = vld1q_f32(query_head.as_ptr().add(i + 12));
+                        let d3 =
+                            vcvtq_f32_u32(vreinterpretq_u32_u8(vqtbl1q_u8(d, shuffle_masks[3])));
+                        dot3 = vfmaq_f32(dot3, q3, d3);
+                    }
+                }
+                _ => {
+                    let mask = vdupq_n_u32(u32::from(u8::MAX) >> (8 - B));
+                    let mut d = vdupq_n_u32(0);
+                    for i in (0..tail_split).step_by(16) {
+                        d = if i % (TURBO_BLOCK_SIZE * 8 / B) == 0 {
+                            let block = i / (TURBO_BLOCK_SIZE * 8 / B);
+                            let x = vld1q_u8(doc.rep.data.as_ptr().add(block * 16) as *const u8);
+                            // Shuffle the bytes so that a single byte right shift+mask produces the next 4.
+                            vreinterpretq_u32_u8(vqtbl1q_u8(
+                                x,
+                                vld1q_u8(
+                                    [0u8, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15]
+                                        .as_ptr(),
+                                ),
+                            ))
+                        } else {
+                            shr_u32::<B>(d)
+                        };
+
+                        let q0 = vld1q_f32(query_head.as_ptr().add(i));
+                        let d0 = vcvtq_f32_u32(vandq_u32(d, mask));
+                        dot0 = vfmaq_f32(dot0, q0, d0);
+
+                        let q1 = vld1q_f32(query_head.as_ptr().add(i + 4));
+                        let d1 = vcvtq_f32_u32(vandq_u32(vshrq_n_u32::<8>(d), mask));
+                        dot1 = vfmaq_f32(dot1, q1, d1);
+
+                        let q2 = vld1q_f32(query_head.as_ptr().add(i + 8));
+                        let d2 = vcvtq_f32_u32(vandq_u32(vshrq_n_u32::<16>(d), mask));
+                        dot2 = vfmaq_f32(dot2, q2, d2);
+
+                        let q3 = vld1q_f32(query_head.as_ptr().add(i + 12));
+                        let d3 = vcvtq_f32_u32(vandq_u32(vshrq_n_u32::<24>(d), mask));
+                        dot3 = vfmaq_f32(dot3, q3, d3);
+                    }
+                }
             }
             vaddvq_f32(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)))
         }

@@ -805,10 +805,9 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for FastTwoLevelQuery
 const TURBO_BLOCK_SIZE: usize = 16;
 
 struct TurboPrimaryVector<'a, const B: usize> {
-    // XXX lower is duplicated, not sure if i ever need upper. l2_norm could be compied.
-    header: PrimaryVectorHeader,
     data: &'a [u8],
     terms: VectorTerms,
+    l2_norm: f32,
 }
 
 impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
@@ -821,9 +820,9 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             component_sum: header.component_sum,
         };
         Self {
-            header,
             data: vector_bytes,
             terms,
+            l2_norm: header.l2_norm,
         }
     }
 
@@ -831,7 +830,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         packing::TurboUnpacker::<B>::new(self.data)
     }
 
-    const fn block_stride(&self) -> usize {
+    const fn block_dim_stride(&self) -> usize {
         TURBO_BLOCK_SIZE * 8 / B
     }
 
@@ -840,7 +839,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
     }
 
     fn l2_norm(&self) -> f64 {
-        self.header.l2_norm.into()
+        self.l2_norm.into()
     }
 }
 
@@ -946,7 +945,6 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<'_, B> {
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => {
                 // XXX should be "primary" instead of "1"
-                // XXX the scalar version works but this...does not.
                 aarch64::tlvq1_f32_dot_unnormalized(self.query.as_ref(), &vector)
             }
             #[cfg(target_arch = "x86_64")]

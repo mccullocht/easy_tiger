@@ -863,12 +863,22 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     doc.f32_dot_correction(query_sum, pdot, rdot).into()
 }
 
+const TLVQ_F32_SHUFFLE: [u8; 16] = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
+
+#[rustfmt::skip]
+const TLVQ8_F32_SHUFFLE_MASKS: [u8; 64] = [
+     0, 16, 16, 16,  1, 16, 16, 16,  2, 16, 16, 16,  3, 16, 16, 16,
+     4, 16, 16, 16,  5, 16, 16, 16,  6, 16, 16, 16,  7, 16, 16, 16,
+     8, 16, 16, 16,  9, 16, 16, 16, 10, 16, 16, 16, 11, 16, 16, 16,
+    12, 16, 16, 16, 13, 16, 16, 16, 14, 16, 16, 16, 15, 16, 16, 16,
+];
+
 pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
     query: &[f32],
     doc: &TurboPrimaryVector<'_, B>,
 ) -> f32 {
-    // XXX block_dim_stride should be in packing rather than a member.
-    let tail_split = query.len() & !(doc.block_dim_stride() - 1);
+    let block_dim_stride = packing::block_dim(B);
+    let tail_split = query.len() & !(block_dim_stride - 1);
     let (query_head, query_tail) = query.split_at(tail_split);
     let mut dot = if !query_head.is_empty() {
         unsafe {
@@ -877,24 +887,12 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
             let mut dot2 = vdupq_n_f32(0.0);
             let mut dot3 = vdupq_n_f32(0.0);
             match B {
-                /* XXX FIXME this is still broken.
                 8 => {
                     let shuffle_masks: [uint8x16_t; 4] = [
-                        vld1q_u8(
-                            [0u8, 16, 16, 16, 1, 16, 16, 16, 2, 16, 16, 16, 3, 16, 16, 16].as_ptr(),
-                        ),
-                        vld1q_u8(
-                            [4, 16, 16, 16, 5, 16, 16, 16, 6, 16, 16, 16, 7, 16, 16, 16].as_ptr(),
-                        ),
-                        vld1q_u8(
-                            [8, 16, 16, 16, 9, 16, 16, 16, 10, 16, 16, 16, 11, 16, 16, 16].as_ptr(),
-                        ),
-                        vld1q_u8(
-                            [
-                                12, 16, 16, 16, 13, 16, 16, 16, 15, 16, 16, 16, 15, 16, 16, 16,
-                            ]
-                            .as_ptr(),
-                        ),
+                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr()),
+                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr().add(16)),
+                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr().add(32)),
+                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr().add(48)),
                     ];
                     for i in (0..tail_split).step_by(16) {
                         let d = vld1q_u8(doc.rep.data.as_ptr().add(i) as *const u8);
@@ -920,8 +918,8 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
                         dot3 = vfmaq_f32(dot3, q3, d3);
                     }
                 }
-                */
                 _ => {
+                    let shuffle_mask = vld1q_u8(TLVQ_F32_SHUFFLE.as_ptr());
                     let mask = vdupq_n_u32(u32::from(u8::MAX) >> (8 - B));
                     let mut d = vdupq_n_u32(0);
                     for i in (0..tail_split).step_by(16) {
@@ -929,13 +927,7 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
                             let block = i / (TURBO_BLOCK_SIZE * 8 / B);
                             let x = vld1q_u8(doc.rep.data.as_ptr().add(block * 16) as *const u8);
                             // Shuffle the bytes so that a single byte right shift+mask produces the next 4.
-                            vreinterpretq_u32_u8(vqtbl1q_u8(
-                                x,
-                                vld1q_u8(
-                                    [0u8, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15]
-                                        .as_ptr(),
-                                ),
-                            ))
+                            vreinterpretq_u32_u8(vqtbl1q_u8(x, shuffle_mask))
                         } else {
                             shr_u32::<B>(d)
                         };
@@ -965,7 +957,7 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
     };
 
     if !query_tail.is_empty() {
-        for (q, p) in query_tail.iter().zip(doc.iter().skip(tail_split)) {
+        for (q, p) in query_tail.iter().zip(doc.slice(tail_split).iter()) {
             dot += q * p as f32;
         }
     }

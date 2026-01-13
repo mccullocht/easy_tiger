@@ -835,16 +835,23 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         packing::TurboUnpacker::<B>::new(self.rep.data)
     }
 
-    const fn block_dim_stride(&self) -> usize {
-        TURBO_BLOCK_SIZE * 8 / B
-    }
-
     fn f32_dot_correction(&self, query_sum: f32, dot: f32) -> f32 {
         dot * self.rep.terms.delta + query_sum * self.rep.terms.lower
     }
 
     fn l2_norm(&self) -> f64 {
         self.l2_norm.into()
+    }
+
+    fn slice(&self, dim: usize) -> Self {
+        let bytes = packing::byte_len(dim, B);
+        Self {
+            rep: EncodedVector {
+                terms: self.rep.terms,
+                data: &self.rep.data[bytes..],
+            },
+            l2_norm: self.l2_norm,
+        }
     }
 }
 
@@ -1188,8 +1195,6 @@ mod packing {
             let next = self.block * TURBO_BLOCK_SIZE + self.pos;
             (total - next, Some(total - next))
         }
-
-        // XXX this needs an nth/skip impl.
     }
 
     impl<'a, const B: usize> FusedIterator for TurboUnpacker<'a, B> {}

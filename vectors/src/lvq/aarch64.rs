@@ -320,18 +320,18 @@ pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &m
             let mut expander = TLVQExpander32::<B>::new(in_head.rep.data.as_ptr());
             for i in (0..tail_split).step_by(16) {
                 let [d0, d1, d2, d3] = expander.next();
-                vst1q_f32(out_head.as_mut_ptr().add(i), vfmaq_f32(d0, delta, lower));
+                vst1q_f32(out_head.as_mut_ptr().add(i), vfmaq_f32(lower, d0, delta));
                 vst1q_f32(
                     out_head.as_mut_ptr().add(i + 4),
-                    vfmaq_f32(d1, delta, lower),
+                    vfmaq_f32(lower, d1, delta),
                 );
                 vst1q_f32(
                     out_head.as_mut_ptr().add(i + 8),
-                    vfmaq_f32(d2, delta, lower),
+                    vfmaq_f32(lower, d2, delta),
                 );
                 vst1q_f32(
                     out_head.as_mut_ptr().add(i + 12),
-                    vfmaq_f32(d3, delta, lower),
+                    vfmaq_f32(lower, d3, delta),
                 );
             }
         }

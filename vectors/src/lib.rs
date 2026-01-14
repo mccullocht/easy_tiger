@@ -608,7 +608,7 @@ fn dot_unnormalized_to_distance(
 mod test {
     use crate::{
         F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize,
-        lvq::{PrimaryVectorCoder, TwoLevelVectorCoder},
+        lvq::{PrimaryVectorCoder, TurboPrimaryCoder, TwoLevelVectorCoder},
     };
 
     struct TestVector {
@@ -772,9 +772,10 @@ mod test {
                 let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
                 let scoder = <$coder>::scalar();
                 let ocoder = <$coder>::default();
+                // TODO: use randomly sized vectors like we do for distance tests.
                 for i in 0..1024 {
                     let vec = l2_normalize(
-                        (0..16)
+                        (0..64)
                             .map(|_| rng.random_range(-1.0f32..=1.0))
                             .collect::<Vec<_>>(),
                     );
@@ -797,4 +798,8 @@ mod test {
     lvq_coding_simd_test!(lvq2x4x4_coding_simd, TwoLevelVectorCoder::<4, 4>);
     lvq_coding_simd_test!(lvq2x4x8_coding_simd, TwoLevelVectorCoder::<4, 8>);
     lvq_coding_simd_test!(lvq2x8x8_coding_simd, TwoLevelVectorCoder::<8, 8>);
+    lvq_coding_simd_test!(tlvq1_coding_simd, TurboPrimaryCoder::<1>);
+    lvq_coding_simd_test!(tlvq2_coding_simd, TurboPrimaryCoder::<2>);
+    lvq_coding_simd_test!(tlvq4_coding_simd, TurboPrimaryCoder::<4>);
+    lvq_coding_simd_test!(tlvq8_coding_simd, TurboPrimaryCoder::<8>);
 }

@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::lvq::{EncodedVector, TurboPrimaryVector};
+use crate::lvq::TurboPrimaryVector;
 
 use super::{
     LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats,
@@ -123,9 +123,9 @@ pub fn primary_quantize_and_pack<const B: usize>(
         .sum()
 }
 
-pub fn primary_decode<const B: usize>(vector: EncodedVector<'_>, out: &mut [f32]) {
-    for (q, o) in TurboUnpacker::<B>::new(vector.data).zip(out.iter_mut()) {
-        *o = (q as f32).mul_add(vector.terms.delta, vector.terms.lower);
+pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
+    for (q, o) in TurboUnpacker::<B>::new(vector.rep.data).zip(out.iter_mut()) {
+        *o = (q as f32).mul_add(vector.rep.terms.delta, vector.rep.terms.lower);
     }
 }
 

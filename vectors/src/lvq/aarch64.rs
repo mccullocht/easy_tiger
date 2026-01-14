@@ -13,10 +13,10 @@ use std::arch::aarch64::{
     vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
     vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8, vqtbl4q_u8,
     vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshl_u8, vshl_u32, vshlq_u8, vshlq_u16,
-    vshlq_u32, vshlq_u64, vshrq_n_u8, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
+    vshlq_u32, vshlq_u64, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
-use crate::lvq::{EncodedVector, TURBO_BLOCK_SIZE, TurboPrimaryVector, scalar};
+use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, scalar};
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats, packing};
 
@@ -312,15 +312,33 @@ pub fn primary_quantize_and_pack<const B: usize>(
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
     let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
     let (out_head, out_tail) = out.split_at_mut(tail_split);
-    let load_interval = TURBO_BLOCK_SIZE * 8 / B;
 
-    if !in_head.is_empty() {
-        todo!("XXX");
+    if !in_head.rep.data.is_empty() {
+        unsafe {
+            let lower = vdupq_n_f32(vector.rep.terms.lower);
+            let delta = vdupq_n_f32(vector.rep.terms.delta);
+            let mut expander = TLVQExpander32::<B>::new(in_head.rep.data.as_ptr());
+            for i in (0..tail_split).step_by(16) {
+                let [d0, d1, d2, d3] = expander.next();
+                vst1q_f32(out_head.as_mut_ptr().add(i), vfmaq_f32(d0, delta, lower));
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 4),
+                    vfmaq_f32(d1, delta, lower),
+                );
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 8),
+                    vfmaq_f32(d2, delta, lower),
+                );
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 12),
+                    vfmaq_f32(d3, delta, lower),
+                );
+            }
+        }
     }
 
-    // XXX I don't have any way partially decode this vector for the tail which is annoying.
-    if !in_tail.is_empty() {
-        todo!("XXX");
+    if !in_tail.rep.data.is_empty() {
+        scalar::primary_decode::<B>(in_tail, out_tail);
     }
 }
 
@@ -968,8 +986,7 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
     query: &[f32],
     doc: &TurboPrimaryVector<'_, B>,
 ) -> f32 {
-    let block_dim_stride = packing::block_dim(B);
-    let tail_split = query.len() & !(block_dim_stride - 1);
+    let (tail_split, doc_head, doc_tail) = doc.split_tail(query.len());
     let (query_head, query_tail) = query.split_at(tail_split);
     let mut dot = if !query_head.is_empty() {
         unsafe {
@@ -977,7 +994,7 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
             let mut dot1 = vdupq_n_f32(0.0);
             let mut dot2 = vdupq_n_f32(0.0);
             let mut dot3 = vdupq_n_f32(0.0);
-            let mut expander = TLVQExpander32::<B>::new(doc.rep.data.as_ptr());
+            let mut expander = TLVQExpander32::<B>::new(doc_head.rep.data.as_ptr());
             for i in (0..tail_split).step_by(16) {
                 let [d0, d1, d2, d3] = expander.next();
 
@@ -993,23 +1010,10 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
     };
 
     if !query_tail.is_empty() {
-        for (q, p) in query_tail.iter().zip(doc.slice(tail_split).iter()) {
-            dot += q * p as f32;
-        }
+        dot += scalar::tlvq_primary_f32_dot_unnormalized(query_tail, &doc_tail);
     }
 
     dot
-}
-
-#[inline(always)]
-unsafe fn shr_u8<const N: usize>(v: uint8x16_t) -> uint8x16_t {
-    match N {
-        1 => vshrq_n_u8::<1>(v),
-        2 => vshrq_n_u8::<2>(v),
-        4 => vshrq_n_u8::<4>(v),
-        8 => vshrq_n_u8::<8>(v),
-        _ => unreachable!(),
-    }
 }
 
 #[inline(always)]

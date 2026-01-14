@@ -843,21 +843,26 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         self.l2_norm.into()
     }
 
-    fn split_tail(&self, dim: usize) -> (usize, &'a [u8], &'a [u8]) {
+    fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
         let tail_dim = dim & !(packing::block_dim(B) - 1);
         let (head_data, tail_data) = self.rep.data.split_at(packing::byte_len(tail_dim, B));
-        (tail_dim, head_data, tail_data)
-    }
-
-    fn slice(&self, dim: usize) -> Self {
-        let bytes = packing::byte_len(dim, B);
-        Self {
-            rep: EncodedVector {
-                terms: self.rep.terms,
-                data: &self.rep.data[bytes..],
+        (
+            tail_dim,
+            Self {
+                rep: EncodedVector {
+                    terms: self.rep.terms,
+                    data: head_data,
+                },
+                l2_norm: self.l2_norm,
             },
-            l2_norm: self.l2_norm,
-        }
+            Self {
+                rep: EncodedVector {
+                    terms: self.rep.terms,
+                    data: tail_data,
+                },
+                l2_norm: self.l2_norm,
+            },
+        )
     }
 }
 
@@ -926,13 +931,11 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
         let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
         match self.0 {
-            InstructionSet::Scalar => scalar::primary_decode::<B>(vector.rep, out),
-            // XXX implement aarch64
+            InstructionSet::Scalar => scalar::primary_decode::<B>(vector, out),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => scalar::primary_decode::<B>(vector.rep, out),
-            // XXX implement x86_64
+            InstructionSet::Neon => aarch64::primary_decode::<B>(vector, out),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => scalar::primary_decode::<B>(vector.rep, out),
+            InstructionSet::Avx512 => scalar::primary_decode::<B>(vector, out),
         };
     }
 

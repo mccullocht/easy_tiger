@@ -6,7 +6,6 @@ mod binary;
 mod float16;
 mod float32;
 mod lvq;
-mod scaled_uniform;
 pub mod soar;
 
 use serde::{Deserialize, Serialize};
@@ -133,27 +132,6 @@ pub enum F32VectorCoding {
     /// This encoding is very compact and efficient for distance computation but also does not have
     /// high fidelity with distances computed between raw vectors.
     BinaryQuantized,
-    /// Quantize into an i8 value shaped to the input vector.
-    ///
-    /// This uses the contents of the vector to try to reduce quantization error but no data from
-    /// other vectors in the data set.
-    ///
-    /// This uses 1 byte per dimension and 8 additional bytes for a scaling factor and l2 norm.
-    I8ScaledUniform,
-    /// Quantize into an i4 value shaped to the input vector and pack 2 dimensions per byte.
-    ///
-    /// This uses the contents of the vector to try to reduce quantization error but no data from
-    /// other vectors in the data set.
-    ///
-    /// This uses 1 byte per 2 dimensions and 8 additional bytes for a scaling factor and l2 norm.
-    I4ScaledUniform,
-    /// Quantize into an i16 value shaped to the input vector.
-    ///
-    /// This uses the contents of the vector to try to reduce quantization error but no data from
-    /// other vectors in the data set.
-    ///
-    /// This uses 2 bytes per dimension and 8 additional bytes for a scaling factor and l2 norm.
-    I16ScaledUniform,
     /// LVQ one-level; 1 bit
     LVQ1x1,
     /// LVQ one-level; 4 bits
@@ -177,9 +155,6 @@ impl F32VectorCoding {
             Self::F32 => Box::new(float32::VectorCoder::new(similarity)),
             Self::F16 => Box::new(float16::VectorCoder::new(similarity)),
             Self::BinaryQuantized => Box::new(binary::BinaryQuantizedVectorCoder),
-            Self::I8ScaledUniform => Box::new(scaled_uniform::I8VectorCoder::new(similarity)),
-            Self::I4ScaledUniform => Box::new(scaled_uniform::I4PackedVectorCoder::new(similarity)),
-            Self::I16ScaledUniform => Box::new(scaled_uniform::I16VectorCoder::new(similarity)),
             Self::LVQ1x1 => Box::new(lvq::PrimaryVectorCoder::<1>::default()),
             Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::<4>::default()),
             Self::LVQ1x8 => Box::new(lvq::PrimaryVectorCoder::<8>::default()),
@@ -203,11 +178,6 @@ impl F32VectorCoding {
             }
             (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance::default()),
             (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
-            (Self::I8ScaledUniform, _) => Box::new(scaled_uniform::I8Distance::new(similarity)),
-            (Self::I4ScaledUniform, _) => {
-                Box::new(scaled_uniform::I4PackedDistance::new(similarity))
-            }
-            (Self::I16ScaledUniform, _) => Box::new(scaled_uniform::I16Distance::new(similarity)),
             (Self::LVQ1x1, _) => Box::new(lvq::PrimaryDistance::<1>::new(similarity)),
             (Self::LVQ1x4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
             (Self::LVQ1x8, _) => Box::new(lvq::PrimaryDistance::<8>::new(similarity)),
@@ -241,15 +211,6 @@ impl F32VectorCoding {
             }
             (_, F32VectorCoding::BinaryQuantized) => Box::new(
                 binary::I1DotProductQueryDistance::new(query.into().as_ref()),
-            ),
-            (_, F32VectorCoding::I4ScaledUniform) => Box::new(
-                scaled_uniform::I4PackedQueryDistance::new(similarity, query.into()),
-            ),
-            (_, F32VectorCoding::I8ScaledUniform) => Box::new(
-                scaled_uniform::I8QueryDistance::new(similarity, query.into()),
-            ),
-            (_, F32VectorCoding::I16ScaledUniform) => Box::new(
-                scaled_uniform::I16QueryDistance::new(similarity, query.into()),
             ),
             (_, F32VectorCoding::LVQ1x1) => Box::new(lvq::PrimaryQueryDistance::<1>::new(
                 similarity,
@@ -297,18 +258,6 @@ impl F32VectorCoding {
             F32VectorCoding::BinaryQuantized => Some(Box::new(QuantizedQueryVectorDistance::new(
                 binary::HammingDistance,
                 binary::BinaryQuantizedVectorCoder.encode(query),
-            ))),
-            F32VectorCoding::I4ScaledUniform => Some(Box::new(QuantizedQueryVectorDistance::new(
-                scaled_uniform::I4PackedDistance::new(similarity),
-                scaled_uniform::I4PackedVectorCoder::new(similarity).encode(query),
-            ))),
-            F32VectorCoding::I8ScaledUniform => Some(Box::new(QuantizedQueryVectorDistance::new(
-                scaled_uniform::I8Distance::new(similarity),
-                scaled_uniform::I8VectorCoder::new(similarity).encode(query),
-            ))),
-            F32VectorCoding::I16ScaledUniform => Some(Box::new(QuantizedQueryVectorDistance::new(
-                scaled_uniform::I16Distance::new(similarity),
-                scaled_uniform::I16VectorCoder::new(similarity).encode(query),
             ))),
             F32VectorCoding::LVQ1x1 => Some(Box::new(QuantizedQueryVectorDistance::new(
                 lvq::PrimaryDistance::<1>::new(similarity),
@@ -369,15 +318,6 @@ impl F32VectorCoding {
                 quantized_qvd!(float16::EuclideanDistance::default(), query)
             }
             (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
-            (_, F32VectorCoding::I8ScaledUniform) => {
-                quantized_qvd!(scaled_uniform::I8Distance::new(similarity), query)
-            }
-            (_, F32VectorCoding::I4ScaledUniform) => {
-                quantized_qvd!(scaled_uniform::I4PackedDistance::new(similarity), query)
-            }
-            (_, F32VectorCoding::I16ScaledUniform) => {
-                quantized_qvd!(scaled_uniform::I16Distance::new(similarity), query)
-            }
             (_, F32VectorCoding::LVQ1x1) => {
                 quantized_qvd!(lvq::PrimaryDistance::<1>::new(similarity), query)
             }
@@ -412,9 +352,6 @@ impl FromStr for F32VectorCoding {
             "raw" | "raw-l2-norm" | "f32" => Ok(Self::F32),
             "f16" => Ok(Self::F16),
             "binary" => Ok(Self::BinaryQuantized),
-            "i8-scaled-uniform" => Ok(Self::I8ScaledUniform),
-            "i4-scaled-uniform" => Ok(Self::I4ScaledUniform),
-            "i16-scaled-uniform" => Ok(Self::I16ScaledUniform),
             "lvq1x1" => Ok(Self::LVQ1x1),
             "lvq1x4" => Ok(Self::LVQ1x4),
             "lvq1x8" => Ok(Self::LVQ1x8),
@@ -433,9 +370,6 @@ impl std::fmt::Display for F32VectorCoding {
             Self::F32 => write!(f, "f32"),
             Self::F16 => write!(f, "f16"),
             Self::BinaryQuantized => write!(f, "binary"),
-            Self::I8ScaledUniform => write!(f, "i8-scaled-uniform"),
-            Self::I4ScaledUniform => write!(f, "i4-scaled-uniform"),
-            Self::I16ScaledUniform => write!(f, "i16-scaled-uniform"),
             Self::LVQ1x1 => write!(f, "lvq1x1"),
             Self::LVQ1x4 => write!(f, "lvq1x4"),
             Self::LVQ1x8 => write!(f, "lvq1x8"),
@@ -621,10 +555,7 @@ mod test {
         assert_float_near!(f32_dist, query_dist, threshold, index);
     }
 
-    use F32VectorCoding::{
-        F16, I4ScaledUniform, I8ScaledUniform, I16ScaledUniform, LVQ1x1, LVQ1x4, LVQ1x8, LVQ2x1x8,
-        LVQ2x4x4, LVQ2x4x8, LVQ2x8x8,
-    };
+    use F32VectorCoding::{F16, LVQ1x1, LVQ1x4, LVQ1x8, LVQ2x1x8, LVQ2x4x4, LVQ2x4x8, LVQ2x8x8};
     use VectorSimilarity::{Cosine, Dot, Euclidean};
     use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
 
@@ -670,13 +601,6 @@ mod test {
     distance_test!(lvq2x4x8_l2_dist, Euclidean, LVQ2x4x8, 0.001);
     distance_test!(lvq2x8x8_dot_dist, Dot, LVQ2x8x8, 0.001);
     distance_test!(lvq2x8x8_l2_dist, Euclidean, LVQ2x8x8, 0.001);
-
-    distance_test!(i4_scaled_dot_dist, Dot, I4ScaledUniform, 0.1);
-    distance_test!(i4_scaled_l2_dist, Euclidean, I4ScaledUniform, 0.1);
-    distance_test!(i8_scaled_dot_dist, Dot, I8ScaledUniform, 0.01);
-    distance_test!(i8_scaled_l2_dist, Euclidean, I8ScaledUniform, 0.01);
-    distance_test!(i16_scaled_dot_dist, Dot, I16ScaledUniform, 0.001);
-    distance_test!(i16_scaled_l2_dist, Euclidean, I16ScaledUniform, 0.001);
 
     macro_rules! lvq_coding_simd_test {
         ($name:ident, $coder:ty) => {

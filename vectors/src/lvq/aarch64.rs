@@ -290,7 +290,7 @@ pub fn primary_quantize_and_pack<const B: usize>(
                 );
                 component_sum += u32::from(vaddlvq_u8(qabcd));
 
-                d = vorrq_u8(d, vshlq_u8(qabcd, vdupq_n_s8(shift as i8)));
+                d = vorrq_u8(d, vshlq_u8(qabcd, vdupq_n_s8(shift)));
                 shift += B as i8;
                 if shift == 8 {
                     vst1q_u8(out_head.as_mut_ptr().add(block * 16), d);
@@ -892,16 +892,6 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     doc.f32_dot_correction(query_sum, pdot, rdot).into()
 }
 
-const TLVQ_F32_SHUFFLE: [u8; 16] = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
-
-#[rustfmt::skip]
-const TLVQ8_F32_SHUFFLE_MASKS: [u8; 64] = [
-     0, 16, 16, 16,  1, 16, 16, 16,  2, 16, 16, 16,  3, 16, 16, 16,
-     4, 16, 16, 16,  5, 16, 16, 16,  6, 16, 16, 16,  7, 16, 16, 16,
-     8, 16, 16, 16,  9, 16, 16, 16, 10, 16, 16, 16, 11, 16, 16, 16,
-    12, 16, 16, 16, 13, 16, 16, 16, 14, 16, 16, 16, 15, 16, 16, 16,
-];
-
 struct TLVQExpander32<const B: usize> {
     start: *const u8,
     next_block: usize,
@@ -914,20 +904,30 @@ struct TLVQExpander32<const B: usize> {
 }
 
 impl<const B: usize> TLVQExpander32<B> {
+    const SHUFFLE_MASK: [u8; 16] = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
+
+    const SHUFFLE_MASKS8: [[u8; 16]; 4] = [
+        [0, 16, 16, 16, 1, 16, 16, 16, 2, 16, 16, 16, 3, 16, 16, 16],
+        [4, 16, 16, 16, 5, 16, 16, 16, 6, 16, 16, 16, 7, 16, 16, 16],
+        [8, 16, 16, 16, 9, 16, 16, 16, 10, 16, 16, 16, 11, 16, 16, 16],
+        [
+            12, 16, 16, 16, 13, 16, 16, 16, 14, 16, 16, 16, 15, 16, 16, 16,
+        ],
+    ];
+
     unsafe fn new(start: *const u8) -> Self {
         let (shuffle_mask, shuffle_mask8) = unsafe {
             match B {
                 8 => (
                     vdupq_n_u8(0),
                     [
-                        // XXX the rep should be [[u8; 16]; 4]
-                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr()),
-                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr().add(16)),
-                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr().add(32)),
-                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr().add(48)),
+                        vld1q_u8(Self::SHUFFLE_MASKS8[0].as_ptr()),
+                        vld1q_u8(Self::SHUFFLE_MASKS8[1].as_ptr()),
+                        vld1q_u8(Self::SHUFFLE_MASKS8[2].as_ptr()),
+                        vld1q_u8(Self::SHUFFLE_MASKS8[3].as_ptr()),
                     ],
                 ),
-                _ => (vld1q_u8(TLVQ_F32_SHUFFLE.as_ptr()), [vdupq_n_u8(0); 4]),
+                _ => (vld1q_u8(Self::SHUFFLE_MASK.as_ptr()), [vdupq_n_u8(0); 4]),
             }
         };
         unsafe {

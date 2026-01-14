@@ -47,16 +47,6 @@ fn float16_benchmarks(c: &mut Criterion) {
     }
 }
 
-fn scaled_uniform_benchmarks(c: &mut Criterion) {
-    for format in [
-        F32VectorCoding::I4ScaledUniform,
-        F32VectorCoding::I8ScaledUniform,
-        F32VectorCoding::I16ScaledUniform,
-    ] {
-        benchmark_coding(c, format, None);
-    }
-}
-
 fn binary_benchmarks(c: &mut Criterion) {
     benchmark_coding(c, F32VectorCoding::BinaryQuantized, None);
 }
@@ -79,7 +69,6 @@ criterion_group!(
     benches,
     float32_benchmarks,
     float16_benchmarks,
-    scaled_uniform_benchmarks,
     binary_benchmarks,
     lvq_benchmarks,
 );

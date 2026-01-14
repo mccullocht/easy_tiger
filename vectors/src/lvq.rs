@@ -1648,7 +1648,6 @@ mod test {
                 component_sum: 11,
             }
         );
-        // NB: vector dimensionality is not a multiple of 8 so we're producting extra dimensions.
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
         coder.decode_to(&encoded, &mut decoded);
         assert_abs_diff_eq!(
@@ -1676,6 +1675,135 @@ mod test {
             ]
             .as_ref(),
             epsilon = 0.00001
+        );
+    }
+
+    #[test]
+    fn tlvq2() {
+        let coder = TurboPrimaryCoder::<2>::default();
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_abs_diff_eq!(
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            PrimaryVectorHeader {
+                l2_norm: 2.5226507,
+                lower: -0.6709247,
+                upper: 0.8410188,
+                component_sum: 32,
+            }
+        );
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_ref(),
+            [
+                -0.6709247,
+                -0.16694355,
+                0.8410188,
+                0.8410188,
+                0.33703762,
+                0.33703762,
+                0.8410188,
+                -0.16694355,
+                -0.16694355,
+                -0.6709247,
+                0.8410188,
+                -0.6709247,
+                -0.16694355,
+                0.33703762,
+                -0.6709247,
+                0.33703762,
+                0.8410188,
+                0.8410188,
+                0.33703762
+            ]
+            .as_ref(),
+            epsilon = 0.0001,
+        );
+    }
+
+    #[test]
+    fn tlvq4() {
+        let coder = TurboPrimaryCoder::<4>::default();
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_abs_diff_eq!(
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            PrimaryVectorHeader {
+                l2_norm: 2.5226507,
+                lower: -0.93474734,
+                upper: 0.9131211,
+                component_sum: 170,
+            }
+        );
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_ref(),
+            [
+                -0.93474734,
+                -0.072408736,
+                0.6667386,
+                0.6667386,
+                0.5435474,
+                0.42035615,
+                0.6667386,
+                0.0507825,
+                -0.19559997,
+                -0.44198242,
+                0.78992987,
+                -0.68836486,
+                -0.3187912,
+                0.5435474,
+                -0.68836486,
+                0.42035615,
+                0.9131211,
+                0.6667386,
+                0.17397368
+            ]
+            .as_ref(),
+            epsilon = 0.0001,
+        );
+    }
+
+    #[test]
+    fn tlvq8() {
+        let coder = TurboPrimaryCoder::<8>::default();
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_abs_diff_eq!(
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            PrimaryVectorHeader {
+                l2_norm: 2.5226507,
+                lower: -0.92000645,
+                upper: 0.91146713,
+                component_sum: 2876,
+            }
+        );
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_ref(),
+            [
+                -0.92000645,
+                -0.058136523,
+                0.66008836,
+                0.6672706,
+                0.57390136,
+                0.43025643,
+                0.6457239,
+                -0.0006785393,
+                -0.20178151,
+                -0.42443126,
+                0.7319109,
+                -0.70453894,
+                -0.27360404,
+                0.53799015,
+                -0.73326796,
+                0.43743867,
+                0.91146713,
+                0.6959997,
+                0.20042449
+            ]
+            .as_ref(),
+            epsilon = 0.0001
         );
     }
 }

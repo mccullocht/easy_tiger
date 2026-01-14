@@ -13,7 +13,7 @@ use std::arch::aarch64::{
     vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
     vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8, vqtbl4q_u8,
     vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshl_u8, vshl_u32, vshlq_u8, vshlq_u16,
-    vshlq_u32, vshlq_u64, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
+    vshlq_u32, vshlq_u64, vshrq_n_u8, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use crate::lvq::{EncodedVector, TURBO_BLOCK_SIZE, TurboPrimaryVector, scalar};
@@ -309,8 +309,19 @@ pub fn primary_quantize_and_pack<const B: usize>(
     component_sum
 }
 
-pub fn primary_decode<const B: usize>(vector: EncodedVector<'_>, out: &mut [f32]) {
-    todo!()
+pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
+    let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
+    let (out_head, out_tail) = out.split_at_mut(tail_split);
+    let load_interval = TURBO_BLOCK_SIZE * 8 / B;
+
+    if !in_head.is_empty() {
+        todo!("XXX");
+    }
+
+    // XXX I don't have any way partially decode this vector for the tail which is annoying.
+    if !in_tail.is_empty() {
+        todo!("XXX");
+    }
 }
 
 pub fn lvq1_quantize_and_pack<const B: usize>(
@@ -873,6 +884,48 @@ const TLVQ8_F32_SHUFFLE_MASKS: [u8; 64] = [
     12, 16, 16, 16, 13, 16, 16, 16, 14, 16, 16, 16, 15, 16, 16, 16,
 ];
 
+struct TLVQExpander32<const B: usize> {
+    start: *const u8,
+    next_block: usize,
+    buf: uint8x16_t,
+
+    shuffle_mask: uint8x16_t,
+    shuffle_mask8: [uint8x16_t; 4],
+}
+
+impl<const B: usize> TLVQExpander32<B> {
+    unsafe fn new(start: *const u8) -> Self {
+        let (shuffle_mask, shuffle_mask8) = unsafe {
+            match B {
+                8 => (
+                    vdupq_n_u8(0),
+                    [
+                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr()),
+                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr().add(16)),
+                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr().add(32)),
+                        vld1q_u8(TLVQ8_F32_SHUFFLE_MASKS.as_ptr().add(48)),
+                    ],
+                ),
+                _ => (vld1q_u8(TLVQ_F32_SHUFFLE.as_ptr()), [vdupq_n_u8(0); 4]),
+            }
+        };
+        unsafe {
+            Self {
+                start,
+                next_block: 0,
+                buf: vdupq_n_u8(0),
+                shuffle_mask,
+                shuffle_mask8,
+            }
+        }
+    }
+
+    unsafe fn next(&mut self) -> [uint32x4_t; 4] {
+        // XXX different paths for B=8 and B != 8.
+        todo!("XXX")
+    }
+}
+
 pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
     query: &[f32],
     doc: &TurboPrimaryVector<'_, B>,
@@ -963,6 +1016,17 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
     }
 
     dot
+}
+
+#[inline(always)]
+unsafe fn shr_u8<const N: usize>(v: uint8x16_t) -> uint8x16_t {
+    match N {
+        1 => vshrq_n_u8::<1>(v),
+        2 => vshrq_n_u8::<2>(v),
+        4 => vshrq_n_u8::<4>(v),
+        8 => vshrq_n_u8::<8>(v),
+        _ => unreachable!(),
+    }
 }
 
 #[inline(always)]

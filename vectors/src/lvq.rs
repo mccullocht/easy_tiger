@@ -843,6 +843,12 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         self.l2_norm.into()
     }
 
+    fn split_tail(&self, dim: usize) -> (usize, &'a [u8], &'a [u8]) {
+        let tail_dim = dim & !(packing::block_dim(B) - 1);
+        let (head_data, tail_data) = self.rep.data.split_at(packing::byte_len(tail_dim, B));
+        (tail_dim, head_data, tail_data)
+    }
+
     fn slice(&self, dim: usize) -> Self {
         let bytes = packing::byte_len(dim, B);
         Self {

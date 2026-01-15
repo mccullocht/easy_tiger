@@ -293,12 +293,12 @@ pub fn split_centroid(
         // TODO: handle replica_count > 1. If this centroid is _not_ the primary for record_id
         // then we always have to search and generate new candidates. We may also need to move
         // postings that are not in centroid_id.
-        let c0_dist = c0_dist_fn.distance(&vector);
-        let c1_dist = c1_dist_fn.distance(&vector);
-        let c2_dist = c2_dist_fn.distance(&vector);
+        let c0_dist = c0_dist_fn.distance(vector);
+        let c1_dist = c1_dist_fn.distance(vector);
+        let c2_dist = c2_dist_fn.distance(vector);
         let new_centroid_id = if c0_dist <= c1_dist && c0_dist <= c2_dist {
             searches += 1;
-            posting_coder.decode_to(&vector, &mut scratch_vector);
+            posting_coder.decode_to(vector, &mut scratch_vector);
             searcher.search(&scratch_vector, head_index)?[0].vertex() as u32
         } else if c1_dist < c2_dist {
             centroid_id as u32
@@ -316,7 +316,6 @@ pub fn split_centroid(
             CentroidAssignment::new(new_centroid_id, &[]).to_formatted_ref(),
         )?;
     }
-
 
     let mut nearby_seen = 0;
     let mut nearby_moved = 0;

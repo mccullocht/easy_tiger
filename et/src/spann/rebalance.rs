@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     spann::{
         centroid_stats::CentroidStats,
-        rebalance::{merge_centroid, split_centroid, BalanceSummary},
+        rebalance::{merge_centroid, split_centroid, BalanceSummary, MergeStats, SplitStats},
         TableIndex,
     },
     vamana::wt::SessionGraphVectorIndex,
@@ -72,6 +72,8 @@ pub fn rebalance(
     } else {
         None
     };
+    let mut total_merge_stats = MergeStats::default();
+    let mut total_split_stats = SplitStats::default();
     for _ in 0..args.iterations.get() {
         let txn_guard = TransactionGuard::new(head_index.session(), None)?;
         let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
@@ -91,10 +93,10 @@ pub fn rebalance(
                 break;
             }
             (Some((to_merge, _)), _) => {
-                merge_centroid(&index, &head_index, to_merge)?;
+                total_merge_stats += merge_centroid(&index, &head_index, to_merge)?;
             }
             (_, Some((to_split, _))) => {
-                split_centroid(
+                total_split_stats += split_centroid(
                     &index,
                     &head_index,
                     to_split,
@@ -128,6 +130,9 @@ pub fn rebalance(
     if summary.in_policy_fraction() < 1.0 {
         print_balance_summary(&summary);
     }
+
+    println!("Merge Stats: {:#?}", total_merge_stats);
+    println!("Split Stats: {:#?}", total_split_stats);
 
     Ok(())
 }

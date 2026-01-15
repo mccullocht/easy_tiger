@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     spann::{
         centroid_stats::CentroidStats,
-        rebalance::{merge_centroid, split_centroid, BalanceSummary},
+        rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
         TableIndex,
     },
     vamana::wt::SessionGraphVectorIndex,
@@ -72,6 +72,7 @@ pub fn rebalance(
     } else {
         None
     };
+    let mut rebalance_stats = RebalanceStats::default();
     for _ in 0..args.iterations.get() {
         let txn_guard = TransactionGuard::new(head_index.session(), None)?;
         let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
@@ -91,10 +92,10 @@ pub fn rebalance(
                 break;
             }
             (Some((to_merge, _)), _) => {
-                merge_centroid(&index, &head_index, to_merge)?;
+                rebalance_stats += merge_centroid(&index, &head_index, to_merge)?;
             }
             (_, Some((to_split, _))) => {
-                split_centroid(
+                rebalance_stats += split_centroid(
                     &index,
                     &head_index,
                     to_split,
@@ -127,6 +128,33 @@ pub fn rebalance(
     let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
     if summary.in_policy_fraction() < 1.0 {
         print_balance_summary(&summary);
+    }
+
+    println!("Merged:         {:10}", rebalance_stats.merged);
+    if rebalance_stats.merged > 0 {
+        println!(
+            "  Moved:        {:10}",
+            rebalance_stats.merge_stats.moved_vectors
+        );
+    }
+    println!("Split:          {:10}", rebalance_stats.split);
+    if rebalance_stats.split > 0 {
+        println!(
+            "  Moved:        {:10}",
+            rebalance_stats.split_stats.moved_vectors
+        );
+        println!(
+            "  Searches:     {:10}",
+            rebalance_stats.split_stats.searches
+        );
+        println!(
+            "  Nearby seen:  {:10}",
+            rebalance_stats.split_stats.nearby_seen
+        );
+        println!(
+            "  Nearby moved: {:10}",
+            rebalance_stats.split_stats.nearby_moved
+        );
     }
 
     Ok(())

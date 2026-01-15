@@ -15,8 +15,12 @@ use wt_mdb::{Error, Result};
 pub struct GraphSearchStats {
     /// Total number of candidates vertices seen and nav scored.
     pub candidates: usize,
+    /// Total number of candidates successfully added to the candidates list.
+    pub candidates_added: usize,
     /// Total number of graph vertices visited and traversed.
     pub visited: usize,
+    /// Total number of candidates visited that did not match the filter predicate.
+    pub filtered: usize,
 }
 
 impl Add for GraphSearchStats {
@@ -25,7 +29,9 @@ impl Add for GraphSearchStats {
     fn add(self, rhs: Self) -> Self::Output {
         GraphSearchStats {
             candidates: self.candidates + rhs.candidates,
+            candidates_added: self.candidates_added + rhs.candidates_added,
             visited: self.visited + rhs.visited,
+            filtered: self.filtered + rhs.filtered,
         }
     }
 }
@@ -73,7 +79,9 @@ pub struct GraphSearcher {
 
     candidates: CandidateList,
     seen: HashSet<i64>, // TODO: use a more efficient hash function (ahash?)
+    candidates_added: usize,
     visited: usize,
+    filtered: usize,
 }
 
 impl GraphSearcher {
@@ -89,7 +97,9 @@ impl GraphSearcher {
             patience,
             candidates: CandidateList::new(params.beam_width.get()),
             seen: HashSet::new(),
+            candidates_added: 0,
             visited: 0,
+            filtered: 0,
         }
     }
 
@@ -102,7 +112,9 @@ impl GraphSearcher {
     pub fn stats(&self) -> GraphSearchStats {
         GraphSearchStats {
             candidates: self.seen.len(),
+            candidates_added: self.candidates_added,
             visited: self.visited,
+            filtered: self.filtered,
         }
     }
 
@@ -220,8 +232,12 @@ impl GraphSearcher {
     ) -> Result<Vec<Neighbor>> {
         // TODO: come up with a better way of managing re-used state.
         self.candidates.clear();
-        if let Some(p) = self.patience.as_mut() { p.clear() }
+        if let Some(p) = self.patience.as_mut() {
+            p.clear()
+        }
+        self.candidates_added = 0;
         self.visited = 0;
+        self.filtered = 0;
 
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
@@ -230,8 +246,12 @@ impl GraphSearcher {
             let entry_vector = nav
                 .get(entry_point)
                 .unwrap_or(Err(Error::not_found_error()))?;
-            self.candidates
-                .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)));
+            if self
+                .candidates
+                .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)))
+            {
+                self.candidates_added += 1;
+            }
             self.seen.insert(entry_point);
         }
 
@@ -242,6 +262,7 @@ impl GraphSearcher {
                 best_candidate.visit();
             } else {
                 best_candidate.remove();
+                self.filtered += 1;
             }
 
             let mut added = 0;
@@ -261,6 +282,7 @@ impl GraphSearcher {
                     added += 1;
                 }
             }
+            self.candidates_added += added;
 
             if self
                 .patience
@@ -745,5 +767,33 @@ mod test {
                 Neighbor::new(16, 0.47999999940395355),
             ]
         );
+    }
+
+    #[test]
+    fn stats_collection() {
+        let index = build_test_graph(4);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(4).unwrap(),
+            num_rerank: 0,
+            patience: None,
+        });
+
+        // Search with a filter that rejects vertex 1
+        let _ = searcher
+            .search_with_filter(
+                &[-0.1, -0.1, -0.1, -0.1],
+                |v| v != 1,
+                &mut index.reader(),
+            )
+            .unwrap();
+
+        let stats = searcher.stats();
+        // We expect some visited nodes
+        assert!(stats.visited > 0);
+        // We expect candidates to be added (at least entry point and neighbors)
+        assert!(stats.candidates_added > 0);
+        // We filtered out vertex 1, so if it was visited, filtered count should be > 0.
+        // In this small graph, vertex 1 is likely to be visited.
+        assert!(stats.filtered >= 1, "Expected at least 1 filtered candidate, got {}", stats.filtered);
     }
 }

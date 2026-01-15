@@ -72,8 +72,7 @@ pub fn rebalance(
     } else {
         None
     };
-    let mut total_merge_stats = MergeStats::default();
-    let mut total_split_stats = SplitStats::default();
+    let mut rebalance_stats = RebalanceStats::default();
     for _ in 0..args.iterations.get() {
         let txn_guard = TransactionGuard::new(head_index.session(), None)?;
         let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
@@ -93,10 +92,10 @@ pub fn rebalance(
                 break;
             }
             (Some((to_merge, _)), _) => {
-                total_merge_stats += merge_centroid(&index, &head_index, to_merge)?;
+                rebalance_stats += merge_centroid(&index, &head_index, to_merge)?;
             }
             (_, Some((to_split, _))) => {
-                total_split_stats += split_centroid(
+                rebalance_stats += split_centroid(
                     &index,
                     &head_index,
                     to_split,
@@ -131,8 +130,17 @@ pub fn rebalance(
         print_balance_summary(&summary);
     }
 
-    println!("Merge Stats: {:#?}", total_merge_stats);
-    println!("Split Stats: {:#?}", total_split_stats);
+    println!("Merged:         {:10}", rebalance_stats.merged);
+    if rebalance_stats.merged > 0 {
+        println!("  Moved:        {:10}", rebalance_stats.merge_stats.moved_vectors);
+    }
+    println!("Split:          {:10}", rebalance_stats.split);
+    if rebalance_stats.split > 0 {
+        println!("  Moved:        {:10}", rebalance_stats.split_stats.moved_vectors);
+        println!("  Searches:     {:10}", rebalance_stats.split_stats.searches);
+        println!("  Nearby seen:  {:10}", rebalance_stats.split_stats.nearby_seen);
+        println!("  Nearby moved: {:10}", rebalance_stats.split_stats.nearby_moved);
+    }
 
     Ok(())
 }

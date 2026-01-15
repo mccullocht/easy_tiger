@@ -45,7 +45,6 @@ impl AddAssign for MergeStats {
 }
 
 /// Statistics collected during a centroid split operation.
-// XXX redo the names they suck.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SplitStats {
     /// Number of vectors in the centroid being split.

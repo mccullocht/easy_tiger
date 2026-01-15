@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     spann::{
         centroid_stats::CentroidStats,
-        rebalance::{merge_centroid, split_centroid, BalanceSummary, MergeStats, SplitStats},
+        rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
         TableIndex,
     },
     vamana::wt::SessionGraphVectorIndex,
@@ -132,14 +132,29 @@ pub fn rebalance(
 
     println!("Merged:         {:10}", rebalance_stats.merged);
     if rebalance_stats.merged > 0 {
-        println!("  Moved:        {:10}", rebalance_stats.merge_stats.moved_vectors);
+        println!(
+            "  Moved:        {:10}",
+            rebalance_stats.merge_stats.moved_vectors
+        );
     }
     println!("Split:          {:10}", rebalance_stats.split);
     if rebalance_stats.split > 0 {
-        println!("  Moved:        {:10}", rebalance_stats.split_stats.moved_vectors);
-        println!("  Searches:     {:10}", rebalance_stats.split_stats.searches);
-        println!("  Nearby seen:  {:10}", rebalance_stats.split_stats.nearby_seen);
-        println!("  Nearby moved: {:10}", rebalance_stats.split_stats.nearby_moved);
+        println!(
+            "  Moved:        {:10}",
+            rebalance_stats.split_stats.moved_vectors
+        );
+        println!(
+            "  Searches:     {:10}",
+            rebalance_stats.split_stats.searches
+        );
+        println!(
+            "  Nearby seen:  {:10}",
+            rebalance_stats.split_stats.nearby_seen
+        );
+        println!(
+            "  Nearby moved: {:10}",
+            rebalance_stats.split_stats.nearby_moved
+        );
     }
 
     Ok(())

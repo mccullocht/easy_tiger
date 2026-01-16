@@ -199,6 +199,11 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
         .zip(b.iter().copied())
         .map(|(a, b)| match B {
             1 => (a & b).count_ones(),
+            2 => {
+                let a = (a & 0x3, (a >> 2) & 0x3, (a >> 4) & 0x3, a >> 6);
+                let b = (b & 0x3, (b >> 2) & 0x3, (b >> 4) & 0x3, b >> 6);
+                (a.0 * b.0 + a.1 * b.1 + a.2 * b.2 + a.3 * b.3).into()
+            }
             4 => {
                 let a = [a & 0xf, a >> 4];
                 let b = [b & 0xf, b >> 4];

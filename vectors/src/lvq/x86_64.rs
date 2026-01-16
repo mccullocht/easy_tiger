@@ -457,8 +457,45 @@ pub unsafe fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
             }
             _mm512_reduce_add_epi32(sum) as u32
         }
+        2 => {
+            let mut dot0 = _mm512_set1_epi32(0);
+            let mut dot1 = _mm512_set1_epi32(0);
+            let mut dot2 = _mm512_set1_epi32(0);
+            let mut dot3 = _mm512_set1_epi32(0);
+            let dibit_mask = _mm512_set1_epi8(0x3);
+            for (ac, bc) in a.chunks(64).zip(b.chunks(64)) {
+                let mask = u64::MAX >> (64 - ac.len());
+                let av = _mm512_maskz_loadu_epi8(mask, ac.as_ptr() as *const i8);
+                let bv = _mm512_maskz_loadu_epi8(mask, bc.as_ptr() as *const i8);
+
+                dot0 = _mm512_dpbusd_epi32(
+                    dot0,
+                    _mm512_and_si512(av, dibit_mask),
+                    _mm512_and_si512(bv, dibit_mask),
+                );
+                dot1 = _mm512_dpbusd_epi32(
+                    dot1,
+                    _mm512_and_si512(_mm512_srli_epi64::<2>(av), dibit_mask),
+                    _mm512_and_si512(_mm512_srli_epi64::<2>(bv), dibit_mask),
+                );
+                dot2 = _mm512_dpbusd_epi32(
+                    dot2,
+                    _mm512_and_si512(_mm512_srli_epi64::<4>(av), dibit_mask),
+                    _mm512_and_si512(_mm512_srli_epi64::<4>(bv), dibit_mask),
+                );
+                dot3 = _mm512_dpbusd_epi32(
+                    dot3,
+                    _mm512_and_si512(_mm512_srli_epi64::<6>(av), dibit_mask),
+                    _mm512_and_si512(_mm512_srli_epi64::<6>(bv), dibit_mask),
+                );
+            }
+            dot0 = _mm512_add_epi32(dot0, dot1);
+            dot2 = _mm512_add_epi32(dot2, dot3);
+            _mm512_reduce_add_epi32(_mm512_add_epi32(dot0, dot2)) as u32
+        }
         4 => {
-            let mut dot = _mm512_set1_epi32(0);
+            let mut dot0 = _mm512_set1_epi32(0);
+            let mut dot1 = _mm512_set1_epi32(0);
             let nibble_mask = _mm512_set1_epi8(0xf);
             for (ac, bc) in a.chunks(64).zip(b.chunks(64)) {
                 let mask = u64::MAX >> (64 - ac.len());
@@ -469,14 +506,15 @@ pub unsafe fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
                 let bv_even = _mm512_and_si512(bv, nibble_mask);
                 let bv_odd = _mm512_and_si512(_mm512_srli_epi64::<4>(bv), nibble_mask);
 
-                dot = _mm512_dpbusd_epi32(dot, av_even, bv_even);
-                dot = _mm512_dpbusd_epi32(dot, av_odd, bv_odd);
+                dot0 = _mm512_dpbusd_epi32(dot0, av_even, bv_even);
+                dot1 = _mm512_dpbusd_epi32(dot1, av_odd, bv_odd);
             }
-            _mm512_reduce_add_epi32(dot) as u32
+            _mm512_reduce_add_epi32(_mm512_add_epi32(dot0, dot1)) as u32
         }
         8 => {
             let zero = _mm512_set1_epi8(0);
-            let mut dot = _mm512_set1_epi32(0);
+            let mut dot0 = _mm512_set1_epi32(0);
+            let mut dot1 = _mm512_set1_epi32(0);
             for (ac, bc) in a.chunks(64).zip(b.chunks(64)) {
                 let mask = u64::MAX >> (64 - ac.len());
                 let av = _mm512_maskz_loadu_epi8(mask, ac.as_ptr() as *const i8);
@@ -486,10 +524,10 @@ pub unsafe fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
                 let bv_lo = _mm512_unpacklo_epi8(bv, zero);
                 let bv_hi = _mm512_unpackhi_epi8(bv, zero);
 
-                dot = _mm512_dpwssd_epi32(dot, av_lo, bv_lo);
-                dot = _mm512_dpwssd_epi32(dot, av_hi, bv_hi);
+                dot0 = _mm512_dpwssd_epi32(dot0, av_lo, bv_lo);
+                dot1 = _mm512_dpwssd_epi32(dot1, av_hi, bv_hi);
             }
-            _mm512_reduce_add_epi32(dot) as u32
+            _mm512_reduce_add_epi32(_mm512_add_epi32(dot0, dot1)) as u32
         }
         _ => super::scalar::dot_u8::<B>(a, b),
     }

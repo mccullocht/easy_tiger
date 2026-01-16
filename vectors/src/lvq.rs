@@ -85,13 +85,27 @@ const fn check_residual_bits(primary: usize, residual: usize) {
     assert!(is_supported_bits(residual, &SUPPORTED_RESIDUAL_BITS));
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct VectorStats {
     min: f32,
     max: f32,
     mean: f32,
     std_dev: f32,
     l2_norm_sq: f32,
+}
+
+impl VectorStats {
+    #[allow(dead_code)]
+    fn from_scalar(value: &[f32]) -> Self {
+        if value.is_empty() {
+            return VectorStats {
+                l2_norm_sq: 1.0,
+                ..Default::default()
+            };
+        }
+
+        scalar::compute_vector_stats(value)
+    }
 }
 
 impl From<&[f32]> for VectorStats {
@@ -934,6 +948,7 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             InstructionSet::Scalar => scalar::primary_decode::<B>(vector, out),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::primary_decode::<B>(vector, out),
+            // XXX implement x86_64
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => scalar::primary_decode::<B>(vector, out),
         };
@@ -1223,7 +1238,7 @@ mod packing {
 mod test {
     use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
 
-    use crate::lvq::TurboPrimaryCoder;
+    use crate::lvq::{TurboPrimaryCoder, VectorStats};
 
     use super::{
         F32VectorCoder, PrimaryVector, PrimaryVectorCoder, PrimaryVectorHeader, TwoLevelVector,
@@ -1241,6 +1256,22 @@ mod test {
             abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
                 && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
                 && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
+        }
+    }
+
+    impl AbsDiffEq for VectorStats {
+        type Epsilon = f32;
+
+        fn default_epsilon() -> Self::Epsilon {
+            0.00001
+        }
+
+        fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
+            abs_diff_eq!(self.min, other.min, epsilon = epsilon)
+                && abs_diff_eq!(self.max, other.max, epsilon = epsilon)
+                && abs_diff_eq!(self.mean, other.mean, epsilon = epsilon)
+                && abs_diff_eq!(self.std_dev, other.std_dev, epsilon = epsilon)
+                && abs_diff_eq!(self.l2_norm_sq, other.l2_norm_sq, epsilon = epsilon)
         }
     }
 
@@ -1633,6 +1664,13 @@ mod test {
             .as_ref(),
             epsilon = 0.0001
         );
+    }
+
+    #[test]
+    fn vector_stats_simd() {
+        let simd_stats = VectorStats::from(TEST_VECTOR.as_ref());
+        let scalar_stats = VectorStats::from_scalar(TEST_VECTOR.as_ref());
+        assert_abs_diff_eq!(simd_stats, scalar_stats);
     }
 
     #[test]

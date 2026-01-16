@@ -764,17 +764,16 @@ pub unsafe fn tlvq_primary_f32_dot_unnormalized_avx512<const B: usize>(
     query: &[f32],
     doc: &TurboPrimaryVector<'_, B>,
 ) -> f32 {
-    let mut dot = _mm512_set1_ps(0.0);
+    let (tail_split, doc_head, doc_tail) = doc.split_tail(query.len());
+    let mut head_dot = _mm512_set1_ps(0.0);
     let mut d = _mm512_set1_epi32(0);
     let doc_mask = _mm512_set1_epi32(i32::from(u8::MAX) >> (8 - B));
-    for i in (0..query.len()).step_by(16) {
-        let chunk_len = (query.len() - i).min(16);
-        let qmask = u16::MAX >> (16 - chunk_len);
-        let qv = _mm512_maskz_loadu_ps(qmask, query.as_ptr().add(i));
-        d = if i % (TURBO_BLOCK_SIZE * 8 / B) == 0 {
+    for i in (0..tail_split).step_by(16) {
+        let qv = _mm512_loadu_ps(query.as_ptr().add(i));
+        d = if i.is_multiple_of(TURBO_BLOCK_SIZE * 8 / B) {
             _mm512_maskz_expandloadu_epi8(
                 0x1111_1111_1111_1111,
-                doc.blocks[i / (TURBO_BLOCK_SIZE * 8 / B)].as_ptr() as *const i8,
+                doc_head.rep.data.as_ptr().add(i / (8 / B)) as *const i8,
             )
         } else {
             match B {
@@ -786,9 +785,14 @@ pub unsafe fn tlvq_primary_f32_dot_unnormalized_avx512<const B: usize>(
             }
         };
         let dv = _mm512_cvtepu32_ps(_mm512_and_si512(d, doc_mask));
-        dot = _mm512_fmadd_ps(qv, dv, dot);
+        head_dot = _mm512_fmadd_ps(qv, dv, head_dot);
     }
-    _mm512_reduce_add_ps(dot)
+
+    let mut dot = _mm512_reduce_add_ps(head_dot);
+    if tail_split < query.len() {
+        dot += super::scalar::tlvq_primary_f32_dot_unnormalized(&query[tail_split..], &doc_tail);
+    }
+    dot
 }
 
 #[target_feature(enable = "avx512f")]

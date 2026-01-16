@@ -76,7 +76,7 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
             let delta_sq = _mm256_mul_ps(delta, delta);
             let m2 = _mm256_fmadd_ps(
                 delta_sq,
-                _mm256_set1_ps(base as f32 / 16.0),
+                _mm256_set1_ps(base as f32 / 32.0),
                 _mm256_add_ps(m2s.0, m2s.1),
             );
 
@@ -98,7 +98,7 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
             let delta_sq = _mm_mul_ps(delta, delta);
             let m2 = _mm_fmadd_ps(
                 delta_sq,
-                _mm_set1_ps(base as f32 / 8.0),
+                _mm_set1_ps(base as f32 / 16.0),
                 _mm_add_ps(m2s.0, m2s.1),
             );
 

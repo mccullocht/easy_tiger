@@ -1,12 +1,12 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::arch::x86_64::{
-    __m512, __m512i, _MM_FROUND_NO_EXC, _MM_FROUND_TRUNC, _mm_add_ps, _mm_and_si128,
+    __m512, __m512i, _MM_FROUND_NO_EXC, _MM_FROUND_TRUNC, _mm_add_pd, _mm_add_ps, _mm_and_si128,
     _mm_andnot_si128, _mm_bsrli_si128, _mm_cmpeq_epi8, _mm_cvtps_pd, _mm_cvtsd_f64, _mm_fmadd_pd,
-    _mm_fmadd_ps, _mm_hadd_pd, _mm_hadd_ps, _mm_hsub_pd, _mm_hsub_ps, _mm_loadu_epi8,
-    _mm_loadu_epi64, _mm_mask_storeu_epi8, _mm_maskz_loadu_epi8, _mm_mul_pd, _mm_mul_ps,
-    _mm_or_si128, _mm_set1_epi8, _mm_set1_epi16, _mm_set1_epi64x, _mm_set1_pd, _mm_set1_ps,
-    _mm_shuffle_epi8, _mm_sllv_epi64, _mm_srli_epi64, _mm_sub_ps, _mm_unpacklo_epi8, _mm256_add_ps,
+    _mm_fmadd_ps, _mm_hadd_pd, _mm_hsub_pd, _mm_loadu_epi8, _mm_loadu_epi64, _mm_mask_storeu_epi8,
+    _mm_maskz_loadu_epi8, _mm_movehl_ps, _mm_mul_pd, _mm_mul_ps, _mm_or_si128, _mm_set1_epi8,
+    _mm_set1_epi16, _mm_set1_epi64x, _mm_set1_pd, _mm_set1_ps, _mm_shuffle_epi8, _mm_sllv_epi64,
+    _mm_srli_epi64, _mm_sub_pd, _mm_sub_ps, _mm_unpacklo_epi8, _mm256_add_ps,
     _mm256_castps256_ps128, _mm256_cvtepi8_epi16, _mm256_cvtepi16_epi8, _mm256_cvtepu8_epi16,
     _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_loadu_epi16, _mm256_mul_ps, _mm256_set1_ps,
     _mm256_sllv_epi16, _mm256_sub_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32,
@@ -106,16 +106,21 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
         };
 
         let (means_2, m2_2) = {
-            let mean = _mm_mul_ps(_mm_hadd_ps(means_4, means_4), _mm_set1_ps(0.5));
-            let delta = _mm_hsub_ps(mean, mean);
-            let delta_sq = _mm_mul_ps(delta, delta);
-            let m2 = _mm_fmadd_ps(
+            let means0 = _mm_cvtps_pd(means_4);
+            let means1 = _mm_cvtps_pd(_mm_movehl_ps(means_4, means_4));
+            let var0 = _mm_cvtps_pd(m2_4);
+            let var1 = _mm_cvtps_pd(_mm_movehl_ps(m2_4, m2_4));
+
+            let mean = _mm_mul_pd(_mm_add_pd(means0, means1), _mm_set1_pd(0.5));
+            let delta = _mm_sub_pd(means0, means1);
+            let delta_sq = _mm_mul_pd(delta, delta);
+            let m2 = _mm_fmadd_pd(
                 delta_sq,
-                _mm_set1_ps(base as f32 / 8.0),
-                _mm_hadd_ps(m2_4, m2_4),
+                _mm_set1_pd(base as f64 / 8.0),
+                _mm_add_pd(var0, var1),
             );
 
-            (_mm_cvtps_pd(mean), _mm_cvtps_pd(m2))
+            (mean, m2)
         };
 
         let delta = _mm_hsub_pd(means_2, means_2);

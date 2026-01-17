@@ -948,9 +948,8 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             InstructionSet::Scalar => scalar::primary_decode::<B>(vector, out),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::primary_decode::<B>(vector, out),
-            // XXX implement x86_64
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => scalar::primary_decode::<B>(vector, out),
+            InstructionSet::Avx512 => unsafe { x86_64::primary_decode_avx512::<B>(vector, out) },
         };
     }
 

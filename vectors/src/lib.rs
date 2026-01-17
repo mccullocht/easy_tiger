@@ -775,7 +775,7 @@ mod test {
                 // TODO: use randomly sized vectors like we do for distance tests.
                 for i in 0..1024 {
                     let vec = l2_normalize(
-                        (0..64)
+                        (0..128)
                             .map(|_| rng.random_range(-1.0f32..=1.0))
                             .collect::<Vec<_>>(),
                     );

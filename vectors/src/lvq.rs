@@ -924,15 +924,16 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
                 delta_inv,
                 vector_bytes,
             ),
-            // XXX implement x86_64
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => scalar::primary_quantize_and_pack::<B>(
-                vector,
-                header.lower,
-                header.upper,
-                delta_inv,
-                vector_bytes,
-            ),
+            InstructionSet::Avx512 => unsafe {
+                x86_64::primary_quantize_and_pack_avx512::<B>(
+                    vector,
+                    header.lower,
+                    header.upper,
+                    delta_inv,
+                    vector_bytes,
+                )
+            },
         };
 
         header.serialize(header_bytes);

@@ -6,24 +6,25 @@ use std::arch::x86_64::{
     _mm_fmadd_pd, _mm_fmadd_ps, _mm_hadd_pd, _mm_hsub_pd, _mm_lddqu_si128, _mm_loadu_epi8,
     _mm_loadu_epi64, _mm_mask_storeu_epi8, _mm_maskz_loadu_epi8, _mm_movehl_ps, _mm_mul_pd,
     _mm_mul_ps, _mm_or_si128, _mm_set1_epi8, _mm_set1_epi16, _mm_set1_epi64x, _mm_set1_pd,
-    _mm_set1_ps, _mm_shuffle_epi8, _mm_sllv_epi64, _mm_srli_epi64, _mm_sub_pd, _mm_sub_ps,
-    _mm_unpacklo_epi8, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepi8_epi16,
+    _mm_set1_ps, _mm_shuffle_epi8, _mm_sllv_epi64, _mm_srli_epi64, _mm_storeu_si128, _mm_sub_pd,
+    _mm_sub_ps, _mm_unpacklo_epi8, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepi8_epi16,
     _mm256_cvtepi16_epi8, _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps, _mm256_fmadd_ps,
     _mm256_loadu_epi16, _mm256_mul_ps, _mm256_set1_ps, _mm256_sllv_epi16, _mm256_sub_ps,
     _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32, _mm512_and_si512, _mm512_castps512_ps256,
     _mm512_cmpgt_epu8_mask, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi16, _mm512_cvtepu32_ps,
-    _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32, _mm512_extractf32x8_ps,
-    _mm512_fmadd_ps, _mm512_loadu_epi8, _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_storeu_ps,
-    _mm512_mask_sub_ps, _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32,
-    _mm512_maskz_expand_epi64, _mm512_maskz_expandloadu_epi8, _mm512_maskz_loadu_epi8,
-    _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_movm_epi8, _mm512_mul_ps,
-    _mm512_permutexvar_epi8, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
-    _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set1_epi8,
-    _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps, _mm512_srli_epi32, _mm512_srli_epi64,
-    _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32,
+    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8, _mm512_loadu_ps,
+    _mm512_mask_mul_ps, _mm512_mask_storeu_ps, _mm512_mask_sub_ps, _mm512_maskz_cvtepu32_ps,
+    _mm512_maskz_cvtps_epu32, _mm512_maskz_expand_epi64, _mm512_maskz_expandloadu_epi8,
+    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_movm_epi8,
+    _mm512_mul_ps, _mm512_or_si512, _mm512_permutexvar_epi8, _mm512_popcnt_epi32,
+    _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps,
+    _mm512_roundscale_ps, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps,
+    _mm512_sll_epi32, _mm512_srli_epi32, _mm512_srli_epi64, _mm512_storeu_ps, _mm512_sub_ps,
+    _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
-use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector};
+use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, packing};
 
 use super::{LAMBDA, LVQ2Dot, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
 
@@ -264,6 +265,62 @@ unsafe fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits:
     let xe = _mm512_reduce_add_ps(xev) as f64;
     let e = _mm512_reduce_add_ps(ev) as f64;
     (1.0 - LAMBDA as f64) * xe * xe / norm_sq + LAMBDA as f64 * e
+}
+
+#[target_feature(enable = "avx512f")]
+pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
+    vector: &[f32],
+    lower: f32,
+    upper: f32,
+    delta_inv: f32,
+    out: &mut [u8],
+) -> u32 {
+    let tail_split = vector.len() & !(packing::block_dim(B) - 1);
+    let (in_head, in_tail) = vector.split_at(tail_split);
+    let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
+
+    let mut component_sum = if !in_head.is_empty() {
+        let lower = _mm512_set1_ps(lower);
+        let upper = _mm512_set1_ps(upper);
+        let delta_inv = _mm512_set1_ps(delta_inv);
+        let mut qbuf = _mm512_set1_epi32(0);
+        let mut component_sum = _mm512_set1_epi32(0);
+        let mut shift = 0;
+        for i in (0..tail_split).step_by(16) {
+            let mut v = _mm512_loadu_ps(in_head.as_ptr().add(i));
+            v = _mm512_min_ps(v, upper);
+            v = _mm512_max_ps(v, lower);
+            v = _mm512_sub_ps(v, lower);
+            v = _mm512_mul_ps(v, delta_inv);
+            let q = _mm512_cvtps_epu32(mm512_round_nonnegative_ties_away_zero_ps(v));
+            component_sum = _mm512_add_epi32(component_sum, q);
+            qbuf = _mm512_or_si512(qbuf, _mm512_sll_epi32(q, _mm_set1_epi64x(shift as i64)));
+            shift += B;
+            if shift == 8 {
+                _mm_storeu_si128(
+                    out_head.as_mut_ptr().add(i / packing::block_dim(B) * 16) as *mut __m128i,
+                    _mm256_cvtepi16_epi8(_mm512_cvtepi32_epi16(qbuf)),
+                );
+                qbuf = _mm512_set1_epi32(0);
+                shift = 0;
+            }
+        }
+
+        // tail_split should be a multiple of the number of dimensions per block.
+        assert_eq!(shift, 0);
+
+        _mm512_reduce_add_epi32(component_sum) as u32
+    } else {
+        0
+    };
+
+    if !in_tail.is_empty() {
+        component_sum += super::scalar::primary_quantize_and_pack::<B>(
+            in_tail, lower, upper, delta_inv, out_tail,
+        );
+    }
+
+    component_sum
 }
 
 #[target_feature(enable = "avx512f,avx512bw,avx2")]

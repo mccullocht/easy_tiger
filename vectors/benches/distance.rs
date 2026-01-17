@@ -83,15 +83,6 @@ pub fn float16_benchmarks(c: &mut Criterion) {
     query_and_doc_benchmarks(c, F32VectorCoding::F16, VectorSimilarity::all());
 }
 
-pub fn scaled_uniform_benchmarks(c: &mut Criterion) {
-    // Regardless of the similarity type all of the implementations use dot product internally and
-    // then adjust using stored hyper parameters.
-    let similarities = [VectorSimilarity::Dot];
-    query_and_doc_benchmarks(c, F32VectorCoding::I4ScaledUniform, similarities);
-    query_and_doc_benchmarks(c, F32VectorCoding::I8ScaledUniform, similarities);
-    query_and_doc_benchmarks(c, F32VectorCoding::I16ScaledUniform, similarities);
-}
-
 pub fn i1_benchmarks(c: &mut Criterion) {
     let (x, y) = generate_test_vectors(1024);
 
@@ -135,7 +126,6 @@ criterion_group!(
     float32_benchmarks,
     float16_benchmarks,
     i1_benchmarks,
-    scaled_uniform_benchmarks,
     lvq_benchmarks,
 );
 criterion_main!(benches);

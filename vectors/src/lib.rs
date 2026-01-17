@@ -631,7 +631,10 @@ mod test {
         assert_float_near!(f32_dist, query_dist, threshold, index);
     }
 
-    use F32VectorCoding::{F16, LVQ1x1, LVQ1x4, LVQ1x8, LVQ2x1x8, LVQ2x4x4, LVQ2x4x8, LVQ2x8x8};
+    use F32VectorCoding::{
+        F16, LVQ1x1, LVQ1x4, LVQ1x8, LVQ2x1x8, LVQ2x4x4, LVQ2x4x8, LVQ2x8x8, TLVQ1, TLVQ2, TLVQ4,
+        TLVQ8,
+    };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
     use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
 

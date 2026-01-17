@@ -15,13 +15,13 @@ use std::arch::x86_64::{
     _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32,
     _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8, _mm512_loadu_ps,
     _mm512_mask_mul_ps, _mm512_mask_storeu_ps, _mm512_mask_sub_ps, _mm512_maskz_cvtepu32_ps,
-    _mm512_maskz_cvtps_epu32, _mm512_maskz_expand_epi64, _mm512_maskz_expandloadu_epi8,
-    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_movm_epi8,
-    _mm512_mul_ps, _mm512_or_si512, _mm512_permutexvar_epi8, _mm512_popcnt_epi32,
-    _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps,
-    _mm512_roundscale_ps, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps,
-    _mm512_sll_epi32, _mm512_srli_epi32, _mm512_srli_epi64, _mm512_storeu_ps, _mm512_sub_ps,
-    _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm512_maskz_cvtps_epu32, _mm512_maskz_expand_epi64, _mm512_maskz_loadu_epi8,
+    _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_movm_epi8, _mm512_mul_ps,
+    _mm512_or_si512, _mm512_permutexvar_epi8, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
+    _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
+    _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps, _mm512_sll_epi32,
+    _mm512_srli_epi32, _mm512_srli_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8,
+    _mm512_unpacklo_epi8,
 };
 
 use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, packing};
@@ -902,7 +902,7 @@ pub unsafe fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     .into()
 }
 
-#[target_feature(enable = "avx512f,avx512vbmi2")]
+#[target_feature(enable = "avx512f")]
 #[inline]
 pub unsafe fn tlvq_primary_f32_dot_unnormalized_avx512<const B: usize>(
     query: &[f32],
@@ -915,10 +915,9 @@ pub unsafe fn tlvq_primary_f32_dot_unnormalized_avx512<const B: usize>(
     for i in (0..tail_split).step_by(16) {
         let qv = _mm512_loadu_ps(query.as_ptr().add(i));
         d = if i.is_multiple_of(TURBO_BLOCK_SIZE * 8 / B) {
-            _mm512_maskz_expandloadu_epi8(
-                0x1111_1111_1111_1111,
-                doc_head.rep.data.as_ptr().add(i / (8 / B)) as *const i8,
-            )
+            _mm512_cvtepi16_epi32(_mm256_cvtepu8_epi16(_mm_lddqu_si128(
+                doc_head.rep.data.as_ptr().add(i / (8 / B)) as *const __m128i,
+            )))
         } else {
             match B {
                 1 => _mm512_srli_epi64::<1>(d),

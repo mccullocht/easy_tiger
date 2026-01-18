@@ -2,7 +2,12 @@
 
 #![allow(dead_code)]
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
+use crate::lvq::TurboPrimaryVector;
+
+use super::{
+    LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats,
+    packing::{TurboPacker, TurboUnpacker},
+};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let (min, max, mean, variance, dot) = vector.iter().copied().enumerate().fold(
@@ -100,6 +105,30 @@ pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: us
     (1.0 - LAMBDA as f64) * xe * xe / norm_sq + LAMBDA as f64 * e
 }
 
+pub fn primary_quantize_and_pack<const B: usize>(
+    vector: &[f32],
+    lower: f32,
+    upper: f32,
+    delta_inv: f32,
+    out: &mut [u8],
+) -> u32 {
+    let mut packer = TurboPacker::<B>::new(out);
+    vector
+        .iter()
+        .map(|&v| {
+            let q = ((v.clamp(lower, upper) - lower) * delta_inv).round() as u8;
+            packer.push(q);
+            u32::from(q)
+        })
+        .sum()
+}
+
+pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
+    for (q, o) in TurboUnpacker::<B>::new(vector.rep.data).zip(out.iter_mut()) {
+        *o = (q as f32).mul_add(vector.rep.terms.delta, vector.rep.terms.lower);
+    }
+}
+
 pub fn lvq1_quantize_and_pack<const B: usize>(
     v: &[f32],
     lower: f32,
@@ -170,6 +199,11 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
         .zip(b.iter().copied())
         .map(|(a, b)| match B {
             1 => (a & b).count_ones(),
+            2 => {
+                let a = (a & 0x3, (a >> 2) & 0x3, (a >> 4) & 0x3, a >> 6);
+                let b = (b & 0x3, (b >> 2) & 0x3, (b >> 4) & 0x3, b >> 6);
+                (a.0 * b.0 + a.1 * b.1 + a.2 * b.2 + a.3 * b.3).into()
+            }
             4 => {
                 let a = [a & 0xf, a >> 4];
                 let b = [b & 0xf, b >> 4];
@@ -232,4 +266,16 @@ pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
         .map(|(q, (p, r))| (*q * p as f32, *q * r as f32))
         .fold((0.0, 0.0), |(sp, sr), (dp, dr)| (sp + dp, sr + dr));
     doc.f32_dot_correction(query_sum, pdot, rdot).into()
+}
+
+#[inline]
+pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
+    query: &[f32],
+    doc: &TurboPrimaryVector<'_, B>,
+) -> f32 {
+    query
+        .iter()
+        .zip(doc.iter())
+        .map(|(q, d)| *q * d as f32)
+        .sum::<f32>()
 }

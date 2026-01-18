@@ -62,7 +62,7 @@ impl Default for InstructionSet {
     }
 }
 
-const SUPPORTED_PRIMARY_BITS: [usize; 3] = [1, 4, 8];
+const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
 const SUPPORTED_RESIDUAL_BITS: [usize; 2] = [4, 8];
 
 const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
@@ -85,13 +85,27 @@ const fn check_residual_bits(primary: usize, residual: usize) {
     assert!(is_supported_bits(residual, &SUPPORTED_RESIDUAL_BITS));
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct VectorStats {
     min: f32,
     max: f32,
     mean: f32,
     std_dev: f32,
     l2_norm_sq: f32,
+}
+
+impl VectorStats {
+    #[allow(dead_code)]
+    fn from_scalar(value: &[f32]) -> Self {
+        if value.is_empty() {
+            return VectorStats {
+                l2_norm_sq: 1.0,
+                ..Default::default()
+            };
+        }
+
+        scalar::compute_vector_stats(value)
+    }
 }
 
 impl From<&[f32]> for VectorStats {
@@ -229,6 +243,16 @@ struct VectorTerms {
     lower: f32,
     delta: f32,
     component_sum: u32,
+}
+
+impl VectorTerms {
+    fn from_primary<const B: usize>(header: PrimaryVectorHeader) -> Self {
+        Self {
+            lower: header.lower,
+            delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
+            component_sum: header.component_sum,
+        }
+    }
 }
 
 const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
@@ -801,8 +825,193 @@ impl<const B1: usize, const B2: usize> QueryVectorDistance for FastTwoLevelQuery
     }
 }
 
+/// The turbo coder requires that all vector data be packed into 16-byte blocks.
+const TURBO_BLOCK_SIZE: usize = 16;
+
+struct TurboPrimaryVector<'a, const B: usize> {
+    rep: EncodedVector<'a>,
+    l2_norm: f32,
+}
+
+impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
+    fn new(data: &'a [u8]) -> Option<Self> {
+        let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
+        Some(Self {
+            rep: EncodedVector {
+                terms: VectorTerms::from_primary::<B>(header),
+                data: vector_bytes,
+            },
+            l2_norm: header.l2_norm,
+        })
+    }
+
+    fn iter(&self) -> impl ExactSizeIterator<Item = u8> {
+        packing::TurboUnpacker::<B>::new(self.rep.data)
+    }
+
+    fn f32_dot_correction(&self, query_sum: f32, dot: f32) -> f32 {
+        dot * self.rep.terms.delta + query_sum * self.rep.terms.lower
+    }
+
+    fn l2_norm(&self) -> f64 {
+        self.l2_norm.into()
+    }
+
+    fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
+        let tail_dim = dim & !(packing::block_dim(B) - 1);
+        let (head_data, tail_data) = self.rep.data.split_at(packing::byte_len(tail_dim, B));
+        (
+            tail_dim,
+            Self {
+                rep: EncodedVector {
+                    terms: self.rep.terms,
+                    data: head_data,
+                },
+                l2_norm: self.l2_norm,
+            },
+            Self {
+                rep: EncodedVector {
+                    terms: self.rep.terms,
+                    data: tail_data,
+                },
+                l2_norm: self.l2_norm,
+            },
+        )
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct TurboPrimaryCoder<const B: usize>(InstructionSet);
+
+impl<const B: usize> TurboPrimaryCoder<B> {
+    const B_CHECK: () = { check_primary_bits(B) };
+
+    #[allow(unused)]
+    pub fn scalar() -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+        Self(InstructionSet::Scalar)
+    }
+}
+
+impl<const B: usize> Default for TurboPrimaryCoder<B> {
+    fn default() -> Self {
+        Self(InstructionSet::default())
+    }
+}
+
+impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let stats = VectorStats::from(vector);
+        let mut header = PrimaryVectorHeader::from(stats);
+        (header.lower, header.upper) = optimize_interval(vector, &stats, B);
+        let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
+
+        let delta_inv = ((1 << B) - 1) as f32 / (header.upper - header.lower);
+        header.component_sum = match self.0 {
+            InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(
+                vector,
+                header.lower,
+                header.upper,
+                delta_inv,
+                vector_bytes,
+            ),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::primary_quantize_and_pack::<B>(
+                vector,
+                header.lower,
+                header.upper,
+                delta_inv,
+                vector_bytes,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::primary_quantize_and_pack_avx512::<B>(
+                    vector,
+                    header.lower,
+                    header.upper,
+                    delta_inv,
+                    vector_bytes,
+                )
+            },
+        };
+
+        header.serialize(header_bytes);
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        PrimaryVectorHeader::LEN + packing::byte_len(dimensions, B)
+    }
+
+    fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
+        let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
+        match self.0 {
+            InstructionSet::Scalar => scalar::primary_decode::<B>(vector, out),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::primary_decode::<B>(vector, out),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe { x86_64::primary_decode_avx512::<B>(vector, out) },
+        };
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        let vector_bytes = byte_len - PrimaryVectorHeader::LEN;
+        (vector_bytes * 8) / B
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TurboPrimaryQueryDistance<'a, const B: usize> {
+    similarity: VectorSimilarity,
+    query: Cow<'a, [f32]>,
+    query_l2_norm: f64,
+    query_sum: f32,
+    inst: InstructionSet,
+}
+
+impl<'a, const B: usize> TurboPrimaryQueryDistance<'a, B> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
+        // For Dot distance we assume the input is l2 normalized.
+        let query_l2_norm = match similarity {
+            VectorSimilarity::Dot => 1.0,
+            _ => super::l2_norm(&query).into(),
+        };
+        let query_sum = query.iter().copied().sum::<f32>();
+        Self {
+            similarity,
+            query,
+            query_l2_norm,
+            query_sum,
+            inst: InstructionSet::default(),
+        }
+    }
+}
+
+impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<'_, B> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
+        let pdot = match self.inst {
+            InstructionSet::Scalar => {
+                scalar::tlvq_primary_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
+            }
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => {
+                aarch64::tlvq_primary_f32_dot_unnormalized(self.query.as_ref(), &vector)
+            }
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::tlvq_primary_f32_dot_unnormalized_avx512(self.query.as_ref(), &vector)
+            },
+        };
+        let dot = vector.f32_dot_correction(self.query_sum, pdot).into();
+        dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))
+    }
+}
+
 mod packing {
     use std::iter::FusedIterator;
+
+    use crate::lvq::TURBO_BLOCK_SIZE;
 
     /// The number of bytes required to pack `dimensions` with `bits` per entry.
     pub const fn byte_len(dimensions: usize, bits: usize) -> usize {
@@ -845,7 +1054,6 @@ mod packing {
             residual[i / dims_per_byte2] |= r << ((i % dims_per_byte2) * B2);
         }
     }
-
     pub struct UnpackIter<'a, const B: usize> {
         inner: std::slice::Iter<'a, u8>,
         buf: u8,
@@ -914,11 +1122,123 @@ mod packing {
     pub fn unpack_iter<const B: usize>(packed: &[u8]) -> impl ExactSizeIterator<Item = u8> + '_ {
         UnpackIter::<B>::new(packed)
     }
+
+    pub struct TurboPacker<'a, const B: usize> {
+        blocks: &'a mut [[u8; TURBO_BLOCK_SIZE]],
+        tail: &'a mut [u8],
+        block: usize,
+        nbuf: usize,
+    }
+
+    impl<'a, const B: usize> TurboPacker<'a, B> {
+        pub fn new(vector_bytes: &'a mut [u8]) -> Self {
+            let (blocks, tail) = vector_bytes.as_chunks_mut::<TURBO_BLOCK_SIZE>();
+            Self {
+                blocks,
+                tail,
+                block: 0,
+                nbuf: 0,
+            }
+        }
+
+        pub fn push(&mut self, q: u8) {
+            if self.block < self.blocks.len() {
+                let block = &mut self.blocks[self.block];
+                let byte = self.nbuf % TURBO_BLOCK_SIZE;
+                let shift = self.nbuf / TURBO_BLOCK_SIZE * B;
+                block[byte] |= q << shift;
+                self.nbuf += 1;
+                if self.nbuf == (TURBO_BLOCK_SIZE * 8) / B {
+                    self.block += 1;
+                    self.nbuf = 0;
+                }
+            } else {
+                let byte = self.nbuf % self.tail.len();
+                let shift = self.nbuf / self.tail.len() * B;
+                self.tail[byte] |= q << shift;
+                self.nbuf += 1;
+                if self.nbuf == self.tail.len() * 8 / B {
+                    self.block += 1;
+                    self.nbuf = 0;
+                }
+            }
+        }
+    }
+
+    pub struct TurboUnpacker<'a, const B: usize> {
+        blocks: &'a [[u8; TURBO_BLOCK_SIZE]],
+        tail: &'a [u8],
+        block: usize,
+        pos: usize,
+    }
+
+    impl<'a, const B: usize> TurboUnpacker<'a, B> {
+        pub fn new(vector_bytes: &'a [u8]) -> Self {
+            let (blocks, tail) = vector_bytes.as_chunks::<TURBO_BLOCK_SIZE>();
+            Self {
+                blocks,
+                tail,
+                block: 0,
+                pos: 0,
+            }
+        }
+    }
+
+    impl<'a, const B: usize> Iterator for TurboUnpacker<'a, B> {
+        type Item = u8;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.block < self.blocks.len() {
+                let block = &self.blocks[self.block];
+                let byte = self.pos % TURBO_BLOCK_SIZE;
+                let shift = self.pos / TURBO_BLOCK_SIZE * B;
+                let v = (block[byte] >> shift) & u8::MAX >> (8 - B);
+                self.pos += 1;
+                if self.pos == (TURBO_BLOCK_SIZE * 8) / B {
+                    self.block += 1;
+                    self.pos = 0;
+                }
+                Some(v)
+            } else if !self.tail.is_empty() && self.block == self.blocks.len() {
+                let byte = self.pos % self.tail.len();
+                let shift = self.pos / self.tail.len() * B;
+                let v = (self.tail[byte] >> shift) & u8::MAX >> (8 - B);
+                self.pos += 1;
+                if self.pos == self.tail.len() * 8 / B {
+                    self.block += 1;
+                    self.pos = 0;
+                }
+                Some(v)
+            } else {
+                None
+            }
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let total = (self.blocks.len() * TURBO_BLOCK_SIZE * 8) / B + self.tail.len() * 8 / B;
+            let next = self.block * TURBO_BLOCK_SIZE + self.pos;
+            (total - next, Some(total - next))
+        }
+    }
+
+    impl<'a, const B: usize> FusedIterator for TurboUnpacker<'a, B> {}
+
+    impl<'a, const B: usize> ExactSizeIterator for TurboUnpacker<'a, B> {}
+
+    /// Return the number of dimensions that can be packed into a single block.
+    ///
+    /// So long as `bits` is a power of 2 the returned value will _also_ be a power of 2.
+    /// This is useful for splitting between the head and tail during vector coding tasks.
+    pub const fn block_dim(bits: usize) -> usize {
+        (TURBO_BLOCK_SIZE * 8) / bits
+    }
 }
 
 #[cfg(test)]
 mod test {
     use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
+
+    use crate::lvq::{TurboPrimaryCoder, VectorStats};
 
     use super::{
         F32VectorCoder, PrimaryVector, PrimaryVectorCoder, PrimaryVectorHeader, TwoLevelVector,
@@ -936,6 +1256,22 @@ mod test {
             abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
                 && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
                 && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
+        }
+    }
+
+    impl AbsDiffEq for VectorStats {
+        type Epsilon = f32;
+
+        fn default_epsilon() -> Self::Epsilon {
+            0.00001
+        }
+
+        fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
+            abs_diff_eq!(self.min, other.min, epsilon = epsilon)
+                && abs_diff_eq!(self.max, other.max, epsilon = epsilon)
+                && abs_diff_eq!(self.mean, other.mean, epsilon = epsilon)
+                && abs_diff_eq!(self.std_dev, other.std_dev, epsilon = epsilon)
+                && abs_diff_eq!(self.l2_norm_sq, other.l2_norm_sq, epsilon = epsilon)
         }
     }
 
@@ -1324,6 +1660,185 @@ mod test {
                 0.9130022,
                 0.694014,
                 0.20198768
+            ]
+            .as_ref(),
+            epsilon = 0.0001
+        );
+    }
+
+    #[test]
+    fn vector_stats_simd() {
+        let simd_stats = VectorStats::from(TEST_VECTOR.as_ref());
+        let scalar_stats = VectorStats::from_scalar(TEST_VECTOR.as_ref());
+        assert_abs_diff_eq!(simd_stats, scalar_stats);
+    }
+
+    #[test]
+    fn tlvq1() {
+        let coder = TurboPrimaryCoder::<1>::default();
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_abs_diff_eq!(
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            PrimaryVectorHeader {
+                l2_norm: 2.5226507,
+                lower: -0.49564388,
+                upper: 0.70561373,
+                component_sum: 11,
+            }
+        );
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_ref(),
+            [
+                -0.49564388,
+                -0.49564388,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                -0.49564388,
+                -0.49564388,
+                -0.49564388,
+                0.70561373,
+                -0.49564388,
+                -0.49564388,
+                0.70561373,
+                -0.49564388,
+                0.70561373,
+                0.70561373,
+                0.70561373,
+                0.70561373
+            ]
+            .as_ref(),
+            epsilon = 0.00001
+        );
+    }
+
+    #[test]
+    fn tlvq2() {
+        let coder = TurboPrimaryCoder::<2>::default();
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_abs_diff_eq!(
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            PrimaryVectorHeader {
+                l2_norm: 2.5226507,
+                lower: -0.6709247,
+                upper: 0.8410188,
+                component_sum: 32,
+            }
+        );
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_ref(),
+            [
+                -0.6709247,
+                -0.16694355,
+                0.8410188,
+                0.8410188,
+                0.33703762,
+                0.33703762,
+                0.8410188,
+                -0.16694355,
+                -0.16694355,
+                -0.6709247,
+                0.8410188,
+                -0.6709247,
+                -0.16694355,
+                0.33703762,
+                -0.6709247,
+                0.33703762,
+                0.8410188,
+                0.8410188,
+                0.33703762
+            ]
+            .as_ref(),
+            epsilon = 0.0001,
+        );
+    }
+
+    #[test]
+    fn tlvq4() {
+        let coder = TurboPrimaryCoder::<4>::default();
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_abs_diff_eq!(
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            PrimaryVectorHeader {
+                l2_norm: 2.5226507,
+                lower: -0.93474734,
+                upper: 0.9131211,
+                component_sum: 170,
+            }
+        );
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_ref(),
+            [
+                -0.93474734,
+                -0.072408736,
+                0.6667386,
+                0.6667386,
+                0.5435474,
+                0.42035615,
+                0.6667386,
+                0.0507825,
+                -0.19559997,
+                -0.44198242,
+                0.78992987,
+                -0.68836486,
+                -0.3187912,
+                0.5435474,
+                -0.68836486,
+                0.42035615,
+                0.9131211,
+                0.6667386,
+                0.17397368
+            ]
+            .as_ref(),
+            epsilon = 0.0001,
+        );
+    }
+
+    #[test]
+    fn tlvq8() {
+        let coder = TurboPrimaryCoder::<8>::default();
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_abs_diff_eq!(
+            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            PrimaryVectorHeader {
+                l2_norm: 2.5226507,
+                lower: -0.92000645,
+                upper: 0.91146713,
+                component_sum: 2876,
+            }
+        );
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_ref(),
+            [
+                -0.92000645,
+                -0.058136523,
+                0.66008836,
+                0.6672706,
+                0.57390136,
+                0.43025643,
+                0.6457239,
+                -0.0006785393,
+                -0.20178151,
+                -0.42443126,
+                0.7319109,
+                -0.70453894,
+                -0.27360404,
+                0.53799015,
+                -0.73326796,
+                0.43743867,
+                0.91146713,
+                0.6959997,
+                0.20042449
             ]
             .as_ref(),
             epsilon = 0.0001

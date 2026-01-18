@@ -348,7 +348,7 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
     upper: f32,
     out: &mut [u8],
 ) -> u32 {
-    let delta = (upper - lower) / ((1 << B) - 1) as f32;
+    let delta_inv = ((1 << B) - 1) as f32 / (upper - lower);
 
     let tail_split = v.len() & !15;
     let (head, tail) = out.split_at_mut(packing::byte_len(tail_split, B));
@@ -356,7 +356,7 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
         unsafe {
             let lowerv = vdupq_n_f32(lower);
             let upperv = vdupq_n_f32(upper);
-            let deltav = vdupq_n_f32(delta.recip());
+            let deltav = vdupq_n_f32(delta_inv);
             let mut component_sumv = 0u32;
             for i in (0..tail_split).step_by(16) {
                 // Load and quantize 16 values.

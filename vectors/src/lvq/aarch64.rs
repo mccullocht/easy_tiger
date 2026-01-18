@@ -648,9 +648,19 @@ unsafe fn pack8(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
 }
 
 unsafe extern "C" {
+    // Symmetric dot product 2 bit
     unsafe fn et_lvq_dot_u2(a: *const u8, b: *const u8, len: usize) -> u32;
+    // Symmetric dot product 4 bit
     unsafe fn et_lvq_dot_u4(a: *const u8, b: *const u8, len: usize) -> u32;
+    // Symmetric dot product 8 bit
     unsafe fn et_lvq_dot_u8(a: *const u8, b: *const u8, len: usize) -> u32;
+    // Asymmetric dot product 8 bit-1 bit. len must be a multiple of 128.
+    unsafe fn et_lvq_dot_u8_u1(q: *const u8, d: *const u8, len: usize) -> u32;
+    // Asymmetric dot product 8 bit-2 bit. len must be a multiple of 64.
+    unsafe fn et_lvq_dot_u8_u2(q: *const u8, d: *const u8, len: usize) -> u32;
+    // Asymmetric dot product 8 bit-4 bit. len must be a multiple of 32.
+    unsafe fn et_lvq_dot_u8_u4(q: *const u8, d: *const u8, len: usize) -> u32;
+
     unsafe fn et_lvq2_dot_u1_u8(
         ap: *const u8,
         ar: *const u8,
@@ -982,38 +992,49 @@ impl<const B: usize> TLVQExpander32<B> {
     }
 }
 
-// XXX remove
-pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
-    query: &[f32],
+#[inline]
+pub fn primary_query8_dot_unnormalized<const B: usize>(
+    query: &[u8],
     doc: &TurboPrimaryVector<'_, B>,
-) -> f32 {
+) -> u32 {
+    if B == 8 {
+        return unsafe { et_lvq_dot_u8(query.as_ptr(), doc.rep.data.as_ptr(), query.len()) };
+    }
+
     let (tail_split, doc_head, doc_tail) = doc.split_tail(query.len());
     let (query_head, query_tail) = query.split_at(tail_split);
     let mut dot = if !query_head.is_empty() {
-        unsafe {
-            let mut dot0 = vdupq_n_f32(0.0);
-            let mut dot1 = vdupq_n_f32(0.0);
-            let mut dot2 = vdupq_n_f32(0.0);
-            let mut dot3 = vdupq_n_f32(0.0);
-            let mut expander = TLVQExpander32::<B>::new(doc_head.rep.data.as_ptr());
-            for i in (0..tail_split).step_by(16) {
-                let [d0, d1, d2, d3] = expander.next();
-
-                dot0 = vfmaq_f32(dot0, vld1q_f32(query_head.as_ptr().add(i)), d0);
-                dot1 = vfmaq_f32(dot1, vld1q_f32(query_head.as_ptr().add(i + 4)), d1);
-                dot2 = vfmaq_f32(dot2, vld1q_f32(query_head.as_ptr().add(i + 8)), d2);
-                dot3 = vfmaq_f32(dot3, vld1q_f32(query_head.as_ptr().add(i + 12)), d3);
-            }
-            vaddvq_f32(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)))
+        match B {
+            1 => unsafe {
+                et_lvq_dot_u8_u1(
+                    query_head.as_ptr(),
+                    doc_head.rep.data.as_ptr(),
+                    query_head.len(),
+                )
+            },
+            2 => unsafe {
+                et_lvq_dot_u8_u2(
+                    query_head.as_ptr(),
+                    doc_head.rep.data.as_ptr(),
+                    query_head.len(),
+                )
+            },
+            4 => unsafe {
+                et_lvq_dot_u8_u4(
+                    query_head.as_ptr(),
+                    doc_head.rep.data.as_ptr(),
+                    query_head.len(),
+                )
+            },
+            _ => scalar::primary_query8_dot_unnormalized::<B>(query_head, &doc_head),
         }
     } else {
-        0.0
+        0
     };
 
     if !query_tail.is_empty() {
-        dot += scalar::tlvq_primary_f32_dot_unnormalized(query_tail, &doc_tail);
+        dot += scalar::primary_query8_dot_unnormalized::<B>(query_tail, &doc_tail);
     }
-
     dot
 }
 

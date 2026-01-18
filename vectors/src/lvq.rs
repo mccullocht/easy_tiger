@@ -292,13 +292,17 @@ fn dot_unnormalized_uint_symmetric<const B: usize>(
 }
 
 fn dot_unnormalized_uint8_asymmetric<const B: usize>(
-    _inst: InstructionSet,
+    inst: InstructionSet,
     query: &[u8],
     query_terms: VectorTerms,
     doc: &TurboPrimaryVector<'_, B>,
 ) -> f32 {
-    // XXX use inst.
-    let dot = scalar::primary_query8_dot_unnormalized(query, doc);
+    let dot = match inst {
+        InstructionSet::Scalar => scalar::primary_query8_dot_unnormalized::<B>(query, doc),
+        #[cfg(target_arch = "aarch64")]
+        InstructionSet::Neon => aarch64::primary_query8_dot_unnormalized::<B>(query, doc),
+        // XXX do avx512
+    };
     correct_dot_uint(dot, query.len(), &query_terms, &doc.rep.terms)
 }
 
@@ -858,10 +862,6 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
 
     fn iter(&self) -> impl ExactSizeIterator<Item = u8> {
         packing::TurboUnpacker::<B>::new(self.rep.data)
-    }
-
-    fn f32_dot_correction(&self, query_sum: f32, dot: f32) -> f32 {
-        dot * self.rep.terms.delta + query_sum * self.rep.terms.lower
     }
 
     fn l2_norm(&self) -> f64 {

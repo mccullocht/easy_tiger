@@ -301,7 +301,10 @@ fn dot_unnormalized_uint8_asymmetric<const B: usize>(
         InstructionSet::Scalar => scalar::primary_query8_dot_unnormalized::<B>(query, doc),
         #[cfg(target_arch = "aarch64")]
         InstructionSet::Neon => aarch64::primary_query8_dot_unnormalized::<B>(query, doc),
-        // XXX do avx512
+        #[cfg(target_arch = "x86_64")]
+        InstructionSet::Avx512 => unsafe {
+            x86_64::primary_query8_dot_unnormalized_avx512::<B>(query, doc)
+        },
     };
     correct_dot_uint(dot, query.len(), &query_terms, &doc.rep.terms)
 }

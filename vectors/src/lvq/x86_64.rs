@@ -10,18 +10,19 @@ use std::arch::x86_64::{
     _mm_sub_ps, _mm_unpacklo_epi8, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepi8_epi16,
     _mm256_cvtepi16_epi8, _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps, _mm256_fmadd_ps,
     _mm256_loadu_epi16, _mm256_mul_ps, _mm256_set1_ps, _mm256_sllv_epi16, _mm256_sub_ps,
-    _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32, _mm512_and_si512, _mm512_castps512_ps256,
-    _mm512_cmpgt_epu8_mask, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi16, _mm512_cvtepu32_ps,
-    _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32,
-    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8, _mm512_loadu_ps,
-    _mm512_mask_mul_ps, _mm512_mask_storeu_ps, _mm512_mask_sub_ps, _mm512_maskz_cvtepu32_ps,
-    _mm512_maskz_cvtps_epu32, _mm512_maskz_expand_epi64, _mm512_maskz_loadu_epi8,
-    _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_movm_epi8, _mm512_mul_ps,
-    _mm512_or_si512, _mm512_permutexvar_epi8, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
-    _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
-    _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps, _mm512_sll_epi32,
-    _mm512_srli_epi32, _mm512_srli_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8,
-    _mm512_unpacklo_epi8,
+    _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32, _mm512_and_si512, _mm512_broadcast_i32x4,
+    _mm512_castps512_ps256, _mm512_cmpgt_epu8_mask, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi16,
+    _mm512_cvtepu32_ps, _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32,
+    _mm512_dpwssd_epi32, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8,
+    _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_storeu_ps, _mm512_mask_sub_ps,
+    _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32, _mm512_maskz_expand_epi64,
+    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps,
+    _mm512_min_ps, _mm512_movm_epi8, _mm512_mul_ps, _mm512_or_si512, _mm512_permutexvar_epi8,
+    _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps,
+    _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set_epi64, _mm512_set1_epi8,
+    _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps, _mm512_shuffle_i64x2, _mm512_sll_epi32,
+    _mm512_srli_epi32, _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps,
+    _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
 use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, packing};
@@ -635,7 +636,7 @@ pub unsafe fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
             }
             _mm512_reduce_add_epi32(_mm512_add_epi32(dot0, dot1)) as u32
         }
-        _ => super::scalar::dot_u8::<B>(a, b),
+        _ => unimplemented!(),
     }
 }
 
@@ -902,38 +903,100 @@ pub unsafe fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     .into()
 }
 
-#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "avx512f,avx512vnni,avx512bw")]
 #[inline]
-pub unsafe fn tlvq_primary_f32_dot_unnormalized_avx512<const B: usize>(
-    query: &[f32],
+pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
+    query: &[u8],
     doc: &TurboPrimaryVector<'_, B>,
-) -> f32 {
-    let (tail_split, doc_head, doc_tail) = doc.split_tail(query.len());
-    let mut head_dot = _mm512_set1_ps(0.0);
-    let mut d = _mm512_set1_epi32(0);
-    let doc_mask = _mm512_set1_epi32(i32::from(u8::MAX) >> (8 - B));
-    for i in (0..tail_split).step_by(16) {
-        let qv = _mm512_loadu_ps(query.as_ptr().add(i));
-        d = if i.is_multiple_of(TURBO_BLOCK_SIZE * 8 / B) {
-            _mm512_cvtepi16_epi32(_mm256_cvtepu8_epi16(_mm_lddqu_si128(
-                doc_head.rep.data.as_ptr().add(i / (8 / B)) as *const __m128i,
-            )))
-        } else {
-            match B {
-                1 => _mm512_srli_epi64::<1>(d),
-                2 => _mm512_srli_epi64::<2>(d),
-                4 => _mm512_srli_epi64::<4>(d),
-                8 => _mm512_srli_epi64::<8>(d),
-                _ => unimplemented!(),
-            }
-        };
-        let dv = _mm512_cvtepu32_ps(_mm512_and_si512(d, doc_mask));
-        head_dot = _mm512_fmadd_ps(qv, dv, head_dot);
+) -> u32 {
+    // 1, 2, and 4 bits are specialized. 8 bit can use the symmetrical impl.
+    match B {
+        1 | 2 | 4 => {}
+        8 => return dot_u8::<8>(query, doc.rep.data),
+        _ => unimplemented!(),
     }
 
-    let mut dot = _mm512_reduce_add_ps(head_dot);
-    if tail_split < query.len() {
-        dot += super::scalar::tlvq_primary_f32_dot_unnormalized(&query[tail_split..], &doc_tail);
+    let (tail_split, doc_head, doc_tail) = doc.split_tail(query.len());
+    let (query_head, query_tail) = query.split_at(tail_split);
+    // TODO: unroll these loops to use more accumulator registers.
+    let mut dot = match B {
+        1 => {
+            let mask = _mm512_set1_epi8(0x1);
+            let mut dot0 = _mm512_set1_epi32(0);
+            let mut dot1 = _mm512_set1_epi32(0);
+            for i in (0..tail_split).step_by(128) {
+                // Load 128 bits and broadcast to 512 bits, then shift right by 0, 1, 2, 3.
+                // This will arrange each dimension into the lowest bit to align with an 8 bit query.
+                let mut dv = _mm512_broadcast_i32x4(_mm_lddqu_si128(
+                    doc_head.rep.data.as_ptr().add(i / 128 * 16) as *const __m128i,
+                ));
+                dv = _mm512_srlv_epi64(dv, _mm512_set_epi64(3, 3, 2, 2, 1, 1, 0, 0));
+
+                dot0 = _mm512_dpbusd_epi32(
+                    dot0,
+                    _mm512_loadu_epi8(query_head.as_ptr().add(i) as *const i8),
+                    _mm512_and_si512(dv, mask),
+                );
+                dot1 = _mm512_dpbusd_epi32(
+                    dot1,
+                    _mm512_loadu_epi8(query_head.as_ptr().add(i + 64) as *const i8),
+                    _mm512_and_si512(_mm512_srli_epi64::<4>(dv), mask),
+                );
+            }
+
+            _mm512_reduce_add_epi32(_mm512_add_epi32(dot0, dot1)) as u32
+        }
+        2 => {
+            let mask = _mm512_set1_epi8(0x3);
+            let mut dot = _mm512_set1_epi32(0);
+            for i in (0..tail_split).step_by(64) {
+                // Load 128 bits and broadcast to 512 bits, then shift right by 0, 2, 4, 6
+                // This will arrange each dimension into the lowest dibit to align with an 8 bit query.
+                let mut dv = _mm512_broadcast_i32x4(_mm_lddqu_si128(
+                    doc_head.rep.data.as_ptr().add(i / 64 * 16) as *const __m128i,
+                ));
+                dv = _mm512_srlv_epi64(dv, _mm512_set_epi64(6, 6, 4, 4, 2, 2, 0, 0));
+
+                dot = _mm512_dpbusd_epi32(
+                    dot,
+                    _mm512_loadu_epi8(query_head.as_ptr().add(i) as *const i8),
+                    _mm512_and_si512(dv, mask),
+                );
+            }
+
+            _mm512_reduce_add_epi32(dot) as u32
+        }
+        4 => {
+            let mask = _mm512_set1_epi8(0xf);
+            let mut dot = _mm512_set1_epi32(0);
+            for i in (0..tail_split).step_by(64) {
+                // Load 128 for 32 dim or 256 bits for 64 dim.
+                let load_mask = u8::MAX >> (8 - (tail_split - i).min(64) / 16);
+                let mut dv = _mm512_maskz_loadu_epi64(
+                    load_mask,
+                    doc_head.rep.data.as_ptr().add(i / 2) as *const i64,
+                );
+                // Shuffle to duplicate each 128 bit block, then shift and mask to unpack.
+                dv = _mm512_shuffle_i64x2::<0b0101_0000>(dv, dv);
+                dv = _mm512_and_si512(
+                    _mm512_srlv_epi64(dv, _mm512_set_epi64(4, 4, 0, 0, 4, 4, 0, 0)),
+                    mask,
+                );
+
+                dot = _mm512_dpbusd_epi32(
+                    dot,
+                    _mm512_loadu_epi8(query_head.as_ptr().add(i) as *const i8),
+                    dv,
+                );
+            }
+
+            _mm512_reduce_add_epi32(dot) as u32
+        }
+        _ => unreachable!(),
+    };
+
+    if !query_tail.is_empty() {
+        dot += super::scalar::primary_query8_dot_unnormalized::<B>(query_tail, &doc_tail);
     }
     dot
 }

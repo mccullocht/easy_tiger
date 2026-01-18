@@ -128,6 +128,79 @@ et_lvq_dot_u8(const uint8_t *a, const uint8_t *b, size_t len) {
   return dot;
 }
 
+__attribute__((target("+dotprod"))) EXPORT uint32_t
+et_lvq_dot_u8_u1(const uint8_t *q, const uint8_t *d, size_t len) {
+  uint32x4_t dot0 = vdupq_n_u32(0);
+  uint32x4_t dot1 = vdupq_n_u32(0);
+  uint32x4_t dot2 = vdupq_n_u32(0);
+  uint32x4_t dot3 = vdupq_n_u32(0);
+  uint8x16_t mask = vdupq_n_u8(0x1);
+  size_t len128 = len & ~127;
+  for (size_t i = 0; i < len128; i += 128) {
+    uint8x16_t dv = vld1q_u8(d + i / 128 * 16);
+
+    dot0 = vdotq_u32(dot0, vld1q_u8(q + i), vandq_u8(dv, mask));
+    dot1 = vdotq_u32(dot1, vld1q_u8(q + i + 16), vandq_u8(vshrq_n_u8(dv, 1), mask));
+    dot2 = vdotq_u32(dot2, vld1q_u8(q + i + 32), vandq_u8(vshrq_n_u8(dv, 2), mask));
+    dot3 = vdotq_u32(dot3, vld1q_u8(q + i + 48), vandq_u8(vshrq_n_u8(dv, 3), mask));
+    dot0 = vdotq_u32(dot0, vld1q_u8(q + i + 64), vandq_u8(vshrq_n_u8(dv, 4), mask));
+    dot1 = vdotq_u32(dot1, vld1q_u8(q + i + 80), vandq_u8(vshrq_n_u8(dv, 5), mask));
+    dot2 = vdotq_u32(dot2, vld1q_u8(q + i + 96), vandq_u8(vshrq_n_u8(dv, 6), mask));
+    dot3 = vdotq_u32(dot3, vld1q_u8(q + i + 112), vandq_u8(vshrq_n_u8(dv, 7), mask));
+  }
+
+  return vaddvq_u32(vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3)));
+}
+
+__attribute__((target("+dotprod"))) EXPORT uint32_t
+et_lvq_dot_u8_u2(const uint8_t *q, const uint8_t *d, size_t len) {
+  uint32x4_t dot0 = vdupq_n_u32(0);
+  uint32x4_t dot1 = vdupq_n_u32(0);
+  uint32x4_t dot2 = vdupq_n_u32(0);
+  uint32x4_t dot3 = vdupq_n_u32(0);
+  uint8x16_t mask = vdupq_n_u8(0x3);
+  size_t len64 = len & ~63;
+  for (size_t i = 0; i < len64; i += 64) {
+    uint8x16_t dv = vld1q_u8(d + i / 64 * 16);
+
+    dot0 = vdotq_u32(dot0, vld1q_u8(q + i), vandq_u8(dv, mask));
+    dot1 = vdotq_u32(dot1, vld1q_u8(q + i + 16), vandq_u8(vshrq_n_u8(dv, 2), mask));
+    dot2 = vdotq_u32(dot2, vld1q_u8(q + i + 32), vandq_u8(vshrq_n_u8(dv, 4), mask));
+    dot3 = vdotq_u32(dot3, vld1q_u8(q + i + 48), vandq_u8(vshrq_n_u8(dv, 6), mask));
+  }
+
+  return vaddvq_u32(vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3)));
+}
+
+__attribute__((target("+dotprod"))) EXPORT uint32_t
+et_lvq_dot_u8_u4(const uint8_t *q, const uint8_t *d, size_t len) {
+  uint32x4_t dot0 = vdupq_n_u32(0);
+  uint32x4_t dot1 = vdupq_n_u32(0);
+  uint32x4_t dot2 = vdupq_n_u32(0);
+  uint32x4_t dot3 = vdupq_n_u32(0);
+  uint8x16_t mask = vdupq_n_u8(0xf);
+  size_t len64 = len & ~63;
+  for (size_t i = 0; i < len64; i += 64) {
+    uint8x16_t dv0 = vld1q_u8(d + i / 64 * 32);
+    uint8x16_t dv1 = vld1q_u8(d + i / 64 * 32 + 16);
+
+    dot0 = vdotq_u32(dot0, vld1q_u8(q + i), vandq_u8(dv0, mask));
+    dot1 = vdotq_u32(dot1, vld1q_u8(q + i + 16), vshrq_n_u8(dv0, 4));
+    dot2 = vdotq_u32(dot2, vld1q_u8(q + i + 32), vandq_u8(dv1, mask));
+    dot3 = vdotq_u32(dot3, vld1q_u8(q + i + 48), vshrq_n_u8(dv1, 4));
+  }
+
+  dot0 = vaddq_u32(dot0, dot1);
+  dot2 = vaddq_u32(dot2, dot3);
+  if (len64 < len) {
+    uint8x16_t dv = vld1q_u8(d + len64 / 64 * 32);
+    dot0 = vdotq_u32(dot0, vld1q_u8(q + len64), vandq_u8(dv, mask));
+    dot2 = vdotq_u32(dot2, vld1q_u8(q + len64 + 16), vshrq_n_u8(dv, 4));
+  }
+
+  return vaddvq_u32(vaddq_u32(dot0, dot2));
+}
+
 struct LVQ2Dot {
   uint32_t ap_dot_bp;
   uint32_t ap_dot_br;

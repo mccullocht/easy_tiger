@@ -982,6 +982,7 @@ impl<const B: usize> TLVQExpander32<B> {
     }
 }
 
+// XXX remove
 pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
     query: &[f32],
     doc: &TurboPrimaryVector<'_, B>,

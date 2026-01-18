@@ -279,3 +279,15 @@ pub fn tlvq_primary_f32_dot_unnormalized<const B: usize>(
         .map(|(q, d)| *q * d as f32)
         .sum::<f32>()
 }
+
+#[inline]
+pub fn primary_query8_dot_unnormalized<const B: usize>(
+    query: &[u8],
+    doc: &TurboPrimaryVector<'_, B>,
+) -> u32 {
+    query
+        .iter()
+        .zip(TurboUnpacker::<B>::new(doc.rep.data))
+        .map(|(&q, d)| q as u32 * d as u32)
+        .sum::<u32>()
+}

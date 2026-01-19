@@ -291,6 +291,24 @@ fn dot_unnormalized_uint_symmetric<const B: usize>(
     correct_dot_uint(dot, dim, &a.terms, &b.terms)
 }
 
+fn dot_unnormalized_uint8_asymmetric<const B: usize>(
+    inst: InstructionSet,
+    query: &[u8],
+    query_terms: VectorTerms,
+    doc: &TurboPrimaryVector<'_, B>,
+) -> f32 {
+    let dot = match inst {
+        InstructionSet::Scalar => scalar::primary_query8_dot_unnormalized::<B>(query, doc),
+        #[cfg(target_arch = "aarch64")]
+        InstructionSet::Neon => aarch64::primary_query8_dot_unnormalized::<B>(query, doc),
+        #[cfg(target_arch = "x86_64")]
+        InstructionSet::Avx512 => unsafe {
+            x86_64::primary_query8_dot_unnormalized_avx512::<B>(query, doc)
+        },
+    };
+    correct_dot_uint(dot, query.len(), &query_terms, &doc.rep.terms)
+}
+
 /// Correct the dot product of two integer vectors using the stored vector terms.
 fn correct_dot_uint(dot: u32, dim: usize, a: &VectorTerms, b: &VectorTerms) -> f32 {
     dot as f32 * a.delta * b.delta
@@ -849,10 +867,6 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         packing::TurboUnpacker::<B>::new(self.rep.data)
     }
 
-    fn f32_dot_correction(&self, query_sum: f32, dot: f32) -> f32 {
-        dot * self.rep.terms.delta + query_sum * self.rep.terms.lower
-    }
-
     fn l2_norm(&self) -> f64 {
         self.l2_norm.into()
     }
@@ -961,50 +975,71 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
 }
 
 #[derive(Debug, Clone)]
-pub struct TurboPrimaryQueryDistance<'a, const B: usize> {
+pub struct TurboPrimaryQueryDistance<const B: usize> {
     similarity: VectorSimilarity,
-    query: Cow<'a, [f32]>,
-    query_l2_norm: f64,
-    query_sum: f32,
+
+    query: Vec<u8>,
+    terms: VectorTerms,
+    l2_norm: f64,
+
     inst: InstructionSet,
 }
 
-impl<'a, const B: usize> TurboPrimaryQueryDistance<'a, B> {
-    pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
-        // For Dot distance we assume the input is l2 normalized.
-        let query_l2_norm = match similarity {
-            VectorSimilarity::Dot => 1.0,
-            _ => super::l2_norm(&query).into(),
+impl<const B: usize> TurboPrimaryQueryDistance<B> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
+        let mut header = PrimaryVectorHeader::from(VectorStats::from(query.as_ref()));
+        let delta_inv = 255.0f32 / (header.upper - header.lower);
+        let mut qvec = vec![0u8; packing::byte_len(query.len(), 8)];
+        let inst = InstructionSet::default();
+        header.component_sum = match inst {
+            InstructionSet::Scalar => scalar::primary_quantize_and_pack::<8>(
+                query.as_ref(),
+                header.lower,
+                header.upper,
+                delta_inv,
+                &mut qvec,
+            ),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::primary_quantize_and_pack::<8>(
+                query.as_ref(),
+                header.lower,
+                header.upper,
+                delta_inv,
+                &mut qvec,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::primary_quantize_and_pack_avx512::<8>(
+                    query.as_ref(),
+                    header.lower,
+                    header.upper,
+                    delta_inv,
+                    &mut qvec,
+                )
+            },
         };
-        let query_sum = query.iter().copied().sum::<f32>();
+        let terms = VectorTerms::from_primary::<8>(header);
+        let l2_norm = header.l2_norm.into();
+
         Self {
             similarity,
-            query,
-            query_l2_norm,
-            query_sum,
-            inst: InstructionSet::default(),
+            query: qvec,
+            terms,
+            l2_norm,
+            inst,
         }
     }
 }
 
-impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<'_, B> {
+impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
-        let pdot = match self.inst {
-            InstructionSet::Scalar => {
-                scalar::tlvq_primary_f32_dot_unnormalized::<B>(self.query.as_ref(), &vector)
-            }
-            #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => {
-                aarch64::tlvq_primary_f32_dot_unnormalized(self.query.as_ref(), &vector)
-            }
-            #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::tlvq_primary_f32_dot_unnormalized_avx512(self.query.as_ref(), &vector)
-            },
-        };
-        let dot = vector.f32_dot_correction(self.query_sum, pdot).into();
-        dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))
+        let dot = dot_unnormalized_uint8_asymmetric(self.inst, &self.query, self.terms, &vector);
+        dot_unnormalized_to_distance(
+            self.similarity,
+            dot.into(),
+            (self.l2_norm, vector.l2_norm()),
+        )
     }
 }
 

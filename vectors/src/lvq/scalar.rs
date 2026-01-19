@@ -160,9 +160,9 @@ pub fn residual_quantize_and_pack<const B: usize>(
         .fold((0, 0), |(psum, rsum), (p, r)| (psum + p, rsum + r))
 }
 
-pub fn residual_decode<const B: usize>(vector: TurboResidualVector<'_, B>, out: &mut [f32]) {
+pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {
     for ((p, r), o) in TurboUnpacker::<B>::new(vector.primary.data)
-        .zip(TurboUnpacker::<RESIDUAL_BITS>::new(vector.residual.data))
+        .zip(vector.residual.data.iter().copied())
         .zip(out.iter_mut())
     {
         *o = (p as f32).mul_add(vector.primary.terms.delta, vector.primary.terms.lower)
@@ -321,13 +321,12 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
 
 #[inline]
 pub fn residual_dot_unnormalized<const B: usize>(
-    query_primary: &[u8],
-    query_residual: &[u8],
-    doc: &TurboResidualVector<'_, B>,
+    query: (&[u8], &[u8]),
+    doc: (&[u8], &[u8]),
 ) -> LVQ2Dot {
-    TurboUnpacker::<B>::new(query_primary)
-        .zip(query_residual.iter().copied())
-        .zip(TurboUnpacker::<B>::new(doc.primary.data).zip(doc.residual.data.iter().copied()))
+    TurboUnpacker::<B>::new(query.0)
+        .zip(query.1.iter().copied())
+        .zip(TurboUnpacker::<B>::new(doc.0).zip(doc.1.iter().copied()))
         .map(|((qp, qr), (dp, dr))| LVQ2Dot {
             ap_dot_bp: qp as u32 * dp as u32,
             ap_dot_br: qp as u32 * dr as u32,

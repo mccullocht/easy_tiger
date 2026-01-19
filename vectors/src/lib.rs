@@ -218,10 +218,10 @@ impl F32VectorCoding {
             (Self::TLVQ2, _) => Box::new(lvq::PrimaryDistance::<2>::new(similarity)),
             (Self::TLVQ4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
             (Self::TLVQ8, _) => Box::new(lvq::PrimaryDistance::<8>::new(similarity)),
-            (Self::TLVQ1x8, _) => todo!("XXX bad pack order"),
-            (Self::TLVQ2x8, _) => todo!("XXX cannot unpack 2 atm"),
-            (Self::TLVQ4x8, _) => todo!("XXX bad pack order"),
-            (Self::TLVQ8x8, _) => Box::new(lvq::TwoLevelDistance::<8, 8>::new(similarity)),
+            (Self::TLVQ1x8, _) => Box::new(lvq::TurboResidualDistance::<1>::new(similarity)),
+            (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualDistance::<2>::new(similarity)),
+            (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualDistance::<4>::new(similarity)),
+            (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualDistance::<8>::new(similarity)),
         }
     }
 
@@ -703,8 +703,8 @@ mod test {
     distance_test!(tlvq1x8_l2_dist, Euclidean, TLVQ1x8, 0.01);
     distance_test!(tlvq2x8_dot_dist, Dot, TLVQ2x8, 0.01);
     distance_test!(tlvq2x8_l2_dist, Euclidean, TLVQ2x8, 0.01);
-    distance_test!(tlvq4x8_dot_dist, Dot, TLVQ4x8, 0.05);
-    distance_test!(tlvq4x8_l2_dist, Euclidean, TLVQ4x8, 0.05);
+    distance_test!(tlvq4x8_dot_dist, Dot, TLVQ4x8, 0.001);
+    distance_test!(tlvq4x8_l2_dist, Euclidean, TLVQ4x8, 0.001);
     distance_test!(tlvq8x8_dot_dist, Dot, TLVQ8x8, 0.001);
     distance_test!(tlvq8x8_l2_dist, Euclidean, TLVQ8x8, 0.001);
 

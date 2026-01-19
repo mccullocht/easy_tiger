@@ -652,7 +652,8 @@ impl<const B: usize> VectorDistance for PrimaryDistance<B> {
     }
 }
 
-/// The four components of an LVQ2 dot product.
+// XXX rename to ResidualComponentDot
+/// The four components of a residual dot product.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
 struct LVQ2Dot {
@@ -660,6 +661,20 @@ struct LVQ2Dot {
     ap_dot_br: u32,
     ar_dot_bp: u32,
     ar_dot_br: u32,
+}
+
+impl LVQ2Dot {
+    fn compute_dot(
+        &self,
+        dim: usize,
+        a: (&VectorTerms, &VectorTerms),
+        b: (&VectorTerms, &VectorTerms),
+    ) -> f32 {
+        correct_dot_uint(self.ap_dot_bp, dim, a.0, b.0)
+            + correct_dot_uint(self.ap_dot_br, dim, a.0, b.1)
+            + correct_dot_uint(self.ar_dot_bp, dim, a.1, b.0)
+            + correct_dot_uint(self.ar_dot_br, dim, a.1, b.1)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1037,6 +1052,10 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
         })
     }
 
+    fn dim(&self) -> usize {
+        self.residual.data.len()
+    }
+
     #[allow(dead_code)] // XXX
     fn iter(&self) -> impl ExactSizeIterator<Item = (u8, u8)> {
         packing::TurboUnpacker::<B>::new(self.primary.data).zip(packing::TurboUnpacker::<
@@ -1151,7 +1170,7 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
             PrimaryVectorHeader::split_output_buf(out).unwrap();
         let (residual_header_bytes, vector_bytes) =
             ResidualVectorHeader::split_output_buf(vector_bytes).unwrap();
-        let split = packing::two_vector_split(vector_bytes.len(), B, 8);
+        let split = packing::two_vector_split(vector_bytes.len(), B, RESIDUAL_BITS);
         let (primary, residual) = vector_bytes.split_at_mut(split);
         let mut residual_header = ResidualVectorHeader {
             magnitude: residual_magnitude,
@@ -1177,13 +1196,13 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
         PrimaryVectorHeader::LEN
             + ResidualVectorHeader::LEN
             + packing::byte_len(dimensions, B)
-            + packing::byte_len(dimensions, RESIDUAL_BITS)
+            + dimensions
     }
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
         let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
         // XXX arch impls
-        scalar::residual_decode::<B>(vector, out);
+        scalar::residual_decode::<B>(&vector, out);
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
@@ -1192,6 +1211,42 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
         let split = packing::two_vector_split(len_no_corrective_terms, B, RESIDUAL_BITS);
         // Residual vector always uses a byte per dimension.
         len_no_corrective_terms - split
+    }
+}
+
+#[allow(dead_code)] // XXX
+#[derive(Debug, Clone, Copy)]
+pub struct TurboResidualDistance<const B: usize>(VectorSimilarity, InstructionSet);
+
+impl<const B: usize> TurboResidualDistance<B> {
+    pub fn new(similarity: VectorSimilarity) -> Self {
+        Self(similarity, InstructionSet::default())
+    }
+}
+
+impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = TurboResidualVector::<B>::new(query).unwrap();
+        let doc = TurboResidualVector::<B>::new(doc).unwrap();
+
+        /*
+        // XXX arch impls
+        let component_dot = scalar::residual_dot_unnormalized::<B>(
+            (&query.primary.data, &query.residual.data),
+            (&doc.primary.data, &doc.residual.data),
+        );
+        let dot = component_dot.compute_dot(
+            query.dim(),
+            (&query.primary.terms, &query.residual.terms),
+            (&doc.primary.terms, &doc.residual.terms),
+        );
+        */
+        let mut qd = vec![0.0f32; query.dim()];
+        let mut dd = vec![0.0f32; query.dim()];
+        scalar::residual_decode::<B>(&query, &mut qd);
+        scalar::residual_decode::<B>(&doc, &mut dd);
+        let dot: f32 = qd.iter().zip(dd.iter()).map(|(q, d)| q * d).sum();
+        dot_unnormalized_to_distance(self.0, dot.into(), (query.l2_norm(), doc.l2_norm()))
     }
 }
 
@@ -1268,34 +1323,14 @@ impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
         let component_dot = scalar::residual_dot_unnormalized::<B>(
-            &self.primary_vector,
-            &self.residual_vector,
-            &vector,
+            (&self.primary_vector, &self.residual_vector),
+            (&vector.primary.data, &vector.residual.data),
         );
-        println!("component_dot: {component_dot:?}");
-        let dim = self.residual_vector.len();
-        let dot = correct_dot_uint(
-            component_dot.ap_dot_bp,
-            dim,
-            &self.primary_terms,
-            &vector.primary.terms,
-        ) + correct_dot_uint(
-            component_dot.ap_dot_br,
-            dim,
-            &self.primary_terms,
-            &vector.residual.terms,
-        ) + correct_dot_uint(
-            component_dot.ar_dot_bp,
-            dim,
-            &self.residual_terms,
-            &vector.primary.terms,
-        ) + correct_dot_uint(
-            component_dot.ar_dot_br,
-            dim,
-            &self.residual_terms,
-            &vector.residual.terms,
+        let dot = component_dot.compute_dot(
+            vector.dim(),
+            (&self.primary_terms, &self.residual_terms),
+            (&vector.primary.terms, &vector.residual.terms),
         );
-        println!("dot: {dot}");
         dot_unnormalized_to_distance(
             self.similarity,
             dot.into(),

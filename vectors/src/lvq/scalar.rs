@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::lvq::TurboPrimaryVector;
+use crate::lvq::{RESIDUAL_BITS, TurboPrimaryVector, TurboResidualVector, VectorEncodeTerms};
 
 use super::{
     LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats,
@@ -126,6 +126,45 @@ pub fn primary_quantize_and_pack<const B: usize>(
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
     for (q, o) in TurboUnpacker::<B>::new(vector.rep.data).zip(out.iter_mut()) {
         *o = (q as f32).mul_add(vector.rep.terms.delta, vector.rep.terms.lower);
+    }
+}
+
+pub fn residual_quantize_and_pack<const B: usize>(
+    vector: &[f32],
+    primary_terms: VectorEncodeTerms,
+    residual_terms: VectorEncodeTerms,
+    primary_delta: f32,
+    primary: &mut [u8],
+    residual: &mut [u8],
+) -> (u32, u32) {
+    let mut primary_packer = TurboPacker::<B>::new(primary);
+    let mut residual_packer = TurboPacker::<RESIDUAL_BITS>::new(residual);
+    vector
+        .iter()
+        .map(|&v| {
+            let p = ((v.clamp(primary_terms.lower, primary_terms.upper) - primary_terms.lower)
+                * primary_terms.delta_inv)
+                .round() as u8;
+            primary_packer.push(p);
+            // After producing the primary value, calculate the residual between the original value
+            // and the dequantized value and quantize that.
+            let res = v - (p as f32).mul_add(primary_delta, primary_terms.lower);
+            let r = ((res.clamp(residual_terms.lower, residual_terms.upper) - residual_terms.lower)
+                * residual_terms.delta_inv)
+                .round() as u8;
+            residual_packer.push(r);
+            (u32::from(p), u32::from(r))
+        })
+        .fold((0, 0), |(psum, rsum), (p, r)| (psum + p, rsum + r))
+}
+
+pub fn residual_decode<const B: usize>(vector: TurboResidualVector<'_, B>, out: &mut [f32]) {
+    for ((p, r), o) in TurboUnpacker::<B>::new(vector.primary.data)
+        .zip(TurboUnpacker::<RESIDUAL_BITS>::new(vector.residual.data))
+        .zip(out.iter_mut())
+    {
+        *o = (p as f32).mul_add(vector.primary.terms.delta, vector.primary.terms.lower)
+            + (r as f32).mul_add(vector.residual.terms.delta, vector.residual.terms.lower);
     }
 }
 

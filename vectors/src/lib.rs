@@ -189,10 +189,10 @@ impl F32VectorCoding {
             Self::TLVQ2 => Box::new(lvq::TurboPrimaryCoder::<2>::default()),
             Self::TLVQ4 => Box::new(lvq::TurboPrimaryCoder::<4>::default()),
             Self::TLVQ8 => Box::new(lvq::TurboPrimaryCoder::<8>::default()),
-            Self::TLVQ1x8 => todo!("XXX"),
-            Self::TLVQ2x8 => todo!("XXX"),
-            Self::TLVQ4x8 => todo!("XXX"),
-            Self::TLVQ8x8 => todo!("XXX"),
+            Self::TLVQ1x8 => Box::new(lvq::TurboResidualCoder::<1>::default()),
+            Self::TLVQ2x8 => Box::new(lvq::TurboResidualCoder::<2>::default()),
+            Self::TLVQ4x8 => Box::new(lvq::TurboResidualCoder::<4>::default()),
+            Self::TLVQ8x8 => Box::new(lvq::TurboResidualCoder::<8>::default()),
         }
     }
 
@@ -213,14 +213,15 @@ impl F32VectorCoding {
             (Self::LVQ2x4x4, _) => Box::new(lvq::TwoLevelDistance::<4, 4>::new(similarity)),
             (Self::LVQ2x4x8, _) => Box::new(lvq::TwoLevelDistance::<4, 8>::new(similarity)),
             (Self::LVQ2x8x8, _) => Box::new(lvq::TwoLevelDistance::<8, 8>::new(similarity)),
+            // XXX rename symmetric distance fns.
             (Self::TLVQ1, _) => Box::new(lvq::PrimaryDistance::<1>::new(similarity)),
             (Self::TLVQ2, _) => Box::new(lvq::PrimaryDistance::<2>::new(similarity)),
             (Self::TLVQ4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
             (Self::TLVQ8, _) => Box::new(lvq::PrimaryDistance::<8>::new(similarity)),
-            (Self::TLVQ1x8, _) => todo!("XXX"),
-            (Self::TLVQ2x8, _) => todo!("XXX"),
-            (Self::TLVQ4x8, _) => todo!("XXX"),
-            (Self::TLVQ8x8, _) => todo!("XXX"),
+            (Self::TLVQ1x8, _) => Box::new(lvq::TwoLevelDistance::<1, 8>::new(similarity)),
+            (Self::TLVQ2x8, _) => todo!("XXX cannot unpack 2 atm"),
+            (Self::TLVQ4x8, _) => Box::new(lvq::TwoLevelDistance::<4, 8>::new(similarity)),
+            (Self::TLVQ8x8, _) => Box::new(lvq::TwoLevelDistance::<8, 8>::new(similarity)),
         }
     }
 
@@ -546,7 +547,7 @@ fn dot_unnormalized_to_distance(
 mod test {
     use crate::{
         F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize,
-        lvq::{PrimaryVectorCoder, TurboPrimaryCoder, TwoLevelVectorCoder},
+        lvq::{PrimaryVectorCoder, TurboPrimaryCoder, TurboResidualCoder, TwoLevelVectorCoder},
     };
 
     struct TestVector {
@@ -725,4 +726,8 @@ mod test {
     lvq_coding_simd_test!(tlvq2_coding_simd, TurboPrimaryCoder::<2>);
     lvq_coding_simd_test!(tlvq4_coding_simd, TurboPrimaryCoder::<4>);
     lvq_coding_simd_test!(tlvq8_coding_simd, TurboPrimaryCoder::<8>);
+    lvq_coding_simd_test!(tlvq1x8_coding_simd, TurboResidualCoder::<1>);
+    lvq_coding_simd_test!(tlvq2x8_coding_simd, TurboResidualCoder::<2>);
+    lvq_coding_simd_test!(tlvq4x8_coding_simd, TurboResidualCoder::<4>);
+    lvq_coding_simd_test!(tlvq8x8_coding_simd, TurboResidualCoder::<8>);
 }

@@ -156,6 +156,22 @@ pub enum F32VectorCoding {
     ///
     /// This encoding is optimized for cases where dimensionality is a multiple of 16.
     TLVQ8,
+    /// Turbo LVQ; 1 bit primary vector and 8 bit residual vector.
+    ///
+    /// This encoding is optimized for cases where dimensionality is a multiple of 128.
+    TLVQ1x8,
+    /// Turbo LVQ; 2 bits primary vector and 8 bits residual vector.
+    ///
+    /// This encoding is optimized for cases where dimensionality is a multiple of 64.
+    TLVQ2x8,
+    /// Turbo LVQ; 4 bits primary vector and 8 bits residual vector.
+    ///
+    /// This encoding is optimized for cases where dimensionality is a multiple of 32.
+    TLVQ4x8,
+    /// Turbo LVQ; 8 bits primary vector and 8 bits residual vector.
+    ///
+    /// This encoding is optimized for cases where dimensionality is a multiple of 16.
+    TLVQ8x8,
 }
 
 impl F32VectorCoding {
@@ -173,6 +189,10 @@ impl F32VectorCoding {
             Self::TLVQ2 => Box::new(lvq::TurboPrimaryCoder::<2>::default()),
             Self::TLVQ4 => Box::new(lvq::TurboPrimaryCoder::<4>::default()),
             Self::TLVQ8 => Box::new(lvq::TurboPrimaryCoder::<8>::default()),
+            Self::TLVQ1x8 => todo!("XXX"),
+            Self::TLVQ2x8 => todo!("XXX"),
+            Self::TLVQ4x8 => todo!("XXX"),
+            Self::TLVQ8x8 => todo!("XXX"),
         }
     }
 
@@ -197,6 +217,10 @@ impl F32VectorCoding {
             (Self::TLVQ2, _) => Box::new(lvq::PrimaryDistance::<2>::new(similarity)),
             (Self::TLVQ4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
             (Self::TLVQ8, _) => Box::new(lvq::PrimaryDistance::<8>::new(similarity)),
+            (Self::TLVQ1x8, _) => todo!("XXX"),
+            (Self::TLVQ2x8, _) => todo!("XXX"),
+            (Self::TLVQ4x8, _) => todo!("XXX"),
+            (Self::TLVQ8x8, _) => todo!("XXX"),
         }
     }
 
@@ -256,6 +280,11 @@ impl F32VectorCoding {
                 similarity,
                 query.into(),
             )),
+            // XXX consider using 8 bit primary against primary+residual.
+            (_, F32VectorCoding::TLVQ1x8) => todo!("XXX"),
+            (_, F32VectorCoding::TLVQ2x8) => todo!("XXX"),
+            (_, F32VectorCoding::TLVQ4x8) => todo!("XXX"),
+            (_, F32VectorCoding::TLVQ8x8) => todo!("XXX"),
         }
     }
 
@@ -287,6 +316,7 @@ impl F32VectorCoding {
             F32VectorCoding::LVQ2x8x8 => Some(Box::new(
                 lvq::FastTwoLevelQueryDistance::<8, 8>::new(similarity, query),
             )),
+            // TODO: consider using asymmetric 8xN distance here.
             F32VectorCoding::TLVQ1 => Some(Box::new(QuantizedQueryVectorDistance::new(
                 lvq::PrimaryDistance::<1>::new(similarity),
                 lvq::TurboPrimaryCoder::<1>::default().encode(query),
@@ -303,6 +333,11 @@ impl F32VectorCoding {
                 lvq::PrimaryDistance::<8>::new(similarity),
                 lvq::TurboPrimaryCoder::<8>::default().encode(query),
             ))),
+            // XXX consider using 8 bit primary against primary.
+            F32VectorCoding::TLVQ1x8 => todo!("XXX"),
+            F32VectorCoding::TLVQ2x8 => todo!("XXX"),
+            F32VectorCoding::TLVQ4x8 => todo!("XXX"),
+            F32VectorCoding::TLVQ8x8 => todo!("XXX"),
         }
     }
 
@@ -362,6 +397,18 @@ impl F32VectorCoding {
             (_, F32VectorCoding::TLVQ8) => {
                 quantized_qvd!(lvq::PrimaryDistance::<8>::new(similarity), query)
             }
+            (_, F32VectorCoding::TLVQ1x8) => {
+                quantized_qvd!(lvq::TwoLevelDistance::<1, 8>::new(similarity), query)
+            }
+            (_, F32VectorCoding::TLVQ2x8) => {
+                quantized_qvd!(lvq::TwoLevelDistance::<2, 8>::new(similarity), query)
+            }
+            (_, F32VectorCoding::TLVQ4x8) => {
+                quantized_qvd!(lvq::TwoLevelDistance::<4, 8>::new(similarity), query)
+            }
+            (_, F32VectorCoding::TLVQ8x8) => {
+                quantized_qvd!(lvq::TwoLevelDistance::<8, 8>::new(similarity), query)
+            }
         }
     }
 }
@@ -383,6 +430,10 @@ impl FromStr for F32VectorCoding {
             "tlvq2" => Ok(Self::TLVQ2),
             "tlvq4" => Ok(Self::TLVQ4),
             "tlvq8" => Ok(Self::TLVQ8),
+            "tlvq1x8" => Ok(Self::TLVQ1x8),
+            "tlvq2x8" => Ok(Self::TLVQ2x8),
+            "tlvq4x8" => Ok(Self::TLVQ4x8),
+            "tlvq8x8" => Ok(Self::TLVQ8x8),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -402,6 +453,10 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TLVQ2 => write!(f, "tlvq2"),
             Self::TLVQ4 => write!(f, "tlvq4"),
             Self::TLVQ8 => write!(f, "tlvq8"),
+            Self::TLVQ1x8 => write!(f, "tlvq1x8"),
+            Self::TLVQ2x8 => write!(f, "tlvq2x8"),
+            Self::TLVQ4x8 => write!(f, "tlvq4x8"),
+            Self::TLVQ8x8 => write!(f, "tlvq8x8"),
         }
     }
 }

@@ -2,7 +2,9 @@
 
 #![allow(dead_code)]
 
-use crate::lvq::{RESIDUAL_BITS, TurboPrimaryVector, TurboResidualVector, VectorEncodeTerms};
+use crate::lvq::{
+    LVQ2Dot, RESIDUAL_BITS, TurboPrimaryVector, TurboResidualVector, VectorEncodeTerms,
+};
 
 use super::{
     LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats,
@@ -315,4 +317,27 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
         .zip(TurboUnpacker::<B>::new(doc.rep.data))
         .map(|(&q, d)| q as u32 * d as u32)
         .sum::<u32>()
+}
+
+#[inline]
+pub fn residual_dot_unnormalized<const B: usize>(
+    query_primary: &[u8],
+    query_residual: &[u8],
+    doc: &TurboResidualVector<'_, B>,
+) -> LVQ2Dot {
+    TurboUnpacker::<B>::new(query_primary)
+        .zip(query_residual.iter().copied())
+        .zip(TurboUnpacker::<B>::new(doc.primary.data).zip(doc.residual.data.iter().copied()))
+        .map(|((qp, qr), (dp, dr))| LVQ2Dot {
+            ap_dot_bp: qp as u32 * dp as u32,
+            ap_dot_br: qp as u32 * dr as u32,
+            ar_dot_bp: qr as u32 * dp as u32,
+            ar_dot_br: qr as u32 * dr as u32,
+        })
+        .fold(LVQ2Dot::default(), |acc, dim| LVQ2Dot {
+            ap_dot_bp: acc.ap_dot_bp + dim.ap_dot_bp,
+            ap_dot_br: acc.ap_dot_br + dim.ap_dot_br,
+            ar_dot_bp: acc.ar_dot_bp + dim.ar_dot_bp,
+            ar_dot_br: acc.ar_dot_br + dim.ar_dot_br,
+        })
 }

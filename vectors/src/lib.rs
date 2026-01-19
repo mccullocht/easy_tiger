@@ -218,9 +218,9 @@ impl F32VectorCoding {
             (Self::TLVQ2, _) => Box::new(lvq::PrimaryDistance::<2>::new(similarity)),
             (Self::TLVQ4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
             (Self::TLVQ8, _) => Box::new(lvq::PrimaryDistance::<8>::new(similarity)),
-            (Self::TLVQ1x8, _) => Box::new(lvq::TwoLevelDistance::<1, 8>::new(similarity)),
+            (Self::TLVQ1x8, _) => todo!("XXX bad pack order"),
             (Self::TLVQ2x8, _) => todo!("XXX cannot unpack 2 atm"),
-            (Self::TLVQ4x8, _) => Box::new(lvq::TwoLevelDistance::<4, 8>::new(similarity)),
+            (Self::TLVQ4x8, _) => todo!("XXX bad pack order"),
             (Self::TLVQ8x8, _) => Box::new(lvq::TwoLevelDistance::<8, 8>::new(similarity)),
         }
     }
@@ -281,11 +281,22 @@ impl F32VectorCoding {
                 similarity,
                 query.into(),
             )),
-            // XXX consider using 8 bit primary against primary+residual.
-            (_, F32VectorCoding::TLVQ1x8) => todo!("XXX"),
-            (_, F32VectorCoding::TLVQ2x8) => todo!("XXX"),
-            (_, F32VectorCoding::TLVQ4x8) => todo!("XXX"),
-            (_, F32VectorCoding::TLVQ8x8) => todo!("XXX"),
+            (_, F32VectorCoding::TLVQ1x8) => Box::new(lvq::TurboResidualQueryDistance::<1>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::TLVQ2x8) => Box::new(lvq::TurboResidualQueryDistance::<2>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::TLVQ4x8) => Box::new(lvq::TurboResidualQueryDistance::<4>::new(
+                similarity,
+                query.into(),
+            )),
+            (_, F32VectorCoding::TLVQ8x8) => Box::new(lvq::TurboResidualQueryDistance::<8>::new(
+                similarity,
+                query.into(),
+            )),
         }
     }
 
@@ -637,7 +648,8 @@ mod test {
     }
 
     use F32VectorCoding::{
-        F16, LVQ2x1x8, LVQ2x4x4, LVQ2x4x8, LVQ2x8x8, TLVQ1, TLVQ2, TLVQ4, TLVQ8,
+        F16, LVQ2x1x8, LVQ2x4x4, LVQ2x4x8, LVQ2x8x8, TLVQ1, TLVQ1x8, TLVQ2, TLVQ2x8, TLVQ4,
+        TLVQ4x8, TLVQ8, TLVQ8x8,
     };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
     use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
@@ -686,6 +698,15 @@ mod test {
     distance_test!(tlvq4_l2_dist, Euclidean, TLVQ4, 0.05);
     distance_test!(tlvq8_dot_dist, Dot, TLVQ8, 0.01);
     distance_test!(tlvq8_l2_dist, Euclidean, TLVQ8, 0.01);
+
+    distance_test!(tlvq1x8_dot_dist, Dot, TLVQ1x8, 0.01);
+    distance_test!(tlvq1x8_l2_dist, Euclidean, TLVQ1x8, 0.01);
+    distance_test!(tlvq2x8_dot_dist, Dot, TLVQ2x8, 0.01);
+    distance_test!(tlvq2x8_l2_dist, Euclidean, TLVQ2x8, 0.01);
+    distance_test!(tlvq4x8_dot_dist, Dot, TLVQ4x8, 0.05);
+    distance_test!(tlvq4x8_l2_dist, Euclidean, TLVQ4x8, 0.05);
+    distance_test!(tlvq8x8_dot_dist, Dot, TLVQ8x8, 0.001);
+    distance_test!(tlvq8x8_l2_dist, Euclidean, TLVQ8x8, 0.001);
 
     macro_rules! lvq_coding_simd_test {
         ($name:ident, $coder:ty) => {

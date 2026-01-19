@@ -238,20 +238,6 @@ pub fn dot_residual_u8<const B1: usize, const B2: usize>(
 }
 
 #[inline]
-pub fn lvq1_f32_dot_unnormalized<const B: usize>(
-    query: &[f32],
-    query_sum: f32,
-    doc: &PrimaryVector<'_, B>,
-) -> f64 {
-    let dot = query
-        .iter()
-        .zip(super::packing::unpack_iter::<B>(doc.v.data))
-        .map(|(q, d)| *q * d as f32)
-        .sum::<f32>();
-    doc.f32_dot_correction(query_sum, dot).into()
-}
-
-#[inline]
 pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
     query: &[f32],
     query_sum: f32,

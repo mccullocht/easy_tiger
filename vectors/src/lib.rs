@@ -132,12 +132,6 @@ pub enum F32VectorCoding {
     /// This encoding is very compact and efficient for distance computation but also does not have
     /// high fidelity with distances computed between raw vectors.
     BinaryQuantized,
-    /// LVQ one-level; 1 bit
-    LVQ1x1,
-    /// LVQ one-level; 4 bits
-    LVQ1x4,
-    /// LVQ one-level; 8 bits
-    LVQ1x8,
     /// LVQ two-level; 1 bit primary 8 bits residual
     LVQ2x1x8,
     /// LVQ two-level; 4 bits primary 4 bits residual
@@ -171,9 +165,6 @@ impl F32VectorCoding {
             Self::F32 => Box::new(float32::VectorCoder::new(similarity)),
             Self::F16 => Box::new(float16::VectorCoder::new(similarity)),
             Self::BinaryQuantized => Box::new(binary::BinaryQuantizedVectorCoder),
-            Self::LVQ1x1 => Box::new(lvq::PrimaryVectorCoder::<1>::default()),
-            Self::LVQ1x4 => Box::new(lvq::PrimaryVectorCoder::<4>::default()),
-            Self::LVQ1x8 => Box::new(lvq::PrimaryVectorCoder::<8>::default()),
             Self::LVQ2x1x8 => Box::new(lvq::TwoLevelVectorCoder::<1, 8>::default()),
             Self::LVQ2x4x4 => Box::new(lvq::TwoLevelVectorCoder::<4, 4>::default()),
             Self::LVQ2x4x8 => Box::new(lvq::TwoLevelVectorCoder::<4, 8>::default()),
@@ -198,9 +189,6 @@ impl F32VectorCoding {
             }
             (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance::default()),
             (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
-            (Self::LVQ1x1, _) => Box::new(lvq::PrimaryDistance::<1>::new(similarity)),
-            (Self::LVQ1x4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
-            (Self::LVQ1x8, _) => Box::new(lvq::PrimaryDistance::<8>::new(similarity)),
             (Self::LVQ2x1x8, _) => Box::new(lvq::TwoLevelDistance::<1, 8>::new(similarity)),
             (Self::LVQ2x4x4, _) => Box::new(lvq::TwoLevelDistance::<4, 4>::new(similarity)),
             (Self::LVQ2x4x8, _) => Box::new(lvq::TwoLevelDistance::<4, 8>::new(similarity)),
@@ -236,18 +224,6 @@ impl F32VectorCoding {
             (_, F32VectorCoding::BinaryQuantized) => Box::new(
                 binary::I1DotProductQueryDistance::new(query.into().as_ref()),
             ),
-            (_, F32VectorCoding::LVQ1x1) => Box::new(lvq::PrimaryQueryDistance::<1>::new(
-                similarity,
-                query.into(),
-            )),
-            (_, F32VectorCoding::LVQ1x4) => Box::new(lvq::PrimaryQueryDistance::<4>::new(
-                similarity,
-                query.into(),
-            )),
-            (_, F32VectorCoding::LVQ1x8) => Box::new(lvq::PrimaryQueryDistance::<8>::new(
-                similarity,
-                query.into(),
-            )),
             (_, F32VectorCoding::LVQ2x1x8) => Box::new(lvq::TwoLevelQueryDistance::<1, 8>::new(
                 similarity,
                 query.into(),
@@ -298,18 +274,6 @@ impl F32VectorCoding {
             F32VectorCoding::BinaryQuantized => Some(Box::new(QuantizedQueryVectorDistance::new(
                 binary::HammingDistance,
                 binary::BinaryQuantizedVectorCoder.encode(query),
-            ))),
-            F32VectorCoding::LVQ1x1 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::PrimaryDistance::<1>::new(similarity),
-                lvq::PrimaryVectorCoder::<1>::default().encode(query),
-            ))),
-            F32VectorCoding::LVQ1x4 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::PrimaryDistance::<4>::new(similarity),
-                lvq::PrimaryVectorCoder::<4>::default().encode(query),
-            ))),
-            F32VectorCoding::LVQ1x8 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::PrimaryDistance::<8>::new(similarity),
-                lvq::PrimaryVectorCoder::<8>::default().encode(query),
             ))),
             F32VectorCoding::LVQ2x1x8 => Some(Box::new(
                 lvq::FastTwoLevelQueryDistance::<1, 8>::new(similarity, query),
@@ -374,15 +338,6 @@ impl F32VectorCoding {
                 quantized_qvd!(float16::EuclideanDistance::default(), query)
             }
             (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
-            (_, F32VectorCoding::LVQ1x1) => {
-                quantized_qvd!(lvq::PrimaryDistance::<1>::new(similarity), query)
-            }
-            (_, F32VectorCoding::LVQ1x4) => {
-                quantized_qvd!(lvq::PrimaryDistance::<4>::new(similarity), query)
-            }
-            (_, F32VectorCoding::LVQ1x8) => {
-                quantized_qvd!(lvq::PrimaryDistance::<8>::new(similarity), query)
-            }
             (_, F32VectorCoding::LVQ2x1x8) => {
                 quantized_qvd!(lvq::TwoLevelDistance::<1, 8>::new(similarity), query)
             }
@@ -420,9 +375,6 @@ impl FromStr for F32VectorCoding {
             "raw" | "raw-l2-norm" | "f32" => Ok(Self::F32),
             "f16" => Ok(Self::F16),
             "binary" => Ok(Self::BinaryQuantized),
-            "lvq1x1" => Ok(Self::LVQ1x1),
-            "lvq1x4" => Ok(Self::LVQ1x4),
-            "lvq1x8" => Ok(Self::LVQ1x8),
             "lvq2x1x8" => Ok(Self::LVQ2x1x8),
             "lvq2x4x4" => Ok(Self::LVQ2x4x4),
             "lvq2x4x8" => Ok(Self::LVQ2x4x8),
@@ -442,9 +394,6 @@ impl std::fmt::Display for F32VectorCoding {
             Self::F32 => write!(f, "f32"),
             Self::F16 => write!(f, "f16"),
             Self::BinaryQuantized => write!(f, "binary"),
-            Self::LVQ1x1 => write!(f, "lvq1x1"),
-            Self::LVQ1x4 => write!(f, "lvq1x4"),
-            Self::LVQ1x8 => write!(f, "lvq1x8"),
             Self::LVQ2x1x8 => write!(f, "lvq2x1x8"),
             Self::LVQ2x4x4 => write!(f, "lvq2x4x4"),
             Self::LVQ2x4x8 => write!(f, "lvq2x4x8"),
@@ -632,8 +581,7 @@ mod test {
     }
 
     use F32VectorCoding::{
-        F16, LVQ1x1, LVQ1x4, LVQ1x8, LVQ2x1x8, LVQ2x4x4, LVQ2x4x8, LVQ2x8x8, TLVQ1, TLVQ2, TLVQ4,
-        TLVQ8,
+        F16, LVQ2x1x8, LVQ2x4x4, LVQ2x4x8, LVQ2x8x8, TLVQ1, TLVQ2, TLVQ4, TLVQ8,
     };
     use VectorSimilarity::{Cosine, Dot, Euclidean};
     use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
@@ -664,13 +612,6 @@ mod test {
     distance_test!(f16_cosine_dist, Cosine, F16, 0.001);
     distance_test!(f16_dot_dist, Dot, F16, 0.001);
     distance_test!(f16_l2_dist, Euclidean, F16, 0.001);
-
-    distance_test!(lvq1x1_dot_dist, Dot, LVQ1x1, 0.4);
-    distance_test!(lvq1x1_l2_dist, Euclidean, LVQ1x1, 0.4);
-    distance_test!(lvq1x4_dot_dist, Dot, LVQ1x4, 0.05);
-    distance_test!(lvq1x4_l2_dist, Euclidean, LVQ1x4, 0.05);
-    distance_test!(lvq1x8_dot_dist, Dot, LVQ1x8, 0.01);
-    distance_test!(lvq1x8_l2_dist, Euclidean, LVQ1x8, 0.01);
 
     distance_test!(lvq2x1x8_dot_dist, Dot, LVQ2x1x8, 0.01);
     distance_test!(lvq2x1x8_l2_dist, Euclidean, LVQ2x1x8, 0.01);

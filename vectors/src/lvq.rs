@@ -362,10 +362,6 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         packing::unpack_iter::<B>(self.v.data)
             .map(|q| (q as f32).mul_add(self.v.terms.delta, self.v.terms.lower))
     }
-
-    fn f32_dot_correction(&self, query_sum: f32, dot: f32) -> f32 {
-        dot * self.v.terms.delta + query_sum * self.v.terms.lower
-    }
 }
 
 struct TwoLevelVector<'a, const B1: usize, const B2: usize> {
@@ -645,55 +641,6 @@ impl<const B: usize> VectorDistance for PrimaryDistance<B> {
             dot_unnormalized_uint_symmetric::<B>(self.1, query.dim(), &query.v, &doc.v).into(),
             (query.l2_norm(), doc.l2_norm()),
         )
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PrimaryQueryDistance<'a, const B: usize> {
-    similarity: VectorSimilarity,
-    query: Cow<'a, [f32]>,
-    query_l2_norm: f64,
-    query_sum: f32,
-    inst: InstructionSet,
-}
-
-impl<'a, const B: usize> PrimaryQueryDistance<'a, B> {
-    pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
-        // For Dot distance we assume the input is l2 normalized.
-        let query_l2_norm = match similarity {
-            VectorSimilarity::Dot => 1.0,
-            _ => super::l2_norm(&query).into(),
-        };
-        let query_sum = query.iter().copied().sum::<f32>();
-        Self {
-            similarity,
-            query,
-            query_l2_norm,
-            query_sum,
-            inst: InstructionSet::default(),
-        }
-    }
-}
-
-impl<const B: usize> QueryVectorDistance for PrimaryQueryDistance<'_, B> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = PrimaryVector::<B>::new(vector).unwrap();
-        let dot = match self.inst {
-            InstructionSet::Scalar => {
-                scalar::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), self.query_sum, &vector)
-            }
-            #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::lvq1_f32_dot_unnormalized::<B>(
-                self.query.as_ref(),
-                self.query_sum,
-                &vector,
-            ),
-            #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::lvq1_f32_dot_unnormalized::<B>(self.query.as_ref(), self.query_sum, &vector)
-            },
-        };
-        dot_unnormalized_to_distance(self.similarity, dot, (self.query_l2_norm, vector.l2_norm()))
     }
 }
 

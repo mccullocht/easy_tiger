@@ -853,24 +853,6 @@ pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
     }
 }
 
-#[target_feature(enable = "avx512vnni,avx512bw,avx512vl,avx512f")]
-pub unsafe fn lvq1_f32_dot_unnormalized<const B: usize>(
-    query: &[f32],
-    query_sum: f32,
-    doc: &PrimaryVector<'_, B>,
-) -> f64 {
-    let chunk_size = (B * 16).div_ceil(8);
-    let mut dot = _mm512_set1_ps(0.0);
-    for (q, d) in query.chunks(16).zip(doc.v.data.chunks(chunk_size)) {
-        let mask = u16::MAX >> (16 - q.len());
-        let qv = _mm512_maskz_loadu_ps(mask, q.as_ptr());
-        let dv = _mm512_maskz_cvtepu32_ps(mask, unpack::<B>(d));
-        dot = _mm512_fmadd_ps(qv, dv, dot);
-    }
-    doc.f32_dot_correction(query_sum, _mm512_reduce_add_ps(dot))
-        .into()
-}
-
 #[target_feature(enable = "avx512f")]
 #[inline]
 pub unsafe fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(

@@ -26,7 +26,9 @@ use std::arch::x86_64::{
 
 use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, packing};
 
-use super::{LAMBDA, LVQ2Dot, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
+use super::{
+    LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, ResidualDotComponents, TwoLevelVector, VectorStats,
+};
 
 /// For an input vector `v` where all values are non-negative, round each value with ties (e.g. 0.5)
 /// rounding away from zero.
@@ -639,14 +641,14 @@ pub unsafe fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     }
 }
 
-struct LVQ2Dot512 {
+struct ResidualDotComponents512 {
     ap_dot_bp: __m512i,
     ap_dot_br: __m512i,
     ar_dot_bp: __m512i,
     ar_dot_br: __m512i,
 }
 
-impl LVQ2Dot512 {
+impl ResidualDotComponents512 {
     #[target_feature(enable = "avx512f")]
     #[inline]
     unsafe fn new() -> Self {
@@ -660,8 +662,8 @@ impl LVQ2Dot512 {
 
     #[target_feature(enable = "avx512f")]
     #[inline]
-    unsafe fn into_lvq2_dot(self) -> LVQ2Dot {
-        LVQ2Dot {
+    unsafe fn into_lvq2_dot(self) -> ResidualDotComponents {
+        ResidualDotComponents {
             ap_dot_bp: _mm512_reduce_add_epi32(self.ap_dot_bp) as u32,
             ap_dot_br: _mm512_reduce_add_epi32(self.ap_dot_br) as u32,
             ar_dot_bp: _mm512_reduce_add_epi32(self.ar_dot_bp) as u32,
@@ -698,11 +700,11 @@ pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
     ar: &[u8],
     bp: &[u8],
     br: &[u8],
-) -> LVQ2Dot {
+) -> ResidualDotComponents {
     match (B1, B2) {
         (1, 8) => {
             let zero = _mm512_set1_epi8(0);
-            let mut dot = LVQ2Dot512::new();
+            let mut dot = ResidualDotComponents512::new();
             for ((ap, ar), (bp, br)) in ap
                 .chunks(8)
                 .zip(ar.chunks(64))
@@ -733,7 +735,7 @@ pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
         }
         (4, 4) => {
             let nibble_mask = _mm512_set1_epi8(0xf);
-            let mut dot = LVQ2Dot512::new();
+            let mut dot = ResidualDotComponents512::new();
             for ((ap, ar), (bp, br)) in ap
                 .chunks(64)
                 .zip(ar.chunks(64))
@@ -768,7 +770,7 @@ pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
         (4, 8) => {
             let nibble_mask = _mm512_set1_epi8(0xf);
             let zero = _mm512_set1_epi8(0);
-            let mut dot = LVQ2Dot512::new();
+            let mut dot = ResidualDotComponents512::new();
             for ((ap, ar), (bp, br)) in ap
                 .chunks(32)
                 .zip(ar.chunks(64))
@@ -816,7 +818,7 @@ pub unsafe fn dot_residual_u8<const B1: usize, const B2: usize>(
         }
         (8, 8) => {
             let zero = _mm512_set1_epi8(0);
-            let mut dot = LVQ2Dot512::new();
+            let mut dot = ResidualDotComponents512::new();
             for ((ap, ar), (bp, br)) in ap
                 .chunks(64)
                 .zip(ar.chunks(64))

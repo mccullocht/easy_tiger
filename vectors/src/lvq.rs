@@ -652,18 +652,17 @@ impl<const B: usize> VectorDistance for PrimaryDistance<B> {
     }
 }
 
-// XXX rename to ResidualComponentDot
 /// The four components of a residual dot product.
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
-struct LVQ2Dot {
+struct ResidualDotComponents {
     ap_dot_bp: u32,
     ap_dot_br: u32,
     ar_dot_bp: u32,
     ar_dot_br: u32,
 }
 
-impl LVQ2Dot {
+impl ResidualDotComponents {
     fn compute_dot(
         &self,
         dim: usize,

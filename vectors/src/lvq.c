@@ -201,7 +201,8 @@ et_lvq_dot_u8_u4(const uint8_t *q, const uint8_t *d, size_t len) {
   return vaddvq_u32(vaddq_u32(dot0, dot2));
 }
 
-struct LVQ2Dot {
+// This is also defined in lvq.rs; the definitions _must_ stay the same.
+struct ResidualDotComponents {
   uint32_t ap_dot_bp;
   uint32_t ap_dot_br;
   uint32_t ar_dot_bp;
@@ -224,7 +225,7 @@ inline HIDDEN uint8x16_t unpack1(uint16_t v) {
   return vandq_u8(shifted, mask);
 }
 
-__attribute__((target("+dotprod"))) EXPORT struct LVQ2Dot
+__attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
 et_lvq2_dot_u1_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
                   const uint8_t *br, size_t len) {
   uint32x4_t ap_dot_bp = vdupq_n_u32(0);
@@ -243,7 +244,7 @@ et_lvq2_dot_u1_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
     ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
   }
 
-  struct LVQ2Dot result = {
+  struct ResidualDotComponents result = {
       .ap_dot_bp = vaddvq_u32(ap_dot_bp),
       .ap_dot_br = vaddvq_u32(ap_dot_br),
       .ar_dot_bp = vaddvq_u32(ar_dot_bp),
@@ -263,7 +264,7 @@ et_lvq2_dot_u1_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
   return result;
 }
 
-__attribute__((target("+dotprod"))) EXPORT struct LVQ2Dot
+__attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
 et_lvq2_dot_u4_u4(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
                   const uint8_t *br, size_t len) {
   uint32x4_t ap_dot_bp = vdupq_n_u32(0);
@@ -302,7 +303,7 @@ et_lvq2_dot_u4_u4(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
                           vandq_u8(brv, nibble_mask));
   }
 
-  struct LVQ2Dot result = {
+  struct ResidualDotComponents result = {
       .ap_dot_bp = vaddvq_u32(ap_dot_bp),
       .ap_dot_br = vaddvq_u32(ap_dot_br),
       .ar_dot_bp = vaddvq_u32(ar_dot_bp),
@@ -338,7 +339,7 @@ inline HIDDEN uint8x16x2_t load_u8x2(const uint8_t *ptr) {
   return (uint8x16x2_t){{vld1q_u8(ptr), vld1q_u8(ptr + 16)}};
 }
 
-__attribute__((target("+dotprod"))) EXPORT struct LVQ2Dot
+__attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
 et_lvq2_dot_u4_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
                   const uint8_t *br, size_t len) {
   uint32x4_t ap_dot_bp = vdupq_n_u32(0);
@@ -384,7 +385,7 @@ et_lvq2_dot_u4_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
   return result;
 }
 
-__attribute__((target("+dotprod"))) EXPORT struct LVQ2Dot
+__attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
 et_lvq2_dot_u8_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
                   const uint8_t *br, size_t len) {
   uint32x4_t ap_dot_bp = vdupq_n_u32(0);
@@ -403,7 +404,7 @@ et_lvq2_dot_u8_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
     ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
   }
 
-  struct LVQ2Dot result = {
+  struct ResidualDotComponents result = {
       .ap_dot_bp = vaddvq_u32(ap_dot_bp),
       .ap_dot_br = vaddvq_u32(ap_dot_br),
       .ar_dot_bp = vaddvq_u32(ar_dot_bp),

@@ -2,12 +2,9 @@
 
 #![allow(dead_code)]
 
-use crate::lvq::{
-    LVQ2Dot, RESIDUAL_BITS, TurboPrimaryVector, TurboResidualVector, VectorEncodeTerms,
-};
-
 use super::{
-    LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats,
+    LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, RESIDUAL_BITS, ResidualDotComponents,
+    TurboPrimaryVector, TurboResidualVector, TwoLevelVector, VectorEncodeTerms, VectorStats,
     packing::{TurboPacker, TurboUnpacker},
 };
 
@@ -262,12 +259,12 @@ pub fn dot_residual_u8<const B1: usize, const B2: usize>(
     ar: &[u8],
     bp: &[u8],
     br: &[u8],
-) -> super::LVQ2Dot {
+) -> ResidualDotComponents {
     super::packing::unpack_iter::<B1>(ap)
         .zip(super::packing::unpack_iter::<B2>(ar))
         .zip(super::packing::unpack_iter::<B1>(bp).zip(super::packing::unpack_iter::<B2>(br)))
         .fold(
-            super::LVQ2Dot::default(),
+            ResidualDotComponents::default(),
             |mut acc, ((ap, ar), (bp, br))| {
                 acc.ap_dot_bp += ap as u32 * bp as u32;
                 acc.ap_dot_br += ap as u32 * br as u32;
@@ -323,20 +320,22 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
 pub fn residual_dot_unnormalized<const B: usize>(
     query: (&[u8], &[u8]),
     doc: (&[u8], &[u8]),
-) -> LVQ2Dot {
+) -> ResidualDotComponents {
     TurboUnpacker::<B>::new(query.0)
         .zip(query.1.iter().copied())
         .zip(TurboUnpacker::<B>::new(doc.0).zip(doc.1.iter().copied()))
-        .map(|((qp, qr), (dp, dr))| LVQ2Dot {
+        .map(|((qp, qr), (dp, dr))| ResidualDotComponents {
             ap_dot_bp: qp as u32 * dp as u32,
             ap_dot_br: qp as u32 * dr as u32,
             ar_dot_bp: qr as u32 * dp as u32,
             ar_dot_br: qr as u32 * dr as u32,
         })
-        .fold(LVQ2Dot::default(), |acc, dim| LVQ2Dot {
-            ap_dot_bp: acc.ap_dot_bp + dim.ap_dot_bp,
-            ap_dot_br: acc.ap_dot_br + dim.ap_dot_br,
-            ar_dot_bp: acc.ar_dot_bp + dim.ar_dot_bp,
-            ar_dot_br: acc.ar_dot_br + dim.ar_dot_br,
+        .fold(ResidualDotComponents::default(), |acc, dim| {
+            ResidualDotComponents {
+                ap_dot_bp: acc.ap_dot_bp + dim.ap_dot_bp,
+                ap_dot_br: acc.ap_dot_br + dim.ap_dot_br,
+                ar_dot_bp: acc.ar_dot_bp + dim.ar_dot_bp,
+                ar_dot_br: acc.ar_dot_br + dim.ar_dot_br,
+            }
         })
 }

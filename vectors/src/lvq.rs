@@ -282,6 +282,22 @@ struct EncodedVector<'a> {
     data: &'a [u8],
 }
 
+impl<'a> EncodedVector<'a> {
+    fn split_at(&self, i: usize) -> (Self, Self) {
+        let (s, e) = self.data.split_at(i);
+        (
+            Self {
+                terms: self.terms,
+                data: s,
+            },
+            Self {
+                terms: self.terms,
+                data: e,
+            },
+        )
+    }
+}
+
 /// Compute an unnormalized dot product beween two vectors encoded with the same bits/dimension..
 fn dot_unnormalized_uint_symmetric<const B: usize>(
     inst: InstructionSet,
@@ -824,21 +840,15 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
 
     fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
         let tail_dim = dim & !(packing::block_dim(B) - 1);
-        let (head_data, tail_data) = self.rep.data.split_at(packing::byte_len(tail_dim, B));
+        let (headv, tailv) = self.rep.split_at(packing::byte_len(tail_dim, B));
         (
             tail_dim,
             Self {
-                rep: EncodedVector {
-                    terms: self.rep.terms,
-                    data: head_data,
-                },
+                rep: headv,
                 l2_norm: self.l2_norm,
             },
             Self {
-                rep: EncodedVector {
-                    terms: self.rep.terms,
-                    data: tail_data,
-                },
+                rep: tailv,
                 l2_norm: self.l2_norm,
             },
         )
@@ -1018,45 +1028,31 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
         self.residual.data.len()
     }
 
-    #[allow(dead_code)] // XXX
-    fn iter(&self) -> impl ExactSizeIterator<Item = (u8, u8)> {
-        packing::TurboUnpacker::<B>::new(self.primary.data).zip(packing::TurboUnpacker::<
-            RESIDUAL_BITS,
-        >::new(self.residual.data))
-    }
-
-    #[allow(dead_code)] // XXX
     fn l2_norm(&self) -> f64 {
         self.l2_norm.into()
     }
 
-    #[allow(dead_code)] // XXX
-    fn split_tail(&self, _dim: usize) -> (usize, Self, Self) {
-        /*
+    fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
         let tail_dim = dim & !(packing::block_dim(B) - 1);
-        let (head_data, tail_data) = self.rep.data.split_at(packing::byte_len(tail_dim, B));
+        let (primary_headv, primary_tailv) = self.primary.split_at(packing::byte_len(tail_dim, B));
+        let (residual_headv, residual_tailv) = self.residual.split_at(tail_dim);
         (
             tail_dim,
             Self {
-                rep: EncodedVector {
-                    terms: self.rep.terms,
-                    data: head_data,
-                },
+                primary: primary_headv,
+                residual: residual_headv,
                 l2_norm: self.l2_norm,
             },
             Self {
-                rep: EncodedVector {
-                    terms: self.rep.terms,
-                    data: tail_data,
-                },
+                primary: primary_tailv,
+                residual: residual_tailv,
                 l2_norm: self.l2_norm,
             },
         )
-        */
-        todo!("XXX")
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct VectorEncodeTerms {
     lower: f32,
     upper: f32,
@@ -1082,7 +1078,6 @@ impl VectorEncodeTerms {
     }
 }
 
-#[allow(dead_code)] // XXX
 #[derive(Debug, Copy, Clone)]
 pub struct TurboResidualCoder<const B: usize>(InstructionSet);
 
@@ -1108,7 +1103,7 @@ impl<const B: usize> TurboResidualCoder<B> {
     }
 
     fn encode_parts_to(
-        _inst: InstructionSet,
+        inst: InstructionSet,
         vector: &[f32],
         primary: &mut [u8],
         residual: &mut [u8],
@@ -1137,16 +1132,39 @@ impl<const B: usize> TurboResidualCoder<B> {
             component_sum: 0,
         };
 
-        // XXX arch impls
-        (primary_header.component_sum, residual_header.component_sum) =
-            scalar::residual_quantize_and_pack::<B>(
+        let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
+        let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
+        let primary_delta = (primary_header.upper - primary_header.lower) / ((1 << B) - 1) as f32;
+        (primary_header.component_sum, residual_header.component_sum) = match inst {
+            InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
-                VectorEncodeTerms::from_primary::<B>(&primary_header),
-                VectorEncodeTerms::from_residual(residual_magnitude),
-                (primary_header.upper - primary_header.lower) / ((1 << B) - 1) as f32,
+                primary_terms,
+                residual_terms,
+                primary_delta,
                 primary,
                 residual,
-            );
+            ),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::residual_quantize_and_pack::<B>(
+                vector,
+                primary_terms,
+                residual_terms,
+                primary_delta,
+                primary,
+                residual,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::residual_quantize_and_pack::<B>(
+                    vector,
+                    primary_terms,
+                    residual_terms,
+                    primary_delta,
+                    primary,
+                    residual,
+                )
+            },
+        };
 
         (primary_header, residual_header)
     }
@@ -1184,8 +1202,13 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
         let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
-        // XXX arch impls
-        scalar::residual_decode::<B>(&vector, out);
+        match self.0 {
+            InstructionSet::Scalar => scalar::residual_decode::<B>(&vector, out),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::residual_decode::<B>(&vector, out),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe { x86_64::residual_decode_avx512::<B>(&vector, out) },
+        }
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {

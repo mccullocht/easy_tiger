@@ -17,7 +17,8 @@ use std::arch::aarch64::{
 };
 
 use crate::lvq::{
-    ResidualDotComponents, TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorEncodeTerms, scalar,
+    RESIDUAL_BITS, ResidualDotComponents, TURBO_BLOCK_SIZE, TurboPrimaryVector,
+    TurboResidualVector, VectorDecodeTerms, VectorEncodeTerms, scalar,
 };
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats, packing};
@@ -241,9 +242,7 @@ pub fn primary_quantize_and_pack<const B: usize>(
     let mut component_sum = 0u32;
     if !vector_head.is_empty() {
         unsafe {
-            let lower = vdupq_n_f32(terms.lower);
-            let upper = vdupq_n_f32(terms.upper);
-            let delta_inv = vdupq_n_f32(terms.delta_inv);
+            let terms = NeonVectorEncodeTerms::from_terms(&terms);
             let shuffle_mask = vld1q_u8(
                 [
                     0u8, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
@@ -254,30 +253,10 @@ pub fn primary_quantize_and_pack<const B: usize>(
             let mut shift = 0i8;
             let mut d = vdupq_n_u8(0);
             for i in (0..tail_split).step_by(16) {
-                let qa = quantize4(
-                    vld1q_f32(vector_head.as_ptr().add(i)),
-                    lower,
-                    upper,
-                    delta_inv,
-                );
-                let qb = quantize4(
-                    vld1q_f32(vector_head.as_ptr().add(i + 4)),
-                    lower,
-                    upper,
-                    delta_inv,
-                );
-                let qc = quantize4(
-                    vld1q_f32(vector_head.as_ptr().add(i + 8)),
-                    lower,
-                    upper,
-                    delta_inv,
-                );
-                let qd = quantize4(
-                    vld1q_f32(vector_head.as_ptr().add(i + 12)),
-                    lower,
-                    upper,
-                    delta_inv,
-                );
+                let qa = quantize4(vld1q_f32(vector_head.as_ptr().add(i)), &terms);
+                let qb = quantize4(vld1q_f32(vector_head.as_ptr().add(i + 4)), &terms);
+                let qc = quantize4(vld1q_f32(vector_head.as_ptr().add(i + 8)), &terms);
+                let qd = quantize4(vld1q_f32(vector_head.as_ptr().add(i + 12)), &terms);
 
                 let qabcd = vqtbl4q_u8(
                     uint8x16x4_t(
@@ -341,6 +320,165 @@ pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &m
     }
 }
 
+pub fn residual_quantize_and_pack<const B: usize>(
+    vector: &[f32],
+    primary_terms: VectorEncodeTerms,
+    residual_terms: VectorEncodeTerms,
+    primary_delta: f32,
+    primary_out: &mut [u8],
+    residual_out: &mut [u8],
+) -> (u32, u32) {
+    let tail_split = vector.len() & !(packing::block_dim(B) - 1);
+    assert!(tail_split.is_multiple_of(16));
+    let (vector_head, vector_tail) = vector.split_at(tail_split);
+    let (primary_out_head, primary_out_tail) =
+        primary_out.split_at_mut(packing::byte_len(tail_split, B));
+    let (residual_out_head, residual_out_tail) = residual_out.split_at_mut(tail_split);
+    let mut primary_component_sum = 0u32;
+    let mut residual_component_sum = 0u32;
+    if !vector_head.is_empty() {
+        unsafe {
+            let primary_terms = NeonVectorEncodeTerms::from_terms(&primary_terms);
+            let primary_delta = vdupq_n_f32(primary_delta);
+            let residual_terms = NeonVectorEncodeTerms::from_terms(&residual_terms);
+
+            let shuffle_mask = vld1q_u8(
+                [
+                    0u8, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
+                ]
+                .as_ptr(),
+            );
+            let mut block = 0usize;
+            let mut shift = 0i8;
+            let mut d = vdupq_n_u8(0);
+            for i in (0..tail_split).step_by(16) {
+                let (pa, ra) = quantize4_residual(
+                    vld1q_f32(vector_head.as_ptr().add(i)),
+                    &primary_terms,
+                    primary_delta,
+                    &residual_terms,
+                );
+                let (pb, rb) = quantize4_residual(
+                    vld1q_f32(vector_head.as_ptr().add(i + 4)),
+                    &primary_terms,
+                    primary_delta,
+                    &residual_terms,
+                );
+                let (pc, rc) = quantize4_residual(
+                    vld1q_f32(vector_head.as_ptr().add(i + 8)),
+                    &primary_terms,
+                    primary_delta,
+                    &residual_terms,
+                );
+                let (pd, rd) = quantize4_residual(
+                    vld1q_f32(vector_head.as_ptr().add(i + 12)),
+                    &primary_terms,
+                    primary_delta,
+                    &residual_terms,
+                );
+
+                let pabcd = vqtbl4q_u8(
+                    uint8x16x4_t(
+                        vreinterpretq_u8_u32(pa),
+                        vreinterpretq_u8_u32(pb),
+                        vreinterpretq_u8_u32(pc),
+                        vreinterpretq_u8_u32(pd),
+                    ),
+                    shuffle_mask,
+                );
+                primary_component_sum += u32::from(vaddlvq_u8(pabcd));
+
+                d = vorrq_u8(d, vshlq_u8(pabcd, vdupq_n_s8(shift)));
+                shift += B as i8;
+                if shift == 8 {
+                    vst1q_u8(primary_out_head.as_mut_ptr().add(block * 16), d);
+                    d = vdupq_n_u8(0);
+                    shift = 0;
+                    block += 1;
+                }
+
+                let rabcd = vqtbl4q_u8(
+                    uint8x16x4_t(
+                        vreinterpretq_u8_u32(ra),
+                        vreinterpretq_u8_u32(rb),
+                        vreinterpretq_u8_u32(rc),
+                        vreinterpretq_u8_u32(rd),
+                    ),
+                    shuffle_mask,
+                );
+                residual_component_sum += u32::from(vaddlvq_u8(rabcd));
+                vst1q_u8(residual_out_head.as_mut_ptr().add(i), rabcd);
+            }
+        }
+    }
+
+    if !vector_tail.is_empty() {
+        let (tail_primary_sum, tail_residual_sum) = scalar::residual_quantize_and_pack::<B>(
+            vector_tail,
+            primary_terms,
+            residual_terms,
+            primary_delta,
+            primary_out_tail,
+            residual_out_tail,
+        );
+        primary_component_sum += tail_primary_sum;
+        residual_component_sum += tail_residual_sum;
+    }
+    (primary_component_sum, residual_component_sum)
+}
+
+pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {
+    let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
+    let (out_head, out_tail) = out.split_at_mut(tail_split);
+
+    if !in_head.primary.data.is_empty() {
+        unsafe {
+            let primary_terms = NeonVectorDecodeTerms::from_terms(&in_head.primary.terms);
+            let residual_terms = NeonVectorDecodeTerms::from_terms(&in_head.residual.terms);
+            let mut primary_expander = TLVQExpander32::<B>::new(in_head.primary.data.as_ptr());
+            let mut residual_expander =
+                TLVQExpander32::<RESIDUAL_BITS>::new(in_head.residual.data.as_ptr());
+            for i in (0..tail_split).step_by(16) {
+                let [pa, pb, pc, pd] = primary_expander.next();
+                let [ra, rb, rc, rd] = residual_expander.next();
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i),
+                    dequantize4_residual(pa, ra, &primary_terms, &residual_terms),
+                );
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 4),
+                    dequantize4_residual(pb, rb, &primary_terms, &residual_terms),
+                );
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 8),
+                    dequantize4_residual(pc, rc, &primary_terms, &residual_terms),
+                );
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 12),
+                    dequantize4_residual(pd, rd, &primary_terms, &residual_terms),
+                );
+            }
+        }
+    }
+
+    if !in_tail.primary.data.is_empty() {
+        scalar::residual_decode::<B>(&in_tail, out_tail);
+    }
+}
+
+#[inline(always)]
+unsafe fn dequantize4_residual(
+    primary: float32x4_t,
+    residual: float32x4_t,
+    primary_terms: &NeonVectorDecodeTerms,
+    residual_terms: &NeonVectorDecodeTerms,
+) -> float32x4_t {
+    vaddq_f32(
+        vfmaq_f32(primary_terms.lower, primary, primary_terms.delta),
+        vfmaq_f32(residual_terms.lower, residual, residual_terms.delta),
+    )
+}
+
 pub fn lvq1_quantize_and_pack<const B: usize>(
     v: &[f32],
     lower: f32,
@@ -353,16 +491,14 @@ pub fn lvq1_quantize_and_pack<const B: usize>(
     let (head, tail) = out.split_at_mut(packing::byte_len(tail_split, B));
     let component_sum = if tail_split > 0 {
         unsafe {
-            let lowerv = vdupq_n_f32(lower);
-            let upperv = vdupq_n_f32(upper);
-            let deltav = vdupq_n_f32(delta_inv);
+            let terms = NeonVectorEncodeTerms::new(lower, upper, delta_inv);
             let mut component_sumv = 0u32;
             for i in (0..tail_split).step_by(16) {
                 // Load and quantize 16 values.
-                let qa = quantize4(vld1q_f32(v.as_ptr().add(i)), lowerv, upperv, deltav);
-                let qb = quantize4(vld1q_f32(v.as_ptr().add(i + 4)), lowerv, upperv, deltav);
-                let qc = quantize4(vld1q_f32(v.as_ptr().add(i + 8)), lowerv, upperv, deltav);
-                let qd = quantize4(vld1q_f32(v.as_ptr().add(i + 12)), lowerv, upperv, deltav);
+                let qa = quantize4(vld1q_f32(v.as_ptr().add(i)), &terms);
+                let qb = quantize4(vld1q_f32(v.as_ptr().add(i + 4)), &terms);
+                let qc = quantize4(vld1q_f32(v.as_ptr().add(i + 8)), &terms);
+                let qd = quantize4(vld1q_f32(v.as_ptr().add(i + 12)), &terms);
 
                 // Reduce to a single byte per dimension.
                 let qabcd = pack_to_byte(qa, qb, qc, qd);
@@ -439,72 +575,45 @@ pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
     let (head_residual, tail_residual) = residual.split_at_mut(packing::byte_len(tail_split, B2));
     let (p_component_sum, r_component_sum) = if tail_split > 0 {
         unsafe {
-            let lowerv = vdupq_n_f32(lower);
-            let upperv = vdupq_n_f32(upper);
-            let deltav = vdupq_n_f32(delta);
-            let delta_inv = vdupq_n_f32(delta_inv);
-            let res_lowerv = vdupq_n_f32(res_lower);
-            let res_upperv = vdupq_n_f32(res_upper);
-            let res_delta_inv = vdupq_n_f32(res_delta_inv);
+            let primary_terms = NeonVectorEncodeTerms::new(lower, upper, delta_inv);
+            let residual_terms = NeonVectorEncodeTerms::new(res_lower, res_upper, res_delta_inv);
+            let delta = vdupq_n_f32(delta);
             let mut p_component_sum = 0u32;
             let mut r_component_sum = 0u32;
             for i in (0..tail_split).step_by(16) {
                 // Load and quantize 16 values, primary and residual
-                let a = vld1q_f32(v.as_ptr().add(i));
-                let qa = quantize4(a, lowerv, upperv, delta_inv);
-                let ra = quantize_residual4(
-                    a,
-                    qa,
-                    lowerv,
-                    deltav,
-                    res_lowerv,
-                    res_upperv,
-                    res_delta_inv,
+                let (pa, ra) = quantize4_residual(
+                    vld1q_f32(v.as_ptr().add(i)),
+                    &primary_terms,
+                    delta,
+                    &residual_terms,
                 );
-
-                let b = vld1q_f32(v.as_ptr().add(i + 4));
-                let qb = quantize4(b, lowerv, upperv, delta_inv);
-                let rb = quantize_residual4(
-                    b,
-                    qb,
-                    lowerv,
-                    deltav,
-                    res_lowerv,
-                    res_upperv,
-                    res_delta_inv,
+                let (pb, rb) = quantize4_residual(
+                    vld1q_f32(v.as_ptr().add(i + 4)),
+                    &primary_terms,
+                    delta,
+                    &residual_terms,
                 );
-
-                let c = vld1q_f32(v.as_ptr().add(i + 8));
-                let qc = quantize4(c, lowerv, upperv, delta_inv);
-                let rc = quantize_residual4(
-                    c,
-                    qc,
-                    lowerv,
-                    deltav,
-                    res_lowerv,
-                    res_upperv,
-                    res_delta_inv,
+                let (pc, rc) = quantize4_residual(
+                    vld1q_f32(v.as_ptr().add(i + 8)),
+                    &primary_terms,
+                    delta,
+                    &residual_terms,
                 );
-
-                let d = vld1q_f32(v.as_ptr().add(i + 12));
-                let qd = quantize4(d, lowerv, upperv, delta_inv);
-                let rd = quantize_residual4(
-                    d,
-                    qd,
-                    lowerv,
-                    deltav,
-                    res_lowerv,
-                    res_upperv,
-                    res_delta_inv,
+                let (pd, rd) = quantize4_residual(
+                    vld1q_f32(v.as_ptr().add(i + 12)),
+                    &primary_terms,
+                    delta,
+                    &residual_terms,
                 );
 
                 // Reduce to a single byte per dimension, sum, and pack.
-                let qabcd = pack_to_byte(qa, qb, qc, qd);
-                p_component_sum += u32::from(vaddlvq_u8(qabcd));
+                let p_abcd = pack_to_byte(pa, pb, pc, pd);
+                p_component_sum += u32::from(vaddlvq_u8(p_abcd));
                 match B1 {
-                    1 => pack1(i, qabcd, head_primary),
-                    4 => pack4(i, qabcd, head_primary),
-                    8 => pack8(i, qabcd, head_primary),
+                    1 => pack1(i, p_abcd, head_primary),
+                    4 => pack4(i, p_abcd, head_primary),
+                    8 => pack8(i, p_abcd, head_primary),
                     _ => unimplemented!(),
                 };
 
@@ -574,29 +683,61 @@ pub fn lvq2_decode<const B1: usize, const B2: usize>(
     }
 }
 
-#[inline(always)]
-unsafe fn quantize4(
-    v: float32x4_t,
+struct NeonVectorEncodeTerms {
     lower: float32x4_t,
     upper: float32x4_t,
     delta_inv: float32x4_t,
-) -> uint32x4_t {
-    vcvtaq_u32_f32(vmulq_f32(vsubq_f32(vminq_f32(v, upper), lower), delta_inv))
+}
+
+impl NeonVectorEncodeTerms {
+    #[inline(always)]
+    unsafe fn new(lower: f32, upper: f32, delta_inv: f32) -> Self {
+        Self {
+            lower: vdupq_n_f32(lower),
+            upper: vdupq_n_f32(upper),
+            delta_inv: vdupq_n_f32(delta_inv),
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn from_terms(terms: &VectorEncodeTerms) -> Self {
+        Self::new(terms.lower, terms.upper, terms.delta_inv)
+    }
+}
+
+struct NeonVectorDecodeTerms {
+    lower: float32x4_t,
+    delta: float32x4_t,
+}
+
+impl NeonVectorDecodeTerms {
+    #[inline(always)]
+    unsafe fn from_terms(terms: &VectorDecodeTerms) -> Self {
+        Self {
+            lower: vdupq_n_f32(terms.lower),
+            delta: vdupq_n_f32(terms.delta),
+        }
+    }
 }
 
 #[inline(always)]
-unsafe fn quantize_residual4(
+unsafe fn quantize4(v: float32x4_t, terms: &NeonVectorEncodeTerms) -> uint32x4_t {
+    vcvtaq_u32_f32(vmulq_f32(
+        vsubq_f32(vminq_f32(v, terms.upper), terms.lower),
+        terms.delta_inv,
+    ))
+}
+
+#[inline(always)]
+unsafe fn quantize4_residual(
     v: float32x4_t,
-    q: uint32x4_t,
-    lower: float32x4_t,
-    delta: float32x4_t,
-    res_lower: float32x4_t,
-    res_upper: float32x4_t,
-    res_delta: float32x4_t,
-) -> uint32x4_t {
-    let q = vfmaq_f32(lower, vcvtq_f32_u32(q), delta);
-    let res = vsubq_f32(v, q);
-    quantize4(res, res_lower, res_upper, res_delta)
+    primary_terms: &NeonVectorEncodeTerms,
+    primary_delta: float32x4_t,
+    residual_terms: &NeonVectorEncodeTerms,
+) -> (uint32x4_t, uint32x4_t) {
+    let primary = quantize4(v, primary_terms);
+    let dq = vfmaq_f32(primary_terms.lower, vcvtq_f32_u32(primary), primary_delta);
+    (primary, quantize4(vsubq_f32(v, dq), residual_terms))
 }
 
 #[inline(always)]

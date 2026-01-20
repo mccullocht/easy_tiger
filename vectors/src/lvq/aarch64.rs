@@ -229,9 +229,7 @@ fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize)
 
 pub fn primary_quantize_and_pack<const B: usize>(
     vector: &[f32],
-    lower: f32,
-    upper: f32,
-    delta_inv: f32,
+    terms: VectorEncodeTerms,
     out: &mut [u8],
 ) -> u32 {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
@@ -241,9 +239,9 @@ pub fn primary_quantize_and_pack<const B: usize>(
     let mut component_sum = 0u32;
     if !vector_head.is_empty() {
         unsafe {
-            let lower = vdupq_n_f32(lower);
-            let upper = vdupq_n_f32(upper);
-            let delta_inv = vdupq_n_f32(delta_inv);
+            let lower = vdupq_n_f32(terms.lower);
+            let upper = vdupq_n_f32(terms.upper);
+            let delta_inv = vdupq_n_f32(terms.delta_inv);
             let shuffle_mask = vld1q_u8(
                 [
                     0u8, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,

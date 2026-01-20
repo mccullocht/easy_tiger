@@ -239,13 +239,13 @@ impl ResidualVectorHeader {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-struct VectorTerms {
+struct VectorDecodeTerms {
     lower: f32,
     delta: f32,
     component_sum: u32,
 }
 
-impl VectorTerms {
+impl VectorDecodeTerms {
     fn from_primary<const B: usize>(header: PrimaryVectorHeader) -> Self {
         Self {
             lower: header.lower,
@@ -278,7 +278,7 @@ const LAMBDA: f32 = 0.1;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 struct EncodedVector<'a> {
-    terms: VectorTerms,
+    terms: VectorDecodeTerms,
     data: &'a [u8],
 }
 
@@ -299,26 +299,8 @@ fn dot_unnormalized_uint_symmetric<const B: usize>(
     correct_dot_uint(dot, dim, &a.terms, &b.terms)
 }
 
-fn dot_unnormalized_uint8_asymmetric<const B: usize>(
-    inst: InstructionSet,
-    query: &[u8],
-    query_terms: VectorTerms,
-    doc: &TurboPrimaryVector<'_, B>,
-) -> f32 {
-    let dot = match inst {
-        InstructionSet::Scalar => scalar::primary_query8_dot_unnormalized::<B>(query, doc),
-        #[cfg(target_arch = "aarch64")]
-        InstructionSet::Neon => aarch64::primary_query8_dot_unnormalized::<B>(query, doc),
-        #[cfg(target_arch = "x86_64")]
-        InstructionSet::Avx512 => unsafe {
-            x86_64::primary_query8_dot_unnormalized_avx512::<B>(query, doc)
-        },
-    };
-    correct_dot_uint(dot, query.len(), &query_terms, &doc.rep.terms)
-}
-
 /// Correct the dot product of two integer vectors using the stored vector terms.
-fn correct_dot_uint(dot: u32, dim: usize, a: &VectorTerms, b: &VectorTerms) -> f32 {
+fn correct_dot_uint(dot: u32, dim: usize, a: &VectorDecodeTerms, b: &VectorDecodeTerms) -> f32 {
     dot as f32 * a.delta * b.delta
         + a.component_sum as f32 * a.delta * b.lower
         + b.component_sum as f32 * b.delta * a.lower
@@ -348,7 +330,7 @@ impl<'a, const B: usize> PrimaryVector<'a, B> {
         Self {
             l2_norm: header.l2_norm,
             v: EncodedVector {
-                terms: VectorTerms {
+                terms: VectorDecodeTerms {
                     lower: header.lower,
                     delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
                     component_sum: header.component_sum,
@@ -390,7 +372,7 @@ impl<'a, const B1: usize, const B2: usize> TwoLevelVector<'a, B1, B2> {
         let (primary_vector, residual_vector) = vector_bytes.split_at(split);
         let primary = PrimaryVector::<'_, B1>::with_header(primary_header, primary_vector);
         let residual = EncodedVector {
-            terms: VectorTerms {
+            terms: VectorDecodeTerms {
                 lower: -residual_header.magnitude / 2.0,
                 delta: residual_header.magnitude / ((1 << B2) - 1) as f32,
                 component_sum: residual_header.component_sum,
@@ -666,8 +648,8 @@ impl ResidualDotComponents {
     fn compute_dot(
         &self,
         dim: usize,
-        a: (&VectorTerms, &VectorTerms),
-        b: (&VectorTerms, &VectorTerms),
+        a: (&VectorDecodeTerms, &VectorDecodeTerms),
+        b: (&VectorDecodeTerms, &VectorDecodeTerms),
     ) -> f32 {
         correct_dot_uint(self.ap_dot_bp, dim, a.0, b.0)
             + correct_dot_uint(self.ap_dot_br, dim, a.0, b.1)
@@ -774,7 +756,7 @@ pub struct FastTwoLevelQueryDistance<const B1: usize, const B2: usize> {
     query: Vec<u8>,
     dim: usize,
     l2_norm: f64,
-    terms: VectorTerms,
+    terms: VectorDecodeTerms,
     inst: InstructionSet,
 }
 
@@ -825,7 +807,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
         Some(Self {
             rep: EncodedVector {
-                terms: VectorTerms::from_primary::<B>(header),
+                terms: VectorDecodeTerms::from_primary::<B>(header),
                 data: vector_bytes,
             },
             l2_norm: header.l2_norm,
@@ -875,6 +857,41 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         let _ = Self::B_CHECK;
         Self(InstructionSet::Scalar)
     }
+
+    fn encode_parts(inst: InstructionSet, vector: &[f32]) -> (PrimaryVectorHeader, Vec<u8>) {
+        let mut out = vec![0u8; packing::byte_len(vector.len(), B)];
+        let header = Self::encode_parts_to(inst, vector, &mut out);
+        (header, out)
+    }
+
+    fn encode_parts_to(
+        inst: InstructionSet,
+        vector: &[f32],
+        out: &mut [u8],
+    ) -> PrimaryVectorHeader {
+        let stats = VectorStats::from(vector);
+        let mut header = PrimaryVectorHeader::from(stats);
+        (header.lower, header.upper) = optimize_interval(vector, &stats, B);
+
+        let terms = VectorEncodeTerms::from_primary::<B>(&header);
+        header.component_sum = match inst {
+            InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::primary_quantize_and_pack::<B>(
+                vector,
+                header.lower,
+                header.upper,
+                delta_inv,
+                out,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::primary_quantize_and_pack_avx512::<B>(vector, terms, out)
+            },
+        };
+
+        header
+    }
 }
 
 impl<const B: usize> Default for TurboPrimaryCoder<B> {
@@ -885,40 +902,8 @@ impl<const B: usize> Default for TurboPrimaryCoder<B> {
 
 impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let stats = VectorStats::from(vector);
-        let mut header = PrimaryVectorHeader::from(stats);
-        (header.lower, header.upper) = optimize_interval(vector, &stats, B);
         let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
-
-        let delta_inv = ((1 << B) - 1) as f32 / (header.upper - header.lower);
-        header.component_sum = match self.0 {
-            InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(
-                vector,
-                header.lower,
-                header.upper,
-                delta_inv,
-                vector_bytes,
-            ),
-            #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::primary_quantize_and_pack::<B>(
-                vector,
-                header.lower,
-                header.upper,
-                delta_inv,
-                vector_bytes,
-            ),
-            #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::primary_quantize_and_pack_avx512::<B>(
-                    vector,
-                    header.lower,
-                    header.upper,
-                    delta_inv,
-                    vector_bytes,
-                )
-            },
-        };
-
+        let header = Self::encode_parts_to(self.0, vector, vector_bytes);
         header.serialize(header_bytes);
     }
 
@@ -950,7 +935,7 @@ pub struct TurboPrimaryQueryDistance<const B: usize> {
     similarity: VectorSimilarity,
 
     query: Vec<u8>,
-    terms: VectorTerms,
+    terms: VectorDecodeTerms,
     l2_norm: f64,
 
     inst: InstructionSet,
@@ -958,44 +943,15 @@ pub struct TurboPrimaryQueryDistance<const B: usize> {
 
 impl<const B: usize> TurboPrimaryQueryDistance<B> {
     pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
-        // XXX consider optimizing interval selection in this case.
-        let mut header = PrimaryVectorHeader::from(VectorStats::from(query.as_ref()));
-        let delta_inv = ((1 << PRIMARY_QUERY_BITS) - 1) as f32 / (header.upper - header.lower);
-        let mut qvec = vec![0u8; packing::byte_len(query.len(), PRIMARY_QUERY_BITS)];
         let inst = InstructionSet::default();
-        header.component_sum = match inst {
-            InstructionSet::Scalar => scalar::primary_quantize_and_pack::<PRIMARY_QUERY_BITS>(
-                query.as_ref(),
-                header.lower,
-                header.upper,
-                delta_inv,
-                &mut qvec,
-            ),
-            #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::primary_quantize_and_pack::<PRIMARY_QUERY_BITS>(
-                query.as_ref(),
-                header.lower,
-                header.upper,
-                delta_inv,
-                &mut qvec,
-            ),
-            #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::primary_quantize_and_pack_avx512::<PRIMARY_QUERY_BITS>(
-                    query.as_ref(),
-                    header.lower,
-                    header.upper,
-                    delta_inv,
-                    &mut qvec,
-                )
-            },
-        };
-        let terms = VectorTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
+        let (header, query) =
+            TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(inst, query.as_ref());
+        let terms = VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
         let l2_norm = header.l2_norm.into();
 
         Self {
             similarity,
-            query: qvec,
+            query,
             terms,
             l2_norm,
             inst,
@@ -1006,8 +962,20 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
 impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
-        // XXX inline this method.
-        let dot = dot_unnormalized_uint8_asymmetric(self.inst, &self.query, self.terms, &vector);
+        let uint8_dot = match self.inst {
+            InstructionSet::Scalar => {
+                scalar::primary_query8_dot_unnormalized::<B>(&self.query, &vector)
+            }
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => {
+                aarch64::primary_query8_dot_unnormalized::<B>(&self.query, &vector)
+            }
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::primary_query8_dot_unnormalized_avx512::<B>(&self.query, &vector)
+            },
+        };
+        let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);
         dot_unnormalized_to_distance(
             self.similarity,
             dot.into(),
@@ -1029,6 +997,7 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
     const B_CHECK: () = { check_primary_bits(B) };
 
     fn new(data: &'a [u8]) -> Option<Self> {
+        #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
 
         let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
@@ -1040,11 +1009,11 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
         ));
         Some(Self {
             primary: EncodedVector {
-                terms: VectorTerms::from_primary::<B>(primary_header),
+                terms: VectorDecodeTerms::from_primary::<B>(primary_header),
                 data: primary_vector,
             },
             residual: EncodedVector {
-                terms: VectorTerms::from_residual(residual_header),
+                terms: VectorDecodeTerms::from_residual(residual_header),
                 data: residual_vector,
             },
             l2_norm: primary_header.l2_norm,
@@ -1094,7 +1063,6 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
     }
 }
 
-// XXX use struct for primary as well
 struct VectorEncodeTerms {
     lower: f32,
     upper: f32,
@@ -1133,18 +1101,24 @@ impl<const B: usize> TurboResidualCoder<B> {
         let _ = Self::B_CHECK;
         Self(InstructionSet::Scalar)
     }
-}
 
-impl<const B: usize> Default for TurboResidualCoder<B> {
-    fn default() -> Self {
-        #[allow(clippy::let_unit_value)]
-        let _ = Self::B_CHECK;
-        Self(InstructionSet::default())
+    fn encode_parts(
+        inst: InstructionSet,
+        vector: &[f32],
+    ) -> (PrimaryVectorHeader, Vec<u8>, ResidualVectorHeader, Vec<u8>) {
+        let mut primary = vec![0u8; packing::byte_len(vector.len(), B)];
+        let mut residual = vec![0u8; vector.len()];
+        let (primary_header, residual_header) =
+            Self::encode_parts_to(inst, vector, &mut primary, &mut residual);
+        (primary_header, primary, residual_header, residual)
     }
-}
 
-impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+    fn encode_parts_to(
+        _inst: InstructionSet,
+        vector: &[f32],
+        primary: &mut [u8],
+        residual: &mut [u8],
+    ) -> (PrimaryVectorHeader, ResidualVectorHeader) {
         let stats = VectorStats::from(vector);
         let mut primary_header = PrimaryVectorHeader::from(stats);
         // NB: this interval optimization reduces loss for the primary vector, but this loss
@@ -1164,13 +1138,6 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
         .max_by(f32::total_cmp)
         .expect("3 values input");
         (primary_header.lower, primary_header.upper) = interval;
-
-        let (primary_header_bytes, vector_bytes) =
-            PrimaryVectorHeader::split_output_buf(out).unwrap();
-        let (residual_header_bytes, vector_bytes) =
-            ResidualVectorHeader::split_output_buf(vector_bytes).unwrap();
-        let split = packing::two_vector_split(vector_bytes.len(), B, RESIDUAL_BITS);
-        let (primary, residual) = vector_bytes.split_at_mut(split);
         let mut residual_header = ResidualVectorHeader {
             magnitude: residual_magnitude,
             component_sum: 0,
@@ -1187,6 +1154,29 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
                 residual,
             );
 
+        (primary_header, residual_header)
+    }
+}
+
+impl<const B: usize> Default for TurboResidualCoder<B> {
+    fn default() -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+        Self(InstructionSet::default())
+    }
+}
+
+impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        let (primary_header_bytes, vector_bytes) =
+            PrimaryVectorHeader::split_output_buf(out).unwrap();
+        let (residual_header_bytes, vector_bytes) =
+            ResidualVectorHeader::split_output_buf(vector_bytes).unwrap();
+        let split = packing::two_vector_split(vector_bytes.len(), B, RESIDUAL_BITS);
+        let (primary, residual) = vector_bytes.split_at_mut(split);
+
+        let (primary_header, residual_header) =
+            Self::encode_parts_to(self.0, vector, primary, residual);
         primary_header.serialize(primary_header_bytes);
         residual_header.serialize(residual_header_bytes);
     }
@@ -1229,8 +1219,8 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
         let doc = TurboResidualVector::<B>::new(doc).unwrap();
 
         let component_dot = scalar::residual_dot_unnormalized::<B>(
-            (&query.primary.data, &query.residual.data),
-            (&doc.primary.data, &doc.residual.data),
+            (query.primary.data, query.residual.data),
+            (doc.primary.data, doc.residual.data),
         );
         let dot = component_dot.compute_dot(
             query.dim(),
@@ -1245,9 +1235,9 @@ pub struct TurboResidualQueryDistance<const B: usize> {
     similarity: VectorSimilarity,
 
     primary_vector: Vec<u8>,
-    primary_terms: VectorTerms,
+    primary_terms: VectorDecodeTerms,
     residual_vector: Vec<u8>,
-    residual_terms: VectorTerms,
+    residual_terms: VectorDecodeTerms,
     l2_norm: f64,
 
     #[allow(dead_code)] // XXX
@@ -1256,47 +1246,11 @@ pub struct TurboResidualQueryDistance<const B: usize> {
 
 impl<const B: usize> TurboResidualQueryDistance<B> {
     pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
-        // XXX refactor to share with residual coder. this contained a duplicated bug which sucks.
-        let stats = VectorStats::from(query.as_ref());
-        let mut primary_header = PrimaryVectorHeader::from(stats);
-        // NB: this interval optimization reduces loss for the primary vector, but this loss
-        // reduction can make the residual vector more lossy if we derive the delta from the primary
-        // interval as described in the LVQ paper. Compute and store a residual delta that is large
-        // enough to encode both the min and max value in the vector.
-        // TODO: investigate interval optimization on the derived residual vector.
-        let interval = optimize_interval(query.as_ref(), &stats, B);
-        // For the residual interval choose the maximum based on primary delta, or the min/max
-        // values we may need to encode based on the gap between the initial and optimized interval.
-        let residual_magnitude = [
-            (interval.1 - interval.0) / ((1 << B) - 1) as f32,
-            (primary_header.lower.abs() - interval.0.abs()) * 2.0,
-            (primary_header.upper.abs() - interval.1.abs()) * 2.0,
-        ]
-        .into_iter()
-        .max_by(f32::total_cmp)
-        .expect("3 values input");
-        (primary_header.lower, primary_header.upper) = interval;
-        let mut residual_header = ResidualVectorHeader {
-            magnitude: residual_magnitude,
-            component_sum: 0,
-        };
-
-        // XXX arch impls
-        // XXX consider encoding an 8-bit primary vector in all cases.
-        let mut primary_vector = vec![0u8; packing::byte_len(query.len(), B)];
-        let mut residual_vector = vec![0u8; query.len()];
-        (primary_header.component_sum, residual_header.component_sum) =
-            scalar::residual_quantize_and_pack::<B>(
-                query.as_ref(),
-                VectorEncodeTerms::from_primary::<B>(&primary_header),
-                VectorEncodeTerms::from_residual(residual_magnitude),
-                (primary_header.upper - primary_header.lower) / ((1 << B) - 1) as f32,
-                &mut primary_vector,
-                &mut residual_vector,
-            );
-
-        let primary_terms = VectorTerms::from_primary::<B>(primary_header);
-        let residual_terms = VectorTerms::from_residual(residual_header);
+        let inst = InstructionSet::default();
+        let (primary_header, primary_vector, residual_header, residual_vector) =
+            TurboResidualCoder::<B>::encode_parts(inst, query.as_ref());
+        let primary_terms = VectorDecodeTerms::from_primary::<B>(primary_header);
+        let residual_terms = VectorDecodeTerms::from_residual(residual_header);
         let l2_norm = primary_header.l2_norm.into();
         Self {
             similarity,
@@ -1315,7 +1269,7 @@ impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
         let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
         let component_dot = scalar::residual_dot_unnormalized::<B>(
             (&self.primary_vector, &self.residual_vector),
-            (&vector.primary.data, &vector.residual.data),
+            (vector.primary.data, vector.residual.data),
         );
         let dot = component_dot.compute_dot(
             vector.dim(),

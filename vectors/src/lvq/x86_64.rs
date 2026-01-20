@@ -24,7 +24,7 @@ use std::arch::x86_64::{
     _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
-use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, packing};
+use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorEncodeTerms, packing};
 
 use super::{
     LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, ResidualDotComponents, TwoLevelVector, VectorStats,
@@ -272,9 +272,7 @@ unsafe fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits:
 #[target_feature(enable = "avx512f")]
 pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
     vector: &[f32],
-    lower: f32,
-    upper: f32,
-    delta_inv: f32,
+    terms: VectorEncodeTerms,
     out: &mut [u8],
 ) -> u32 {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
@@ -282,9 +280,9 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
     let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
 
     let mut component_sum = if !in_head.is_empty() {
-        let lower = _mm512_set1_ps(lower);
-        let upper = _mm512_set1_ps(upper);
-        let delta_inv = _mm512_set1_ps(delta_inv);
+        let lower = _mm512_set1_ps(terms.lower);
+        let upper = _mm512_set1_ps(terms.upper);
+        let delta_inv = _mm512_set1_ps(terms.delta_inv);
         let mut qbuf = _mm512_set1_epi32(0);
         let mut component_sum = _mm512_set1_epi32(0);
         let mut shift = 0;
@@ -317,9 +315,7 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
     };
 
     if !in_tail.is_empty() {
-        component_sum += super::scalar::primary_quantize_and_pack::<B>(
-            in_tail, lower, upper, delta_inv, out_tail,
-        );
+        component_sum += super::scalar::primary_quantize_and_pack::<B>(in_tail, terms, out_tail);
     }
 
     component_sum

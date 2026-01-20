@@ -106,16 +106,15 @@ pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: us
 
 pub fn primary_quantize_and_pack<const B: usize>(
     vector: &[f32],
-    lower: f32,
-    upper: f32,
-    delta_inv: f32,
+    terms: VectorEncodeTerms,
     out: &mut [u8],
 ) -> u32 {
     let mut packer = TurboPacker::<B>::new(out);
     vector
         .iter()
         .map(|&v| {
-            let q = ((v.clamp(lower, upper) - lower) * delta_inv).round() as u8;
+            let q =
+                ((v.clamp(terms.lower, terms.upper) - terms.lower) * terms.delta_inv).round() as u8;
             packer.push(q);
             u32::from(q)
         })

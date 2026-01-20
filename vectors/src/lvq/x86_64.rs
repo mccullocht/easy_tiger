@@ -15,14 +15,13 @@ use std::arch::x86_64::{
     _mm512_cvtepu32_ps, _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32,
     _mm512_dpwssd_epi32, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8,
     _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_storeu_ps, _mm512_mask_sub_ps,
-    _mm512_maskz_cvtepu32_ps, _mm512_maskz_cvtps_epu32, _mm512_maskz_expand_epi64,
-    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps,
-    _mm512_min_ps, _mm512_movm_epi8, _mm512_mul_ps, _mm512_or_si512, _mm512_permutexvar_epi8,
-    _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps,
-    _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set_epi64, _mm512_set1_epi8,
-    _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps, _mm512_shuffle_i64x2, _mm512_sll_epi32,
-    _mm512_srli_epi32, _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps,
-    _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm512_maskz_cvtps_epu32, _mm512_maskz_expand_epi64, _mm512_maskz_loadu_epi8,
+    _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps,
+    _mm512_movm_epi8, _mm512_mul_ps, _mm512_or_si512, _mm512_permutexvar_epi8, _mm512_popcnt_epi32,
+    _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps,
+    _mm512_roundscale_ps, _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_epi64,
+    _mm512_set1_ps, _mm512_shuffle_i64x2, _mm512_sll_epi32, _mm512_srli_epi32, _mm512_srli_epi64,
+    _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
 use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, packing};

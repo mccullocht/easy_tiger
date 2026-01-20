@@ -1157,7 +1157,7 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
         // For the residual interval choose the maximum based on primary delta, or the min/max
         // values we may need to encode based on the gap between the initial and optimized interval.
         let residual_magnitude = [
-            (interval.1 - interval.0) / RESIDUAL_MAX,
+            (interval.1 - interval.0) / ((1 << B) - 1) as f32,
             (primary_header.lower.abs() - interval.0.abs()) * 2.0,
             (primary_header.upper.abs() - interval.1.abs()) * 2.0,
         ]
@@ -1569,7 +1569,7 @@ mod packing {
 mod test {
     use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
 
-    use crate::lvq::{TurboPrimaryCoder, TurboResidualCoder, VectorStats};
+    use crate::lvq::{ResidualVectorHeader, TurboPrimaryCoder, TurboResidualCoder, VectorStats};
 
     use super::{
         F32VectorCoder, PrimaryVector, PrimaryVectorCoder, PrimaryVectorHeader, TwoLevelVector,
@@ -1587,6 +1587,19 @@ mod test {
             abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
                 && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
                 && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
+        }
+    }
+
+    impl AbsDiffEq for ResidualVectorHeader {
+        type Epsilon = f32;
+
+        fn default_epsilon() -> Self::Epsilon {
+            0.00001
+        }
+
+        fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
+            abs_diff_eq!(self.magnitude, other.magnitude, epsilon = epsilon)
+                && abs_diff_eq!(self.component_sum, other.component_sum)
         }
     }
 
@@ -1788,13 +1801,22 @@ mod test {
             .as_ref(),
             epsilon = 1
         );
+        let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded).unwrap();
         assert_abs_diff_eq!(
-            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            primary_header,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
                 component_sum: 11,
+            }
+        );
+        let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
+        assert_abs_diff_eq!(
+            residual_header,
+            ResidualVectorHeader {
+                magnitude: 1.2012575,
+                component_sum: 2292,
             }
         );
         assert_abs_diff_eq!(
@@ -2180,8 +2202,9 @@ mod test {
     fn tlvq1x8() {
         let coder = TurboResidualCoder::<1>::default();
         let encoded = coder.encode(&TEST_VECTOR);
+        let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded).unwrap();
         assert_abs_diff_eq!(
-            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            primary_header,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
@@ -2189,30 +2212,38 @@ mod test {
                 component_sum: 11,
             }
         );
+        let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
+        assert_abs_diff_eq!(
+            residual_header,
+            ResidualVectorHeader {
+                magnitude: 1.2012575,
+                component_sum: 2292,
+            }
+        );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
         coder.decode_to(&encoded, &mut decoded);
         assert_abs_diff_eq!(
             decoded.as_ref(),
             [
-                -0.921,
-                -0.070287764,
-                0.66057605,
-                0.6705844,
-                0.57383674,
-                0.4303833,
-                0.6472315,
-                -0.070287764,
-                -0.20039669,
-                -0.4272533,
-                0.7306347,
-                -0.70415175,
-                -0.2737915,
-                0.5404755,
-                -0.7308408,
-                0.43705556,
-                0.9141216,
-                0.6939373,
-                0.2802576
+                -0.9219725,
+                -0.05989358,
+                0.660861,
+                0.6702826,
+                0.5713555,
+                0.4300311,
+                0.6467286,
+                0.0013469756,
+                -0.20121804,
+                -0.42733708,
+                0.7315232,
+                -0.7052751,
+                -0.27188024,
+                0.5383798,
+                -0.72882915,
+                0.4347419,
+                0.91524494,
+                0.6938367,
+                0.20391202
             ]
             .as_ref(),
             epsilon = 0.00001
@@ -2223,8 +2254,9 @@ mod test {
     fn tlvq2x8() {
         let coder = TurboResidualCoder::<2>::default();
         let encoded = coder.encode(&TEST_VECTOR);
+        let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded).unwrap();
         assert_abs_diff_eq!(
-            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            primary_header,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
@@ -2232,30 +2264,38 @@ mod test {
                 component_sum: 32,
             }
         );
+        let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
+        assert_abs_diff_eq!(
+            residual_header,
+            ResidualVectorHeader {
+                magnitude: 0.5039812,
+                component_sum: 2319,
+            }
+        );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
         coder.decode_to(&encoded, &mut decoded);
         assert_abs_diff_eq!(
             decoded.as_ref(),
             [
-                -0.921,
-                -0.06004864,
-                0.6595916,
-                0.6693985,
-                0.5733833,
-                0.4302029,
-                0.645862,
-                0.00075396895,
-                -0.19930625,
-                -0.42869496,
-                0.7302011,
-                -0.7032874,
-                -0.2738385,
-                0.53807855,
-                -0.7307467,
-                0.436087,
-                0.912609,
-                0.69489634,
-                0.20268345
+                -0.9209389,
+                -0.06120634,
+                0.6582021,
+                0.67006046,
+                0.57321703,
+                0.43091646,
+                0.6463437,
+                6.195903e-5,
+                -0.19955412,
+                -0.42881614,
+                0.72935236,
+                -0.70353526,
+                -0.2726808,
+                0.53961825,
+                -0.7312048,
+                0.43684563,
+                0.9131573,
+                0.6937772,
+                0.20165443
             ]
             .as_ref(),
             epsilon = 0.0001,
@@ -2266,8 +2306,9 @@ mod test {
     fn tlvq4x8() {
         let coder = TurboResidualCoder::<4>::default();
         let encoded = coder.encode(&TEST_VECTOR);
+        let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded).unwrap();
         assert_abs_diff_eq!(
-            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            primary_header,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
@@ -2275,30 +2316,38 @@ mod test {
                 component_sum: 170,
             }
         );
+        let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
+        assert_abs_diff_eq!(
+            residual_header,
+            ResidualVectorHeader {
+                magnitude: 0.123191215,
+                component_sum: 2407,
+            }
+        );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
         coder.decode_to(&encoded, &mut decoded);
         assert_abs_diff_eq!(
             decoded.as_ref(),
             [
-                -0.9311241,
-                -0.06878546,
-                0.6631154,
-                0.66999245,
-                0.54717064,
-                0.42397946,
-                0.6631154,
-                0.047159232,
-                -0.19922324,
-                -0.43835914,
-                0.7863066,
-                -0.6919881,
-                -0.3151679,
-                0.53992414,
-                -0.6919881,
-                0.42397946,
-                0.91299325,
-                0.6703619,
-                0.17759702
+                -0.9209789,
+                -0.06105582,
+                0.65876746,
+                0.6698788,
+                0.5727751,
+                0.43122596,
+                0.64620674,
+                0.0007813573,
+                -0.20018944,
+                -0.42821398,
+                0.72978354,
+                -0.7040657,
+                -0.273138,
+                0.5389579,
+                -0.73111945,
+                0.436057,
+                0.9128795,
+                0.6940339,
+                0.20223519
             ]
             .as_ref(),
             epsilon = 0.0001,
@@ -2309,13 +2358,22 @@ mod test {
     fn tlvq8x8() {
         let coder = TurboResidualCoder::<8>::default();
         let encoded = coder.encode(&TEST_VECTOR);
+        let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded).unwrap();
         assert_abs_diff_eq!(
-            PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+            primary_header,
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
                 component_sum: 2876,
+            }
+        );
+        let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
+        assert_abs_diff_eq!(
+            residual_header,
+            ResidualVectorHeader {
+                magnitude: 0.0071822493,
+                component_sum: 2422,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];

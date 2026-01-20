@@ -16,7 +16,9 @@ use std::arch::aarch64::{
     vshlq_u32, vshlq_u64, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
-use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, scalar};
+use crate::lvq::{
+    ResidualDotComponents, TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorEncodeTerms, scalar,
+};
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats, packing};
 
@@ -301,8 +303,7 @@ pub fn primary_quantize_and_pack<const B: usize>(
     }
 
     if !vector_tail.is_empty() {
-        component_sum +=
-            scalar::primary_quantize_and_pack::<B>(vector_tail, lower, upper, delta_inv, out_tail);
+        component_sum += scalar::primary_quantize_and_pack::<B>(vector_tail, terms, out_tail);
     }
     component_sum
 }
@@ -665,28 +666,28 @@ unsafe extern "C" {
         bp: *const u8,
         br: *const u8,
         len: usize,
-    ) -> super::LVQ2Dot;
+    ) -> ResidualDotComponents;
     unsafe fn et_lvq2_dot_u4_u4(
         ap: *const u8,
         ar: *const u8,
         bp: *const u8,
         br: *const u8,
         len: usize,
-    ) -> super::LVQ2Dot;
+    ) -> ResidualDotComponents;
     unsafe fn et_lvq2_dot_u4_u8(
         ap: *const u8,
         ar: *const u8,
         bp: *const u8,
         br: *const u8,
         len: usize,
-    ) -> super::LVQ2Dot;
+    ) -> ResidualDotComponents;
     unsafe fn et_lvq2_dot_u8_u8(
         ap: *const u8,
         ar: *const u8,
         bp: *const u8,
         br: *const u8,
         len: usize,
-    ) -> super::LVQ2Dot;
+    ) -> ResidualDotComponents;
 }
 
 #[inline]
@@ -733,7 +734,7 @@ pub fn dot_residual_u8<const B1: usize, const B2: usize>(
     ar: &[u8],
     bp: &[u8],
     br: &[u8],
-) -> super::LVQ2Dot {
+) -> ResidualDotComponents {
     match (B1, B2) {
         (1, 8) => unsafe {
             et_lvq2_dot_u1_u8(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ar.len())

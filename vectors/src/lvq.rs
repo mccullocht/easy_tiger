@@ -1229,8 +1229,6 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
         let query = TurboResidualVector::<B>::new(query).unwrap();
         let doc = TurboResidualVector::<B>::new(doc).unwrap();
 
-        /*
-        // XXX arch impls
         let component_dot = scalar::residual_dot_unnormalized::<B>(
             (&query.primary.data, &query.residual.data),
             (&doc.primary.data, &doc.residual.data),
@@ -1240,12 +1238,6 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
             (&query.primary.terms, &query.residual.terms),
             (&doc.primary.terms, &doc.residual.terms),
         );
-        */
-        let mut qd = vec![0.0f32; query.dim()];
-        let mut dd = vec![0.0f32; query.dim()];
-        scalar::residual_decode::<B>(&query, &mut qd);
-        scalar::residual_decode::<B>(&doc, &mut dd);
-        let dot: f32 = qd.iter().zip(dd.iter()).map(|(q, d)| q * d).sum();
         dot_unnormalized_to_distance(self.0, dot.into(), (query.l2_norm(), doc.l2_norm()))
     }
 }
@@ -1265,7 +1257,7 @@ pub struct TurboResidualQueryDistance<const B: usize> {
 
 impl<const B: usize> TurboResidualQueryDistance<B> {
     pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
-        // XXX refactor to share with residual coder.
+        // XXX refactor to share with residual coder. this contained a duplicated bug which sucks.
         let stats = VectorStats::from(query.as_ref());
         let mut primary_header = PrimaryVectorHeader::from(stats);
         // NB: this interval optimization reduces loss for the primary vector, but this loss
@@ -1277,7 +1269,7 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
         // For the residual interval choose the maximum based on primary delta, or the min/max
         // values we may need to encode based on the gap between the initial and optimized interval.
         let residual_magnitude = [
-            (interval.1 - interval.0) / RESIDUAL_MAX,
+            (interval.1 - interval.0) / ((1 << B) - 1) as f32,
             (primary_header.lower.abs() - interval.0.abs()) * 2.0,
             (primary_header.upper.abs() - interval.1.abs()) * 2.0,
         ]

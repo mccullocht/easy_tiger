@@ -108,10 +108,6 @@ fn lvq_benchmarks(c: &mut Criterion) {
     // Regardless of the similarity type all of the implementations use dot product internally and
     // then adjust using stored hyper parameters.
     let similarities = [VectorSimilarity::Dot];
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x1x8, similarities);
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x4x4, similarities);
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x4x8, similarities);
-    query_and_doc_benchmarks(c, F32VectorCoding::LVQ2x8x8, similarities);
     query_and_doc_benchmarks(c, F32VectorCoding::TLVQ1, similarities);
     query_and_doc_benchmarks(c, F32VectorCoding::TLVQ2, similarities);
     query_and_doc_benchmarks(c, F32VectorCoding::TLVQ4, similarities);

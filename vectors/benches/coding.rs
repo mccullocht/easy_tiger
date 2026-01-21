@@ -53,10 +53,6 @@ fn binary_benchmarks(c: &mut Criterion) {
 
 fn lvq_benchmarks(c: &mut Criterion) {
     for format in [
-        F32VectorCoding::LVQ2x1x8,
-        F32VectorCoding::LVQ2x4x4,
-        F32VectorCoding::LVQ2x4x8,
-        F32VectorCoding::LVQ2x8x8,
         F32VectorCoding::TLVQ1,
         F32VectorCoding::TLVQ2,
         F32VectorCoding::TLVQ4,

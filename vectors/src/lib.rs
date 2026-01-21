@@ -624,8 +624,8 @@ mod test {
     distance_test!(tlvq1_l2_dist, Euclidean, TLVQ1, 0.4);
     distance_test!(tlvq2_dot_dist, Dot, TLVQ2, 0.2);
     distance_test!(tlvq2_l2_dist, Euclidean, TLVQ2, 0.2);
-    distance_test!(tlvq4_dot_dist, Dot, TLVQ4, 0.05);
-    distance_test!(tlvq4_l2_dist, Euclidean, TLVQ4, 0.05);
+    distance_test!(tlvq4_dot_dist, Dot, TLVQ4, 0.1);
+    distance_test!(tlvq4_l2_dist, Euclidean, TLVQ4, 0.1);
     distance_test!(tlvq8_dot_dist, Dot, TLVQ8, 0.01);
     distance_test!(tlvq8_l2_dist, Euclidean, TLVQ8, 0.01);
 

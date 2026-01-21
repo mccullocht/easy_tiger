@@ -320,27 +320,6 @@ fn correct_dot_uint(dot: u32, dim: usize, a: &VectorDecodeTerms, b: &VectorDecod
         + a.lower * b.lower * dim as f32
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct PrimaryDistance<const B: usize>(VectorSimilarity, InstructionSet);
-
-impl<const B: usize> PrimaryDistance<B> {
-    pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity, InstructionSet::default())
-    }
-}
-
-impl<const B: usize> VectorDistance for PrimaryDistance<B> {
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = TurboPrimaryVector::<B>::new(query).unwrap();
-        let doc = TurboPrimaryVector::<B>::new(doc).unwrap();
-        dot_unnormalized_to_distance(
-            self.0,
-            dot_unnormalized_uint_symmetric::<B>(self.1, query.dim(), &query.rep, &doc.rep).into(),
-            (query.l2_norm(), doc.l2_norm()),
-        )
-    }
-}
-
 /// The four components of a residual dot product.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
@@ -502,6 +481,27 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     fn dimensions(&self, byte_len: usize) -> usize {
         let vector_bytes = byte_len - PrimaryVectorHeader::LEN;
         (vector_bytes * 8) / B
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TurboPrimaryDistance<const B: usize>(VectorSimilarity, InstructionSet);
+
+impl<const B: usize> TurboPrimaryDistance<B> {
+    pub fn new(similarity: VectorSimilarity) -> Self {
+        Self(similarity, InstructionSet::default())
+    }
+}
+
+impl<const B: usize> VectorDistance for TurboPrimaryDistance<B> {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = TurboPrimaryVector::<B>::new(query).unwrap();
+        let doc = TurboPrimaryVector::<B>::new(doc).unwrap();
+        dot_unnormalized_to_distance(
+            self.0,
+            dot_unnormalized_uint_symmetric::<B>(self.1, query.dim(), &query.rep, &doc.rep).into(),
+            (query.l2_norm(), doc.l2_norm()),
+        )
     }
 }
 
@@ -900,6 +900,58 @@ impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
     }
 }
 
+/// Compute a "fast" distance by comparing primary vectors and ignoring residual vectors.
+///
+/// This quantizes the query vector the same as the primary vector rather than using an 8-bit
+/// representation. This makes the comparison symmetrical and faster, but at the cost of accuracy.
+/// For 1-bit primary quantization this is 2-3x faster than comparing and 8-bit quantization.
+pub struct TurboResidualFastQueryDistance<const B: usize> {
+    similarity: VectorSimilarity,
+
+    query: Vec<u8>,
+    terms: VectorDecodeTerms,
+    l2_norm: f64,
+
+    inst: InstructionSet,
+}
+
+impl<const B: usize> TurboResidualFastQueryDistance<B> {
+    pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
+        let inst = InstructionSet::default();
+        let (header, query) = TurboPrimaryCoder::<B>::encode_parts(inst, query);
+        let terms = VectorDecodeTerms::from_primary::<B>(header);
+        let l2_norm = header.l2_norm.into();
+
+        Self {
+            similarity,
+            query,
+            terms,
+            l2_norm,
+            inst,
+        }
+    }
+}
+
+impl<const B: usize> QueryVectorDistance for TurboResidualFastQueryDistance<B> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
+        let dot_uint = match self.inst {
+            InstructionSet::Scalar => scalar::dot_u8::<B>(&self.query, &vector.primary.data),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::dot_u8::<B>(&self.query, &vector.primary.data),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::dot_u8_avx512::<B>(&self.query, &vector.primary.data)
+            },
+        };
+        dot_unnormalized_to_distance(
+            self.similarity,
+            correct_dot_uint(dot_uint, vector.dim(), &self.terms, &vector.primary.terms).into(),
+            (self.l2_norm, vector.l2_norm.into()),
+        )
+    }
+}
+
 mod packing {
     use std::iter::FusedIterator;
 
@@ -1068,7 +1120,7 @@ mod test {
         fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
             // XXX tlvq8x8 fails on aarch64 when epsilon = 0; figure this out
             abs_diff_eq!(self.magnitude, other.magnitude, epsilon = epsilon)
-                && abs_diff_eq!(self.component_sum, other.component_sum, epsilon = 1)
+                && abs_diff_eq!(self.component_sum, other.component_sum)
         }
     }
 

@@ -197,11 +197,10 @@ impl F32VectorCoding {
             }
             (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance::default()),
             (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
-            // XXX rename symmetric distance fns.
-            (Self::TLVQ1, _) => Box::new(lvq::PrimaryDistance::<1>::new(similarity)),
-            (Self::TLVQ2, _) => Box::new(lvq::PrimaryDistance::<2>::new(similarity)),
-            (Self::TLVQ4, _) => Box::new(lvq::PrimaryDistance::<4>::new(similarity)),
-            (Self::TLVQ8, _) => Box::new(lvq::PrimaryDistance::<8>::new(similarity)),
+            (Self::TLVQ1, _) => Box::new(lvq::TurboPrimaryDistance::<1>::new(similarity)),
+            (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryDistance::<2>::new(similarity)),
+            (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryDistance::<4>::new(similarity)),
+            (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryDistance::<8>::new(similarity)),
             (Self::TLVQ1x8, _) => Box::new(lvq::TurboResidualDistance::<1>::new(similarity)),
             (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualDistance::<2>::new(similarity)),
             (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualDistance::<4>::new(similarity)),
@@ -286,26 +285,33 @@ impl F32VectorCoding {
             ))),
             // TODO: consider using asymmetric 8xN distance here.
             F32VectorCoding::TLVQ1 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::PrimaryDistance::<1>::new(similarity),
+                lvq::TurboPrimaryDistance::<1>::new(similarity),
                 lvq::TurboPrimaryCoder::<1>::default().encode(query),
             ))),
             F32VectorCoding::TLVQ2 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::PrimaryDistance::<2>::new(similarity),
+                lvq::TurboPrimaryDistance::<2>::new(similarity),
                 lvq::TurboPrimaryCoder::<2>::default().encode(query),
             ))),
             F32VectorCoding::TLVQ4 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::PrimaryDistance::<4>::new(similarity),
+                lvq::TurboPrimaryDistance::<4>::new(similarity),
                 lvq::TurboPrimaryCoder::<4>::default().encode(query),
             ))),
             F32VectorCoding::TLVQ8 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::PrimaryDistance::<8>::new(similarity),
+                lvq::TurboPrimaryDistance::<8>::new(similarity),
                 lvq::TurboPrimaryCoder::<8>::default().encode(query),
             ))),
-            // XXX consider using 8 bit primary against primary.
-            F32VectorCoding::TLVQ1x8 => todo!("XXX"),
-            F32VectorCoding::TLVQ2x8 => todo!("XXX"),
-            F32VectorCoding::TLVQ4x8 => todo!("XXX"),
-            F32VectorCoding::TLVQ8x8 => todo!("XXX"),
+            F32VectorCoding::TLVQ1x8 => Some(Box::new(
+                lvq::TurboResidualFastQueryDistance::<1>::new(similarity, query),
+            )),
+            F32VectorCoding::TLVQ2x8 => Some(Box::new(
+                lvq::TurboResidualFastQueryDistance::<2>::new(similarity, query),
+            )),
+            F32VectorCoding::TLVQ4x8 => Some(Box::new(
+                lvq::TurboResidualFastQueryDistance::<4>::new(similarity, query),
+            )),
+            F32VectorCoding::TLVQ8x8 => Some(Box::new(
+                lvq::TurboResidualFastQueryDistance::<8>::new(similarity, query),
+            )),
         }
     }
 
@@ -342,16 +348,16 @@ impl F32VectorCoding {
             }
             (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
             (_, F32VectorCoding::TLVQ1) => {
-                quantized_qvd!(lvq::PrimaryDistance::<1>::new(similarity), query)
+                quantized_qvd!(lvq::TurboPrimaryDistance::<1>::new(similarity), query)
             }
             (_, F32VectorCoding::TLVQ2) => {
-                quantized_qvd!(lvq::PrimaryDistance::<2>::new(similarity), query)
+                quantized_qvd!(lvq::TurboPrimaryDistance::<2>::new(similarity), query)
             }
             (_, F32VectorCoding::TLVQ4) => {
-                quantized_qvd!(lvq::PrimaryDistance::<4>::new(similarity), query)
+                quantized_qvd!(lvq::TurboPrimaryDistance::<4>::new(similarity), query)
             }
             (_, F32VectorCoding::TLVQ8) => {
-                quantized_qvd!(lvq::PrimaryDistance::<8>::new(similarity), query)
+                quantized_qvd!(lvq::TurboPrimaryDistance::<8>::new(similarity), query)
             }
             (_, F32VectorCoding::TLVQ1x8) => {
                 quantized_qvd!(lvq::TurboResidualDistance::<1>::new(similarity), query)

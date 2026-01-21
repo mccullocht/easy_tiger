@@ -9,20 +9,21 @@ use std::arch::x86_64::{
     _mm_set1_ps, _mm_shuffle_epi8, _mm_sllv_epi64, _mm_srli_epi64, _mm_storeu_si128, _mm_sub_pd,
     _mm_sub_ps, _mm_unpacklo_epi8, _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtepi8_epi16,
     _mm256_cvtepi16_epi8, _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps, _mm256_fmadd_ps,
-    _mm256_loadu_epi16, _mm256_mul_ps, _mm256_set1_ps, _mm256_sllv_epi16, _mm256_sub_ps,
-    _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32, _mm512_and_si512, _mm512_broadcast_i32x4,
-    _mm512_castps512_ps256, _mm512_cmpgt_epu8_mask, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi8,
-    _mm512_cvtepi32_epi16, _mm512_cvtepu8_epi32, _mm512_cvtepu32_ps, _mm512_cvtps_epu32,
-    _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32, _mm512_extractf32x8_ps,
-    _mm512_fmadd_ps, _mm512_loadu_epi8, _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_storeu_ps,
-    _mm512_mask_sub_ps, _mm512_maskz_cvtps_epu32, _mm512_maskz_expand_epi64,
-    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps,
-    _mm512_min_ps, _mm512_movm_epi8, _mm512_mul_ps, _mm512_or_si512, _mm512_permutexvar_epi8,
-    _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps,
-    _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set_epi64, _mm512_set1_epi8,
-    _mm512_set1_epi32, _mm512_set1_epi64, _mm512_set1_ps, _mm512_shuffle_i64x2, _mm512_sll_epi32,
-    _mm512_sll_epi64, _mm512_srli_epi32, _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps,
-    _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm256_loadu_epi16, _mm256_maskz_loadu_epi8, _mm256_mul_ps, _mm256_set1_ps, _mm256_sllv_epi16,
+    _mm256_sub_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32, _mm512_and_si512,
+    _mm512_broadcast_i32x4, _mm512_castps512_ps256, _mm512_cmpgt_epu8_mask, _mm512_cvtepi16_epi32,
+    _mm512_cvtepi32_epi8, _mm512_cvtepi32_epi16, _mm512_cvtepu8_epi16, _mm512_cvtepu8_epi32,
+    _mm512_cvtepu32_ps, _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32,
+    _mm512_dpwssd_epi32, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8,
+    _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_storeu_ps, _mm512_mask_sub_ps,
+    _mm512_maskz_cvtps_epu32, _mm512_maskz_expand_epi64, _mm512_maskz_loadu_epi8,
+    _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps,
+    _mm512_movm_epi8, _mm512_mul_ps, _mm512_or_si512, _mm512_permutexvar_epi8, _mm512_popcnt_epi32,
+    _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps,
+    _mm512_roundscale_ps, _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_epi64,
+    _mm512_set1_ps, _mm512_setzero_si512, _mm512_shuffle_i64x2, _mm512_sll_epi32, _mm512_sll_epi64,
+    _mm512_srli_epi32, _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps,
+    _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
 use crate::lvq::{
@@ -794,6 +795,7 @@ impl ResidualDotComponents512 {
         }
     }
 
+    // XXX fix name
     #[target_feature(enable = "avx512f")]
     #[inline]
     unsafe fn into_lvq2_dot(self) -> ResidualDotComponents {
@@ -1102,7 +1104,10 @@ pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
 
                 dot = _mm512_dpbusd_epi32(
                     dot,
-                    _mm512_loadu_epi8(query_head.as_ptr().add(i) as *const i8),
+                    _mm512_maskz_loadu_epi8(
+                        u64::MAX >> (64 - (tail_split - i).min(64)),
+                        query_head.as_ptr().add(i) as *const i8,
+                    ),
                     dv,
                 );
             }
@@ -1118,12 +1123,185 @@ pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
     dot
 }
 
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni")]
 pub unsafe fn residual_dot_unnormalized_avx512<const B: usize>(
     query: (&[u8], &[u8]),
     doc: (&[u8], &[u8]),
 ) -> ResidualDotComponents {
-    // XXX
-    super::scalar::residual_dot_unnormalized::<B>(query, doc)
+    let tail_split = query.1.len() & !(packing::block_dim(B) - 1);
+    let primary_split = packing::byte_len(tail_split, B);
+
+    let (query_head, query_tail) = split_residual_vector(query, primary_split, tail_split);
+    let (doc_head, doc_tail) = split_residual_vector(doc, primary_split, tail_split);
+
+    // XXX have to factor out all of these loading routines, they are often shared with other fns.
+    let mut dot = if !query_head.0.is_empty() {
+        let mut dot = ResidualDotComponents512::new();
+        match B {
+            1 => {
+                let mask = _mm512_set1_epi8(0x1);
+                for i in (0..tail_split).step_by(128) {
+                    // Load 128 bits and broadcast to 512 bits, then shift right by 0, 1, 2, 3.
+                    // This will arrange each dimension into the lowest bit to align with an 8 bit query.
+                    let ap_buf = _mm512_srlv_epi64(
+                        _mm512_broadcast_i32x4(_mm_lddqu_si128(
+                            query_head.0.as_ptr().add(i / 128 * 16) as *const __m128i,
+                        )),
+                        _mm512_set_epi64(3, 3, 2, 2, 1, 1, 0, 0),
+                    );
+                    let bp_buf = _mm512_srlv_epi64(
+                        _mm512_broadcast_i32x4(_mm_lddqu_si128(
+                            doc_head.0.as_ptr().add(i / 128 * 16) as *const __m128i,
+                        )),
+                        _mm512_set_epi64(3, 3, 2, 2, 1, 1, 0, 0),
+                    );
+
+                    let ap = _mm512_and_si512(ap_buf, mask);
+                    let bp = _mm512_and_si512(bp_buf, mask);
+                    let ar = _mm512_loadu_epi8(query_head.1.as_ptr().add(i) as *const i8);
+                    let br = _mm512_loadu_epi8(doc_head.1.as_ptr().add(i) as *const i8);
+
+                    dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, ap, bp);
+                    dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, br, ap);
+                    dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, ar, bp);
+                    dot.ar_dot_br = mm512_dot_u8(dot.ar_dot_br, ar, br);
+
+                    let ap = _mm512_and_si512(_mm512_srli_epi64::<4>(ap_buf), mask);
+                    let bp = _mm512_and_si512(_mm512_srli_epi64::<4>(bp_buf), mask);
+                    let ar = _mm512_loadu_epi8(query_head.1.as_ptr().add(i + 64) as *const i8);
+                    let br = _mm512_loadu_epi8(doc_head.1.as_ptr().add(i + 64) as *const i8);
+
+                    dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, ap, bp);
+                    dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, br, ap);
+                    dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, ar, bp);
+                    dot.ar_dot_br = mm512_dot_u8(dot.ar_dot_br, ar, br);
+                }
+
+                dot.into_lvq2_dot()
+            }
+            2 => {
+                let mask = _mm512_set1_epi8(0x3);
+                for i in (0..tail_split).step_by(64) {
+                    let ap = _mm512_and_si512(
+                        mask,
+                        _mm512_srlv_epi64(
+                            _mm512_broadcast_i32x4(_mm_lddqu_si128(
+                                query_head.0.as_ptr().add(i / 64 * 16) as *const __m128i,
+                            )),
+                            _mm512_set_epi64(6, 6, 4, 4, 2, 2, 0, 0),
+                        ),
+                    );
+                    let bp = _mm512_and_si512(
+                        mask,
+                        _mm512_srlv_epi64(
+                            _mm512_broadcast_i32x4(_mm_lddqu_si128(
+                                doc_head.0.as_ptr().add(i / 64 * 16) as *const __m128i,
+                            )),
+                            _mm512_set_epi64(6, 6, 4, 4, 2, 2, 0, 0),
+                        ),
+                    );
+                    let ar = _mm512_loadu_epi8(query_head.1.as_ptr().add(i) as *const i8);
+                    let br = _mm512_loadu_epi8(doc_head.1.as_ptr().add(i) as *const i8);
+
+                    dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, ap, bp);
+                    dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, br, ap);
+                    dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, ar, bp);
+                    dot.ar_dot_br = mm512_dot_u8(dot.ar_dot_br, ar, br);
+                }
+                dot.into_lvq2_dot()
+            }
+            4 => {
+                let mask = _mm512_set1_epi8(0xf);
+                for i in (0..tail_split).step_by(64) {
+                    // Load 128 for 32 dim or 256 bits for 64 dim.
+                    let load_mask = u8::MAX >> (8 - (tail_split - i).min(64) / 16);
+                    let mut ap = _mm512_maskz_loadu_epi64(
+                        load_mask,
+                        query_head.0.as_ptr().add(i / 2) as *const i64,
+                    );
+                    ap = _mm512_and_si512(
+                        _mm512_srlv_epi64(
+                            _mm512_shuffle_i64x2::<0b0101_0000>(ap, ap),
+                            _mm512_set_epi64(4, 4, 0, 0, 4, 4, 0, 0),
+                        ),
+                        mask,
+                    );
+                    let mut bp = _mm512_maskz_loadu_epi64(
+                        load_mask,
+                        doc_head.0.as_ptr().add(i / 2) as *const i64,
+                    );
+                    bp = _mm512_and_si512(
+                        _mm512_srlv_epi64(
+                            _mm512_shuffle_i64x2::<0b0101_0000>(bp, bp),
+                            _mm512_set_epi64(4, 4, 0, 0, 4, 4, 0, 0),
+                        ),
+                        mask,
+                    );
+                    let residual_load_mask = u64::MAX >> (64 - (tail_split - i).min(64));
+                    let ar = _mm512_maskz_loadu_epi8(
+                        residual_load_mask,
+                        query_head.1.as_ptr().add(i) as *const i8,
+                    );
+                    let br = _mm512_maskz_loadu_epi8(
+                        residual_load_mask,
+                        doc_head.1.as_ptr().add(i) as *const i8,
+                    );
+
+                    dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, ap, bp);
+                    dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, br, ap);
+                    dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, ar, bp);
+                    dot.ar_dot_br = mm512_dot_u8(dot.ar_dot_br, ar, br);
+                }
+                dot.into_lvq2_dot()
+            }
+            8 => {
+                // XXX try going to 64? might be faster.
+                for i in (0..tail_split).step_by(32) {
+                    let load_mask = u32::MAX >> (32 - (tail_split - i).min(32)) as u32;
+                    let ap = _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(
+                        load_mask,
+                        query_head.0.as_ptr().add(i) as *const i8,
+                    ));
+                    let ar = _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(
+                        load_mask,
+                        query_head.1.as_ptr().add(i) as *const i8,
+                    ));
+                    let bp = _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(
+                        load_mask,
+                        doc_head.0.as_ptr().add(i) as *const i8,
+                    ));
+                    let br = _mm512_cvtepu8_epi16(_mm256_maskz_loadu_epi8(
+                        load_mask,
+                        doc_head.1.as_ptr().add(i) as *const i8,
+                    ));
+
+                    dot.ap_dot_bp = _mm512_dpwssd_epi32(dot.ap_dot_bp, ap, bp);
+                    dot.ap_dot_br = _mm512_dpwssd_epi32(dot.ap_dot_br, ap, br);
+                    dot.ar_dot_bp = _mm512_dpwssd_epi32(dot.ar_dot_bp, ar, bp);
+                    dot.ar_dot_br = _mm512_dpwssd_epi32(dot.ar_dot_br, ar, br);
+                }
+                dot.into_lvq2_dot()
+            }
+            _ => unreachable!(),
+        }
+    } else {
+        ResidualDotComponents::default()
+    };
+
+    if !query_tail.0.is_empty() {
+        dot += super::scalar::residual_dot_unnormalized::<B>(query_tail, doc_tail);
+    }
+    dot
+}
+
+fn split_residual_vector<'a>(
+    v: (&'a [u8], &'a [u8]),
+    primary_split: usize,
+    residual_split: usize,
+) -> ((&'a [u8], &'a [u8]), (&'a [u8], &'a [u8])) {
+    let primary = v.0.split_at(primary_split);
+    let residual = v.1.split_at(residual_split);
+    ((primary.0, residual.0), (primary.1, residual.1))
 }
 
 #[target_feature(enable = "avx512f")]
@@ -1210,4 +1388,14 @@ impl VectorDecodeTermsAvx512 {
     unsafe fn dequantize(&self, v: __m512i) -> __m512 {
         _mm512_fmadd_ps(_mm512_cvtepu32_ps(v), self.delta, self.lower)
     }
+}
+
+#[target_feature(enable = "avx512f,avx512bw")]
+#[inline]
+unsafe fn mm512_dot_u8(dot: __m512i, a: __m512i, b: __m512i) -> __m512i {
+    let zero = _mm512_setzero_si512();
+    let (a_lo, a_hi) = (_mm512_unpacklo_epi8(a, zero), _mm512_unpackhi_epi8(a, zero));
+    let (b_lo, b_hi) = (_mm512_unpacklo_epi8(b, zero), _mm512_unpackhi_epi8(b, zero));
+    let dot = _mm512_dpwssd_epi32(dot, a_lo, b_lo);
+    _mm512_dpwssd_epi32(dot, a_hi, b_hi)
 }

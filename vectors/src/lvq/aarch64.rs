@@ -829,6 +829,42 @@ unsafe extern "C" {
         br: *const u8,
         len: usize,
     ) -> ResidualDotComponents;
+
+    // This function requires that len is a multiple of 128.
+    unsafe fn et_residual_dot_u1_u8(
+        ap: *const u8,
+        ar: *const u8,
+        bp: *const u8,
+        br: *const u8,
+        len: usize,
+    ) -> ResidualDotComponents;
+
+    // This function requires that len is a multiple of 64.
+    unsafe fn et_residual_dot_u2_u8(
+        ap: *const u8,
+        ar: *const u8,
+        bp: *const u8,
+        br: *const u8,
+        len: usize,
+    ) -> ResidualDotComponents;
+
+    // This function requires that len is a multiple of 32.
+    unsafe fn et_residual_dot_u4_u8(
+        ap: *const u8,
+        ar: *const u8,
+        bp: *const u8,
+        br: *const u8,
+        len: usize,
+    ) -> ResidualDotComponents;
+
+    // This function requires that len is a multiple of 16.
+    unsafe fn et_residual_dot_u8_u8(
+        ap: *const u8,
+        ar: *const u8,
+        bp: *const u8,
+        br: *const u8,
+        len: usize,
+    ) -> ResidualDotComponents;
 }
 
 #[inline]
@@ -1123,7 +1159,7 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
                     query_head.len(),
                 )
             },
-            _ => scalar::primary_query8_dot_unnormalized::<B>(query_head, &doc_head),
+            _ => unimplemented!(),
         }
     } else {
         0
@@ -1133,6 +1169,78 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
         dot += scalar::primary_query8_dot_unnormalized::<B>(query_tail, &doc_tail);
     }
     dot
+}
+
+#[inline]
+pub fn residual_dot_unnormalized<const B: usize>(
+    query: (&[u8], &[u8]),
+    doc: (&[u8], &[u8]),
+) -> ResidualDotComponents {
+    let tail_split = query.1.len() & !(packing::block_dim(B) - 1);
+    let primary_split = packing::byte_len(tail_split, B);
+
+    let (query_head, query_tail) = split_residual_vector(query, primary_split, tail_split);
+    let (doc_head, doc_tail) = split_residual_vector(doc, primary_split, tail_split);
+
+    let mut dot = if !query_head.0.is_empty() {
+        match B {
+            1 => unsafe {
+                et_residual_dot_u1_u8(
+                    query_head.0.as_ptr(),
+                    query_head.1.as_ptr(),
+                    doc_head.0.as_ptr(),
+                    doc_head.1.as_ptr(),
+                    query_head.1.len(),
+                )
+            },
+            2 => unsafe {
+                et_residual_dot_u2_u8(
+                    query_head.0.as_ptr(),
+                    query_head.1.as_ptr(),
+                    doc_head.0.as_ptr(),
+                    doc_head.1.as_ptr(),
+                    query_head.1.len(),
+                )
+            },
+            4 => unsafe {
+                et_residual_dot_u4_u8(
+                    query_head.0.as_ptr(),
+                    query_head.1.as_ptr(),
+                    doc_head.0.as_ptr(),
+                    doc_head.1.as_ptr(),
+                    query_head.1.len(),
+                )
+            },
+            8 => unsafe {
+                et_residual_dot_u8_u8(
+                    query_head.0.as_ptr(),
+                    query_head.1.as_ptr(),
+                    doc_head.0.as_ptr(),
+                    doc_head.1.as_ptr(),
+                    query_head.1.len(),
+                )
+            },
+            _ => scalar::residual_dot_unnormalized::<B>(query_head, doc_head),
+        }
+    } else {
+        ResidualDotComponents::default()
+    };
+
+    if !query_tail.0.is_empty() {
+        dot += scalar::residual_dot_unnormalized::<B>(query_tail, doc_tail);
+    }
+
+    dot
+}
+
+fn split_residual_vector<'a>(
+    v: (&'a [u8], &'a [u8]),
+    primary_split: usize,
+    residual_split: usize,
+) -> ((&'a [u8], &'a [u8]), (&'a [u8], &'a [u8])) {
+    let primary = v.0.split_at(primary_split);
+    let residual = v.1.split_at(residual_split);
+    ((primary.0, residual.0), (primary.1, residual.1))
 }
 
 #[inline(always)]

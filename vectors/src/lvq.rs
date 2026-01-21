@@ -14,7 +14,10 @@ mod scalar;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    ops::{Add, AddAssign},
+};
 
 use crate::{
     F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
@@ -651,7 +654,7 @@ impl<const B: usize> VectorDistance for PrimaryDistance<B> {
 }
 
 /// The four components of a residual dot product.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
 struct ResidualDotComponents {
     ap_dot_bp: u32,
@@ -671,6 +674,24 @@ impl ResidualDotComponents {
             + correct_dot_uint(self.ap_dot_br, dim, a.0, b.1)
             + correct_dot_uint(self.ar_dot_bp, dim, a.1, b.0)
             + correct_dot_uint(self.ar_dot_br, dim, a.1, b.1)
+    }
+}
+
+impl Add for ResidualDotComponents {
+    type Output = Self;
+
+    fn add(mut self, rhs: Self) -> Self::Output {
+        self += rhs;
+        self
+    }
+}
+
+impl AddAssign for ResidualDotComponents {
+    fn add_assign(&mut self, rhs: Self) {
+        self.ap_dot_bp += rhs.ap_dot_bp;
+        self.ap_dot_br += rhs.ap_dot_br;
+        self.ar_dot_bp += rhs.ar_dot_bp;
+        self.ar_dot_br += rhs.ar_dot_br;
     }
 }
 
@@ -1220,7 +1241,6 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
     }
 }
 
-#[allow(dead_code)] // XXX
 #[derive(Debug, Clone, Copy)]
 pub struct TurboResidualDistance<const B: usize>(VectorSimilarity, InstructionSet);
 
@@ -1235,10 +1255,24 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
         let query = TurboResidualVector::<B>::new(query).unwrap();
         let doc = TurboResidualVector::<B>::new(doc).unwrap();
 
-        let component_dot = scalar::residual_dot_unnormalized::<B>(
-            (query.primary.data, query.residual.data),
-            (doc.primary.data, doc.residual.data),
-        );
+        let component_dot = match self.1 {
+            InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B>(
+                (query.primary.data, query.residual.data),
+                (doc.primary.data, doc.residual.data),
+            ),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::residual_dot_unnormalized::<B>(
+                (query.primary.data, query.residual.data),
+                (doc.primary.data, doc.residual.data),
+            ),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::residual_dot_unnormalized_avx512::<B>(
+                    (query.primary.data, query.residual.data),
+                    (doc.primary.data, doc.residual.data),
+                )
+            },
+        };
         let dot = component_dot.compute_dot(
             query.dim(),
             (&query.primary.terms, &query.residual.terms),
@@ -1257,7 +1291,6 @@ pub struct TurboResidualQueryDistance<const B: usize> {
     residual_terms: VectorDecodeTerms,
     l2_norm: f64,
 
-    #[allow(dead_code)] // XXX
     inst: InstructionSet,
 }
 
@@ -1284,10 +1317,24 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
 impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
-        let component_dot = scalar::residual_dot_unnormalized::<B>(
-            (&self.primary_vector, &self.residual_vector),
-            (vector.primary.data, vector.residual.data),
-        );
+        let component_dot = match self.inst {
+            InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B>(
+                (&self.primary_vector, &self.residual_vector),
+                (vector.primary.data, vector.residual.data),
+            ),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::residual_dot_unnormalized::<B>(
+                (&self.primary_vector, &self.residual_vector),
+                (vector.primary.data, vector.residual.data),
+            ),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::residual_dot_unnormalized_avx512::<B>(
+                    (&self.primary_vector, &self.residual_vector),
+                    (vector.primary.data, vector.residual.data),
+                )
+            },
+        };
         let dot = component_dot.compute_dot(
             vector.dim(),
             (&self.primary_terms, &self.residual_terms),

@@ -234,6 +234,7 @@ inline HIDDEN uint8x16_t unpack1(uint16_t v) {
   return vandq_u8(shifted, mask);
 }
 
+// XXX remove
 __attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
 et_lvq2_dot_u1_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
                   const uint8_t *br, size_t len) {
@@ -273,6 +274,7 @@ et_lvq2_dot_u1_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
   return result;
 }
 
+// XXX remove
 __attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
 et_lvq2_dot_u4_u4(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
                   const uint8_t *br, size_t len) {
@@ -348,6 +350,7 @@ inline HIDDEN uint8x16x2_t load_u8x2(const uint8_t *ptr) {
   return (uint8x16x2_t){{vld1q_u8(ptr), vld1q_u8(ptr + 16)}};
 }
 
+// XXX remove
 __attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
 et_lvq2_dot_u4_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
                   const uint8_t *br, size_t len) {
@@ -394,6 +397,7 @@ et_lvq2_dot_u4_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
   return result;
 }
 
+// XXX remove
 __attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
 et_lvq2_dot_u8_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
                   const uint8_t *br, size_t len) {
@@ -431,6 +435,147 @@ et_lvq2_dot_u8_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
   }
 
   return result;
+}
+
+__attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
+et_residual_dot_u1_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
+                      const uint8_t *br, size_t len) {
+  uint32_t ap_dot_bp = 0;
+  uint32x4_t ap_dot_br = vdupq_n_u32(0);
+  uint32x4_t ar_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ar_dot_br = vdupq_n_u32(0);
+  uint8x16_t ap_buf = vdupq_n_u8(0);
+  uint8x16_t bp_buf = vdupq_n_u8(0);
+  uint8x16_t mask = vdupq_n_u8(1);
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 16) {
+    if (i % 128 == 0) {
+      ap_buf = vld1q_u8(ap + i / 128 * 16);
+      bp_buf = vld1q_u8(bp + i / 128 * 16);
+      ap_dot_bp += vaddlvq_u8(vcntq_u8(vandq_u8(ap_buf, bp_buf)));
+    } else {
+      ap_buf = vshrq_n_u8(ap_buf, 1);
+      bp_buf = vshrq_n_u8(bp_buf, 1);
+    }
+
+    uint8x16_t apv = vandq_u8(ap_buf, mask);
+    uint8x16_t arv = vld1q_u8(ar + i);
+    uint8x16_t bpv = vandq_u8(bp_buf, mask);
+    uint8x16_t brv = vld1q_u8(br + i);
+    ap_dot_br = vdotq_u32(ap_dot_br, apv, brv);
+    ar_dot_bp = vdotq_u32(ar_dot_bp, arv, bpv);
+    ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
+  }
+
+  return (struct ResidualDotComponents){
+      .ap_dot_bp = ap_dot_bp,
+      .ap_dot_br = vaddvq_u32(ap_dot_br),
+      .ar_dot_bp = vaddvq_u32(ar_dot_bp),
+      .ar_dot_br = vaddvq_u32(ar_dot_br),
+  };
+}
+
+__attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
+et_residual_dot_u2_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
+                      const uint8_t *br, size_t len) {
+  uint32x4_t ap_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ap_dot_br = vdupq_n_u32(0);
+  uint32x4_t ar_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ar_dot_br = vdupq_n_u32(0);
+  uint8x16_t ap_buf = vdupq_n_u8(0);
+  uint8x16_t bp_buf = vdupq_n_u8(0);
+  uint8x16_t mask = vdupq_n_u8(3);
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 16) {
+    if (i % 64 == 0) {
+      ap_buf = vld1q_u8(ap + i / 64 * 16);
+      bp_buf = vld1q_u8(bp + i / 64 * 16);
+    } else {
+      ap_buf = vshrq_n_u8(ap_buf, 2);
+      bp_buf = vshrq_n_u8(bp_buf, 2);
+    }
+
+    uint8x16_t apv = vandq_u8(ap_buf, mask);
+    uint8x16_t arv = vld1q_u8(ar + i);
+    uint8x16_t bpv = vandq_u8(bp_buf, mask);
+    uint8x16_t brv = vld1q_u8(br + i);
+    ap_dot_bp = vdotq_u32(ap_dot_bp, apv, bpv);
+    ap_dot_br = vdotq_u32(ap_dot_br, apv, brv);
+    ar_dot_bp = vdotq_u32(ar_dot_bp, arv, bpv);
+    ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
+  }
+
+  return (struct ResidualDotComponents){
+      .ap_dot_bp = vaddvq_u32(ap_dot_bp),
+      .ap_dot_br = vaddvq_u32(ap_dot_br),
+      .ar_dot_bp = vaddvq_u32(ar_dot_bp),
+      .ar_dot_br = vaddvq_u32(ar_dot_br),
+  };
+}
+
+__attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
+et_residual_dot_u4_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
+                      const uint8_t *br, size_t len) {
+  uint32x4_t ap_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ap_dot_br = vdupq_n_u32(0);
+  uint32x4_t ar_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ar_dot_br = vdupq_n_u32(0);
+  uint8x16_t ap_buf = vdupq_n_u8(0);
+  uint8x16_t bp_buf = vdupq_n_u8(0);
+  uint8x16_t mask = vdupq_n_u8(0xf);
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 16) {
+    if (i % 32 == 0) {
+      ap_buf = vld1q_u8(ap + i / 32 * 16);
+      bp_buf = vld1q_u8(bp + i / 32 * 16);
+    } else {
+      ap_buf = vshrq_n_u8(ap_buf, 4);
+      bp_buf = vshrq_n_u8(bp_buf, 4);
+    }
+
+    uint8x16_t apv = vandq_u8(ap_buf, mask);
+    uint8x16_t arv = vld1q_u8(ar + i);
+    uint8x16_t bpv = vandq_u8(bp_buf, mask);
+    uint8x16_t brv = vld1q_u8(br + i);
+    ap_dot_bp = vdotq_u32(ap_dot_bp, apv, bpv);
+    ap_dot_br = vdotq_u32(ap_dot_br, apv, brv);
+    ar_dot_bp = vdotq_u32(ar_dot_bp, arv, bpv);
+    ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
+  }
+
+  return (struct ResidualDotComponents){
+      .ap_dot_bp = vaddvq_u32(ap_dot_bp),
+      .ap_dot_br = vaddvq_u32(ap_dot_br),
+      .ar_dot_bp = vaddvq_u32(ar_dot_bp),
+      .ar_dot_br = vaddvq_u32(ar_dot_br),
+  };
+}
+
+__attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
+et_residual_dot_u8_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
+                      const uint8_t *br, size_t len) {
+  uint32x4_t ap_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ap_dot_br = vdupq_n_u32(0);
+  uint32x4_t ar_dot_bp = vdupq_n_u32(0);
+  uint32x4_t ar_dot_br = vdupq_n_u32(0);
+  size_t len16 = len & ~15;
+  for (size_t i = 0; i < len16; i += 16) {
+    uint8x16_t apv = vld1q_u8(ap + i);
+    uint8x16_t arv = vld1q_u8(ar + i);
+    uint8x16_t bpv = vld1q_u8(bp + i);
+    uint8x16_t brv = vld1q_u8(br + i);
+    ap_dot_bp = vdotq_u32(ap_dot_bp, apv, bpv);
+    ap_dot_br = vdotq_u32(ap_dot_br, apv, brv);
+    ar_dot_bp = vdotq_u32(ar_dot_bp, arv, bpv);
+    ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
+  }
+
+  return (struct ResidualDotComponents){
+      .ap_dot_bp = vaddvq_u32(ap_dot_bp),
+      .ap_dot_br = vaddvq_u32(ap_dot_br),
+      .ar_dot_bp = vaddvq_u32(ar_dot_bp),
+      .ar_dot_br = vaddvq_u32(ar_dot_br),
+  };
 }
 
 #endif /* __aarch64__ */

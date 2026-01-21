@@ -173,8 +173,7 @@ pub fn merge_centroid(
 
     // Query the head index for each vector and assign a new centroid.
     let coder = index.new_posting_coder();
-    let mut float_vector =
-        vec![0.0f32; coder.dimensions(index.head_config().config().dimensions.get())];
+    let mut float_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
     let mut searcher = GraphSearcher::new(index.config().head_search_params);
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
 

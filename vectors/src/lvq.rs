@@ -407,11 +407,6 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         (self.rep.data.len() * 8) / B
     }
 
-    // XXX remove?
-    fn iter(&self) -> impl ExactSizeIterator<Item = u8> {
-        packing::TurboUnpacker::<B>::new(self.rep.data)
-    }
-
     fn l2_norm(&self) -> f64 {
         self.l2_norm.into()
     }

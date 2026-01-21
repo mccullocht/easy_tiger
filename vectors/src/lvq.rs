@@ -1176,7 +1176,7 @@ impl<const B: usize> TurboResidualCoder<B> {
             ),
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                x86_64::residual_quantize_and_pack::<B>(
+                x86_64::residual_quantize_and_pack_avx512::<B>(
                     vector,
                     primary_terms,
                     residual_terms,

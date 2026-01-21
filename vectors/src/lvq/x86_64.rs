@@ -277,20 +277,12 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
     let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
 
     let mut component_sum = if !in_head.is_empty() {
-        // XXX use terms and common quantization routine.
-        let lower = _mm512_set1_ps(terms.lower);
-        let upper = _mm512_set1_ps(terms.upper);
-        let delta_inv = _mm512_set1_ps(terms.delta_inv);
+        let terms = VectorEncodeTermsAvx512::from_terms(&terms);
         let mut qbuf = _mm512_set1_epi32(0);
         let mut component_sum = _mm512_set1_epi32(0);
         let mut shift = 0;
         for i in (0..tail_split).step_by(16) {
-            let mut v = _mm512_loadu_ps(in_head.as_ptr().add(i));
-            v = _mm512_min_ps(v, upper);
-            v = _mm512_max_ps(v, lower);
-            v = _mm512_sub_ps(v, lower);
-            v = _mm512_mul_ps(v, delta_inv);
-            let q = _mm512_cvtps_epu32(mm512_round_nonnegative_ties_away_zero_ps(v));
+            let q = terms.quantize(_mm512_loadu_ps(in_head.as_ptr().add(i)));
             component_sum = _mm512_add_epi32(component_sum, q);
             qbuf = _mm512_or_si512(qbuf, _mm512_sll_epi32(q, _mm_set1_epi64x(shift as i64)));
             shift += B;
@@ -502,7 +494,7 @@ pub fn residual_decode_avx512<const B: usize>(
 
 #[target_feature(enable = "avx512vnni,avx512bw,avx512vl,avx512vpopcntdq,avx512f")]
 #[inline]
-pub unsafe fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
+pub unsafe fn dot_u8_avx512<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     match B {
         1 => {
             let mut sum = _mm512_set1_epi32(0);
@@ -591,38 +583,6 @@ pub unsafe fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     }
 }
 
-struct ResidualDotComponents512 {
-    ap_dot_bp: __m512i,
-    ap_dot_br: __m512i,
-    ar_dot_bp: __m512i,
-    ar_dot_br: __m512i,
-}
-
-impl ResidualDotComponents512 {
-    #[target_feature(enable = "avx512f")]
-    #[inline]
-    unsafe fn new() -> Self {
-        Self {
-            ap_dot_bp: _mm512_set1_epi32(0),
-            ap_dot_br: _mm512_set1_epi32(0),
-            ar_dot_bp: _mm512_set1_epi32(0),
-            ar_dot_br: _mm512_set1_epi32(0),
-        }
-    }
-
-    // XXX fix name
-    #[target_feature(enable = "avx512f")]
-    #[inline]
-    unsafe fn into_lvq2_dot(self) -> ResidualDotComponents {
-        ResidualDotComponents {
-            ap_dot_bp: _mm512_reduce_add_epi32(self.ap_dot_bp) as u32,
-            ap_dot_br: _mm512_reduce_add_epi32(self.ap_dot_br) as u32,
-            ar_dot_bp: _mm512_reduce_add_epi32(self.ar_dot_bp) as u32,
-            ar_dot_br: _mm512_reduce_add_epi32(self.ar_dot_br) as u32,
-        }
-    }
-}
-
 #[target_feature(enable = "avx512f,avx512vnni,avx512bw")]
 #[inline]
 pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
@@ -632,7 +592,7 @@ pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
     // 1, 2, and 4 bits are specialized. 8 bit can use the symmetrical impl.
     match B {
         1 | 2 | 4 => {}
-        8 => return dot_u8::<8>(query, doc.rep.data),
+        8 => return dot_u8_avx512::<8>(query, doc.rep.data),
         _ => unimplemented!(),
     }
 
@@ -641,67 +601,51 @@ pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
     // TODO: unroll these loops to use more accumulator registers.
     let mut dot = match B {
         1 => {
-            let mask = _mm512_set1_epi8(0x1);
             let mut dot0 = _mm512_set1_epi32(0);
             let mut dot1 = _mm512_set1_epi32(0);
             for i in (0..tail_split).step_by(128) {
-                // Load 128 bits and broadcast to 512 bits, then shift right by 0, 1, 2, 3.
-                // This will arrange each dimension into the lowest bit to align with an 8 bit query.
-                let mut dv = _mm512_broadcast_i32x4(_mm_lddqu_si128(
+                let (dv64, dv128) = unpack_u1_avx512(_mm_lddqu_si128(
                     doc_head.rep.data.as_ptr().add(i / 128 * 16) as *const __m128i,
                 ));
-                dv = _mm512_srlv_epi64(dv, _mm512_set_epi64(3, 3, 2, 2, 1, 1, 0, 0));
 
                 dot0 = _mm512_dpbusd_epi32(
                     dot0,
                     _mm512_loadu_epi8(query_head.as_ptr().add(i) as *const i8),
-                    _mm512_and_si512(dv, mask),
+                    dv64,
                 );
                 dot1 = _mm512_dpbusd_epi32(
                     dot1,
                     _mm512_loadu_epi8(query_head.as_ptr().add(i + 64) as *const i8),
-                    _mm512_and_si512(_mm512_srli_epi64::<4>(dv), mask),
+                    dv128,
                 );
             }
 
             _mm512_reduce_add_epi32(_mm512_add_epi32(dot0, dot1)) as u32
         }
         2 => {
-            let mask = _mm512_set1_epi8(0x3);
             let mut dot = _mm512_set1_epi32(0);
             for i in (0..tail_split).step_by(64) {
-                // Load 128 bits and broadcast to 512 bits, then shift right by 0, 2, 4, 6
-                // This will arrange each dimension into the lowest dibit to align with an 8 bit query.
-                let mut dv = _mm512_broadcast_i32x4(_mm_lddqu_si128(
+                let dv = unpack_u2_avx512(_mm_lddqu_si128(
                     doc_head.rep.data.as_ptr().add(i / 64 * 16) as *const __m128i,
                 ));
-                dv = _mm512_srlv_epi64(dv, _mm512_set_epi64(6, 6, 4, 4, 2, 2, 0, 0));
 
                 dot = _mm512_dpbusd_epi32(
                     dot,
                     _mm512_loadu_epi8(query_head.as_ptr().add(i) as *const i8),
-                    _mm512_and_si512(dv, mask),
+                    dv,
                 );
             }
 
             _mm512_reduce_add_epi32(dot) as u32
         }
         4 => {
-            let mask = _mm512_set1_epi8(0xf);
             let mut dot = _mm512_set1_epi32(0);
             for i in (0..tail_split).step_by(64) {
-                // Load 128 for 32 dim or 256 bits for 64 dim.
                 let load_mask = u8::MAX >> (8 - (tail_split - i).min(64) / 16);
-                let mut dv = _mm512_maskz_loadu_epi64(
+                let dv = unpack_u4_avx512(_mm512_maskz_loadu_epi64(
                     load_mask,
                     doc_head.rep.data.as_ptr().add(i / 2) as *const i64,
-                );
-                // Shuffle to duplicate each 128 bit block, then shift and mask to unpack.
-                dv = _mm512_shuffle_i64x2::<0b0101_0000>(dv, dv);
-                dv = _mm512_and_si512(
-                    _mm512_srlv_epi64(dv, _mm512_set_epi64(4, 4, 0, 0, 4, 4, 0, 0)),
-                    mask,
-                );
+                ));
 
                 dot = _mm512_dpbusd_epi32(
                     dot,
@@ -724,6 +668,37 @@ pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
     dot
 }
 
+struct ResidualDotComponents512 {
+    ap_dot_bp: __m512i,
+    ap_dot_br: __m512i,
+    ar_dot_bp: __m512i,
+    ar_dot_br: __m512i,
+}
+
+impl ResidualDotComponents512 {
+    #[target_feature(enable = "avx512f")]
+    #[inline]
+    unsafe fn new() -> Self {
+        Self {
+            ap_dot_bp: _mm512_set1_epi32(0),
+            ap_dot_br: _mm512_set1_epi32(0),
+            ar_dot_bp: _mm512_set1_epi32(0),
+            ar_dot_br: _mm512_set1_epi32(0),
+        }
+    }
+
+    #[target_feature(enable = "avx512f")]
+    #[inline]
+    unsafe fn into_components(self) -> ResidualDotComponents {
+        ResidualDotComponents {
+            ap_dot_bp: _mm512_reduce_add_epi32(self.ap_dot_bp) as u32,
+            ap_dot_br: _mm512_reduce_add_epi32(self.ap_dot_br) as u32,
+            ar_dot_bp: _mm512_reduce_add_epi32(self.ar_dot_bp) as u32,
+            ar_dot_br: _mm512_reduce_add_epi32(self.ar_dot_br) as u32,
+        }
+    }
+}
+
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni")]
 pub unsafe fn residual_dot_unnormalized_avx512<const B: usize>(
     query: (&[u8], &[u8]),
@@ -735,72 +710,41 @@ pub unsafe fn residual_dot_unnormalized_avx512<const B: usize>(
     let (query_head, query_tail) = split_residual_vector(query, primary_split, tail_split);
     let (doc_head, doc_tail) = split_residual_vector(doc, primary_split, tail_split);
 
-    // XXX have to factor out all of these loading routines, they are often shared with other fns.
     let mut dot = if !query_head.0.is_empty() {
         let mut dot = ResidualDotComponents512::new();
         match B {
             1 => {
-                let mask = _mm512_set1_epi8(0x1);
                 for i in (0..tail_split).step_by(128) {
-                    // Load 128 bits and broadcast to 512 bits, then shift right by 0, 1, 2, 3.
-                    // This will arrange each dimension into the lowest bit to align with an 8 bit query.
-                    let ap_buf = _mm512_srlv_epi64(
-                        _mm512_broadcast_i32x4(_mm_lddqu_si128(
-                            query_head.0.as_ptr().add(i / 128 * 16) as *const __m128i,
-                        )),
-                        _mm512_set_epi64(3, 3, 2, 2, 1, 1, 0, 0),
-                    );
-                    let bp_buf = _mm512_srlv_epi64(
-                        _mm512_broadcast_i32x4(_mm_lddqu_si128(
-                            doc_head.0.as_ptr().add(i / 128 * 16) as *const __m128i,
-                        )),
-                        _mm512_set_epi64(3, 3, 2, 2, 1, 1, 0, 0),
-                    );
+                    let (ap64, ap128) = unpack_u1_avx512(_mm_lddqu_si128(
+                        query_head.0.as_ptr().add(i / 128 * 16) as *const __m128i,
+                    ));
+                    let (bp64, bp128) = unpack_u1_avx512(_mm_lddqu_si128(
+                        doc_head.0.as_ptr().add(i / 128 * 16) as *const __m128i,
+                    ));
 
-                    let ap = _mm512_and_si512(ap_buf, mask);
-                    let bp = _mm512_and_si512(bp_buf, mask);
                     let ar = _mm512_loadu_epi8(query_head.1.as_ptr().add(i) as *const i8);
                     let br = _mm512_loadu_epi8(doc_head.1.as_ptr().add(i) as *const i8);
-
-                    dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, ap, bp);
-                    dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, br, ap);
-                    dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, ar, bp);
+                    dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, ap64, bp64);
+                    dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, br, ap64);
+                    dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, ar, bp64);
                     dot.ar_dot_br = mm512_dot_u8(dot.ar_dot_br, ar, br);
 
-                    let ap = _mm512_and_si512(_mm512_srli_epi64::<4>(ap_buf), mask);
-                    let bp = _mm512_and_si512(_mm512_srli_epi64::<4>(bp_buf), mask);
                     let ar = _mm512_loadu_epi8(query_head.1.as_ptr().add(i + 64) as *const i8);
                     let br = _mm512_loadu_epi8(doc_head.1.as_ptr().add(i + 64) as *const i8);
-
-                    dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, ap, bp);
-                    dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, br, ap);
-                    dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, ar, bp);
+                    dot.ap_dot_bp = _mm512_dpbusd_epi32(dot.ap_dot_bp, ap128, bp128);
+                    dot.ap_dot_br = _mm512_dpbusd_epi32(dot.ap_dot_br, br, ap128);
+                    dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, ar, bp128);
                     dot.ar_dot_br = mm512_dot_u8(dot.ar_dot_br, ar, br);
                 }
-
-                dot.into_lvq2_dot()
             }
             2 => {
-                let mask = _mm512_set1_epi8(0x3);
                 for i in (0..tail_split).step_by(64) {
-                    let ap = _mm512_and_si512(
-                        mask,
-                        _mm512_srlv_epi64(
-                            _mm512_broadcast_i32x4(_mm_lddqu_si128(
-                                query_head.0.as_ptr().add(i / 64 * 16) as *const __m128i,
-                            )),
-                            _mm512_set_epi64(6, 6, 4, 4, 2, 2, 0, 0),
-                        ),
-                    );
-                    let bp = _mm512_and_si512(
-                        mask,
-                        _mm512_srlv_epi64(
-                            _mm512_broadcast_i32x4(_mm_lddqu_si128(
-                                doc_head.0.as_ptr().add(i / 64 * 16) as *const __m128i,
-                            )),
-                            _mm512_set_epi64(6, 6, 4, 4, 2, 2, 0, 0),
-                        ),
-                    );
+                    let ap = unpack_u2_avx512(_mm_lddqu_si128(
+                        query_head.0.as_ptr().add(i / 64 * 16) as *const __m128i,
+                    ));
+                    let bp = unpack_u2_avx512(_mm_lddqu_si128(
+                        doc_head.0.as_ptr().add(i / 64 * 16) as *const __m128i,
+                    ));
                     let ar = _mm512_loadu_epi8(query_head.1.as_ptr().add(i) as *const i8);
                     let br = _mm512_loadu_epi8(doc_head.1.as_ptr().add(i) as *const i8);
 
@@ -809,35 +753,19 @@ pub unsafe fn residual_dot_unnormalized_avx512<const B: usize>(
                     dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, ar, bp);
                     dot.ar_dot_br = mm512_dot_u8(dot.ar_dot_br, ar, br);
                 }
-                dot.into_lvq2_dot()
             }
             4 => {
-                let mask = _mm512_set1_epi8(0xf);
                 for i in (0..tail_split).step_by(64) {
                     // Load 128 for 32 dim or 256 bits for 64 dim.
                     let load_mask = u8::MAX >> (8 - (tail_split - i).min(64) / 16);
-                    let mut ap = _mm512_maskz_loadu_epi64(
+                    let ap = unpack_u4_avx512(_mm512_maskz_loadu_epi64(
                         load_mask,
                         query_head.0.as_ptr().add(i / 2) as *const i64,
-                    );
-                    ap = _mm512_and_si512(
-                        _mm512_srlv_epi64(
-                            _mm512_shuffle_i64x2::<0b0101_0000>(ap, ap),
-                            _mm512_set_epi64(4, 4, 0, 0, 4, 4, 0, 0),
-                        ),
-                        mask,
-                    );
-                    let mut bp = _mm512_maskz_loadu_epi64(
+                    ));
+                    let bp = unpack_u4_avx512(_mm512_maskz_loadu_epi64(
                         load_mask,
                         doc_head.0.as_ptr().add(i / 2) as *const i64,
-                    );
-                    bp = _mm512_and_si512(
-                        _mm512_srlv_epi64(
-                            _mm512_shuffle_i64x2::<0b0101_0000>(bp, bp),
-                            _mm512_set_epi64(4, 4, 0, 0, 4, 4, 0, 0),
-                        ),
-                        mask,
-                    );
+                    ));
                     let residual_load_mask = u64::MAX >> (64 - (tail_split - i).min(64));
                     let ar = _mm512_maskz_loadu_epi8(
                         residual_load_mask,
@@ -853,7 +781,6 @@ pub unsafe fn residual_dot_unnormalized_avx512<const B: usize>(
                     dot.ar_dot_bp = _mm512_dpbusd_epi32(dot.ar_dot_bp, ar, bp);
                     dot.ar_dot_br = mm512_dot_u8(dot.ar_dot_br, ar, br);
                 }
-                dot.into_lvq2_dot()
             }
             8 => {
                 // XXX try going to 64? might be faster.
@@ -881,10 +808,10 @@ pub unsafe fn residual_dot_unnormalized_avx512<const B: usize>(
                     dot.ar_dot_bp = _mm512_dpwssd_epi32(dot.ar_dot_bp, ar, bp);
                     dot.ar_dot_br = _mm512_dpwssd_epi32(dot.ar_dot_br, ar, br);
                 }
-                dot.into_lvq2_dot()
             }
             _ => unreachable!(),
         }
+        dot.into_components()
     } else {
         ResidualDotComponents::default()
     };
@@ -960,4 +887,45 @@ unsafe fn mm512_dot_u8(dot: __m512i, a: __m512i, b: __m512i) -> __m512i {
     let (b_lo, b_hi) = (_mm512_unpacklo_epi8(b, zero), _mm512_unpackhi_epi8(b, zero));
     let dot = _mm512_dpwssd_epi32(dot, a_lo, b_lo);
     _mm512_dpwssd_epi32(dot, a_hi, b_hi)
+}
+
+/// Unpack 128 bits of u1 input as 128 bytes with 1 dimension per byte.
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn unpack_u1_avx512(v: __m128i) -> (__m512i, __m512i) {
+    // Broadcast the 128 bit to all lanes in the 512 bit register.
+    let b = _mm512_broadcast_i32x4(v);
+    // Shift each 128 bit lane to the right to expose bits [0, 1, 2, 3]
+    let shifted = _mm512_srlv_epi64(b, _mm512_set_epi64(3, 3, 2, 2, 1, 1, 0, 0));
+    // Shift one copy of the register right by 4 to expose bits [4, 5, 6, 7].
+    // Then mask both outputs to the lowest byte.
+    let mask = _mm512_set1_epi8(1);
+    (
+        _mm512_and_si512(shifted, mask),
+        _mm512_and_si512(_mm512_srli_epi64::<4>(shifted), mask),
+    )
+}
+
+/// Unpack 128 bits of u2 input as 64 bytes with 1 dimension per byte.
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn unpack_u2_avx512(v: __m128i) -> __m512i {
+    // Broadcast the 128 bit to all lanes in the 512 bit register.
+    let b = _mm512_broadcast_i32x4(v);
+    // Shift each 128 bit lane to the right to expose bits [0, 2, 4, 6]
+    let shifted = _mm512_srlv_epi64(b, _mm512_set_epi64(6, 6, 4, 4, 2, 2, 0, 0));
+    // Mask each dimensio ndown to 2 bits.
+    _mm512_and_si512(shifted, _mm512_set1_epi8(3))
+}
+
+/// Unpack 256 bits of u4 input (passed as 512) as 64 bytes with 1 dimension per byte.
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn unpack_u4_avx512(v: __m512i) -> __m512i {
+    // Broadcast to place the low 128 bits end-to-end as 256, do the same with the next 128.
+    let b = _mm512_shuffle_i64x2::<0b0101_0000>(v, v);
+    // Shift each 128 bit lane right [0, 4, 0, 4] to align the low nibbles correctly.
+    let shifted = _mm512_srlv_epi64(b, _mm512_set_epi64(4, 4, 0, 0, 4, 4, 0, 0));
+    // Mask each dimension down to 4 bits.
+    _mm512_and_si512(shifted, _mm512_set1_epi8(0xf))
 }

@@ -307,7 +307,7 @@ fn dot_unnormalized_uint_symmetric<const B: usize>(
         #[cfg(target_arch = "aarch64")]
         InstructionSet::Neon => aarch64::dot_u8::<B>(a.data, b.data),
         #[cfg(target_arch = "x86_64")]
-        InstructionSet::Avx512 => unsafe { x86_64::dot_u8::<B>(a.data, b.data) },
+        InstructionSet::Avx512 => unsafe { x86_64::dot_u8_avx512::<B>(a.data, b.data) },
     };
     correct_dot_uint(dot, dim, &a.terms, &b.terms)
 }

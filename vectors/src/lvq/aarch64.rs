@@ -763,11 +763,8 @@ pub fn residual_dot_unnormalized<const B: usize>(
     query: (&[u8], &[u8]),
     doc: (&[u8], &[u8]),
 ) -> ResidualDotComponents {
-    let tail_split = query.1.len() & !(packing::block_dim(B) - 1);
-    let primary_split = packing::byte_len(tail_split, B);
-
-    let (query_head, query_tail) = split_residual_vector(query, primary_split, tail_split);
-    let (doc_head, doc_tail) = split_residual_vector(doc, primary_split, tail_split);
+    let (_, query_head, query_tail) = TurboResidualVector::<B>::split_vector_tail(query);
+    let (_, doc_head, doc_tail) = TurboResidualVector::<B>::split_vector_tail(doc);
 
     let mut dot = if !query_head.0.is_empty() {
         match B {
@@ -818,16 +815,6 @@ pub fn residual_dot_unnormalized<const B: usize>(
     }
 
     dot
-}
-
-fn split_residual_vector<'a>(
-    v: (&'a [u8], &'a [u8]),
-    primary_split: usize,
-    residual_split: usize,
-) -> ((&'a [u8], &'a [u8]), (&'a [u8], &'a [u8])) {
-    let primary = v.0.split_at(primary_split);
-    let residual = v.1.split_at(residual_split);
-    ((primary.0, residual.0), (primary.1, residual.1))
 }
 
 #[inline(always)]

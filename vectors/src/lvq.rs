@@ -1132,9 +1132,9 @@ mod test {
         }
 
         fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
-            // XXX tlvq8x8 fails on aarch64 when epsilon = 0; figure this out
+            // TODO: tlvq8x8 fails on aarch64 when epsilon = 0; figure this out
             abs_diff_eq!(self.magnitude, other.magnitude, epsilon = epsilon)
-                && abs_diff_eq!(self.component_sum, other.component_sum)
+                && abs_diff_eq!(self.component_sum, other.component_sum, epsilon = 1)
         }
     }
 

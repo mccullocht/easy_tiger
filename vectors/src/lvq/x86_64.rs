@@ -14,9 +14,10 @@ use std::arch::x86_64::{
     _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps,
     _mm512_min_ps, _mm512_mul_ps, _mm512_or_si512, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
     _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
-    _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_i64x2,
-    _mm512_sll_epi32, _mm512_sll_epi64, _mm512_srli_epi16, _mm512_srli_epi32, _mm512_srli_epi64,
-    _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi16, _mm512_set1_epi32, _mm512_set1_ps,
+    _mm512_shuffle_i64x2, _mm512_sll_epi32, _mm512_sll_epi64, _mm512_srli_epi16, _mm512_srli_epi32,
+    _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8,
+    _mm512_unpacklo_epi8,
 };
 
 use crate::lvq::{
@@ -703,11 +704,8 @@ pub unsafe fn residual_dot_unnormalized_avx512<const B: usize>(
     query: (&[u8], &[u8]),
     doc: (&[u8], &[u8]),
 ) -> ResidualDotComponents {
-    let tail_split = query.1.len() & !(packing::block_dim(B) - 1);
-    let primary_split = packing::byte_len(tail_split, B);
-
-    let (query_head, query_tail) = split_residual_vector(query, primary_split, tail_split);
-    let (doc_head, doc_tail) = split_residual_vector(doc, primary_split, tail_split);
+    let (tail_split, query_head, query_tail) = TurboResidualVector::<B>::split_vector_tail(query);
+    let (_, doc_head, doc_tail) = TurboResidualVector::<B>::split_vector_tail(doc);
 
     let mut dot = if !query_head.0.is_empty() {
         let mut dot = ResidualDotComponents512::new();
@@ -822,16 +820,6 @@ pub unsafe fn residual_dot_unnormalized_avx512<const B: usize>(
     dot
 }
 
-fn split_residual_vector<'a>(
-    v: (&'a [u8], &'a [u8]),
-    primary_split: usize,
-    residual_split: usize,
-) -> ((&'a [u8], &'a [u8]), (&'a [u8], &'a [u8])) {
-    let primary = v.0.split_at(primary_split);
-    let residual = v.1.split_at(residual_split);
-    ((primary.0, residual.0), (primary.1, residual.1))
-}
-
 struct VectorEncodeTermsAvx512 {
     lower: __m512,
     upper: __m512,
@@ -886,11 +874,11 @@ unsafe fn mm512_dot_u8(dot: __m512i, a: __m512i, b: __m512i) -> __m512i {
     // u8 dot product. This unpack does not produce a linear dimension order but it doesn't matter
     // here because our unpacks match and dot product is a summation.
     let (a_lo, a_hi) = (
-        _mm512_and_si512(a, _mm512_set1_epi8(-1)),
+        _mm512_and_si512(a, _mm512_set1_epi16(0xff)),
         _mm512_srli_epi16::<8>(a),
     );
     let (b_lo, b_hi) = (
-        _mm512_and_si512(b, _mm512_set1_epi8(-1)),
+        _mm512_and_si512(b, _mm512_set1_epi16(0xff)),
         _mm512_srli_epi16::<8>(b),
     );
     let dot = _mm512_dpwssd_epi32(dot, a_lo, b_lo);

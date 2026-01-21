@@ -623,7 +623,21 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
             },
         )
     }
+
+    /// Splits (primary, residual) vector bytes into head and tail pairs.
+    /// The head contains full 16 byte blocks, while the tail contains the remaining bytes.
+    /// Returns the dimension chosen for the split in addition to the head and tail pairs.
+    fn split_vector_tail<'b>(
+        vector: ResidualVectorBytes<'b>,
+    ) -> (usize, ResidualVectorBytes<'b>, ResidualVectorBytes<'b>) {
+        let tail_split = vector.1.len() & !(packing::block_dim(B) - 1);
+        let primary = vector.0.split_at(packing::byte_len(tail_split, B));
+        let residual = vector.1.split_at(tail_split);
+        (tail_split, (primary.0, residual.0), (primary.1, residual.1))
+    }
 }
+
+type ResidualVectorBytes<'b> = (&'b [u8], &'b [u8]);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct VectorEncodeTerms {
@@ -936,12 +950,12 @@ impl<const B: usize> QueryVectorDistance for TurboResidualFastQueryDistance<B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
         let dot_uint = match self.inst {
-            InstructionSet::Scalar => scalar::dot_u8::<B>(&self.query, &vector.primary.data),
+            InstructionSet::Scalar => scalar::dot_u8::<B>(&self.query, vector.primary.data),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::dot_u8::<B>(&self.query, &vector.primary.data),
+            InstructionSet::Neon => aarch64::dot_u8::<B>(&self.query, vector.primary.data),
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                x86_64::dot_u8_avx512::<B>(&self.query, &vector.primary.data)
+                x86_64::dot_u8_avx512::<B>(&self.query, vector.primary.data)
             },
         };
         dot_unnormalized_to_distance(

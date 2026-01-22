@@ -2,7 +2,11 @@
 
 #![allow(dead_code)]
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats};
+use super::{
+    LAMBDA, MINIMUM_MSE_GRID, RESIDUAL_BITS, ResidualDotComponents, TurboPrimaryVector,
+    TurboResidualVector, VectorEncodeTerms, VectorStats,
+    packing::{TurboPacker, TurboUnpacker},
+};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let (min, max, mean, variance, dot) = vector.iter().copied().enumerate().fold(
@@ -100,66 +104,65 @@ pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: us
     (1.0 - LAMBDA as f64) * xe * xe / norm_sq + LAMBDA as f64 * e
 }
 
-pub fn lvq1_quantize_and_pack<const B: usize>(
-    v: &[f32],
-    lower: f32,
-    upper: f32,
+pub fn primary_quantize_and_pack<const B: usize>(
+    vector: &[f32],
+    terms: VectorEncodeTerms,
     out: &mut [u8],
 ) -> u32 {
-    let delta_inv = ((1 << B) - 1) as f32 / (upper - lower);
-    let mut component_sum = 0u32;
-    super::packing::pack_iter::<B>(
-        v.iter().copied().map(|x| {
-            let q = ((x.clamp(lower, upper) - lower) * delta_inv).round() as u8;
-            component_sum += u32::from(q);
-            q
-        }),
-        out,
-    );
-    component_sum
+    let mut packer = TurboPacker::<B>::new(out);
+    vector
+        .iter()
+        .map(|&v| {
+            let q =
+                ((v.clamp(terms.lower, terms.upper) - terms.lower) * terms.delta_inv).round() as u8;
+            packer.push(q);
+            u32::from(q)
+        })
+        .sum()
 }
 
-pub fn lvq1_decode<const B: usize>(v: &PrimaryVector<B>, out: &mut [f32]) {
-    for (d, o) in v.f32_iter().zip(out.iter_mut()) {
-        *o = d;
+pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
+    for (q, o) in TurboUnpacker::<B>::new(vector.rep.data).zip(out.iter_mut()) {
+        *o = (q as f32).mul_add(vector.rep.terms.delta, vector.rep.terms.lower);
     }
 }
 
-pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
-    v: &[f32],
-    lower: f32,
-    upper: f32,
+pub fn residual_quantize_and_pack<const B: usize>(
+    vector: &[f32],
+    primary_terms: VectorEncodeTerms,
+    residual_terms: VectorEncodeTerms,
+    primary_delta: f32,
     primary: &mut [u8],
-    residual_interval: f32,
     residual: &mut [u8],
 ) -> (u32, u32) {
-    let delta = (upper - lower) / ((1 << B1) - 1) as f32;
-    let delta_inv = ((1 << B1) - 1) as f32 / (upper - lower);
-    let res_lower = -residual_interval / 2.0;
-    let res_upper = residual_interval / 2.0;
-    let res_delta_inv = ((1 << B2) - 1) as f32 / residual_interval;
-    let mut p_component_sum = 0u32;
-    let mut r_component_sum = 0u32;
-    super::packing::pack_iter2::<B1, B2>(
-        v.iter().copied().map(|x| {
-            let q = ((x.clamp(lower, upper) - lower) * delta_inv).round() as u8;
-            p_component_sum += u32::from(q);
-            // After producing the primary value, calculate the error produced and quantize that
-            // value based on the delta between primary items.
-            let res = x - (q as f32).mul_add(delta, lower);
-            let r = ((res.clamp(res_lower, res_upper) - res_lower) * res_delta_inv).round() as u8;
-            r_component_sum += u32::from(r);
-            (q, r)
-        }),
-        primary,
-        residual,
-    );
-    (p_component_sum, r_component_sum)
+    let mut primary_packer = TurboPacker::<B>::new(primary);
+    let mut residual_packer = TurboPacker::<RESIDUAL_BITS>::new(residual);
+    vector
+        .iter()
+        .map(|&v| {
+            let p = ((v.clamp(primary_terms.lower, primary_terms.upper) - primary_terms.lower)
+                * primary_terms.delta_inv)
+                .round() as u8;
+            primary_packer.push(p);
+            // After producing the primary value, calculate the residual between the original value
+            // and the dequantized value and quantize that.
+            let res = v - (p as f32).mul_add(primary_delta, primary_terms.lower);
+            let r = ((res.clamp(residual_terms.lower, residual_terms.upper) - residual_terms.lower)
+                * residual_terms.delta_inv)
+                .round() as u8;
+            residual_packer.push(r);
+            (u32::from(p), u32::from(r))
+        })
+        .fold((0, 0), |(psum, rsum), (p, r)| (psum + p, rsum + r))
 }
 
-pub fn lvq2_decode<const B1: usize, const B2: usize>(v: &TwoLevelVector<B1, B2>, out: &mut [f32]) {
-    for (d, o) in v.f32_iter().zip(out.iter_mut()) {
-        *o = d;
+pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {
+    for ((p, r), o) in TurboUnpacker::<B>::new(vector.primary.data)
+        .zip(vector.residual.data.iter().copied())
+        .zip(out.iter_mut())
+    {
+        *o = (p as f32).mul_add(vector.primary.terms.delta, vector.primary.terms.lower)
+            + (r as f32).mul_add(vector.residual.terms.delta, vector.residual.terms.lower);
     }
 }
 
@@ -170,6 +173,11 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
         .zip(b.iter().copied())
         .map(|(a, b)| match B {
             1 => (a & b).count_ones(),
+            2 => {
+                let a = (a & 0x3, (a >> 2) & 0x3, (a >> 4) & 0x3, a >> 6);
+                let b = (b & 0x3, (b >> 2) & 0x3, (b >> 4) & 0x3, b >> 6);
+                (a.0 * b.0 + a.1 * b.1 + a.2 * b.2 + a.3 * b.3).into()
+            }
             4 => {
                 let a = [a & 0xf, a >> 4];
                 let b = [b & 0xf, b >> 4];
@@ -182,49 +190,37 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
 }
 
 #[inline]
-pub fn dot_residual_u8<const B1: usize, const B2: usize>(
-    ap: &[u8],
-    ar: &[u8],
-    bp: &[u8],
-    br: &[u8],
-) -> super::LVQ2Dot {
-    super::packing::unpack_iter::<B1>(ap)
-        .zip(super::packing::unpack_iter::<B2>(ar))
-        .zip(super::packing::unpack_iter::<B1>(bp).zip(super::packing::unpack_iter::<B2>(br)))
-        .fold(
-            super::LVQ2Dot::default(),
-            |mut acc, ((ap, ar), (bp, br))| {
-                acc.ap_dot_bp += ap as u32 * bp as u32;
-                acc.ap_dot_br += ap as u32 * br as u32;
-                acc.ar_dot_bp += ar as u32 * bp as u32;
-                acc.ar_dot_br += ar as u32 * br as u32;
-                acc
-            },
-        )
+pub fn primary_query8_dot_unnormalized<const B: usize>(
+    query: &[u8],
+    doc: &TurboPrimaryVector<'_, B>,
+) -> u32 {
+    query
+        .iter()
+        .zip(TurboUnpacker::<B>::new(doc.rep.data))
+        .map(|(&q, d)| q as u32 * d as u32)
+        .sum::<u32>()
 }
 
 #[inline]
-pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
-    query
-        .iter()
-        .zip(
-            super::packing::unpack_iter::<B>(doc.v.data)
-                .map(|q| q as f32 * doc.v.terms.delta + doc.v.terms.lower),
-        )
-        .map(|(q, d)| *q * d)
-        .sum::<f32>()
-        .into()
-}
-
-#[inline]
-pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
-    query: &[f32],
-    doc: &TwoLevelVector<'_, B1, B2>,
-) -> f64 {
-    query
-        .iter()
-        .zip(doc.f32_iter())
-        .map(|(q, d)| *q * d)
-        .sum::<f32>()
-        .into()
+pub fn residual_dot_unnormalized<const B: usize>(
+    query: (&[u8], &[u8]),
+    doc: (&[u8], &[u8]),
+) -> ResidualDotComponents {
+    TurboUnpacker::<B>::new(query.0)
+        .zip(query.1.iter().copied())
+        .zip(TurboUnpacker::<B>::new(doc.0).zip(doc.1.iter().copied()))
+        .map(|((qp, qr), (dp, dr))| ResidualDotComponents {
+            ap_dot_bp: qp as u32 * dp as u32,
+            ap_dot_br: qp as u32 * dr as u32,
+            ar_dot_bp: qr as u32 * dp as u32,
+            ar_dot_br: qr as u32 * dr as u32,
+        })
+        .fold(ResidualDotComponents::default(), |acc, dim| {
+            ResidualDotComponents {
+                ap_dot_bp: acc.ap_dot_bp + dim.ap_dot_bp,
+                ap_dot_br: acc.ap_dot_br + dim.ap_dot_br,
+                ar_dot_bp: acc.ar_dot_bp + dim.ar_dot_bp,
+                ar_dot_br: acc.ar_dot_br + dim.ar_dot_br,
+            }
+        })
 }

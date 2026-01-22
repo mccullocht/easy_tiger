@@ -191,7 +191,7 @@ impl<'a> CentroidAssignmentUpdater<'a> {
     /// Returns true if `key` is for the primary assigned for `record_id`.
     pub fn is_primary(&mut self, key: PostingKey) -> Result<bool> {
         if self.replica_count <= 1 {
-            return Ok(true);
+            Ok(true)
         } else {
             self.assignments_cursor
                 .seek_exact(key.record_id)

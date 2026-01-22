@@ -19,13 +19,136 @@ use crate::{
     },
 };
 
+use std::ops::{Add, AddAssign};
+
+/// Statistics collected during a centroid merge operation.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MergeStats {
+    /// Number of vectors that were in the merged centroid.
+    pub moved_vectors: usize,
+}
+
+impl Add for MergeStats {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            moved_vectors: self.moved_vectors + rhs.moved_vectors,
+        }
+    }
+}
+
+impl AddAssign for MergeStats {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+/// Statistics collected during a centroid split operation.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SplitStats {
+    /// Number of vectors in the centroid being split.
+    pub moved_vectors: usize,
+    /// Number of vectors where we had to search the head index again to find a new assigned centroid.
+    pub searches: usize,
+    /// The number of nearby vectors we examine for reassignment.
+    pub nearby_seen: usize,
+    /// The number of nearby vectors that were reassigned to a new centroid.
+    pub nearby_moved: usize,
+}
+
+impl Add for SplitStats {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            moved_vectors: self.moved_vectors + rhs.moved_vectors,
+            searches: self.searches + rhs.searches,
+            nearby_seen: self.nearby_seen + rhs.nearby_seen,
+            nearby_moved: self.nearby_moved + rhs.nearby_moved,
+        }
+    }
+}
+
+impl AddAssign for SplitStats {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+/// Statistics collected during a rebalance operation.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RebalanceStats {
+    pub merged: usize,
+    pub merge_stats: MergeStats,
+    pub split: usize,
+    pub split_stats: SplitStats,
+}
+
+impl Add for RebalanceStats {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            merged: self.merged + rhs.merged,
+            merge_stats: self.merge_stats + rhs.merge_stats,
+            split: self.split + rhs.split,
+            split_stats: self.split_stats + rhs.split_stats,
+        }
+    }
+}
+
+impl AddAssign for RebalanceStats {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+impl Add<MergeStats> for RebalanceStats {
+    type Output = Self;
+
+    fn add(self, rhs: MergeStats) -> Self::Output {
+        Self {
+            merged: self.merged + 1,
+            merge_stats: self.merge_stats + rhs,
+            split: self.split,
+            split_stats: self.split_stats,
+        }
+    }
+}
+
+impl AddAssign<MergeStats> for RebalanceStats {
+    fn add_assign(&mut self, rhs: MergeStats) {
+        *self = *self + rhs;
+    }
+}
+
+impl Add<SplitStats> for RebalanceStats {
+    type Output = Self;
+
+    fn add(self, rhs: SplitStats) -> Self::Output {
+        Self {
+            merged: self.merged,
+            merge_stats: self.merge_stats,
+            split: self.split + 1,
+            split_stats: self.split_stats + rhs,
+        }
+    }
+}
+
+impl AddAssign<SplitStats> for RebalanceStats {
+    fn add_assign(&mut self, rhs: SplitStats) {
+        *self = *self + rhs;
+    }
+}
+
 /// Remove `centroid_id` and merge each of its vectors into the next closest centroid.
 pub fn merge_centroid(
     index: &TableIndex,
     head_index: &SessionGraphVectorIndex,
     centroid_id: usize,
     len: usize,
-) -> Result<()> {
+) -> Result<MergeStats> {
     // Collect all of the vectors for the centroid to merge.
     let mut posting_cursor = head_index
         .session()
@@ -54,7 +177,7 @@ pub fn merge_centroid(
             .session()
             .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
             .remove(centroid_id as u32)?;
-        return Ok(());
+        return Ok(MergeStats::default());
     }
 
     // TODO: run the required searches in parallel. WiredTiger sessions will make it challenging
@@ -65,7 +188,9 @@ pub fn merge_centroid(
     let mut float_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
     let mut searcher = GraphSearcher::new(index.config().head_search_params);
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
+
     posting_cursor.reset()?;
+    let removed_vectors = vectors.len();
     for (record_id, vector) in vectors {
         coder.decode_to(&vector, &mut float_vector);
         // TODO: seed the search with the existing assignments for this record; reduce budget.
@@ -97,7 +222,9 @@ pub fn merge_centroid(
         .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
         .remove(centroid_id as u32)?;
 
-    Ok(())
+    Ok(MergeStats {
+        moved_vectors: removed_vectors,
+    })
 }
 
 /// Split `centroid_id` in two, creating a `next_centroid_id`.
@@ -110,9 +237,13 @@ pub fn split_centroid(
     target_centroid_ids: (usize, usize),
     len: usize,
     rng: &mut impl Rng,
-) -> Result<()> {
-    // XXX something is really rotten in this method, the stats are clearly drifting from the index
-    // itself because we are attempting to split centroids that are too small.
+) -> Result<SplitStats> {
+    assert_eq!(
+        index.config().replica_count,
+        1,
+        "rebalance only implemented for replica count 1"
+    );
+
     let mut posting_cursor = head_index
         .session()
         .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
@@ -178,11 +309,14 @@ pub fn split_centroid(
     let c0_dist_fn = posting_format.query_vector_distance_f32(original_centroid, similarity);
     let c1_dist_fn = posting_format.query_vector_distance_f32(&centroids[0], similarity);
     let c2_dist_fn = posting_format.query_vector_distance_f32(&centroids[1], similarity);
+    let mut searches = 0;
+    let moved_vectors = vectors.len();
     for (record_id, vector) in vectors {
         let c0_dist = c0_dist_fn.distance(&vector);
         let c1_dist = c1_dist_fn.distance(&vector);
         let c2_dist = c2_dist_fn.distance(&vector);
         let new_assignment = if c0_dist <= c1_dist && c0_dist <= c2_dist {
+            searches += 1;
             posting_coder.decode_to(&vector, &mut scratch_vector);
             let mut candidates = searcher.search(&scratch_vector, head_index)?;
             candidates.truncate(index.config().replica_count * 4);
@@ -224,6 +358,8 @@ pub fn split_centroid(
         )?;
     }
 
+    let mut nearby_seen = 0;
+    let mut nearby_moved = 0;
     // For a list of nearby centroids, examine all vectors and reassign them if they are closer
     // to one of the new centroids than they are to the current centroid.
     // TODO: process nearby centroids in parallel.
@@ -251,6 +387,7 @@ pub fn split_centroid(
             if !assignment_updater.is_primary(key)? {
                 continue;
             }
+            nearby_seen += 1;
 
             // If one of the candidates (c1 or c2) is closer than the current centroid then we will
             // move the vector. This is trivial if there is a single replica, otherwise we may need
@@ -268,8 +405,8 @@ pub fn split_centroid(
             };
 
             let new_assignment = if index.config().replica_count > 1 {
-                // XXX this doesn't include the new centroids _at all_.
-                posting_coder.decode_to(&vector, &mut scratch_vector);
+                searches += 1;
+                posting_coder.decode_to(vector, &mut scratch_vector);
                 let candidates = searcher.search(&scratch_vector, head_index)?;
                 select_centroids(
                     index.config().replica_selection,
@@ -281,6 +418,8 @@ pub fn split_centroid(
             } else {
                 CentroidAssignment::new(assigned_centroid_id, &[])
             };
+            nearby_moved += 1;
+
             let old_assignment =
                 assignment_updater.update(key.record_id, new_assignment.to_formatted_ref())?;
             move_postings(
@@ -299,7 +438,12 @@ pub fn split_centroid(
         .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
         .remove(centroid_id as u32)?;
 
-    Ok(())
+    Ok(SplitStats {
+        moved_vectors,
+        searches,
+        nearby_seen,
+        nearby_moved,
+    })
 }
 
 /// Remove all the vectors from `centroid_id` using `cursor` and return them.
@@ -332,11 +476,6 @@ fn move_postings(
         .iter()
         .map(|(_, id)| id)
         .collect::<BTreeSet<_>>();
-    // XXX I split 1798
-    // XXX i process nearby 1796
-    // XXX old={1796,1798}
-    // XXX new={1796,1801}
-    // XXX now i try to delete 1798 but that fails because it's been drained.
     for to_remove in old_assignment
         .difference(&new_assignment)
         .map(|&c| original_key.with_centroid_id(c))
@@ -350,7 +489,7 @@ fn move_postings(
                     Err(e)
                 }
             })
-            .expect(&format!("failed to remove posting {to_remove:?}"));
+            .expect("failed to remove posting");
     }
     for to_add in new_assignment
         .difference(&old_assignment)

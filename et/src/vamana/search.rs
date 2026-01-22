@@ -129,12 +129,14 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         )?;
 
         println!(
-            "queries {} avg duration {:0.6}s max duration {:0.6}s  avg candidates {:.2} avg visited {:.2}",
+            "queries {} avg duration {:0.6}s max duration {:0.6}s  avg candidates {:.2} avg added {:.2} avg visited {:.2} avg filtered {:.2}",
             stats.count,
             stats.total_duration.as_secs_f64() / stats.count as f64,
             stats.max_duration.as_secs_f64(),
             stats.total_graph_stats.candidates as f64 / stats.count as f64,
+            stats.total_graph_stats.candidates_added as f64 / stats.count as f64,
             stats.total_graph_stats.visited as f64 / stats.count as f64,
+            stats.total_graph_stats.filtered as f64 / stats.count as f64,
         );
 
         let wt_stats = WiredTigerConnectionStats::try_from(&connection)?;

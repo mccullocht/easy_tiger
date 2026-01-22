@@ -3,19 +3,22 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::arch::aarch64::{
-    float32x4_t, uint8x16_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32, vaddq_f64, vaddq_u16,
-    vaddvq_f32, vaddvq_u16, vaddvq_u64, vand_u8, vand_u32, vandq_u8, vcntq_u8, vcombine_u8,
-    vcombine_u32, vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32,
-    vdup_n_u8, vdup_n_u32, vdupq_n_f32, vdupq_n_f64, vdupq_n_u16, vextq_f64, vfmaq_f32, vfmaq_f64,
-    vget_low_f32, vget_low_u16, vgetq_lane_f64, vld1_s8, vld1_s32, vld1_u8, vld1q_f32, vld1q_s8,
-    vld1q_s16, vld1q_s32, vld1q_s64, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32,
-    vmovl_high_u16, vmovl_u8, vmovl_u16, vmovn_high_u16, vmovn_high_u32, vmovn_u16, vmovn_u32,
-    vmulq_f32, vmulq_f64, vpaddlq_u8, vpaddlq_u16, vpaddlq_u32, vqtbl1q_u8, vreinterpretq_u8_u32,
-    vreinterpretq_u32_u8, vrndaq_f32, vshl_u8, vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64,
-    vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
+    float32x4_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32,
+    vaddq_f64, vaddq_u16, vaddvq_f32, vandq_u8, vandq_u32, vcntq_u8, vcvt_f64_f32,
+    vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdupq_n_f32, vdupq_n_f64,
+    vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64, vfmaq_f32, vfmaq_f64,
+    vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32,
+    vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8,
+    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8, vshrq_n_u32, vst1q_f32,
+    vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, PrimaryVector, TwoLevelVector, VectorStats, packing};
+use crate::lvq::{
+    RESIDUAL_BITS, ResidualDotComponents, TURBO_BLOCK_SIZE, TurboPrimaryVector,
+    TurboResidualVector, VectorDecodeTerms, VectorEncodeTerms, scalar,
+};
+
+use super::{LAMBDA, MINIMUM_MSE_GRID, VectorStats, packing};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let tail_split = vector.len() & !3;
@@ -224,342 +227,361 @@ fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize)
     (1.0 - LAMBDA as f64) * xe as f64 * xe as f64 / norm_sq + LAMBDA as f64 * e as f64
 }
 
-pub fn lvq1_quantize_and_pack<const B: usize>(
-    v: &[f32],
-    lower: f32,
-    upper: f32,
+pub fn primary_quantize_and_pack<const B: usize>(
+    vector: &[f32],
+    terms: VectorEncodeTerms,
     out: &mut [u8],
 ) -> u32 {
-    let delta = (upper - lower) / ((1 << B) - 1) as f32;
-
-    let tail_split = v.len() & !15;
-    let (head, tail) = out.split_at_mut(packing::byte_len(tail_split, B));
-    let component_sum = if tail_split > 0 {
+    let tail_split = vector.len() & !(packing::block_dim(B) - 1);
+    assert!(tail_split.is_multiple_of(16));
+    let (vector_head, vector_tail) = vector.split_at(tail_split);
+    let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
+    let mut component_sum = 0u32;
+    if !vector_head.is_empty() {
         unsafe {
-            let lowerv = vdupq_n_f32(lower);
-            let upperv = vdupq_n_f32(upper);
-            let deltav = vdupq_n_f32(delta.recip());
-            let mut component_sumv = 0u32;
+            let terms = NeonVectorEncodeTerms::from_terms(&terms);
+            let shuffle_mask = vld1q_u8(
+                [
+                    0u8, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
+                ]
+                .as_ptr(),
+            );
+            let mut block = 0usize;
+            let mut shift = 0i8;
+            let mut d = vdupq_n_u8(0);
             for i in (0..tail_split).step_by(16) {
-                // Load and quantize 16 values.
-                let qa = quantize4(vld1q_f32(v.as_ptr().add(i)), lowerv, upperv, deltav);
-                let qb = quantize4(vld1q_f32(v.as_ptr().add(i + 4)), lowerv, upperv, deltav);
-                let qc = quantize4(vld1q_f32(v.as_ptr().add(i + 8)), lowerv, upperv, deltav);
-                let qd = quantize4(vld1q_f32(v.as_ptr().add(i + 12)), lowerv, upperv, deltav);
+                let qa = quantize4(vld1q_f32(vector_head.as_ptr().add(i)), &terms);
+                let qb = quantize4(vld1q_f32(vector_head.as_ptr().add(i + 4)), &terms);
+                let qc = quantize4(vld1q_f32(vector_head.as_ptr().add(i + 8)), &terms);
+                let qd = quantize4(vld1q_f32(vector_head.as_ptr().add(i + 12)), &terms);
 
-                // Reduce to a single byte per dimension.
-                let qabcd = pack_to_byte(qa, qb, qc, qd);
-                component_sumv += u32::from(vaddlvq_u8(qabcd));
+                let qabcd = vqtbl4q_u8(
+                    uint8x16x4_t(
+                        vreinterpretq_u8_u32(qa),
+                        vreinterpretq_u8_u32(qb),
+                        vreinterpretq_u8_u32(qc),
+                        vreinterpretq_u8_u32(qd),
+                    ),
+                    shuffle_mask,
+                );
+                component_sum += u32::from(vaddlvq_u8(qabcd));
 
-                match B {
-                    1 => pack1(i, qabcd, head),
-                    4 => pack4(i, qabcd, head),
-                    8 => pack8(i, qabcd, head),
-                    _ => unimplemented!(),
-                };
+                d = vorrq_u8(d, vshlq_u8(qabcd, vdupq_n_s8(shift)));
+                shift += B as i8;
+                if shift == 8 {
+                    vst1q_u8(out_head.as_mut_ptr().add(block * 16), d);
+                    d = vdupq_n_u8(0);
+                    shift = 0;
+                    block += 1;
+                }
             }
-            component_sumv
         }
-    } else {
-        0
-    };
-
-    if tail_split < v.len() {
-        component_sum
-            + super::scalar::lvq1_quantize_and_pack::<B>(&v[tail_split..], lower, upper, tail)
-    } else {
-        component_sum
     }
+
+    if !vector_tail.is_empty() {
+        component_sum += scalar::primary_quantize_and_pack::<B>(vector_tail, terms, out_tail);
+    }
+    component_sum
 }
 
-pub fn lvq1_decode<const B: usize>(v: &PrimaryVector<B>, out: &mut [f32]) {
-    let tail_split = out.len() & !7;
-    let (in_head, in_tail) = v.v.data.split_at(packing::byte_len(tail_split, B));
+pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
+    let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
     let (out_head, out_tail) = out.split_at_mut(tail_split);
 
-    // TODO: consider unrolling more, since up to 4 independent accumulators seems to help.
-    if !in_head.is_empty() {
+    if !in_head.rep.data.is_empty() {
         unsafe {
-            let converter = LVQ1F32Converter::from_vector(v);
-            for i in (0..tail_split).step_by(8) {
-                let d = unpack::<B>(i, in_head);
-                vst1q_f32(out_head.as_mut_ptr().add(i), converter.unpacked_to_f32(d.0));
+            let lower = vdupq_n_f32(vector.rep.terms.lower);
+            let delta = vdupq_n_f32(vector.rep.terms.delta);
+            let mut expander = TLVQExpander32::<B>::new(in_head.rep.data.as_ptr());
+            for i in (0..tail_split).step_by(16) {
+                let [d0, d1, d2, d3] = expander.next();
+                vst1q_f32(out_head.as_mut_ptr().add(i), vfmaq_f32(lower, d0, delta));
                 vst1q_f32(
                     out_head.as_mut_ptr().add(i + 4),
-                    converter.unpacked_to_f32(d.1),
+                    vfmaq_f32(lower, d1, delta),
+                );
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 8),
+                    vfmaq_f32(lower, d2, delta),
+                );
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 12),
+                    vfmaq_f32(lower, d3, delta),
                 );
             }
         }
     }
 
-    if !in_tail.is_empty() {
-        for (d, o) in v
-            .f32_iter()
-            .skip(tail_split)
-            .zip(out_tail.iter_mut().skip(tail_split))
-        {
-            *o = d;
-        }
+    if !in_tail.rep.data.is_empty() {
+        scalar::primary_decode::<B>(in_tail, out_tail);
     }
 }
 
-pub fn lvq2_quantize_and_pack<const B1: usize, const B2: usize>(
-    v: &[f32],
-    lower: f32,
-    upper: f32,
-    primary: &mut [u8],
-    residual_interval: f32,
-    residual: &mut [u8],
+pub fn residual_quantize_and_pack<const B: usize>(
+    vector: &[f32],
+    primary_terms: VectorEncodeTerms,
+    residual_terms: VectorEncodeTerms,
+    primary_delta: f32,
+    primary_out: &mut [u8],
+    residual_out: &mut [u8],
 ) -> (u32, u32) {
-    let delta = (upper - lower) / ((1 << B1) - 1) as f32;
-    let delta_inv = ((1 << B1) - 1) as f32 / (upper - lower);
-    let res_lower = -residual_interval / 2.0;
-    let res_upper = residual_interval / 2.0;
-    let res_delta_inv = ((1 << B2) - 1) as f32 / residual_interval;
-
-    let tail_split = v.len() & !15;
-    let (head_primary, tail_primary) = primary.split_at_mut(packing::byte_len(tail_split, B1));
-    let (head_residual, tail_residual) = residual.split_at_mut(packing::byte_len(tail_split, B2));
-    let (p_component_sum, r_component_sum) = if tail_split > 0 {
+    let tail_split = vector.len() & !(packing::block_dim(B) - 1);
+    assert!(tail_split.is_multiple_of(16));
+    let (vector_head, vector_tail) = vector.split_at(tail_split);
+    let (primary_out_head, primary_out_tail) =
+        primary_out.split_at_mut(packing::byte_len(tail_split, B));
+    let (residual_out_head, residual_out_tail) = residual_out.split_at_mut(tail_split);
+    let mut primary_component_sum = 0u32;
+    let mut residual_component_sum = 0u32;
+    if !vector_head.is_empty() {
         unsafe {
-            let lowerv = vdupq_n_f32(lower);
-            let upperv = vdupq_n_f32(upper);
-            let deltav = vdupq_n_f32(delta);
-            let delta_inv = vdupq_n_f32(delta_inv);
-            let res_lowerv = vdupq_n_f32(res_lower);
-            let res_upperv = vdupq_n_f32(res_upper);
-            let res_delta_inv = vdupq_n_f32(res_delta_inv);
-            let mut p_component_sum = 0u32;
-            let mut r_component_sum = 0u32;
+            let primary_terms = NeonVectorEncodeTerms::from_terms(&primary_terms);
+            let primary_delta = vdupq_n_f32(primary_delta);
+            let residual_terms = NeonVectorEncodeTerms::from_terms(&residual_terms);
+
+            let shuffle_mask = vld1q_u8(
+                [
+                    0u8, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
+                ]
+                .as_ptr(),
+            );
+            let mut block = 0usize;
+            let mut shift = 0i8;
+            let mut d = vdupq_n_u8(0);
             for i in (0..tail_split).step_by(16) {
-                // Load and quantize 16 values, primary and residual
-                let a = vld1q_f32(v.as_ptr().add(i));
-                let qa = quantize4(a, lowerv, upperv, delta_inv);
-                let ra = quantize_residual4(
-                    a,
-                    qa,
-                    lowerv,
-                    deltav,
-                    res_lowerv,
-                    res_upperv,
-                    res_delta_inv,
+                let (pa, ra) = quantize4_residual(
+                    vld1q_f32(vector_head.as_ptr().add(i)),
+                    &primary_terms,
+                    primary_delta,
+                    &residual_terms,
+                );
+                let (pb, rb) = quantize4_residual(
+                    vld1q_f32(vector_head.as_ptr().add(i + 4)),
+                    &primary_terms,
+                    primary_delta,
+                    &residual_terms,
+                );
+                let (pc, rc) = quantize4_residual(
+                    vld1q_f32(vector_head.as_ptr().add(i + 8)),
+                    &primary_terms,
+                    primary_delta,
+                    &residual_terms,
+                );
+                let (pd, rd) = quantize4_residual(
+                    vld1q_f32(vector_head.as_ptr().add(i + 12)),
+                    &primary_terms,
+                    primary_delta,
+                    &residual_terms,
                 );
 
-                let b = vld1q_f32(v.as_ptr().add(i + 4));
-                let qb = quantize4(b, lowerv, upperv, delta_inv);
-                let rb = quantize_residual4(
-                    b,
-                    qb,
-                    lowerv,
-                    deltav,
-                    res_lowerv,
-                    res_upperv,
-                    res_delta_inv,
+                let pabcd = vqtbl4q_u8(
+                    uint8x16x4_t(
+                        vreinterpretq_u8_u32(pa),
+                        vreinterpretq_u8_u32(pb),
+                        vreinterpretq_u8_u32(pc),
+                        vreinterpretq_u8_u32(pd),
+                    ),
+                    shuffle_mask,
                 );
+                primary_component_sum += u32::from(vaddlvq_u8(pabcd));
 
-                let c = vld1q_f32(v.as_ptr().add(i + 8));
-                let qc = quantize4(c, lowerv, upperv, delta_inv);
-                let rc = quantize_residual4(
-                    c,
-                    qc,
-                    lowerv,
-                    deltav,
-                    res_lowerv,
-                    res_upperv,
-                    res_delta_inv,
+                d = vorrq_u8(d, vshlq_u8(pabcd, vdupq_n_s8(shift)));
+                shift += B as i8;
+                if shift == 8 {
+                    vst1q_u8(primary_out_head.as_mut_ptr().add(block * 16), d);
+                    d = vdupq_n_u8(0);
+                    shift = 0;
+                    block += 1;
+                }
+
+                let rabcd = vqtbl4q_u8(
+                    uint8x16x4_t(
+                        vreinterpretq_u8_u32(ra),
+                        vreinterpretq_u8_u32(rb),
+                        vreinterpretq_u8_u32(rc),
+                        vreinterpretq_u8_u32(rd),
+                    ),
+                    shuffle_mask,
                 );
-
-                let d = vld1q_f32(v.as_ptr().add(i + 12));
-                let qd = quantize4(d, lowerv, upperv, delta_inv);
-                let rd = quantize_residual4(
-                    d,
-                    qd,
-                    lowerv,
-                    deltav,
-                    res_lowerv,
-                    res_upperv,
-                    res_delta_inv,
-                );
-
-                // Reduce to a single byte per dimension, sum, and pack.
-                let qabcd = pack_to_byte(qa, qb, qc, qd);
-                p_component_sum += u32::from(vaddlvq_u8(qabcd));
-                match B1 {
-                    1 => pack1(i, qabcd, head_primary),
-                    4 => pack4(i, qabcd, head_primary),
-                    8 => pack8(i, qabcd, head_primary),
-                    _ => unimplemented!(),
-                };
-
-                // Reduce to a single byte per dimension and pack.
-                let rabcd = pack_to_byte(ra, rb, rc, rd);
-                r_component_sum += u32::from(vaddlvq_u8(rabcd));
-                match B2 {
-                    1 => pack1(i, rabcd, head_residual),
-                    4 => pack4(i, rabcd, head_residual),
-                    8 => pack8(i, rabcd, head_residual),
-                    _ => unimplemented!(),
-                };
+                residual_component_sum += u32::from(vaddlvq_u8(rabcd));
+                vst1q_u8(residual_out_head.as_mut_ptr().add(i), rabcd);
             }
-            (p_component_sum, r_component_sum)
         }
-    } else {
-        (0, 0)
-    };
-
-    if tail_split < v.len() {
-        let (p, r) = super::scalar::lvq2_quantize_and_pack::<B1, B2>(
-            &v[tail_split..],
-            lower,
-            upper,
-            tail_primary,
-            residual_interval,
-            tail_residual,
-        );
-        (p_component_sum + p, r_component_sum + r)
-    } else {
-        (p_component_sum, r_component_sum)
     }
+
+    if !vector_tail.is_empty() {
+        let (tail_primary_sum, tail_residual_sum) = scalar::residual_quantize_and_pack::<B>(
+            vector_tail,
+            primary_terms,
+            residual_terms,
+            primary_delta,
+            primary_out_tail,
+            residual_out_tail,
+        );
+        primary_component_sum += tail_primary_sum;
+        residual_component_sum += tail_residual_sum;
+    }
+    (primary_component_sum, residual_component_sum)
 }
 
-pub fn lvq2_decode<const B1: usize, const B2: usize>(
-    v: &TwoLevelVector<'_, B1, B2>,
-    out: &mut [f32],
-) {
-    let tail_split = out.len() & !7;
-
-    let (in_l1_head, _) = v.primary.v.data.split_at(packing::byte_len(tail_split, B1));
-    let (in_l2_head, _) = v.residual.data.split_at(packing::byte_len(tail_split, B2));
+pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {
+    let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
     let (out_head, out_tail) = out.split_at_mut(tail_split);
 
-    if !in_l1_head.is_empty() {
+    if !in_head.primary.data.is_empty() {
         unsafe {
-            let converter = LVQ2F32Converter::from_vector(v);
-            for i in (0..tail_split).step_by(8) {
-                let d = unpack_lvq2::<B1, B2>(i, in_l1_head, in_l2_head);
-                vst1q_f32(out_head.as_mut_ptr().add(i), converter.unpacked_to_f32(d.0));
+            let primary_terms = NeonVectorDecodeTerms::from_terms(&in_head.primary.terms);
+            let residual_terms = NeonVectorDecodeTerms::from_terms(&in_head.residual.terms);
+            let mut primary_expander = TLVQExpander32::<B>::new(in_head.primary.data.as_ptr());
+            let mut residual_expander =
+                TLVQExpander32::<RESIDUAL_BITS>::new(in_head.residual.data.as_ptr());
+            for i in (0..tail_split).step_by(16) {
+                let [pa, pb, pc, pd] = primary_expander.next();
+                let [ra, rb, rc, rd] = residual_expander.next();
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i),
+                    dequantize4_residual(pa, ra, &primary_terms, &residual_terms),
+                );
                 vst1q_f32(
                     out_head.as_mut_ptr().add(i + 4),
-                    converter.unpacked_to_f32(d.1),
+                    dequantize4_residual(pb, rb, &primary_terms, &residual_terms),
+                );
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 8),
+                    dequantize4_residual(pc, rc, &primary_terms, &residual_terms),
+                );
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i + 12),
+                    dequantize4_residual(pd, rd, &primary_terms, &residual_terms),
                 );
             }
         }
     }
 
-    if !out_tail.is_empty() {
-        for (d, o) in v
-            .f32_iter()
-            .skip(tail_split)
-            .zip(out_tail.iter_mut().skip(tail_split))
-        {
-            *o = d;
-        }
+    if !in_tail.primary.data.is_empty() {
+        scalar::residual_decode::<B>(&in_tail, out_tail);
     }
 }
 
 #[inline(always)]
-unsafe fn quantize4(
-    v: float32x4_t,
+unsafe fn dequantize4_residual(
+    primary: float32x4_t,
+    residual: float32x4_t,
+    primary_terms: &NeonVectorDecodeTerms,
+    residual_terms: &NeonVectorDecodeTerms,
+) -> float32x4_t {
+    vaddq_f32(
+        vfmaq_f32(primary_terms.lower, primary, primary_terms.delta),
+        vfmaq_f32(residual_terms.lower, residual, residual_terms.delta),
+    )
+}
+
+struct NeonVectorEncodeTerms {
     lower: float32x4_t,
     upper: float32x4_t,
     delta_inv: float32x4_t,
-) -> uint32x4_t {
-    vcvtaq_u32_f32(vmulq_f32(vsubq_f32(vminq_f32(v, upper), lower), delta_inv))
 }
 
-#[inline(always)]
-unsafe fn quantize_residual4(
-    v: float32x4_t,
-    q: uint32x4_t,
+impl NeonVectorEncodeTerms {
+    #[inline(always)]
+    unsafe fn new(lower: f32, upper: f32, delta_inv: f32) -> Self {
+        Self {
+            lower: vdupq_n_f32(lower),
+            upper: vdupq_n_f32(upper),
+            delta_inv: vdupq_n_f32(delta_inv),
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn from_terms(terms: &VectorEncodeTerms) -> Self {
+        Self::new(terms.lower, terms.upper, terms.delta_inv)
+    }
+}
+
+struct NeonVectorDecodeTerms {
     lower: float32x4_t,
     delta: float32x4_t,
-    res_lower: float32x4_t,
-    res_upper: float32x4_t,
-    res_delta: float32x4_t,
-) -> uint32x4_t {
-    let q = vfmaq_f32(lower, vcvtq_f32_u32(q), delta);
-    let res = vsubq_f32(v, q);
-    quantize4(res, res_lower, res_upper, res_delta)
+}
+
+impl NeonVectorDecodeTerms {
+    #[inline(always)]
+    unsafe fn from_terms(terms: &VectorDecodeTerms) -> Self {
+        Self {
+            lower: vdupq_n_f32(terms.lower),
+            delta: vdupq_n_f32(terms.delta),
+        }
+    }
 }
 
 #[inline(always)]
-unsafe fn pack_to_byte(a: uint32x4_t, b: uint32x4_t, c: uint32x4_t, d: uint32x4_t) -> uint8x16_t {
-    let ab = vmovn_high_u32(vmovn_u32(a), b);
-    let cd = vmovn_high_u32(vmovn_u32(c), d);
-    vmovn_high_u16(vmovn_u16(ab), cd)
+unsafe fn quantize4(v: float32x4_t, terms: &NeonVectorEncodeTerms) -> uint32x4_t {
+    vcvtaq_u32_f32(vmulq_f32(
+        vsubq_f32(vminq_f32(v, terms.upper), terms.lower),
+        terms.delta_inv,
+    ))
 }
 
-/// Pack 16 scalar quantized entries into 1 bit per dimension (2 bytes) and write to out.
 #[inline(always)]
-unsafe fn pack1(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
-    // pack 2 dimensions in a single lane and widen to 16
-    let qp2abcd = vpaddlq_u8(vshlq_u8(
-        qabcd,
-        vld1q_s8([0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1].as_ptr()),
-    ));
-    let v = vaddvq_u16(vshlq_u16(
-        qp2abcd,
-        vld1q_s16([0, 2, 4, 6, 8, 10, 12, 14].as_ptr()),
-    ));
-    std::ptr::write_unaligned(out.as_mut_ptr().add(start_dim / 8) as *mut u16, v.to_le());
-}
-
-/// Pack 16 scalar quantized entries into 4 bits per dimension (8 bytes) and write to out.
-#[inline(always)]
-unsafe fn pack4(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
-    // pack 2 dimensions in a single lane with pair add and widen to 16
-    let qp2abcd = vpaddlq_u8(vshlq_u8(
-        qabcd,
-        vld1q_s8([0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4, 0, 4].as_ptr()),
-    ));
-    // pack 4 dimensions in a single lane with pair add and widen to 32.
-    let qp4abcd = vpaddlq_u16(vshlq_u16(
-        qp2abcd,
-        vld1q_s16([0, 8, 0, 8, 0, 8, 0, 8].as_ptr()),
-    ));
-    // pack 8 dimensions in a single lane with pair add and widen to 32.
-    let qp8abcd = vpaddlq_u32(vshlq_u32(qp4abcd, vld1q_s32([0, 16, 0, 16].as_ptr())));
-    let v = vaddvq_u64(vshlq_u64(qp8abcd, vld1q_s64([0, 32].as_ptr())));
-    std::ptr::write_unaligned(out.as_mut_ptr().add(start_dim / 2) as *mut u64, v.to_le());
-}
-
-/// Pack 16 scalar quantized entries into 8 bits per dimension (16 bytes) and write to out.
-#[inline(always)]
-unsafe fn pack8(start_dim: usize, qabcd: uint8x16_t, out: &mut [u8]) {
-    vst1q_u8(out.as_mut_ptr().add(start_dim), qabcd);
+unsafe fn quantize4_residual(
+    v: float32x4_t,
+    primary_terms: &NeonVectorEncodeTerms,
+    primary_delta: float32x4_t,
+    residual_terms: &NeonVectorEncodeTerms,
+) -> (uint32x4_t, uint32x4_t) {
+    let primary = quantize4(v, primary_terms);
+    let dq = vfmaq_f32(primary_terms.lower, vcvtq_f32_u32(primary), primary_delta);
+    (primary, quantize4(vsubq_f32(v, dq), residual_terms))
 }
 
 unsafe extern "C" {
+    // Symmetric dot product 2 bit
+    unsafe fn et_lvq_dot_u2(a: *const u8, b: *const u8, len: usize) -> u32;
+    // Symmetric dot product 4 bit
     unsafe fn et_lvq_dot_u4(a: *const u8, b: *const u8, len: usize) -> u32;
+    // Symmetric dot product 8 bit
     unsafe fn et_lvq_dot_u8(a: *const u8, b: *const u8, len: usize) -> u32;
-    unsafe fn et_lvq2_dot_u1_u8(
+    // Asymmetric dot product 8 bit-1 bit. len must be a multiple of 128.
+    unsafe fn et_lvq_dot_u8_u1(q: *const u8, d: *const u8, len: usize) -> u32;
+    // Asymmetric dot product 8 bit-2 bit. len must be a multiple of 64.
+    unsafe fn et_lvq_dot_u8_u2(q: *const u8, d: *const u8, len: usize) -> u32;
+    // Asymmetric dot product 8 bit-4 bit. len must be a multiple of 32.
+    unsafe fn et_lvq_dot_u8_u4(q: *const u8, d: *const u8, len: usize) -> u32;
+
+    // This function requires that len is a multiple of 128.
+    unsafe fn et_residual_dot_u1_u8(
         ap: *const u8,
         ar: *const u8,
         bp: *const u8,
         br: *const u8,
         len: usize,
-    ) -> super::LVQ2Dot;
-    unsafe fn et_lvq2_dot_u4_u4(
+    ) -> ResidualDotComponents;
+
+    // This function requires that len is a multiple of 64.
+    unsafe fn et_residual_dot_u2_u8(
         ap: *const u8,
         ar: *const u8,
         bp: *const u8,
         br: *const u8,
         len: usize,
-    ) -> super::LVQ2Dot;
-    unsafe fn et_lvq2_dot_u4_u8(
+    ) -> ResidualDotComponents;
+
+    // This function requires that len is a multiple of 32.
+    unsafe fn et_residual_dot_u4_u8(
         ap: *const u8,
         ar: *const u8,
         bp: *const u8,
         br: *const u8,
         len: usize,
-    ) -> super::LVQ2Dot;
-    unsafe fn et_lvq2_dot_u8_u8(
+    ) -> ResidualDotComponents;
+
+    // This function requires that len is a multiple of 16.
+    unsafe fn et_residual_dot_u8_u8(
         ap: *const u8,
         ar: *const u8,
         bp: *const u8,
         br: *const u8,
         len: usize,
-    ) -> super::LVQ2Dot;
+    ) -> ResidualDotComponents;
 }
 
 #[inline]
@@ -593,243 +615,217 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
             }
             dot
         },
+        2 => unsafe { et_lvq_dot_u2(a.as_ptr(), b.as_ptr(), a.len()) },
         4 => unsafe { et_lvq_dot_u4(a.as_ptr(), b.as_ptr(), a.len()) },
         8 => unsafe { et_lvq_dot_u8(a.as_ptr(), b.as_ptr(), a.len()) },
         _ => unimplemented!(),
     }
 }
 
+struct TLVQExpander32<const B: usize> {
+    start: *const u8,
+    next_block: usize,
+
+    buf: uint32x4_t,
+    mask: uint32x4_t,
+    shuffle_mask: uint8x16_t,
+
+    shuffle_mask8: [uint8x16_t; 4],
+}
+
+impl<const B: usize> TLVQExpander32<B> {
+    const SHUFFLE_MASK: [u8; 16] = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
+
+    const SHUFFLE_MASKS8: [[u8; 16]; 4] = [
+        [0, 16, 16, 16, 1, 16, 16, 16, 2, 16, 16, 16, 3, 16, 16, 16],
+        [4, 16, 16, 16, 5, 16, 16, 16, 6, 16, 16, 16, 7, 16, 16, 16],
+        [8, 16, 16, 16, 9, 16, 16, 16, 10, 16, 16, 16, 11, 16, 16, 16],
+        [
+            12, 16, 16, 16, 13, 16, 16, 16, 14, 16, 16, 16, 15, 16, 16, 16,
+        ],
+    ];
+
+    unsafe fn new(start: *const u8) -> Self {
+        let (shuffle_mask, shuffle_mask8) = unsafe {
+            match B {
+                8 => (
+                    vdupq_n_u8(0),
+                    [
+                        vld1q_u8(Self::SHUFFLE_MASKS8[0].as_ptr()),
+                        vld1q_u8(Self::SHUFFLE_MASKS8[1].as_ptr()),
+                        vld1q_u8(Self::SHUFFLE_MASKS8[2].as_ptr()),
+                        vld1q_u8(Self::SHUFFLE_MASKS8[3].as_ptr()),
+                    ],
+                ),
+                _ => (vld1q_u8(Self::SHUFFLE_MASK.as_ptr()), [vdupq_n_u8(0); 4]),
+            }
+        };
+        unsafe {
+            Self {
+                start,
+                next_block: 0,
+                buf: vdupq_n_u32(0),
+                mask: vdupq_n_u32(u32::from(u8::MAX) >> (8 - B)),
+                shuffle_mask,
+                shuffle_mask8,
+            }
+        }
+    }
+
+    unsafe fn next(&mut self) -> [float32x4_t; 4] {
+        let group = match B {
+            8 => {
+                let d = vld1q_u8(self.start.add(self.next_block * TURBO_BLOCK_SIZE));
+                [
+                    vreinterpretq_u32_u8(vqtbl1q_u8(d, self.shuffle_mask8[0])),
+                    vreinterpretq_u32_u8(vqtbl1q_u8(d, self.shuffle_mask8[1])),
+                    vreinterpretq_u32_u8(vqtbl1q_u8(d, self.shuffle_mask8[2])),
+                    vreinterpretq_u32_u8(vqtbl1q_u8(d, self.shuffle_mask8[3])),
+                ]
+            }
+            _ => {
+                let interval = 8 / B;
+                self.buf = if self.next_block.is_multiple_of(interval) {
+                    let x = vld1q_u8(
+                        self.start
+                            .add((self.next_block / interval) * TURBO_BLOCK_SIZE),
+                    );
+                    vreinterpretq_u32_u8(vqtbl1q_u8(x, self.shuffle_mask))
+                } else {
+                    shr_u32::<B>(self.buf)
+                };
+                [
+                    vandq_u32(self.buf, self.mask),
+                    vandq_u32(vshrq_n_u32::<8>(self.buf), self.mask),
+                    vandq_u32(vshrq_n_u32::<16>(self.buf), self.mask),
+                    vandq_u32(vshrq_n_u32::<24>(self.buf), self.mask),
+                ]
+            }
+        };
+        self.next_block += 1;
+        [
+            vcvtq_f32_u32(group[0]),
+            vcvtq_f32_u32(group[1]),
+            vcvtq_f32_u32(group[2]),
+            vcvtq_f32_u32(group[3]),
+        ]
+    }
+}
+
 #[inline]
-pub fn dot_residual_u8<const B1: usize, const B2: usize>(
-    ap: &[u8],
-    ar: &[u8],
-    bp: &[u8],
-    br: &[u8],
-) -> super::LVQ2Dot {
-    match (B1, B2) {
-        (1, 8) => unsafe {
-            et_lvq2_dot_u1_u8(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ar.len())
-        },
-        (4, 4) => unsafe {
-            et_lvq2_dot_u4_u4(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ap.len())
-        },
-        (4, 8) => unsafe {
-            et_lvq2_dot_u4_u8(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ar.len())
-        },
-        (8, 8) => unsafe {
-            et_lvq2_dot_u8_u8(ap.as_ptr(), ar.as_ptr(), bp.as_ptr(), br.as_ptr(), ap.len())
-        },
-        _ => super::scalar::dot_residual_u8::<B1, B2>(ap, ar, bp, br),
-    }
-}
-
-struct LVQ1F32Converter {
-    delta: float32x4_t,
-    lower: float32x4_t,
-}
-
-impl LVQ1F32Converter {
-    #[inline(always)]
-    unsafe fn from_vector<const B: usize>(vector: &PrimaryVector<'_, B>) -> Self {
-        Self {
-            delta: vdupq_n_f32(vector.v.terms.delta),
-            lower: vdupq_n_f32(vector.v.terms.lower),
-        }
+pub fn primary_query8_dot_unnormalized<const B: usize>(
+    query: &[u8],
+    doc: &TurboPrimaryVector<'_, B>,
+) -> u32 {
+    if B == 8 {
+        return unsafe { et_lvq_dot_u8(query.as_ptr(), doc.rep.data.as_ptr(), query.len()) };
     }
 
-    #[inline(always)]
-    unsafe fn unpacked_to_f32(&self, unpacked: uint32x4_t) -> float32x4_t {
-        vfmaq_f32(self.lower, self.delta, vcvtq_f32_u32(unpacked))
-    }
-}
-
-struct LVQ2F32Converter {
-    l1: LVQ1F32Converter,
-    delta: float32x4_t,
-    lower: float32x4_t,
-}
-
-impl LVQ2F32Converter {
-    #[inline(always)]
-    unsafe fn from_vector<const B1: usize, const B2: usize>(
-        vector: &TwoLevelVector<'_, B1, B2>,
-    ) -> Self {
-        Self {
-            l1: LVQ1F32Converter::from_vector(&vector.primary),
-            delta: vdupq_n_f32(vector.residual.terms.delta),
-            lower: vdupq_n_f32(vector.residual.terms.lower),
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn unpacked_to_f32(&self, unpacked: (uint32x4_t, uint32x4_t)) -> float32x4_t {
-        let l1 = self.l1.unpacked_to_f32(unpacked.0);
-        let l2 = vfmaq_f32(self.lower, self.delta, vcvtq_f32_u32(unpacked.1));
-        vaddq_f32(l1, l2)
-    }
-}
-
-/// Perform unnormalized dot product between an `f32` query and a primary lvq vector.
-pub fn lvq1_f32_dot_unnormalized<const B: usize>(query: &[f32], doc: &PrimaryVector<'_, B>) -> f64 {
-    let tail_split = query.len() & !7;
+    let (tail_split, doc_head, doc_tail) = doc.split_tail(query.len());
     let (query_head, query_tail) = query.split_at(tail_split);
-    let (doc_head, doc_tail) = doc.v.data.split_at(packing::byte_len(tail_split, B));
-
-    // TODO: consider unrolling more, since up to 4 independent accumulators seems to help.
-    let pdot = if !query_head.is_empty() {
-        unsafe {
-            let converter = LVQ1F32Converter::from_vector(doc);
-            let mut dot0 = vdupq_n_f32(0.0);
-            let mut dot1 = vdupq_n_f32(0.0);
-            for i in (0..tail_split).step_by(8) {
-                let q = (
-                    vld1q_f32(query_head.as_ptr().add(i)),
-                    vld1q_f32(query_head.as_ptr().add(i + 4)),
-                );
-                let d = unpack::<B>(i, doc_head);
-                dot0 = vfmaq_f32(dot0, q.0, converter.unpacked_to_f32(d.0));
-                dot1 = vfmaq_f32(dot1, q.1, converter.unpacked_to_f32(d.1));
-            }
-            vaddvq_f32(vaddq_f32(dot0, dot1))
+    let mut dot = if !query_head.is_empty() {
+        match B {
+            1 => unsafe {
+                et_lvq_dot_u8_u1(
+                    query_head.as_ptr(),
+                    doc_head.rep.data.as_ptr(),
+                    query_head.len(),
+                )
+            },
+            2 => unsafe {
+                et_lvq_dot_u8_u2(
+                    query_head.as_ptr(),
+                    doc_head.rep.data.as_ptr(),
+                    query_head.len(),
+                )
+            },
+            4 => unsafe {
+                et_lvq_dot_u8_u4(
+                    query_head.as_ptr(),
+                    doc_head.rep.data.as_ptr(),
+                    query_head.len(),
+                )
+            },
+            _ => unimplemented!(),
         }
     } else {
-        0.0
+        0
     };
 
-    (pdot
-        + query_tail
-            .iter()
-            .zip(
-                packing::unpack_iter::<B>(doc_tail)
-                    .map(|q| q as f32 * doc.v.terms.delta + doc.v.terms.lower),
-            )
-            .map(|(q, d)| *q * d)
-            .sum::<f32>())
-    .into()
-}
-
-pub fn lvq2_f32_dot_unnormalized<const B1: usize, const B2: usize>(
-    query: &[f32],
-    doc: &TwoLevelVector<'_, B1, B2>,
-) -> f64 {
-    let tail_split = query.len() & !7;
-
-    let (doc_l1_head, _) = doc
-        .primary
-        .v
-        .data
-        .split_at(packing::byte_len(tail_split, B1));
-    let (doc_l2_head, _) = doc
-        .residual
-        .data
-        .split_at(packing::byte_len(tail_split, B2));
-
-    let pdot = if !doc_l1_head.is_empty() {
-        unsafe {
-            let converter = LVQ2F32Converter::from_vector(doc);
-            let mut dot0 = vdupq_n_f32(0.0);
-            let mut dot1 = vdupq_n_f32(0.0);
-            for i in (0..tail_split).step_by(8) {
-                let q = (
-                    vld1q_f32(query.as_ptr().add(i)),
-                    vld1q_f32(query.as_ptr().add(i + 4)),
-                );
-                let d = unpack_lvq2::<B1, B2>(i, doc_l1_head, doc_l2_head);
-                dot0 = vfmaq_f32(dot0, q.0, converter.unpacked_to_f32(d.0));
-                dot1 = vfmaq_f32(dot1, q.1, converter.unpacked_to_f32(d.1));
-            }
-            vaddvq_f32(vaddq_f32(dot0, dot1))
-        }
-    } else {
-        0.0
-    };
-
-    if tail_split < query.len() {
-        pdot + query
-            .iter()
-            .skip(tail_split)
-            .zip(doc.f32_iter().skip(tail_split))
-            .map(|(q, d)| *q * d)
-            .sum::<f32>()
-    } else {
-        pdot
+    if !query_tail.is_empty() {
+        dot += scalar::primary_query8_dot_unnormalized::<B>(query_tail, &doc_tail);
     }
-    .into()
+    dot
 }
 
-// Unpack 8 values from a vector with N-bit dimensions starting at `start_dim`
-#[inline(always)]
-unsafe fn unpack_lvq2<const B1: usize, const B2: usize>(
-    start_dim: usize,
-    l1: &[u8],
-    l2: &[u8],
-) -> ((uint32x4_t, uint32x4_t), (uint32x4_t, uint32x4_t)) {
-    let l1 = unpack::<B1>(start_dim, l1);
-    let l2 = unpack::<B2>(start_dim, l2);
-    ((l1.0, l2.0), (l1.1, l2.1))
+#[inline]
+pub fn residual_dot_unnormalized<const B: usize>(
+    query: (&[u8], &[u8]),
+    doc: (&[u8], &[u8]),
+) -> ResidualDotComponents {
+    let (_, query_head, query_tail) = TurboResidualVector::<B>::split_vector_tail(query);
+    let (_, doc_head, doc_tail) = TurboResidualVector::<B>::split_vector_tail(doc);
+
+    let mut dot = if !query_head.0.is_empty() {
+        match B {
+            1 => unsafe {
+                et_residual_dot_u1_u8(
+                    query_head.0.as_ptr(),
+                    query_head.1.as_ptr(),
+                    doc_head.0.as_ptr(),
+                    doc_head.1.as_ptr(),
+                    query_head.1.len(),
+                )
+            },
+            2 => unsafe {
+                et_residual_dot_u2_u8(
+                    query_head.0.as_ptr(),
+                    query_head.1.as_ptr(),
+                    doc_head.0.as_ptr(),
+                    doc_head.1.as_ptr(),
+                    query_head.1.len(),
+                )
+            },
+            4 => unsafe {
+                et_residual_dot_u4_u8(
+                    query_head.0.as_ptr(),
+                    query_head.1.as_ptr(),
+                    doc_head.0.as_ptr(),
+                    doc_head.1.as_ptr(),
+                    query_head.1.len(),
+                )
+            },
+            8 => unsafe {
+                et_residual_dot_u8_u8(
+                    query_head.0.as_ptr(),
+                    query_head.1.as_ptr(),
+                    doc_head.0.as_ptr(),
+                    doc_head.1.as_ptr(),
+                    query_head.1.len(),
+                )
+            },
+            _ => scalar::residual_dot_unnormalized::<B>(query_head, doc_head),
+        }
+    } else {
+        ResidualDotComponents::default()
+    };
+
+    if !query_tail.0.is_empty() {
+        dot += scalar::residual_dot_unnormalized::<B>(query_tail, doc_tail);
+    }
+
+    dot
 }
 
-// Unpack 8 values from a vector with N-bit dimensions starting at `start_dim`
 #[inline(always)]
-unsafe fn unpack<const N: usize>(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
+unsafe fn shr_u32<const N: usize>(v: uint32x4_t) -> uint32x4_t {
     match N {
-        1 => unpack1(start_dim, vector),
-        4 => unpack4(start_dim, vector),
-        8 => unpack8(start_dim, vector),
-        _ => unimplemented!(),
+        1 => vshrq_n_u32::<1>(v),
+        2 => vshrq_n_u32::<2>(v),
+        4 => vshrq_n_u32::<4>(v),
+        8 => vshrq_n_u32::<8>(v),
+        _ => unreachable!(),
     }
-}
-
-// Unpack 8 values from a vector with 1-bit dimensions starting at `start_dim`.
-#[inline(always)]
-unsafe fn unpack1(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
-    let mut dp = vdup_n_u8(vector[start_dim / 8]);
-    dp = vand_u8(
-        vshl_u8(dp, vld1_s8([0, -1, -2, -3, -4, -5, -6, -7].as_ptr())),
-        vdup_n_u8(1),
-    );
-    let d = vcombine_u8(dp, dp);
-    (
-        vreinterpretq_u32_u8(vqtbl1q_u8(
-            d,
-            vld1q_u8([0, 16, 16, 16, 1, 16, 16, 16, 2, 16, 16, 16, 3, 16, 16, 16].as_ptr()),
-        )),
-        vreinterpretq_u32_u8(vqtbl1q_u8(
-            d,
-            vld1q_u8([4, 16, 16, 16, 5, 16, 16, 16, 6, 16, 16, 16, 7, 16, 16, 16].as_ptr()),
-        )),
-    )
-}
-
-// Unpack 8 values from a vector with 4-bit dimensions starting at `start_dim`.
-#[inline(always)]
-unsafe fn unpack4(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
-    let mut dp = vdup_n_u32(u32::from_le_bytes(std::ptr::read_unaligned(
-        vector.as_ptr().add(start_dim / 2) as *const [u8; 4],
-    )));
-    // now the value are packed in bytes in dim order [0, 2, 4, 8, 1, 3, 5, 7]
-    dp = vand_u32(
-        vshl_u32(dp, vld1_s32([0, -4].as_ptr())),
-        vdup_n_u32(0x0f0f0f0f),
-    );
-    let d = vreinterpretq_u8_u32(vcombine_u32(dp, dp));
-    (
-        vreinterpretq_u32_u8(vqtbl1q_u8(
-            d,
-            vld1q_u8([0, 16, 16, 16, 4, 16, 16, 16, 1, 16, 16, 16, 5, 16, 16, 16].as_ptr()),
-        )),
-        vreinterpretq_u32_u8(vqtbl1q_u8(
-            d,
-            vld1q_u8([2, 16, 16, 16, 6, 16, 16, 16, 3, 16, 16, 16, 7, 16, 16, 16].as_ptr()),
-        )),
-    )
-}
-
-// Unpack 8 values from a vector with 8-bit dimensions starting at `start_dim`.
-#[inline(always)]
-unsafe fn unpack8(start_dim: usize, vector: &[u8]) -> (uint32x4_t, uint32x4_t) {
-    let d = vmovl_u8(vld1_u8(vector.as_ptr().add(start_dim)));
-    (vmovl_u16(vget_low_u16(d)), vmovl_high_u16(d))
 }
 
 #[cfg(test)]

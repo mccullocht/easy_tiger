@@ -47,29 +47,20 @@ fn float16_benchmarks(c: &mut Criterion) {
     }
 }
 
-fn scaled_uniform_benchmarks(c: &mut Criterion) {
-    for format in [
-        F32VectorCoding::I4ScaledUniform,
-        F32VectorCoding::I8ScaledUniform,
-        F32VectorCoding::I16ScaledUniform,
-    ] {
-        benchmark_coding(c, format, None);
-    }
-}
-
 fn binary_benchmarks(c: &mut Criterion) {
     benchmark_coding(c, F32VectorCoding::BinaryQuantized, None);
 }
 
 fn lvq_benchmarks(c: &mut Criterion) {
     for format in [
-        F32VectorCoding::LVQ1x1,
-        F32VectorCoding::LVQ1x4,
-        F32VectorCoding::LVQ1x8,
-        F32VectorCoding::LVQ2x1x8,
-        F32VectorCoding::LVQ2x4x4,
-        F32VectorCoding::LVQ2x4x8,
-        F32VectorCoding::LVQ2x8x8,
+        F32VectorCoding::TLVQ1,
+        F32VectorCoding::TLVQ2,
+        F32VectorCoding::TLVQ4,
+        F32VectorCoding::TLVQ8,
+        F32VectorCoding::TLVQ1x8,
+        F32VectorCoding::TLVQ2x8,
+        F32VectorCoding::TLVQ4x8,
+        F32VectorCoding::TLVQ8x8,
     ] {
         benchmark_coding(c, format, None);
     }
@@ -79,7 +70,6 @@ criterion_group!(
     benches,
     float32_benchmarks,
     float16_benchmarks,
-    scaled_uniform_benchmarks,
     binary_benchmarks,
     lvq_benchmarks,
 );

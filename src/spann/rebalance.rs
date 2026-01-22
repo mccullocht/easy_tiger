@@ -238,12 +238,6 @@ pub fn split_centroid(
     len: usize,
     rng: &mut impl Rng,
 ) -> Result<SplitStats> {
-    assert_eq!(
-        index.config().replica_count,
-        1,
-        "rebalance only implemented for replica count 1"
-    );
-
     let mut posting_cursor = head_index
         .session()
         .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;

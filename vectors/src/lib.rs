@@ -99,6 +99,17 @@ pub trait VectorDistance: Send + Sync {
     /// This function is not required to be commutative and may panic if
     /// one of the inputs is misshapen.
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64;
+
+    /// Compute the distance between the `query` vector and each of the `docs` vectors, writing
+    /// the results to `out`.
+    ///
+    /// This function is not required to be commutative and may panic if one of the inputs is
+    /// misshapen. It may also panic if `docs` and `out` are not the same length.
+    fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
+        for (doc, out) in docs.iter().zip(out.iter_mut()) {
+            *out = self.distance(query, doc);
+        }
+    }
 }
 
 /// Distance function for `f32` vectors.
@@ -454,7 +465,21 @@ pub trait F32VectorCoder: Send + Sync {
 /// Compute the distance between a fixed vector provided at creation time and other vectors.
 /// This is often useful in query flows where everything references a specific point.
 pub trait QueryVectorDistance: Send + Sync {
+    /// Compute the distance between the bound query vector and `vector`.
+    ///
+    /// May panic if `vector` has an unexpected shape.
     fn distance(&self, vector: &[u8]) -> f64;
+
+    /// Compute the distance between the bound query vector and `vectors`, writing the results to
+    /// `out`.
+    ///
+    /// May panic if `vectors` and `out` are not the same length or if any of the vectors have an
+    /// unexpected shape.
+    fn bulk_distance(&self, vectors: &[&[u8]], out: &mut [f64]) {
+        for (vector, out) in vectors.iter().zip(out.iter_mut()) {
+            *out = self.distance(vector);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

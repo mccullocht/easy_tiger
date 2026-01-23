@@ -4,6 +4,7 @@ use rand::{Rng, SeedableRng};
 use vectors::{F32VectorCoding, VectorSimilarity};
 
 const DIMENSIONS: usize = 2048;
+const BULK_VECTORS: usize = 16;
 
 fn generate_test_vectors(dim: usize) -> (Vec<f32>, Vec<f32>) {
     let mut rng = rand_xoshiro::Xoroshiro128PlusPlus::seed_from_u64(0x455A_5469676572);
@@ -86,7 +87,7 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
         let x = coder.encode(&a);
         let y = coder.encode(&b);
 
-        let mut group = c.benchmark_group(encoding.to_string());
+        let mut group = c.benchmark_group(format!("{encoding}/distance"));
         group.throughput(Throughput::ElementsAndBytes {
             elements: 1,
             bytes: x.len() as u64,
@@ -99,6 +100,36 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
         let query_dist = encoding.query_vector_distance_f32(&a, sim);
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| std::hint::black_box(query_dist.distance(&y)))
+        });
+        drop(group);
+
+        let mut group = c.benchmark_group(format!("{encoding}/bulk_distance"));
+        group.throughput(Throughput::ElementsAndBytes {
+            elements: BULK_VECTORS as u64,
+            bytes: (x.len() * BULK_VECTORS) as u64,
+        });
+        let mut bulk_docs_storage = vec![];
+        bulk_docs_storage.resize_with(BULK_VECTORS, || y.clone());
+        let bulk_docs = bulk_docs_storage
+            .iter()
+            .map(|x| x.as_slice())
+            .collect::<Vec<_>>();
+        let mut bulk_out = vec![0.0; BULK_VECTORS];
+        group.bench_function(&format!("doc/{sim}"), |b| {
+            b.iter(|| {
+                std::hint::black_box({
+                    dist.bulk_distance(&x, &bulk_docs, &mut bulk_out);
+                    bulk_out[0]
+                })
+            })
+        });
+        group.bench_function(&format!("query/{sim}"), |b| {
+            b.iter(|| {
+                std::hint::black_box({
+                    query_dist.bulk_distance(&bulk_docs, &mut bulk_out);
+                    bulk_out[0]
+                })
+            })
         });
     }
 }

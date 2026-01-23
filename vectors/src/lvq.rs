@@ -511,6 +511,52 @@ impl<const B: usize> VectorDistance for TurboPrimaryDistance<B> {
 
     fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
         let query = TurboPrimaryVector::<B>::new(query).unwrap();
+        #[cfg(target_arch = "aarch64")]
+        if B == 1 {
+            let (doc_chunks, docs_rem) = docs.as_chunks::<8>();
+            let (out_chunks, out_rem) = out.as_chunks_mut::<8>();
+            unsafe {
+                use std::arch::aarch64::*;
+                for (doc_chunk, out_chunk) in doc_chunks.iter().zip(out_chunks.iter_mut()) {
+                    let doc_vecs = [
+                        TurboPrimaryVector::<B>::new(doc_chunk[0]).unwrap(),
+                        TurboPrimaryVector::<B>::new(doc_chunk[1]).unwrap(),
+                        TurboPrimaryVector::<B>::new(doc_chunk[2]).unwrap(),
+                        TurboPrimaryVector::<B>::new(doc_chunk[3]).unwrap(),
+                        TurboPrimaryVector::<B>::new(doc_chunk[4]).unwrap(),
+                        TurboPrimaryVector::<B>::new(doc_chunk[5]).unwrap(),
+                        TurboPrimaryVector::<B>::new(doc_chunk[6]).unwrap(),
+                        TurboPrimaryVector::<B>::new(doc_chunk[7]).unwrap(),
+                    ];
+
+                    let mut dots = [vdupq_n_u16(0); 8];
+
+                    for i in (0..query.rep.data.len()).step_by(16) {
+                        let q_chunk = vld1q_u8(query.rep.data.as_ptr().add(i));
+                        for i in 0..8 {
+                            dots[i] = vpadalq_u8(
+                                dots[i],
+                                vcntq_u8(vandq_u8(
+                                    q_chunk,
+                                    vld1q_u8(doc_vecs[i].rep.data.as_ptr().add(i)),
+                                )),
+                            );
+                        }
+                    }
+                    for i in 0..8 {
+                        out_chunk[i] = dot_unnormalized_to_distance(
+                            self.0,
+                            vaddvq_u32(vpaddlq_u16(dots[i])) as f64,
+                            (query.l2_norm(), doc_vecs[i].l2_norm()),
+                        );
+                    }
+                }
+            }
+            for (doc, out) in docs_rem.iter().zip(out_rem.iter_mut()) {
+                *out = self.distance_internal(&query, doc);
+            }
+            return;
+        }
         for (doc, out) in docs.iter().zip(out.iter_mut()) {
             *out = self.distance_internal(&query, doc);
         }

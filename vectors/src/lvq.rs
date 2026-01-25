@@ -491,17 +491,29 @@ impl<const B: usize> TurboPrimaryDistance<B> {
     pub fn new(similarity: VectorSimilarity) -> Self {
         Self(similarity, InstructionSet::default())
     }
-}
 
-impl<const B: usize> VectorDistance for TurboPrimaryDistance<B> {
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = TurboPrimaryVector::<B>::new(query).unwrap();
+    #[inline(always)]
+    fn distance_internal(&self, query: &TurboPrimaryVector<B>, doc: &[u8]) -> f64 {
         let doc = TurboPrimaryVector::<B>::new(doc).unwrap();
         dot_unnormalized_to_distance(
             self.0,
             dot_unnormalized_uint_symmetric::<B>(self.1, query.dim(), &query.rep, &doc.rep).into(),
             (query.l2_norm(), doc.l2_norm()),
         )
+    }
+}
+
+impl<const B: usize> VectorDistance for TurboPrimaryDistance<B> {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let query = TurboPrimaryVector::<B>::new(query).unwrap();
+        self.distance_internal(&query, doc)
+    }
+
+    fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
+        let query = TurboPrimaryVector::<B>::new(query).unwrap();
+        for (doc, out) in docs.iter().zip(out.iter_mut()) {
+            *out = self.distance_internal(&query, doc);
+        }
     }
 }
 
@@ -534,10 +546,9 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
             inst,
         }
     }
-}
 
-impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
-    fn distance(&self, vector: &[u8]) -> f64 {
+    #[inline(always)]
+    fn distance_internal(&self, vector: &[u8]) -> f64 {
         let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
         let uint8_dot = match self.inst {
             InstructionSet::Scalar => {
@@ -558,6 +569,18 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
             dot.into(),
             (self.l2_norm, vector.l2_norm()),
         )
+    }
+}
+
+impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.distance_internal(vector)
+    }
+
+    fn bulk_distance(&self, vectors: &[&[u8]], out: &mut [f64]) {
+        for (vector, out) in vectors.iter().zip(out.iter_mut()) {
+            *out = self.distance_internal(vector);
+        }
     }
 }
 

@@ -162,14 +162,7 @@ pub fn merge_centroid(
     );
 
     // Remove the centroid from the graph.
-    // XXX remove this.
-    delete_vector(centroid_id as i64, head_index).or_else(|e| {
-        if e == Error::not_found_error() && vectors.is_empty() {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })?;
+    delete_vector(centroid_id as i64, head_index)?;
 
     // If the centroid is already empty then there is nothing to do.
     if vectors.is_empty() {

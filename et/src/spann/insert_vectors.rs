@@ -52,11 +52,6 @@ pub fn insert_vectors(
     args: InsertVectorsArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    assert!(
-        index.config().replica_count == 1,
-        "insert_vectors only implemented for replica count 1"
-    );
-
     let session = connection.open_session()?;
     let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
 

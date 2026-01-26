@@ -371,9 +371,6 @@ pub fn split_centroid(
         posting_cursor.set_bounds(PostingKey::centroid_range(nearby_centroid_id))?;
         // SAFETY: memory remains valid because this path does not commit or rollback txns.
         while let Some(r) = unsafe { posting_cursor.next_unsafe() } {
-            // TODO: handle replica_count > 1. If this is the primary and it changes we should
-            // search again to generate new candidates. If this is a secondary then we should just
-            // leave it alone.
             let (key, vector) = r?;
 
             // Do not move postings that are not assigned to the original centroid; we're not

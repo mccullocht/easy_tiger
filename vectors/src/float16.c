@@ -88,7 +88,7 @@ HIDDEN float32x4_t load_tail_f32x4(const float *v, size_t len) {
   return vld1q_f32(&tail[0]);
 }
 
-__attribute__((target("+fp16,+f16fml"))) EXPORT float
+__attribute__((target("+fp16"))) EXPORT float
 et_dot_f16_f16(const __fp16 *a, const __fp16 *b, size_t len) {
   float32x4_t dot0 = vdupq_n_f32(0.0);
   float32x4_t dot1 = vdupq_n_f32(0.0);
@@ -163,7 +163,7 @@ et_dot_f32_f16(const float *a, const __fp16 *b, size_t len) {
   return vaddvq_f32(dot0);
 }
 
-__attribute__((target("+fp16,+f16fml"))) EXPORT float
+__attribute__((target("+fp16"))) EXPORT float
 et_l2_f16_f16(const __fp16 *a, const __fp16 *b, size_t len) {
   float32x4_t sum0 = vdupq_n_f32(0.0);
   float32x4_t sum1 = vdupq_n_f32(0.0);

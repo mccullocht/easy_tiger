@@ -314,10 +314,13 @@ fn dot_unnormalized_uint_symmetric<const B: usize>(
 
 /// Correct the dot product of two integer vectors using the stored vector terms.
 fn correct_dot_uint(dot: u32, dim: usize, a: &VectorDecodeTerms, b: &VectorDecodeTerms) -> f32 {
-    dot as f32 * a.delta * b.delta
-        + a.component_sum as f32 * a.delta * b.lower
-        + b.component_sum as f32 * b.delta * a.lower
-        + a.lower * b.lower * dim as f32
+    // Note that any dot value larger than (2 << 24) will be rounded when converted to f32 which can
+    // cause vector comparisons a <-> b and b <-> to return slightly different results. To prevent
+    // this convert dot to f64 before including it in the correction.
+    (dot as f64 * (a.delta * b.delta) as f64
+        + (a.component_sum as f32 * a.delta * b.lower
+            + b.component_sum as f32 * b.delta * a.lower
+            + a.lower * b.lower * dim as f32) as f64) as f32
 }
 
 /// The four components of a residual dot product.

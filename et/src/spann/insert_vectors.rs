@@ -52,11 +52,6 @@ pub fn insert_vectors(
     args: InsertVectorsArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    assert!(
-        index.config().replica_count == 1,
-        "insert_vectors only implemented for replica count 1"
-    );
-
     let session = connection.open_session()?;
     let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
 
@@ -115,6 +110,7 @@ pub fn insert_vectors(
         rebalance_stats += rebalance(&index, &head_index, &mut rng, &main_progress)?;
     }
 
+    main_progress.set_message("inserting vectors");
     main_progress.finish();
 
     println!("Merged:         {:10}", rebalance_stats.merged);
@@ -247,15 +243,17 @@ fn rebalance(
         match (summary.below_exemplar(), summary.above_exemplar()) {
             (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
                 progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
-                rebalance_stats += merge_centroid(&index, &head_index, to_merge)?;
+                rebalance_stats += merge_centroid(&index, &head_index, to_merge, len)?;
             }
             (_, Some((to_split, len))) => {
                 progress.set_message(format!("split {to_split} of {len} ({iter})"));
                 // TODO: split_centroid should allow splitting into multiple centroids.
                 // This requires allocating an arbitrary number of ids and accommodating these
                 // additional ids in the split of the centroid and updating of nearby centroids.
-                let next_id = stats.available_centroid_ids().next().unwrap();
-                rebalance_stats += split_centroid(&index, &head_index, to_split, next_id, rng)?;
+                let mut it = stats.available_centroid_ids();
+                let target_centroid_ids = (it.next().unwrap(), it.next().unwrap());
+                rebalance_stats +=
+                    split_centroid(&index, &head_index, to_split, target_centroid_ids, len, rng)?;
             }
             _ => break,
         }

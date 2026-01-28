@@ -437,6 +437,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         let stats = VectorStats::from(vector);
         let mut header = PrimaryVectorHeader::from(stats);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
+        println!("stats: {stats:?} header {header:?}");
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
         header.component_sum = match inst {
@@ -1129,11 +1130,11 @@ mod packing {
 mod test {
     use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
 
-    use crate::F32VectorCoder;
     use crate::lvq::{
         PrimaryVectorHeader, ResidualVectorHeader, TurboPrimaryCoder, TurboResidualCoder,
         VectorStats,
     };
+    use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity};
 
     impl AbsDiffEq for PrimaryVectorHeader {
         type Epsilon = f32;
@@ -1573,5 +1574,26 @@ mod test {
             .as_ref(),
             epsilon = 0.0001
         );
+    }
+
+    #[test]
+    fn null_vector_decode() {
+        let vector = vec![0.0f32; 256];
+        for coding in [
+            F32VectorCoding::TLVQ1,
+            F32VectorCoding::TLVQ2,
+            F32VectorCoding::TLVQ4,
+            F32VectorCoding::TLVQ8,
+            F32VectorCoding::TLVQ1x8,
+            F32VectorCoding::TLVQ2x8,
+            F32VectorCoding::TLVQ4x8,
+            F32VectorCoding::TLVQ8x8,
+        ] {
+            let coder = coding.new_coder(VectorSimilarity::Dot);
+            let encoded = coder.encode(&vector);
+            let decoded = coder.decode(&encoded);
+            println!("encoding {coding:?}");
+            assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
+        }
     }
 }

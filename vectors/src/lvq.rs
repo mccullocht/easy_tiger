@@ -125,6 +125,11 @@ impl From<&[f32]> for VectorStats {
 }
 
 fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+    // There are several spots in the optimization routine where we may divide by the input range
+    // and if that range is zero then it produces NaNs.
+    if stats.min == stats.max {
+        return (stats.min, stats.min + f32::MIN_POSITIVE);
+    }
     match InstructionSet::default() {
         InstructionSet::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
         #[cfg(target_arch = "aarch64")]

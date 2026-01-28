@@ -1596,4 +1596,25 @@ mod test {
             assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
         }
     }
+
+    #[test]
+    fn fill_vector_decode() {
+        let vector = vec![1.0f32; 256];
+        for coding in [
+            F32VectorCoding::TLVQ1,
+            F32VectorCoding::TLVQ2,
+            F32VectorCoding::TLVQ4,
+            F32VectorCoding::TLVQ8,
+            F32VectorCoding::TLVQ1x8,
+            F32VectorCoding::TLVQ2x8,
+            F32VectorCoding::TLVQ4x8,
+            F32VectorCoding::TLVQ8x8,
+        ] {
+            let coder = coding.new_coder(VectorSimilarity::Dot);
+            let encoded = coder.encode(&vector);
+            let decoded = coder.decode(&encoded);
+            println!("encoding {coding:?}");
+            assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
+        }
+    }
 }

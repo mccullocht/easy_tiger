@@ -5,7 +5,7 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
-        rebalance::{merge_centroid, split_centroid, BalanceSummary},
+        rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
         CentroidAssignment, PostingKey, TableIndex,
     },
     vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
@@ -52,11 +52,6 @@ pub fn insert_vectors(
     args: InsertVectorsArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    assert!(
-        index.config().replica_count == 1,
-        "insert_vectors only implemented for replica count 1"
-    );
-
     let session = connection.open_session()?;
     let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
 
@@ -97,6 +92,8 @@ pub fn insert_vectors(
     let batch_size = args.batch_size.get();
     let main_progress = progress_bar(args.count.get() - args.start, "inserting vectors");
 
+    let mut rebalance_stats = RebalanceStats::default();
+
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
 
@@ -110,7 +107,37 @@ pub fn insert_vectors(
             &main_progress,
         )?;
 
-        rebalance(&index, &head_index, &mut rng, &main_progress)?;
+        rebalance_stats += rebalance(&index, &head_index, &mut rng, &main_progress)?;
+    }
+
+    main_progress.set_message("inserting vectors");
+    main_progress.finish();
+
+    println!("Merged:         {:10}", rebalance_stats.merged);
+    if rebalance_stats.merged > 0 {
+        println!(
+            "  Moved:        {:10}",
+            rebalance_stats.merge_stats.moved_vectors
+        );
+    }
+    println!("Split:          {:10}", rebalance_stats.split);
+    if rebalance_stats.split > 0 {
+        println!(
+            "  Moved:        {:10}",
+            rebalance_stats.split_stats.moved_vectors
+        );
+        println!(
+            "  Searches:     {:10}",
+            rebalance_stats.split_stats.searches
+        );
+        println!(
+            "  Nearby seen:  {:10}",
+            rebalance_stats.split_stats.nearby_seen
+        );
+        println!(
+            "  Nearby moved: {:10}",
+            rebalance_stats.split_stats.nearby_moved
+        );
     }
 
     Ok(())
@@ -203,8 +230,9 @@ fn rebalance(
     head_index: &SessionGraphVectorIndex,
     rng: &mut impl Rng,
     progress: &ProgressBar,
-) -> Result<()> {
+) -> Result<RebalanceStats> {
     let mut iter = 1;
+    let mut rebalance_stats = RebalanceStats::default();
     loop {
         // Need a new transaction for rebalancing steps
         let txn_guard = TransactionGuard::new(head_index.session(), None)?;
@@ -215,15 +243,17 @@ fn rebalance(
         match (summary.below_exemplar(), summary.above_exemplar()) {
             (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
                 progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
-                merge_centroid(&index, &head_index, to_merge)?;
+                rebalance_stats += merge_centroid(&index, &head_index, to_merge, len)?;
             }
             (_, Some((to_split, len))) => {
                 progress.set_message(format!("split {to_split} of {len} ({iter})"));
                 // TODO: split_centroid should allow splitting into multiple centroids.
                 // This requires allocating an arbitrary number of ids and accommodating these
                 // additional ids in the split of the centroid and updating of nearby centroids.
-                let next_id = stats.available_centroid_ids().next().unwrap();
-                split_centroid(&index, &head_index, to_split, next_id, rng)?;
+                let mut it = stats.available_centroid_ids();
+                let target_centroid_ids = (it.next().unwrap(), it.next().unwrap());
+                rebalance_stats +=
+                    split_centroid(&index, &head_index, to_split, target_centroid_ids, len, rng)?;
             }
             _ => break,
         }
@@ -232,5 +262,5 @@ fn rebalance(
         iter += 1;
     }
 
-    Ok(())
+    Ok(rebalance_stats)
 }

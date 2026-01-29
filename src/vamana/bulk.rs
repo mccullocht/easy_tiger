@@ -24,6 +24,7 @@ use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use rustix::io::Errno;
 use thread_local::ThreadLocal;
+use tracing::warn;
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{session::CreateOptionsBuilder, Connection, Error, Result, Session};
 
@@ -396,12 +397,20 @@ where
         )?;
         for (i, n) in self.graph.iter().enumerate().take(self.limit) {
             let vertex = n.read().unwrap();
+            let mut edges = vertex.iter().map(Neighbor::vertex).collect::<Vec<_>>();
+            let edges_len = edges.len();
+            edges.sort_unstable();
+            edges.dedup();
+            if edges.len() != edges_len {
+                // TODO: figure out how we end up with duplicate edges.
+                warn!("vertex {i} has {} duplicate edges", edges_len - edges.len());
+            }
             stats.vertices += 1;
-            stats.edges += vertex.len();
-            if vertex.is_empty() {
+            stats.edges += edges.len();
+            if edges.is_empty() {
                 stats.unconnected += 1;
             }
-            let edges = encode_graph_vertex(vertex.iter().map(|n| n.vertex()).collect());
+            let edges = encode_graph_vertex(edges);
             cursor.insert(i as i64, &edges)?;
             progress(1);
         }

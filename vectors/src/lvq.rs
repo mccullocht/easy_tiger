@@ -442,7 +442,6 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         let stats = VectorStats::from(vector);
         let mut header = PrimaryVectorHeader::from(stats);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
-        println!("stats: {stats:?} header {header:?}");
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
         header.component_sum = match inst {
@@ -1597,7 +1596,6 @@ mod test {
             let coder = coding.new_coder(VectorSimilarity::Dot);
             let encoded = coder.encode(&vector);
             let decoded = coder.decode(&encoded);
-            println!("encoding {coding:?}");
             assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
         }
     }
@@ -1618,7 +1616,6 @@ mod test {
             let coder = coding.new_coder(VectorSimilarity::Dot);
             let encoded = coder.encode(&vector);
             let decoded = coder.decode(&encoded);
-            println!("encoding {coding:?}");
             assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
         }
     }

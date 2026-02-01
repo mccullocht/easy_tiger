@@ -176,33 +176,50 @@ pub fn merge_centroid(
 
     // Query the head index for each vector and assign a new centroid.
     let coder = index.new_posting_coder();
-    let mut float_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
-    let mut searcher = GraphSearcher::new(index.config().head_search_params);
-    let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
-
-    posting_cursor.reset()?;
     let removed_vectors = vectors.len();
-    for (record_id, vector) in vectors {
-        coder.decode_to(&vector, &mut float_vector);
-        // TODO: seed the search with the existing assignments for this record; reduce budget.
-        let candidates = searcher.search(&float_vector, head_index)?;
-        let new_assignment = select_centroids(
-            index.config().replica_selection,
-            index.config().replica_count,
-            candidates,
-            &float_vector,
-            head_index,
-        )?;
-        let old_assignment =
-            assignment_updater.update(record_id, new_assignment.to_formatted_ref())?;
+    let connection = Arc::clone(head_index.session().connection());
+    let reassignments = vectors
+        .into_par_iter()
+        .map_init(
+            || {
+                (
+                    SessionGraphVectorIndex::new(
+                        Arc::clone(index.head_config()),
+                        connection.open_session().expect("open session"),
+                    ),
+                    GraphSearcher::new(index.config().head_search_params),
+                    vec![0.0f32; index.head_config().config().dimensions.get()],
+                )
+            },
+            |(head_index, searcher, float_vector), (record_id, vector)| {
+                coder.decode_to(&vector, float_vector);
+                // TODO: seed the search with the existing assignments for this record; reduce budget.
+                let candidates = searcher.search(&float_vector, head_index)?;
+                let new_assignments = select_centroids(
+                    index.config().replica_selection,
+                    index.config().replica_count,
+                    candidates,
+                    &float_vector,
+                    head_index,
+                )?;
+                Ok((record_id, new_assignments, vector))
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
+    posting_cursor.reset()?;
+    for (record_id, new_assignments, vector) in reassignments {
+        let old_assignments =
+            assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
         move_postings(
             PostingKey {
                 centroid_id: centroid_id as u32,
                 record_id,
             },
             &vector,
-            &old_assignment,
-            &new_assignment,
+            &old_assignments,
+            &new_assignments,
             &mut posting_cursor,
         )?;
     }

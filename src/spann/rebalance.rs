@@ -195,7 +195,7 @@ pub fn merge_centroid(
                 coder.decode_to(&vector, float_vector);
                 // TODO: seed the search with the existing assignments for this record; reduce budget.
                 let candidates = searcher.search_with_filter(
-                    &float_vector,
+                    float_vector,
                     |i| i != centroid_id as i64,
                     head_index,
                 )?;
@@ -203,7 +203,7 @@ pub fn merge_centroid(
                     index.config().replica_selection,
                     index.config().replica_count,
                     candidates,
-                    &float_vector,
+                    float_vector,
                     head_index,
                 )?;
                 Ok((record_id, new_assignments, vector))

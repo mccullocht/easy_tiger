@@ -1,6 +1,7 @@
-use std::{collections::BTreeSet, num::NonZero, ops::RangeInclusive};
+use std::{collections::BTreeSet, num::NonZero, ops::RangeInclusive, sync::Arc};
 
 use rand::Rng;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tracing::warn;
 use wt_mdb::{session::Formatted, Error, Result, TypedCursor};
 
@@ -173,38 +174,56 @@ pub fn merge_centroid(
         return Ok(MergeStats::default());
     }
 
-    // TODO: run the required searches in parallel. WiredTiger sessions will make it challenging
-    // to abstract this away from the storage engine.
-
     // Query the head index for each vector and assign a new centroid.
     let coder = index.new_posting_coder();
-    let mut float_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
-    let mut searcher = GraphSearcher::new(index.config().head_search_params);
-    let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
-
-    posting_cursor.reset()?;
     let removed_vectors = vectors.len();
-    for (record_id, vector) in vectors {
-        coder.decode_to(&vector, &mut float_vector);
-        // TODO: seed the search with the existing assignments for this record; reduce budget.
-        let candidates = searcher.search(&float_vector, head_index)?;
-        let new_assignment = select_centroids(
-            index.config().replica_selection,
-            index.config().replica_count,
-            candidates,
-            &float_vector,
-            head_index,
-        )?;
-        let old_assignment =
-            assignment_updater.update(record_id, new_assignment.to_formatted_ref())?;
+    let connection = Arc::clone(head_index.session().connection());
+    let reassignments = vectors
+        .into_par_iter()
+        .map_init(
+            || {
+                (
+                    SessionGraphVectorIndex::new(
+                        Arc::clone(index.head_config()),
+                        connection.open_session().expect("open session"),
+                    ),
+                    GraphSearcher::new(index.config().head_search_params),
+                    vec![0.0f32; index.head_config().config().dimensions.get()],
+                )
+            },
+            |(head_index, searcher, float_vector), (record_id, vector)| {
+                coder.decode_to(&vector, float_vector);
+                // TODO: seed the search with the existing assignments for this record; reduce budget.
+                let candidates = searcher.search_with_filter(
+                    float_vector,
+                    |i| i != centroid_id as i64,
+                    head_index,
+                )?;
+                let new_assignments = select_centroids(
+                    index.config().replica_selection,
+                    index.config().replica_count,
+                    candidates,
+                    float_vector,
+                    head_index,
+                )?;
+                Ok((record_id, new_assignments, vector))
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
+    posting_cursor.reset()?;
+    for (record_id, new_assignments, vector) in reassignments {
+        let old_assignments =
+            assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
         move_postings(
             PostingKey {
                 centroid_id: centroid_id as u32,
                 record_id,
             },
             &vector,
-            &old_assignment,
-            &new_assignment,
+            &old_assignments,
+            &new_assignments,
             &mut posting_cursor,
         )?;
     }
@@ -290,48 +309,83 @@ pub fn split_centroid(
     upsert_vector(target_centroid_ids.0 as i64, &centroids[0], head_index)?;
     upsert_vector(target_centroid_ids.1 as i64, &centroids[1], head_index)?;
 
-    // TODO: perform searches in parallel.
-    searcher = GraphSearcher::new(index.config().head_search_params);
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
-    let c0_dist_fn = posting_format.query_vector_distance_f32(original_centroid, similarity);
-    let c1_dist_fn = posting_format.query_vector_distance_f32(&centroids[0], similarity);
-    let c2_dist_fn = posting_format.query_vector_distance_f32(&centroids[1], similarity);
+    // TODO: skip decoding if head index and posting index format are the same.
+    let c0_dist_fn = posting_format
+        .query_vector_distance_indexing(posting_coder.encode(&original_centroid), similarity);
+    let c1_dist_fn = posting_format
+        .query_vector_distance_indexing(posting_coder.encode(&centroids[0]), similarity);
+    let c2_dist_fn = posting_format
+        .query_vector_distance_indexing(posting_coder.encode(&centroids[1]), similarity);
     let mut searches = 0;
     let moved_vectors = vectors.len();
-    for (record_id, vector) in vectors {
-        let c0_dist = c0_dist_fn.distance(&vector);
-        let c1_dist = c1_dist_fn.distance(&vector);
-        let c2_dist = c2_dist_fn.distance(&vector);
-        let new_assignment = if c0_dist <= c1_dist && c0_dist <= c2_dist {
-            searches += 1;
-            posting_coder.decode_to(&vector, &mut scratch_vector);
-            let mut candidates = searcher.search(&scratch_vector, head_index)?;
-            candidates.truncate(index.config().replica_count * 4);
-            select_centroids(
-                index.config().replica_selection,
-                index.config().replica_count,
-                candidates,
-                &scratch_vector,
-                head_index,
-            )?
-        } else {
-            let updated_centroid_id = if c1_dist < c2_dist {
-                target_centroid_ids.0
-            } else {
-                target_centroid_ids.1
-            };
-            if index.config().replica_count <= 1 {
-                CentroidAssignment::new(updated_centroid_id as u32, &[])
-            } else {
-                let mut current_assignment = assignment_updater
-                    .read(record_id)
-                    .unwrap_or(Err(Error::not_found_error()))?;
-                current_assignment.replace(centroid_id as u32, updated_centroid_id as u32);
-                current_assignment
-            }
-        };
-        let old_assignment =
-            assignment_updater.update(record_id, new_assignment.to_formatted_ref())?;
+    let connection = Arc::clone(head_index.session().connection());
+    // XXX this won't observe the deletion of the head vector.
+    let split_reassignments = vectors
+        .into_par_iter()
+        .map_init(
+            || {
+                (
+                    SessionGraphVectorIndex::new(
+                        Arc::clone(index.head_config()),
+                        connection.open_session().expect("open session"),
+                    ),
+                    GraphSearcher::new(index.config().head_search_params),
+                    vec![0.0f32; index.head_config().config().dimensions.get()],
+                )
+            },
+            |(head_index, searcher, float_vector), (record_id, vector)| {
+                let mut searched = 0;
+                let c0_dist = c0_dist_fn.distance(&vector);
+                let c1_dist = c1_dist_fn.distance(&vector);
+                let c2_dist = c2_dist_fn.distance(&vector);
+                let new_assignments = if c0_dist <= c1_dist && c0_dist <= c2_dist {
+                    searched += 1;
+                    posting_coder.decode_to(&vector, float_vector);
+                    let mut candidates = searcher.search_with_filter(
+                        float_vector,
+                        |i| i != centroid_id as i64,
+                        head_index,
+                    )?;
+                    candidates.truncate(index.config().replica_count * 4);
+                    select_centroids(
+                        index.config().replica_selection,
+                        index.config().replica_count,
+                        candidates,
+                        &scratch_vector,
+                        head_index,
+                    )?
+                } else {
+                    let updated_centroid_id = if c1_dist < c2_dist {
+                        target_centroid_ids.0
+                    } else {
+                        target_centroid_ids.1
+                    };
+                    if index.config().replica_count <= 1 {
+                        CentroidAssignment::new(updated_centroid_id as u32, &[])
+                    } else {
+                        let mut cursor = head_index
+                            .session()
+                            .get_or_create_typed_cursor::<i64, CentroidAssignment>(
+                                &index.table_names.centroids,
+                            )?;
+                        let mut current_assignments = cursor
+                            .seek_exact(record_id)
+                            .unwrap_or(Err(Error::not_found_error()))?;
+                        current_assignments.replace(centroid_id as u32, updated_centroid_id as u32);
+                        current_assignments
+                    }
+                };
+
+                Ok((record_id, new_assignments, vector, searched))
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+
+    for (record_id, new_assignments, vector, searched) in split_reassignments {
+        searches += searched;
+        let old_assignments =
+            assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
 
         move_postings(
             PostingKey {
@@ -339,8 +393,8 @@ pub fn split_centroid(
                 record_id,
             },
             &vector,
-            &old_assignment,
-            &new_assignment,
+            &old_assignments,
+            &new_assignments,
             &mut posting_cursor,
         )?;
     }
@@ -349,71 +403,117 @@ pub fn split_centroid(
     let mut nearby_moved = 0;
     // For a list of nearby centroids, examine all vectors and reassign them if they are closer
     // to one of the new centroids than they are to the current centroid.
-    // TODO: process nearby centroids in parallel.
-    let mut update_posting_cursor = head_index
-        .session()
-        .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
-    for nearby_centroid_id in nearby_clusters.into_iter().map(|n| n.vertex() as u32) {
-        let nearby_centroid = head_coder.decode(
-            head_vectors
-                .get(nearby_centroid_id as i64)
-                .unwrap_or(Err(Error::not_found_error()))?,
-        );
-        let c0_dist_fn = posting_format.query_vector_distance_f32(nearby_centroid, similarity);
+    let connection = Arc::clone(head_index.session().connection());
+    let reassignments = nearby_clusters
+        .into_par_iter()
+        .map_init(
+            || {
+                (
+                    SessionGraphVectorIndex::new(
+                        Arc::clone(index.head_config()),
+                        connection.open_session().expect("open session"),
+                    ),
+                    GraphSearcher::new(index.config().head_search_params),
+                    scratch_vector.clone(),
+                )
+            },
+            |(head_index, searcher, ref mut scratch_vector), n| {
+                let nearby_centroid_id = n.vertex() as u32;
+                let mut head_vectors = head_index.high_fidelity_vectors()?;
+                let nearby_centroid = head_coder.decode(
+                    head_vectors
+                        .get(nearby_centroid_id as i64)
+                        .unwrap_or(Err(Error::not_found_error()))?,
+                );
+                let c0_dist_fn = posting_format.query_vector_distance_indexing(
+                    posting_coder.encode(&nearby_centroid),
+                    similarity,
+                );
+                let mut posting_cursor = head_index
+                    .session()
+                    .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
+                        index.postings_table_name(),
+                    )?;
+                let mut assignment_cursor = head_index
+                    .session()
+                    .get_or_create_typed_cursor::<i64, CentroidAssignment>(
+                        index.centroid_assignments_table_name(),
+                    )?;
 
-        posting_cursor.set_bounds(PostingKey::centroid_range(nearby_centroid_id))?;
-        // SAFETY: memory remains valid because this path does not commit or rollback txns.
-        while let Some(r) = unsafe { posting_cursor.next_unsafe() } {
-            let (key, vector) = r?;
+                posting_cursor.set_bounds(PostingKey::centroid_range(nearby_centroid_id))?;
+                let mut to_reassign = vec![];
+                let mut nearby_seen = 0;
+                let mut searches = 0;
+                while let Some(r) = unsafe { posting_cursor.next_unsafe() } {
+                    let (key, vector) = r?;
+                    let c0_dist = c0_dist_fn.distance(vector);
+                    let c1_dist = c1_dist_fn.distance(vector);
+                    let c2_dist = c2_dist_fn.distance(vector);
 
-            // Do not move postings that are not assigned to the original centroid; we're not
-            // willing to do this work for secondaries.
-            if !assignment_updater.is_primary(key)? {
-                continue;
-            }
-            nearby_seen += 1;
+                    // Do not move postings that are not assigned to the original centroid; we're not
+                    // willing to do this work for secondaries.
+                    if index.config().replica_count > 1
+                        && assignment_cursor
+                            .seek_exact(key.record_id)
+                            .map(|r| r.map(|a| a.primary_id != key.centroid_id))
+                            .unwrap_or(Ok(true))?
+                    {
+                        continue;
+                    }
+                    nearby_seen += 1;
 
-            // If one of the candidates (c1 or c2) is closer than the current centroid then we will
-            // move the vector. This is trivial if there is a single replica, otherwise we may need
-            // to search again to generate new candidates.
-            let c0_dist = c0_dist_fn.distance(vector);
-            let c1_dist = c1_dist_fn.distance(vector);
-            let c2_dist = c2_dist_fn.distance(vector);
+                    let assigned_centroid_id = if c1_dist < c0_dist {
+                        target_centroid_ids.0 as u32
+                    } else if c2_dist < c0_dist {
+                        target_centroid_ids.1 as u32
+                    } else {
+                        continue;
+                    };
 
-            let assigned_centroid_id = if c1_dist < c0_dist {
-                target_centroid_ids.0 as u32
-            } else if c2_dist < c0_dist {
-                target_centroid_ids.1 as u32
-            } else {
-                continue;
-            };
+                    let new_assignment = if index.config().replica_count > 1 {
+                        searches += 1;
+                        posting_coder.decode_to(vector, scratch_vector);
+                        let candidates = searcher.search_with_filter(
+                            scratch_vector,
+                            |i| i != centroid_id as i64,
+                            head_index,
+                        )?;
+                        select_centroids(
+                            index.config().replica_selection,
+                            index.config().replica_count,
+                            candidates,
+                            scratch_vector,
+                            head_index,
+                        )?
+                    } else {
+                        CentroidAssignment::new(assigned_centroid_id, &[])
+                    };
 
-            let new_assignment = if index.config().replica_count > 1 {
-                searches += 1;
-                posting_coder.decode_to(vector, &mut scratch_vector);
-                let candidates = searcher.search(&scratch_vector, head_index)?;
-                select_centroids(
-                    index.config().replica_selection,
-                    index.config().replica_count,
-                    candidates,
-                    &scratch_vector,
-                    head_index,
-                )?
-            } else {
-                CentroidAssignment::new(assigned_centroid_id, &[])
-            };
-            nearby_moved += 1;
+                    to_reassign.push((key, new_assignment, vector.to_vec()));
+                }
+                Ok((to_reassign, nearby_seen, searches))
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
 
-            let old_assignment =
-                assignment_updater.update(key.record_id, new_assignment.to_formatted_ref())?;
-            move_postings(
-                key,
-                vector,
-                &old_assignment,
-                &new_assignment,
-                &mut update_posting_cursor,
-            )?;
-        }
+    for (_, seen, searched) in reassignments.iter() {
+        nearby_seen += *seen;
+        searches += *searched;
+    }
+
+    // We do not need to deduplicate reassignments -- only primary assignments are evaluated for
+    // reassignment so no record_id will appear twice in the list.
+    posting_cursor.reset()?;
+    for (key, new_assignments, vector) in reassignments.into_iter().flat_map(|(r, _, _)| r) {
+        let old_assignments =
+            assignment_updater.update(key.record_id, new_assignments.to_formatted_ref())?;
+        nearby_moved += move_postings(
+            key,
+            &vector,
+            &old_assignments,
+            &new_assignments,
+            &mut posting_cursor,
+        )?;
     }
 
     assignment_updater.flush()?;
@@ -451,7 +551,7 @@ fn move_postings(
     old_assignment: &CentroidAssignment,
     new_assignment: &CentroidAssignment,
     posting_cursor: &mut TypedCursor<'_, PostingKey, Vec<u8>>,
-) -> Result<()> {
+) -> Result<usize> {
     let old_assignment = old_assignment
         .iter()
         .map(|(_, id)| id)
@@ -475,13 +575,15 @@ fn move_postings(
             })
             .expect("failed to remove posting");
     }
+    let mut added = 0;
     for to_add in new_assignment
         .difference(&old_assignment)
         .map(|&c| original_key.with_centroid_id(c))
     {
         posting_cursor.set(to_add, vector)?;
+        added += 1;
     }
-    Ok(())
+    Ok(added)
 }
 
 /// A summary of centroid assignment balance.

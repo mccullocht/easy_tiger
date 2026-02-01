@@ -780,11 +780,7 @@ mod test {
 
         // Search with a filter that rejects vertex 1
         let _ = searcher
-            .search_with_filter(
-                &[-0.1, -0.1, -0.1, -0.1],
-                |v| v != 1,
-                &mut index.reader(),
-            )
+            .search_with_filter(&[-0.1, -0.1, -0.1, -0.1], |v| v != 1, &mut index.reader())
             .unwrap();
 
         let stats = searcher.stats();
@@ -794,6 +790,10 @@ mod test {
         assert!(stats.candidates_added > 0);
         // We filtered out vertex 1, so if it was visited, filtered count should be > 0.
         // In this small graph, vertex 1 is likely to be visited.
-        assert!(stats.filtered >= 1, "Expected at least 1 filtered candidate, got {}", stats.filtered);
+        assert!(
+            stats.filtered >= 1,
+            "Expected at least 1 filtered candidate, got {}",
+            stats.filtered
+        );
     }
 }

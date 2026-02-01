@@ -90,7 +90,7 @@ pub fn insert_vectors(
         .map(|f| f.new_coder(similarity));
 
     let batch_size = args.batch_size.get();
-    let main_progress = progress_bar(args.count.get() - args.start, "inserting vectors");
+    let main_progress = progress_bar(args.count.get(), "inserting vectors");
 
     let mut rebalance_stats = RebalanceStats::default();
 

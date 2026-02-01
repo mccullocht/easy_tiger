@@ -194,7 +194,11 @@ pub fn merge_centroid(
             |(head_index, searcher, float_vector), (record_id, vector)| {
                 coder.decode_to(&vector, float_vector);
                 // TODO: seed the search with the existing assignments for this record; reduce budget.
-                let candidates = searcher.search(&float_vector, head_index)?;
+                let candidates = searcher.search_with_filter(
+                    &float_vector,
+                    |i| i != centroid_id as i64,
+                    head_index,
+                )?;
                 let new_assignments = select_centroids(
                     index.config().replica_selection,
                     index.config().replica_count,
@@ -316,6 +320,7 @@ pub fn split_centroid(
     let mut searches = 0;
     let moved_vectors = vectors.len();
     let connection = Arc::clone(head_index.session().connection());
+    // XXX this won't observe the deletion of the head vector.
     let split_reassignments = vectors
         .into_par_iter()
         .map_init(
@@ -337,7 +342,11 @@ pub fn split_centroid(
                 let new_assignments = if c0_dist <= c1_dist && c0_dist <= c2_dist {
                     searched += 1;
                     posting_coder.decode_to(&vector, float_vector);
-                    let mut candidates = searcher.search(float_vector, head_index)?;
+                    let mut candidates = searcher.search_with_filter(
+                        float_vector,
+                        |i| i != centroid_id as i64,
+                        head_index,
+                    )?;
                     candidates.truncate(index.config().replica_count * 4);
                     select_centroids(
                         index.config().replica_selection,
@@ -464,7 +473,11 @@ pub fn split_centroid(
                     let new_assignment = if index.config().replica_count > 1 {
                         searches += 1;
                         posting_coder.decode_to(vector, scratch_vector);
-                        let candidates = searcher.search(scratch_vector, head_index)?;
+                        let candidates = searcher.search_with_filter(
+                            scratch_vector,
+                            |i| i != centroid_id as i64,
+                            head_index,
+                        )?;
                         select_centroids(
                             index.config().replica_selection,
                             index.config().replica_count,

@@ -47,23 +47,17 @@ pub struct DistanceLossArgs {
 }
 
 // XXX state of play
-// for tlvq8 dot uncentered >> center-distance-s > center-distance-a
+// for tlvq8 dot center-distance-a >> uncentered >> center-distance-s
 //            l2 centered >> uncentered
 //   all l2 distances are less accurate than uncentered dot though. maybe a metric artifact.
-// for tlvq1 dot center-distance-s > center-distance-a > uncentered
+// for tlvq1 dot center-distance-a > center-distance-s >> uncentered
 //            l2 centered >> uncentered
 //   again all l2 distances are less accurate than uncentered dot. maybe a metric artifact.
 //
-// XXX for the metric artifact I could attempt to measure the average distance to get a sense of
-// error scale.
+// For dot this only works because I hacked it so that l2norm=1 on both side, otherwise the doc
+// residual gets a non-trivial l2norm and the produced adjustment is wrong.
 //
-// XXX in the dot product case I am computing and storing an l2 norm that I actually do not want
-// to use. If I am going to store anything I should just claim the value to be 1. If I use 1 as the
-// norm instead of whatever junk I am generating error goes way tf down. this works for asymmetric,
-// for symmetric things remain as bad or possibly worse. may be infeasible. math is hard.
-//
-// XXX symmetric improvement is something like 35% for tlvq8? very meh. might need to examine for
-// a real cluster.
+// The improvements are very good at SPANN cluster scale.
 
 struct CenteredDotQueryVectorDistance {
     // XXX query_residual_scorer

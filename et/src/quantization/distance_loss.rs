@@ -94,15 +94,14 @@ impl QueryVectorDistance for CenteredDotQueryVectorDistance {
     }
 }
 
-// XXX rq = q - c; rd = d - c;
-// XXX dot(q,d) = dot(rq+c, rd+c) = dot(rq,rd) + dot(rq,c) + dot(c,rd) + dot(c,c)
-// XXX the osq impl does dot(rq,rd) + dot(rq,c) + dot(rd,c) - dot(c,c)
-// XXX osq is doing a different formulation where they compute dot(v,c) without centering first
-//     which honestly makes a lot more sense. for the doc I _only_ have the residual vector without
-//     centering dot so I don't think this can be made to work this way, the dot product i need
-//     must be computed from the original doc vector and stored.
-// XXX (rv0 + c0) * (rd0 + c0) = rv0*rd0 + rv0*c0 + c0*rd0 + c0*c0
-
+// XXX as written this cannot work.
+// XXX trivially, dot(q,d) = dot(rq+c, rd+c) = dot(rq,rd) + dot(rq,c) + dot(c,rd) + dot(c,c)
+// XXX practically I do not want to multiply the residual vectors by the center vector, so after
+//     this first expansion I sub those terms with q/d where possible:
+// XXX dot(rq, rd) + dot(q - c, c) + dot(d - c, c) + dot(c, c)
+// XXX dot(rq, rq) + dot(q, c) + dot(d, c) + dot(c, c)
+// XXX To do this the quantizer must know the center to compute dot(v,c) without centering first,
+//     and it must store this term.
 struct SymmetricalCenteredDotQueryVectorDistance {
     query_residual_scorer: Box<dyn QueryVectorDistance>,
     center_residual_scorer: Box<dyn QueryVectorDistance>,

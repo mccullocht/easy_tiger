@@ -38,8 +38,32 @@ pub struct DistanceLossArgs {
     /// If set, all docs will be centered before encoding, but queries will use a centering aware
     /// distance function instead of also being centered.
     #[arg(long, default_value_t = false)]
-    center_distance: bool,
+    center_distance_a: bool,
+
+    /// If set, both docs and queries will be centered before encoding and the distance function
+    /// will be centering aware.
+    #[arg(long, default_value_t = false)]
+    center_distance_s: bool,
 }
+
+// XXX state of play
+// for tlvq8 dot uncentered >> center-distance-s > center-distance-a
+//            l2 centered >> uncentered
+//   all l2 distances are less accurate than uncentered dot though. maybe a metric artifact.
+// for tlvq1 dot center-distance-s > center-distance-a > uncentered
+//            l2 centered >> uncentered
+//   again all l2 distances are less accurate than uncentered dot. maybe a metric artifact.
+//
+// XXX for the metric artifact I could attempt to measure the average distance to get a sense of
+// error scale.
+//
+// XXX in the dot product case I am computing and storing an l2 norm that I actually do not want
+// to use. If I am going to store anything I should just claim the value to be 1. If I use 1 as the
+// norm instead of whatever junk I am generating error goes way tf down. this works for asymmetric,
+// for symmetric things remain as bad or possibly worse. may be infeasible. math is hard.
+//
+// XXX symmetric improvement is something like 35% for tlvq8? very meh. might need to examine for
+// a real cluster.
 
 struct CenteredDotQueryVectorDistance {
     // XXX query_residual_scorer
@@ -76,6 +100,63 @@ impl QueryVectorDistance for CenteredDotQueryVectorDistance {
     }
 }
 
+// XXX rq = q - c; rd = d - c;
+// XXX dot(q,d) = dot(rq+c, rd+c) = dot(rq,rd) + dot(rq,c) + dot(c,rd) + dot(c,c)
+// XXX the osq impl does dot(rq,rd) + dot(rq,c) + dot(rd,c) - dot(c,c)
+// XXX osq is doing a different formulation where they compute dot(v,c) without centering first
+//     which honestly makes a lot more sense. for the doc I _only_ have the residual vector without
+//     centering dot so I don't think this can be made to work this way, the dot product i need
+//     must be computed from the original doc vector and stored.
+// XXX (rv0 + c0) * (rd0 + c0) = rv0*rd0 + rv0*c0 + c0*rd0 + c0*c0
+
+struct SymmetricalCenteredDotQueryVectorDistance {
+    query_residual_scorer: Box<dyn QueryVectorDistance>,
+    center_residual_scorer: Box<dyn QueryVectorDistance>,
+    query_center_dot: f64,
+    center_dot: f64,
+}
+
+impl SymmetricalCenteredDotQueryVectorDistance {
+    pub fn new(query: &[f32], center: &[f32], format: F32VectorCoding) -> Self {
+        let query_residual_scorer = format.query_vector_distance_f32(
+            query
+                .iter()
+                .zip(center.iter())
+                .map(|(q, c)| q - c)
+                .collect::<Vec<f32>>(),
+            VectorSimilarity::Dot,
+        );
+        let center_residual_scorer =
+            format.query_vector_distance_f32(center.to_owned(), VectorSimilarity::Dot);
+        let query_center_dot = query
+            .iter()
+            .zip(center.iter())
+            .map(|(a, b)| a * b)
+            .sum::<f32>() as f64;
+        let center_dot = center.iter().map(|&c| c * c).sum::<f32>() as f64;
+        Self {
+            query_residual_scorer,
+            center_residual_scorer,
+            query_center_dot,
+            center_dot,
+        }
+    }
+
+    /// Convert a dot product score back into a normalized dot product.
+    fn invert_score(dot_score: f64) -> f64 {
+        dot_score * -2.0 + 1.0
+    }
+}
+
+impl QueryVectorDistance for SymmetricalCenteredDotQueryVectorDistance {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let qd_dot = Self::invert_score(self.query_residual_scorer.distance(vector));
+        let cd_dot = Self::invert_score(self.center_residual_scorer.distance(vector));
+        let dot = qd_dot + self.query_center_dot + cd_dot + self.center_dot;
+        (-dot + 1.0) / 2.0
+    }
+}
+
 pub fn distance_loss(
     args: DistanceLossArgs,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
@@ -96,23 +177,30 @@ pub fn distance_loss(
     };
 
     let coder = args.format.new_coder(args.similarity);
-    // XXX the quantized code may do all sorts of centering fuckery, but the _f32_ comparison should
-    // remain uncentered.
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
             let mut query = Cow::from(&query_vectors[i]);
+            let f32_dist =
+                F32VectorCoding::F32.query_vector_distance_f32(query.to_vec(), args.similarity);
             if let Some(center) = center.as_ref() {
                 for (q, c) in query.to_mut().iter_mut().zip(center.iter()) {
                     *q -= *c;
                 }
             }
             let qdist = if let Some(center) = center.as_ref()
-                && args.center_distance
+                && args.center_distance_a
             {
-                println!("original query_vector {i} d0 {}", query_vectors[i][0]);
                 Box::new(CenteredDotQueryVectorDistance::new(
                     &query_vectors[i],
+                    center,
+                    args.format,
+                ))
+            } else if let Some(center) = center.as_ref()
+                && args.center_distance_s
+            {
+                Box::new(SymmetricalCenteredDotQueryVectorDistance::new(
+                    &query,
                     center,
                     args.format,
                 ))
@@ -123,9 +211,6 @@ pub fn distance_loss(
                 args.format
                     .query_vector_distance_f32(query.to_vec(), args.similarity)
             };
-            println!("f32 query_vector {i} d0 {}", query[0]);
-            let f32_dist =
-                F32VectorCoding::F32.query_vector_distance_f32(query.into_owned(), args.similarity);
             (f32_dist, qdist)
         })
         .collect::<Vec<_>>();
@@ -136,14 +221,14 @@ pub fn distance_loss(
         .into_par_iter()
         .progress_count(doc_limit as u64)
         .flat_map(|d| {
-            let mut doc_f32 = Cow::from(&vectors[d]);
+            let doc_f32 = Arc::new(vectors[d].to_vec());
+            let mut doc = Cow::from(&vectors[d]);
             if let Some(center) = center.as_ref() {
-                for (d, c) in doc_f32.to_mut().iter_mut().zip(center.iter()) {
+                for (d, c) in doc.to_mut().iter_mut().zip(center.iter()) {
                     *d -= *c;
                 }
             }
-            let doc_f32 = Arc::new(doc_f32);
-            let doc = Arc::new(coder.encode(&doc_f32));
+            let doc = Arc::new(coder.encode(&doc));
             (0..query_limit)
                 .into_par_iter()
                 .map(move |q| (q, Arc::clone(&doc), Arc::clone(&doc_f32)))

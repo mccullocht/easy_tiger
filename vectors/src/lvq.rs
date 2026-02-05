@@ -572,11 +572,13 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
             },
         };
         let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);
-        dot_unnormalized_to_distance(
+        let d = dot_unnormalized_to_distance(
             self.similarity,
             dot.into(),
-            (self.l2_norm, vector.l2_norm()),
-        )
+            (1.0, 1.0),
+            // XXX HACK (self.l2_norm, vector.l2_norm()),
+        );
+        d
     }
 }
 

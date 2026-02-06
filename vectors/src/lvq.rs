@@ -592,6 +592,105 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
     }
 }
 
+/// Primary query vector distance for 1-bit vectors.
+///
+/// This implementation quantizes the query vector to 4 bits per dimension but transforms the
+/// representation so that the dot product can be computed as a series of 1-bit comparisons.
+pub struct TurboPrimaryQueryDistance1 {
+    similarity: VectorSimilarity,
+    query: Vec<u8>,
+    query_part_len: usize,
+    terms: VectorDecodeTerms,
+    l2_norm: f64,
+    inst: InstructionSet,
+}
+
+impl TurboPrimaryQueryDistance1 {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
+        let inst = InstructionSet::default();
+        let query_part_len = packing::byte_len(query.len(), 1);
+        let (header, query) = TurboPrimaryCoder::<4>::encode_parts(inst, query.as_ref());
+        let terms = VectorDecodeTerms::from_primary::<4>(header);
+        let l2_norm = header.l2_norm.into();
+
+        let mut transposed = vec![0u8; query_part_len * 4];
+        let (transposed0, transposedrem) = transposed.split_at_mut(query_part_len);
+        let mut pack0 = packing::TurboPacker::<1>::new(transposed0);
+        let (transposed1, transposedrem) = transposedrem.split_at_mut(query_part_len);
+        let mut pack1 = packing::TurboPacker::<1>::new(transposed1);
+        let (transposed2, transposed3) = transposedrem.split_at_mut(query_part_len);
+        let mut pack2 = packing::TurboPacker::<1>::new(transposed2);
+        let mut pack3 = packing::TurboPacker::<1>::new(transposed3);
+
+        for d in packing::TurboUnpacker::<4>::new(&query) {
+            pack0.push(d & 1);
+            pack1.push((d >> 1) & 1);
+            pack2.push((d >> 2) & 1);
+            pack3.push((d >> 3) & 1);
+        }
+
+        Self {
+            similarity,
+            query: transposed,
+            query_part_len,
+            terms,
+            l2_norm,
+            inst,
+        }
+    }
+}
+
+impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let vector = TurboPrimaryVector::<1>::new(vector).expect("valid primary vector");
+        let query_parts = [
+            &self.query[0..self.query_part_len],
+            &self.query[self.query_part_len..self.query_part_len * 2],
+            &self.query[self.query_part_len * 2..self.query_part_len * 3],
+            &self.query[self.query_part_len * 3..self.query_part_len * 4],
+        ];
+        let uint_dot_parts = match self.inst {
+            InstructionSet::Scalar => [
+                scalar::dot_u8::<1>(&query_parts[0], &vector.rep.data),
+                scalar::dot_u8::<1>(&query_parts[1], &vector.rep.data),
+                scalar::dot_u8::<1>(&query_parts[2], &vector.rep.data),
+                scalar::dot_u8::<1>(&query_parts[3], &vector.rep.data),
+            ],
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => [
+                aarch64::dot_u8::<1>(&query_parts[0], &vector.rep.data),
+                aarch64::dot_u8::<1>(&query_parts[1], &vector.rep.data),
+                aarch64::dot_u8::<1>(&query_parts[2], &vector.rep.data),
+                aarch64::dot_u8::<1>(&query_parts[3], &vector.rep.data),
+            ],
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                [
+                    x86_64::dot_u8::<1>(&query_parts[0], &vector.rep.data),
+                    x86_64::dot_u8::<1>(&query_parts[1], &vector.rep.data),
+                    x86_64::dot_u8::<1>(&query_parts[2], &vector.rep.data),
+                    x86_64::dot_u8::<1>(&query_parts[3], &vector.rep.data),
+                ]
+            },
+        };
+        let uint_dot = uint_dot_parts[0]
+            + uint_dot_parts[1] * 2
+            + uint_dot_parts[2] * 4
+            + uint_dot_parts[3] * 8;
+        let dot = correct_dot_uint(
+            uint_dot,
+            self.query_part_len * 8,
+            &self.terms,
+            &vector.rep.terms,
+        );
+        dot_unnormalized_to_distance(
+            self.similarity,
+            dot.into(),
+            (self.l2_norm, vector.l2_norm()),
+        )
+    }
+}
+
 const RESIDUAL_BITS: usize = 8;
 const RESIDUAL_MAX: f32 = ((1 << RESIDUAL_BITS) - 1) as f32;
 

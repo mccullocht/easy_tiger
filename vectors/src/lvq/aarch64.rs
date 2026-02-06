@@ -8,7 +8,7 @@ use std::arch::aarch64::{
     vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdupq_n_f32, vdupq_n_f64,
     vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64, vfmaq_f32, vfmaq_f64,
     vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32,
-    vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8,
+    vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpadalq_u8, vqtbl1q_u8, vqtbl4q_u8,
     vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8, vshrq_n_u32, vst1q_f32,
     vst1q_u8, vsubq_f32, vsubq_f64,
 };
@@ -594,11 +594,11 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
             for i in (0..len32).step_by(32) {
                 let mut av = vld1q_u8(a.as_ptr().add(i));
                 let mut bv = vld1q_u8(b.as_ptr().add(i));
-                dot0 = vaddq_u16(dot0, vpaddlq_u8(vcntq_u8(vandq_u8(av, bv))));
+                dot0 = vpadalq_u8(dot0, vcntq_u8(vandq_u8(av, bv)));
 
                 av = vld1q_u8(a.as_ptr().add(i + 16));
                 bv = vld1q_u8(b.as_ptr().add(i + 16));
-                dot1 = vaddq_u16(dot1, vpaddlq_u8(vcntq_u8(vandq_u8(av, bv))));
+                dot1 = vpadalq_u8(dot1, vcntq_u8(vandq_u8(av, bv)));
             }
 
             dot0 = vaddq_u16(dot0, dot1);
@@ -606,7 +606,7 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
             if len32 < len16 {
                 let av = vld1q_u8(a.as_ptr().add(len32));
                 let bv = vld1q_u8(b.as_ptr().add(len32));
-                dot0 = vaddq_u16(dot0, vpaddlq_u8(vcntq_u8(vandq_u8(av, bv))));
+                dot0 = vpadalq_u8(dot0, vcntq_u8(vandq_u8(av, bv)));
             }
 
             let mut dot = vaddlvq_u16(dot0);
@@ -638,10 +638,10 @@ pub fn dot_u1_4_transposed(query: &[&[u8]; 4], doc: &[u8]) -> u32 {
             let q3 = vld1q_u8(query[3].as_ptr().add(i));
             let d = vld1q_u8(doc.as_ptr().add(i));
 
-            dot0 = vaddq_u16(dot0, vpaddlq_u8(vcntq_u8(vandq_u8(d, q0))));
-            dot1 = vaddq_u16(dot1, vpaddlq_u8(vcntq_u8(vandq_u8(d, q1))));
-            dot2 = vaddq_u16(dot2, vpaddlq_u8(vcntq_u8(vandq_u8(d, q2))));
-            dot3 = vaddq_u16(dot3, vpaddlq_u8(vcntq_u8(vandq_u8(d, q3))));
+            dot0 = vpadalq_u8(dot0, vcntq_u8(vandq_u8(d, q0)));
+            dot1 = vpadalq_u8(dot1, vcntq_u8(vandq_u8(d, q1)));
+            dot2 = vpadalq_u8(dot2, vcntq_u8(vandq_u8(d, q2)));
+            dot3 = vpadalq_u8(dot3, vcntq_u8(vandq_u8(d, q3)));
         }
 
         let mut dot = vaddlvq_u16(dot0)

@@ -505,16 +505,18 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
 
 /// For a given similarity function, compute a distance score based on the unnormalized dot product
 /// of two vectors and their l2 norms.
+// XXX move this into lvq, the only place where is is actually used.
 fn dot_unnormalized_to_distance(
     similarity: VectorSimilarity,
     dot_unnormalized: f64,
     l2_norm: (f64, f64),
 ) -> f64 {
     match similarity {
-        VectorSimilarity::Cosine | VectorSimilarity::Dot => {
+        VectorSimilarity::Cosine => {
             let dot = dot_unnormalized / (l2_norm.0 * l2_norm.1);
             (-dot + 1.0) / 2.0
         }
+        VectorSimilarity::Dot => dot_unnormalized.mul_add(-0.5, 0.5),
         VectorSimilarity::Euclidean => {
             l2_norm.0 * l2_norm.0 + l2_norm.1 * l2_norm.1 - (2.0 * dot_unnormalized)
         }

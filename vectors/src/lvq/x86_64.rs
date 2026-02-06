@@ -583,6 +583,33 @@ pub unsafe fn dot_u8_avx512<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     }
 }
 
+#[target_feature(enable = "avx512f,avx512bw,avx512vpopcntdq")]
+#[inline]
+pub unsafe fn dot_u1_4_tranposed_avx512(query: &[&[u8]; 4], doc: &[u8]) -> u32 {
+    let mut dot0 = _mm512_set1_epi32(0);
+    let mut dot1 = _mm512_set1_epi32(0);
+    let mut dot2 = _mm512_set1_epi32(0);
+    let mut dot3 = _mm512_set1_epi32(0);
+    for dc in doc.chunks(64) {
+        let mask = u64::MAX >> (64 - dc.len());
+        let dv = _mm512_maskz_loadu_epi8(mask, dc.as_ptr() as *const i8);
+        let qv0 = _mm512_maskz_loadu_epi8(mask, query[0].as_ptr() as *const i8);
+        let qv1 = _mm512_maskz_loadu_epi8(mask, query[1].as_ptr() as *const i8);
+        let qv2 = _mm512_maskz_loadu_epi8(mask, query[2].as_ptr() as *const i8);
+        let qv3 = _mm512_maskz_loadu_epi8(mask, query[3].as_ptr() as *const i8);
+
+        dot0 = _mm512_add_epi32(dot0, _mm512_popcnt_epi32(_mm512_and_epi32(qv0, dv)));
+        dot1 = _mm512_add_epi32(dot1, _mm512_popcnt_epi32(_mm512_and_epi32(qv1, dv)));
+        dot2 = _mm512_add_epi32(dot2, _mm512_popcnt_epi32(_mm512_and_epi32(qv2, dv)));
+        dot3 = _mm512_add_epi32(dot3, _mm512_popcnt_epi32(_mm512_and_epi32(qv3, dv)));
+    }
+
+    _mm512_reduce_add_epi32(dot0) as u32
+        + _mm512_reduce_add_epi32(dot1) as u32 * 2
+        + _mm512_reduce_add_epi32(dot2) as u32 * 4
+        + _mm512_reduce_add_epi32(dot3) as u32 * 8
+}
+
 #[target_feature(enable = "avx512f,avx512vnni,avx512bw")]
 #[inline]
 pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(

@@ -664,12 +664,15 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
             InstructionSet::Neon => aarch64::dot_u1_4_transposed(&query_parts, &vector.rep.data),
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
+                /*
                 Self::sum_dot_parts([
-                    x86_64::dot_u8::<1>(&query_parts[0], &vector.rep.data),
-                    x86_64::dot_u8::<1>(&query_parts[1], &vector.rep.data),
-                    x86_64::dot_u8::<1>(&query_parts[2], &vector.rep.data),
-                    x86_64::dot_u8::<1>(&query_parts[3], &vector.rep.data),
+                    x86_64::dot_u8_avx512::<1>(&query_parts[0], &vector.rep.data),
+                    x86_64::dot_u8_avx512::<1>(&query_parts[1], &vector.rep.data),
+                    x86_64::dot_u8_avx512::<1>(&query_parts[2], &vector.rep.data),
+                    x86_64::dot_u8_avx512::<1>(&query_parts[3], &vector.rep.data),
                 ])
+                */
+                x86_64::dot_u1_4_tranposed_avx512(&query_parts, &vector.rep.data)
             },
         };
         let dot = correct_dot_uint(

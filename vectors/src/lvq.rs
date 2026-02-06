@@ -638,6 +638,10 @@ impl TurboPrimaryQueryDistance1 {
             inst,
         }
     }
+
+    fn sum_dot_parts(parts: [u32; 4]) -> u32 {
+        parts[0] + (parts[1] << 1) + (parts[2] << 2) + (parts[3] << 3)
+    }
 }
 
 impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
@@ -649,34 +653,25 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
             &self.query[self.query_part_len * 2..self.query_part_len * 3],
             &self.query[self.query_part_len * 3..self.query_part_len * 4],
         ];
-        let uint_dot_parts = match self.inst {
-            InstructionSet::Scalar => [
+        let uint_dot = match self.inst {
+            InstructionSet::Scalar => Self::sum_dot_parts([
                 scalar::dot_u8::<1>(&query_parts[0], &vector.rep.data),
                 scalar::dot_u8::<1>(&query_parts[1], &vector.rep.data),
                 scalar::dot_u8::<1>(&query_parts[2], &vector.rep.data),
                 scalar::dot_u8::<1>(&query_parts[3], &vector.rep.data),
-            ],
+            ]),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => [
-                aarch64::dot_u8::<1>(&query_parts[0], &vector.rep.data),
-                aarch64::dot_u8::<1>(&query_parts[1], &vector.rep.data),
-                aarch64::dot_u8::<1>(&query_parts[2], &vector.rep.data),
-                aarch64::dot_u8::<1>(&query_parts[3], &vector.rep.data),
-            ],
+            InstructionSet::Neon => aarch64::dot_u1_4_transposed(&query_parts, &vector.rep.data),
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                [
+                Self::sum_dot_parts([
                     x86_64::dot_u8::<1>(&query_parts[0], &vector.rep.data),
                     x86_64::dot_u8::<1>(&query_parts[1], &vector.rep.data),
                     x86_64::dot_u8::<1>(&query_parts[2], &vector.rep.data),
                     x86_64::dot_u8::<1>(&query_parts[3], &vector.rep.data),
-                ]
+                ])
             },
         };
-        let uint_dot = uint_dot_parts[0]
-            + uint_dot_parts[1] * 2
-            + uint_dot_parts[2] * 4
-            + uint_dot_parts[3] * 8;
         let dot = correct_dot_uint(
             uint_dot,
             self.query_part_len * 8,

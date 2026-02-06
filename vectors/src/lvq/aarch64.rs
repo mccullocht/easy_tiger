@@ -622,6 +622,42 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     }
 }
 
+#[inline]
+pub fn dot_u1_4_transposed(query: &[&[u8]; 4], doc: &[u8]) -> u32 {
+    unsafe {
+        let mut dot0 = vdupq_n_u16(0);
+        let mut dot1 = vdupq_n_u16(0);
+        let mut dot2 = vdupq_n_u16(0);
+        let mut dot3 = vdupq_n_u16(0);
+
+        let len16 = doc.len() & !15;
+        for i in (0..len16).step_by(16) {
+            let q0 = vld1q_u8(query[0].as_ptr().add(i));
+            let q1 = vld1q_u8(query[1].as_ptr().add(i));
+            let q2 = vld1q_u8(query[2].as_ptr().add(i));
+            let q3 = vld1q_u8(query[3].as_ptr().add(i));
+            let d = vld1q_u8(doc.as_ptr().add(i));
+
+            dot0 = vaddq_u16(dot0, vpaddlq_u8(vcntq_u8(vandq_u8(d, q0))));
+            dot1 = vaddq_u16(dot1, vpaddlq_u8(vcntq_u8(vandq_u8(d, q1))));
+            dot2 = vaddq_u16(dot2, vpaddlq_u8(vcntq_u8(vandq_u8(d, q2))));
+            dot3 = vaddq_u16(dot3, vpaddlq_u8(vcntq_u8(vandq_u8(d, q3))));
+        }
+
+        let mut dot = vaddlvq_u16(dot0)
+            + vaddlvq_u16(dot1) * 2
+            + vaddlvq_u16(dot2) * 4
+            + vaddlvq_u16(dot3) * 8;
+        for i in len16..doc.len() {
+            dot += (doc[i] & query[0][i]).count_ones();
+            dot += (doc[i] & query[1][i]).count_ones() * 2;
+            dot += (doc[i] & query[2][i]).count_ones() * 4;
+            dot += (doc[i] & query[3][i]).count_ones() * 8;
+        }
+        dot
+    }
+}
+
 struct TLVQExpander32<const B: usize> {
     start: *const u8,
     next_block: usize,

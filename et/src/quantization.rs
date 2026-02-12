@@ -13,6 +13,9 @@ use memmap2::Mmap;
 use distance_loss::{distance_loss, DistanceLossArgs};
 use loss::{loss, LossArgs};
 use recall::{recall, RecallArgs};
+use residuals::{residuals, ResidualsArgs};
+
+mod residuals;
 
 #[derive(Args)]
 pub struct QuantizationArgs {
@@ -35,6 +38,8 @@ pub enum Command {
     DistanceLoss(DistanceLossArgs),
     /// Compute recall difference with quantization using exhaustive search.
     Recall(RecallArgs),
+    /// Compute residuals and their dot product with decoded vectors.
+    Residuals(ResidualsArgs),
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
@@ -47,6 +52,7 @@ pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
         Command::Loss(args) => loss(args, &vectors),
         Command::DistanceLoss(args) => distance_loss(args, &vectors),
         Command::Recall(args) => recall(args, &vectors),
+        Command::Residuals(args) => residuals(args, &vectors),
     }
 }
 

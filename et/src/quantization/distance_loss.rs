@@ -44,7 +44,11 @@ pub fn distance_loss(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         NonZero::new(vectors.elem_stride()).unwrap(),
     )?;
-    let query_limit = args.query_limit.unwrap_or(query_vectors.len());
+    let query_limit = args
+        .query_limit
+        .unwrap_or(query_vectors.len())
+        .min(query_vectors.len());
+    let doc_limit = args.doc_limit.unwrap_or(vectors.len()).min(vectors.len());
 
     let center = if args.center {
         Some(super::compute_center(vectors))
@@ -75,8 +79,6 @@ pub fn distance_loss(
         })
         .collect::<Vec<_>>();
 
-    let doc_limit = args.doc_limit.unwrap_or(vectors.len());
-
     let (count, error_sum, error_sq_sum) = (0..doc_limit)
         .into_par_iter()
         .progress_count(doc_limit as u64)
@@ -87,16 +89,15 @@ pub fn distance_loss(
                     *d -= *c;
                 }
             }
+            let doc_f32 = Arc::new(doc_f32.into_owned());
             let doc = Arc::new(coder.encode(&doc_f32));
             (0..query_limit)
                 .into_par_iter()
-                .map(move |q| (q, d, Arc::clone(&doc)))
+                .map(move |q| (q, Arc::clone(&doc), Arc::clone(&doc_f32)))
         })
-        .map(|(q, d, doc)| {
+        .map(|(q, doc, doc_f32)| {
             let (f32_dist, qdist) = &query_scorers[q];
-            let diff = f32_dist
-                .as_ref()
-                .distance(bytemuck::cast_slice(&vectors[d]))
+            let diff = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32))
                 - qdist.as_ref().distance(doc.as_ref());
             (1, diff.abs(), diff * diff)
         })

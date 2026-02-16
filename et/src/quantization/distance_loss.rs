@@ -79,7 +79,7 @@ pub fn distance_loss(
         })
         .collect::<Vec<_>>();
 
-    let (count, error_sum, error_sq_sum) = (0..doc_limit)
+    let (count, error_sum, error_sq_sum, in_range_count) = (0..doc_limit)
         .into_par_iter()
         .progress_count(doc_limit as u64)
         .flat_map(|d| {
@@ -91,26 +91,49 @@ pub fn distance_loss(
             }
             let doc_f32 = Arc::new(doc_f32.into_owned());
             let doc = Arc::new(coder.encode(&doc_f32));
+            let doc_decoded = coder.decode(&doc);
+            let error_term = (doc_f32
+                .iter()
+                .zip(doc_decoded.iter())
+                .map(|(a, b)| {
+                    let diff = a - b;
+                    diff * diff
+                })
+                .sum::<f32>()
+                / doc_f32.len() as f32)
+                .sqrt();
             (0..query_limit)
                 .into_par_iter()
-                .map(move |q| (q, Arc::clone(&doc), Arc::clone(&doc_f32)))
+                .map(move |q| (q, Arc::clone(&doc), Arc::clone(&doc_f32), error_term))
         })
-        .map(|(q, doc, doc_f32)| {
+        .map(|(q, doc, doc_f32, error_term)| {
             let (f32_dist, qdist) = &query_scorers[q];
-            let diff = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32))
-                - qdist.as_ref().distance(doc.as_ref());
-            (1, diff.abs(), diff * diff)
+            let expected = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32));
+            let actual = qdist.as_ref().distance(doc.as_ref());
+            let actual_est_error = 1.96 * error_term as f64 * 2.0;
+            let actual_range = (actual - actual_est_error)..=(actual + actual_est_error);
+            let diff = expected - actual;
+            (
+                1,
+                diff.abs(),
+                diff * diff,
+                if actual_range.contains(&expected) {
+                    1
+                } else {
+                    0
+                },
+            )
         })
         .reduce(
-            || (0, 0.0f64, 0.0f64),
-            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
+            || (0, 0.0f64, 0.0f64, 0),
+            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
         );
 
     println!(
-        "Vectors: {} mean abs error: {} mean square error: {}",
-        count,
+        "Vectors: {count} mean abs error: {:.6} mean square error: {:.6} in range: {in_range_count} ({:.2}%)",
         error_sum / count as f64,
-        error_sq_sum / count as f64
+        error_sq_sum / count as f64,
+        in_range_count as f64 / count as f64 * 100.0
     );
     Ok(())
 }

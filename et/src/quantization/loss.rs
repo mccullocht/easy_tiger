@@ -47,23 +47,27 @@ pub fn loss(
                 .unwrap_or(Cow::from(&vectors[i]));
             let encoded = coder.encode(&v);
             let q = coder.decode(&encoded);
-            let error = v
+            let (abs_error, sq_error) = v
                 .iter()
                 .zip(q.iter())
-                .map(|(d, q)| (*d - *q).abs() as f64)
-                .sum::<f64>();
-            (error, error * error)
+                .map(|(d, q)| {
+                    let diff = *d - *q;
+                    (diff.abs(), diff * diff)
+                })
+                .reduce(|a, b| (a.0 + b.0, a.1 + b.1))
+                .unwrap();
+            (abs_error, sq_error.sqrt())
         })
-        .reduce(|| (0.0f64, 0.0f64), |a, b| (a.0 + b.0, a.1 + b.1));
+        .reduce(|| (0.0f32, 0.0f32), |a, b| (a.0 + b.0, a.1 + b.1));
     println!("Vectors: {}", vectors.len());
     println!(
-        "Sum of absolute error: {:.6} squared error: {:.6}",
+        "Sum of absolute error: {:.6} error l2 norm: {:.6}",
         abs_error, sq_error
     );
     println!(
-        "Per vector absolute error: {:.6} squared error: {:.6}",
-        abs_error / vectors.len() as f64,
-        sq_error / vectors.len() as f64
+        "Per vector absolute error: {:.6} error l2 norm: {:.6}",
+        abs_error / vectors.len() as f32,
+        sq_error / vectors.len() as f32
     );
     Ok(())
 }

@@ -131,7 +131,6 @@ pub fn residual_quantize_and_pack<const B: usize>(
     vector: &[f32],
     primary_terms: VectorEncodeTerms,
     residual_terms: VectorEncodeTerms,
-    primary_delta: f32,
     primary: &mut [u8],
     residual: &mut [u8],
 ) -> (u32, u32) {
@@ -146,7 +145,7 @@ pub fn residual_quantize_and_pack<const B: usize>(
             primary_packer.push(p);
             // After producing the primary value, calculate the residual between the original value
             // and the dequantized value and quantize that.
-            let res = v - (p as f32).mul_add(primary_delta, primary_terms.lower);
+            let res = v - (p as f32).mul_add(primary_terms.delta, primary_terms.lower);
             let r = ((res.clamp(residual_terms.lower, residual_terms.upper) - residual_terms.lower)
                 * residual_terms.delta_inv)
                 .round() as u8;

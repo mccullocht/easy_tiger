@@ -321,7 +321,6 @@ pub fn residual_quantize_and_pack<const B: usize>(
     vector: &[f32],
     primary_terms: VectorEncodeTerms,
     residual_terms: VectorEncodeTerms,
-    primary_delta: f32,
     primary_out: &mut [u8],
     residual_out: &mut [u8],
 ) -> (u32, u32) {
@@ -336,7 +335,6 @@ pub fn residual_quantize_and_pack<const B: usize>(
     if !vector_head.is_empty() {
         unsafe {
             let primary_terms = NeonVectorEncodeTerms::from_terms(&primary_terms);
-            let primary_delta = vdupq_n_f32(primary_delta);
             let residual_terms = NeonVectorEncodeTerms::from_terms(&residual_terms);
 
             let shuffle_mask = vld1q_u8(
@@ -352,25 +350,21 @@ pub fn residual_quantize_and_pack<const B: usize>(
                 let (pa, ra) = quantize4_residual(
                     vld1q_f32(vector_head.as_ptr().add(i)),
                     &primary_terms,
-                    primary_delta,
                     &residual_terms,
                 );
                 let (pb, rb) = quantize4_residual(
                     vld1q_f32(vector_head.as_ptr().add(i + 4)),
                     &primary_terms,
-                    primary_delta,
                     &residual_terms,
                 );
                 let (pc, rc) = quantize4_residual(
                     vld1q_f32(vector_head.as_ptr().add(i + 8)),
                     &primary_terms,
-                    primary_delta,
                     &residual_terms,
                 );
                 let (pd, rd) = quantize4_residual(
                     vld1q_f32(vector_head.as_ptr().add(i + 12)),
                     &primary_terms,
-                    primary_delta,
                     &residual_terms,
                 );
 
@@ -414,7 +408,6 @@ pub fn residual_quantize_and_pack<const B: usize>(
             vector_tail,
             primary_terms,
             residual_terms,
-            primary_delta,
             primary_out_tail,
             residual_out_tail,
         );
@@ -480,21 +473,23 @@ struct NeonVectorEncodeTerms {
     lower: float32x4_t,
     upper: float32x4_t,
     delta_inv: float32x4_t,
+    delta: float32x4_t,
 }
 
 impl NeonVectorEncodeTerms {
     #[inline(always)]
-    unsafe fn new(lower: f32, upper: f32, delta_inv: f32) -> Self {
+    unsafe fn new(lower: f32, upper: f32, delta_inv: f32, delta: f32) -> Self {
         Self {
             lower: vdupq_n_f32(lower),
             upper: vdupq_n_f32(upper),
             delta_inv: vdupq_n_f32(delta_inv),
+            delta: vdupq_n_f32(delta),
         }
     }
 
     #[inline(always)]
     unsafe fn from_terms(terms: &VectorEncodeTerms) -> Self {
-        Self::new(terms.lower, terms.upper, terms.delta_inv)
+        Self::new(terms.lower, terms.upper, terms.delta_inv, terms.delta)
     }
 }
 
@@ -525,11 +520,14 @@ unsafe fn quantize4(v: float32x4_t, terms: &NeonVectorEncodeTerms) -> uint32x4_t
 unsafe fn quantize4_residual(
     v: float32x4_t,
     primary_terms: &NeonVectorEncodeTerms,
-    primary_delta: float32x4_t,
     residual_terms: &NeonVectorEncodeTerms,
 ) -> (uint32x4_t, uint32x4_t) {
     let primary = quantize4(v, primary_terms);
-    let dq = vfmaq_f32(primary_terms.lower, vcvtq_f32_u32(primary), primary_delta);
+    let dq = vfmaq_f32(
+        primary_terms.lower,
+        vcvtq_f32_u32(primary),
+        primary_terms.delta,
+    );
     (primary, quantize4(vsubq_f32(v, dq), residual_terms))
 }
 

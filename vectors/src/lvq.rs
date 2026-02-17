@@ -675,15 +675,18 @@ struct VectorEncodeTerms {
     lower: f32,
     upper: f32,
     delta_inv: f32,
+    delta: f32,
 }
 
 impl VectorEncodeTerms {
     fn from_primary<const B: usize>(primary: &PrimaryVectorHeader) -> Self {
         let delta_inv = ((1 << B) - 1) as f32 / (primary.upper - primary.lower);
+        let delta = (primary.upper - primary.lower) / ((1 << B) - 1) as f32;
         Self {
             lower: primary.lower,
             upper: primary.upper,
             delta_inv,
+            delta,
         }
     }
 
@@ -692,6 +695,7 @@ impl VectorEncodeTerms {
             lower: -magnitude / 2.0,
             upper: magnitude / 2.0,
             delta_inv: RESIDUAL_MAX / magnitude,
+            delta: 0.0,
         }
     }
 }
@@ -752,13 +756,11 @@ impl<const B: usize> TurboResidualCoder<B> {
 
         let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
         let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
-        let primary_delta = (primary_header.upper - primary_header.lower) / ((1 << B) - 1) as f32;
         (primary_header.component_sum, residual_header.component_sum) = match inst {
             InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,
                 residual_terms,
-                primary_delta,
                 primary,
                 residual,
             ),
@@ -767,7 +769,6 @@ impl<const B: usize> TurboResidualCoder<B> {
                 vector,
                 primary_terms,
                 residual_terms,
-                primary_delta,
                 primary,
                 residual,
             ),
@@ -777,7 +778,6 @@ impl<const B: usize> TurboResidualCoder<B> {
                     vector,
                     primary_terms,
                     residual_terms,
-                    primary_delta,
                     primary,
                     residual,
                 )

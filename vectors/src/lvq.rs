@@ -675,13 +675,16 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
             dot_primary.into(),
             (self.l2_norm, vector.l2_norm()),
         );
-        let error = self.residual_error + vector.residual_error();
+        // XXX this sqrt is going kill me.
+        let error = ((self.residual_error + vector.residual_error())
+            / self.residual_query.len() as f64)
+            .sqrt();
         let mult = match self.similarity {
             VectorSimilarity::Dot | VectorSimilarity::Cosine => 0.5,
             VectorSimilarity::Euclidean => 2.0,
         };
         let estimated_error = 1.96 * mult * error;
-        if distance_primary + estimated_error > max_distance {
+        if distance_primary - estimated_error > max_distance {
             return None;
         }
 

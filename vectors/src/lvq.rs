@@ -389,6 +389,7 @@ const TURBO_BLOCK_SIZE: usize = 16;
 struct TurboPrimaryVector<'a, const B: usize> {
     rep: EncodedVector<'a>,
     l2_norm: f32,
+    residual_error: f32,
 }
 
 impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
@@ -400,6 +401,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
                 data: vector_bytes,
             },
             l2_norm: header.l2_norm,
+            residual_error: header.residual_error,
         })
     }
 
@@ -411,6 +413,10 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         self.l2_norm.into()
     }
 
+    fn residual_error(&self) -> f64 {
+        self.residual_error.into()
+    }
+
     fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
         let tail_dim = dim & !(packing::block_dim(B) - 1);
         let (headv, tailv) = self.rep.split_at(packing::byte_len(tail_dim, B));
@@ -419,10 +425,12 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             Self {
                 rep: headv,
                 l2_norm: self.l2_norm,
+                residual_error: self.residual_error,
             },
             Self {
                 rep: tailv,
                 l2_norm: self.l2_norm,
+                residual_error: self.residual_error,
             },
         )
     }
@@ -602,6 +610,105 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
         for (vector, out) in vectors.iter().zip(out.iter_mut()) {
             *out = self.distance_internal(vector);
         }
+    }
+}
+
+pub struct TurboPrimaryQueryDistance1 {
+    similarity: VectorSimilarity,
+
+    primary_query: Vec<u8>,
+    primary_terms: VectorDecodeTerms,
+    residual_query: Vec<u8>,
+    residual_terms: VectorDecodeTerms,
+    l2_norm: f64,
+    residual_error: f64,
+
+    inst: InstructionSet,
+}
+
+impl TurboPrimaryQueryDistance1 {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
+        let inst = InstructionSet::default();
+        let (primary_header, primary_query, residual_header, residual_query) =
+            TurboResidualCoder::<1>::encode_parts(inst, query.as_ref());
+        let primary_terms = VectorDecodeTerms::from_primary::<1>(primary_header);
+        let residual_terms = VectorDecodeTerms::from_residual(residual_header);
+        let l2_norm = primary_header.l2_norm.into();
+        let residual_error = primary_header.residual_error.into();
+        Self {
+            similarity,
+            primary_query,
+            primary_terms,
+            residual_query,
+            residual_terms,
+            l2_norm,
+            residual_error,
+            inst,
+        }
+    }
+}
+
+impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.bound_distance(vector, f64::INFINITY).unwrap()
+    }
+
+    fn bound_distance(&self, vector: &[u8], max_distance: f64) -> Option<f64> {
+        let vector = TurboPrimaryVector::<1>::new(vector).expect("valid primary vector");
+        let uint8_dot_primary = match self.inst {
+            InstructionSet::Scalar => scalar::dot_u8::<1>(&self.primary_query, vector.rep.data),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::dot_u8::<1>(&self.primary_query, vector.rep.data),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::dot_u8_avx512::<1>(&self.primary_query, vector.rep.data)
+            },
+        };
+        let dot_primary = correct_dot_uint(
+            uint8_dot_primary,
+            self.residual_query.len(),
+            &self.primary_terms,
+            &vector.rep.terms,
+        );
+        let distance_primary = dot_unnormalized_to_distance(
+            self.similarity,
+            dot_primary.into(),
+            (self.l2_norm, vector.l2_norm()),
+        );
+        let error = self.residual_error + vector.residual_error();
+        let mult = match self.similarity {
+            VectorSimilarity::Dot | VectorSimilarity::Cosine => 0.5,
+            VectorSimilarity::Euclidean => 2.0,
+        };
+        let estimated_error = 1.96 * mult * error;
+        if distance_primary + estimated_error > max_distance {
+            return None;
+        }
+
+        let uint8_dot_residual = match self.inst {
+            InstructionSet::Scalar => {
+                scalar::primary_query8_dot_unnormalized::<1>(&self.residual_query, &vector)
+            }
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => {
+                aarch64::primary_query8_dot_unnormalized::<1>(&self.residual_query, &vector)
+            }
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::primary_query8_dot_unnormalized_avx512::<1>(&self.residual_query, &vector)
+            },
+        };
+        let dot_residual = correct_dot_uint(
+            uint8_dot_residual,
+            self.residual_query.len(),
+            &self.residual_terms,
+            &vector.rep.terms,
+        );
+        Some(dot_unnormalized_to_distance(
+            self.similarity,
+            (dot_primary + dot_residual).into(),
+            (self.l2_norm, vector.l2_norm()),
+        ))
     }
 }
 

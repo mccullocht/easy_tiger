@@ -243,7 +243,13 @@ impl F32VectorCoding {
             (_, F32VectorCoding::BinaryQuantized) => Box::new(
                 binary::I1DotProductQueryDistance::new(query.into().as_ref()),
             ),
+            /* XXX
             (_, F32VectorCoding::TLVQ1) => Box::new(lvq::TurboPrimaryQueryDistance::<1>::new(
+                similarity,
+                query.into(),
+            )),
+            */
+            (_, F32VectorCoding::TLVQ1) => Box::new(lvq::TurboPrimaryQueryDistance1::new(
                 similarity,
                 query.into(),
             )),
@@ -479,6 +485,12 @@ pub trait QueryVectorDistance: Send + Sync {
         for (vector, out) in vectors.iter().zip(out.iter_mut()) {
             *out = self.distance(vector);
         }
+    }
+
+    /// Compute the distance between the bound query vector and `vector`. May return `None` if the
+    /// distance estimate is less than `max_distance`.
+    fn bound_distance(&self, vector: &[u8], _max_distance: f64) -> Option<f64> {
+        Some(self.distance(vector))
     }
 }
 

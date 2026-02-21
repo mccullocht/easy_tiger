@@ -44,6 +44,11 @@ impl TopNeighbors {
         }
     }
 
+    /// Return the maximum competitive distance.
+    pub fn max_distance(&self) -> f64 {
+        f64::from_bits(self.max_dist.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// Extract the list of the top N neighbors.
     pub fn into_neighbors(self) -> Vec<Neighbor> {
         let (neighbors_mu, n) = self.rep.into_inner();

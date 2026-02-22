@@ -155,9 +155,10 @@ struct PrimaryVectorHeader {
     /// Upper interval bound used for quantization, no larger than the maximum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     upper: f32,
-    /// Magnitude of the residual vector after quantization.
-    /// This value is used to compute a statistical bound on the estimated distance.
-    residual_error: f32,
+    /// Residual term used to compute a statistical bound on the estimated distance.
+    /// This contains sqrt(<residual,residual> / dim), an approximation of one standard deviation
+    /// of error from the true distance.
+    residual_term: f32,
     /// Sum of all the quantized components of the vector. This is used to correct the uint dot
     /// product to an f32 dot product.
     component_sum: u32,
@@ -178,7 +179,7 @@ impl PrimaryVectorHeader {
         header[0] = self.l2_norm.to_le_bytes();
         header[1] = self.lower.to_le_bytes();
         header[2] = self.upper.to_le_bytes();
-        header[3] = self.residual_error.to_le_bytes();
+        header[3] = self.residual_term.to_le_bytes();
         header[4] = self.component_sum.to_le_bytes();
     }
 
@@ -191,7 +192,7 @@ impl PrimaryVectorHeader {
                 l2_norm: f32::from_le_bytes(header_entries[0]),
                 lower: f32::from_le_bytes(header_entries[1]),
                 upper: f32::from_le_bytes(header_entries[2]),
-                residual_error: f32::from_le_bytes(header_entries[3]),
+                residual_term: f32::from_le_bytes(header_entries[3]),
                 component_sum: u32::from_le_bytes(header_entries[4]),
             },
             vector_bytes,
@@ -205,7 +206,7 @@ impl From<VectorStats> for PrimaryVectorHeader {
             l2_norm: value.l2_norm_sq.sqrt(),
             lower: value.min,
             upper: value.max,
-            residual_error: 0.0,
+            residual_term: 0.0,
             component_sum: 0,
         }
     }
@@ -457,7 +458,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
-        (header.component_sum, header.residual_error) = match inst {
+        (header.component_sum, header.residual_term) = match inst {
             InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
@@ -769,10 +770,11 @@ impl<const B: usize> TurboResidualCoder<B> {
 
         let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
         let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
+        // XXX we may want the call to compute residual error and we will generate the term.
         (
             primary_header.component_sum,
             residual_header.component_sum,
-            primary_header.residual_error,
+            primary_header.residual_term,
         ) = match inst {
             InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
@@ -1168,7 +1170,7 @@ mod test {
             abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
                 && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
                 && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
-                && abs_diff_eq!(self.residual_error, other.residual_error, epsilon = epsilon)
+                && abs_diff_eq!(self.residual_term, other.residual_term, epsilon = epsilon)
                 && abs_diff_eq!(self.component_sum, other.component_sum)
         }
     }
@@ -1228,7 +1230,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
-                residual_error: 1.0788424,
+                residual_term: 0.11854761,
                 component_sum: 11,
             }
         );
@@ -1272,7 +1274,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
-                residual_error: 0.81943595,
+                residual_term: 0.09004297,
                 component_sum: 32,
             }
         );
@@ -1316,7 +1318,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
-                residual_error: 0.3442146,
+                residual_term: 0.037823707,
                 component_sum: 170,
             }
         );
@@ -1360,7 +1362,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
-                residual_error: 0.054974027,
+                residual_term: 0.009641445,
                 component_sum: 2876,
             }
         );
@@ -1405,7 +1407,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
-                residual_error: 1.0788424,
+                residual_term: 0.11854761,
                 component_sum: 11,
             }
         );
@@ -1458,7 +1460,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
-                residual_error: 0.81943595,
+                residual_term: 0.09004297,
                 component_sum: 32,
             }
         );
@@ -1511,7 +1513,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
-                residual_error: 0.3442146,
+                residual_term: 0.037823707,
                 component_sum: 170,
             }
         );
@@ -1564,7 +1566,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
-                residual_error: 0.054974027,
+                residual_term: 0.009641445,
                 component_sum: 2876,
             }
         );

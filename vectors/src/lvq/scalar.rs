@@ -121,7 +121,10 @@ pub fn primary_quantize_and_pack<const B: usize>(
         .fold((0, 0.0), |(sum, rsum), (q, r)| {
             (sum + q, r.mul_add(r, rsum))
         });
-    (component_sum, residual_error_sq.sqrt())
+    (
+        component_sum,
+        (residual_error_sq / vector.len() as f32).sqrt(),
+    )
 }
 
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
@@ -158,7 +161,11 @@ pub fn residual_quantize_and_pack<const B: usize>(
         .fold((0, 0, 0.0f32), |(psum, rsum, rerr), (p, r, e)| {
             (psum + p, rsum + r, e.mul_add(e, rerr))
         });
-    (primary_sum, residual_sum, residual_error_sq.sqrt())
+    (
+        primary_sum,
+        residual_sum,
+        (residual_error_sq / vector.len() as f32).sqrt(),
+    )
 }
 
 pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {

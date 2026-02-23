@@ -4,10 +4,12 @@ use crate::{neighbor_util::TopNeighbors, recall::RecallComputer};
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
+    kmeans::{kmeans, Params},
     Neighbor,
 };
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
+use rand::SeedableRng;
 use rayon::prelude::*;
 use vectors::{F32VectorCoding, VectorSimilarity};
 
@@ -49,6 +51,15 @@ pub struct RecallArgs {
     /// the closest center for each doc.
     #[arg(long, default_value_t = 0)]
     centers: usize,
+
+    /// When computing 2 or more centers, sample the data set to at most this many vectors.
+    #[arg(long, default_value_t = 100_000)]
+    center_sample_size: usize,
+
+    /// Random seed used for clustering computations.
+    /// Use a fixed value for repeatability.
+    #[arg(long, default_value_t = 0x7774_7370414E4E)]
+    seed: u64,
 }
 
 pub fn recall(
@@ -81,7 +92,32 @@ pub fn recall(
             centers.push(&mean);
             Some(centers)
         }
-        _ => unimplemented!(),
+        _ => {
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(args.seed);
+            let sample_size = args.center_sample_size.min(doc_limit);
+            let sample_vectors = if sample_size < doc_limit {
+                let indices = rand::seq::index::sample(&mut rng, doc_limit, sample_size);
+                SubsetViewVectorStore::new(doc_vectors, indices.into_vec())
+            } else {
+                SubsetViewVectorStore::new(doc_vectors, (0..doc_limit).collect())
+            };
+            println!(
+                "Computing {} centers from a sample of {} vectors",
+                args.centers,
+                sample_vectors.len()
+            );
+            let centers = kmeans(
+                &sample_vectors,
+                args.centers,
+                &Params {
+                    iters: 100,
+                    epsilon: 0.0001,
+                    ..Params::default()
+                },
+                &mut rng,
+            );
+            Some(centers.unwrap_or_else(|e| e))
+        }
     };
 
     let coder = args.format.new_coder(args.similarity);

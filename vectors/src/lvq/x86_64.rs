@@ -316,11 +316,11 @@ pub unsafe fn primary_decode_avx512<const B: usize>(
     let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
     let (out_head, out_tail) = out.split_at_mut(tail_split);
 
-    if !in_head.rep.data.is_empty() {
+    if !in_head.data.is_empty() {
         unsafe {
             let load_interval = TURBO_BLOCK_SIZE * 8 / B;
-            let lower = _mm512_set1_ps(vector.rep.terms.lower);
-            let delta = _mm512_set1_ps(vector.rep.terms.delta);
+            let lower = _mm512_set1_ps(vector.terms.lower);
+            let delta = _mm512_set1_ps(vector.terms.delta);
             let mask = _mm512_set1_epi32(i32::from(u8::MAX >> (8 - B)));
             let mut d = _mm512_set1_epi32(0);
             for i in (0..tail_split).step_by(16) {
@@ -328,7 +328,6 @@ pub unsafe fn primary_decode_avx512<const B: usize>(
                     // Load 16 bytes but expand such that each byte is LSB of a 32-bit integer
                     _mm512_cvtepi16_epi32(_mm256_cvtepu8_epi16(_mm_lddqu_si128(
                         in_head
-                            .rep
                             .data
                             .as_ptr()
                             .add(i / load_interval * TURBO_BLOCK_SIZE)
@@ -351,7 +350,7 @@ pub unsafe fn primary_decode_avx512<const B: usize>(
         }
     }
 
-    if !in_tail.rep.data.is_empty() {
+    if !in_tail.data.is_empty() {
         super::scalar::primary_decode::<B>(in_tail, out_tail);
     }
 }
@@ -427,19 +426,18 @@ pub fn residual_decode_avx512<const B: usize>(
     let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
     let (out_head, out_tail) = out.split_at_mut(tail_split);
 
-    if !in_head.primary.data.is_empty() {
+    if !in_head.primary_data.is_empty() {
         let primary_interval = packing::block_dim(B);
         unsafe {
-            let primary_terms = VectorDecodeTermsAvx512::from_terms(&in_head.primary.terms);
-            let residual_terms = VectorDecodeTermsAvx512::from_terms(&in_head.residual.terms);
+            let primary_terms = VectorDecodeTermsAvx512::from_terms(&in_head.primary_terms);
+            let residual_terms = VectorDecodeTermsAvx512::from_terms(&in_head.residual_terms);
             let mask = _mm512_set1_epi32(i32::from(u8::MAX >> (8 - B)));
             let mut pbuf = _mm512_set1_epi32(0);
             for i in (0..tail_split).step_by(16) {
                 if i.is_multiple_of(primary_interval) {
                     pbuf = _mm512_cvtepu8_epi32(_mm_lddqu_si128(
                         in_head
-                            .primary
-                            .data
+                            .primary_data
                             .as_ptr()
                             .add(i / primary_interval * TURBO_BLOCK_SIZE)
                             as *const __m128i,
@@ -456,7 +454,7 @@ pub fn residual_decode_avx512<const B: usize>(
 
                 let primary = _mm512_and_si512(pbuf, mask);
                 let residual = _mm512_cvtepu8_epi32(_mm_lddqu_si128(
-                    in_head.residual.data.as_ptr().add(i) as *const __m128i,
+                    in_head.residual_data.as_ptr().add(i) as *const __m128i,
                 ));
 
                 let decoded = _mm512_add_ps(
@@ -468,7 +466,7 @@ pub fn residual_decode_avx512<const B: usize>(
         }
     }
 
-    if !in_tail.primary.data.is_empty() {
+    if !in_tail.primary_data.is_empty() {
         super::scalar::residual_decode::<B>(&in_tail, out_tail);
     }
 }
@@ -573,7 +571,7 @@ pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
     // 1, 2, and 4 bits are specialized. 8 bit can use the symmetrical impl.
     match B {
         1 | 2 | 4 => {}
-        8 => return dot_u8_avx512::<8>(query, doc.rep.data),
+        8 => return dot_u8_avx512::<8>(query, doc.data),
         _ => unimplemented!(),
     }
 
@@ -586,7 +584,7 @@ pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
             let mut dot1 = _mm512_set1_epi32(0);
             for i in (0..tail_split).step_by(128) {
                 let (dv64, dv128) = unpack_u1_avx512(_mm_lddqu_si128(
-                    doc_head.rep.data.as_ptr().add(i / 128 * 16) as *const __m128i,
+                    doc_head.data.as_ptr().add(i / 128 * 16) as *const __m128i,
                 ));
 
                 dot0 = _mm512_dpbusd_epi32(
@@ -607,7 +605,7 @@ pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
             let mut dot = _mm512_set1_epi32(0);
             for i in (0..tail_split).step_by(64) {
                 let dv = unpack_u2_avx512(_mm_lddqu_si128(
-                    doc_head.rep.data.as_ptr().add(i / 64 * 16) as *const __m128i,
+                    doc_head.data.as_ptr().add(i / 64 * 16) as *const __m128i
                 ));
 
                 dot = _mm512_dpbusd_epi32(
@@ -625,7 +623,7 @@ pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
                 let load_mask = u8::MAX >> (8 - (tail_split - i).min(64) / 16);
                 let dv = unpack_u4_avx512(_mm512_maskz_loadu_epi64(
                     load_mask,
-                    doc_head.rep.data.as_ptr().add(i / 2) as *const i64,
+                    doc_head.data.as_ptr().add(i / 2) as *const i64,
                 ));
 
                 dot = _mm512_dpbusd_epi32(

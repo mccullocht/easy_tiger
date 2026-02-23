@@ -290,11 +290,11 @@ pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &m
     let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
     let (out_head, out_tail) = out.split_at_mut(tail_split);
 
-    if !in_head.rep.data.is_empty() {
+    if !in_head.data.is_empty() {
         unsafe {
-            let lower = vdupq_n_f32(vector.rep.terms.lower);
-            let delta = vdupq_n_f32(vector.rep.terms.delta);
-            let mut expander = TLVQExpander32::<B>::new(in_head.rep.data.as_ptr());
+            let lower = vdupq_n_f32(vector.terms.lower);
+            let delta = vdupq_n_f32(vector.terms.delta);
+            let mut expander = TLVQExpander32::<B>::new(in_head.data.as_ptr());
             for i in (0..tail_split).step_by(16) {
                 let [d0, d1, d2, d3] = expander.next();
                 vst1q_f32(out_head.as_mut_ptr().add(i), vfmaq_f32(lower, d0, delta));
@@ -314,7 +314,7 @@ pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &m
         }
     }
 
-    if !in_tail.rep.data.is_empty() {
+    if !in_tail.data.is_empty() {
         scalar::primary_decode::<B>(in_tail, out_tail);
     }
 }
@@ -423,13 +423,13 @@ pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out:
     let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
     let (out_head, out_tail) = out.split_at_mut(tail_split);
 
-    if !in_head.primary.data.is_empty() {
+    if !in_head.primary_data.is_empty() {
         unsafe {
-            let primary_terms = NeonVectorDecodeTerms::from_terms(&in_head.primary.terms);
-            let residual_terms = NeonVectorDecodeTerms::from_terms(&in_head.residual.terms);
-            let mut primary_expander = TLVQExpander32::<B>::new(in_head.primary.data.as_ptr());
+            let primary_terms = NeonVectorDecodeTerms::from_terms(&in_head.primary_terms);
+            let residual_terms = NeonVectorDecodeTerms::from_terms(&in_head.residual_terms);
+            let mut primary_expander = TLVQExpander32::<B>::new(in_head.primary_data.as_ptr());
             let mut residual_expander =
-                TLVQExpander32::<RESIDUAL_BITS>::new(in_head.residual.data.as_ptr());
+                TLVQExpander32::<RESIDUAL_BITS>::new(in_head.residual_data.as_ptr());
             for i in (0..tail_split).step_by(16) {
                 let [pa, pb, pc, pd] = primary_expander.next();
                 let [ra, rb, rc, rd] = residual_expander.next();
@@ -453,7 +453,7 @@ pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out:
         }
     }
 
-    if !in_tail.primary.data.is_empty() {
+    if !in_tail.primary_data.is_empty() {
         scalar::residual_decode::<B>(&in_tail, out_tail);
     }
 }
@@ -713,7 +713,7 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
     doc: &TurboPrimaryVector<'_, B>,
 ) -> u32 {
     if B == 8 {
-        return unsafe { et_lvq_dot_u8(query.as_ptr(), doc.rep.data.as_ptr(), query.len()) };
+        return unsafe { et_lvq_dot_u8(query.as_ptr(), doc.data.as_ptr(), query.len()) };
     }
 
     let (tail_split, doc_head, doc_tail) = doc.split_tail(query.len());
@@ -723,21 +723,21 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
             1 => unsafe {
                 et_lvq_dot_u8_u1(
                     query_head.as_ptr(),
-                    doc_head.rep.data.as_ptr(),
+                    doc_head.data.as_ptr(),
                     query_head.len(),
                 )
             },
             2 => unsafe {
                 et_lvq_dot_u8_u2(
                     query_head.as_ptr(),
-                    doc_head.rep.data.as_ptr(),
+                    doc_head.data.as_ptr(),
                     query_head.len(),
                 )
             },
             4 => unsafe {
                 et_lvq_dot_u8_u4(
                     query_head.as_ptr(),
-                    doc_head.rep.data.as_ptr(),
+                    doc_head.data.as_ptr(),
                     query_head.len(),
                 )
             },

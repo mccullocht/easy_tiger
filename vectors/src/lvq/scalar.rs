@@ -119,8 +119,8 @@ pub fn primary_quantize_and_pack<const B: usize>(
 }
 
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
-    for (q, o) in TurboUnpacker::<B>::new(vector.rep.data).zip(out.iter_mut()) {
-        *o = (q as f32).mul_add(vector.rep.terms.delta, vector.rep.terms.lower);
+    for (q, o) in TurboUnpacker::<B>::new(vector.data).zip(out.iter_mut()) {
+        *o = (q as f32).mul_add(vector.terms.delta, vector.terms.lower);
     }
 }
 
@@ -150,12 +150,12 @@ pub fn residual_quantize_and_pack<const B: usize>(
 }
 
 pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {
-    for ((p, r), o) in TurboUnpacker::<B>::new(vector.primary.data)
-        .zip(vector.residual.data.iter().copied())
+    for ((p, r), o) in TurboUnpacker::<B>::new(vector.primary_data)
+        .zip(vector.residual_data.iter().copied())
         .zip(out.iter_mut())
     {
-        *o = (p as f32).mul_add(vector.primary.terms.delta, vector.primary.terms.lower)
-            + (r as f32).mul_add(vector.residual.terms.delta, vector.residual.terms.lower);
+        *o = (p as f32).mul_add(vector.primary_terms.delta, vector.primary_terms.lower)
+            + (r as f32).mul_add(vector.residual_terms.delta, vector.residual_terms.lower);
     }
 }
 
@@ -189,7 +189,7 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
 ) -> u32 {
     query
         .iter()
-        .zip(TurboUnpacker::<B>::new(doc.rep.data))
+        .zip(TurboUnpacker::<B>::new(doc.data))
         .map(|(&q, d)| q as u32 * d as u32)
         .sum::<u32>()
 }

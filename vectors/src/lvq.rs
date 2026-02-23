@@ -248,13 +248,6 @@ struct VectorDecodeTerms {
 }
 
 impl VectorDecodeTerms {
-    fn from_primary<const B: usize>(header: PrimaryVectorHeader) -> Self {
-        Self {
-            lower: header.lower,
-            delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
-        }
-    }
-
     fn from_residual(header: ResidualVectorHeader) -> Self {
         Self {
             lower: -header.magnitude / 2.0,
@@ -276,20 +269,6 @@ const MINIMUM_MSE_GRID: [(f32, f32); 8] = [
 
 const LAMBDA: f32 = 0.1;
 
-/// Correct the dot product of two integer vectors using the stored vector terms.
-fn correct_dot_uint(
-    dot: u32,
-    dim: usize,
-    a: (f32, &VectorDecodeTerms),
-    b: (f32, &VectorDecodeTerms),
-) -> f32 {
-    // Note that any dot value larger than (2 << 24) will be rounded when converted to f32 which can
-    // cause vector comparisons a <-> b and b <-> a to return slightly different results. To prevent
-    // this convert dot to f64 before including it in the correction.
-    ((dot as f64 * (a.1.delta * b.1.delta) as f64) as f32) + a.0 * b.1.lower + b.0 * a.1.lower
-        - a.1.lower * b.1.lower * dim as f32
-}
-
 /// The four components of a residual dot product.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 #[repr(C)]
@@ -300,23 +279,24 @@ struct ResidualDotComponents {
     ar_dot_br: u32,
 }
 
-// XXX I'm not sure how this is structured makes any sense. we're not decomposing into a series of
-// correct_dot_uint() calls anymore so a struct rather than tuple-town might be better.
-// VectorDecoderTerms is used for decoding but also scoring even though they don't share many params.
 impl ResidualDotComponents {
+    // XXX move this to a new ResidualVectorTerms structure that will contain primary terms plus
+    // residual delta + lower. This will make the signature less awkward and while still allowing
+    // it to be used from QVDs that don't have a vector object.
     fn compute_dot(
         &self,
         dim: usize,
-        a: (f32, &VectorDecodeTerms, &VectorDecodeTerms),
-        b: (f32, &VectorDecodeTerms, &VectorDecodeTerms),
+        a: (&PrimaryVectorTerms, &VectorDecodeTerms),
+        b: (&PrimaryVectorTerms, &VectorDecodeTerms),
     ) -> f32 {
-        let dot_raw = self.ap_dot_bp as f64 * (a.1.delta * b.1.delta) as f64
-            + self.ap_dot_br as f64 * (a.1.delta * b.2.delta) as f64
-            + self.ar_dot_bp as f64 * (a.2.delta * b.1.delta) as f64
-            + self.ar_dot_br as f64 * (a.2.delta * b.2.delta) as f64;
-        let a_lower = a.1.lower + a.2.lower;
-        let b_lower = b.1.lower + b.2.lower;
-        dot_raw as f32 + a.0 * b_lower + b.0 * a_lower - dim as f32 * a_lower * b_lower
+        let dot_raw = self.ap_dot_bp as f64 * (a.0.delta * b.0.delta) as f64
+            + self.ap_dot_br as f64 * (a.0.delta * b.1.delta) as f64
+            + self.ar_dot_bp as f64 * (a.1.delta * b.0.delta) as f64
+            + self.ar_dot_br as f64 * (a.1.delta * b.1.delta) as f64;
+        let a_lower = a.0.lower + a.1.lower;
+        let b_lower = b.0.lower + b.1.lower;
+        dot_raw as f32 + a.0.component_sum * b_lower + b.0.component_sum * a_lower
+            - dim as f32 * a_lower * b_lower
     }
 }
 
@@ -342,11 +322,38 @@ impl AddAssign for ResidualDotComponents {
 const TURBO_BLOCK_SIZE: usize = 16;
 
 #[derive(Debug, Clone, Copy)]
-struct TurboPrimaryVector<'a, const B: usize> {
-    data: &'a [u8],
-    terms: VectorDecodeTerms,
+struct PrimaryVectorTerms {
     l2_norm: f32,
     component_sum: f32,
+    lower: f32,
+    delta: f32,
+}
+
+impl PrimaryVectorTerms {
+    fn from_header<const B: usize>(header: PrimaryVectorHeader) -> Self {
+        Self {
+            l2_norm: header.l2_norm,
+            component_sum: header.component_sum,
+            lower: header.lower,
+            delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
+        }
+    }
+
+    fn correct_dot(&self, dot: u32, dim: usize, other: &PrimaryVectorTerms) -> f32 {
+        // Note that any dot value larger than (2 << 24) will be rounded when converted to f32 which can
+        // cause vector comparisons a <-> b and b <-> a to return slightly different results. To prevent
+        // this convert dot to f64 before including it in the correction.
+        ((dot as f64 * (self.delta * other.delta) as f64) as f32)
+            + self.component_sum * other.lower
+            + other.component_sum * self.lower
+            - self.lower * other.lower * dim as f32
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TurboPrimaryVector<'a, const B: usize> {
+    data: &'a [u8],
+    terms: PrimaryVectorTerms,
 }
 
 impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
@@ -354,9 +361,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
         Some(Self {
             data: vector_bytes,
-            terms: VectorDecodeTerms::from_primary::<B>(header),
-            l2_norm: header.l2_norm,
-            component_sum: header.component_sum,
+            terms: PrimaryVectorTerms::from_header::<B>(header),
         })
     }
 
@@ -365,7 +370,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
     }
 
     fn l2_norm(&self) -> f64 {
-        self.l2_norm.into()
+        self.terms.l2_norm.into()
     }
 
     fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
@@ -475,12 +480,7 @@ impl<const B: usize> TurboPrimaryDistance<B> {
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe { x86_64::dot_u8_avx512::<B>(query.data, doc.data) },
         };
-        let dot = correct_dot_uint(
-            uint_dot,
-            query.dim(),
-            (query.component_sum, &query.terms),
-            (doc.component_sum, &doc.terms),
-        );
+        let dot = query.terms.correct_dot(uint_dot, query.dim(), &doc.terms);
         dot_unnormalized_to_distance(self.0, dot.into(), (query.l2_norm(), doc.l2_norm()))
     }
 }
@@ -506,9 +506,7 @@ pub struct TurboPrimaryQueryDistance<const B: usize> {
     similarity: VectorSimilarity,
 
     query: Vec<u8>,
-    terms: VectorDecodeTerms,
-    l2_norm: f64,
-    component_sum: f32,
+    terms: PrimaryVectorTerms,
 
     inst: InstructionSet,
 }
@@ -522,9 +520,7 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
         Self {
             similarity,
             query,
-            terms: VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header),
-            l2_norm: header.l2_norm.into(),
-            component_sum: header.component_sum,
+            terms: PrimaryVectorTerms::from_header::<PRIMARY_QUERY_BITS>(header),
             inst,
         }
     }
@@ -545,16 +541,13 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
                 x86_64::primary_query8_dot_unnormalized_avx512::<B>(&self.query, &vector)
             },
         };
-        let dot = correct_dot_uint(
-            uint8_dot,
-            self.query.len(),
-            (self.component_sum, &self.terms),
-            (vector.component_sum, &vector.terms),
-        );
+        let dot = self
+            .terms
+            .correct_dot(uint8_dot, self.query.len(), &vector.terms);
         dot_unnormalized_to_distance(
             self.similarity,
             dot.into(),
-            (self.l2_norm, vector.l2_norm()),
+            (self.terms.l2_norm.into(), vector.l2_norm()),
         )
     }
 }
@@ -577,11 +570,9 @@ const RESIDUAL_MAX: f32 = ((1 << RESIDUAL_BITS) - 1) as f32;
 #[derive(Debug, Copy, Clone)]
 struct TurboResidualVector<'a, const B: usize> {
     primary_data: &'a [u8],
-    primary_terms: VectorDecodeTerms,
+    primary_terms: PrimaryVectorTerms,
     residual_data: &'a [u8],
     residual_terms: VectorDecodeTerms,
-    l2_norm: f32,
-    component_sum: f32,
 }
 
 impl<'a, const B: usize> TurboResidualVector<'a, B> {
@@ -600,11 +591,9 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
         ));
         Some(Self {
             primary_data: primary_vector,
-            primary_terms: VectorDecodeTerms::from_primary::<B>(primary_header),
+            primary_terms: PrimaryVectorTerms::from_header::<B>(primary_header),
             residual_data: residual_vector,
             residual_terms: VectorDecodeTerms::from_residual(residual_header),
-            l2_norm: primary_header.l2_norm,
-            component_sum: primary_header.component_sum,
         })
     }
 
@@ -613,7 +602,7 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
     }
 
     fn l2_norm(&self) -> f64 {
-        self.l2_norm.into()
+        self.primary_terms.l2_norm.into()
     }
 
     fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
@@ -850,12 +839,8 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
         };
         let dot = component_dot.compute_dot(
             query.dim(),
-            (
-                query.component_sum,
-                &query.primary_terms,
-                &query.residual_terms,
-            ),
-            (doc.component_sum, &doc.primary_terms, &doc.residual_terms),
+            (&query.primary_terms, &query.residual_terms),
+            (&doc.primary_terms, &doc.residual_terms),
         );
         dot_unnormalized_to_distance(self.0, dot.into(), (query.l2_norm(), doc.l2_norm()))
     }
@@ -865,11 +850,9 @@ pub struct TurboResidualQueryDistance<const B: usize> {
     similarity: VectorSimilarity,
 
     primary_vector: Vec<u8>,
-    primary_terms: VectorDecodeTerms,
+    primary_terms: PrimaryVectorTerms,
     residual_vector: Vec<u8>,
     residual_terms: VectorDecodeTerms,
-    l2_norm: f64,
-    component_sum: f32,
 
     inst: InstructionSet,
 }
@@ -882,11 +865,9 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
         Self {
             similarity,
             primary_vector,
-            primary_terms: VectorDecodeTerms::from_primary::<B>(primary_header),
+            primary_terms: PrimaryVectorTerms::from_header::<B>(primary_header),
             residual_vector,
             residual_terms: VectorDecodeTerms::from_residual(residual_header),
-            l2_norm: primary_header.l2_norm.into(),
-            component_sum: primary_header.component_sum,
             inst: InstructionSet::default(),
         }
     }
@@ -915,21 +896,13 @@ impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
         };
         let dot = component_dot.compute_dot(
             vector.dim(),
-            (
-                self.component_sum,
-                &self.primary_terms,
-                &self.residual_terms,
-            ),
-            (
-                vector.component_sum,
-                &vector.primary_terms,
-                &vector.residual_terms,
-            ),
+            (&self.primary_terms, &self.residual_terms),
+            (&vector.primary_terms, &vector.residual_terms),
         );
         dot_unnormalized_to_distance(
             self.similarity,
             dot.into(),
-            (self.l2_norm, vector.l2_norm.into()),
+            (self.primary_terms.l2_norm.into(), vector.l2_norm()),
         )
     }
 }
@@ -943,9 +916,7 @@ pub struct TurboResidualFastQueryDistance<const B: usize> {
     similarity: VectorSimilarity,
 
     query: Vec<u8>,
-    terms: VectorDecodeTerms,
-    l2_norm: f64,
-    component_sum: f32,
+    terms: PrimaryVectorTerms,
 
     inst: InstructionSet,
 }
@@ -954,16 +925,12 @@ impl<const B: usize> TurboResidualFastQueryDistance<B> {
     pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
         let inst = InstructionSet::default();
         let (header, query) = TurboPrimaryCoder::<B>::encode_parts(inst, query);
-        let terms = VectorDecodeTerms::from_primary::<B>(header);
-        let l2_norm = header.l2_norm.into();
-        let component_sum = header.component_sum;
+        let terms = PrimaryVectorTerms::from_header::<B>(header);
 
         Self {
             similarity,
             query,
             terms,
-            l2_norm,
-            component_sum,
             inst,
         }
     }
@@ -983,14 +950,10 @@ impl<const B: usize> QueryVectorDistance for TurboResidualFastQueryDistance<B> {
         };
         dot_unnormalized_to_distance(
             self.similarity,
-            correct_dot_uint(
-                dot_uint,
-                vector.dim(),
-                (self.component_sum, &self.terms),
-                (vector.component_sum, &vector.primary_terms),
-            )
-            .into(),
-            (self.l2_norm, vector.l2_norm.into()),
+            self.terms
+                .correct_dot(dot_uint, self.query.len(), &vector.primary_terms)
+                .into(),
+            (self.terms.l2_norm.into(), vector.l2_norm()),
         )
     }
 }

@@ -320,8 +320,8 @@ fn correct_dot_uint(dot: u32, dim: usize, a: &VectorDecodeTerms, b: &VectorDecod
     // Note that any dot value larger than (2 << 24) will be rounded when converted to f32 which can
     // cause vector comparisons a <-> b and b <-> a to return slightly different results. To prevent
     // this convert dot to f64 before including it in the correction.
-    (dot as f64 * (a.delta * b.delta) as f64
-        + (a.sum * b.lower + b.sum * a.lower - a.lower * b.lower * dim as f32) as f64) as f32
+    ((dot as f64 * (a.delta * b.delta) as f64) as f32) + a.sum * b.lower + b.sum * a.lower
+        - a.lower * b.lower * dim as f32
 }
 
 /// The four components of a residual dot product.

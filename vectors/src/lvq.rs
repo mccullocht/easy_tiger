@@ -151,7 +151,7 @@ struct PrimaryVectorHeader {
     l2_norm: f32,
     lower: f32,
     upper: f32,
-    sum: f32,
+    component_sum: f32,
 }
 
 impl PrimaryVectorHeader {
@@ -169,7 +169,7 @@ impl PrimaryVectorHeader {
         header[0] = self.l2_norm.to_le_bytes();
         header[1] = self.lower.to_le_bytes();
         header[2] = self.upper.to_le_bytes();
-        header[3] = self.sum.to_le_bytes();
+        header[3] = self.component_sum.to_le_bytes();
     }
 
     #[inline]
@@ -181,7 +181,7 @@ impl PrimaryVectorHeader {
                 l2_norm: f32::from_le_bytes(header_entries[0]),
                 lower: f32::from_le_bytes(header_entries[1]),
                 upper: f32::from_le_bytes(header_entries[2]),
-                sum: f32::from_le_bytes(header_entries[3]),
+                component_sum: f32::from_le_bytes(header_entries[3]),
             },
             vector_bytes,
         ))
@@ -194,7 +194,7 @@ impl From<VectorStats> for PrimaryVectorHeader {
             l2_norm: value.l2_norm_sq.sqrt(),
             lower: value.min,
             upper: value.max,
-            sum: value.sum,
+            component_sum: value.sum,
         }
     }
 }
@@ -242,6 +242,7 @@ impl ResidualVectorHeader {
 struct VectorDecodeTerms {
     lower: f32,
     delta: f32,
+    // XXX remove this field.
     sum: f32,
 }
 
@@ -250,7 +251,7 @@ impl VectorDecodeTerms {
         Self {
             lower: header.lower,
             delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
-            sum: header.sum,
+            sum: header.component_sum,
         }
     }
 
@@ -1150,7 +1151,7 @@ mod test {
             abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
                 && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
                 && abs_diff_eq!(self.upper, other.upper)
-                && abs_diff_eq!(self.sum, other.sum)
+                && abs_diff_eq!(self.component_sum, other.component_sum)
         }
     }
 
@@ -1208,7 +1209,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
-                sum: 3.176,
+                component_sum: 3.176,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1251,7 +1252,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
-                sum: 3.176,
+                component_sum: 3.176,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1294,7 +1295,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
-                sum: 3.176,
+                component_sum: 3.176,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1337,7 +1338,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
-                sum: 3.176,
+                component_sum: 3.176,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1381,7 +1382,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
-                sum: 3.176,
+                component_sum: 3.176,
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
@@ -1432,7 +1433,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
-                sum: 3.176,
+                component_sum: 3.176,
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
@@ -1483,7 +1484,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
-                sum: 3.176,
+                component_sum: 3.176,
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
@@ -1534,7 +1535,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
-                sum: 3.176,
+                component_sum: 3.176,
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();

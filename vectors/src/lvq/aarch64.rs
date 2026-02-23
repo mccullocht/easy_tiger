@@ -3,14 +3,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::arch::aarch64::{
-    float32x4_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32,
-    vaddq_f64, vaddq_u16, vaddvq_f32, vandq_u8, vandq_u32, vcntq_u8, vcvt_f64_f32,
-    vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdupq_n_f32, vdupq_n_f64,
-    vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64, vfmaq_f32, vfmaq_f64,
-    vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32,
-    vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8,
-    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8, vshrq_n_u32, vst1q_f32,
-    vst1q_u8, vsubq_f32, vsubq_f64,
+    float32x4_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vaddlvq_u16, vaddq_f32, vaddq_f64,
+    vaddq_u16, vaddvq_f32, vandq_u8, vandq_u32, vcntq_u8, vcvt_f64_f32, vcvt_high_f64_f32,
+    vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdupq_n_f32, vdupq_n_f64, vdupq_n_s8, vdupq_n_u8,
+    vdupq_n_u16, vdupq_n_u32, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64,
+    vld1q_f32, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64,
+    vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8, vreinterpretq_u8_u32, vreinterpretq_u32_u8,
+    vrndaq_f32, vshlq_u8, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use crate::lvq::{
@@ -22,13 +21,14 @@ use super::{LAMBDA, MINIMUM_MSE_GRID, VectorStats, packing};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let tail_split = vector.len() & !3;
-    let (min, max, mean, mean_sq, dot) = if tail_split > 0 {
+    let (min, max, mean, mean_sq, dot, sum) = if tail_split > 0 {
         unsafe {
             let mut min = vdupq_n_f32(f32::MAX);
             let mut max = vdupq_n_f32(f32::MIN);
             let mut mean = vdupq_n_f32(0.0);
             let mut mean_sq = vdupq_n_f32(0.0);
             let mut dot = vdupq_n_f32(0.0);
+            let mut sum_v = vdupq_n_f32(0.0);
             for i in (0..tail_split).step_by(4) {
                 let x = vld1q_f32(vector.as_ptr().add(i));
                 min = vminq_f32(min, x);
@@ -38,6 +38,7 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
                 let delta2 = vsubq_f32(x, mean);
                 mean_sq = vfmaq_f32(mean_sq, delta, delta2);
                 dot = vfmaq_f32(dot, x, x);
+                sum_v = vaddq_f32(sum_v, x);
             }
 
             (
@@ -46,29 +47,33 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
                 vaddvq_f32(mean) / 4.0,
                 reduce_variance(mean, mean_sq, tail_split),
                 vaddvq_f32(dot),
+                vaddvq_f32(sum_v),
             )
         }
     } else {
-        (f32::MAX, f32::MIN, 0.0, 0.0, 0.0)
+        (f32::MAX, f32::MIN, 0.0, 0.0, 0.0, 0.0)
     };
-    let (min, max, mean, mean_sq, dot) = vector.iter().copied().enumerate().skip(tail_split).fold(
-        (min, max, mean, mean_sq, dot),
-        |mut stats, (i, x)| {
-            stats.0 = x.min(stats.0);
-            stats.1 = x.max(stats.1);
-            stats.4 += x * x;
-            let delta = x - stats.2;
-            stats.2 += delta / (i + 1) as f32;
-            stats.3 += delta * (x - stats.2);
-            stats
-        },
-    );
+    let (min, max, mean, mean_sq, dot, sum) =
+        vector.iter().copied().enumerate().skip(tail_split).fold(
+            (min, max, mean, mean_sq, dot, sum),
+            |mut stats, (i, x)| {
+                stats.0 = x.min(stats.0);
+                stats.1 = x.max(stats.1);
+                stats.4 += x * x;
+                stats.5 += x;
+                let delta = x - stats.2;
+                stats.2 += delta / (i + 1) as f32;
+                stats.3 += delta * (x - stats.2);
+                stats
+            },
+        );
     VectorStats {
         min,
         max,
         mean,
         std_dev: (mean_sq / vector.len() as f32).sqrt(),
         l2_norm_sq: dot,
+        sum,
     }
 }
 
@@ -231,12 +236,11 @@ pub fn primary_quantize_and_pack<const B: usize>(
     vector: &[f32],
     terms: VectorEncodeTerms,
     out: &mut [u8],
-) -> u32 {
+) {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
     let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
-    let mut component_sum = 0u32;
     if !vector_head.is_empty() {
         unsafe {
             let terms = NeonVectorEncodeTerms::from_terms(&terms);
@@ -264,7 +268,6 @@ pub fn primary_quantize_and_pack<const B: usize>(
                     ),
                     shuffle_mask,
                 );
-                component_sum += u32::from(vaddlvq_u8(qabcd));
 
                 d = vorrq_u8(d, vshlq_u8(qabcd, vdupq_n_s8(shift)));
                 shift += B as i8;
@@ -279,9 +282,8 @@ pub fn primary_quantize_and_pack<const B: usize>(
     }
 
     if !vector_tail.is_empty() {
-        component_sum += scalar::primary_quantize_and_pack::<B>(vector_tail, terms, out_tail);
+        scalar::primary_quantize_and_pack::<B>(vector_tail, terms, out_tail);
     }
-    component_sum
 }
 
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
@@ -324,15 +326,13 @@ pub fn residual_quantize_and_pack<const B: usize>(
     primary_delta: f32,
     primary_out: &mut [u8],
     residual_out: &mut [u8],
-) -> (u32, u32) {
+) {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
     let (primary_out_head, primary_out_tail) =
         primary_out.split_at_mut(packing::byte_len(tail_split, B));
     let (residual_out_head, residual_out_tail) = residual_out.split_at_mut(tail_split);
-    let mut primary_component_sum = 0u32;
-    let mut residual_component_sum = 0u32;
     if !vector_head.is_empty() {
         unsafe {
             let primary_terms = NeonVectorEncodeTerms::from_terms(&primary_terms);
@@ -383,7 +383,6 @@ pub fn residual_quantize_and_pack<const B: usize>(
                     ),
                     shuffle_mask,
                 );
-                primary_component_sum += u32::from(vaddlvq_u8(pabcd));
 
                 d = vorrq_u8(d, vshlq_u8(pabcd, vdupq_n_s8(shift)));
                 shift += B as i8;
@@ -403,14 +402,13 @@ pub fn residual_quantize_and_pack<const B: usize>(
                     ),
                     shuffle_mask,
                 );
-                residual_component_sum += u32::from(vaddlvq_u8(rabcd));
                 vst1q_u8(residual_out_head.as_mut_ptr().add(i), rabcd);
             }
         }
     }
 
     if !vector_tail.is_empty() {
-        let (tail_primary_sum, tail_residual_sum) = scalar::residual_quantize_and_pack::<B>(
+        scalar::residual_quantize_and_pack::<B>(
             vector_tail,
             primary_terms,
             residual_terms,
@@ -418,10 +416,7 @@ pub fn residual_quantize_and_pack<const B: usize>(
             primary_out_tail,
             residual_out_tail,
         );
-        primary_component_sum += tail_primary_sum;
-        residual_component_sum += tail_residual_sum;
     }
-    (primary_component_sum, residual_component_sum)
 }
 
 pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {

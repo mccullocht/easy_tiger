@@ -89,6 +89,7 @@ struct VectorStats {
     mean: f32,
     std_dev: f32,
     l2_norm_sq: f32,
+    sum: f32,
 }
 
 impl VectorStats {
@@ -150,7 +151,7 @@ struct PrimaryVectorHeader {
     l2_norm: f32,
     lower: f32,
     upper: f32,
-    component_sum: u32,
+    sum: f32,
 }
 
 impl PrimaryVectorHeader {
@@ -168,7 +169,7 @@ impl PrimaryVectorHeader {
         header[0] = self.l2_norm.to_le_bytes();
         header[1] = self.lower.to_le_bytes();
         header[2] = self.upper.to_le_bytes();
-        header[3] = self.component_sum.to_le_bytes();
+        header[3] = self.sum.to_le_bytes();
     }
 
     #[inline]
@@ -180,7 +181,7 @@ impl PrimaryVectorHeader {
                 l2_norm: f32::from_le_bytes(header_entries[0]),
                 lower: f32::from_le_bytes(header_entries[1]),
                 upper: f32::from_le_bytes(header_entries[2]),
-                component_sum: u32::from_le_bytes(header_entries[3]),
+                sum: f32::from_le_bytes(header_entries[3]),
             },
             vector_bytes,
         ))
@@ -193,7 +194,7 @@ impl From<VectorStats> for PrimaryVectorHeader {
             l2_norm: value.l2_norm_sq.sqrt(),
             lower: value.min,
             upper: value.max,
-            component_sum: 0,
+            sum: value.sum,
         }
     }
 }
@@ -207,7 +208,6 @@ impl From<VectorStats> for PrimaryVectorHeader {
 #[repr(C)]
 struct ResidualVectorHeader {
     magnitude: f32,
-    component_sum: u32,
 }
 
 impl ResidualVectorHeader {
@@ -223,7 +223,6 @@ impl ResidualVectorHeader {
     fn serialize(&self, header_bytes: &mut [u8]) {
         let header = header_bytes.as_chunks_mut::<4>().0;
         header[0] = self.magnitude.to_le_bytes();
-        header[1] = self.component_sum.to_le_bytes();
     }
 
     #[inline]
@@ -233,7 +232,6 @@ impl ResidualVectorHeader {
         Some((
             Self {
                 magnitude: f32::from_le_bytes(header_entries[0]),
-                component_sum: u32::from_le_bytes(header_entries[1]),
             },
             vector_bytes,
         ))
@@ -244,7 +242,7 @@ impl ResidualVectorHeader {
 struct VectorDecodeTerms {
     lower: f32,
     delta: f32,
-    component_sum: u32,
+    sum: f32,
 }
 
 impl VectorDecodeTerms {
@@ -252,7 +250,7 @@ impl VectorDecodeTerms {
         Self {
             lower: header.lower,
             delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
-            component_sum: header.component_sum,
+            sum: header.sum,
         }
     }
 
@@ -260,7 +258,7 @@ impl VectorDecodeTerms {
         Self {
             lower: -header.magnitude / 2.0,
             delta: header.magnitude / RESIDUAL_MAX,
-            component_sum: header.component_sum,
+            sum: 0.0,
         }
     }
 }
@@ -323,9 +321,7 @@ fn correct_dot_uint(dot: u32, dim: usize, a: &VectorDecodeTerms, b: &VectorDecod
     // cause vector comparisons a <-> b and b <-> a to return slightly different results. To prevent
     // this convert dot to f64 before including it in the correction.
     (dot as f64 * (a.delta * b.delta) as f64
-        + (a.component_sum as f32 * a.delta * b.lower
-            + b.component_sum as f32 * b.delta * a.lower
-            + a.lower * b.lower * dim as f32) as f64) as f32
+        + (a.sum * b.lower + b.sum * a.lower - a.lower * b.lower * dim as f32) as f64) as f32
 }
 
 /// The four components of a residual dot product.
@@ -338,6 +334,7 @@ struct ResidualDotComponents {
     ar_dot_br: u32,
 }
 
+// XXX VectorDecodeTerms.sum doesn't make any sense.
 impl ResidualDotComponents {
     fn compute_dot(
         &self,
@@ -345,10 +342,13 @@ impl ResidualDotComponents {
         a: (&VectorDecodeTerms, &VectorDecodeTerms),
         b: (&VectorDecodeTerms, &VectorDecodeTerms),
     ) -> f32 {
-        correct_dot_uint(self.ap_dot_bp, dim, a.0, b.0)
-            + correct_dot_uint(self.ap_dot_br, dim, a.0, b.1)
-            + correct_dot_uint(self.ar_dot_bp, dim, a.1, b.0)
-            + correct_dot_uint(self.ar_dot_br, dim, a.1, b.1)
+        let dot_raw = self.ap_dot_bp as f64 * (a.0.delta * b.0.delta) as f64
+            + self.ap_dot_br as f64 * (a.0.delta * b.1.delta) as f64
+            + self.ar_dot_bp as f64 * (a.1.delta * b.0.delta) as f64
+            + self.ar_dot_br as f64 * (a.1.delta * b.1.delta) as f64;
+        let a_lower = a.0.lower + a.1.lower;
+        let b_lower = b.0.lower + b.1.lower;
+        dot_raw as f32 + a.0.sum * b_lower + b.0.sum * a_lower - dim as f32 * a_lower * b_lower
     }
 }
 
@@ -444,7 +444,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
-        header.component_sum = match inst {
+        match inst {
             InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
@@ -745,15 +745,14 @@ impl<const B: usize> TurboResidualCoder<B> {
         .max_by(f32::total_cmp)
         .expect("3 values input");
         (primary_header.lower, primary_header.upper) = interval;
-        let mut residual_header = ResidualVectorHeader {
+        let residual_header = ResidualVectorHeader {
             magnitude: residual_magnitude,
-            component_sum: 0,
         };
 
         let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
         let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
         let primary_delta = (primary_header.upper - primary_header.lower) / ((1 << B) - 1) as f32;
-        (primary_header.component_sum, residual_header.component_sum) = match inst {
+        match inst {
             InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,
@@ -1150,8 +1149,8 @@ mod test {
         fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
             abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
                 && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
-                && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
-                && abs_diff_eq!(self.component_sum, other.component_sum)
+                && abs_diff_eq!(self.upper, other.upper)
+                && abs_diff_eq!(self.sum, other.sum)
         }
     }
 
@@ -1165,7 +1164,6 @@ mod test {
         fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
             // TODO: tlvq8x8 fails on aarch64 when epsilon = 0; figure this out
             abs_diff_eq!(self.magnitude, other.magnitude, epsilon = epsilon)
-                && abs_diff_eq!(self.component_sum, other.component_sum, epsilon = 1)
         }
     }
 
@@ -1210,7 +1208,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
-                component_sum: 11,
+                sum: 3.176,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1253,7 +1251,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
-                component_sum: 32,
+                sum: 3.176,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1296,7 +1294,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
-                component_sum: 170,
+                sum: 3.176,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1339,7 +1337,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
-                component_sum: 2876,
+                sum: 3.176,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1383,15 +1381,14 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
-                component_sum: 11,
+                sum: 3.176,
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
         assert_abs_diff_eq!(
             residual_header,
             ResidualVectorHeader {
-                magnitude: 1.2012575,
-                component_sum: 2292,
+                magnitude: 1.2012576,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1435,7 +1432,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
-                component_sum: 32,
+                sum: 3.176,
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
@@ -1443,7 +1440,6 @@ mod test {
             residual_header,
             ResidualVectorHeader {
                 magnitude: 0.5039812,
-                component_sum: 2319,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1487,15 +1483,14 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
-                component_sum: 170,
+                sum: 3.176,
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
         assert_abs_diff_eq!(
             residual_header,
             ResidualVectorHeader {
-                magnitude: 0.123191215,
-                component_sum: 2407,
+                magnitude: 0.12319123,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1539,7 +1534,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
-                component_sum: 2876,
+                sum: 3.176,
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
@@ -1547,7 +1542,6 @@ mod test {
             residual_header,
             ResidualVectorHeader {
                 magnitude: 0.0071822493,
-                component_sum: 2422,
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];

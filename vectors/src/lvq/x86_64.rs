@@ -45,6 +45,7 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
     let mut meanv = _mm512_set1_ps(0.0);
     let mut variancev = _mm512_set1_ps(0.0);
     let mut dotv = _mm512_set1_ps(0.0);
+    let mut sumv = _mm512_set1_ps(0.0);
     let (head, tail) = vector.as_chunks::<16>();
     for (i, c) in head.iter().enumerate() {
         let x = _mm512_loadu_ps(c.as_ptr());
@@ -55,6 +56,7 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
         let delta2 = _mm512_sub_ps(x, meanv);
         variancev = _mm512_fmadd_ps(delta, delta2, variancev);
         dotv = _mm512_fmadd_ps(x, x, dotv);
+        sumv = _mm512_add_ps(sumv, x);
     }
 
     let base = head.len() * 16;
@@ -133,6 +135,7 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
         )) as f32
     };
     let mut dot = _mm512_reduce_add_ps(dotv);
+    let mut sum = _mm512_reduce_add_ps(sumv);
 
     for (i, x) in tail.iter().enumerate() {
         min = x.min(min);
@@ -141,6 +144,7 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
         mean += delta / (base + i + 1) as f32;
         variance += delta * (x - mean);
         dot += x * x;
+        sum += x;
     }
 
     VectorStats {
@@ -149,6 +153,7 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
         mean,
         std_dev: (variance / vector.len() as f32).sqrt(),
         l2_norm_sq: dot,
+        sum,
     }
 }
 
@@ -271,19 +276,17 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
     vector: &[f32],
     terms: VectorEncodeTerms,
     out: &mut [u8],
-) -> u32 {
+) {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     let (in_head, in_tail) = vector.split_at(tail_split);
     let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
 
-    let mut component_sum = if !in_head.is_empty() {
+    if !in_head.is_empty() {
         let terms = VectorEncodeTermsAvx512::from_terms(&terms);
         let mut qbuf = _mm512_set1_epi32(0);
-        let mut component_sum = _mm512_set1_epi32(0);
         let mut shift = 0;
         for i in (0..tail_split).step_by(16) {
             let q = terms.quantize(_mm512_loadu_ps(in_head.as_ptr().add(i)));
-            component_sum = _mm512_add_epi32(component_sum, q);
             qbuf = _mm512_or_si512(qbuf, _mm512_sll_epi32(q, _mm_set1_epi64x(shift as i64)));
             shift += B;
             if shift == 8 {
@@ -298,17 +301,11 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
 
         // tail_split should be a multiple of the number of dimensions per block.
         assert_eq!(shift, 0);
-
-        _mm512_reduce_add_epi32(component_sum) as u32
-    } else {
-        0
-    };
-
-    if !in_tail.is_empty() {
-        component_sum += super::scalar::primary_quantize_and_pack::<B>(in_tail, terms, out_tail);
     }
 
-    component_sum
+    if !in_tail.is_empty() {
+        super::scalar::primary_quantize_and_pack::<B>(in_tail, terms, out_tail);
+    }
 }
 
 #[target_feature(enable = "avx512f,avx512bw,avx2")]
@@ -367,7 +364,7 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
     primary_delta: f32,
     primary_out: &mut [u8],
     residual_out: &mut [u8],
-) -> (u32, u32) {
+) {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
@@ -375,12 +372,10 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
         primary_out.split_at_mut(packing::byte_len(tail_split, B));
     let (residual_out_head, residual_out_tail) = residual_out.split_at_mut(tail_split);
 
-    let (mut primary_component_sum, mut residual_component_sum) = if !vector_head.is_empty() {
+    if !vector_head.is_empty() {
         let primary_terms = VectorEncodeTermsAvx512::from_terms(&primary_terms);
         let residual_terms = VectorEncodeTermsAvx512::from_terms(&residual_terms);
         let primary_delta = _mm512_set1_ps(primary_delta);
-        let mut primary_component_sum = _mm512_set1_epi32(0);
-        let mut residual_component_sum = _mm512_set1_epi32(0);
         let mut pbuf = _mm512_set1_epi32(0);
         let mut block = 0usize;
         let mut shift = 0i64;
@@ -389,9 +384,6 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
             let p = primary_terms.quantize(v);
             let dq = _mm512_fmadd_ps(primary_delta, _mm512_cvtepu32_ps(p), primary_terms.lower);
             let r = residual_terms.quantize(_mm512_sub_ps(v, dq));
-
-            primary_component_sum = _mm512_add_epi32(primary_component_sum, p);
-            residual_component_sum = _mm512_add_epi32(residual_component_sum, r);
 
             pbuf = _mm512_or_si512(pbuf, _mm512_sll_epi64(p, _mm_set1_epi64x(shift)));
             shift += B as i64;
@@ -413,17 +405,10 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
 
         // tail_split should be a multiple of the number of dimensions per block.
         assert_eq!(shift, 0);
-
-        (
-            _mm512_reduce_add_epi32(primary_component_sum) as u32,
-            _mm512_reduce_add_epi32(residual_component_sum) as u32,
-        )
-    } else {
-        (0, 0)
-    };
+    }
 
     if !vector_tail.is_empty() {
-        let (p, r) = super::scalar::residual_quantize_and_pack::<B>(
+        super::scalar::residual_quantize_and_pack::<B>(
             vector_tail,
             primary_terms,
             residual_terms,
@@ -431,11 +416,7 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
             primary_out_tail,
             residual_out_tail,
         );
-        primary_component_sum += p;
-        residual_component_sum += r;
     }
-
-    (primary_component_sum, residual_component_sum)
 }
 
 #[target_feature(enable = "avx512f")]

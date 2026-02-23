@@ -3,11 +3,13 @@ use std::{fs::File, io, num::NonZero, path::PathBuf};
 use crate::{neighbor_util::TopNeighbors, recall::RecallComputer};
 use clap::Args;
 use easy_tiger::{
-    input::{DerefVectorStore, VectorStore},
+    input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
+    kmeans::{kmeans, Params},
     Neighbor,
 };
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
+use rand::SeedableRng;
 use rayon::prelude::*;
 use vectors::{F32VectorCoding, VectorSimilarity};
 
@@ -38,6 +40,26 @@ pub struct RecallArgs {
 
     #[command(flatten)]
     recall: crate::recall::RecallArgs,
+
+    /// Number of centers to compute and use.
+    ///
+    /// If 0, the data set will be uncentered.
+    ///
+    /// If 1, a mean vector will be computed and used as the center for all queries and docs.
+    ///
+    /// If >1, k-means will be used to compute centers. Each comparison will happen relative to
+    /// the closest center for each doc.
+    #[arg(long, default_value_t = 0)]
+    centers: usize,
+
+    /// When computing 2 or more centers, sample the data set to at most this many vectors.
+    #[arg(long, default_value_t = 100_000)]
+    center_sample_size: usize,
+
+    /// Random seed used for clustering computations.
+    /// Use a fixed value for repeatability.
+    #[arg(long, default_value_t = 0x7774_7370414E4E)]
+    seed: u64,
 }
 
 pub fn recall(
@@ -52,7 +74,6 @@ pub fn recall(
         .query_limit
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
-
     let doc_limit = args
         .doc_limit
         .unwrap_or(doc_vectors.len())
@@ -62,20 +83,78 @@ pub fn recall(
         io::Error::new(io::ErrorKind::InvalidInput, "must provide recall args"),
     )?;
 
+    let centers = match args.centers {
+        0 => None,
+        1 => {
+            let vectors = SubsetViewVectorStore::new(doc_vectors, (0..doc_limit).collect());
+            let mean = super::compute_center(&vectors);
+            let mut centers = VecVectorStore::with_capacity(doc_vectors.elem_stride(), 1);
+            centers.push(&mean);
+            Some(centers)
+        }
+        _ => {
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(args.seed);
+            let sample_size = args.center_sample_size.min(doc_limit);
+            let sample_vectors = if sample_size < doc_limit {
+                let indices = rand::seq::index::sample(&mut rng, doc_limit, sample_size);
+                SubsetViewVectorStore::new(doc_vectors, indices.into_vec())
+            } else {
+                SubsetViewVectorStore::new(doc_vectors, (0..doc_limit).collect())
+            };
+            println!(
+                "Computing {} centers from a sample of {} vectors",
+                args.centers,
+                sample_vectors.len()
+            );
+            let centers = kmeans(
+                &sample_vectors,
+                args.centers,
+                &Params {
+                    iters: 100,
+                    epsilon: 0.0001,
+                    ..Params::default()
+                },
+                &mut rng,
+            );
+            Some(centers.unwrap_or_else(|e| e))
+        }
+    };
+
     let coder = args.format.new_coder(args.similarity);
     let query_scorers = (0..query_limit)
         .into_par_iter()
-        .map(|i| {
-            let qdist = if args.quantize_query {
-                args.format.query_vector_distance_indexing(
-                    coder.encode(&query_vectors[i]),
-                    args.similarity,
-                )
-            } else {
-                args.format
-                    .query_vector_distance_f32(query_vectors[i].to_vec(), args.similarity)
-            };
-            qdist
+        .map(|i| match centers.as_ref() {
+            None => {
+                let qdist = if args.quantize_query {
+                    args.format.query_vector_distance_indexing(
+                        coder.encode(&query_vectors[i]),
+                        args.similarity,
+                    )
+                } else {
+                    args.format
+                        .query_vector_distance_f32(query_vectors[i].to_vec(), args.similarity)
+                };
+                vec![qdist]
+            }
+            Some(centers) => centers
+                .iter()
+                .map(|c| {
+                    let centered = query_vectors[i]
+                        .iter()
+                        .zip(c.iter())
+                        .map(|(q, c)| q - c)
+                        .collect::<Vec<_>>();
+                    if args.quantize_query {
+                        args.format.query_vector_distance_indexing(
+                            coder.encode(&centered),
+                            args.similarity,
+                        )
+                    } else {
+                        args.format
+                            .query_vector_distance_f32(centered, args.similarity)
+                    }
+                })
+                .collect::<Vec<_>>(),
         })
         .collect::<Vec<_>>();
 
@@ -86,9 +165,20 @@ pub fn recall(
         .into_par_iter()
         .progress_count(doc_limit as u64)
         .for_each(|d| {
-            let doc = coder.encode(&doc_vectors[d]);
+            let center = select_center_for_doc(&doc_vectors[d], centers.as_ref(), args.similarity);
+            let doc = if let Some(centers) = centers.as_ref() {
+                coder.encode(
+                    &doc_vectors[d]
+                        .iter()
+                        .zip(centers[center].iter())
+                        .map(|(d, c)| d - c)
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                coder.encode(&doc_vectors[d])
+            };
             for (q, s) in query_scorers.iter().enumerate() {
-                query_k[q].add(Neighbor::new(d as i64, s.distance(&doc)));
+                query_k[q].add(Neighbor::new(d as i64, s[center].distance(&doc)));
             }
         });
 
@@ -106,4 +196,27 @@ pub fn recall(
     );
 
     Ok(())
+}
+
+fn select_center_for_doc(
+    doc: &[f32],
+    centers: Option<&VecVectorStore<f32>>,
+    similarity: VectorSimilarity,
+) -> usize {
+    if let Some(centers) = centers {
+        if centers.len() == 1 {
+            0
+        } else {
+            let dist = similarity.new_distance_function();
+            centers
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (i, dist.distance_f32(doc, &c)))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+                .unwrap()
+        }
+    } else {
+        0
+    }
 }

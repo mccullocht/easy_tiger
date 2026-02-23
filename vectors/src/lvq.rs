@@ -1150,8 +1150,8 @@ mod test {
         fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
             abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
                 && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
-                && abs_diff_eq!(self.upper, other.upper)
-                && abs_diff_eq!(self.component_sum, other.component_sum)
+                && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
+                && abs_diff_eq!(self.component_sum, other.component_sum, epsilon = epsilon)
         }
     }
 

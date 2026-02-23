@@ -21,8 +21,8 @@ use std::arch::x86_64::{
 };
 
 use crate::lvq::{
-    TURBO_BLOCK_SIZE, TurboPrimaryVector, TurboResidualVector, VectorDecodeTerms,
-    VectorEncodeTerms, packing,
+    PrimaryVectorTerms, TURBO_BLOCK_SIZE, TurboPrimaryVector, TurboResidualVector,
+    VectorDecodeTerms, VectorEncodeTerms, packing,
 };
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, ResidualDotComponents, VectorStats};
@@ -429,7 +429,7 @@ pub fn residual_decode_avx512<const B: usize>(
     if !in_head.primary_data.is_empty() {
         let primary_interval = packing::block_dim(B);
         unsafe {
-            let primary_terms = VectorDecodeTermsAvx512::from_terms(&in_head.primary_terms);
+            let primary_terms = VectorDecodeTermsAvx512::from_primary_terms(&in_head.primary_terms);
             let residual_terms = VectorDecodeTermsAvx512::from_terms(&in_head.residual_terms);
             let mask = _mm512_set1_epi32(i32::from(u8::MAX >> (8 - B)));
             let mut pbuf = _mm512_set1_epi32(0);
@@ -832,6 +832,14 @@ struct VectorDecodeTermsAvx512 {
 }
 
 impl VectorDecodeTermsAvx512 {
+    #[inline(always)]
+    unsafe fn from_primary_terms(terms: &PrimaryVectorTerms) -> Self {
+        Self {
+            lower: _mm512_set1_ps(terms.lower),
+            delta: _mm512_set1_ps(terms.delta),
+        }
+    }
+
     #[inline(always)]
     unsafe fn from_terms(terms: &VectorDecodeTerms) -> Self {
         Self {

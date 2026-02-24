@@ -14,6 +14,7 @@ mod scalar;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
+use half::f16;
 use std::{
     borrow::Cow,
     ops::{Add, AddAssign},
@@ -148,10 +149,10 @@ fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, 
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 struct PrimaryVectorHeader {
-    l2_norm: f32,
-    lower: f32,
-    delta: f32,
-    component_sum: f32,
+    l2_norm: f16,
+    lower: f16,
+    delta: f16,
+    component_sum: f16,
 }
 
 impl PrimaryVectorHeader {
@@ -165,7 +166,7 @@ impl PrimaryVectorHeader {
 
     #[inline]
     fn serialize(&self, header_bytes: &mut [u8]) {
-        let header = header_bytes.as_chunks_mut::<4>().0;
+        let header = header_bytes.as_chunks_mut::<2>().0;
         header[0] = self.l2_norm.to_le_bytes();
         header[1] = self.lower.to_le_bytes();
         header[2] = self.delta.to_le_bytes();
@@ -175,13 +176,13 @@ impl PrimaryVectorHeader {
     #[inline]
     fn deserialize(raw: &[u8]) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
-        let header_entries = header_bytes.as_chunks::<4>().0;
+        let header_entries = header_bytes.as_chunks::<2>().0;
         Some((
             Self {
-                l2_norm: f32::from_le_bytes(header_entries[0]),
-                lower: f32::from_le_bytes(header_entries[1]),
-                delta: f32::from_le_bytes(header_entries[2]),
-                component_sum: f32::from_le_bytes(header_entries[3]),
+                l2_norm: f16::from_le_bytes(header_entries[0]),
+                lower: f16::from_le_bytes(header_entries[1]),
+                delta: f16::from_le_bytes(header_entries[2]),
+                component_sum: f16::from_le_bytes(header_entries[3]),
             },
             vector_bytes,
         ))
@@ -196,7 +197,7 @@ impl PrimaryVectorHeader {
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 struct ResidualVectorHeader {
-    magnitude: f32,
+    magnitude: f16,
 }
 
 impl ResidualVectorHeader {
@@ -210,17 +211,17 @@ impl ResidualVectorHeader {
 
     #[inline]
     fn serialize(&self, header_bytes: &mut [u8]) {
-        let header = header_bytes.as_chunks_mut::<4>().0;
+        let header = header_bytes.as_chunks_mut::<2>().0;
         header[0] = self.magnitude.to_le_bytes();
     }
 
     #[inline]
     fn deserialize(raw: &[u8]) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
-        let header_entries = header_bytes.as_chunks::<4>().0;
+        let header_entries = header_bytes.as_chunks::<2>().0;
         Some((
             Self {
-                magnitude: f32::from_le_bytes(header_entries[0]),
+                magnitude: f16::from_le_bytes(header_entries[0]),
             },
             vector_bytes,
         ))
@@ -291,14 +292,13 @@ impl PrimaryVectorTerms {
     }
 }
 
-// NB: this is kind of silly, but it will be less silly when the header is packed f16.
 impl From<PrimaryVectorHeader> for PrimaryVectorTerms {
     fn from(header: PrimaryVectorHeader) -> Self {
         Self {
-            l2_norm: header.l2_norm,
-            component_sum: header.component_sum,
-            lower: header.lower,
-            delta: header.delta,
+            l2_norm: header.l2_norm.to_f32(),
+            component_sum: header.component_sum.to_f32(),
+            lower: header.lower.to_f32(),
+            delta: header.delta.to_f32(),
         }
     }
 }
@@ -325,13 +325,12 @@ impl ResidualVectorTerms {
     }
 }
 
-// NB: this is kind of silly, but it will be less silly when the header is packed f16.
 impl From<(PrimaryVectorHeader, ResidualVectorHeader)> for ResidualVectorTerms {
     fn from(header: (PrimaryVectorHeader, ResidualVectorHeader)) -> Self {
         Self {
             primary: PrimaryVectorTerms::from(header.0),
-            lower: -header.1.magnitude / 2.0,
-            delta: header.1.magnitude / RESIDUAL_MAX,
+            lower: -header.1.magnitude.to_f32() / 2.0,
+            delta: header.1.magnitude.to_f32() / RESIDUAL_MAX,
         }
     }
 }
@@ -398,12 +397,13 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         let stats = VectorStats::from(vector);
         let interval = optimize_interval(vector, &stats, B);
         let header = PrimaryVectorHeader {
-            l2_norm: stats.l2_norm_sq.sqrt(),
-            component_sum: stats.component_sum,
-            lower: interval.0,
-            delta: (interval.1 - interval.0) / ((1 << B) - 1) as f32,
+            l2_norm: f16::from_f32(stats.l2_norm_sq.sqrt()),
+            component_sum: f16::from_f32(stats.component_sum),
+            lower: f16::from_f32(interval.0),
+            delta: f16::from_f32((interval.1 - interval.0) / ((1 << B) - 1) as f32),
         };
 
+        // XXX interval.1 need to do a f16 round trip.
         let terms = VectorEncodeTerms::from_primary::<B>(&header, interval.1);
         match inst {
             InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
@@ -634,10 +634,14 @@ struct VectorEncodeTerms {
 }
 
 impl VectorEncodeTerms {
-    fn from_primary<const B: usize>(primary: &PrimaryVectorHeader, upper: f32) -> Self {
-        let delta_inv = ((1 << B) - 1) as f32 / (upper - primary.lower);
+    // XXX should consume the upper bound, it did the wrong thing here.
+    fn from_primary<const B: usize>(primary: &PrimaryVectorHeader, _upper: f32) -> Self {
+        let lower = primary.lower.to_f32();
+        let delta = primary.delta.to_f32();
+        let upper = lower + delta * ((1 << B) - 1) as f32;
+        let delta_inv = 1.0 / delta;
         Self {
-            lower: primary.lower,
+            lower,
             upper,
             delta_inv,
         }
@@ -700,23 +704,24 @@ impl<const B: usize> TurboResidualCoder<B> {
         .max_by(f32::total_cmp)
         .expect("3 values input");
         let primary_header = PrimaryVectorHeader {
-            l2_norm: stats.l2_norm_sq.sqrt(),
-            component_sum: stats.component_sum,
-            lower: interval.0,
-            delta: (interval.1 - interval.0) / ((1 << B) - 1) as f32,
+            l2_norm: f16::from_f32(stats.l2_norm_sq.sqrt()),
+            component_sum: f16::from_f32(stats.component_sum),
+            lower: f16::from_f32(interval.0),
+            delta: f16::from_f32((interval.1 - interval.0) / ((1 << B) - 1) as f32),
         };
         let residual_header = ResidualVectorHeader {
-            magnitude: residual_magnitude,
+            magnitude: f16::from_f32(residual_magnitude),
         };
 
+        // XXX interval.1 need to do a f16 round trip.
         let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header, interval.1);
-        let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
+        let residual_terms = VectorEncodeTerms::from_residual(residual_header.magnitude.to_f32());
         match inst {
             InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,
                 residual_terms,
-                primary_header.delta,
+                primary_header.delta.to_f32(),
                 primary,
                 residual,
             ),
@@ -725,7 +730,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                 vector,
                 primary_terms,
                 residual_terms,
-                primary_header.delta,
+                primary_header.delta.to_f32(),
                 primary,
                 residual,
             ),
@@ -735,7 +740,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                     vector,
                     primary_terms,
                     residual_terms,
-                    primary_header.delta,
+                    primary_header.delta.to_f32(),
                     primary,
                     residual,
                 )
@@ -1079,6 +1084,7 @@ mod packing {
 #[cfg(test)]
 mod test {
     use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
+    use half::f16;
 
     use crate::lvq::{
         PrimaryVectorHeader, ResidualVectorHeader, TurboPrimaryCoder, TurboResidualCoder,
@@ -1094,10 +1100,17 @@ mod test {
         }
 
         fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
-            abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
-                && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
-                && abs_diff_eq!(self.delta, other.delta, epsilon = epsilon)
-                && abs_diff_eq!(self.component_sum, other.component_sum, epsilon = epsilon)
+            abs_diff_eq!(
+                self.l2_norm.to_f32(),
+                other.l2_norm.to_f32(),
+                epsilon = epsilon
+            ) && abs_diff_eq!(self.lower.to_f32(), other.lower.to_f32(), epsilon = epsilon)
+                && abs_diff_eq!(self.delta.to_f32(), other.delta.to_f32(), epsilon = epsilon)
+                && abs_diff_eq!(
+                    self.component_sum.to_f32(),
+                    other.component_sum.to_f32(),
+                    epsilon = epsilon
+                )
         }
     }
 
@@ -1110,7 +1123,11 @@ mod test {
 
         fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
             // TODO: tlvq8x8 fails on aarch64 when epsilon = 0; figure this out
-            abs_diff_eq!(self.magnitude, other.magnitude, epsilon = epsilon)
+            abs_diff_eq!(
+                self.magnitude.to_f32(),
+                other.magnitude.to_f32(),
+                epsilon = epsilon
+            )
         }
     }
 
@@ -1153,10 +1170,10 @@ mod test {
         assert_abs_diff_eq!(
             PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
-                l2_norm: 2.5226507,
-                lower: -0.49564388,
-                delta: 1.2012576,
-                component_sum: 3.176,
+                l2_norm: f16::from_f32(2.5226507),
+                lower: f16::from_f32(-0.49564388),
+                delta: f16::from_f32(1.2012576),
+                component_sum: f16::from_f32(3.176),
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1164,25 +1181,25 @@ mod test {
         assert_abs_diff_eq!(
             decoded.as_ref(),
             [
-                -0.49564388,
-                -0.49564388,
-                0.70561373,
-                0.70561373,
-                0.70561373,
-                0.70561373,
-                0.70561373,
-                -0.49564388,
-                -0.49564388,
-                -0.49564388,
-                0.70561373,
-                -0.49564388,
-                -0.49564388,
-                0.70561373,
-                -0.49564388,
-                0.70561373,
-                0.70561373,
-                0.70561373,
-                0.70561373
+                -0.49560547,
+                -0.49560547,
+                0.7055664,
+                0.7055664,
+                0.7055664,
+                0.7055664,
+                0.7055664,
+                -0.49560547,
+                -0.49560547,
+                -0.49560547,
+                0.7055664,
+                -0.49560547,
+                -0.49560547,
+                0.7055664,
+                -0.49560547,
+                0.7055664,
+                0.7055664,
+                0.7055664,
+                0.7055664
             ]
             .as_ref(),
             epsilon = 0.00001
@@ -1196,10 +1213,10 @@ mod test {
         assert_abs_diff_eq!(
             PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
-                l2_norm: 2.5226507,
-                lower: -0.6709247,
-                delta: 0.5039812,
-                component_sum: 3.176,
+                l2_norm: f16::from_f32(2.5226507),
+                lower: f16::from_f32(-0.6709247),
+                delta: f16::from_f32(0.5039812),
+                component_sum: f16::from_f32(3.176),
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1207,25 +1224,25 @@ mod test {
         assert_abs_diff_eq!(
             decoded.as_ref(),
             [
-                -0.6709247,
-                -0.16694355,
-                0.8410188,
-                0.8410188,
-                0.33703762,
-                0.33703762,
-                0.8410188,
-                -0.16694355,
-                -0.16694355,
-                -0.6709247,
-                0.8410188,
-                -0.6709247,
-                -0.16694355,
-                0.33703762,
-                -0.6709247,
-                0.33703762,
-                0.8410188,
-                0.8410188,
-                0.33703762
+                -0.67089844,
+                -0.16699219,
+                0.8408203,
+                0.8408203,
+                0.33691406,
+                0.33691406,
+                0.8408203,
+                -0.16699219,
+                -0.16699219,
+                -0.67089844,
+                0.8408203,
+                -0.67089844,
+                -0.16699219,
+                0.33691406,
+                -0.67089844,
+                0.33691406,
+                0.8408203,
+                0.8408203,
+                0.33691406
             ]
             .as_ref(),
             epsilon = 0.0001,
@@ -1239,10 +1256,10 @@ mod test {
         assert_abs_diff_eq!(
             PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
-                l2_norm: 2.5226507,
-                lower: -0.93474734,
-                delta: 0.12319123,
-                component_sum: 3.176,
+                l2_norm: f16::from_f32(2.5226507),
+                lower: f16::from_f32(-0.93474734),
+                delta: f16::from_f32(0.12319123),
+                component_sum: f16::from_f32(3.176),
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1250,25 +1267,25 @@ mod test {
         assert_abs_diff_eq!(
             decoded.as_ref(),
             [
-                -0.93474734,
-                -0.072408736,
-                0.6667386,
-                0.6667386,
-                0.5435474,
-                0.42035615,
-                0.6667386,
-                0.0507825,
-                -0.19559997,
-                -0.44198242,
-                0.78992987,
-                -0.68836486,
-                -0.3187912,
-                0.5435474,
-                -0.68836486,
-                0.42035615,
-                0.9131211,
-                0.6667386,
-                0.17397368
+                -0.9345703,
+                -0.072387695,
+                0.666626,
+                0.666626,
+                0.54345703,
+                0.4202881,
+                0.666626,
+                0.05078125,
+                -0.19555664,
+                -0.44189453,
+                0.7897949,
+                -0.6882324,
+                -0.3187256,
+                0.54345703,
+                -0.6882324,
+                0.4202881,
+                0.91296387,
+                0.666626,
+                0.1739502
             ]
             .as_ref(),
             epsilon = 0.0001,
@@ -1282,10 +1299,10 @@ mod test {
         assert_abs_diff_eq!(
             PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
             PrimaryVectorHeader {
-                l2_norm: 2.5226507,
-                lower: -0.92000645,
-                delta: 0.0071822493,
-                component_sum: 3.176,
+                l2_norm: f16::from_f32(2.5226507),
+                lower: f16::from_f32(-0.92000645),
+                delta: f16::from_f32(0.0071822493),
+                component_sum: f16::from_f32(3.176),
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1293,25 +1310,25 @@ mod test {
         assert_abs_diff_eq!(
             decoded.as_ref(),
             [
-                -0.92000645,
-                -0.058136523,
-                0.66008836,
-                0.6672706,
-                0.57390136,
-                0.43025643,
-                0.6457239,
-                -0.0006785393,
-                -0.20178151,
-                -0.42443126,
-                0.7319109,
-                -0.70453894,
-                -0.27360404,
-                0.53799015,
-                -0.73326796,
-                0.43743867,
-                0.91146713,
-                0.6959997,
-                0.20042449
+                -0.9199219,
+                -0.05795288,
+                0.6603546,
+                0.6675377,
+                0.5741577,
+                0.43049622,
+                0.64598846,
+                -0.00048828125,
+                -0.20161438,
+                -0.43147278,
+                0.73218536,
+                -0.7044296,
+                -0.27344513,
+                0.53824234,
+                -0.7331619,
+                0.4376793,
+                0.91176224,
+                0.69627,
+                0.20063782
             ]
             .as_ref(),
             epsilon = 0.0001
@@ -1326,17 +1343,17 @@ mod test {
         assert_abs_diff_eq!(
             primary_header,
             PrimaryVectorHeader {
-                l2_norm: 2.5226507,
-                lower: -0.49564388,
-                delta: 1.2012576,
-                component_sum: 3.176,
+                l2_norm: f16::from_f32(2.5226507),
+                lower: f16::from_f32(-0.49564388),
+                delta: f16::from_f32(1.2012576),
+                component_sum: f16::from_f32(3.176),
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
         assert_abs_diff_eq!(
             residual_header,
             ResidualVectorHeader {
-                magnitude: 1.2012576,
+                magnitude: f16::from_f32(1.2012576),
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1344,25 +1361,25 @@ mod test {
         assert_abs_diff_eq!(
             decoded.as_ref(),
             [
-                -0.9219725,
-                -0.05989358,
-                0.660861,
-                0.6702826,
-                0.5713555,
-                0.4300311,
-                0.6467286,
-                0.0013469756,
-                -0.20121804,
-                -0.42733708,
-                0.7315232,
-                -0.7052751,
-                -0.27188024,
-                0.5383798,
-                -0.72882915,
-                0.4347419,
-                0.91524494,
-                0.6938367,
-                0.20391202
+                -0.9219037,
+                -0.059886307,
+                0.66081685,
+                0.6702378,
+                0.5713178,
+                0.43000343,
+                0.6466854,
+                0.001349926,
+                -0.20120063,
+                -0.42730355,
+                0.73147404,
+                -0.7052218,
+                -0.2718578,
+                0.53834444,
+                -0.72877413,
+                0.4347139,
+                0.91518265,
+                0.6937902,
+                0.20390052
             ]
             .as_ref(),
             epsilon = 0.00001
@@ -1377,17 +1394,17 @@ mod test {
         assert_abs_diff_eq!(
             primary_header,
             PrimaryVectorHeader {
-                l2_norm: 2.5226507,
-                lower: -0.6709247,
-                delta: 0.5039812,
-                component_sum: 3.176,
+                l2_norm: f16::from_f32(2.5226507),
+                lower: f16::from_f32(-0.6709247),
+                delta: f16::from_f32(0.5039812),
+                component_sum: f16::from_f32(3.176),
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
         assert_abs_diff_eq!(
             residual_header,
             ResidualVectorHeader {
-                magnitude: 0.5039812,
+                magnitude: f16::from_f32(0.5039812),
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1395,25 +1412,25 @@ mod test {
         assert_abs_diff_eq!(
             decoded.as_ref(),
             [
-                -0.9209389,
-                -0.06120634,
-                0.6582021,
-                0.67006046,
-                0.57321703,
-                0.43091646,
-                0.6463437,
-                6.195903e-5,
-                -0.19955412,
-                -0.42881614,
-                0.72935236,
-                -0.70353526,
-                -0.2726808,
-                0.53961825,
-                -0.7312048,
-                0.43684563,
-                0.9131573,
-                0.6937772,
-                0.20165443
+                -0.92087543,
+                -0.06127066,
+                0.6580308,
+                0.6698874,
+                0.57305837,
+                0.43077898,
+                0.6461742,
+                0.0019646436,
+                -0.19959787,
+                -0.4288258,
+                0.7291705,
+                -0.70350415,
+                -0.2727137,
+                0.53946465,
+                -0.7311696,
+                0.4367073,
+                0.9129481,
+                0.69360065,
+                0.20155102
             ]
             .as_ref(),
             epsilon = 0.0001,
@@ -1428,17 +1445,17 @@ mod test {
         assert_abs_diff_eq!(
             primary_header,
             PrimaryVectorHeader {
-                l2_norm: 2.5226507,
-                lower: -0.93474734,
-                delta: 0.12319123,
-                component_sum: 3.176,
+                l2_norm: f16::from_f32(2.5226507),
+                lower: f16::from_f32(-0.93474734),
+                delta: f16::from_f32(0.12319123),
+                component_sum: f16::from_f32(3.176),
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
         assert_abs_diff_eq!(
             residual_header,
             ResidualVectorHeader {
-                magnitude: 0.12319123,
+                magnitude: f16::from_f32(0.12319123),
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -1446,25 +1463,25 @@ mod test {
         assert_abs_diff_eq!(
             decoded.as_ref(),
             [
-                -0.9209789,
-                -0.06105582,
-                0.65876746,
-                0.6698788,
-                0.5727751,
-                0.43122596,
-                0.64620674,
-                0.0007813573,
-                -0.20018944,
-                -0.42821398,
-                0.72978354,
-                -0.7040657,
-                -0.273138,
-                0.5389579,
-                -0.73111945,
-                0.436057,
-                0.9128795,
-                0.6940339,
-                0.20223519
+                -0.9208044,
+                -0.061036833,
+                0.6591392,
+                0.6697656,
+                0.5731625,
+                0.43115592,
+                0.64609784,
+                0.00078914687,
+                -0.20014529,
+                -0.4281286,
+                0.73014253,
+                -0.70393044,
+                -0.27308062,
+                0.53886837,
+                -0.73097926,
+                0.4359861,
+                0.9132054,
+                0.6939163,
+                0.2022066
             ]
             .as_ref(),
             epsilon = 0.0001,
@@ -1479,17 +1496,17 @@ mod test {
         assert_abs_diff_eq!(
             primary_header,
             PrimaryVectorHeader {
-                l2_norm: 2.5226507,
-                lower: -0.92000645,
-                delta: 0.0071822493,
-                component_sum: 3.176,
+                l2_norm: f16::from_f32(2.5226507),
+                lower: f16::from_f32(-0.92000645),
+                delta: f16::from_f32(0.0071822493),
+                component_sum: f16::from_f32(3.176),
             }
         );
         let (residual_header, _) = ResidualVectorHeader::deserialize(&vector_bytes).unwrap();
         assert_abs_diff_eq!(
             residual_header,
             ResidualVectorHeader {
-                magnitude: 0.0071822493,
+                magnitude: f16::from_f32(0.0071822493),
             }
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];

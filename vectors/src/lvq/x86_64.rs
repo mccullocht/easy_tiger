@@ -21,8 +21,8 @@ use std::arch::x86_64::{
 };
 
 use crate::lvq::{
-    PrimaryVectorTerms, TURBO_BLOCK_SIZE, TurboPrimaryVector, TurboResidualVector,
-    VectorDecodeTerms, VectorEncodeTerms, packing,
+    PrimaryVectorTerms, ResidualVectorTerms, TURBO_BLOCK_SIZE, TurboPrimaryVector,
+    TurboResidualVector, VectorEncodeTerms, packing,
 };
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, ResidualDotComponents, VectorStats};
@@ -319,8 +319,7 @@ pub unsafe fn primary_decode_avx512<const B: usize>(
     if !in_head.data.is_empty() {
         unsafe {
             let load_interval = TURBO_BLOCK_SIZE * 8 / B;
-            let lower = _mm512_set1_ps(vector.terms.lower);
-            let delta = _mm512_set1_ps(vector.terms.delta);
+            let terms = VectorDecodeTermsAvx512::from_primary_terms(&in_head.terms);
             let mask = _mm512_set1_epi32(i32::from(u8::MAX >> (8 - B)));
             let mut d = _mm512_set1_epi32(0);
             for i in (0..tail_split).step_by(16) {
@@ -344,7 +343,11 @@ pub unsafe fn primary_decode_avx512<const B: usize>(
                 };
                 _mm512_storeu_ps(
                     out_head.as_mut_ptr().add(i),
-                    _mm512_fmadd_ps(_mm512_cvtepu32_ps(_mm512_and_si512(d, mask)), delta, lower),
+                    _mm512_fmadd_ps(
+                        _mm512_cvtepu32_ps(_mm512_and_si512(d, mask)),
+                        terms.delta,
+                        terms.lower,
+                    ),
                 );
             }
         }
@@ -429,8 +432,8 @@ pub fn residual_decode_avx512<const B: usize>(
     if !in_head.primary_data.is_empty() {
         let primary_interval = packing::block_dim(B);
         unsafe {
-            let primary_terms = VectorDecodeTermsAvx512::from_primary_terms(&in_head.primary_terms);
-            let residual_terms = VectorDecodeTermsAvx512::from_terms(&in_head.residual_terms);
+            let (primary_terms, residual_terms) =
+                VectorDecodeTermsAvx512::from_residual_terms(&in_head.terms);
             let mask = _mm512_set1_epi32(i32::from(u8::MAX >> (8 - B)));
             let mut pbuf = _mm512_set1_epi32(0);
             for i in (0..tail_split).step_by(16) {
@@ -841,11 +844,14 @@ impl VectorDecodeTermsAvx512 {
     }
 
     #[inline(always)]
-    unsafe fn from_terms(terms: &VectorDecodeTerms) -> Self {
-        Self {
-            lower: _mm512_set1_ps(terms.lower),
-            delta: _mm512_set1_ps(terms.delta),
-        }
+    unsafe fn from_residual_terms(terms: &ResidualVectorTerms) -> (Self, Self) {
+        (
+            Self::from_primary_terms(&terms.primary),
+            Self {
+                lower: _mm512_set1_ps(terms.lower),
+                delta: _mm512_set1_ps(terms.delta),
+            },
+        )
     }
 
     #[inline(always)]

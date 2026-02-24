@@ -13,8 +13,8 @@ use std::arch::aarch64::{
 };
 
 use crate::lvq::{
-    PrimaryVectorTerms, RESIDUAL_BITS, ResidualDotComponents, TURBO_BLOCK_SIZE, TurboPrimaryVector,
-    TurboResidualVector, VectorDecodeTerms, VectorEncodeTerms, scalar,
+    PrimaryVectorTerms, RESIDUAL_BITS, ResidualDotComponents, ResidualVectorTerms,
+    TURBO_BLOCK_SIZE, TurboPrimaryVector, TurboResidualVector, VectorEncodeTerms, scalar,
 };
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, VectorStats, packing};
@@ -292,23 +292,25 @@ pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &m
 
     if !in_head.data.is_empty() {
         unsafe {
-            let lower = vdupq_n_f32(vector.terms.lower);
-            let delta = vdupq_n_f32(vector.terms.delta);
+            let terms = NeonVectorDecodeTerms::from_primary_terms(&vector.terms);
             let mut expander = TLVQExpander32::<B>::new(in_head.data.as_ptr());
             for i in (0..tail_split).step_by(16) {
                 let [d0, d1, d2, d3] = expander.next();
-                vst1q_f32(out_head.as_mut_ptr().add(i), vfmaq_f32(lower, d0, delta));
+                vst1q_f32(
+                    out_head.as_mut_ptr().add(i),
+                    vfmaq_f32(terms.lower, d0, terms.delta),
+                );
                 vst1q_f32(
                     out_head.as_mut_ptr().add(i + 4),
-                    vfmaq_f32(lower, d1, delta),
+                    vfmaq_f32(terms.lower, d1, terms.delta),
                 );
                 vst1q_f32(
                     out_head.as_mut_ptr().add(i + 8),
-                    vfmaq_f32(lower, d2, delta),
+                    vfmaq_f32(terms.lower, d2, terms.delta),
                 );
                 vst1q_f32(
                     out_head.as_mut_ptr().add(i + 12),
-                    vfmaq_f32(lower, d3, delta),
+                    vfmaq_f32(terms.lower, d3, terms.delta),
                 );
             }
         }
@@ -425,8 +427,8 @@ pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out:
 
     if !in_head.primary_data.is_empty() {
         unsafe {
-            let primary_terms = NeonVectorDecodeTerms::from_primary_terms(&in_head.primary_terms);
-            let residual_terms = NeonVectorDecodeTerms::from_terms(&in_head.residual_terms);
+            let (primary_terms, residual_terms) =
+                NeonVectorDecodeTerms::from_residual_terms(&in_head.terms);
             let mut primary_expander = TLVQExpander32::<B>::new(in_head.primary_data.as_ptr());
             let mut residual_expander =
                 TLVQExpander32::<RESIDUAL_BITS>::new(in_head.residual_data.as_ptr());
@@ -500,7 +502,7 @@ struct NeonVectorDecodeTerms {
 
 impl NeonVectorDecodeTerms {
     #[inline(always)]
-    unsafe fn from_terms(terms: &VectorDecodeTerms) -> Self {
+    unsafe fn from_primary_terms(terms: &PrimaryVectorTerms) -> Self {
         Self {
             lower: vdupq_n_f32(terms.lower),
             delta: vdupq_n_f32(terms.delta),
@@ -508,11 +510,17 @@ impl NeonVectorDecodeTerms {
     }
 
     #[inline(always)]
-    unsafe fn from_primary_terms(terms: &PrimaryVectorTerms) -> Self {
-        Self {
-            lower: vdupq_n_f32(terms.lower),
-            delta: vdupq_n_f32(terms.delta),
-        }
+    unsafe fn from_residual_terms(terms: &ResidualVectorTerms) -> (Self, Self) {
+        (
+            Self {
+                lower: vdupq_n_f32(terms.primary.lower),
+                delta: vdupq_n_f32(terms.primary.delta),
+            },
+            Self {
+                lower: vdupq_n_f32(terms.lower),
+                delta: vdupq_n_f32(terms.delta),
+            },
+        )
     }
 }
 

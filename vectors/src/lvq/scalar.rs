@@ -154,8 +154,8 @@ pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out:
         .zip(vector.residual_data.iter().copied())
         .zip(out.iter_mut())
     {
-        *o = (p as f32).mul_add(vector.primary_terms.delta, vector.primary_terms.lower)
-            + (r as f32).mul_add(vector.residual_terms.delta, vector.residual_terms.lower);
+        *o = (p as f32).mul_add(vector.terms.primary.delta, vector.terms.primary.lower)
+            + (r as f32).mul_add(vector.terms.delta, vector.terms.lower);
     }
 }
 

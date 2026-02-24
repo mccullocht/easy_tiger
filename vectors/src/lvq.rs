@@ -151,7 +151,7 @@ fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, 
 struct PrimaryVectorHeader {
     l2_norm: f16,
     lower: f16,
-    delta: f16,
+    upper: f16,
     component_sum: f16,
 }
 
@@ -169,7 +169,7 @@ impl PrimaryVectorHeader {
         let header = header_bytes.as_chunks_mut::<2>().0;
         header[0] = self.l2_norm.to_le_bytes();
         header[1] = self.lower.to_le_bytes();
-        header[2] = self.delta.to_le_bytes();
+        header[2] = self.upper.to_le_bytes();
         header[3] = self.component_sum.to_le_bytes();
     }
 
@@ -181,7 +181,7 @@ impl PrimaryVectorHeader {
             Self {
                 l2_norm: f16::from_le_bytes(header_entries[0]),
                 lower: f16::from_le_bytes(header_entries[1]),
-                delta: f16::from_le_bytes(header_entries[2]),
+                upper: f16::from_le_bytes(header_entries[2]),
                 component_sum: f16::from_le_bytes(header_entries[3]),
             },
             vector_bytes,
@@ -281,6 +281,15 @@ struct PrimaryVectorTerms {
 }
 
 impl PrimaryVectorTerms {
+    fn from_header<const B: usize>(header: PrimaryVectorHeader) -> Self {
+        Self {
+            l2_norm: header.l2_norm.to_f32(),
+            component_sum: header.component_sum.to_f32(),
+            lower: header.lower.to_f32(),
+            delta: (header.upper.to_f32() - header.lower.to_f32()) / ((1 << B) - 1) as f32,
+        }
+    }
+
     fn correct_dot(&self, dot: u32, dim: usize, other: &PrimaryVectorTerms) -> f32 {
         // Note that any dot value larger than (2 << 24) will be rounded when converted to f32 which can
         // cause vector comparisons a <-> b and b <-> a to return slightly different results. To prevent
@@ -292,17 +301,6 @@ impl PrimaryVectorTerms {
     }
 }
 
-impl From<PrimaryVectorHeader> for PrimaryVectorTerms {
-    fn from(header: PrimaryVectorHeader) -> Self {
-        Self {
-            l2_norm: header.l2_norm.to_f32(),
-            component_sum: header.component_sum.to_f32(),
-            lower: header.lower.to_f32(),
-            delta: header.delta.to_f32(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct ResidualVectorTerms {
     primary: PrimaryVectorTerms,
@@ -311,6 +309,14 @@ struct ResidualVectorTerms {
 }
 
 impl ResidualVectorTerms {
+    fn from_header<const B: usize>(header: (PrimaryVectorHeader, ResidualVectorHeader)) -> Self {
+        Self {
+            primary: PrimaryVectorTerms::from_header::<B>(header.0),
+            lower: -header.1.magnitude.to_f32() / 2.0,
+            delta: header.1.magnitude.to_f32() / RESIDUAL_MAX,
+        }
+    }
+
     fn correct_dot(&self, dot: &ResidualDotComponents, dim: usize, other: &Self) -> f32 {
         let dot_raw = dot.ap_dot_bp as f64 * (self.primary.delta * other.primary.delta) as f64
             + dot.ap_dot_br as f64 * (self.primary.delta * other.delta) as f64
@@ -325,16 +331,6 @@ impl ResidualVectorTerms {
     }
 }
 
-impl From<(PrimaryVectorHeader, ResidualVectorHeader)> for ResidualVectorTerms {
-    fn from(header: (PrimaryVectorHeader, ResidualVectorHeader)) -> Self {
-        Self {
-            primary: PrimaryVectorTerms::from(header.0),
-            lower: -header.1.magnitude.to_f32() / 2.0,
-            delta: header.1.magnitude.to_f32() / RESIDUAL_MAX,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct TurboPrimaryVector<'a, const B: usize> {
     data: &'a [u8],
@@ -346,7 +342,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
         Some(Self {
             data: vector_bytes,
-            terms: PrimaryVectorTerms::from(header),
+            terms: PrimaryVectorTerms::from_header::<B>(header),
         })
     }
 
@@ -400,10 +396,10 @@ impl<const B: usize> TurboPrimaryCoder<B> {
             l2_norm: f16::from_f32(stats.l2_norm_sq.sqrt()),
             component_sum: f16::from_f32(stats.component_sum),
             lower: f16::from_f32(interval.0),
-            delta: f16::from_f32((interval.1 - interval.0) / ((1 << B) - 1) as f32),
+            upper: f16::from_f32(interval.1),
         };
 
-        let terms = VectorEncodeTerms::from_primary::<B>(&header, f16::from_f32(interval.1));
+        let terms = VectorEncodeTerms::from_primary::<B>(&header);
         match inst {
             InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
@@ -510,7 +506,7 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
         Self {
             similarity,
             query,
-            terms: PrimaryVectorTerms::from(header),
+            terms: PrimaryVectorTerms::from_header::<PRIMARY_QUERY_BITS>(header),
             inst,
         }
     }
@@ -581,7 +577,7 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
         Some(Self {
             primary_data: primary_vector,
             residual_data: residual_vector,
-            terms: ResidualVectorTerms::from((primary_header, residual_header)),
+            terms: ResidualVectorTerms::from_header::<B>((primary_header, residual_header)),
         })
     }
 
@@ -633,9 +629,10 @@ struct VectorEncodeTerms {
 }
 
 impl VectorEncodeTerms {
-    fn from_primary<const B: usize>(primary: &PrimaryVectorHeader, upper: f16) -> Self {
-        let lower = primary.lower.to_f32();
-        let upper = upper.to_f32();
+    fn from_primary<const B: usize>(header: &PrimaryVectorHeader) -> Self {
+        let lower = header.lower.to_f32();
+        let upper = header.upper.to_f32();
+        // XXX memoize B component
         let delta_inv = ((1 << B) - 1) as f32 / (upper - lower);
         Self {
             lower,
@@ -704,21 +701,22 @@ impl<const B: usize> TurboResidualCoder<B> {
             l2_norm: f16::from_f32(stats.l2_norm_sq.sqrt()),
             component_sum: f16::from_f32(stats.component_sum),
             lower: f16::from_f32(interval.0),
-            delta: f16::from_f32((interval.1 - interval.0) / ((1 << B) - 1) as f32),
+            upper: f16::from_f32(interval.1),
         };
         let residual_header = ResidualVectorHeader {
             magnitude: f16::from_f32(residual_magnitude),
         };
 
-        let primary_terms =
-            VectorEncodeTerms::from_primary::<B>(&primary_header, f16::from_f32(interval.1));
+        let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
         let residual_terms = VectorEncodeTerms::from_residual(residual_header.magnitude.to_f32());
+        // XXX memorize B component 1/ (2^B - 1)
+        let primary_delta = (primary_terms.upper - primary_terms.lower) / ((1 << B) - 1) as f32;
         match inst {
             InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,
                 residual_terms,
-                primary_header.delta.to_f32(),
+                primary_delta,
                 primary,
                 residual,
             ),
@@ -727,7 +725,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                 vector,
                 primary_terms,
                 residual_terms,
-                primary_header.delta.to_f32(),
+                primary_delta,
                 primary,
                 residual,
             ),
@@ -737,7 +735,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                     vector,
                     primary_terms,
                     residual_terms,
-                    primary_header.delta.to_f32(),
+                    primary_delta,
                     primary,
                     residual,
                 )
@@ -856,7 +854,7 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
             similarity,
             primary_vector,
             residual_vector,
-            terms: ResidualVectorTerms::from((primary_header, residual_header)),
+            terms: ResidualVectorTerms::from_header::<B>((primary_header, residual_header)),
             inst: InstructionSet::default(),
         }
     }
@@ -912,7 +910,7 @@ impl<const B: usize> TurboResidualFastQueryDistance<B> {
     pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
         let inst = InstructionSet::default();
         let (header, query) = TurboPrimaryCoder::<B>::encode_parts(inst, query);
-        let terms = PrimaryVectorTerms::from(header);
+        let terms = PrimaryVectorTerms::from_header::<B>(header);
 
         Self {
             similarity,
@@ -1102,7 +1100,7 @@ mod test {
                 other.l2_norm.to_f32(),
                 epsilon = epsilon
             ) && abs_diff_eq!(self.lower.to_f32(), other.lower.to_f32(), epsilon = epsilon)
-                && abs_diff_eq!(self.delta.to_f32(), other.delta.to_f32(), epsilon = epsilon)
+                && abs_diff_eq!(self.upper.to_f32(), other.upper.to_f32(), epsilon = epsilon)
                 && abs_diff_eq!(
                     self.component_sum.to_f32(),
                     other.component_sum.to_f32(),
@@ -1169,7 +1167,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: f16::from_f32(2.5226507),
                 lower: f16::from_f32(-0.49564388),
-                delta: f16::from_f32(1.2012576),
+                upper: f16::from_f32(0.7055664),
                 component_sum: f16::from_f32(3.176),
             }
         );
@@ -1212,7 +1210,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: f16::from_f32(2.5226507),
                 lower: f16::from_f32(-0.6709247),
-                delta: f16::from_f32(0.5039812),
+                upper: f16::from_f32(0.8408203),
                 component_sum: f16::from_f32(3.176),
             }
         );
@@ -1255,7 +1253,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: f16::from_f32(2.5226507),
                 lower: f16::from_f32(-0.93474734),
-                delta: f16::from_f32(0.12319123),
+                upper: f16::from_f32(0.91308594),
                 component_sum: f16::from_f32(3.176),
             }
         );
@@ -1265,24 +1263,24 @@ mod test {
             decoded.as_ref(),
             [
                 -0.9345703,
-                -0.072387695,
-                0.666626,
-                0.666626,
-                0.54345703,
-                0.4202881,
-                0.666626,
-                0.05078125,
-                -0.19555664,
-                -0.44189453,
-                0.7897949,
-                -0.6882324,
-                -0.3187256,
-                0.54345703,
-                -0.6882324,
-                0.4202881,
-                0.91296387,
-                0.666626,
-                0.1739502
+                -0.07233074,
+                0.6667317,
+                0.6667317,
+                0.54355466,
+                0.42037758,
+                0.6667317,
+                0.05084634,
+                -0.19550782,
+                -0.441862,
+                0.7899088,
+                -0.68821615,
+                -0.3186849,
+                0.54355466,
+                -0.68821615,
+                0.42037758,
+                0.91308594,
+                0.6667317,
+                0.17402342
             ]
             .as_ref(),
             epsilon = 0.0001,
@@ -1298,7 +1296,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: f16::from_f32(2.5226507),
                 lower: f16::from_f32(-0.92000645),
-                delta: f16::from_f32(0.0071822493),
+                upper: f16::from_f32(0.9116211),
                 component_sum: f16::from_f32(3.176),
             }
         );
@@ -1308,24 +1306,24 @@ mod test {
             decoded.as_ref(),
             [
                 -0.9199219,
-                -0.05795288,
-                0.6603546,
-                0.6675377,
-                0.5741577,
-                0.43049622,
-                0.64598846,
-                -0.00048828125,
-                -0.20161438,
-                -0.43147278,
-                0.73218536,
-                -0.7044296,
-                -0.27344513,
-                0.53824234,
-                -0.7331619,
-                0.4376793,
-                0.91176224,
-                0.69627,
-                0.20063782
+                -0.05801932,
+                0.6602328,
+                0.6674153,
+                0.57404256,
+                0.43039212,
+                0.64586776,
+                -0.0005591512,
+                -0.20166975,
+                -0.43151042,
+                0.73205805,
+                -0.70444626,
+                -0.27349496,
+                0.5381299,
+                -0.73317635,
+                0.43757465,
+                0.91162103,
+                0.6961454,
+                0.20055145
             ]
             .as_ref(),
             epsilon = 0.0001
@@ -1342,7 +1340,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: f16::from_f32(2.5226507),
                 lower: f16::from_f32(-0.49564388),
-                delta: f16::from_f32(1.2012576),
+                upper: f16::from_f32(0.7055664),
                 component_sum: f16::from_f32(3.176),
             }
         );
@@ -1393,7 +1391,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: f16::from_f32(2.5226507),
                 lower: f16::from_f32(-0.6709247),
-                delta: f16::from_f32(0.5039812),
+                upper: f16::from_f32(0.8408203),
                 component_sum: f16::from_f32(3.176),
             }
         );
@@ -1444,7 +1442,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: f16::from_f32(2.5226507),
                 lower: f16::from_f32(-0.93474734),
-                delta: f16::from_f32(0.12319123),
+                upper: f16::from_f32(0.91308594),
                 component_sum: f16::from_f32(3.176),
             }
         );
@@ -1461,24 +1459,24 @@ mod test {
             decoded.as_ref(),
             [
                 -0.9208044,
-                -0.061036833,
-                0.6591392,
-                0.6697656,
-                0.5731625,
-                0.43115592,
-                0.64609784,
-                0.00078914687,
-                -0.20014529,
-                -0.4281286,
-                0.73014253,
-                -0.70393044,
-                -0.27308062,
-                0.53886837,
-                -0.73097926,
-                0.4359861,
-                0.9132054,
-                0.6939163,
-                0.2022066
+                -0.06097988,
+                0.658762,
+                0.66987133,
+                0.5727771,
+                0.4307624,
+                0.6462036,
+                0.00085423514,
+                -0.20009647,
+                -0.42809606,
+                0.7297734,
+                -0.70391417,
+                -0.27303994,
+                0.538966,
+                -0.730963,
+                0.43607557,
+                0.9128444,
+                0.69402206,
+                0.2017968
             ]
             .as_ref(),
             epsilon = 0.0001,
@@ -1495,7 +1493,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: f16::from_f32(2.5226507),
                 lower: f16::from_f32(-0.92000645),
-                delta: f16::from_f32(0.0071822493),
+                upper: f16::from_f32(0.9116211),
                 component_sum: f16::from_f32(3.176),
             }
         );

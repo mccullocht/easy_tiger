@@ -89,7 +89,7 @@ struct VectorStats {
     mean: f32,
     std_dev: f32,
     l2_norm_sq: f32,
-    sum: f32,
+    component_sum: f32,
 }
 
 impl VectorStats {
@@ -150,10 +150,7 @@ fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, 
 struct PrimaryVectorHeader {
     l2_norm: f32,
     lower: f32,
-    // XXX upper is only consumed at encoding time and we must immediately transform this value into
-    // a delta on decoding. Consider packing the delta instead and making upper an encoder-only
-    // concept.
-    upper: f32,
+    delta: f32,
     component_sum: f32,
 }
 
@@ -171,7 +168,7 @@ impl PrimaryVectorHeader {
         let header = header_bytes.as_chunks_mut::<4>().0;
         header[0] = self.l2_norm.to_le_bytes();
         header[1] = self.lower.to_le_bytes();
-        header[2] = self.upper.to_le_bytes();
+        header[2] = self.delta.to_le_bytes();
         header[3] = self.component_sum.to_le_bytes();
     }
 
@@ -183,22 +180,11 @@ impl PrimaryVectorHeader {
             Self {
                 l2_norm: f32::from_le_bytes(header_entries[0]),
                 lower: f32::from_le_bytes(header_entries[1]),
-                upper: f32::from_le_bytes(header_entries[2]),
+                delta: f32::from_le_bytes(header_entries[2]),
                 component_sum: f32::from_le_bytes(header_entries[3]),
             },
             vector_bytes,
         ))
-    }
-}
-
-impl From<VectorStats> for PrimaryVectorHeader {
-    fn from(value: VectorStats) -> Self {
-        Self {
-            l2_norm: value.l2_norm_sq.sqrt(),
-            lower: value.min,
-            upper: value.max,
-            component_sum: value.sum,
-        }
     }
 }
 
@@ -294,12 +280,14 @@ struct PrimaryVectorTerms {
 }
 
 impl PrimaryVectorTerms {
-    fn from_header<const B: usize>(header: PrimaryVectorHeader) -> Self {
+    // NB: this is kind of silly, but it will be less silly when the header is packed f16.
+    // XXX impl From<PrimaryVectorHeader>
+    fn from_header(header: PrimaryVectorHeader) -> Self {
         Self {
             l2_norm: header.l2_norm,
             component_sum: header.component_sum,
             lower: header.lower,
-            delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
+            delta: header.delta,
         }
     }
 
@@ -322,12 +310,11 @@ struct ResidualVectorTerms {
 }
 
 impl ResidualVectorTerms {
-    fn from_header<const B: usize>(
-        primary: PrimaryVectorHeader,
-        residual: ResidualVectorHeader,
-    ) -> Self {
+    // NB: this is kind of silly, but it will be less silly when the header is packed f16.
+    // XXX impl From<(PrimaryVectorHeader, ResidualVectorHeader)>
+    fn from_header(primary: PrimaryVectorHeader, residual: ResidualVectorHeader) -> Self {
         Self {
-            primary: PrimaryVectorTerms::from_header::<B>(primary),
+            primary: PrimaryVectorTerms::from_header(primary),
             lower: -residual.magnitude / 2.0,
             delta: residual.magnitude / RESIDUAL_MAX,
         }
@@ -358,7 +345,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
         Some(Self {
             data: vector_bytes,
-            terms: PrimaryVectorTerms::from_header::<B>(header),
+            terms: PrimaryVectorTerms::from_header(header),
         })
     }
 
@@ -407,10 +394,15 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         out: &mut [u8],
     ) -> PrimaryVectorHeader {
         let stats = VectorStats::from(vector);
-        let mut header = PrimaryVectorHeader::from(stats);
-        (header.lower, header.upper) = optimize_interval(vector, &stats, B);
+        let interval = optimize_interval(vector, &stats, B);
+        let header = PrimaryVectorHeader {
+            l2_norm: stats.l2_norm_sq.sqrt(),
+            component_sum: stats.component_sum,
+            lower: interval.0,
+            delta: (interval.1 - interval.0) / ((1 << B) - 1) as f32,
+        };
 
-        let terms = VectorEncodeTerms::from_primary::<B>(&header);
+        let terms = VectorEncodeTerms::from_primary::<B>(&header, interval.1);
         match inst {
             InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
@@ -517,7 +509,7 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
         Self {
             similarity,
             query,
-            terms: PrimaryVectorTerms::from_header::<PRIMARY_QUERY_BITS>(header),
+            terms: PrimaryVectorTerms::from_header(header),
             inst,
         }
     }
@@ -588,7 +580,7 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
         Some(Self {
             primary_data: primary_vector,
             residual_data: residual_vector,
-            terms: ResidualVectorTerms::from_header::<B>(primary_header, residual_header),
+            terms: ResidualVectorTerms::from_header(primary_header, residual_header),
         })
     }
 
@@ -617,7 +609,6 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
         (tail_dim, head, tail)
     }
 
-    // XXX figure out how to reconcile this with split_tail. These should not be different!
     /// Splits (primary, residual) vector bytes into head and tail pairs.
     /// The head contains full 16 byte blocks, while the tail contains the remaining bytes.
     /// Returns the dimension chosen for the split in addition to the head and tail pairs.
@@ -641,11 +632,11 @@ struct VectorEncodeTerms {
 }
 
 impl VectorEncodeTerms {
-    fn from_primary<const B: usize>(primary: &PrimaryVectorHeader) -> Self {
-        let delta_inv = ((1 << B) - 1) as f32 / (primary.upper - primary.lower);
+    fn from_primary<const B: usize>(primary: &PrimaryVectorHeader, upper: f32) -> Self {
+        let delta_inv = ((1 << B) - 1) as f32 / (upper - primary.lower);
         Self {
             lower: primary.lower,
-            upper: primary.upper,
+            upper,
             delta_inv,
         }
     }
@@ -690,7 +681,6 @@ impl<const B: usize> TurboResidualCoder<B> {
         residual: &mut [u8],
     ) -> (PrimaryVectorHeader, ResidualVectorHeader) {
         let stats = VectorStats::from(vector);
-        let mut primary_header = PrimaryVectorHeader::from(stats);
         // NB: this interval optimization reduces loss for the primary vector, but this loss
         // reduction can make the residual vector more lossy if we derive the delta from the primary
         // interval as described in the LVQ paper. Compute and store a residual delta that is large
@@ -701,26 +691,30 @@ impl<const B: usize> TurboResidualCoder<B> {
         // values we may need to encode based on the gap between the initial and optimized interval.
         let residual_magnitude = [
             (interval.1 - interval.0) / ((1 << B) - 1) as f32,
-            (primary_header.lower.abs() - interval.0.abs()) * 2.0,
-            (primary_header.upper.abs() - interval.1.abs()) * 2.0,
+            (stats.min.abs() - interval.0.abs()) * 2.0,
+            (stats.max.abs() - interval.1.abs()) * 2.0,
         ]
         .into_iter()
         .max_by(f32::total_cmp)
         .expect("3 values input");
-        (primary_header.lower, primary_header.upper) = interval;
+        let primary_header = PrimaryVectorHeader {
+            l2_norm: stats.l2_norm_sq.sqrt(),
+            component_sum: stats.component_sum,
+            lower: interval.0,
+            delta: (interval.1 - interval.0) / ((1 << B) - 1) as f32,
+        };
         let residual_header = ResidualVectorHeader {
             magnitude: residual_magnitude,
         };
 
-        let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
+        let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header, interval.1);
         let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
-        let primary_delta = (primary_header.upper - primary_header.lower) / ((1 << B) - 1) as f32;
         match inst {
             InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,
                 residual_terms,
-                primary_delta,
+                primary_header.delta,
                 primary,
                 residual,
             ),
@@ -729,7 +723,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                 vector,
                 primary_terms,
                 residual_terms,
-                primary_delta,
+                primary_header.delta,
                 primary,
                 residual,
             ),
@@ -739,7 +733,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                     vector,
                     primary_terms,
                     residual_terms,
-                    primary_delta,
+                    primary_header.delta,
                     primary,
                     residual,
                 )
@@ -858,7 +852,7 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
             similarity,
             primary_vector,
             residual_vector,
-            terms: ResidualVectorTerms::from_header::<B>(primary_header, residual_header),
+            terms: ResidualVectorTerms::from_header(primary_header, residual_header),
             inst: InstructionSet::default(),
         }
     }
@@ -914,7 +908,7 @@ impl<const B: usize> TurboResidualFastQueryDistance<B> {
     pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
         let inst = InstructionSet::default();
         let (header, query) = TurboPrimaryCoder::<B>::encode_parts(inst, query);
-        let terms = PrimaryVectorTerms::from_header::<B>(header);
+        let terms = PrimaryVectorTerms::from_header(header);
 
         Self {
             similarity,
@@ -1100,7 +1094,7 @@ mod test {
         fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
             abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
                 && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
-                && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
+                && abs_diff_eq!(self.delta, other.delta, epsilon = epsilon)
                 && abs_diff_eq!(self.component_sum, other.component_sum, epsilon = epsilon)
         }
     }
@@ -1131,6 +1125,7 @@ mod test {
                 && abs_diff_eq!(self.mean, other.mean, epsilon = epsilon)
                 && abs_diff_eq!(self.std_dev, other.std_dev, epsilon = epsilon)
                 && abs_diff_eq!(self.l2_norm_sq, other.l2_norm_sq, epsilon = epsilon)
+                && abs_diff_eq!(self.component_sum, other.component_sum, epsilon = epsilon)
         }
     }
 
@@ -1158,7 +1153,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
-                upper: 0.70561373,
+                delta: 1.2012576,
                 component_sum: 3.176,
             }
         );
@@ -1201,7 +1196,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
-                upper: 0.8410188,
+                delta: 0.5039812,
                 component_sum: 3.176,
             }
         );
@@ -1244,7 +1239,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
-                upper: 0.9131211,
+                delta: 0.12319123,
                 component_sum: 3.176,
             }
         );
@@ -1287,7 +1282,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
-                upper: 0.91146713,
+                delta: 0.0071822493,
                 component_sum: 3.176,
             }
         );
@@ -1331,7 +1326,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
-                upper: 0.70561373,
+                delta: 1.2012576,
                 component_sum: 3.176,
             }
         );
@@ -1382,7 +1377,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
-                upper: 0.8410188,
+                delta: 0.5039812,
                 component_sum: 3.176,
             }
         );
@@ -1433,7 +1428,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
-                upper: 0.9131211,
+                delta: 0.12319123,
                 component_sum: 3.176,
             }
         );
@@ -1484,7 +1479,7 @@ mod test {
             PrimaryVectorHeader {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
-                upper: 0.91146713,
+                delta: 0.0071822493,
                 component_sum: 3.176,
             }
         );

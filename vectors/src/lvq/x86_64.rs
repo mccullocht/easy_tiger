@@ -153,7 +153,7 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
         mean,
         std_dev: (variance / vector.len() as f32).sqrt(),
         l2_norm_sq: dot,
-        sum,
+        component_sum: sum,
     }
 }
 

@@ -73,7 +73,7 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
         mean,
         std_dev: (mean_sq / vector.len() as f32).sqrt(),
         l2_norm_sq: dot,
-        sum,
+        component_sum: sum,
     }
 }
 

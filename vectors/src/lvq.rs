@@ -280,17 +280,6 @@ struct PrimaryVectorTerms {
 }
 
 impl PrimaryVectorTerms {
-    // NB: this is kind of silly, but it will be less silly when the header is packed f16.
-    // XXX impl From<PrimaryVectorHeader>
-    fn from_header(header: PrimaryVectorHeader) -> Self {
-        Self {
-            l2_norm: header.l2_norm,
-            component_sum: header.component_sum,
-            lower: header.lower,
-            delta: header.delta,
-        }
-    }
-
     fn correct_dot(&self, dot: u32, dim: usize, other: &PrimaryVectorTerms) -> f32 {
         // Note that any dot value larger than (2 << 24) will be rounded when converted to f32 which can
         // cause vector comparisons a <-> b and b <-> a to return slightly different results. To prevent
@@ -302,6 +291,18 @@ impl PrimaryVectorTerms {
     }
 }
 
+// NB: this is kind of silly, but it will be less silly when the header is packed f16.
+impl From<PrimaryVectorHeader> for PrimaryVectorTerms {
+    fn from(header: PrimaryVectorHeader) -> Self {
+        Self {
+            l2_norm: header.l2_norm,
+            component_sum: header.component_sum,
+            lower: header.lower,
+            delta: header.delta,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ResidualVectorTerms {
     primary: PrimaryVectorTerms,
@@ -310,16 +311,6 @@ struct ResidualVectorTerms {
 }
 
 impl ResidualVectorTerms {
-    // NB: this is kind of silly, but it will be less silly when the header is packed f16.
-    // XXX impl From<(PrimaryVectorHeader, ResidualVectorHeader)>
-    fn from_header(primary: PrimaryVectorHeader, residual: ResidualVectorHeader) -> Self {
-        Self {
-            primary: PrimaryVectorTerms::from_header(primary),
-            lower: -residual.magnitude / 2.0,
-            delta: residual.magnitude / RESIDUAL_MAX,
-        }
-    }
-
     fn correct_dot(&self, dot: &ResidualDotComponents, dim: usize, other: &Self) -> f32 {
         let dot_raw = dot.ap_dot_bp as f64 * (self.primary.delta * other.primary.delta) as f64
             + dot.ap_dot_br as f64 * (self.primary.delta * other.delta) as f64
@@ -334,6 +325,17 @@ impl ResidualVectorTerms {
     }
 }
 
+// NB: this is kind of silly, but it will be less silly when the header is packed f16.
+impl From<(PrimaryVectorHeader, ResidualVectorHeader)> for ResidualVectorTerms {
+    fn from(header: (PrimaryVectorHeader, ResidualVectorHeader)) -> Self {
+        Self {
+            primary: PrimaryVectorTerms::from(header.0),
+            lower: -header.1.magnitude / 2.0,
+            delta: header.1.magnitude / RESIDUAL_MAX,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct TurboPrimaryVector<'a, const B: usize> {
     data: &'a [u8],
@@ -345,7 +347,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
         Some(Self {
             data: vector_bytes,
-            terms: PrimaryVectorTerms::from_header(header),
+            terms: PrimaryVectorTerms::from(header),
         })
     }
 
@@ -509,7 +511,7 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
         Self {
             similarity,
             query,
-            terms: PrimaryVectorTerms::from_header(header),
+            terms: PrimaryVectorTerms::from(header),
             inst,
         }
     }
@@ -580,7 +582,7 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
         Some(Self {
             primary_data: primary_vector,
             residual_data: residual_vector,
-            terms: ResidualVectorTerms::from_header(primary_header, residual_header),
+            terms: ResidualVectorTerms::from((primary_header, residual_header)),
         })
     }
 
@@ -852,7 +854,7 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
             similarity,
             primary_vector,
             residual_vector,
-            terms: ResidualVectorTerms::from_header(primary_header, residual_header),
+            terms: ResidualVectorTerms::from((primary_header, residual_header)),
             inst: InstructionSet::default(),
         }
     }
@@ -908,7 +910,7 @@ impl<const B: usize> TurboResidualFastQueryDistance<B> {
     pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
         let inst = InstructionSet::default();
         let (header, query) = TurboPrimaryCoder::<B>::encode_parts(inst, query);
-        let terms = PrimaryVectorTerms::from_header(header);
+        let terms = PrimaryVectorTerms::from(header);
 
         Self {
             similarity,

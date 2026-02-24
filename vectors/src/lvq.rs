@@ -403,8 +403,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
             delta: f16::from_f32((interval.1 - interval.0) / ((1 << B) - 1) as f32),
         };
 
-        // XXX interval.1 need to do a f16 round trip.
-        let terms = VectorEncodeTerms::from_primary::<B>(&header, interval.1);
+        let terms = VectorEncodeTerms::from_primary::<B>(&header, f16::from_f32(interval.1));
         match inst {
             InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
@@ -634,12 +633,10 @@ struct VectorEncodeTerms {
 }
 
 impl VectorEncodeTerms {
-    // XXX should consume the upper bound, it did the wrong thing here.
-    fn from_primary<const B: usize>(primary: &PrimaryVectorHeader, _upper: f32) -> Self {
+    fn from_primary<const B: usize>(primary: &PrimaryVectorHeader, upper: f16) -> Self {
         let lower = primary.lower.to_f32();
-        let delta = primary.delta.to_f32();
-        let upper = lower + delta * ((1 << B) - 1) as f32;
-        let delta_inv = 1.0 / delta;
+        let upper = upper.to_f32();
+        let delta_inv = ((1 << B) - 1) as f32 / (upper - lower);
         Self {
             lower,
             upper,
@@ -713,8 +710,8 @@ impl<const B: usize> TurboResidualCoder<B> {
             magnitude: f16::from_f32(residual_magnitude),
         };
 
-        // XXX interval.1 need to do a f16 round trip.
-        let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header, interval.1);
+        let primary_terms =
+            VectorEncodeTerms::from_primary::<B>(&primary_header, f16::from_f32(interval.1));
         let residual_terms = VectorEncodeTerms::from_residual(residual_header.magnitude.to_f32());
         match inst {
             InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(

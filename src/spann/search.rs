@@ -6,9 +6,11 @@ use std::{
     num::NonZero,
     ops::{Add, AddAssign},
     str::FromStr,
+    sync::{mpsc, Arc, LazyLock},
 };
 
 use min_max_heap::MinMaxHeap;
+use threadpool::ThreadPool;
 use tracing::warn;
 use vectors::{F32VectorCoding, QueryVectorDistance, VectorSimilarity};
 use wt_mdb::{Result, Session};
@@ -21,6 +23,15 @@ use crate::{
     },
     Neighbor,
 };
+
+// XXX tried values in [4, 8, 16]. 8 seems to be best, as this scales we just get hosed more and
+// more by time in free().
+const IO_THREADS_PER_REQUEST: usize = 8;
+// XXX 32 is num_cores. We should probably use num_cpus::get() instead.
+const IO_THREAD_POOL_SIZE: usize = 32 * IO_THREADS_PER_REQUEST;
+
+static IO_THREAD_POOL: LazyLock<ThreadPool> =
+    LazyLock::new(|| ThreadPool::new(IO_THREAD_POOL_SIZE));
 
 /// The algorithm used to select centroids to search in the tail index.
 #[derive(Debug, Copy, Clone)]
@@ -212,38 +223,65 @@ impl Searcher {
 
         centroids = self.params.centroid_selector.select(centroids);
         self.stats.postings_read = centroids.len();
-
         self.seen.clear();
+
+        let per_thread_centroids = (0..IO_THREADS_PER_REQUEST)
+            .map(|t| {
+                centroids
+                    .iter()
+                    .map(|c| c.vertex() as u32)
+                    .skip(t)
+                    .step_by(IO_THREADS_PER_REQUEST)
+                    .collect::<Vec<u32>>()
+            })
+            .collect::<Vec<_>>();
+        let (tx, rx) = mpsc::channel();
+        for thread_centroids in per_thread_centroids {
+            let tx = tx.clone();
+            let index = Arc::clone(&reader.index);
+            let conn = Arc::clone(reader.session().connection());
+            IO_THREAD_POOL.execute(move || {
+                let session = conn.open_session().unwrap();
+                for centroid_id in thread_centroids {
+                    let mut cursor = session
+                        .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
+                            &index.table_names.postings,
+                        )
+                        .unwrap();
+                    cursor
+                        .set_bounds(PostingKey::centroid_range(centroid_id))
+                        .unwrap();
+                    while let Some(r) = unsafe { cursor.next_unsafe() } {
+                        let (record_id, vector) = match r {
+                            Ok((k, v)) => (k.record_id, v),
+                            Err(e) => {
+                                warn!("failed to read posting in centroid {centroid_id}: {e}");
+                                continue;
+                            }
+                        };
+
+                        // XXX we could perform seen filtering here to reduce the number of vectors
+                        // sent over the channel if we had a concurrent sent. In practice we are
+                        // using a single replica so the seen check is wasteful anyway.
+                        tx.send((record_id, vector.to_vec())).unwrap();
+                    }
+                }
+                drop(tx);
+            });
+        }
+        // Ensure all of the open senders are in the thread pool.
+        drop(tx);
+
         let mut result_queue = MultiResultQueue::new(
             query,
             reader.index.config().posting_coder,
             reader.index().head_config().config().similarity,
             self.params.limit.get(),
         );
-        for c in centroids {
-            let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
-            // TODO: if I can't read a posting list then skip and warn rather than exiting early.
-            let mut cursor = reader
-                .session()
-                .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
-                    &reader.index().table_names.postings,
-                )?;
-            cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
-            while let Some(r) = unsafe { cursor.next_unsafe() } {
-                self.stats.posting_vectors_read += 1;
-                let (record_id, vector) = match r {
-                    Ok((k, v)) => (k.record_id, v),
-                    Err(e) => {
-                        warn!("failed to read posting in centroid {centroid_id}: {e}");
-                        continue;
-                    }
-                };
-
-                if !self.seen.insert(record_id) {
-                    continue; // already seen
-                }
-
-                result_queue.push(record_id, vector);
+        for (record_id, vector) in rx {
+            self.stats.posting_vectors_read += 1;
+            if self.seen.insert(record_id) {
+                result_queue.push(record_id, &vector);
             }
         }
 

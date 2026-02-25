@@ -170,9 +170,10 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             stats.total_stats.posting_vectors_slow_scored as f64 / stats.count as f64,
         );
         println!(
-            "avg duration head search {:.6}s tail search {:.6}s rerank {:.6}s tail io {:.6}s rerank io {:.6}s",
+            "avg duration head search {:.6}s tail search {:.6}s tail scoring {:.6}s rerank {:.6}s tail io {:.6}s rerank io {:.6}s",
             stats.total_head_search_duration.as_secs_f64() / stats.count as f64,
             stats.total_tail_search_duration.as_secs_f64() / stats.count as f64,
+            stats.total_tail_scoring_duration.as_secs_f64() / stats.count as f64,
             stats.total_rerank_duration.as_secs_f64() / stats.count as f64,
             stats.total_tail_io_duration.as_secs_f64() / stats.count as f64,
             stats.total_rerank_io_duration.as_secs_f64() / stats.count as f64,
@@ -288,6 +289,7 @@ struct AggregateSearchStats {
     total_tail_search_duration: Duration,
     total_rerank_duration: Duration,
 
+    total_tail_scoring_duration: Duration,
     total_tail_io_duration: Duration,
     total_rerank_io_duration: Duration,
 }
@@ -303,6 +305,7 @@ impl AggregateSearchStats {
             total_head_search_duration: total_stats.head_search_duration,
             total_tail_search_duration: total_stats.tail_search_duration,
             total_rerank_duration: total_stats.rerank_duration,
+            total_tail_scoring_duration: total_stats.tail_scoring_duration,
             total_tail_io_duration: total_stats.tail_io_duration,
             total_rerank_io_duration: total_stats.rerank_io_duration,
         }
@@ -333,6 +336,8 @@ impl Add<AggregateSearchStats> for AggregateSearchStats {
             total_tail_search_duration: self.total_tail_search_duration
                 + rhs.total_tail_search_duration,
             total_rerank_duration: self.total_rerank_duration + rhs.total_rerank_duration,
+            total_tail_scoring_duration: self.total_tail_scoring_duration
+                + rhs.total_tail_scoring_duration,
             total_tail_io_duration: self.total_tail_io_duration + rhs.total_tail_io_duration,
             total_rerank_io_duration: self.total_rerank_io_duration + rhs.total_rerank_io_duration,
         }

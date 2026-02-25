@@ -176,6 +176,8 @@ pub struct SearchStats {
     /// Wall time spent reranking the results.
     pub rerank_duration: Duration,
 
+    /// Wall time spent computing distances during tail search.
+    pub tail_scoring_duration: Duration,
     /// Wall time spent in read operations during tail search.
     pub tail_io_duration: Duration,
     /// Wall time spent in read operations during reranking.
@@ -197,6 +199,7 @@ impl Add for SearchStats {
             head_search_duration: self.head_search_duration + rhs.head_search_duration,
             tail_search_duration: self.tail_search_duration + rhs.tail_search_duration,
             rerank_duration: self.rerank_duration + rhs.rerank_duration,
+            tail_scoring_duration: self.tail_scoring_duration + rhs.tail_scoring_duration,
             tail_io_duration: self.tail_io_duration + rhs.tail_io_duration,
             rerank_io_duration: self.rerank_io_duration + rhs.rerank_io_duration,
         }
@@ -319,14 +322,19 @@ impl Searcher {
             reader.index().head_config().config().similarity,
             self.params.limit.get(),
         );
+        // XXX record the time to the first byte, an maybe the time just spent waiting.
+        // XXX we might do better with a different strategy at the producer where we just produce
+        // fixed size blocks of N vectors at a time. It's not really important to chunk by centroid.
         for (record_ids, vectors, duration) in rx {
             self.stats.posting_vectors_read += vectors.len();
             self.stats.tail_io_duration += duration;
+            let start = Instant::now();
             for (record_id, vector) in record_ids.into_iter().zip(vectors.iter()) {
                 if self.seen.insert(record_id) {
                     result_queue.push(record_id, &vector);
                 }
             }
+            self.stats.tail_scoring_duration += start.elapsed();
         }
 
         self.stats.posting_vectors_fast_scored = result_queue.fast_count;

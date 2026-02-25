@@ -129,7 +129,7 @@ impl From<OptionsBuilder> for Options {
         if value.log {
             options.push("log=(enabled=true)".to_string());
         }
-        options.push("session_max=1024".to_string());
+        options.push("session_max=16384".to_string());
         if options.is_empty() {
             Self(None)
         } else {

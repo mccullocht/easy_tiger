@@ -16,22 +16,26 @@ use vectors::{F32VectorCoding, QueryVectorDistance, VectorSimilarity};
 use wt_mdb::{Result, Session};
 
 use crate::{
+    input::{VecVectorStore, VectorStore},
     spann::{centroid_stats::CentroidStats, PostingKey, SessionIndexReader, TableIndex},
     vamana::{
         search::{GraphSearchStats, GraphSearcher},
-        {GraphSearchParams, GraphVectorIndex},
+        GraphSearchParams, GraphVectorIndex,
     },
     Neighbor,
 };
 
-// XXX tried values in [4, 8, 16]. 8 seems to be best, as this scales we just get hosed more and
-// more by time in free().
-const IO_THREADS_PER_REQUEST: usize = 8;
-// XXX 32 is num_cores. We should probably use num_cpus::get() instead.
-const IO_THREAD_POOL_SIZE: usize = 32 * IO_THREADS_PER_REQUEST;
+// XXX this is a bit of a guess. In practice I don't seem to run out of parallelism.
+const IO_THREADS_PER_REQUEST: usize = 16;
 
-static IO_THREAD_POOL: LazyLock<ThreadPool> =
-    LazyLock::new(|| ThreadPool::new(IO_THREAD_POOL_SIZE));
+static IO_THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| {
+    // Capping thread count helps avoid excessive contention in the kernel page cache when we are
+    // very memory constrained.
+    threadpool::Builder::new()
+        .num_threads(32 * IO_THREADS_PER_REQUEST.min(4))
+        .thread_name("spann_wt_io".into())
+        .build()
+});
 
 /// The algorithm used to select centroids to search in the tail index.
 #[derive(Debug, Copy, Clone)]
@@ -235,6 +239,14 @@ impl Searcher {
                     .collect::<Vec<u32>>()
             })
             .collect::<Vec<_>>();
+        let max_centroid_len = reader.index().config().max_centroid_len;
+        let posting_entry_len = reader
+            .index
+            .config()
+            .posting_coder
+            .new_coder(reader.index.head_config().config().similarity)
+            .byte_len(reader.index.head_config().config().dimensions.get());
+
         let (tx, rx) = mpsc::channel();
         for thread_centroids in per_thread_centroids {
             let tx = tx.clone();
@@ -242,6 +254,7 @@ impl Searcher {
             let conn = Arc::clone(reader.session().connection());
             IO_THREAD_POOL.execute(move || {
                 let session = conn.open_session().unwrap();
+                let _txn = session.transaction(None).unwrap();
                 for centroid_id in thread_centroids {
                     let mut cursor = session
                         .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
@@ -251,22 +264,27 @@ impl Searcher {
                     cursor
                         .set_bounds(PostingKey::centroid_range(centroid_id))
                         .unwrap();
+                    let mut record_ids = Vec::with_capacity(max_centroid_len);
+                    let mut vectors =
+                        VecVectorStore::with_capacity(posting_entry_len, max_centroid_len);
                     while let Some(r) = unsafe { cursor.next_unsafe() } {
-                        let (record_id, vector) = match r {
-                            Ok((k, v)) => (k.record_id, v),
+                        // TODO: we could perform seen filtering here to reduce the number of vectors
+                        // sent over the channel if we had a concurrent set. In practice we are
+                        // using a single replica so the seen check is wasteful anyway.
+                        match r {
+                            Ok((k, v)) => {
+                                record_ids.push(k.record_id);
+                                vectors.push(&v);
+                            }
                             Err(e) => {
                                 warn!("failed to read posting in centroid {centroid_id}: {e}");
                                 continue;
                             }
                         };
-
-                        // XXX we could perform seen filtering here to reduce the number of vectors
-                        // sent over the channel if we had a concurrent sent. In practice we are
-                        // using a single replica so the seen check is wasteful anyway.
-                        tx.send((record_id, vector.to_vec())).unwrap();
                     }
+
+                    tx.send((record_ids, vectors)).unwrap();
                 }
-                drop(tx);
             });
         }
         // Ensure all of the open senders are in the thread pool.
@@ -278,10 +296,12 @@ impl Searcher {
             reader.index().head_config().config().similarity,
             self.params.limit.get(),
         );
-        for (record_id, vector) in rx {
-            self.stats.posting_vectors_read += 1;
-            if self.seen.insert(record_id) {
-                result_queue.push(record_id, &vector);
+        for (record_ids, vectors) in rx {
+            self.stats.posting_vectors_read += vectors.len();
+            for (record_id, vector) in record_ids.into_iter().zip(vectors.iter()) {
+                if self.seen.insert(record_id) {
+                    result_queue.push(record_id, &vector);
+                }
             }
         }
 
@@ -306,28 +326,47 @@ impl Searcher {
             .config()
             .rerank_format
             .expect("rerank format is set");
-        let query = format.query_vector_distance_f32(query, reader.head_reader.config().similarity);
-        let mut raw_cursor = reader
-            .session()
-            .open_record_cursor(&reader.index().table_names.raw_vectors)?;
-        let mut reranked = result_queue
-            .into_results()
-            .into_iter()
-            .take(self.params.num_rerank)
-            .map(|n| {
-                Ok(Neighbor::new(
-                    n.vertex(),
-                    query.distance(unsafe {
-                        raw_cursor
-                            .seek_exact_unsafe(n.vertex())
-                            .expect("raw vector for candidate")?
-                    }),
-                ))
+        let query = format
+            .query_vector_distance_f32(query.to_vec(), reader.head_reader.config().similarity);
+        let results = result_queue.into_results();
+        let per_thread_results = (0..IO_THREADS_PER_REQUEST)
+            .map(|t| {
+                results
+                    .iter()
+                    .take(self.params.num_rerank)
+                    .skip(t)
+                    .step_by(IO_THREADS_PER_REQUEST)
+                    .map(|n| n.vertex())
+                    .collect::<Vec<_>>()
             })
-            .collect::<Result<Vec<_>>>()?;
-        reranked.sort_unstable();
+            .collect::<Vec<_>>();
 
-        Ok(reranked)
+        let (tx, rx) = mpsc::channel();
+        for thread_results in per_thread_results {
+            let conn = Arc::clone(reader.session().connection());
+            let tx = tx.clone();
+            let index = Arc::clone(&reader.index);
+            IO_THREAD_POOL.execute(move || {
+                let session = conn.open_session().unwrap();
+                let _txn = session.transaction(None).unwrap();
+                let mut cursor = session
+                    .get_record_cursor(&index.table_names.raw_vectors)
+                    .unwrap();
+                for vertex_id in thread_results {
+                    let v = cursor.seek_exact(vertex_id).unwrap().unwrap();
+                    tx.send((vertex_id, v)).unwrap();
+                }
+            });
+        }
+        drop(tx);
+
+        let mut reranked_results = Vec::with_capacity(results.len());
+        for (vertex_id, vector) in rx {
+            reranked_results.push(Neighbor::new(vertex_id, query.distance(&vector)));
+        }
+        reranked_results.sort_unstable();
+
+        Ok(reranked_results)
     }
 }
 

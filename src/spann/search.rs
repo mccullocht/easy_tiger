@@ -7,6 +7,7 @@ use std::{
     ops::{Add, AddAssign},
     str::FromStr,
     sync::{mpsc, Arc, LazyLock},
+    time::{Duration, Instant},
 };
 
 use min_max_heap::MinMaxHeap;
@@ -167,6 +168,18 @@ pub struct SearchStats {
     pub posting_vectors_fast_scored: usize,
     /// Number of posting entries "slow" scored.
     pub posting_vectors_slow_scored: usize,
+
+    /// Wall time spent searching the head graph and selecting centroids to search.
+    pub head_search_duration: Duration,
+    /// Wall time spent searching the tail postings.
+    pub tail_search_duration: Duration,
+    /// Wall time spent reranking the results.
+    pub rerank_duration: Duration,
+
+    /// Wall time spent in read operations during tail search.
+    pub tail_io_duration: Duration,
+    /// Wall time spent in read operations during reranking.
+    pub rerank_io_duration: Duration,
 }
 
 impl Add for SearchStats {
@@ -181,6 +194,11 @@ impl Add for SearchStats {
                 + rhs.posting_vectors_fast_scored,
             posting_vectors_slow_scored: self.posting_vectors_slow_scored
                 + rhs.posting_vectors_slow_scored,
+            head_search_duration: self.head_search_duration + rhs.head_search_duration,
+            tail_search_duration: self.tail_search_duration + rhs.tail_search_duration,
+            rerank_duration: self.rerank_duration + rhs.rerank_duration,
+            tail_io_duration: self.tail_io_duration + rhs.tail_io_duration,
+            rerank_io_duration: self.rerank_io_duration + rhs.rerank_io_duration,
         }
     }
 }
@@ -219,6 +237,8 @@ impl Searcher {
     ) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 
+        let start = Instant::now();
+
         let mut centroids = self.head_searcher.search(query, &reader.head_reader)?;
         self.stats.head = self.head_searcher.stats();
         if centroids.is_empty() {
@@ -228,6 +248,9 @@ impl Searcher {
         centroids = self.params.centroid_selector.select(centroids);
         self.stats.postings_read = centroids.len();
         self.seen.clear();
+
+        self.stats.head_search_duration = start.elapsed();
+        let start = Instant::now();
 
         let per_thread_centroids = (0..IO_THREADS_PER_REQUEST)
             .map(|t| {
@@ -255,12 +278,12 @@ impl Searcher {
             IO_THREAD_POOL.execute(move || {
                 let session = conn.open_session().unwrap();
                 let _txn = session.transaction(None).unwrap();
+                let mut cursor = session
+                    .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(&index.table_names.postings)
+                    .unwrap();
                 for centroid_id in thread_centroids {
-                    let mut cursor = session
-                        .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
-                            &index.table_names.postings,
-                        )
-                        .unwrap();
+                    let start = Instant::now();
+
                     cursor
                         .set_bounds(PostingKey::centroid_range(centroid_id))
                         .unwrap();
@@ -283,7 +306,7 @@ impl Searcher {
                         };
                     }
 
-                    tx.send((record_ids, vectors)).unwrap();
+                    tx.send((record_ids, vectors, start.elapsed())).unwrap();
                 }
             });
         }
@@ -296,8 +319,9 @@ impl Searcher {
             reader.index().head_config().config().similarity,
             self.params.limit.get(),
         );
-        for (record_ids, vectors) in rx {
+        for (record_ids, vectors, duration) in rx {
             self.stats.posting_vectors_read += vectors.len();
+            self.stats.tail_io_duration += duration;
             for (record_id, vector) in record_ids.into_iter().zip(vectors.iter()) {
                 if self.seen.insert(record_id) {
                     result_queue.push(record_id, &vector);
@@ -307,6 +331,8 @@ impl Searcher {
 
         self.stats.posting_vectors_fast_scored = result_queue.fast_count;
         self.stats.posting_vectors_slow_scored = result_queue.slow_count;
+
+        self.stats.tail_search_duration = start.elapsed();
 
         self.maybe_rerank_results(query, result_queue, reader)
     }
@@ -320,6 +346,8 @@ impl Searcher {
         if self.params.num_rerank == 0 || reader.index().config().rerank_format.is_none() {
             return Ok(result_queue.into_results());
         }
+
+        let start = Instant::now();
 
         let format = reader
             .index()
@@ -353,18 +381,22 @@ impl Searcher {
                     .get_record_cursor(&index.table_names.raw_vectors)
                     .unwrap();
                 for vertex_id in thread_results {
+                    let start = Instant::now();
                     let v = cursor.seek_exact(vertex_id).unwrap().unwrap();
-                    tx.send((vertex_id, v)).unwrap();
+                    tx.send((vertex_id, v, start.elapsed())).unwrap();
                 }
             });
         }
         drop(tx);
 
         let mut reranked_results = Vec::with_capacity(results.len());
-        for (vertex_id, vector) in rx {
+        for (vertex_id, vector, duration) in rx {
+            self.stats.rerank_io_duration += duration;
             reranked_results.push(Neighbor::new(vertex_id, query.distance(&vector)));
         }
         reranked_results.sort_unstable();
+
+        self.stats.rerank_duration = start.elapsed();
 
         Ok(reranked_results)
     }

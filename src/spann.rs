@@ -214,15 +214,13 @@ impl TableIndex {
         let table_names = TableNames::from_index_name(index_name);
         let session = connection.open_session()?;
         for table_name in table_names.record_table_names() {
-            session.create_table(
-                table_name,
-                Some(
-                    CreateOptionsBuilder::default()
-                        .key_format::<i64>()
-                        .value_format::<Vec<u8>>()
-                        .into(),
-                ),
-            )?;
+            let mut options = CreateOptionsBuilder::default()
+                .key_format::<i64>()
+                .value_format::<Vec<u8>>();
+            if table_name == table_names.raw_vectors {
+                options = options.leaf_page_max(8 << 10); // XXX hack. may even want to go smaller!
+            }
+            session.create_table(table_name, Some(options.into()))?;
         }
         session.create_table(
             &table_names.centroid_stats,
@@ -240,6 +238,7 @@ impl TableIndex {
                     .key_format::<PostingKey>()
                     .value_format::<Vec<u8>>()
                     .app_metadata(&serde_json::to_string(&spann_config)?)
+                    .leaf_page_max(128 << 10) // XXX unprincipled hack.
                     .into(),
             ),
         )?;

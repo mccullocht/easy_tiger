@@ -27,13 +27,13 @@ use crate::{
 };
 
 // XXX this is a bit of a guess. In practice I don't seem to run out of parallelism.
-const IO_THREADS_PER_REQUEST: usize = 16;
+const IO_THREADS_PER_REQUEST: usize = 4;
 
 static IO_THREAD_POOL: LazyLock<ThreadPool> = LazyLock::new(|| {
     // Capping thread count helps avoid excessive contention in the kernel page cache when we are
     // very memory constrained.
     threadpool::Builder::new()
-        .num_threads(32 * IO_THREADS_PER_REQUEST.min(4))
+        .num_threads(32 * IO_THREADS_PER_REQUEST)
         .thread_name("spann_wt_io".into())
         .build()
 });
@@ -322,9 +322,11 @@ impl Searcher {
             reader.index().head_config().config().similarity,
             self.params.limit.get(),
         );
-        // XXX record the time to the first byte, an maybe the time just spent waiting.
-        // XXX we might do better with a different strategy at the producer where we just produce
-        // fixed size blocks of N vectors at a time. It's not really important to chunk by centroid.
+        // If the size of the thread pool, request concurrency, and IO threads per request line up
+        // then initial read latency is quite low. It still takes quite a while to read all the
+        // postings -- 15-20ms for 25k postings across 65 centroids and it's mostly IO because the
+        // vector scoring only takes ~2ms. Rerank is very slow and IO driven as well, but the values
+        // are larger and the access pattern is totally random.
         for (record_ids, vectors, duration) in rx {
             self.stats.posting_vectors_read += vectors.len();
             self.stats.tail_io_duration += duration;

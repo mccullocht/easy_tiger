@@ -143,6 +143,7 @@ pub struct CreateOptionsBuilder {
     key_format: FormatString,
     value_format: FormatString,
     app_metadata: Option<String>,
+    leaf_page_max: Option<usize>,
 }
 
 impl Default for CreateOptionsBuilder {
@@ -151,6 +152,7 @@ impl Default for CreateOptionsBuilder {
             key_format: FormatString::new(c"q"),
             value_format: FormatString::new(c"u"),
             app_metadata: None,
+            leaf_page_max: None,
         }
     }
 }
@@ -177,6 +179,11 @@ impl CreateOptionsBuilder {
         self.app_metadata = Some(metadata.to_owned());
         self
     }
+
+    pub fn leaf_page_max(mut self, max: usize) -> Self {
+        self.leaf_page_max = Some(max);
+        self
+    }
 }
 
 /// Options when creating a table, column group, index, or file in WiredTiger.
@@ -197,6 +204,9 @@ impl From<CreateOptionsBuilder> for CreateOptions {
         ];
         if let Some(metadata) = value.app_metadata {
             parts.push(format!("app_metadata={metadata}"));
+        }
+        if let Some(size) = value.leaf_page_max {
+            parts.push(format!("leaf_page_max={size}"));
         }
         Self(CString::new(parts.join(",")).expect("no nulls"))
     }

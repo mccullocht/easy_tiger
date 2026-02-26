@@ -218,7 +218,10 @@ impl TableIndex {
                 .key_format::<i64>()
                 .value_format::<Vec<u8>>();
             if table_name == table_names.raw_vectors {
-                options = options.leaf_page_max(8 << 10); // XXX hack. may even want to go smaller!
+                options = options
+                    .leaf_page_max(8 << 10)
+                    .access_pattern_hint(wt_mdb::session::AccessPatternHint::Random);
+                // XXX hack. may even want to go smaller!
             }
             session.create_table(table_name, Some(options.into()))?;
         }
@@ -239,6 +242,7 @@ impl TableIndex {
                     .value_format::<Vec<u8>>()
                     .app_metadata(&serde_json::to_string(&spann_config)?)
                     .leaf_page_max(128 << 10) // XXX unprincipled hack.
+                    .access_pattern_hint(wt_mdb::session::AccessPatternHint::Sequential)
                     .into(),
             ),
         )?;

@@ -137,6 +137,26 @@ impl SetTransactionTimestampType {
     }
 }
 
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub enum AccessPatternHint {
+    /// No hint provided.
+    None,
+    /// Advise OS that access pattern is random.
+    Random,
+    /// Advise OS that access pattern is sequential.
+    Sequential,
+}
+
+impl std::fmt::Display for AccessPatternHint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Random => write!(f, "random"),
+            Self::Sequential => write!(f, "sequential"),
+        }
+    }
+}
+
 /// An options builder for creating a table, column group, index, or file in WiredTiger.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub struct CreateOptionsBuilder {
@@ -144,6 +164,7 @@ pub struct CreateOptionsBuilder {
     value_format: FormatString,
     app_metadata: Option<String>,
     leaf_page_max: Option<usize>,
+    access_pattern_hint: AccessPatternHint,
 }
 
 impl Default for CreateOptionsBuilder {
@@ -153,6 +174,7 @@ impl Default for CreateOptionsBuilder {
             value_format: FormatString::new(c"u"),
             app_metadata: None,
             leaf_page_max: None,
+            access_pattern_hint: AccessPatternHint::None,
         }
     }
 }
@@ -180,8 +202,17 @@ impl CreateOptionsBuilder {
         self
     }
 
+    /// Set the maximum size of a leaf page in bytes before it is split.
+    ///
+    /// The page size must be a multiple of 4096. Default is 32KB.
     pub fn leaf_page_max(mut self, max: usize) -> Self {
         self.leaf_page_max = Some(max);
+        self
+    }
+
+    /// Set an access pattern hint that is passed to the OS.
+    pub fn access_pattern_hint(mut self, hint: AccessPatternHint) -> Self {
+        self.access_pattern_hint = hint;
         self
     }
 }
@@ -207,6 +238,9 @@ impl From<CreateOptionsBuilder> for CreateOptions {
         }
         if let Some(size) = value.leaf_page_max {
             parts.push(format!("leaf_page_max={size}"));
+        }
+        if value.access_pattern_hint != AccessPatternHint::None {
+            parts.push(format!("access_pattern_hint={}", value.access_pattern_hint));
         }
         Self(CString::new(parts.join(",")).expect("no nulls"))
     }

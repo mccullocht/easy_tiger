@@ -186,7 +186,6 @@ pub fn recall(
                     total_competitive += 1;
                 }
                 total_scored += 1;
-                query_k[q].add(Neighbor::new(d as i64, s[center].distance(&doc)));
             }
             (total_scored, total_competitive)
         })

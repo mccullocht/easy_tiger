@@ -247,12 +247,6 @@ impl F32VectorCoding {
                 similarity,
                 query.into(),
             )),
-            /* XXX
-            (_, F32VectorCoding::TLVQ1) => Box::new(lvq::TurboPrimaryQueryDistance::<1>::new(
-                similarity,
-                query.into(),
-            )),
-            */
             (_, F32VectorCoding::TLVQ2) => Box::new(lvq::TurboPrimaryQueryDistance::<2>::new(
                 similarity,
                 query.into(),

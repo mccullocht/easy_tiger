@@ -308,6 +308,7 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
         component_sum += super::scalar::primary_quantize_and_pack::<B>(in_tail, terms, out_tail);
     }
 
+    // XXX busted
     component_sum
 }
 
@@ -435,6 +436,7 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
         residual_component_sum += r;
     }
 
+    // XXX busted
     (primary_component_sum, residual_component_sum)
 }
 

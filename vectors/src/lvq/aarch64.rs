@@ -304,10 +304,7 @@ pub fn primary_quantize_and_pack<const B: usize>(
         residual_error_sq += re;
         component_sum += cs;
     }
-    (
-        component_sum,
-        (residual_error_sq / vector.len() as f32).sqrt(),
-    )
+    (component_sum, residual_error_sq)
 }
 
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
@@ -461,7 +458,7 @@ pub fn residual_quantize_and_pack<const B: usize>(
     (
         primary_component_sum,
         residual_component_sum,
-        (residual_error_sq / vector.len() as f32).sqrt(),
+        residual_error_sq,
     )
 }
 

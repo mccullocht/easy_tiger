@@ -158,7 +158,7 @@ struct PrimaryVectorHeader {
     /// Residual term used to compute a statistical bound on the estimated distance.
     /// This contains sqrt(<residual,residual> / dim), an approximation of one standard deviation
     /// of error from the true distance.
-    residual_term: f32,
+    residual_error_term: f32,
     /// Sum of all the quantized components of the vector. This is used to correct the uint dot
     /// product to an f32 dot product.
     component_sum: u32,
@@ -179,7 +179,7 @@ impl PrimaryVectorHeader {
         header[0] = self.l2_norm.to_le_bytes();
         header[1] = self.lower.to_le_bytes();
         header[2] = self.upper.to_le_bytes();
-        header[3] = self.residual_term.to_le_bytes();
+        header[3] = self.residual_error_term.to_le_bytes();
         header[4] = self.component_sum.to_le_bytes();
     }
 
@@ -192,7 +192,7 @@ impl PrimaryVectorHeader {
                 l2_norm: f32::from_le_bytes(header_entries[0]),
                 lower: f32::from_le_bytes(header_entries[1]),
                 upper: f32::from_le_bytes(header_entries[2]),
-                residual_term: f32::from_le_bytes(header_entries[3]),
+                residual_error_term: f32::from_le_bytes(header_entries[3]),
                 component_sum: u32::from_le_bytes(header_entries[4]),
             },
             vector_bytes,
@@ -206,7 +206,7 @@ impl From<VectorStats> for PrimaryVectorHeader {
             l2_norm: value.l2_norm_sq.sqrt(),
             lower: value.min,
             upper: value.max,
-            residual_term: 0.0,
+            residual_error_term: 0.0,
             component_sum: 0,
         }
     }
@@ -390,7 +390,7 @@ const TURBO_BLOCK_SIZE: usize = 16;
 struct TurboPrimaryVector<'a, const B: usize> {
     rep: EncodedVector<'a>,
     l2_norm: f32,
-    residual_term: f32,
+    residual_error_term: f32,
 }
 
 impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
@@ -402,7 +402,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
                 data: vector_bytes,
             },
             l2_norm: header.l2_norm,
-            residual_term: header.residual_term,
+            residual_error_term: header.residual_error_term,
         })
     }
 
@@ -414,9 +414,8 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         self.l2_norm.into()
     }
 
-    // XXX this wrong.
-    fn residual_error(&self) -> f64 {
-        self.residual_term.into()
+    fn residual_error_term(&self) -> f64 {
+        self.residual_error_term.into()
     }
 
     fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
@@ -427,12 +426,12 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             Self {
                 rep: headv,
                 l2_norm: self.l2_norm,
-                residual_term: self.residual_term,
+                residual_error_term: self.residual_error_term,
             },
             Self {
                 rep: tailv,
                 l2_norm: self.l2_norm,
-                residual_term: self.residual_term,
+                residual_error_term: self.residual_error_term,
             },
         )
     }
@@ -467,7 +466,8 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
-        (header.component_sum, header.residual_term) = match inst {
+        let residual_error_sq;
+        (header.component_sum, residual_error_sq) = match inst {
             InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
@@ -476,6 +476,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
                 x86_64::primary_quantize_and_pack_avx512::<B>(vector, terms, out)
             },
         };
+        header.residual_error_term = (residual_error_sq / vector.len() as f32).sqrt();
 
         header
     }
@@ -615,6 +616,12 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
     }
 }
 
+/// An implementation of distance against one-bit quantized vectors.
+///
+/// This implementation quantizes the query 1x8 bits and provides a bounded distance function that
+/// short circuits residual evaluation if the result would not fall below the maximum distance.
+/// This can provide significant savings, particularly when using memory bound indexes like a flat
+/// index or partitioned index.
 pub struct TurboPrimaryQueryDistance1 {
     similarity: VectorSimilarity,
 
@@ -623,7 +630,7 @@ pub struct TurboPrimaryQueryDistance1 {
     residual_query: Vec<u8>,
     residual_terms: VectorDecodeTerms,
     l2_norm: f64,
-    residual_term: f64,
+    residual_error_term: f64,
 
     inst: InstructionSet,
 }
@@ -636,7 +643,7 @@ impl TurboPrimaryQueryDistance1 {
         let primary_terms = VectorDecodeTerms::from_primary::<1>(primary_header);
         let residual_terms = VectorDecodeTerms::from_residual(residual_header);
         let l2_norm = primary_header.l2_norm.into();
-        let residual_term = primary_header.residual_term.into();
+        let residual_error_term = primary_header.residual_error_term.into();
         Self {
             similarity,
             primary_query,
@@ -644,7 +651,7 @@ impl TurboPrimaryQueryDistance1 {
             residual_query,
             residual_terms,
             l2_norm,
-            residual_term,
+            residual_error_term,
             inst,
         }
     }
@@ -677,10 +684,7 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
             dot_primary.into(),
             (self.l2_norm, vector.l2_norm()),
         );
-        // XXX this sqrt is going kill me.
-        let error = ((self.residual_term + vector.residual_error())
-            / self.residual_query.len() as f64)
-            .sqrt();
+        let error = self.residual_error_term + vector.residual_error_term();
         let mult = match self.similarity {
             VectorSimilarity::Dot | VectorSimilarity::Cosine => 0.5,
             VectorSimilarity::Euclidean => 2.0,
@@ -881,11 +885,11 @@ impl<const B: usize> TurboResidualCoder<B> {
 
         let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
         let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
-        // XXX we may want the call to compute residual error and we will generate the term.
+        let residual_error_sq;
         (
             primary_header.component_sum,
             residual_header.component_sum,
-            primary_header.residual_term,
+            residual_error_sq,
         ) = match inst {
             InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
@@ -913,6 +917,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                 )
             },
         };
+        primary_header.residual_error_term = (residual_error_sq / vector.len() as f32).sqrt();
 
         (primary_header, residual_header)
     }
@@ -1281,7 +1286,11 @@ mod test {
             abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
                 && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
                 && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
-                && abs_diff_eq!(self.residual_term, other.residual_term, epsilon = epsilon)
+                && abs_diff_eq!(
+                    self.residual_error_term,
+                    other.residual_error_term,
+                    epsilon = epsilon
+                )
                 && abs_diff_eq!(self.component_sum, other.component_sum)
         }
     }
@@ -1341,7 +1350,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
-                residual_term: 0.11854761,
+                residual_error_term: 0.11854761,
                 component_sum: 11,
             }
         );
@@ -1385,7 +1394,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
-                residual_term: 0.09004297,
+                residual_error_term: 0.09004297,
                 component_sum: 32,
             }
         );
@@ -1429,7 +1438,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
-                residual_term: 0.037823707,
+                residual_error_term: 0.037823707,
                 component_sum: 170,
             }
         );
@@ -1473,7 +1482,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
-                residual_term: 0.009641445,
+                residual_error_term: 0.009641445,
                 component_sum: 2876,
             }
         );
@@ -1518,7 +1527,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
-                residual_term: 0.11854761,
+                residual_error_term: 0.11854761,
                 component_sum: 11,
             }
         );
@@ -1571,7 +1580,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
-                residual_term: 0.09004297,
+                residual_error_term: 0.09004297,
                 component_sum: 32,
             }
         );
@@ -1624,7 +1633,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
-                residual_term: 0.037823707,
+                residual_error_term: 0.037823707,
                 component_sum: 170,
             }
         );
@@ -1677,7 +1686,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
-                residual_term: 0.009641445,
+                residual_error_term: 0.009641445,
                 component_sum: 2876,
             }
         );

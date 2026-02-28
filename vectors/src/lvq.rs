@@ -659,10 +659,10 @@ impl TurboPrimaryQueryDistance1 {
 
 impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
     fn distance(&self, vector: &[u8]) -> f64 {
-        self.bound_distance(vector, f64::INFINITY).unwrap()
+        self.distance_with_bound(vector, f64::INFINITY).unwrap()
     }
 
-    fn bound_distance(&self, vector: &[u8], max_distance: f64) -> Option<f64> {
+    fn distance_with_bound(&self, vector: &[u8], max_distance: f64) -> Option<f64> {
         let vector = TurboPrimaryVector::<1>::new(vector).expect("valid primary vector");
         let uint8_dot_primary = match self.inst {
             InstructionSet::Scalar => scalar::dot_u8::<1>(&self.primary_query, vector.rep.data),

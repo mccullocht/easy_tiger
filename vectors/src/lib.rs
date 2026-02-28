@@ -482,8 +482,9 @@ pub trait QueryVectorDistance: Send + Sync {
     }
 
     /// Compute the distance between the bound query vector and `vector`. May return `None` if the
-    /// distance estimate is less than `max_distance`.
-    fn bound_distance(&self, vector: &[u8], _max_distance: f64) -> Option<f64> {
+    /// distance would be greater than max_distance.
+    #[allow(unused_variables)]
+    fn distance_with_bound(&self, vector: &[u8], max_distance: f64) -> Option<f64> {
         Some(self.distance(vector))
     }
 }

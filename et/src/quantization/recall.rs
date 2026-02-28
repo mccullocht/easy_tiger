@@ -181,7 +181,7 @@ pub fn recall(
             let mut total_competitive = 0;
             for (q, s) in query_scorers.iter().enumerate() {
                 let max_distance = query_k[q].max_distance();
-                if let Some(distance) = s[center].bound_distance(&doc, max_distance) {
+                if let Some(distance) = s[center].distance_with_bound(&doc, max_distance) {
                     query_k[q].add(Neighbor::new(d as i64, distance));
                     total_competitive += 1;
                 }

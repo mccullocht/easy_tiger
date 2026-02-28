@@ -1347,7 +1347,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
-                residual_error_term: 0.11854761,
+                residual_error_term: 1.163901,
                 component_sum: 11,
             }
         );
@@ -1391,7 +1391,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
-                residual_error_term: 0.09004297,
+                residual_error_term: 0.6714753,
                 component_sum: 32,
             }
         );
@@ -1435,7 +1435,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
-                residual_error_term: 0.037823707,
+                residual_error_term: 0.11848368,
                 component_sum: 170,
             }
         );
@@ -1479,7 +1479,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
-                residual_error_term: 0.009641445,
+                residual_error_term: 0.007704542,
                 component_sum: 2876,
             }
         );
@@ -1524,7 +1524,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
-                residual_error_term: 0.11854761,
+                residual_error_term: 1.163901,
                 component_sum: 11,
             }
         );
@@ -1577,7 +1577,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
-                residual_error_term: 0.09004297,
+                residual_error_term: 0.6714753,
                 component_sum: 32,
             }
         );
@@ -1630,7 +1630,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
-                residual_error_term: 0.037823707,
+                residual_error_term: 0.11848368,
                 component_sum: 170,
             }
         );
@@ -1683,7 +1683,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
-                residual_error_term: 0.009641445,
+                residual_error_term: 0.007704542,
                 component_sum: 2876,
             }
         );

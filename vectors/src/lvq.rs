@@ -155,9 +155,8 @@ struct PrimaryVectorHeader {
     /// Upper interval bound used for quantization, no larger than the maximum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     upper: f32,
-    /// Residual term used to compute a statistical bound on the estimated distance.
-    /// This contains sqrt(<residual,residual> / dim), an approximation of one standard deviation
-    /// of error from the true distance.
+    /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
+    /// This term can be used to compute a statistical bound on the estimated distance.
     residual_error_term: f32,
     /// Sum of all the quantized components of the vector. This is used to correct the uint dot
     /// product to an f32 dot product.
@@ -476,7 +475,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
                 x86_64::primary_quantize_and_pack_avx512::<B>(vector, terms, out)
             },
         };
-        header.residual_error_term = (residual_error_sq / vector.len() as f32).sqrt();
+        header.residual_error_term = residual_error_sq.sqrt();
 
         header
     }
@@ -631,6 +630,7 @@ pub struct TurboPrimaryQueryDistance1 {
     residual_terms: VectorDecodeTerms,
     l2_norm: f64,
     residual_error_term: f64,
+    sqrt_dim_inv: f64,
 
     inst: InstructionSet,
 }
@@ -640,18 +640,15 @@ impl TurboPrimaryQueryDistance1 {
         let inst = InstructionSet::default();
         let (primary_header, primary_query, residual_header, residual_query) =
             TurboResidualCoder::<1>::encode_parts(inst, query.as_ref());
-        let primary_terms = VectorDecodeTerms::from_primary::<1>(primary_header);
-        let residual_terms = VectorDecodeTerms::from_residual(residual_header);
-        let l2_norm = primary_header.l2_norm.into();
-        let residual_error_term = primary_header.residual_error_term.into();
         Self {
             similarity,
             primary_query,
-            primary_terms,
+            primary_terms: VectorDecodeTerms::from_primary::<1>(primary_header),
             residual_query,
-            residual_terms,
-            l2_norm,
-            residual_error_term,
+            residual_terms: VectorDecodeTerms::from_residual(residual_header),
+            l2_norm: primary_header.l2_norm.into(),
+            residual_error_term: primary_header.residual_error_term.into(),
+            sqrt_dim_inv: 1.0 / (query.len() as f64).sqrt(),
             inst,
         }
     }
@@ -684,7 +681,7 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
             dot_primary.into(),
             (self.l2_norm, vector.l2_norm()),
         );
-        let error = self.residual_error_term + vector.residual_error_term();
+        let error = (self.residual_error_term + vector.residual_error_term()) * self.sqrt_dim_inv;
         let mult = match self.similarity {
             VectorSimilarity::Dot | VectorSimilarity::Cosine => 0.5,
             VectorSimilarity::Euclidean => 2.0,
@@ -917,7 +914,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                 )
             },
         };
-        primary_header.residual_error_term = (residual_error_sq / vector.len() as f32).sqrt();
+        primary_header.residual_error_term = residual_error_sq.sqrt();
 
         (primary_header, residual_header)
     }

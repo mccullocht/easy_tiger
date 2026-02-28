@@ -108,17 +108,20 @@ pub fn primary_quantize_and_pack<const B: usize>(
     vector: &[f32],
     terms: VectorEncodeTerms,
     out: &mut [u8],
-) -> u32 {
+) -> (u32, f32) {
     let mut packer = TurboPacker::<B>::new(out);
-    vector
+    let (component_sum, residual_error_sq) = vector
         .iter()
         .map(|&v| {
-            let q =
-                ((v.clamp(terms.lower, terms.upper) - terms.lower) * terms.delta_inv).round() as u8;
-            packer.push(q);
-            u32::from(q)
+            let q = ((v.clamp(terms.lower, terms.upper) - terms.lower) * terms.delta_inv).round();
+            let r = v - q.mul_add(terms.delta, terms.lower);
+            packer.push(q as u8);
+            (q as u32, r)
         })
-        .sum()
+        .fold((0, 0.0), |(sum, rsum), (q, r)| {
+            (sum + q, r.mul_add(r, rsum))
+        });
+    (component_sum, residual_error_sq)
 }
 
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
@@ -131,13 +134,12 @@ pub fn residual_quantize_and_pack<const B: usize>(
     vector: &[f32],
     primary_terms: VectorEncodeTerms,
     residual_terms: VectorEncodeTerms,
-    primary_delta: f32,
     primary: &mut [u8],
     residual: &mut [u8],
-) -> (u32, u32) {
+) -> (u32, u32, f32) {
     let mut primary_packer = TurboPacker::<B>::new(primary);
     let mut residual_packer = TurboPacker::<RESIDUAL_BITS>::new(residual);
-    vector
+    let (primary_sum, residual_sum, residual_error_sq) = vector
         .iter()
         .map(|&v| {
             let p = ((v.clamp(primary_terms.lower, primary_terms.upper) - primary_terms.lower)
@@ -146,14 +148,17 @@ pub fn residual_quantize_and_pack<const B: usize>(
             primary_packer.push(p);
             // After producing the primary value, calculate the residual between the original value
             // and the dequantized value and quantize that.
-            let res = v - (p as f32).mul_add(primary_delta, primary_terms.lower);
+            let res = v - (p as f32).mul_add(primary_terms.delta, primary_terms.lower);
             let r = ((res.clamp(residual_terms.lower, residual_terms.upper) - residual_terms.lower)
                 * residual_terms.delta_inv)
                 .round() as u8;
             residual_packer.push(r);
-            (u32::from(p), u32::from(r))
+            (u32::from(p), u32::from(r), res)
         })
-        .fold((0, 0), |(psum, rsum), (p, r)| (psum + p, rsum + r))
+        .fold((0, 0, 0.0f32), |(psum, rsum, rerr), (p, r, e)| {
+            (psum + p, rsum + r, e.mul_add(e, rerr))
+        });
+    (primary_sum, residual_sum, residual_error_sq)
 }
 
 pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {

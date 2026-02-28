@@ -147,9 +147,19 @@ fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, 
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 struct PrimaryVectorHeader {
+    /// L2 norm (magnitude) of the vector.
     l2_norm: f32,
+    /// Lower interval bound used for quantization, no smaller than the minimum component value.
+    /// This is used to correct the uint dot product to an f32 dot product.
     lower: f32,
+    /// Upper interval bound used for quantization, no larger than the maximum component value.
+    /// This is used to correct the uint dot product to an f32 dot product.
     upper: f32,
+    /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
+    /// This term can be used to compute a statistical bound on the estimated distance.
+    residual_error_term: f32,
+    /// Sum of all the quantized components of the vector. This is used to correct the uint dot
+    /// product to an f32 dot product.
     component_sum: u32,
 }
 
@@ -168,7 +178,8 @@ impl PrimaryVectorHeader {
         header[0] = self.l2_norm.to_le_bytes();
         header[1] = self.lower.to_le_bytes();
         header[2] = self.upper.to_le_bytes();
-        header[3] = self.component_sum.to_le_bytes();
+        header[3] = self.residual_error_term.to_le_bytes();
+        header[4] = self.component_sum.to_le_bytes();
     }
 
     #[inline]
@@ -180,7 +191,8 @@ impl PrimaryVectorHeader {
                 l2_norm: f32::from_le_bytes(header_entries[0]),
                 lower: f32::from_le_bytes(header_entries[1]),
                 upper: f32::from_le_bytes(header_entries[2]),
-                component_sum: u32::from_le_bytes(header_entries[3]),
+                residual_error_term: f32::from_le_bytes(header_entries[3]),
+                component_sum: u32::from_le_bytes(header_entries[4]),
             },
             vector_bytes,
         ))
@@ -193,6 +205,7 @@ impl From<VectorStats> for PrimaryVectorHeader {
             l2_norm: value.l2_norm_sq.sqrt(),
             lower: value.min,
             upper: value.max,
+            residual_error_term: 0.0,
             component_sum: 0,
         }
     }
@@ -376,6 +389,7 @@ const TURBO_BLOCK_SIZE: usize = 16;
 struct TurboPrimaryVector<'a, const B: usize> {
     rep: EncodedVector<'a>,
     l2_norm: f32,
+    residual_error_term: f32,
 }
 
 impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
@@ -387,6 +401,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
                 data: vector_bytes,
             },
             l2_norm: header.l2_norm,
+            residual_error_term: header.residual_error_term,
         })
     }
 
@@ -398,6 +413,10 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         self.l2_norm.into()
     }
 
+    fn residual_error_term(&self) -> f64 {
+        self.residual_error_term.into()
+    }
+
     fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
         let tail_dim = dim & !(packing::block_dim(B) - 1);
         let (headv, tailv) = self.rep.split_at(packing::byte_len(tail_dim, B));
@@ -406,10 +425,12 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             Self {
                 rep: headv,
                 l2_norm: self.l2_norm,
+                residual_error_term: self.residual_error_term,
             },
             Self {
                 rep: tailv,
                 l2_norm: self.l2_norm,
+                residual_error_term: self.residual_error_term,
             },
         )
     }
@@ -444,7 +465,8 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
-        header.component_sum = match inst {
+        let residual_error_sq;
+        (header.component_sum, residual_error_sq) = match inst {
             InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
@@ -453,6 +475,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
                 x86_64::primary_quantize_and_pack_avx512::<B>(vector, terms, out)
             },
         };
+        header.residual_error_term = residual_error_sq.sqrt();
 
         header
     }
@@ -592,6 +615,109 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
     }
 }
 
+/// An implementation of distance against one-bit quantized vectors.
+///
+/// This implementation quantizes the query 1x8 bits and provides a bounded distance function that
+/// short circuits residual evaluation if the result would not fall below the maximum distance.
+/// This can provide significant savings, particularly when using memory bound indexes like a flat
+/// index or partitioned index.
+pub struct TurboPrimaryQueryDistance1 {
+    similarity: VectorSimilarity,
+
+    primary_query: Vec<u8>,
+    primary_terms: VectorDecodeTerms,
+    residual_query: Vec<u8>,
+    residual_terms: VectorDecodeTerms,
+    l2_norm: f64,
+    residual_error_term: f64,
+    sqrt_dim_inv: f64,
+
+    inst: InstructionSet,
+}
+
+impl TurboPrimaryQueryDistance1 {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
+        let inst = InstructionSet::default();
+        let (primary_header, primary_query, residual_header, residual_query) =
+            TurboResidualCoder::<1>::encode_parts(inst, query.as_ref());
+        Self {
+            similarity,
+            primary_query,
+            primary_terms: VectorDecodeTerms::from_primary::<1>(primary_header),
+            residual_query,
+            residual_terms: VectorDecodeTerms::from_residual(residual_header),
+            l2_norm: primary_header.l2_norm.into(),
+            residual_error_term: primary_header.residual_error_term.into(),
+            sqrt_dim_inv: 1.0 / (query.len() as f64).sqrt(),
+            inst,
+        }
+    }
+}
+
+impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.distance_with_bound(vector, f64::INFINITY).unwrap()
+    }
+
+    fn distance_with_bound(&self, vector: &[u8], max_distance: f64) -> Option<f64> {
+        let vector = TurboPrimaryVector::<1>::new(vector).expect("valid primary vector");
+        let uint8_dot_primary = match self.inst {
+            InstructionSet::Scalar => scalar::dot_u8::<1>(&self.primary_query, vector.rep.data),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::dot_u8::<1>(&self.primary_query, vector.rep.data),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::dot_u8_avx512::<1>(&self.primary_query, vector.rep.data)
+            },
+        };
+        let dot_primary = correct_dot_uint(
+            uint8_dot_primary,
+            self.residual_query.len(),
+            &self.primary_terms,
+            &vector.rep.terms,
+        );
+        let distance_primary = dot_unnormalized_to_distance(
+            self.similarity,
+            dot_primary.into(),
+            (self.l2_norm, vector.l2_norm()),
+        );
+        let error = (self.residual_error_term + vector.residual_error_term()) * self.sqrt_dim_inv;
+        let mult = match self.similarity {
+            VectorSimilarity::Dot | VectorSimilarity::Cosine => 0.5,
+            VectorSimilarity::Euclidean => 2.0,
+        };
+        let estimated_error = 1.96 * mult * error;
+        if distance_primary - estimated_error > max_distance {
+            return None;
+        }
+
+        let uint8_dot_residual = match self.inst {
+            InstructionSet::Scalar => {
+                scalar::primary_query8_dot_unnormalized::<1>(&self.residual_query, &vector)
+            }
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => {
+                aarch64::primary_query8_dot_unnormalized::<1>(&self.residual_query, &vector)
+            }
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::primary_query8_dot_unnormalized_avx512::<1>(&self.residual_query, &vector)
+            },
+        };
+        let dot_residual = correct_dot_uint(
+            uint8_dot_residual,
+            self.residual_query.len(),
+            &self.residual_terms,
+            &vector.rep.terms,
+        );
+        Some(dot_unnormalized_to_distance(
+            self.similarity,
+            (dot_primary + dot_residual).into(),
+            (self.l2_norm, vector.l2_norm()),
+        ))
+    }
+}
+
 const RESIDUAL_BITS: usize = 8;
 const RESIDUAL_MAX: f32 = ((1 << RESIDUAL_BITS) - 1) as f32;
 
@@ -675,15 +801,18 @@ struct VectorEncodeTerms {
     lower: f32,
     upper: f32,
     delta_inv: f32,
+    delta: f32,
 }
 
 impl VectorEncodeTerms {
     fn from_primary<const B: usize>(primary: &PrimaryVectorHeader) -> Self {
         let delta_inv = ((1 << B) - 1) as f32 / (primary.upper - primary.lower);
+        let delta = (primary.upper - primary.lower) / ((1 << B) - 1) as f32;
         Self {
             lower: primary.lower,
             upper: primary.upper,
             delta_inv,
+            delta,
         }
     }
 
@@ -692,6 +821,7 @@ impl VectorEncodeTerms {
             lower: -magnitude / 2.0,
             upper: magnitude / 2.0,
             delta_inv: RESIDUAL_MAX / magnitude,
+            delta: 0.0,
         }
     }
 }
@@ -752,13 +882,16 @@ impl<const B: usize> TurboResidualCoder<B> {
 
         let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
         let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
-        let primary_delta = (primary_header.upper - primary_header.lower) / ((1 << B) - 1) as f32;
-        (primary_header.component_sum, residual_header.component_sum) = match inst {
+        let residual_error_sq;
+        (
+            primary_header.component_sum,
+            residual_header.component_sum,
+            residual_error_sq,
+        ) = match inst {
             InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,
                 residual_terms,
-                primary_delta,
                 primary,
                 residual,
             ),
@@ -767,7 +900,6 @@ impl<const B: usize> TurboResidualCoder<B> {
                 vector,
                 primary_terms,
                 residual_terms,
-                primary_delta,
                 primary,
                 residual,
             ),
@@ -777,12 +909,12 @@ impl<const B: usize> TurboResidualCoder<B> {
                     vector,
                     primary_terms,
                     residual_terms,
-                    primary_delta,
                     primary,
                     residual,
                 )
             },
         };
+        primary_header.residual_error_term = residual_error_sq.sqrt();
 
         (primary_header, residual_header)
     }
@@ -1151,6 +1283,11 @@ mod test {
             abs_diff_eq!(self.l2_norm, other.l2_norm, epsilon = epsilon)
                 && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
                 && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
+                && abs_diff_eq!(
+                    self.residual_error_term,
+                    other.residual_error_term,
+                    epsilon = epsilon
+                )
                 && abs_diff_eq!(self.component_sum, other.component_sum)
         }
     }
@@ -1210,6 +1347,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
+                residual_error_term: 1.163901,
                 component_sum: 11,
             }
         );
@@ -1253,6 +1391,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
+                residual_error_term: 0.6714753,
                 component_sum: 32,
             }
         );
@@ -1296,6 +1435,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
+                residual_error_term: 0.11848368,
                 component_sum: 170,
             }
         );
@@ -1339,6 +1479,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
+                residual_error_term: 0.007704542,
                 component_sum: 2876,
             }
         );
@@ -1383,6 +1524,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.49564388,
                 upper: 0.70561373,
+                residual_error_term: 1.163901,
                 component_sum: 11,
             }
         );
@@ -1435,6 +1577,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.6709247,
                 upper: 0.8410188,
+                residual_error_term: 0.6714753,
                 component_sum: 32,
             }
         );
@@ -1487,6 +1630,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.93474734,
                 upper: 0.9131211,
+                residual_error_term: 0.11848368,
                 component_sum: 170,
             }
         );
@@ -1539,6 +1683,7 @@ mod test {
                 l2_norm: 2.5226507,
                 lower: -0.92000645,
                 upper: 0.91146713,
+                residual_error_term: 0.007704542,
                 component_sum: 2876,
             }
         );

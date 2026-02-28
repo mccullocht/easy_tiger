@@ -1,6 +1,6 @@
 use std::{fs::File, io, num::NonZero, path::PathBuf};
 
-use crate::{neighbor_util::TopNeighbors, recall::RecallComputer};
+use crate::{neighbor_util::TopNeighbors, recall::RecallComputer, ui::progress_bar};
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
@@ -161,10 +161,10 @@ pub fn recall(
     let k = recall_computer.k();
     let mut query_k = Vec::with_capacity(query_limit);
     query_k.resize_with(query_limit, || TopNeighbors::new(k));
-    (0..doc_limit)
+    let (total_scored, total_competitive) = (0..doc_limit)
         .into_par_iter()
-        .progress_count(doc_limit as u64)
-        .for_each(|d| {
+        .progress_with(progress_bar(doc_limit, "scoring"))
+        .map(|d| {
             let center = select_center_for_doc(&doc_vectors[d], centers.as_ref(), args.similarity);
             let doc = if let Some(centers) = centers.as_ref() {
                 coder.encode(
@@ -177,10 +177,19 @@ pub fn recall(
             } else {
                 coder.encode(&doc_vectors[d])
             };
+            let mut total_scored = 0;
+            let mut total_competitive = 0;
             for (q, s) in query_scorers.iter().enumerate() {
-                query_k[q].add(Neighbor::new(d as i64, s[center].distance(&doc)));
+                let max_distance = query_k[q].max_distance();
+                if let Some(distance) = s[center].distance_with_bound(&doc, max_distance) {
+                    query_k[q].add(Neighbor::new(d as i64, distance));
+                    total_competitive += 1;
+                }
+                total_scored += 1;
             }
-        });
+            (total_scored, total_competitive)
+        })
+        .reduce(|| (0usize, 0usize), |a, b| (a.0 + b.0, a.1 + b.1));
 
     // TODO: add analysis for re-scoring depth. For simple recall this amount to using a larger set
     // on the "actual" side, but may be more complicated for NDCG.
@@ -193,6 +202,12 @@ pub fn recall(
         "{}: {:.6}",
         recall_computer.label(),
         sum_recall / query_limit as f64
+    );
+    println!(
+        "scored: {} competitive: {} ratio: {:.6}",
+        total_scored,
+        total_competitive,
+        total_competitive as f64 / total_scored as f64
     );
 
     Ok(())

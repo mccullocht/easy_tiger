@@ -178,23 +178,60 @@ pub enum F32VectorCoding {
 }
 
 impl F32VectorCoding {
+    // XXX deprecate and remove this method.
     /// Create a new coder for this format.
     pub fn new_coder(&self, similarity: VectorSimilarity) -> Box<dyn F32VectorCoder> {
-        match self {
-            Self::F32 => Box::new(float32::VectorCoder::new(similarity)),
-            Self::F16 => Box::new(float16::VectorCoder::new(similarity)),
-            Self::BinaryQuantized => Box::new(binary::BinaryQuantizedVectorCoder),
-            Self::TLVQ1 => Box::new(lvq::TurboPrimaryCoder::<1>::default()),
-            Self::TLVQ2 => Box::new(lvq::TurboPrimaryCoder::<2>::default()),
-            Self::TLVQ4 => Box::new(lvq::TurboPrimaryCoder::<4>::default()),
-            Self::TLVQ8 => Box::new(lvq::TurboPrimaryCoder::<8>::default()),
-            Self::TLVQ1x8 => Box::new(lvq::TurboResidualCoder::<1>::default()),
-            Self::TLVQ2x8 => Box::new(lvq::TurboResidualCoder::<2>::default()),
-            Self::TLVQ4x8 => Box::new(lvq::TurboResidualCoder::<4>::default()),
-            Self::TLVQ8x8 => Box::new(lvq::TurboResidualCoder::<8>::default()),
+        self.coder(similarity, None)
+    }
+
+    /// Create a new coder for this format and similarity function.
+    ///
+    /// If `center`` is present, the center vector will be subtracted from each vector before
+    /// quantization occurs.  Centering reduces the dynamic range of the vectors and can reduce
+    /// quantization loss substantially, particularly when using lower bit rates formats. This holds
+    /// true even if the center is the mean vector over a large data set.
+    pub fn coder(
+        &self,
+        similarity: VectorSimilarity,
+        center: Option<Vec<f32>>,
+    ) -> Box<dyn F32VectorCoder> {
+        match (self, similarity) {
+            (Self::F32, _) => Box::new(float32::VectorCoder::new(similarity)),
+            (Self::F16, _) => Box::new(float16::VectorCoder::new(similarity)),
+            (Self::BinaryQuantized, _) => Box::new(binary::BinaryQuantizedVectorCoder),
+            (Self::TLVQ1, VectorSimilarity::Euclidean) => {
+                Box::new(lvq::TurboPrimaryCoder::<1>::new(similarity, center))
+            }
+            (Self::TLVQ2, VectorSimilarity::Euclidean) => {
+                Box::new(lvq::TurboPrimaryCoder::<2>::new(similarity, center))
+            }
+            (Self::TLVQ4, VectorSimilarity::Euclidean) => {
+                Box::new(lvq::TurboPrimaryCoder::<4>::new(similarity, center))
+            }
+            (Self::TLVQ8, VectorSimilarity::Euclidean) => {
+                Box::new(lvq::TurboPrimaryCoder::<8>::new(similarity, center))
+            }
+            // XXX fix centering for angular distance.
+            (Self::TLVQ1, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
+                Box::new(lvq::TurboPrimaryCoder::<1>::new(similarity, None))
+            }
+            (Self::TLVQ2, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
+                Box::new(lvq::TurboPrimaryCoder::<2>::new(similarity, None))
+            }
+            (Self::TLVQ4, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
+                Box::new(lvq::TurboPrimaryCoder::<4>::new(similarity, None))
+            }
+            (Self::TLVQ8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
+                Box::new(lvq::TurboPrimaryCoder::<8>::new(similarity, None))
+            }
+            (Self::TLVQ1x8, _) => Box::new(lvq::TurboResidualCoder::<1>::default()),
+            (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualCoder::<2>::default()),
+            (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualCoder::<4>::default()),
+            (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualCoder::<8>::default()),
         }
     }
 
+    // XXX will need a centered variant of this for angular distance.
     /// Returns a [VectorDistance] between vectors encoded using this coder.
     pub fn new_vector_distance(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
@@ -278,6 +315,8 @@ impl F32VectorCoding {
         }
     }
 
+    // XXX remove this entirely, we don't need multi-queue because we'll be using tlvq1 postings
+    // and we can use the fast QVD.
     /// Create a new [QueryVectorDistance] between `query` and vectors formatted with this encoding
     /// by `similarity` distance metric, but trade fidelity for speed.
     /// * This is not implemented for all codings and similarities.
@@ -297,19 +336,19 @@ impl F32VectorCoding {
             // TODO: consider using asymmetric 8xN distance here.
             F32VectorCoding::TLVQ1 => Some(Box::new(QuantizedQueryVectorDistance::new(
                 lvq::TurboPrimaryDistance::<1>::new(similarity),
-                lvq::TurboPrimaryCoder::<1>::default().encode(query),
+                lvq::TurboPrimaryCoder::<1>::new(similarity, None).encode(query),
             ))),
             F32VectorCoding::TLVQ2 => Some(Box::new(QuantizedQueryVectorDistance::new(
                 lvq::TurboPrimaryDistance::<2>::new(similarity),
-                lvq::TurboPrimaryCoder::<2>::default().encode(query),
+                lvq::TurboPrimaryCoder::<2>::new(similarity, None).encode(query),
             ))),
             F32VectorCoding::TLVQ4 => Some(Box::new(QuantizedQueryVectorDistance::new(
                 lvq::TurboPrimaryDistance::<4>::new(similarity),
-                lvq::TurboPrimaryCoder::<4>::default().encode(query),
+                lvq::TurboPrimaryCoder::<4>::new(similarity, None).encode(query),
             ))),
             F32VectorCoding::TLVQ8 => Some(Box::new(QuantizedQueryVectorDistance::new(
                 lvq::TurboPrimaryDistance::<8>::new(similarity),
-                lvq::TurboPrimaryCoder::<8>::default().encode(query),
+                lvq::TurboPrimaryCoder::<8>::new(similarity, None).encode(query),
             ))),
             F32VectorCoding::TLVQ1x8 => Some(Box::new(
                 lvq::TurboResidualFastQueryDistance::<1>::new(similarity, query),
@@ -678,7 +717,7 @@ mod test {
                 println!("SEED {seed:#016x}");
                 let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
                 let scoder = <$coder>::scalar();
-                let ocoder = <$coder>::default();
+                let ocoder = <$coder>::new(VectorSimilarity::Euclidean, None);
                 // TODO: use randomly sized vectors like we do for distance tests.
                 for i in 0..1024 {
                     let vec = l2_normalize(

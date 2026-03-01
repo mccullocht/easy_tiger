@@ -144,15 +144,8 @@ pub struct SearchStats {
     ///
     /// This may be greater than the number scored if vectors are replicated across centroids.
     pub posting_vectors_read: usize,
-    /// Number of posting entries "fast" scored.
-    ///
-    /// Certain vector encodings accept a max distance bound and will exit early if a vector will
-    /// not produce a competitive score based on a low fidelity score and statistical bounding.
-    /// Depending on the posting coding this will either be 0 or some number less than
-    /// `posting_vectors_slow_scored`.
-    pub posting_vectors_fast_scored: usize,
-    /// Number of posting entries "slow" scored.
-    pub posting_vectors_slow_scored: usize,
+    /// Number of posting vectors scored.
+    pub posting_vectors_scored: usize,
 }
 
 impl Add for SearchStats {
@@ -163,10 +156,7 @@ impl Add for SearchStats {
             head: self.head + rhs.head,
             postings_read: self.postings_read + rhs.postings_read,
             posting_vectors_read: self.posting_vectors_read + rhs.posting_vectors_read,
-            posting_vectors_fast_scored: self.posting_vectors_fast_scored
-                + rhs.posting_vectors_fast_scored,
-            posting_vectors_slow_scored: self.posting_vectors_slow_scored
-                + rhs.posting_vectors_slow_scored,
+            posting_vectors_scored: self.posting_vectors_scored + rhs.posting_vectors_scored,
         }
     }
 }
@@ -250,11 +240,7 @@ impl Searcher {
             }
         }
 
-        // If a document passes bounds it is only counted as slow scored even though it was "fast"
-        // scored too.
-        self.stats.posting_vectors_fast_scored =
-            result_queue.fast_scored + result_queue.slow_scored;
-        self.stats.posting_vectors_slow_scored = result_queue.slow_scored;
+        self.stats.posting_vectors_scored = result_queue.results.len();
 
         self.maybe_rerank_results(query, result_queue, reader)
     }
@@ -303,9 +289,6 @@ struct ResultQueue<'a> {
     dist_fn: Box<dyn QueryVectorDistance + 'a>,
     results: MinMaxHeap<Neighbor>,
     max_len: usize,
-
-    slow_scored: usize,
-    fast_scored: usize,
 }
 
 impl<'a> ResultQueue<'a> {
@@ -314,8 +297,6 @@ impl<'a> ResultQueue<'a> {
             dist_fn,
             results: MinMaxHeap::with_capacity(max_len),
             max_len,
-            slow_scored: 0,
-            fast_scored: 0,
         }
     }
 
@@ -324,17 +305,14 @@ impl<'a> ResultQueue<'a> {
         if self.results.len() < self.max_len {
             self.results
                 .push(Neighbor::new(vertex, self.dist_fn.distance(vector)));
-            self.slow_scored += 1;
             return true;
         }
 
         let max_distance = self.results.peek_max().unwrap().distance();
         if let Some(dist) = self.dist_fn.distance_with_bound(vector, max_distance) {
             self.results.push_pop_max(Neighbor::new(vertex, dist));
-            self.slow_scored += 1;
             true
         } else {
-            self.fast_scored += 1;
             false
         }
     }

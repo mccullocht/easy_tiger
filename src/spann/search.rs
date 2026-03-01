@@ -10,7 +10,7 @@ use std::{
 
 use min_max_heap::MinMaxHeap;
 use tracing::warn;
-use vectors::{F32VectorCoding, QueryVectorDistance, VectorSimilarity};
+use vectors::QueryVectorDistance;
 use wt_mdb::{Result, Session};
 
 use crate::{
@@ -144,14 +144,8 @@ pub struct SearchStats {
     ///
     /// This may be greater than the number scored if vectors are replicated across centroids.
     pub posting_vectors_read: usize,
-    /// Number of posting entries "fast" scored.
-    ///
-    /// Certain vector encodings support a "fast" distance function that is less accurate but faster
-    /// than the "slow" distance function. Depending on the posting coding this will either be 0
-    /// or some number less than `posting_vectors_slow_scored`.
-    pub posting_vectors_fast_scored: usize,
-    /// Number of posting entries "slow" scored.
-    pub posting_vectors_slow_scored: usize,
+    /// Number of posting vectors scored.
+    pub posting_vectors_scored: usize,
 }
 
 impl Add for SearchStats {
@@ -162,10 +156,7 @@ impl Add for SearchStats {
             head: self.head + rhs.head,
             postings_read: self.postings_read + rhs.postings_read,
             posting_vectors_read: self.posting_vectors_read + rhs.posting_vectors_read,
-            posting_vectors_fast_scored: self.posting_vectors_fast_scored
-                + rhs.posting_vectors_fast_scored,
-            posting_vectors_slow_scored: self.posting_vectors_slow_scored
-                + rhs.posting_vectors_slow_scored,
+            posting_vectors_scored: self.posting_vectors_scored + rhs.posting_vectors_scored,
         }
     }
 }
@@ -214,11 +205,13 @@ impl Searcher {
         self.stats.postings_read = centroids.len();
 
         self.seen.clear();
-        let mut result_queue = MultiResultQueue::new(
-            query,
-            reader.index.config().posting_coder,
-            reader.index().head_config().config().similarity,
+        let mut result_queue = ResultQueue::new(
             self.params.limit.get(),
+            reader
+                .index
+                .config()
+                .posting_coder
+                .query_vector_distance_f32(query, reader.index().head_config().config().similarity),
         );
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
@@ -247,8 +240,7 @@ impl Searcher {
             }
         }
 
-        self.stats.posting_vectors_fast_scored = result_queue.fast_count;
-        self.stats.posting_vectors_slow_scored = result_queue.slow_count;
+        self.stats.posting_vectors_scored = result_queue.results.len();
 
         self.maybe_rerank_results(query, result_queue, reader)
     }
@@ -256,7 +248,7 @@ impl Searcher {
     fn maybe_rerank_results(
         &mut self,
         query: &[f32],
-        result_queue: MultiResultQueue<'_>,
+        result_queue: ResultQueue<'_>,
         reader: &mut SessionIndexReader,
     ) -> Result<Vec<Neighbor>> {
         if self.params.num_rerank == 0 || reader.index().config().rerank_format.is_none() {
@@ -310,56 +302,22 @@ impl<'a> ResultQueue<'a> {
 
     /// Returns `true` if `v` is kept in the queue rather than discarded.
     fn push(&mut self, vertex: i64, vector: &[u8]) -> bool {
-        let n = Neighbor::new(vertex, self.dist_fn.distance(vector));
         if self.results.len() < self.max_len {
-            self.results.push(n);
+            self.results
+                .push(Neighbor::new(vertex, self.dist_fn.distance(vector)));
+            return true;
+        }
+
+        let max_distance = self.results.peek_max().unwrap().distance();
+        if let Some(dist) = self.dist_fn.distance_with_bound(vector, max_distance) {
+            self.results.push_pop_max(Neighbor::new(vertex, dist));
             true
         } else {
-            self.results.push_pop_max(n).vertex() != vertex
+            false
         }
-    }
-}
-
-struct MultiResultQueue<'a> {
-    fast: Option<ResultQueue<'a>>,
-    fast_count: usize,
-
-    slow: ResultQueue<'a>,
-    slow_count: usize,
-}
-
-impl<'a> MultiResultQueue<'a> {
-    fn new(
-        query: &'a [f32],
-        coding: F32VectorCoding,
-        similarity: VectorSimilarity,
-        limit: usize,
-    ) -> Self {
-        let fast = coding
-            .query_vector_distance_f32_fast(query, similarity)
-            .map(|d| ResultQueue::new(limit, d));
-        let slow = ResultQueue::new(limit, coding.query_vector_distance_f32(query, similarity));
-        Self {
-            fast,
-            fast_count: 0,
-            slow,
-            slow_count: 0,
-        }
-    }
-
-    fn push(&mut self, vertex: i64, vector: &[u8]) {
-        if let Some(fast) = self.fast.as_mut() {
-            // If we have a lo queue and the result doesn't rank, don't bother with the hi score.
-            self.fast_count += 1;
-            if !fast.push(vertex, vector) {
-                return;
-            }
-        }
-        self.slow_count += 1;
-        self.slow.push(vertex, vector);
     }
 
     fn into_results(self) -> Vec<Neighbor> {
-        self.slow.results.into_vec_asc()
+        self.results.into_vec_asc()
     }
 }

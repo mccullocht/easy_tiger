@@ -315,56 +315,6 @@ impl F32VectorCoding {
         }
     }
 
-    // XXX remove this entirely, we don't need multi-queue because we'll be using tlvq1 postings
-    // and we can use the fast QVD.
-    /// Create a new [QueryVectorDistance] between `query` and vectors formatted with this encoding
-    /// by `similarity` distance metric, but trade fidelity for speed.
-    /// * This is not implemented for all codings and similarities.
-    /// * Distances are less accurate but this does not mean the distances are more or less than a
-    ///   a higher fidelity distance computation. YMMV.
-    pub fn query_vector_distance_f32_fast(
-        &self,
-        query: &[f32],
-        similarity: VectorSimilarity,
-    ) -> Option<Box<dyn QueryVectorDistance>> {
-        match *self {
-            F32VectorCoding::F32 | F32VectorCoding::F16 => None,
-            F32VectorCoding::BinaryQuantized => Some(Box::new(QuantizedQueryVectorDistance::new(
-                binary::HammingDistance,
-                binary::BinaryQuantizedVectorCoder.encode(query),
-            ))),
-            // TODO: consider using asymmetric 8xN distance here.
-            F32VectorCoding::TLVQ1 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::TurboPrimaryDistance::<1>::new(similarity),
-                lvq::TurboPrimaryCoder::<1>::new(similarity, None).encode(query),
-            ))),
-            F32VectorCoding::TLVQ2 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::TurboPrimaryDistance::<2>::new(similarity),
-                lvq::TurboPrimaryCoder::<2>::new(similarity, None).encode(query),
-            ))),
-            F32VectorCoding::TLVQ4 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::TurboPrimaryDistance::<4>::new(similarity),
-                lvq::TurboPrimaryCoder::<4>::new(similarity, None).encode(query),
-            ))),
-            F32VectorCoding::TLVQ8 => Some(Box::new(QuantizedQueryVectorDistance::new(
-                lvq::TurboPrimaryDistance::<8>::new(similarity),
-                lvq::TurboPrimaryCoder::<8>::new(similarity, None).encode(query),
-            ))),
-            F32VectorCoding::TLVQ1x8 => Some(Box::new(
-                lvq::TurboResidualFastQueryDistance::<1>::new(similarity, query),
-            )),
-            F32VectorCoding::TLVQ2x8 => Some(Box::new(
-                lvq::TurboResidualFastQueryDistance::<2>::new(similarity, query),
-            )),
-            F32VectorCoding::TLVQ4x8 => Some(Box::new(
-                lvq::TurboResidualFastQueryDistance::<4>::new(similarity, query),
-            )),
-            F32VectorCoding::TLVQ8x8 => Some(Box::new(
-                lvq::TurboResidualFastQueryDistance::<8>::new(similarity, query),
-            )),
-        }
-    }
-
     /// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
     pub fn query_vector_distance_indexing<'a>(
         &self,

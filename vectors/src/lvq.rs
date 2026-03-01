@@ -1157,58 +1157,6 @@ impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
     }
 }
 
-/// Compute a "fast" distance by comparing primary vectors and ignoring residual vectors.
-///
-/// This quantizes the query vector the same as the primary vector rather than using an 8-bit
-/// representation. This makes the comparison symmetrical and faster, but at the cost of accuracy.
-/// For 1-bit primary quantization this is 2-3x faster than comparing and 8-bit quantization.
-pub struct TurboResidualFastQueryDistance<const B: usize> {
-    similarity: VectorSimilarity,
-
-    query: Vec<u8>,
-    terms: VectorDecodeTerms,
-    l2_norm: f64,
-
-    inst: InstructionSet,
-}
-
-impl<const B: usize> TurboResidualFastQueryDistance<B> {
-    pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
-        let inst = InstructionSet::default();
-        let (header, query) = TurboPrimaryCoder::<B>::encode_parts(inst, query);
-        let terms = VectorDecodeTerms::from_primary::<B>(header);
-        let l2_norm = header.l2_norm.into();
-
-        Self {
-            similarity,
-            query,
-            terms,
-            l2_norm,
-            inst,
-        }
-    }
-}
-
-impl<const B: usize> QueryVectorDistance for TurboResidualFastQueryDistance<B> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
-        let dot_uint = match self.inst {
-            InstructionSet::Scalar => scalar::dot_u8::<B>(&self.query, vector.primary.data),
-            #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::dot_u8::<B>(&self.query, vector.primary.data),
-            #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::dot_u8_avx512::<B>(&self.query, vector.primary.data)
-            },
-        };
-        dot_unnormalized_to_distance(
-            self.similarity,
-            correct_dot_uint(dot_uint, vector.dim(), &self.terms, &vector.primary.terms).into(),
-            (self.l2_norm, vector.l2_norm.into()),
-        )
-    }
-}
-
 mod packing {
     use std::iter::FusedIterator;
 

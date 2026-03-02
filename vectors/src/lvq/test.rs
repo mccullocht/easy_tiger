@@ -713,7 +713,7 @@ fn null_vector_decode() {
         F32VectorCoding::TLVQ4x8,
         F32VectorCoding::TLVQ8x8,
     ] {
-        let coder = coding.new_coder(VectorSimilarity::Dot);
+        let coder = coding.coder(VectorSimilarity::Dot, None);
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
@@ -733,7 +733,7 @@ fn fill_vector_decode() {
         F32VectorCoding::TLVQ4x8,
         F32VectorCoding::TLVQ8x8,
     ] {
-        let coder = coding.new_coder(VectorSimilarity::Dot);
+        let coder = coding.coder(VectorSimilarity::Dot, None);
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());

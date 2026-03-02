@@ -178,8 +178,8 @@ pub enum F32VectorCoding {
 }
 
 impl F32VectorCoding {
-    // XXX deprecate and remove this method.
     /// Create a new coder for this format.
+    #[deprecated = "use `coder(similarity, None)` instead"]
     pub fn new_coder(&self, similarity: VectorSimilarity) -> Box<dyn F32VectorCoder> {
         self.coder(similarity, None)
     }
@@ -562,7 +562,7 @@ mod test {
             } else {
                 vec.into()
             };
-            let f32_coder = F32VectorCoding::F32.new_coder(similarity);
+            let f32_coder = F32VectorCoding::F32.coder(similarity, None);
             let rvec = f32_coder
                 .encode(&vec)
                 .chunks(4)
@@ -595,7 +595,7 @@ mod test {
         b: &[f32],
         threshold: f64,
     ) {
-        let coder = format.new_coder(similarity);
+        let coder = format.coder(similarity, None);
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 
@@ -618,7 +618,7 @@ mod test {
         b: &[f32],
         threshold: f64,
     ) {
-        let coder = format.new_coder(similarity);
+        let coder = format.coder(similarity, None);
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 

@@ -468,7 +468,6 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
 #[derive(Debug)]
 struct CenteringState {
     center: Vec<f32>,
-    // XXX I hate this. there are callers that don't need the additional scratch space.
     scratch: ThreadLocal<RefCell<Vec<f32>>>,
 }
 
@@ -515,14 +514,18 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         }
     }
 
-    // XXX figure out where this is called; callers will need to be fixed.
-    fn encode_parts(inst: InstructionSet, vector: &[f32]) -> (PrimaryVectorHeader, Vec<u8>) {
+    fn encode_parts(
+        inst: InstructionSet,
+        vector: &[f32],
+        center: Option<&[f32]>,
+    ) -> (PrimaryVectorHeader, Vec<u8>) {
+        let mut scratch = center.map(|c| vec![0.0f32; c.len()]);
         let mut out = vec![0u8; packing::byte_len(vector.len(), B)];
-        let header = Self::encode_parts_to(inst, vector, None, &mut out);
+        let header =
+            Self::encode_parts_to(inst, vector, center.zip(scratch.as_deref_mut()), &mut out);
         (header, out)
     }
 
-    // XXX center should contain the center vector and a scratch buffer.
     fn encode_parts_to(
         inst: InstructionSet,
         vector: &[f32],
@@ -644,7 +647,7 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
     pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
         let inst = InstructionSet::default();
         let (header, query) =
-            TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(inst, query.as_ref());
+            TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(inst, query.as_ref(), None);
         let terms = VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
         let l2_norm = header.l2_norm.into();
 

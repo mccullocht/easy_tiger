@@ -55,7 +55,7 @@ fn compute_center(vectors: &impl VectorStore<Elem = f32>) -> Vec<f32> {
     for (i, v) in vectors
         .iter()
         .enumerate()
-        .progress_count(vectors.len() as u64)
+        .progress_with(crate::ui::progress_bar(vectors.len(), "Computing center"))
     {
         for (d, m) in v.iter().zip(mean.iter_mut()) {
             let delta = *d as f64 - *m;

@@ -18,8 +18,8 @@ mod x86_64;
 
 use std::{
     borrow::Cow,
-    cell::{RefCell, RefMut},
-    ops::{Add, AddAssign, Deref},
+    cell::RefCell,
+    ops::{Add, AddAssign},
 };
 
 use thread_local::ThreadLocal;
@@ -141,6 +141,30 @@ fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, 
         InstructionSet::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
         #[cfg(target_arch = "x86_64")]
         InstructionSet::Avx512 => unsafe { x86_64::optimize_interval_avx512(vector, stats, bits) },
+    }
+}
+
+fn maybe_center_vector_to<'a>(
+    vector: &'a [f32],
+    center: Option<(&[f32], &'a mut [f32])>,
+) -> &'a [f32] {
+    if let Some((center, out)) = center {
+        center_vector(vector, center, out);
+        out
+    } else {
+        vector
+    }
+}
+
+fn center_vector(vector: &[f32], center: &[f32], out: &mut [f32]) {
+    for ((v, c), o) in vector.iter().zip(center.iter()).zip(out.iter_mut()) {
+        *o = *v - *c;
+    }
+}
+
+fn uncenter_vector(center: &[f32], vector: &mut [f32]) {
+    for (c, v) in center.iter().zip(vector.iter_mut()) {
+        *v += *c;
     }
 }
 
@@ -455,25 +479,6 @@ impl CenteringState {
             scratch: ThreadLocal::new(),
         }
     }
-
-    fn center_vector(&self, vector: &[f32]) -> RefMut<'_, Vec<f32>> {
-        let mut centered = self.scratch.get_or_default().borrow_mut();
-        centered.resize(vector.len(), 0.0);
-        for ((v, c), o) in vector
-            .iter()
-            .zip(self.center.iter())
-            .zip(centered.iter_mut())
-        {
-            *o = *v - *c;
-        }
-        centered
-    }
-
-    fn uncenter_vector(&self, vector: &mut [f32]) {
-        for (c, v) in self.center.iter().zip(vector.iter_mut()) {
-            *v += *c;
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -499,14 +504,13 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         }
     }
 
-    // XXX this should accept the same arguments as new().
     #[allow(unused)]
-    pub fn scalar() -> Self {
+    pub fn scalar(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
         Self {
-            similarity: VectorSimilarity::Euclidean,
-            centering_state: None,
+            similarity,
+            centering_state: center.map(CenteringState::new),
             inst: InstructionSet::Scalar,
         }
     }
@@ -522,15 +526,10 @@ impl<const B: usize> TurboPrimaryCoder<B> {
     fn encode_parts_to(
         inst: InstructionSet,
         vector: &[f32],
-        center: Option<&CenteringState>,
+        center: Option<(&[f32], &mut [f32])>,
         out: &mut [u8],
     ) -> PrimaryVectorHeader {
-        // Center the vector if a center was provided.
-        let centered = center.map(|c| c.center_vector(vector));
-        let vector = centered
-            .as_ref()
-            .map(|c| c.deref().as_slice())
-            .unwrap_or(vector);
+        let vector = maybe_center_vector_to(vector, center);
 
         let stats = VectorStats::from(vector);
         let mut header = PrimaryVectorHeader::from(stats);
@@ -556,12 +555,18 @@ impl<const B: usize> TurboPrimaryCoder<B> {
 impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
-        let header = Self::encode_parts_to(
-            self.inst,
-            vector,
-            self.centering_state.as_ref(),
-            vector_bytes,
-        );
+
+        let mut center_scratch = self.centering_state.as_ref().map(|c| {
+            let mut scratch = c.scratch.get_or_default().borrow_mut();
+            scratch.resize(vector.len(), 0.0);
+            scratch
+        });
+        let center_state = self
+            .centering_state
+            .as_ref()
+            .map(|c| c.center.as_slice())
+            .zip(center_scratch.as_mut().map(|s| s.as_mut_slice()));
+        let header = Self::encode_parts_to(self.inst, vector, center_state, vector_bytes);
         header.serialize(header_bytes);
     }
 
@@ -578,8 +583,8 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe { x86_64::primary_decode_avx512::<B>(vector, out) },
         };
-        if let Some(center) = self.centering_state.as_ref() {
-            center.uncenter_vector(out);
+        if let Some(c) = self.centering_state.as_ref() {
+            uncenter_vector(&c.center, out);
         }
     }
 
@@ -713,7 +718,7 @@ impl TurboPrimaryQueryDistance1 {
     pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
         let inst = InstructionSet::default();
         let (primary_header, primary_query, residual_header, residual_query) =
-            TurboResidualCoder::<1>::encode_parts(inst, query.as_ref());
+            TurboResidualCoder::<1>::encode_parts(inst, query.as_ref(), None /* XXX center */);
         Self {
             similarity,
             primary_query,
@@ -900,42 +905,66 @@ impl VectorEncodeTerms {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct TurboResidualCoder<const B: usize>(InstructionSet);
+#[derive(Debug)]
+pub struct TurboResidualCoder<const B: usize> {
+    // XXX this needs similarity because it is noticeable broken for angular distance.
+    // the fix involves storing v•c in the header to correct the dot product.
+    #[allow(dead_code)]
+    similarity: VectorSimilarity,
+    centering_state: Option<CenteringState>,
+    inst: InstructionSet,
+}
 
 impl<const B: usize> TurboResidualCoder<B> {
     const B_CHECK: () = { check_primary_bits(B) };
 
-    // XXX needs a real impl
-    #[allow(unused)]
     pub fn new(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
-        Self::default()
+        Self {
+            similarity,
+            centering_state: center.map(CenteringState::new),
+            inst: InstructionSet::default(),
+        }
     }
 
     #[allow(unused)]
-    pub fn scalar() -> Self {
+    pub fn scalar(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
-        Self(InstructionSet::Scalar)
+        Self {
+            similarity,
+            centering_state: center.map(CenteringState::new),
+            inst: InstructionSet::Scalar,
+        }
     }
 
     fn encode_parts(
         inst: InstructionSet,
         vector: &[f32],
+        center: Option<&[f32]>,
     ) -> (PrimaryVectorHeader, Vec<u8>, ResidualVectorHeader, Vec<u8>) {
+        let mut scratch = center.map(|c| vec![0.0f32; c.len()]);
         let mut primary = vec![0u8; packing::byte_len(vector.len(), B)];
         let mut residual = vec![0u8; vector.len()];
-        let (primary_header, residual_header) =
-            Self::encode_parts_to(inst, vector, &mut primary, &mut residual);
+        let (primary_header, residual_header) = Self::encode_parts_to(
+            inst,
+            vector,
+            center.zip(scratch.as_deref_mut()),
+            &mut primary,
+            &mut residual,
+        );
         (primary_header, primary, residual_header, residual)
     }
 
     fn encode_parts_to(
         inst: InstructionSet,
         vector: &[f32],
+        center: Option<(&[f32], &mut [f32])>,
         primary: &mut [u8],
         residual: &mut [u8],
     ) -> (PrimaryVectorHeader, ResidualVectorHeader) {
+        // XXX produce correction term for angular distance.
+        let vector = maybe_center_vector_to(vector, center);
+
         let stats = VectorStats::from(vector);
         let mut primary_header = PrimaryVectorHeader::from(stats);
         // NB: this interval optimization reduces loss for the primary vector, but this loss
@@ -1000,14 +1029,6 @@ impl<const B: usize> TurboResidualCoder<B> {
     }
 }
 
-impl<const B: usize> Default for TurboResidualCoder<B> {
-    fn default() -> Self {
-        #[allow(clippy::let_unit_value)]
-        let _ = Self::B_CHECK;
-        Self(InstructionSet::default())
-    }
-}
-
 impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let (primary_header_bytes, vector_bytes) =
@@ -1017,8 +1038,18 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
         let split = packing::two_vector_split(vector_bytes.len(), B, RESIDUAL_BITS);
         let (primary, residual) = vector_bytes.split_at_mut(split);
 
+        let mut center_scratch = self.centering_state.as_ref().map(|c| {
+            let mut scratch = c.scratch.get_or_default().borrow_mut();
+            scratch.resize(vector.len(), 0.0);
+            scratch
+        });
+        let center_state = self
+            .centering_state
+            .as_ref()
+            .map(|c| c.center.as_slice())
+            .zip(center_scratch.as_mut().map(|s| s.as_mut_slice()));
         let (primary_header, residual_header) =
-            Self::encode_parts_to(self.0, vector, primary, residual);
+            Self::encode_parts_to(self.inst, vector, center_state, primary, residual);
         primary_header.serialize(primary_header_bytes);
         residual_header.serialize(residual_header_bytes);
     }
@@ -1032,12 +1063,15 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
         let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
-        match self.0 {
+        match self.inst {
             InstructionSet::Scalar => scalar::residual_decode::<B>(&vector, out),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::residual_decode::<B>(&vector, out),
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe { x86_64::residual_decode_avx512::<B>(&vector, out) },
+        }
+        if let Some(c) = self.centering_state.as_ref() {
+            uncenter_vector(&c.center, out);
         }
     }
 
@@ -1107,7 +1141,7 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
     pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
         let inst = InstructionSet::default();
         let (primary_header, primary_vector, residual_header, residual_vector) =
-            TurboResidualCoder::<B>::encode_parts(inst, query.as_ref());
+            TurboResidualCoder::<B>::encode_parts(inst, query.as_ref(), None /* XXX center */);
         let primary_terms = VectorDecodeTerms::from_primary::<B>(primary_header);
         let residual_terms = VectorDecodeTerms::from_residual(residual_header);
         let l2_norm = primary_header.l2_norm.into();

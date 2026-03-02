@@ -103,8 +103,12 @@ macro_rules! tlvq_coder_test {
     ($name:ident, $coder:ty, $center:expr, $primary_header:expr, $residual_header:expr, $decoded:expr) => {
         #[test]
         fn $name() {
-            // XXX actually do it
-            let coder = <$coder>::default();
+            let coder = match $center {
+                Centering::Uncentered => <$coder>::new(VectorSimilarity::Euclidean, None),
+                Centering::Centered => {
+                    <$coder>::new(VectorSimilarity::Euclidean, Some(TEST_CENTER.to_vec()))
+                }
+            };
             let encoded = coder.encode(&TEST_VECTOR);
             let (primary_header, vector_bytes) =
                 PrimaryVectorHeader::deserialize(&encoded).unwrap();
@@ -393,7 +397,7 @@ tlvq_coder_test!(
 );
 
 tlvq_coder_test!(
-    tlvq1x8,
+    tlvq1x8_uncentered,
     TurboResidualCoder::<1>,
     Centering::Uncentered,
     PrimaryVectorHeader {
@@ -431,7 +435,45 @@ tlvq_coder_test!(
 );
 
 tlvq_coder_test!(
-    tlvq2x8,
+    tlvq1x8_centered,
+    TurboResidualCoder::<1>,
+    Centering::Centered,
+    PrimaryVectorHeader {
+        l2_norm: 1.5514041,
+        lower: -0.60490876,
+        upper: 0.23906991,
+        residual_error_term: 0.8178981,
+        component_sum: 13,
+    },
+    ResidualVectorHeader {
+        magnitude: 0.84397864,
+        component_sum: 2453,
+    },
+    [
+        -0.9213099,
+        -0.06198204,
+        0.66031784,
+        0.6688582,
+        0.57363904,
+        0.43232933,
+        0.64515805,
+        -0.00035113096,
+        -0.20065583,
+        -0.42750263,
+        0.7285221,
+        -0.7037695,
+        -0.27251413,
+        0.5390065,
+        -0.7319261,
+        0.43469012,
+        0.9127511,
+        0.69340515,
+        0.20173621
+    ]
+);
+
+tlvq_coder_test!(
+    tlvq2x8_uncentered,
     TurboResidualCoder::<2>,
     Centering::Uncentered,
     PrimaryVectorHeader {
@@ -469,7 +511,45 @@ tlvq_coder_test!(
 );
 
 tlvq_coder_test!(
-    tlvq4x8,
+    tlvq2x8_centered,
+    TurboResidualCoder::<2>,
+    Centering::Centered,
+    PrimaryVectorHeader {
+        l2_norm: 1.5514041,
+        lower: -0.5572752,
+        upper: 0.5681409,
+        residual_error_term: 0.5325365,
+        component_sum: 27,
+    },
+    ResidualVectorHeader {
+        magnitude: 0.37513867,
+        component_sum: 2453,
+    },
+    [
+        -0.9216064,
+        -0.060816605,
+        0.6585645,
+        0.6704028,
+        0.57292926,
+        0.4305159,
+        0.6467262,
+        0.0014903545,
+        -0.1998304,
+        -0.42747492,
+        0.7293266,
+        -0.7037104,
+        -0.27242625,
+        0.53876096,
+        -0.730826,
+        0.4358647,
+        0.9124768,
+        0.69425285,
+        0.2017653
+    ]
+);
+
+tlvq_coder_test!(
+    tlvq4x8_uncentered,
     TurboResidualCoder::<4>,
     Centering::Uncentered,
     PrimaryVectorHeader {
@@ -507,7 +587,45 @@ tlvq_coder_test!(
 );
 
 tlvq_coder_test!(
-    tlvq8x8,
+    tlvq4x8_centered,
+    TurboResidualCoder::<4>,
+    Centering::Centered,
+    PrimaryVectorHeader {
+        l2_norm: 1.5514041,
+        lower: -0.69084126,
+        upper: 0.5633911,
+        residual_error_term: 0.09595752,
+        component_sum: 152,
+    },
+    ResidualVectorHeader {
+        magnitude: 0.0836155,
+        component_sum: 2425,
+    },
+    [
+        -0.921089,
+        -0.060902063,
+        0.65886086,
+        0.669848,
+        0.5728782,
+        0.4309433,
+        0.6459062,
+        0.0010663271,
+        -0.19988842,
+        -0.42811972,
+        0.7299415,
+        -0.7040529,
+        -0.27287427,
+        0.5390318,
+        -0.73094004,
+        0.43589473,
+        0.9128531,
+        0.69405365,
+        0.20198014
+    ]
+);
+
+tlvq_coder_test!(
+    tlvq8x8_uncentered,
     TurboResidualCoder::<8>,
     Centering::Uncentered,
     PrimaryVectorHeader {
@@ -541,6 +659,44 @@ tlvq_coder_test!(
         0.9130022,
         0.69401395,
         0.20198764
+    ]
+);
+
+tlvq_coder_test!(
+    tlvq8x8_centered,
+    TurboResidualCoder::<8>,
+    Centering::Centered,
+    PrimaryVectorHeader {
+        l2_norm: 1.5514041,
+        lower: -0.69532096,
+        upper: 0.5748244,
+        residual_error_term: 0.00552745,
+        component_sum: 2569,
+    },
+    ResidualVectorHeader {
+        magnitude: 0.0049809623,
+        component_sum: 2425,
+    },
+    [
+        -0.9209982,
+        -0.060999487,
+        0.65900046,
+        0.6700081,
+        0.5729991,
+        0.43099484,
+        0.6460004,
+        0.0010072589,
+        -0.19999509,
+        -0.4279989,
+        0.73000747,
+        -0.7039986,
+        -0.27299327,
+        0.53899044,
+        -0.7309987,
+        0.435998,
+        0.91300464,
+        0.6940077,
+        0.2020064
     ]
 );
 

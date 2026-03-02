@@ -224,10 +224,31 @@ impl F32VectorCoding {
             (Self::TLVQ8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
                 Box::new(lvq::TurboPrimaryCoder::<8>::new(similarity, None))
             }
-            (Self::TLVQ1x8, _) => Box::new(lvq::TurboResidualCoder::<1>::default()),
-            (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualCoder::<2>::default()),
-            (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualCoder::<4>::default()),
-            (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualCoder::<8>::default()),
+            (Self::TLVQ1x8, VectorSimilarity::Euclidean) => {
+                Box::new(lvq::TurboResidualCoder::<1>::new(similarity, center))
+            }
+            (Self::TLVQ2x8, VectorSimilarity::Euclidean) => {
+                Box::new(lvq::TurboResidualCoder::<2>::new(similarity, center))
+            }
+            (Self::TLVQ4x8, VectorSimilarity::Euclidean) => {
+                Box::new(lvq::TurboResidualCoder::<4>::new(similarity, center))
+            }
+            (Self::TLVQ8x8, VectorSimilarity::Euclidean) => {
+                Box::new(lvq::TurboResidualCoder::<8>::new(similarity, center))
+            }
+            // XXX fix centering for angular distance.
+            (Self::TLVQ1x8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
+                Box::new(lvq::TurboResidualCoder::<1>::new(similarity, None))
+            }
+            (Self::TLVQ2x8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
+                Box::new(lvq::TurboResidualCoder::<2>::new(similarity, None))
+            }
+            (Self::TLVQ4x8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
+                Box::new(lvq::TurboResidualCoder::<4>::new(similarity, None))
+            }
+            (Self::TLVQ8x8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
+                Box::new(lvq::TurboResidualCoder::<8>::new(similarity, None))
+            }
         }
     }
 
@@ -666,7 +687,7 @@ mod test {
                 let seed = OsRng::default().try_next_u64().unwrap();
                 println!("SEED {seed:#016x}");
                 let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
-                let scoder = <$coder>::scalar();
+                let scoder = <$coder>::scalar(VectorSimilarity::Euclidean, None);
                 let ocoder = <$coder>::new(VectorSimilarity::Euclidean, None);
                 // TODO: use randomly sized vectors like we do for distance tests.
                 for i in 0..1024 {

@@ -29,6 +29,25 @@ use crate::{
     dot_unnormalized_to_distance,
 };
 
+const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
+
+const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
+    let mut i = 0;
+    while i < allowed.len() {
+        if bits == allowed[i] {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+const fn check_primary_bits(bits: usize) {
+    assert!(is_supported_bits(bits, &SUPPORTED_PRIMARY_BITS));
+}
+
+const ESTIMATED_DISTANCE_Z_SCORE: f64 = 1.96;
+
 #[derive(Debug, Copy, Clone)]
 enum InstructionSet {
     Scalar,
@@ -68,23 +87,6 @@ impl Default for InstructionSet {
             InstructionSet::Scalar
         }
     }
-}
-
-const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
-
-const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
-    let mut i = 0;
-    while i < allowed.len() {
-        if bits == allowed[i] {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-const fn check_primary_bits(bits: usize) {
-    assert!(is_supported_bits(bits, &SUPPORTED_PRIMARY_BITS));
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -172,6 +174,103 @@ fn center_vector(vector: &[f32], center: &[f32], out: &mut [f32]) {
 fn uncenter_vector(center: &[f32], vector: &mut [f32]) {
     for (c, v) in center.iter().zip(vector.iter_mut()) {
         *v += *c;
+    }
+}
+
+#[derive(Debug, Clone)]
+enum DistanceCorrectionTerms {
+    Euclidean {
+        l2_norm_sq: f32,
+    },
+    Dot {
+        center_dot: f32,
+        center_center_dot: f32,
+    },
+    Cosine {
+        l2_norm: f32,
+        center_dot: f32,
+        center_center_dot: f32,
+    },
+}
+
+impl DistanceCorrectionTerms {
+    fn new(
+        header: &PrimaryVectorHeader,
+        center: Option<&[f32]>,
+        similarity: VectorSimilarity,
+    ) -> Self {
+        match similarity {
+            VectorSimilarity::Euclidean => Self::Euclidean {
+                l2_norm_sq: header.l2_norm.powi(2),
+            },
+            VectorSimilarity::Dot => Self::Dot {
+                center_dot: header.center_dot,
+                center_center_dot: center
+                    .map(|c| c.iter().map(|&v| v * v).sum())
+                    .unwrap_or(0.0),
+            },
+            VectorSimilarity::Cosine => Self::Cosine {
+                l2_norm: header.l2_norm,
+                center_dot: header.center_dot,
+                center_center_dot: center
+                    .map(|c| c.iter().map(|&v| v * v).sum())
+                    .unwrap_or(0.0),
+            },
+        }
+    }
+
+    fn distance_from_dot_unnormalized(
+        &self,
+        dot_unnormalized: f32,
+        vector_l2_norm: f32,
+        vector_center_dot: f32,
+    ) -> f32 {
+        match self {
+            Self::Euclidean { l2_norm_sq } => {
+                l2_norm_sq + vector_l2_norm.powi(2) - (2.0 * dot_unnormalized)
+            }
+            Self::Dot {
+                center_dot,
+                center_center_dot,
+            } => (dot_unnormalized + center_dot + vector_center_dot - center_center_dot)
+                .mul_add(-0.5, 0.5),
+            Self::Cosine {
+                l2_norm,
+                center_dot,
+                center_center_dot,
+            } => ((dot_unnormalized + center_dot + vector_center_dot - center_center_dot)
+                / (l2_norm * vector_l2_norm))
+                .mul_add(-0.5, 0.5),
+        }
+    }
+}
+
+struct ErrorBoundTerms {
+    l2_norm: f32,
+    residual_error_term: f32,
+    mult: f32,
+}
+
+impl ErrorBoundTerms {
+    fn from_header(header: &PrimaryVectorHeader, dim: usize, similarity: VectorSimilarity) -> Self {
+        // XXX get rid of cast.
+        let mult = (ESTIMATED_DISTANCE_Z_SCORE as f32
+            * match similarity {
+                VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
+                VectorSimilarity::Euclidean => 2.0,
+            })
+            / (dim as f32).sqrt();
+        Self {
+            l2_norm: header.l2_norm,
+            residual_error_term: header.residual_error_term,
+            mult,
+        }
+    }
+
+    fn error_bound<const B: usize>(&self, vector: &TurboPrimaryVector<B>) -> f32 {
+        // XXX i can probably also fold mult into the self terms.
+        (self.residual_error_term * vector.l2_norm + vector.residual_error_term * self.l2_norm)
+            * self.mult
     }
 }
 
@@ -432,6 +531,7 @@ struct TurboPrimaryVector<'a, const B: usize> {
     rep: EncodedVector<'a>,
     l2_norm: f32,
     residual_error_term: f32,
+    center_dot: f32,
 }
 
 impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
@@ -444,6 +544,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             },
             l2_norm: header.l2_norm,
             residual_error_term: header.residual_error_term,
+            center_dot: header.center_dot,
         })
     }
 
@@ -455,10 +556,6 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
         self.l2_norm.into()
     }
 
-    fn residual_error_term(&self) -> f64 {
-        self.residual_error_term.into()
-    }
-
     fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
         let tail_dim = dim & !(packing::block_dim(B) - 1);
         let (headv, tailv) = self.rep.split_at(packing::byte_len(tail_dim, B));
@@ -468,11 +565,13 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
                 rep: headv,
                 l2_norm: self.l2_norm,
                 residual_error_term: self.residual_error_term,
+                center_dot: self.center_dot,
             },
             Self {
                 rep: tailv,
                 l2_norm: self.l2_norm,
                 residual_error_term: self.residual_error_term,
+                center_dot: self.center_dot,
             },
         )
     }
@@ -657,32 +756,33 @@ const PRIMARY_QUERY_BITS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct TurboPrimaryQueryDistance<const B: usize> {
-    similarity: VectorSimilarity,
-
     query: Vec<u8>,
     terms: VectorDecodeTerms,
-    l2_norm: f64,
+    correction_terms: DistanceCorrectionTerms,
 
     inst: InstructionSet,
 }
 
 impl<const B: usize> TurboPrimaryQueryDistance<B> {
-    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
+    pub fn new(
+        similarity: VectorSimilarity,
+        query: Cow<'_, [f32]>,
+        center: Option<&[f32]>,
+    ) -> Self {
         let inst = InstructionSet::default();
         let (header, query) = TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(
             inst,
             similarity,
             query.as_ref(),
-            None, /* XXX center */
+            center,
         );
         let terms = VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
-        let l2_norm = header.l2_norm.into();
+        let correction_terms = DistanceCorrectionTerms::new(&header, center, similarity);
 
         Self {
-            similarity,
             query,
             terms,
-            l2_norm,
+            correction_terms,
             inst,
         }
     }
@@ -704,11 +804,9 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
             },
         };
         let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);
-        dot_unnormalized_to_distance(
-            self.similarity,
-            dot.into(),
-            (self.l2_norm, vector.l2_norm()),
-        )
+        self.correction_terms
+            .distance_from_dot_unnormalized(dot, vector.l2_norm, vector.center_dot)
+            .into()
     }
 }
 
@@ -731,33 +829,33 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
 /// This can provide significant savings, particularly when using memory bound indexes like a flat
 /// index or partitioned index.
 pub struct TurboPrimaryQueryDistance1 {
-    similarity: VectorSimilarity,
-
     primary_query: Vec<u8>,
     primary_terms: VectorDecodeTerms,
     residual_query: Vec<u8>,
     residual_terms: VectorDecodeTerms,
-    l2_norm: f64,
-    residual_error_term: f64,
-    sqrt_dim_inv: f64,
+    correction_terms: DistanceCorrectionTerms,
+    error_terms: ErrorBoundTerms,
 
     inst: InstructionSet,
 }
 
 impl TurboPrimaryQueryDistance1 {
-    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
+    pub fn new(
+        similarity: VectorSimilarity,
+        query: Cow<'_, [f32]>,
+        center: Option<&[f32]>,
+    ) -> Self {
         let inst = InstructionSet::default();
         let (primary_header, primary_query, residual_header, residual_query) =
-            TurboResidualCoder::<1>::encode_parts(inst, similarity, query.as_ref(), None);
+            TurboResidualCoder::<1>::encode_parts(inst, similarity, query.as_ref(), center);
+        let correction_terms = DistanceCorrectionTerms::new(&primary_header, center, similarity);
         Self {
-            similarity,
             primary_query,
             primary_terms: VectorDecodeTerms::from_primary::<1>(primary_header),
             residual_query,
             residual_terms: VectorDecodeTerms::from_residual(residual_header),
-            l2_norm: primary_header.l2_norm.into(),
-            residual_error_term: primary_header.residual_error_term.into(),
-            sqrt_dim_inv: 1.0 / (query.len() as f64).sqrt(),
+            correction_terms,
+            error_terms: ErrorBoundTerms::from_header(&primary_header, query.len(), similarity),
             inst,
         }
     }
@@ -785,18 +883,13 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
             &self.primary_terms,
             &vector.rep.terms,
         );
-        let distance_primary = dot_unnormalized_to_distance(
-            self.similarity,
-            dot_primary.into(),
-            (self.l2_norm, vector.l2_norm()),
+        let distance_primary = self.correction_terms.distance_from_dot_unnormalized(
+            dot_primary,
+            vector.l2_norm,
+            vector.center_dot,
         );
-        let error = (self.residual_error_term + vector.residual_error_term()) * self.sqrt_dim_inv;
-        let mult = match self.similarity {
-            VectorSimilarity::Dot | VectorSimilarity::Cosine => 0.5,
-            VectorSimilarity::Euclidean => 2.0,
-        };
-        let estimated_error = 1.96 * mult * error;
-        if distance_primary - estimated_error > max_distance {
+        let error = self.error_terms.error_bound(&vector);
+        if distance_primary as f64 - error as f64 > max_distance {
             return None;
         }
 
@@ -819,11 +912,15 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
             &self.residual_terms,
             &vector.rep.terms,
         );
-        Some(dot_unnormalized_to_distance(
-            self.similarity,
-            (dot_primary + dot_residual).into(),
-            (self.l2_norm, vector.l2_norm()),
-        ))
+        Some(
+            self.correction_terms
+                .distance_from_dot_unnormalized(
+                    dot_primary + dot_residual,
+                    vector.l2_norm,
+                    vector.center_dot,
+                )
+                .into(),
+        )
     }
 }
 
@@ -834,6 +931,7 @@ struct TurboResidualVector<'a, const B: usize> {
     primary: EncodedVector<'a>,
     residual: EncodedVector<'a>,
     l2_norm: f32,
+    center_dot: f32,
 }
 
 impl<'a, const B: usize> TurboResidualVector<'a, B> {
@@ -860,6 +958,7 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
                 data: residual_vector,
             },
             l2_norm: primary_header.l2_norm,
+            center_dot: primary_header.center_dot,
         })
     }
 
@@ -881,11 +980,13 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
                 primary: primary_headv,
                 residual: residual_headv,
                 l2_norm: self.l2_norm,
+                center_dot: self.center_dot,
             },
             Self {
                 primary: primary_tailv,
                 residual: residual_tailv,
                 l2_norm: self.l2_norm,
+                center_dot: self.center_dot,
             },
         )
     }
@@ -1161,37 +1262,33 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
 }
 
 pub struct TurboResidualQueryDistance<const B: usize> {
-    similarity: VectorSimilarity,
-
     primary_vector: Vec<u8>,
     primary_terms: VectorDecodeTerms,
     residual_vector: Vec<u8>,
     residual_terms: VectorDecodeTerms,
-    l2_norm: f64,
+    correction_terms: DistanceCorrectionTerms,
 
     inst: InstructionSet,
 }
 
 impl<const B: usize> TurboResidualQueryDistance<B> {
-    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
+    pub fn new(
+        similarity: VectorSimilarity,
+        query: Cow<'_, [f32]>,
+        center: Option<&[f32]>,
+    ) -> Self {
         let inst = InstructionSet::default();
         let (primary_header, primary_vector, residual_header, residual_vector) =
-            TurboResidualCoder::<B>::encode_parts(
-                inst,
-                similarity,
-                query.as_ref(),
-                None, /* XXX center */
-            );
+            TurboResidualCoder::<B>::encode_parts(inst, similarity, query.as_ref(), center);
         let primary_terms = VectorDecodeTerms::from_primary::<B>(primary_header);
         let residual_terms = VectorDecodeTerms::from_residual(residual_header);
-        let l2_norm = primary_header.l2_norm.into();
+        let correction_terms = DistanceCorrectionTerms::new(&primary_header, center, similarity);
         Self {
-            similarity,
             primary_vector,
             primary_terms,
             residual_vector,
             residual_terms,
-            l2_norm,
+            correction_terms,
             inst: InstructionSet::default(),
         }
     }
@@ -1223,11 +1320,9 @@ impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
             (&self.primary_terms, &self.residual_terms),
             (&vector.primary.terms, &vector.residual.terms),
         );
-        dot_unnormalized_to_distance(
-            self.similarity,
-            dot.into(),
-            (self.l2_norm, vector.l2_norm.into()),
-        )
+        self.correction_terms
+            .distance_from_dot_unnormalized(dot, vector.l2_norm, vector.center_dot)
+            .into()
     }
 }
 

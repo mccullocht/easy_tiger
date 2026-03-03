@@ -716,6 +716,8 @@ tlvq_coder_test!(
     ]
 );
 
+// XXX centered and uncentered distance tests.
+
 #[test]
 fn null_vector_decode() {
     let vector = vec![0.0f32; 256];

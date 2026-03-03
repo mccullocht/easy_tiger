@@ -51,6 +51,11 @@ impl VectorSimilarity {
         *self == Self::Cosine
     }
 
+    /// Return true if this is an angular distance measure.
+    pub fn angular(&self) -> bool {
+        *self == Self::Cosine || *self == Self::Dot
+    }
+
     /// Return an iterator over all similarity functions.
     pub fn all() -> impl ExactSizeIterator<Item = VectorSimilarity> {
         [
@@ -236,60 +241,81 @@ impl F32VectorCoding {
     }
 
     /// Create a new [QueryVectorDistance] given a query, similarity function, and vector coding.
+    #[deprecated = "use query_distance_asymmetric() instead"]
     pub fn query_vector_distance_f32<'a>(
         &self,
         query: impl Into<Cow<'a, [f32]>>,
         similarity: VectorSimilarity,
     ) -> Box<dyn QueryVectorDistance + 'a> {
-        use VectorSimilarity::{Cosine, Dot, Euclidean};
+        self.query_distance_asymmetric(query, None, similarity)
+    }
 
-        match (similarity, *self) {
-            (_, F32VectorCoding::F32) => {
+    /// Create a new [`QueryVectorDistance`] that computes distance between a fixed float query and
+    /// an arbitrary vector using this vector coding.
+    ///
+    /// If `center` is present then it will be accounted for in the distance calculation assuming
+    /// all input vectors _also_ use the same center value.
+    pub fn query_distance_asymmetric<'a>(
+        &self,
+        query: impl Into<Cow<'a, [f32]>>,
+        center: Option<&[f32]>,
+        similarity: VectorSimilarity,
+    ) -> Box<dyn QueryVectorDistance + 'a> {
+        match (*self, similarity) {
+            (F32VectorCoding::F32, _) => {
                 float32::new_query_vector_distance(similarity, query.into())
             }
-            (Cosine, F32VectorCoding::F16) => Box::new(float16::DotProductQueryDistance::new(
-                l2_normalize(query.into()),
-            )),
-            (Dot, F32VectorCoding::F16) => {
+            (F32VectorCoding::F16, VectorSimilarity::Cosine) => Box::new(
+                float16::DotProductQueryDistance::new(l2_normalize(query.into())),
+            ),
+            (F32VectorCoding::F16, VectorSimilarity::Dot) => {
                 Box::new(float16::DotProductQueryDistance::new(query.into()))
             }
-            (Euclidean, F32VectorCoding::F16) => {
+            (F32VectorCoding::F16, VectorSimilarity::Euclidean) => {
                 Box::new(float16::EuclideanQueryDistance::new(query.into()))
             }
-            (_, F32VectorCoding::BinaryQuantized) => Box::new(
+            (F32VectorCoding::BinaryQuantized, _) => Box::new(
                 binary::I1DotProductQueryDistance::new(query.into().as_ref()),
             ),
-            (_, F32VectorCoding::TLVQ1) => Box::new(lvq::TurboPrimaryQueryDistance1::new(
+            (F32VectorCoding::TLVQ1, _) => Box::new(lvq::TurboPrimaryQueryDistance1::new(
                 similarity,
                 query.into(),
+                center,
             )),
-            (_, F32VectorCoding::TLVQ2) => Box::new(lvq::TurboPrimaryQueryDistance::<2>::new(
+            (F32VectorCoding::TLVQ2, _) => Box::new(lvq::TurboPrimaryQueryDistance::<2>::new(
                 similarity,
                 query.into(),
+                center,
             )),
-            (_, F32VectorCoding::TLVQ4) => Box::new(lvq::TurboPrimaryQueryDistance::<4>::new(
+            (F32VectorCoding::TLVQ4, _) => Box::new(lvq::TurboPrimaryQueryDistance::<4>::new(
                 similarity,
                 query.into(),
+                center,
             )),
-            (_, F32VectorCoding::TLVQ8) => Box::new(lvq::TurboPrimaryQueryDistance::<8>::new(
+            (F32VectorCoding::TLVQ8, _) => Box::new(lvq::TurboPrimaryQueryDistance::<8>::new(
                 similarity,
                 query.into(),
+                center,
             )),
-            (_, F32VectorCoding::TLVQ1x8) => Box::new(lvq::TurboResidualQueryDistance::<1>::new(
+            (F32VectorCoding::TLVQ1x8, _) => Box::new(lvq::TurboResidualQueryDistance::<1>::new(
                 similarity,
                 query.into(),
+                center,
             )),
-            (_, F32VectorCoding::TLVQ2x8) => Box::new(lvq::TurboResidualQueryDistance::<2>::new(
+            (F32VectorCoding::TLVQ2x8, _) => Box::new(lvq::TurboResidualQueryDistance::<2>::new(
                 similarity,
                 query.into(),
+                center,
             )),
-            (_, F32VectorCoding::TLVQ4x8) => Box::new(lvq::TurboResidualQueryDistance::<4>::new(
+            (F32VectorCoding::TLVQ4x8, _) => Box::new(lvq::TurboResidualQueryDistance::<4>::new(
                 similarity,
                 query.into(),
+                center,
             )),
-            (_, F32VectorCoding::TLVQ8x8) => Box::new(lvq::TurboResidualQueryDistance::<8>::new(
+            (F32VectorCoding::TLVQ8x8, _) => Box::new(lvq::TurboResidualQueryDistance::<8>::new(
                 similarity,
                 query.into(),
+                center,
             )),
         }
     }
@@ -478,6 +504,7 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
     }
 }
 
+// XXX remove
 /// For a given similarity function, compute a distance score based on the unnormalized dot product
 /// of two vectors and their l2 norms.
 fn dot_unnormalized_to_distance(
@@ -583,7 +610,7 @@ mod test {
         let f32_dist_fn = similarity.new_distance_function();
         let f32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
 
-        let query_dist_fn = format.query_vector_distance_f32(&a.rvec, similarity);
+        let query_dist_fn = format.query_distance_asymmetric(&a.rvec, None, similarity);
         let query_dist = query_dist_fn.distance(&b.qvec);
 
         assert_float_near!(f32_dist, query_dist, threshold, index);

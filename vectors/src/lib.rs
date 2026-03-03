@@ -215,9 +215,21 @@ impl F32VectorCoding {
         }
     }
 
-    // XXX will need a centered variant of this for angular distance.
     /// Returns a [VectorDistance] between vectors encoded using this coder.
+    #[deprecated = "use distance_symmetric() instead"]
     pub fn new_vector_distance(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
+        self.distance_symmetric(None, similarity)
+    }
+
+    /// Returns a [`VectorDistance`] between vectors encoded using this scheme.
+    ///
+    /// If `center` is present, it is assumed that all inputs vectors are centered with respect to
+    /// this vector before encoding, and `center` may be used as part of distance corrections.
+    pub fn distance_symmetric(
+        &self,
+        center: Option<&[f32]>,
+        similarity: VectorSimilarity,
+    ) -> Box<dyn VectorDistance> {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
 
         match (self, similarity) {
@@ -229,14 +241,22 @@ impl F32VectorCoding {
             }
             (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance::default()),
             (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
-            (Self::TLVQ1, _) => Box::new(lvq::TurboPrimaryDistance::<1>::new(similarity)),
-            (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryDistance::<2>::new(similarity)),
-            (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryDistance::<4>::new(similarity)),
-            (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryDistance::<8>::new(similarity)),
-            (Self::TLVQ1x8, _) => Box::new(lvq::TurboResidualDistance::<1>::new(similarity)),
-            (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualDistance::<2>::new(similarity)),
-            (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualDistance::<4>::new(similarity)),
-            (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualDistance::<8>::new(similarity)),
+            (Self::TLVQ1, _) => Box::new(lvq::TurboPrimaryDistance::<1>::new(similarity, center)),
+            (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryDistance::<2>::new(similarity, center)),
+            (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryDistance::<4>::new(similarity, center)),
+            (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryDistance::<8>::new(similarity, center)),
+            (Self::TLVQ1x8, _) => {
+                Box::new(lvq::TurboResidualDistance::<1>::new(similarity, center))
+            }
+            (Self::TLVQ2x8, _) => {
+                Box::new(lvq::TurboResidualDistance::<2>::new(similarity, center))
+            }
+            (Self::TLVQ4x8, _) => {
+                Box::new(lvq::TurboResidualDistance::<4>::new(similarity, center))
+            }
+            (Self::TLVQ8x8, _) => {
+                Box::new(lvq::TurboResidualDistance::<8>::new(similarity, center))
+            }
         }
     }
 
@@ -352,29 +372,42 @@ impl F32VectorCoding {
                 quantized_qvd!(float16::EuclideanDistance::default(), query)
             }
             (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
+            // XXX add centering
             (_, F32VectorCoding::TLVQ1) => {
-                quantized_qvd!(lvq::TurboPrimaryDistance::<1>::new(similarity), query)
+                quantized_qvd!(lvq::TurboPrimaryDistance::<1>::new(similarity, None), query)
             }
             (_, F32VectorCoding::TLVQ2) => {
-                quantized_qvd!(lvq::TurboPrimaryDistance::<2>::new(similarity), query)
+                quantized_qvd!(lvq::TurboPrimaryDistance::<2>::new(similarity, None), query)
             }
             (_, F32VectorCoding::TLVQ4) => {
-                quantized_qvd!(lvq::TurboPrimaryDistance::<4>::new(similarity), query)
+                quantized_qvd!(lvq::TurboPrimaryDistance::<4>::new(similarity, None), query)
             }
             (_, F32VectorCoding::TLVQ8) => {
-                quantized_qvd!(lvq::TurboPrimaryDistance::<8>::new(similarity), query)
+                quantized_qvd!(lvq::TurboPrimaryDistance::<8>::new(similarity, None), query)
             }
             (_, F32VectorCoding::TLVQ1x8) => {
-                quantized_qvd!(lvq::TurboResidualDistance::<1>::new(similarity), query)
+                quantized_qvd!(
+                    lvq::TurboResidualDistance::<1>::new(similarity, None),
+                    query
+                )
             }
             (_, F32VectorCoding::TLVQ2x8) => {
-                quantized_qvd!(lvq::TurboResidualDistance::<2>::new(similarity), query)
+                quantized_qvd!(
+                    lvq::TurboResidualDistance::<2>::new(similarity, None),
+                    query
+                )
             }
             (_, F32VectorCoding::TLVQ4x8) => {
-                quantized_qvd!(lvq::TurboResidualDistance::<4>::new(similarity), query)
+                quantized_qvd!(
+                    lvq::TurboResidualDistance::<4>::new(similarity, None),
+                    query
+                )
             }
             (_, F32VectorCoding::TLVQ8x8) => {
-                quantized_qvd!(lvq::TurboResidualDistance::<8>::new(similarity), query)
+                quantized_qvd!(
+                    lvq::TurboResidualDistance::<8>::new(similarity, None),
+                    query
+                )
             }
         }
     }
@@ -504,25 +537,6 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
     }
 }
 
-// XXX remove
-/// For a given similarity function, compute a distance score based on the unnormalized dot product
-/// of two vectors and their l2 norms.
-fn dot_unnormalized_to_distance(
-    similarity: VectorSimilarity,
-    dot_unnormalized: f64,
-    l2_norm: (f64, f64),
-) -> f64 {
-    match similarity {
-        VectorSimilarity::Cosine | VectorSimilarity::Dot => {
-            let dot = dot_unnormalized / (l2_norm.0 * l2_norm.1);
-            (-dot + 1.0) / 2.0
-        }
-        VectorSimilarity::Euclidean => {
-            l2_norm.0 * l2_norm.0 + l2_norm.1 * l2_norm.1 - (2.0 * dot_unnormalized)
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use crate::{
@@ -590,7 +604,7 @@ mod test {
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
         assert_float_near!(rf32_dist, ru8_dist, 0.0001, index);
 
-        let dist_fn = format.new_vector_distance(similarity);
+        let dist_fn = format.distance_symmetric(None, similarity);
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);
         assert_float_near!(rf32_dist, qdist, threshold, index);
     }

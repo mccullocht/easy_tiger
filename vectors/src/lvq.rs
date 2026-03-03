@@ -24,10 +24,7 @@ use std::{
 
 use thread_local::ThreadLocal;
 
-use crate::{
-    F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
-    dot_unnormalized_to_distance,
-};
+use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity};
 
 const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
 
@@ -215,6 +212,28 @@ impl DistanceCorrectionTerms {
                 center_center_dot: center
                     .map(|c| c.iter().map(|&v| v * v).sum())
                     .unwrap_or(0.0),
+            },
+        }
+    }
+
+    fn from_parts(
+        l2_norm: f32,
+        center_dot: f32,
+        center_center_dot: f32,
+        similarity: VectorSimilarity,
+    ) -> Self {
+        match similarity {
+            VectorSimilarity::Euclidean => Self::Euclidean {
+                l2_norm_sq: l2_norm.powi(2),
+            },
+            VectorSimilarity::Dot => Self::Dot {
+                center_dot,
+                center_center_dot,
+            },
+            VectorSimilarity::Cosine => Self::Cosine {
+                l2_norm,
+                center_dot,
+                center_center_dot,
             },
         }
     }
@@ -454,23 +473,6 @@ impl<'a> EncodedVector<'a> {
     }
 }
 
-/// Compute an unnormalized dot product beween two vectors encoded with the same bits/dimension..
-fn dot_unnormalized_uint_symmetric<const B: usize>(
-    inst: InstructionSet,
-    dim: usize,
-    a: &EncodedVector<'_>,
-    b: &EncodedVector<'_>,
-) -> f32 {
-    let dot = match inst {
-        InstructionSet::Scalar => scalar::dot_u8::<B>(a.data, b.data),
-        #[cfg(target_arch = "aarch64")]
-        InstructionSet::Neon => aarch64::dot_u8::<B>(a.data, b.data),
-        #[cfg(target_arch = "x86_64")]
-        InstructionSet::Avx512 => unsafe { x86_64::dot_u8_avx512::<B>(a.data, b.data) },
-    };
-    correct_dot_uint(dot, dim, &a.terms, &b.terms)
-}
-
 /// Correct the dot product of two integer vectors using the stored vector terms.
 fn correct_dot_uint(dot: u32, dim: usize, a: &VectorDecodeTerms, b: &VectorDecodeTerms) -> f32 {
     // Note that any dot value larger than (2 << 24) will be rounded when converted to f32 which can
@@ -550,10 +552,6 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
 
     fn dim(&self) -> usize {
         (self.rep.data.len() * 8) / B
-    }
-
-    fn l2_norm(&self) -> f64 {
-        self.l2_norm.into()
     }
 
     fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
@@ -720,34 +718,74 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TurboPrimaryDistance<const B: usize>(VectorSimilarity, InstructionSet);
+pub struct TurboPrimaryDistance<const B: usize> {
+    similarity: VectorSimilarity,
+    center_center_dot: f32,
+    inst: InstructionSet,
+}
 
 impl<const B: usize> TurboPrimaryDistance<B> {
-    pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity, InstructionSet::default())
+    pub fn new(similarity: VectorSimilarity, center: Option<&[f32]>) -> Self {
+        let center_center_dot = if let Some(c) = center
+            && similarity.angular()
+        {
+            c.iter().map(|v| v * v).sum()
+        } else {
+            0.0
+        };
+        Self {
+            similarity,
+            center_center_dot,
+            inst: InstructionSet::default(),
+        }
     }
 
     #[inline(always)]
-    fn distance_internal(&self, query: &TurboPrimaryVector<B>, doc: &[u8]) -> f64 {
+    fn distance_internal(
+        &self,
+        correction_terms: &DistanceCorrectionTerms,
+        query: &TurboPrimaryVector<B>,
+        doc: &[u8],
+    ) -> f64 {
         let doc = TurboPrimaryVector::<B>::new(doc).unwrap();
-        dot_unnormalized_to_distance(
-            self.0,
-            dot_unnormalized_uint_symmetric::<B>(self.1, query.dim(), &query.rep, &doc.rep).into(),
-            (query.l2_norm(), doc.l2_norm()),
-        )
+        let uint_dot = match self.inst {
+            InstructionSet::Scalar => scalar::dot_u8::<B>(query.rep.data, doc.rep.data),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::dot_u8::<B>(query.rep.data, doc.rep.data),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::dot_u8_avx512::<B>(query.rep.data, doc.rep.data)
+            },
+        };
+        let dot = correct_dot_uint(uint_dot, query.dim(), &query.rep.terms, &doc.rep.terms);
+        correction_terms
+            .distance_from_dot_unnormalized(dot, doc.l2_norm, doc.center_dot)
+            .into()
     }
 }
 
 impl<const B: usize> VectorDistance for TurboPrimaryDistance<B> {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = TurboPrimaryVector::<B>::new(query).unwrap();
-        self.distance_internal(&query, doc)
+        let correction_terms = DistanceCorrectionTerms::from_parts(
+            query.l2_norm,
+            query.center_dot,
+            self.center_center_dot,
+            self.similarity,
+        );
+        self.distance_internal(&correction_terms, &query, doc)
     }
 
     fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
         let query = TurboPrimaryVector::<B>::new(query).unwrap();
+        let correction_terms = DistanceCorrectionTerms::from_parts(
+            query.l2_norm,
+            query.center_dot,
+            self.center_center_dot,
+            self.similarity,
+        );
         for (doc, out) in docs.iter().zip(out.iter_mut()) {
-            *out = self.distance_internal(&query, doc);
+            *out = self.distance_internal(&correction_terms, &query, doc);
         }
     }
 }
@@ -964,10 +1002,6 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
 
     fn dim(&self) -> usize {
         self.residual.data.len()
-    }
-
-    fn l2_norm(&self) -> f64 {
-        self.l2_norm.into()
     }
 
     fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
@@ -1221,11 +1255,26 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TurboResidualDistance<const B: usize>(VectorSimilarity, InstructionSet);
+pub struct TurboResidualDistance<const B: usize> {
+    similarity: VectorSimilarity,
+    center_center_dot: f32,
+    inst: InstructionSet,
+}
 
 impl<const B: usize> TurboResidualDistance<B> {
-    pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity, InstructionSet::default())
+    pub fn new(similarity: VectorSimilarity, center: Option<&[f32]>) -> Self {
+        let center_center_dot = if let Some(c) = center
+            && similarity.angular()
+        {
+            c.iter().map(|v| v * v).sum()
+        } else {
+            0.0
+        };
+        Self {
+            similarity,
+            center_center_dot,
+            inst: InstructionSet::default(),
+        }
     }
 }
 
@@ -1234,7 +1283,7 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
         let query = TurboResidualVector::<B>::new(query).unwrap();
         let doc = TurboResidualVector::<B>::new(doc).unwrap();
 
-        let component_dot = match self.1 {
+        let component_dot = match self.inst {
             InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B>(
                 (query.primary.data, query.residual.data),
                 (doc.primary.data, doc.residual.data),
@@ -1257,7 +1306,15 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
             (&query.primary.terms, &query.residual.terms),
             (&doc.primary.terms, &doc.residual.terms),
         );
-        dot_unnormalized_to_distance(self.0, dot.into(), (query.l2_norm(), doc.l2_norm()))
+        let correction_terms = DistanceCorrectionTerms::from_parts(
+            query.l2_norm,
+            query.center_dot,
+            self.center_center_dot,
+            self.similarity,
+        );
+        correction_terms
+            .distance_from_dot_unnormalized(dot, doc.l2_norm, doc.center_dot)
+            .into()
     }
 }
 

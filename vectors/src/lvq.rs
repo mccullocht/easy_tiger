@@ -184,24 +184,40 @@ fn uncenter_vector(center: &[f32], vector: &mut [f32]) {
 #[repr(C)]
 struct PrimaryVectorHeader {
     /// L2 norm (magnitude) of the vector.
+    /// This is used to compute euclidean distance and the statistical bound on estimated distance.
     l2_norm: f32,
+    /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
+    /// This term can be used to compute a statistical bound on the estimated distance.
+    residual_error_term: f32,
+    /// The dot product of the vector and the centroid.
+    /// This is used to compute angular distance when the vector is centered.
+    center_dot: f32,
     /// Lower interval bound used for quantization, no smaller than the minimum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     lower: f32,
     /// Upper interval bound used for quantization, no larger than the maximum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     upper: f32,
-    /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
-    /// This term can be used to compute a statistical bound on the estimated distance.
-    residual_error_term: f32,
     /// Sum of all the quantized components of the vector. This is used to correct the uint dot
     /// product to an f32 dot product.
     component_sum: u32,
 }
 
+// XXX we should not encode center_dot when using euclidean distance.
 impl PrimaryVectorHeader {
     /// Encoded buffer size.
     const LEN: usize = std::mem::size_of::<Self>();
+
+    fn new(stats: VectorStats, center_dot: f32) -> Self {
+        Self {
+            l2_norm: stats.l2_norm_sq.sqrt(),
+            residual_error_term: 0.0,
+            center_dot,
+            lower: stats.min,
+            upper: stats.max,
+            component_sum: 0,
+        }
+    }
 
     #[inline]
     fn split_output_buf(buf: &mut [u8]) -> Option<(&mut [u8], &mut [u8])> {
@@ -212,10 +228,11 @@ impl PrimaryVectorHeader {
     fn serialize(&self, header_bytes: &mut [u8]) {
         let header = header_bytes.as_chunks_mut::<4>().0;
         header[0] = self.l2_norm.to_le_bytes();
-        header[1] = self.lower.to_le_bytes();
-        header[2] = self.upper.to_le_bytes();
-        header[3] = self.residual_error_term.to_le_bytes();
-        header[4] = self.component_sum.to_le_bytes();
+        header[1] = self.residual_error_term.to_le_bytes();
+        header[2] = self.center_dot.to_le_bytes();
+        header[3] = self.lower.to_le_bytes();
+        header[4] = self.upper.to_le_bytes();
+        header[5] = self.component_sum.to_le_bytes();
     }
 
     #[inline]
@@ -225,25 +242,14 @@ impl PrimaryVectorHeader {
         Some((
             Self {
                 l2_norm: f32::from_le_bytes(header_entries[0]),
-                lower: f32::from_le_bytes(header_entries[1]),
-                upper: f32::from_le_bytes(header_entries[2]),
-                residual_error_term: f32::from_le_bytes(header_entries[3]),
-                component_sum: u32::from_le_bytes(header_entries[4]),
+                residual_error_term: f32::from_le_bytes(header_entries[1]),
+                center_dot: f32::from_le_bytes(header_entries[2]),
+                lower: f32::from_le_bytes(header_entries[3]),
+                upper: f32::from_le_bytes(header_entries[4]),
+                component_sum: u32::from_le_bytes(header_entries[5]),
             },
             vector_bytes,
         ))
-    }
-}
-
-impl From<VectorStats> for PrimaryVectorHeader {
-    fn from(value: VectorStats) -> Self {
-        Self {
-            l2_norm: value.l2_norm_sq.sqrt(),
-            lower: value.min,
-            upper: value.max,
-            residual_error_term: 0.0,
-            component_sum: 0,
-        }
     }
 }
 
@@ -543,10 +549,10 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         center: Option<(&[f32], &mut [f32])>,
         out: &mut [u8],
     ) -> PrimaryVectorHeader {
-        let (vector, _center_dot) = maybe_center_vector_to(vector, center, similarity);
+        let (vector, center_dot) = maybe_center_vector_to(vector, center, similarity);
 
         let stats = VectorStats::from(vector);
-        let mut header = PrimaryVectorHeader::from(stats);
+        let mut header = PrimaryVectorHeader::new(stats, center_dot);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
@@ -986,11 +992,10 @@ impl<const B: usize> TurboResidualCoder<B> {
         primary: &mut [u8],
         residual: &mut [u8],
     ) -> (PrimaryVectorHeader, ResidualVectorHeader) {
-        // XXX produce correction term for angular distance.
-        let (vector, _center_dot) = maybe_center_vector_to(vector, center, similarity);
+        let (vector, center_dot) = maybe_center_vector_to(vector, center, similarity);
 
         let stats = VectorStats::from(vector);
-        let mut primary_header = PrimaryVectorHeader::from(stats);
+        let mut primary_header = PrimaryVectorHeader::new(stats, center_dot);
         // NB: this interval optimization reduces loss for the primary vector, but this loss
         // reduction can make the residual vector more lossy if we derive the delta from the primary
         // interval as described in the LVQ paper. Compute and store a residual delta that is large

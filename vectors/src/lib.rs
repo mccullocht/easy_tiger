@@ -199,56 +199,14 @@ impl F32VectorCoding {
             (Self::F32, _) => Box::new(float32::VectorCoder::new(similarity)),
             (Self::F16, _) => Box::new(float16::VectorCoder::new(similarity)),
             (Self::BinaryQuantized, _) => Box::new(binary::BinaryQuantizedVectorCoder),
-            (Self::TLVQ1, VectorSimilarity::Euclidean) => {
-                Box::new(lvq::TurboPrimaryCoder::<1>::new(similarity, center))
-            }
-            (Self::TLVQ2, VectorSimilarity::Euclidean) => {
-                Box::new(lvq::TurboPrimaryCoder::<2>::new(similarity, center))
-            }
-            (Self::TLVQ4, VectorSimilarity::Euclidean) => {
-                Box::new(lvq::TurboPrimaryCoder::<4>::new(similarity, center))
-            }
-            (Self::TLVQ8, VectorSimilarity::Euclidean) => {
-                Box::new(lvq::TurboPrimaryCoder::<8>::new(similarity, center))
-            }
-            // XXX fix centering for angular distance.
-            (Self::TLVQ1, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
-                Box::new(lvq::TurboPrimaryCoder::<1>::new(similarity, None))
-            }
-            (Self::TLVQ2, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
-                Box::new(lvq::TurboPrimaryCoder::<2>::new(similarity, None))
-            }
-            (Self::TLVQ4, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
-                Box::new(lvq::TurboPrimaryCoder::<4>::new(similarity, None))
-            }
-            (Self::TLVQ8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
-                Box::new(lvq::TurboPrimaryCoder::<8>::new(similarity, None))
-            }
-            (Self::TLVQ1x8, VectorSimilarity::Euclidean) => {
-                Box::new(lvq::TurboResidualCoder::<1>::new(similarity, center))
-            }
-            (Self::TLVQ2x8, VectorSimilarity::Euclidean) => {
-                Box::new(lvq::TurboResidualCoder::<2>::new(similarity, center))
-            }
-            (Self::TLVQ4x8, VectorSimilarity::Euclidean) => {
-                Box::new(lvq::TurboResidualCoder::<4>::new(similarity, center))
-            }
-            (Self::TLVQ8x8, VectorSimilarity::Euclidean) => {
-                Box::new(lvq::TurboResidualCoder::<8>::new(similarity, center))
-            }
-            // XXX fix centering for angular distance.
-            (Self::TLVQ1x8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
-                Box::new(lvq::TurboResidualCoder::<1>::new(similarity, None))
-            }
-            (Self::TLVQ2x8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
-                Box::new(lvq::TurboResidualCoder::<2>::new(similarity, None))
-            }
-            (Self::TLVQ4x8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
-                Box::new(lvq::TurboResidualCoder::<4>::new(similarity, None))
-            }
-            (Self::TLVQ8x8, VectorSimilarity::Cosine | VectorSimilarity::Dot) => {
-                Box::new(lvq::TurboResidualCoder::<8>::new(similarity, None))
-            }
+            (Self::TLVQ1, _) => Box::new(lvq::TurboPrimaryCoder::<1>::new(similarity, center)),
+            (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryCoder::<2>::new(similarity, center)),
+            (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryCoder::<4>::new(similarity, center)),
+            (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryCoder::<8>::new(similarity, center)),
+            (Self::TLVQ1x8, _) => Box::new(lvq::TurboResidualCoder::<1>::new(similarity, center)),
+            (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualCoder::<2>::new(similarity, center)),
+            (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualCoder::<4>::new(similarity, center)),
+            (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualCoder::<8>::new(similarity, center)),
         }
     }
 

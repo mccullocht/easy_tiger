@@ -7,6 +7,8 @@ use memmap2::Mmap;
 use rayon::prelude::*;
 use vectors::{F32VectorCoding, VectorSimilarity};
 
+use crate::ui::progress_bar;
+
 #[derive(Args)]
 pub struct DistanceLossArgs {
     /// Little-endian f32 vectors of some dimensionality as input vectors.
@@ -19,10 +21,6 @@ pub struct DistanceLossArgs {
     /// Limit on the number of queries. If unset, use all input queries.
     #[arg(long)]
     query_limit: Option<usize>,
-
-    /// Limit on the number of documents. If unset, use all input vectors as docs.
-    #[arg(long)]
-    doc_limit: Option<usize>,
 
     /// Similarity function to use.
     #[arg(long)]
@@ -48,7 +46,6 @@ pub fn distance_loss(
         .query_limit
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
-    let doc_limit = args.doc_limit.unwrap_or(vectors.len()).min(vectors.len());
 
     let center = if args.center {
         Some(super::compute_center(vectors))
@@ -79,9 +76,9 @@ pub fn distance_loss(
         })
         .collect::<Vec<_>>();
 
-    let (count, error_sum, error_sq_sum, in_range_count) = (0..doc_limit)
+    let (count, error_sum, error_sq_sum, in_range_count) = (0..vectors.len())
         .into_par_iter()
-        .progress_count(doc_limit as u64)
+        .progress_with(progress_bar(vectors.len(), "scoring"))
         .flat_map(|d| {
             let mut doc_f32 = Cow::from(&vectors[d]);
             if let Some(center) = center.as_ref() {

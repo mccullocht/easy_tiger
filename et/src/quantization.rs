@@ -6,7 +6,7 @@ use std::{fs::File, io, num::NonZero, path::PathBuf};
 
 use clap::{Args, Subcommand};
 
-use easy_tiger::input::{DerefVectorStore, VectorStore};
+use easy_tiger::input::{DerefVectorStore, SubsetViewVectorStore, VectorStore};
 use indicatif::ProgressIterator;
 use memmap2::Mmap;
 
@@ -25,6 +25,10 @@ pub struct QuantizationArgs {
     /// Vector dimensions for --input-vectors
     #[arg(short, long)]
     dimensions: NonZero<usize>,
+
+    /// Maximum number of vectors to process.
+    #[arg(long)]
+    doc_limit: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -43,10 +47,19 @@ pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
         args.dimensions,
     )?;
 
-    match args.command {
-        Command::Loss(args) => loss(args, &vectors),
-        Command::DistanceLoss(args) => distance_loss(args, &vectors),
-        Command::Recall(args) => recall(args, &vectors),
+    if let Some(limit) = args.doc_limit && limit < vectors.len() {
+        let vectors = SubsetViewVectorStore::new(&vectors, (0..limit).collect());
+        cmd(args.command, &vectors)
+    } else {
+        cmd(args.command, &vectors)
+    }
+}
+
+fn cmd(cmd: Command, vectors: &(impl VectorStore<Elem = f32> + Send + Sync)) -> io::Result<()> {
+    match cmd {
+        Command::Loss(args) => loss(args, vectors),
+        Command::DistanceLoss(args) => distance_loss(args, vectors),
+        Command::Recall(args) => recall(args, vectors),
     }
 }
 

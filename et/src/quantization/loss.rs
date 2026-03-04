@@ -6,6 +6,8 @@ use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 use vectors::{F32VectorCoding, VectorSimilarity};
 
+use crate::ui::progress_bar;
+
 #[derive(Args)]
 pub struct LossArgs {
     /// Target format to measure the quantization loss of.
@@ -31,7 +33,7 @@ pub fn loss(
     let coder = args.format.new_coder(VectorSimilarity::Euclidean);
     let (abs_error, sq_error) = (0..vectors.len())
         .into_par_iter()
-        .progress_count(vectors.len() as u64)
+        .progress_with(progress_bar(vectors.len(), "loss"))
         .map(|i| {
             let v = mean
                 .as_ref()

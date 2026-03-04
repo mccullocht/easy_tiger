@@ -37,6 +37,13 @@ pub struct RecallArgs {
     #[command(flatten)]
     recall: crate::recall::RecallArgs,
 
+    /// Multiplier for recall k.
+    ///
+    /// Collect k * k_mult neighbors for each query and compute recall using that set. This
+    /// simulates recall with full-fidelity reranking where we over retrieve to get the final set.
+    #[arg(long, default_value_t = 1.0)]
+    k_mult: f64,
+
     /// Number of centers to compute and use.
     ///
     /// If 0, the data set will be uncentered.
@@ -151,8 +158,9 @@ pub fn recall(
         .collect::<Vec<_>>();
 
     let k = recall_computer.k();
+    let result_len = (k as f64 * args.k_mult) as usize;
     let mut query_k = Vec::with_capacity(query_limit);
-    query_k.resize_with(query_limit, || TopNeighbors::new(k));
+    query_k.resize_with(query_limit, || TopNeighbors::new(result_len));
     let (total_scored, total_competitive) = (0..doc_vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
@@ -183,8 +191,6 @@ pub fn recall(
         })
         .reduce(|| (0usize, 0usize), |a, b| (a.0 + b.0, a.1 + b.1));
 
-    // TODO: add analysis for re-scoring depth. For simple recall this amount to using a larger set
-    // on the "actual" side, but may be more complicated for NDCG.
     let sum_recall = query_k
         .into_iter()
         .enumerate()

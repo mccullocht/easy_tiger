@@ -150,13 +150,11 @@ pub fn rebalance(
             rebalance_stats.split_stats.searches
         );
         println!(
-            "  Nearby seen:  {:10}",
-            rebalance_stats.split_stats.nearby_seen
+            "Nearby centroids: {:10}",
+            rebalance_stats.split_stats.nearby_centroids
         );
-        println!(
-            "  Nearby moved: {:10}",
-            rebalance_stats.split_stats.nearby_moved
-        );
+        println!("  Seen:  {:10}", rebalance_stats.split_stats.nearby_seen);
+        println!("  Moved: {:10}", rebalance_stats.split_stats.nearby_moved);
     }
 
     Ok(())

@@ -131,11 +131,15 @@ pub fn insert_vectors(
             rebalance_stats.split_stats.searches
         );
         println!(
-            "  Nearby seen:  {:10}",
+            "Nearby:         {:10}",
+            rebalance_stats.split_stats.nearby_centroids
+        );
+        println!(
+            "  Seen:         {:10}",
             rebalance_stats.split_stats.nearby_seen
         );
         println!(
-            "  Nearby moved: {:10}",
+            "  Moved:        {:10}",
             rebalance_stats.split_stats.nearby_moved
         );
     }

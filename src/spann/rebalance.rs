@@ -52,6 +52,8 @@ pub struct SplitStats {
     pub moved_vectors: usize,
     /// Number of vectors where we had to search the head index again to find a new assigned centroid.
     pub searches: usize,
+    /// Number of nearby centroids processed for reassignment.
+    pub nearby_centroids: usize,
     /// The number of nearby vectors we examine for reassignment.
     pub nearby_seen: usize,
     /// The number of nearby vectors that were reassigned to a new centroid.
@@ -65,6 +67,7 @@ impl Add for SplitStats {
         Self {
             moved_vectors: self.moved_vectors + rhs.moved_vectors,
             searches: self.searches + rhs.searches,
+            nearby_centroids: self.nearby_centroids + rhs.nearby_centroids,
             nearby_seen: self.nearby_seen + rhs.nearby_seen,
             nearby_moved: self.nearby_moved + rhs.nearby_moved,
         }
@@ -320,7 +323,6 @@ pub fn split_centroid(
     let mut searches = 0;
     let moved_vectors = vectors.len();
     let connection = Arc::clone(head_index.session().connection());
-    // XXX this won't observe the deletion of the head vector.
     let split_reassignments = vectors
         .into_par_iter()
         .map_init(
@@ -399,6 +401,7 @@ pub fn split_centroid(
         )?;
     }
 
+    let nearby_centroids = nearby_clusters.len();
     let mut nearby_seen = 0;
     let mut nearby_moved = 0;
     // For a list of nearby centroids, examine all vectors and reassign them if they are closer
@@ -525,6 +528,7 @@ pub fn split_centroid(
     Ok(SplitStats {
         moved_vectors,
         searches,
+        nearby_centroids,
         nearby_seen,
         nearby_moved,
     })

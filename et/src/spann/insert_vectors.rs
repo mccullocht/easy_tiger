@@ -14,6 +14,7 @@ use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
+use tracing::info_span;
 use vectors::F32VectorCoder;
 use wt_mdb::{
     Connection, Result,
@@ -169,6 +170,9 @@ fn insert_batch(
     rerank_coder: Option<&dyn F32VectorCoder>,
     progress: &ProgressBar,
 ) -> Result<()> {
+    let span = info_span!("insert_batch", len = batch.end - batch.start);
+    let _enter = span.enter();
+
     progress.set_message("inserting vectors");
 
     let connection = Arc::clone(head_index.session().connection());
@@ -248,9 +252,15 @@ fn rebalance(
     rng: &mut impl Rng,
     progress: &ProgressBar,
 ) -> Result<RebalanceStats> {
+    let span = info_span!("rebalance");
+    let _enter = span.enter();
+
     let mut iter = 1;
     let mut rebalance_stats = RebalanceStats::default();
     loop {
+        let span = info_span!("iter", iter = iter);
+        let _enter = span.enter();
+
         // Need a new transaction for rebalancing steps
         let txn_guard = TransactionGuard::new(head_index.session(), None)?;
 

@@ -258,9 +258,6 @@ fn rebalance(
     let mut iter = 1;
     let mut rebalance_stats = RebalanceStats::default();
     loop {
-        let span = info_span!("iter", iter = iter);
-        let _enter = span.enter();
-
         // Need a new transaction for rebalancing steps
         let txn_guard = TransactionGuard::new(head_index.session(), None)?;
 
@@ -269,10 +266,14 @@ fn rebalance(
 
         match (summary.below_exemplar(), summary.above_exemplar()) {
             (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
+                let span = info_span!("merge_centroid", iter = iter);
+                let _enter = span.enter();
                 progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
                 rebalance_stats += merge_centroid(&index, &head_index, to_merge, len)?;
             }
             (_, Some((to_split, len))) => {
+                let span = info_span!("split_centroid", iter = iter);
+                let _enter = span.enter();
                 progress.set_message(format!("split {to_split} of {len} ({iter})"));
                 // TODO: split_centroid should allow splitting into multiple centroids.
                 // This requires allocating an arbitrary number of ids and accommodating these

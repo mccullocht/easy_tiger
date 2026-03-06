@@ -3,14 +3,14 @@ use std::{io, num::NonZero, sync::Arc};
 use clap::Args;
 use easy_tiger::{
     spann::{
-        centroid_stats::CentroidStats,
-        rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
         TableIndex,
+        centroid_stats::CentroidStats,
+        rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
     },
     vamana::wt::SessionGraphVectorIndex,
 };
 use rand::SeedableRng;
-use wt_mdb::{session::TransactionGuard, Connection};
+use wt_mdb::{Connection, session::TransactionGuard};
 
 use crate::ui::progress_spinner;
 
@@ -126,6 +126,11 @@ pub fn rebalance(
     if summary.in_policy_fraction() < 1.0 {
         print_balance_summary(&summary);
     }
+    let (min, max) = stats
+        .assignment_counts_iter()
+        .map(|(i, _)| i)
+        .fold((usize::MAX, usize::MIN), |mm, i| (mm.0.min(i), mm.1.max(i)));
+    println!("Centroid ids in ({min}..={max})");
 
     println!("Merged:         {:10}", rebalance_stats.merged);
     if rebalance_stats.merged > 0 {

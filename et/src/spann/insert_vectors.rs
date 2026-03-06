@@ -4,9 +4,9 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
-        rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
         CentroidAssignment, PostingKey, TableIndex,
+        centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
+        rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
     },
     vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
 };
@@ -16,8 +16,8 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use vectors::F32VectorCoder;
 use wt_mdb::{
-    session::{Formatted, TransactionGuard},
     Connection, Result,
+    session::{Formatted, TransactionGuard},
 };
 
 use crate::ui::progress_bar;
@@ -137,6 +137,19 @@ pub fn insert_vectors(
         println!(
             "  Nearby moved: {:10}",
             rebalance_stats.split_stats.nearby_moved
+        );
+    }
+
+    {
+        let _txn = TransactionGuard::new(head_index.session(), None)?;
+        let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
+        let (min, max) = stats
+            .assignment_counts_iter()
+            .map(|(i, _)| i)
+            .fold((usize::MAX, usize::MIN), |mm, i| (mm.0.min(i), mm.1.max(i)));
+        println!(
+            "=> {} centroids with ids in ({min}..={max})",
+            stats.centroid_count()
         );
     }
 

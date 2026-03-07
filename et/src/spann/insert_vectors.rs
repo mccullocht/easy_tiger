@@ -252,9 +252,6 @@ fn rebalance(
     rng: &mut impl Rng,
     progress: &ProgressBar,
 ) -> Result<RebalanceStats> {
-    let span = info_span!("rebalance");
-    let _enter = span.enter();
-
     let mut iter = 1;
     let mut rebalance_stats = RebalanceStats::default();
     loop {
@@ -272,8 +269,6 @@ fn rebalance(
                 rebalance_stats += merge_centroid(&index, &head_index, to_merge, len)?;
             }
             (_, Some((to_split, len))) => {
-                let span = info_span!("split_centroid", iter = iter);
-                let _enter = span.enter();
                 progress.set_message(format!("split {to_split} of {len} ({iter})"));
                 // TODO: split_centroid should allow splitting into multiple centroids.
                 // This requires allocating an arbitrary number of ids and accommodating these

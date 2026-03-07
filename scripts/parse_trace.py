@@ -32,16 +32,26 @@ def main():
     
     totals = {
         "insert_batch": 0.0,
-        "rebalance": 0.0,
-        "merge": 0.0,
-        "split": 0.0
+        "merge_centroid": 0.0,
+        "split_centroid": 0.0,
+        "partition_centroid": 0.0,
+        "delete_head_centroid": 0.0,
+        "insert_head_centroids": 0.0,
+        "split_reassignments": 0.0,
+        "nearby_reassignments": 0.0,
+        "write_reassignments": 0.0,
     }
     
     counts = {
         "insert_batch": 0,
-        "rebalance": 0,
-        "merge": 0,
-        "split": 0
+        "merge_centroid": 0,
+        "split_centroid": 0,
+        "partition_centroid": 0,
+        "delete_head_centroid": 0,
+        "insert_head_centroids": 0,
+        "split_reassignments": 0,
+        "nearby_reassignments": 0,
+        "write_reassignments": 0,
     }
     
     with open(filepath, 'r') as f:
@@ -67,12 +77,12 @@ def main():
                 totals[span_name] += duration
                 counts[span_name] += 1
                 
-    print(f"{'Trace Spans':<15} | {'Total time.busy (s)':<20} | {'Count':<10} | {'Avg (ms)':<15}")
+    print(f"{'Trace Spans':<25} | {'Total time.busy (s)':<20} | {'Count':<10} | {'Avg (ms)':<15}")
     print("-" * 70)
     for name in totals:
         count = counts[name]
         avg = (totals[name] / count * 1000) if count > 0 else 0
-        print(f"{name:<15} | {totals[name]:<20.4f} | {count:<10} | {avg:<15.4f}")
+        print(f"{name:<25} | {totals[name]:<20.4f} | {count:<10} | {avg:<15.4f}")
 
 if __name__ == '__main__':
     main()

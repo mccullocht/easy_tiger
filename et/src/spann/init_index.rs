@@ -85,6 +85,10 @@ pub struct InitIndexArgs {
     #[arg(long)]
     posting_coder: F32VectorCoding,
 
+    /// If true, center vectors that are written to the postings table around the assigned centroid.
+    #[arg(long, default_value_t = false)]
+    center_postings: bool,
+
     /// Format to use for a rerank table. May be omitted.
     #[arg(long)]
     rerank_format: Option<F32VectorCoding>,
@@ -146,6 +150,7 @@ pub fn init_index(
             patience: None,
         },
         posting_coder: args.posting_coder,
+        center_postings: args.center_postings,
         rerank_format: args.rerank_format,
     };
     let index = Arc::new(TableIndex::init_index(

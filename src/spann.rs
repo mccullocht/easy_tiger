@@ -59,6 +59,9 @@ pub struct IndexConfig {
     pub replica_selection: ReplicaSelectionAlgorithm,
     /// If set, build a vector id keyed vector table in this format for re-ranking results.
     pub rerank_format: Option<F32VectorCoding>,
+    /// If true, center vectors that are written to the postings table around the assigned centroid.
+    #[serde(default)]
+    pub center_postings: bool,
 }
 
 impl IndexConfig {
@@ -160,10 +163,15 @@ impl TableIndex {
         &self.config
     }
 
+    #[deprecated]
     pub fn new_posting_coder(&self) -> Box<dyn F32VectorCoder> {
+        self.posting_coder(None)
+    }
+
+    pub fn posting_coder(&self, center: Option<Vec<f32>>) -> Box<dyn F32VectorCoder> {
         self.config
             .posting_coder
-            .new_coder(self.head_config().config().similarity)
+            .coder(self.head_config().config().similarity, center)
     }
 
     pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {

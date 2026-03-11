@@ -10,8 +10,7 @@ use std::{
 
 use min_max_heap::MinMaxHeap;
 use tracing::warn;
-use vectors::QueryVectorDistance;
-use wt_mdb::{Result, Session};
+use wt_mdb::{Error, Result, Session};
 
 use crate::{
     spann::{centroid_stats::CentroidStats, PostingKey, SessionIndexReader, TableIndex},
@@ -212,19 +211,51 @@ impl Searcher {
         }
 
         centroids = self.params.centroid_selector.select(centroids);
+        let centroid_vectors = if reader.index().config().center_postings {
+            let head_vector_table = reader.head_reader().index().high_fidelity_table();
+            let head_coder = head_vector_table.new_coder();
+            let mut cursor = reader
+                .session()
+                .open_record_cursor(head_vector_table.name())?;
+            Some(
+                centroids
+                    .iter()
+                    .map(|n| unsafe {
+                        cursor
+                            .seek_exact_unsafe(n.vertex())
+                            .unwrap_or(Err(Error::not_found_error()))
+                            .map(|v| head_coder.decode(&v))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            )
+        } else {
+            None
+        };
         self.stats.postings_read = centroids.len();
 
         self.seen.clear();
-        let mut result_queue = ResultQueue::new(
-            self.params.limit.get(),
-            reader
-                .index
-                .config()
-                .posting_coder
-                .query_vector_distance_f32(query, reader.index().head_config().config().similarity),
-        );
-        for c in centroids {
+        let posting_format = reader.index.config().posting_coder;
+        let similarity = reader.index.head_config().config().similarity;
+        let center_postings = reader.index().config().center_postings;
+
+        let mut result_queue = MinMaxHeap::with_capacity(self.params.limit.get());
+        let mut slow_scored = 0;
+        let mut fast_scored = 0;
+        let query_dist_fn = if center_postings {
+            None
+        } else {
+            Some(posting_format.query_distance_asymmetric(query, None, similarity))
+        };
+
+        for (i, c) in centroids.into_iter().enumerate() {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
+            let centered_dist_fn = centroid_vectors
+                .as_ref()
+                .map(|v| posting_format.query_distance_asymmetric(query, Some(&v[i]), similarity));
+            // XXX one of these will be set.
+            let dist_fn = query_dist_fn
+                .as_ref()
+                .unwrap_or(centered_dist_fn.as_ref().unwrap());
             // TODO: if I can't read a posting list then skip and warn rather than exiting early.
             let mut cursor = reader
                 .session()
@@ -246,27 +277,38 @@ impl Searcher {
                     continue; // already seen
                 }
 
-                result_queue.push(record_id, vector);
+                if result_queue.len() < self.params.limit.get() {
+                    result_queue.push(Neighbor::new(record_id, dist_fn.distance(vector)));
+                    slow_scored += 1;
+                    continue;
+                }
+
+                let max_distance = result_queue.peek_max().unwrap().distance();
+                if let Some(dist) = dist_fn.distance_with_bound(vector, max_distance) {
+                    result_queue.push_pop_max(Neighbor::new(record_id, dist));
+                    slow_scored += 1;
+                } else {
+                    fast_scored += 1;
+                }
             }
         }
 
         // If a document passes bounds it is only counted as slow scored even though it was "fast"
         // scored too.
-        self.stats.posting_vectors_fast_scored =
-            result_queue.fast_scored + result_queue.slow_scored;
-        self.stats.posting_vectors_slow_scored = result_queue.slow_scored;
+        self.stats.posting_vectors_fast_scored = fast_scored + slow_scored;
+        self.stats.posting_vectors_slow_scored = slow_scored;
 
-        self.maybe_rerank_results(query, result_queue, reader)
+        self.maybe_rerank_results(query, result_queue.into_vec_asc(), reader)
     }
 
     fn maybe_rerank_results(
         &mut self,
         query: &[f32],
-        result_queue: ResultQueue<'_>,
+        result_queue: Vec<Neighbor>,
         reader: &mut SessionIndexReader,
     ) -> Result<Vec<Neighbor>> {
         if self.params.num_rerank == 0 || reader.index().config().rerank_format.is_none() {
-            return Ok(result_queue.into_results());
+            return Ok(result_queue);
         }
 
         let format = reader
@@ -274,12 +316,12 @@ impl Searcher {
             .config()
             .rerank_format
             .expect("rerank format is set");
-        let query = format.query_vector_distance_f32(query, reader.head_reader.config().similarity);
+        let query =
+            format.query_distance_asymmetric(query, None, reader.head_reader.config().similarity);
         let mut raw_cursor = reader
             .session()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;
         let mut reranked = result_queue
-            .into_results()
             .into_iter()
             .take(self.params.num_rerank)
             .map(|n| {
@@ -296,50 +338,5 @@ impl Searcher {
         reranked.sort_unstable();
 
         Ok(reranked)
-    }
-}
-
-struct ResultQueue<'a> {
-    dist_fn: Box<dyn QueryVectorDistance + 'a>,
-    results: MinMaxHeap<Neighbor>,
-    max_len: usize,
-
-    slow_scored: usize,
-    fast_scored: usize,
-}
-
-impl<'a> ResultQueue<'a> {
-    fn new(max_len: usize, dist_fn: Box<dyn QueryVectorDistance + 'a>) -> Self {
-        Self {
-            dist_fn,
-            results: MinMaxHeap::with_capacity(max_len),
-            max_len,
-            slow_scored: 0,
-            fast_scored: 0,
-        }
-    }
-
-    /// Returns `true` if `v` is kept in the queue rather than discarded.
-    fn push(&mut self, vertex: i64, vector: &[u8]) -> bool {
-        if self.results.len() < self.max_len {
-            self.results
-                .push(Neighbor::new(vertex, self.dist_fn.distance(vector)));
-            self.slow_scored += 1;
-            return true;
-        }
-
-        let max_distance = self.results.peek_max().unwrap().distance();
-        if let Some(dist) = self.dist_fn.distance_with_bound(vector, max_distance) {
-            self.results.push_pop_max(Neighbor::new(vertex, dist));
-            self.slow_scored += 1;
-            true
-        } else {
-            self.fast_scored += 1;
-            false
-        }
-    }
-
-    fn into_results(self) -> Vec<Neighbor> {
-        self.results.into_vec_asc()
     }
 }

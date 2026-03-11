@@ -341,9 +341,24 @@ impl F32VectorCoding {
     }
 
     /// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
+    #[deprecated = "use query_distance_symmetric() instead"]
     pub fn query_vector_distance_indexing<'a>(
         &self,
         query: impl Into<Cow<'a, [u8]>>,
+        similarity: VectorSimilarity,
+    ) -> Box<dyn QueryVectorDistance + 'a> {
+        self.query_distance_symmetric(query, None, similarity)
+    }
+
+    /// Create a new [`QueryVectorDistance`] that computes distance between a fixed query encoded
+    /// in this format and other vectors that are also in this format.
+    ///
+    /// If `center` is present then it will be accounted for in the distance calculation assuming
+    /// all input vectors _also_ use the same center value.
+    pub fn query_distance_symmetric<'a>(
+        &self,
+        query: impl Into<Cow<'a, [u8]>>,
+        center: Option<&[f32]>,
         similarity: VectorSimilarity,
     ) -> Box<dyn QueryVectorDistance + 'a> {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
@@ -372,40 +387,51 @@ impl F32VectorCoding {
                 quantized_qvd!(float16::EuclideanDistance::default(), query)
             }
             (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
-            // XXX add centering
             (_, F32VectorCoding::TLVQ1) => {
-                quantized_qvd!(lvq::TurboPrimaryDistance::<1>::new(similarity, None), query)
+                quantized_qvd!(
+                    lvq::TurboPrimaryDistance::<1>::new(similarity, center),
+                    query
+                )
             }
             (_, F32VectorCoding::TLVQ2) => {
-                quantized_qvd!(lvq::TurboPrimaryDistance::<2>::new(similarity, None), query)
+                quantized_qvd!(
+                    lvq::TurboPrimaryDistance::<2>::new(similarity, center),
+                    query
+                )
             }
             (_, F32VectorCoding::TLVQ4) => {
-                quantized_qvd!(lvq::TurboPrimaryDistance::<4>::new(similarity, None), query)
+                quantized_qvd!(
+                    lvq::TurboPrimaryDistance::<4>::new(similarity, center),
+                    query
+                )
             }
             (_, F32VectorCoding::TLVQ8) => {
-                quantized_qvd!(lvq::TurboPrimaryDistance::<8>::new(similarity, None), query)
+                quantized_qvd!(
+                    lvq::TurboPrimaryDistance::<8>::new(similarity, center),
+                    query
+                )
             }
             (_, F32VectorCoding::TLVQ1x8) => {
                 quantized_qvd!(
-                    lvq::TurboResidualDistance::<1>::new(similarity, None),
+                    lvq::TurboResidualDistance::<1>::new(similarity, center),
                     query
                 )
             }
             (_, F32VectorCoding::TLVQ2x8) => {
                 quantized_qvd!(
-                    lvq::TurboResidualDistance::<2>::new(similarity, None),
+                    lvq::TurboResidualDistance::<2>::new(similarity, center),
                     query
                 )
             }
             (_, F32VectorCoding::TLVQ4x8) => {
                 quantized_qvd!(
-                    lvq::TurboResidualDistance::<4>::new(similarity, None),
+                    lvq::TurboResidualDistance::<4>::new(similarity, center),
                     query
                 )
             }
             (_, F32VectorCoding::TLVQ8x8) => {
                 quantized_qvd!(
-                    lvq::TurboResidualDistance::<8>::new(similarity, None),
+                    lvq::TurboResidualDistance::<8>::new(similarity, center),
                     query
                 )
             }

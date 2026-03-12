@@ -258,7 +258,8 @@ pub fn split_centroid(
         len = len,
         src = centroid_id,
         dst1 = target_centroid_ids.0,
-        dst2 = target_centroid_ids.1
+        dst2 = target_centroid_ids.1,
+        searches = tracing::field::Empty
     );
     let _split_centroid_span_enter = split_centroid_span.enter();
 
@@ -567,6 +568,8 @@ pub fn split_centroid(
         .session()
         .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
         .remove(centroid_id as u32)?;
+
+    split_centroid_span.record("searches", searches + 1);
 
     Ok(SplitStats {
         moved_vectors,

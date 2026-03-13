@@ -9,6 +9,8 @@ pub mod rebalance;
 pub mod search;
 
 use std::{
+    borrow::Cow,
+    collections::HashMap,
     io,
     num::NonZero,
     ops::{Range, RangeInclusive},
@@ -17,7 +19,7 @@ use std::{
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
-use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding};
+use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding, VectorSimilarity};
 use wt_mdb::{
     session::{CreateOptionsBuilder, DropOptions, FormatString, Formatted},
     Connection, Error, Result, Session,
@@ -27,7 +29,9 @@ use crate::{
     spann::centroid_stats::CentroidCounts,
     vamana::{
         prune_edges,
-        wt::{read_app_metadata, SessionGraphVectorIndex, TableGraphVectorIndex},
+        wt::{
+            read_app_metadata, CursorVectorStore, SessionGraphVectorIndex, TableGraphVectorIndex,
+        },
         EdgePruningConfig, EdgeSetDistanceComputer, GraphConfig, GraphSearchParams,
         GraphVectorIndex, GraphVectorStore,
     },
@@ -602,5 +606,143 @@ impl SessionIndexReader {
 
     pub fn head_reader(&self) -> &SessionGraphVectorIndex {
         &self.head_reader
+    }
+}
+
+/// Wrapper that provides posting coders for a given centroid. This exists to handle complexity
+/// surrounding centered vs uncentered posting coding.
+#[allow(clippy::large_enum_variant)]
+enum PostingVectorCoder<'a> {
+    Uncentered(Box<dyn F32VectorCoder>),
+    Centered {
+        posting_format: F32VectorCoding,
+        similarity: VectorSimilarity,
+        /// Table for centroid access.
+        centroid_vectors: CursorVectorStore<'a>,
+        /// Used to decode centroid vectors to create posting coders.
+        centroid_coder: Box<dyn F32VectorCoder>,
+        /// Per-centroid posting coders.
+        posting_coders: HashMap<u32, Box<dyn F32VectorCoder>>,
+        /// Rerank vectors if enabled.
+        rerank_vectors: Option<(CursorVectorStore<'a>, Box<dyn F32VectorCoder>)>,
+    },
+}
+
+impl<'a> PostingVectorCoder<'a> {
+    fn new(index: &TableIndex, head_index: &'a SessionGraphVectorIndex) -> Result<Self> {
+        if index.config().center_postings {
+            let similarity = head_index.config().similarity;
+            let centroid_vectors = head_index.high_fidelity_vectors()?;
+            let centroid_coder = centroid_vectors.new_coder();
+            let rerank_vectors = index
+                .config()
+                .rerank_format
+                .map(|format| {
+                    head_index
+                        .session()
+                        .get_record_cursor(index.postings_table_name())
+                        .map(|cursor| {
+                            let store = CursorVectorStore::new(cursor, similarity, format);
+                            let coder = store.new_coder();
+                            (store, coder)
+                        })
+                })
+                .transpose()?;
+            Ok(Self::Centered {
+                posting_format: index.config().posting_coder,
+                similarity,
+                centroid_vectors,
+                centroid_coder,
+                posting_coders: HashMap::new(),
+                rerank_vectors,
+            })
+        } else {
+            Ok(Self::Uncentered(index.posting_coder(None)))
+        }
+    }
+
+    fn for_centroid(&mut self, centroid_id: u32) -> Result<&dyn F32VectorCoder> {
+        match self {
+            Self::Uncentered(coder) => Ok(&**coder),
+            Self::Centered {
+                posting_format,
+                similarity,
+                centroid_vectors,
+                centroid_coder,
+                posting_coders,
+                rerank_vectors: _,
+            } => {
+                use std::collections::hash_map::Entry;
+                let e = match posting_coders.entry(centroid_id) {
+                    Entry::Occupied(e) => e,
+                    Entry::Vacant(e) => {
+                        let vector = centroid_coder.decode(
+                            centroid_vectors
+                                .get(centroid_id as i64)
+                                .unwrap_or(Err(Error::not_found_error()))?,
+                        );
+                        e.insert_entry(posting_format.coder(*similarity, Some(vector)))
+                    }
+                };
+                Ok(&**e.into_mut())
+            }
+        }
+    }
+
+    fn posting_vector(&mut self, source_centroid_id: u32, record_id: i64) -> Result<PostingVector> {
+        match self {
+            Self::Uncentered(_) => Ok(PostingVector::Uncentered),
+            Self::Centered {
+                posting_format: _,
+                similarity: _,
+                centroid_vectors: _,
+                centroid_coder: _,
+                posting_coders: _,
+                rerank_vectors,
+            } => {
+                if let Some((rerank_store, rerank_coder)) = rerank_vectors.as_mut() {
+                    Ok(PostingVector::CenteredRerank(
+                        rerank_coder.decode(
+                            rerank_store
+                                .get(record_id)
+                                .unwrap_or(Err(Error::not_found_error()))?,
+                        ),
+                    ))
+                } else {
+                    Ok(PostingVector::CenteredPosting(source_centroid_id))
+                }
+            }
+        }
+    }
+}
+
+// XXX uncentered we just pass through
+// XXX centered + rerank, this contains the decoded rerank vector
+enum PostingVector {
+    Uncentered,
+    CenteredPosting(u32),
+    CenteredRerank(Vec<f32>),
+}
+
+impl PostingVector {
+    fn encode<'a>(
+        &self,
+        coder: &mut PostingVectorCoder<'_>,
+        target_centroid_id: u32,
+        posting_vector: &'a [u8],
+    ) -> Result<Cow<'a, [u8]>> {
+        match self {
+            Self::Uncentered => Ok(posting_vector.into()),
+            Self::CenteredPosting(source_centroid_id) => {
+                let source_coder = coder.for_centroid(*source_centroid_id)?;
+                let vector = source_coder.decode(posting_vector);
+                let target_coder = coder.for_centroid(target_centroid_id)?;
+                Ok(target_coder.encode(&vector).into())
+            }
+            Self::CenteredRerank(v) => {
+                let target_coder = coder.for_centroid(target_centroid_id)?;
+                Ok(target_coder.encode(v).into())
+            }
+        }
     }
 }

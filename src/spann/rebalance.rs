@@ -10,7 +10,7 @@ use crate::{
     kmeans,
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
-        select_centroids, CentroidAssignment, PostingKey, TableIndex,
+        select_centroids, CentroidAssignment, PostingKey, PostingVectorCoder, TableIndex,
     },
     vamana::{
         mutate::{delete_vector, upsert_vector},
@@ -150,6 +150,9 @@ pub fn merge_centroid(
     centroid_id: usize,
     len: usize,
 ) -> Result<MergeStats> {
+    let mut posting_coder = PostingVectorCoder::new(index, head_index)?;
+    let merge_coder = posting_coder.for_centroid(centroid_id as u32)?;
+
     // Collect all of the vectors for the centroid to merge.
     let mut posting_cursor = head_index
         .session()
@@ -174,8 +177,9 @@ pub fn merge_centroid(
         return Ok(MergeStats::default());
     }
 
+    // XXX another object could handle re-encoding during move with a Fn or FnMut.
+
     // Query the head index for each vector and assign a new centroid.
-    let coder = index.new_posting_coder();
     let removed_vectors = vectors.len();
     let connection = Arc::clone(head_index.session().connection());
     let reassignments = vectors
@@ -192,7 +196,7 @@ pub fn merge_centroid(
                 )
             },
             |(head_index, searcher, float_vector), (record_id, vector)| {
-                coder.decode_to(&vector, float_vector);
+                merge_coder.decode_to(&vector, float_vector);
                 // TODO: seed the search with the existing assignments for this record; reduce budget.
                 let candidates = searcher.search_with_filter(
                     float_vector,
@@ -213,19 +217,29 @@ pub fn merge_centroid(
 
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
     posting_cursor.reset()?;
-    for (record_id, new_assignments, vector) in reassignments {
+    for (record_id, new_assignments, posting_vector) in reassignments {
         let old_assignments =
             assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
-        move_postings(
-            PostingKey {
-                centroid_id: centroid_id as u32,
+        let (to_remove, to_add) = diff_assignments(&old_assignments, &new_assignments);
+        for centroid_id in to_remove {
+            posting_cursor.remove(PostingKey {
+                centroid_id,
                 record_id,
-            },
-            &vector,
-            &old_assignments,
-            &new_assignments,
-            &mut posting_cursor,
-        )?;
+            })?;
+        }
+
+        let reencode_vector = posting_coder.posting_vector(centroid_id as u32, record_id)?;
+        for centroid_id in to_add {
+            posting_cursor.set(
+                PostingKey {
+                    centroid_id,
+                    record_id,
+                },
+                reencode_vector
+                    .encode(&mut posting_coder, centroid_id, &posting_vector)?
+                    .as_ref(),
+            )?;
+        }
     }
 
     assignment_updater.flush()?;
@@ -266,6 +280,9 @@ pub fn split_centroid(
     let similarity = index.head_config().config().similarity;
     let posting_coder = posting_format.new_coder(similarity);
     let mut scratch_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
+    // XXX if we have rerank vectors and are centered, we should read those instead of decoding
+    // the postings. if the vectors are centered we may as well keep the decoded vectors since
+    // we'll have to re-encode anyway.
     let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), vectors.len());
     for (_, vector) in vectors.iter() {
         posting_coder.decode_to(vector, &mut scratch_vector);
@@ -320,7 +337,6 @@ pub fn split_centroid(
     let mut searches = 0;
     let moved_vectors = vectors.len();
     let connection = Arc::clone(head_index.session().connection());
-    // XXX this won't observe the deletion of the head vector.
     let split_reassignments = vectors
         .into_par_iter()
         .map_init(
@@ -341,6 +357,7 @@ pub fn split_centroid(
                 let c2_dist = c2_dist_fn.distance(&vector);
                 let new_assignments = if c0_dist <= c1_dist && c0_dist <= c2_dist {
                     searched += 1;
+                    // XXX do I want to use rerank vectors?
                     posting_coder.decode_to(&vector, float_vector);
                     let mut candidates = searcher.search_with_filter(
                         float_vector,
@@ -472,6 +489,7 @@ pub fn split_centroid(
 
                     let new_assignment = if index.config().replica_count > 1 {
                         searches += 1;
+                        // XXX do I want to use rerank vectors here?
                         posting_coder.decode_to(vector, scratch_vector);
                         let candidates = searcher.search_with_filter(
                             scratch_vector,
@@ -584,6 +602,30 @@ fn move_postings(
         added += 1;
     }
     Ok(added)
+}
+
+fn diff_assignments(
+    old_assignment: &CentroidAssignment,
+    new_assignment: &CentroidAssignment,
+) -> (Vec<u32>, Vec<u32>) {
+    let old_assignment = old_assignment
+        .iter()
+        .map(|(_, id)| id)
+        .collect::<BTreeSet<_>>();
+    let new_assignment = new_assignment
+        .iter()
+        .map(|(_, id)| id)
+        .collect::<BTreeSet<_>>();
+    (
+        old_assignment
+            .difference(&new_assignment)
+            .cloned()
+            .collect(),
+        new_assignment
+            .difference(&old_assignment)
+            .cloned()
+            .collect(),
+    )
 }
 
 /// A summary of centroid assignment balance.

@@ -224,7 +224,7 @@ impl Searcher {
                         cursor
                             .seek_exact_unsafe(n.vertex())
                             .unwrap_or(Err(Error::not_found_error()))
-                            .map(|v| head_coder.decode(&v))
+                            .map(|v| head_coder.decode(v))
                     })
                     .collect::<Result<Vec<_>>>()?,
             )

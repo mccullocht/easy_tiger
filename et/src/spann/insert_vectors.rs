@@ -4,8 +4,8 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
-        rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
+        centroid_stats::CentroidAssignmentUpdater,
+        rebalance::{rebalance_all, RebalanceStats},
         CentroidAssignment, PostingKey, TableIndex,
     },
     vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
@@ -16,7 +16,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use vectors::F32VectorCoder;
 use wt_mdb::{
-    session::{Formatted, TransactionGuard},
+    session::Formatted,
     Connection, Result,
 };
 
@@ -107,7 +107,7 @@ pub fn insert_vectors(
             &main_progress,
         )?;
 
-        rebalance_stats += rebalance(&index, &head_index, &mut rng, &main_progress)?;
+        rebalance_stats += rebalance_all(&index, &head_index, &mut rng)?;
     }
 
     main_progress.set_message("inserting vectors");
@@ -225,42 +225,3 @@ fn insert_batch(
     txn.commit(None)
 }
 
-fn rebalance(
-    index: &TableIndex,
-    head_index: &SessionGraphVectorIndex,
-    rng: &mut impl Rng,
-    progress: &ProgressBar,
-) -> Result<RebalanceStats> {
-    let mut iter = 1;
-    let mut rebalance_stats = RebalanceStats::default();
-    loop {
-        // Need a new transaction for rebalancing steps
-        let txn_guard = TransactionGuard::new(head_index.session(), None)?;
-
-        let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
-        let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
-
-        match (summary.below_exemplar(), summary.above_exemplar()) {
-            (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
-                progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
-                rebalance_stats += merge_centroid(&index, &head_index, to_merge, len)?;
-            }
-            (_, Some((to_split, len))) => {
-                progress.set_message(format!("split {to_split} of {len} ({iter})"));
-                // TODO: split_centroid should allow splitting into multiple centroids.
-                // This requires allocating an arbitrary number of ids and accommodating these
-                // additional ids in the split of the centroid and updating of nearby centroids.
-                let mut it = stats.available_centroid_ids();
-                let target_centroid_ids = (it.next().unwrap(), it.next().unwrap());
-                rebalance_stats +=
-                    split_centroid(&index, &head_index, to_split, target_centroid_ids, len, rng)?;
-            }
-            _ => break,
-        }
-
-        txn_guard.commit(None)?;
-        iter += 1;
-    }
-
-    Ok(rebalance_stats)
-}

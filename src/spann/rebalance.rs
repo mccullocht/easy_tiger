@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, num::NonZero, ops::RangeInclusive, sync::Arc};
 use rand::Rng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tracing::warn;
-use wt_mdb::{session::Formatted, Error, Result, TypedCursor};
+use wt_mdb::{session::{Formatted, TransactionGuard}, Error, Result, TypedCursor};
 
 use crate::{
     input::VecVectorStore,
@@ -741,4 +741,32 @@ impl BalanceSummary {
     pub fn above_exemplar(&self) -> Option<(usize, usize)> {
         self.above_exemplar
     }
+}
+
+/// Rebalance all centroids by repeatedly merging and splitting until all are within the
+/// configured assignment count bounds.
+pub fn rebalance_all(
+    index: &TableIndex,
+    head_index: &SessionGraphVectorIndex,
+    rng: &mut impl Rng,
+) -> Result<RebalanceStats> {
+    let bounds = index.config().centroid_len_range();
+    let mut stats = RebalanceStats::default();
+    loop {
+        let txn = TransactionGuard::new(head_index.session(), None)?;
+        let centroid_stats = CentroidStats::from_index_stats(head_index.session(), index)?;
+        let summary = BalanceSummary::new(&centroid_stats, bounds.clone());
+        if let Some((centroid_id, len)) = summary.below_exemplar().filter(|_| summary.total_clusters() > 1) {
+            stats += merge_centroid(index, head_index, centroid_id, len)?;
+        } else if let Some((centroid_id, len)) = summary.above_exemplar() {
+            let mut avail = centroid_stats.available_centroid_ids();
+            let id_a = avail.next().expect("centroid IDs are unbounded");
+            let id_b = avail.next().expect("centroid IDs are unbounded");
+            stats += split_centroid(index, head_index, centroid_id, (id_a, id_b), len, rng)?;
+        } else {
+            break;
+        }
+        txn.commit(None)?;
+    }
+    Ok(stats)
 }

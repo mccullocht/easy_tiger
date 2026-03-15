@@ -150,23 +150,22 @@ pub fn merge_centroid(
     centroid_id: usize,
     len: usize,
 ) -> Result<MergeStats> {
-    // Collect all of the vectors for the centroid to merge.
     let mut posting_cursor = head_index
         .session()
         .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
-    let vectors = read_centroid(centroid_id, &mut posting_cursor)?;
+    let reassignments = merge_reassign(index, head_index, centroid_id, &mut posting_cursor)?;
     assert_eq!(
-        vectors.len(),
+        reassignments.len(),
         len,
         "merge_centroid of {centroid_id} expected {len} vectors; actual {}",
-        vectors.len()
+        reassignments.len()
     );
 
     // Remove the centroid from the graph.
     delete_vector(centroid_id as i64, head_index)?;
 
     // If the centroid is already empty then there is nothing to do.
-    if vectors.is_empty() {
+    if reassignments.is_empty() {
         head_index
             .session()
             .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
@@ -174,11 +173,51 @@ pub fn merge_centroid(
         return Ok(MergeStats::default());
     }
 
+    let removed_vectors = reassignments.len();
+    let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
+    posting_cursor.reset()?;
+    for (record_id, new_assignments, vector) in reassignments {
+        let old_assignments =
+            assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
+        move_postings(
+            PostingKey {
+                centroid_id: centroid_id as u32,
+                record_id,
+            },
+            &vector,
+            &old_assignments,
+            &new_assignments,
+            &mut posting_cursor,
+        )?;
+    }
+
+    assignment_updater.flush()?;
+    head_index
+        .session()
+        .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
+        .remove(centroid_id as u32)?;
+
+    Ok(MergeStats {
+        moved_vectors: removed_vectors,
+    })
+}
+
+/// Read all vectors for `centroid_id` and compute new centroid assignments for each.
+fn merge_reassign(
+    index: &TableIndex,
+    head_index: &SessionGraphVectorIndex,
+    centroid_id: usize,
+    posting_cursor: &mut TypedCursor<'_, PostingKey, Vec<u8>>,
+) -> Result<Vec<(i64, CentroidAssignment, Vec<u8>)>> {
+    let vectors = read_centroid(centroid_id, posting_cursor)?;
+    if vectors.is_empty() {
+        return Ok(vec![]);
+    }
+
     // Query the head index for each vector and assign a new centroid.
     let coder = index.new_posting_coder();
-    let removed_vectors = vectors.len();
     let connection = Arc::clone(head_index.session().connection());
-    let reassignments = vectors
+    vectors
         .into_par_iter()
         .map_init(
             || {
@@ -209,34 +248,7 @@ pub fn merge_centroid(
                 Ok((record_id, new_assignments, vector))
             },
         )
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
-    posting_cursor.reset()?;
-    for (record_id, new_assignments, vector) in reassignments {
-        let old_assignments =
-            assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
-        move_postings(
-            PostingKey {
-                centroid_id: centroid_id as u32,
-                record_id,
-            },
-            &vector,
-            &old_assignments,
-            &new_assignments,
-            &mut posting_cursor,
-        )?;
-    }
-
-    assignment_updater.flush()?;
-    head_index
-        .session()
-        .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
-        .remove(centroid_id as u32)?;
-
-    Ok(MergeStats {
-        moved_vectors: removed_vectors,
-    })
+        .collect::<Result<Vec<_>>>()
 }
 
 /// Split `centroid_id` in two, creating a `next_centroid_id`.

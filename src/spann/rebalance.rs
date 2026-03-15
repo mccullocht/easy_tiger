@@ -18,6 +18,7 @@ use crate::{
         wt::SessionGraphVectorIndex,
         GraphVectorIndex, GraphVectorStore,
     },
+    Neighbor,
 };
 
 use std::ops::{Add, AddAssign};
@@ -415,8 +416,70 @@ pub fn split_centroid(
     let mut nearby_moved = 0;
     // For a list of nearby centroids, examine all vectors and reassign them if they are closer
     // to one of the new centroids than they are to the current centroid.
+    let (nearby_reassignments, nearby_seen_delta, searches_delta) = nearby_reassign(
+        index,
+        head_index,
+        centroid_id,
+        nearby_clusters,
+        (target_centroid_ids.0, &centroids[0]),
+        (target_centroid_ids.1, &centroids[1]),
+    )?;
+    nearby_seen += nearby_seen_delta;
+    searches += searches_delta;
+
+    // We do not need to deduplicate reassignments -- only primary assignments are evaluated for
+    // reassignment so no record_id will appear twice in the list.
+    posting_cursor.reset()?;
+    for (key, new_assignments, vector) in nearby_reassignments {
+        let old_assignments =
+            assignment_updater.update(key.record_id, new_assignments.to_formatted_ref())?;
+        nearby_moved += move_postings(
+            key,
+            &vector,
+            &old_assignments,
+            &new_assignments,
+            &mut posting_cursor,
+        )?;
+    }
+
+    assignment_updater.flush()?;
+    head_index
+        .session()
+        .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
+        .remove(centroid_id as u32)?;
+
+    Ok(SplitStats {
+        moved_vectors,
+        searches,
+        nearby_seen,
+        nearby_moved,
+    })
+}
+
+/// For each centroid in `nearby_clusters`, read its vectors and compute reassignments for any
+/// that are closer to `centroid_a` or `centroid_b` than to their current centroid.
+///
+/// Returns the list of reassignments together with aggregate `nearby_seen` and `searches` counts.
+fn nearby_reassign(
+    index: &TableIndex,
+    head_index: &SessionGraphVectorIndex,
+    centroid_id: usize,
+    nearby_clusters: Vec<Neighbor>,
+    centroid_a: (usize, &[f32]),
+    centroid_b: (usize, &[f32]),
+) -> Result<(Vec<(PostingKey, CentroidAssignment, Vec<u8>)>, usize, usize)> {
+    let posting_format = index.config().posting_coder;
+    let similarity = index.head_config().config().similarity;
+    let posting_coder = posting_format.new_coder(similarity);
+    let head_vectors = head_index.high_fidelity_vectors()?;
+    let head_coder = head_vectors.new_coder();
+    let c1_dist_fn = posting_format
+        .query_vector_distance_indexing(posting_coder.encode(centroid_a.1), similarity);
+    let c2_dist_fn = posting_format
+        .query_vector_distance_indexing(posting_coder.encode(centroid_b.1), similarity);
+    let scratch_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
     let connection = Arc::clone(head_index.session().connection());
-    let reassignments = nearby_clusters
+    let results = nearby_clusters
         .into_par_iter()
         .map_init(
             || {
@@ -475,9 +538,9 @@ pub fn split_centroid(
                     nearby_seen += 1;
 
                     let assigned_centroid_id = if c1_dist < c0_dist {
-                        target_centroid_ids.0 as u32
+                        centroid_a.0 as u32
                     } else if c2_dist < c0_dist {
-                        target_centroid_ids.1 as u32
+                        centroid_b.0 as u32
                     } else {
                         continue;
                     };
@@ -508,38 +571,15 @@ pub fn split_centroid(
         )
         .collect::<Result<Vec<_>>>()?;
 
-    for (_, seen, searched) in reassignments.iter() {
-        nearby_seen += *seen;
-        searches += *searched;
+    let mut nearby_seen = 0;
+    let mut searches = 0;
+    let mut reassignments = vec![];
+    for (to_reassign, seen, searched) in results {
+        nearby_seen += seen;
+        searches += searched;
+        reassignments.extend(to_reassign);
     }
-
-    // We do not need to deduplicate reassignments -- only primary assignments are evaluated for
-    // reassignment so no record_id will appear twice in the list.
-    posting_cursor.reset()?;
-    for (key, new_assignments, vector) in reassignments.into_iter().flat_map(|(r, _, _)| r) {
-        let old_assignments =
-            assignment_updater.update(key.record_id, new_assignments.to_formatted_ref())?;
-        nearby_moved += move_postings(
-            key,
-            &vector,
-            &old_assignments,
-            &new_assignments,
-            &mut posting_cursor,
-        )?;
-    }
-
-    assignment_updater.flush()?;
-    head_index
-        .session()
-        .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
-        .remove(centroid_id as u32)?;
-
-    Ok(SplitStats {
-        moved_vectors,
-        searches,
-        nearby_seen,
-        nearby_moved,
-    })
+    Ok((reassignments, nearby_seen, searches))
 }
 
 /// Read all the vectors from `centroid_id` using `cursor` and return them.

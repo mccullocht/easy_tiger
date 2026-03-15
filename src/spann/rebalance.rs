@@ -154,7 +154,7 @@ pub fn merge_centroid(
     let mut posting_cursor = head_index
         .session()
         .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
-    let vectors = drain_centroid(centroid_id, &mut posting_cursor)?;
+    let vectors = read_centroid(centroid_id, &mut posting_cursor)?;
     assert_eq!(
         vectors.len(),
         len,
@@ -253,7 +253,7 @@ pub fn split_centroid(
     let mut posting_cursor = head_index
         .session()
         .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
-    let vectors = drain_centroid(centroid_id, &mut posting_cursor)?;
+    let vectors = read_centroid(centroid_id, &mut posting_cursor)?;
     assert_eq!(
         vectors.len(),
         len,
@@ -530,8 +530,8 @@ pub fn split_centroid(
     })
 }
 
-/// Remove all the vectors from `centroid_id` using `cursor` and return them.
-fn drain_centroid(
+/// Read all the vectors from `centroid_id` using `cursor` and return them.
+fn read_centroid(
     centroid_id: usize,
     cursor: &mut TypedCursor<'_, PostingKey, Vec<u8>>,
 ) -> Result<Vec<(i64, Vec<u8>)>> {
@@ -540,7 +540,6 @@ fn drain_centroid(
     while let Some(r) = cursor.next() {
         let (key, vector) = r?;
         vectors.push((key.record_id, vector));
-        cursor.remove(key)?;
     }
     Ok(vectors)
 }
@@ -564,16 +563,7 @@ fn move_postings(
         .difference(&new_assignment)
         .map(|&c| original_key.with_centroid_id(c))
     {
-        posting_cursor
-            .remove(to_remove)
-            .or_else(|e| {
-                if e == Error::not_found_error() {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })
-            .expect("failed to remove posting");
+        posting_cursor.remove(to_remove)?;
     }
     let mut added = 0;
     for to_add in new_assignment

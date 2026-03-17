@@ -11,7 +11,7 @@ use easy_tiger::{
     vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
 };
 use indicatif::{ParallelProgressIterator, ProgressBar};
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use vectors::F32VectorCoder;

@@ -3,7 +3,10 @@ use std::{collections::BTreeSet, num::NonZero, ops::RangeInclusive, sync::Arc};
 use rand::Rng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tracing::warn;
-use wt_mdb::{session::{Formatted, TransactionGuard}, Error, Result, TypedCursor};
+use wt_mdb::{
+    session::{Formatted, TransactionGuard},
+    Error, Result, TypedCursor,
+};
 
 use crate::{
     input::VecVectorStore,
@@ -263,41 +266,13 @@ pub fn split_centroid(
     len: usize,
     rng: &mut impl Rng,
 ) -> Result<SplitStats> {
-    let mut posting_cursor = head_index
-        .session()
-        .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
-    let vectors = read_centroid(centroid_id, &mut posting_cursor)?;
+    let (vectors, centroids) = partition_centroid(index, head_index, centroid_id, rng)?;
     assert_eq!(
         vectors.len(),
         len,
         "split_centroid of {centroid_id} expected {len} vectors; actual {}",
         vectors.len()
     );
-
-    // Unpack all of the vectors as floats and split into two clusters.
-    let posting_format = index.config().posting_coder;
-    let similarity = index.head_config().config().similarity;
-    let posting_coder = posting_format.new_coder(similarity);
-    let mut scratch_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
-    let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), vectors.len());
-    for (_, vector) in vectors.iter() {
-        posting_coder.decode_to(vector, &mut scratch_vector);
-        clustering_vectors.push(&scratch_vector);
-    }
-    posting_cursor.reset()?;
-
-    let centroids = match kmeans::balanced_binary_partition(
-        &clustering_vectors,
-        100,
-        index.config().min_centroid_len,
-        rng,
-    ) {
-        Ok(r) => r,
-        Err(r) => {
-            warn!("split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!", vectors.len());
-            r
-        }
-    };
 
     // Extract the original centroid vector from the head index and delete original centroid.
     let mut head_vectors = head_index.high_fidelity_vectors()?;
@@ -332,6 +307,9 @@ pub fn split_centroid(
         (target_centroid_ids.0, &centroids[0]),
         (target_centroid_ids.1, &centroids[1]),
     )?;
+    let mut posting_cursor = head_index
+        .session()
+        .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
     for (record_id, new_assignments, vector) in split_reassignments {
         let old_assignments =
@@ -392,6 +370,52 @@ pub fn split_centroid(
     })
 }
 
+/// Read all vectors for `centroid_id`, decode them to floats, and run balanced binary k-means
+/// to produce two new centroid vectors.
+///
+/// Returns the original encoded vectors (for subsequent reassignment) together with a
+/// two-entry `VecVectorStore` whose entries are the two new centroid vectors.
+fn partition_centroid(
+    index: &TableIndex,
+    head_index: &SessionGraphVectorIndex,
+    centroid_id: usize,
+    rng: &mut impl Rng,
+) -> Result<(Vec<(i64, Vec<u8>)>, VecVectorStore<f32>)> {
+    let mut posting_cursor = head_index
+        .session()
+        .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
+    let vectors = read_centroid(centroid_id, &mut posting_cursor)?;
+
+    let posting_format = index.config().posting_coder;
+    let similarity = index.head_config().config().similarity;
+    let posting_coder = posting_format.new_coder(similarity);
+    let mut scratch_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
+    let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), vectors.len());
+    for (_, vector) in vectors.iter() {
+        posting_coder.decode_to(vector, &mut scratch_vector);
+        clustering_vectors.push(&scratch_vector);
+    }
+    posting_cursor.reset()?;
+
+    let centroids = match kmeans::balanced_binary_partition(
+        &clustering_vectors,
+        100,
+        index.config().min_centroid_len,
+        rng,
+    ) {
+        Ok(r) => r,
+        Err(r) => {
+            warn!(
+                "split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!",
+                vectors.len()
+            );
+            r
+        }
+    };
+
+    Ok((vectors, centroids))
+}
+
 /// Compute new centroid assignments for each vector in a centroid being split.
 ///
 /// Vectors closer to `original_centroid` than to either new centroid trigger a full graph search;
@@ -419,7 +443,6 @@ fn split_reassign(
     let c2_dist_fn = posting_format
         .query_vector_distance_indexing(posting_coder.encode(centroid_b.1), similarity);
     let connection = Arc::clone(head_index.session().connection());
-    // XXX this won't observe the deletion of the head vector.
     let raw = vectors
         .into_par_iter()
         .map_init(
@@ -750,13 +773,18 @@ pub fn rebalance_all(
     head_index: &SessionGraphVectorIndex,
     rng: &mut impl Rng,
 ) -> Result<RebalanceStats> {
+    // XXX rebalancing has to be separate from insertion because the parallel reads in other
+    // sessions would otherwise be unable to observe the batch being inserted.
     let bounds = index.config().centroid_len_range();
     let mut stats = RebalanceStats::default();
     loop {
         let txn = TransactionGuard::new(head_index.session(), None)?;
         let centroid_stats = CentroidStats::from_index_stats(head_index.session(), index)?;
         let summary = BalanceSummary::new(&centroid_stats, bounds.clone());
-        if let Some((centroid_id, len)) = summary.below_exemplar().filter(|_| summary.total_clusters() > 1) {
+        if let Some((centroid_id, len)) = summary
+            .below_exemplar()
+            .filter(|_| summary.total_clusters() > 1)
+        {
             stats += merge_centroid(index, head_index, centroid_id, len)?;
         } else if let Some((centroid_id, len)) = summary.above_exemplar() {
             let mut avail = centroid_stats.available_centroid_ids();

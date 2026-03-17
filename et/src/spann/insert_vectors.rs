@@ -4,9 +4,9 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        centroid_stats::CentroidAssignmentUpdater,
-        rebalance::{rebalance_all, RebalanceStats},
         CentroidAssignment, PostingKey, TableIndex,
+        centroid_stats::CentroidAssignmentUpdater,
+        rebalance::{RebalanceStats, rebalance_all},
     },
     vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
 };
@@ -16,8 +16,8 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use vectors::F32VectorCoder;
 use wt_mdb::{
-    session::Formatted,
     Connection, Result,
+    session::{Formatted, TransactionGuard},
 };
 
 use crate::ui::progress_bar;
@@ -224,4 +224,3 @@ fn insert_batch(
     assignment_updater.flush()?;
     txn.commit(None)
 }
-

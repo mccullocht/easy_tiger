@@ -1,12 +1,12 @@
-use std::{fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
+use std::{collections::HashSet, fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
-        rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
         CentroidAssignment, PostingKey, TableIndex,
+        centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
+        rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
     },
     vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
 };
@@ -16,8 +16,8 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use vectors::F32VectorCoder;
 use wt_mdb::{
-    session::{Formatted, TransactionGuard},
     Connection, Result,
+    session::{Formatted, TransactionGuard},
 };
 
 use crate::ui::progress_bar;
@@ -93,11 +93,13 @@ pub fn insert_vectors(
     let main_progress = progress_bar(args.count.get(), "inserting vectors");
 
     let mut rebalance_stats = RebalanceStats::default();
+    let mut batches: usize = 0;
+    let mut total_batch_unique_centroids: usize = 0;
 
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
 
-        insert_batch(
+        total_batch_unique_centroids += insert_batch(
             &index,
             &head_index,
             &f32_vectors,
@@ -106,6 +108,7 @@ pub fn insert_vectors(
             rerank_coder.as_ref().map(|c| c.as_ref()),
             &main_progress,
         )?;
+        batches += 1;
 
         rebalance_stats += rebalance(&index, &head_index, &mut rng, &main_progress)?;
     }
@@ -113,11 +116,22 @@ pub fn insert_vectors(
     main_progress.set_message("inserting vectors");
     main_progress.finish();
 
+    println!("Batches:        {:10}", batches);
+    if batches > 0 {
+        println!(
+            "  Avg Unique:        {:10.1}",
+            total_batch_unique_centroids as f64 / batches as f64
+        );
+    }
     println!("Merged:         {:10}", rebalance_stats.merged);
     if rebalance_stats.merged > 0 {
         println!(
             "  Moved:        {:10}",
             rebalance_stats.merge_stats.moved_vectors
+        );
+        println!(
+            "  Avg Unique:   {:10.1}",
+            rebalance_stats.merge_stats.unique_centroids as f64 / rebalance_stats.merged as f64
         );
     }
     println!("Split:          {:10}", rebalance_stats.split);
@@ -131,11 +145,16 @@ pub fn insert_vectors(
             rebalance_stats.split_stats.searches
         );
         println!(
-            "  Nearby seen:  {:10}",
+            "  Avg unique:   {:10.1}",
+            rebalance_stats.split_stats.unique_centroids as f64 / rebalance_stats.split as f64
+        );
+        println!("Nearby:");
+        println!(
+            "  Seen:         {:10}",
             rebalance_stats.split_stats.nearby_seen
         );
         println!(
-            "  Nearby moved: {:10}",
+            "  Moved:        {:10}",
             rebalance_stats.split_stats.nearby_moved
         );
     }
@@ -151,7 +170,7 @@ fn insert_batch(
     posting_coder: &dyn F32VectorCoder,
     rerank_coder: Option<&dyn F32VectorCoder>,
     progress: &ProgressBar,
-) -> Result<()> {
+) -> Result<usize> {
     progress.set_message("inserting vectors");
 
     let connection = Arc::clone(head_index.session().connection());
@@ -189,6 +208,12 @@ fn insert_batch(
         )
         .collect::<Result<Vec<_>>>()?;
 
+    let unique_centroids = vector_state
+        .iter()
+        .filter_map(|(_, a, _, _)| a.iter().next().map(|(_, id)| id))
+        .collect::<HashSet<_>>()
+        .len();
+
     let txn = TransactionGuard::new(head_index.session(), None)?;
     progress.set_message("writing postings");
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
@@ -222,7 +247,8 @@ fn insert_batch(
     }
 
     assignment_updater.flush()?;
-    txn.commit(None)
+    txn.commit(None)?;
+    Ok(unique_centroids)
 }
 
 fn rebalance(

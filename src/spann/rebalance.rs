@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, num::NonZero, ops::RangeInclusive, sync::Arc};
+use std::{collections::{BTreeSet, HashSet}, num::NonZero, ops::RangeInclusive, sync::Arc};
 
 use rand::Rng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -27,6 +27,8 @@ use std::ops::{Add, AddAssign};
 pub struct MergeStats {
     /// Number of vectors that were in the merged centroid.
     pub moved_vectors: usize,
+    /// Number of unique centroids that vectors were reassigned to.
+    pub unique_centroids: usize,
 }
 
 impl Add for MergeStats {
@@ -35,6 +37,7 @@ impl Add for MergeStats {
     fn add(self, rhs: Self) -> Self::Output {
         Self {
             moved_vectors: self.moved_vectors + rhs.moved_vectors,
+            unique_centroids: self.unique_centroids + rhs.unique_centroids,
         }
     }
 }
@@ -52,6 +55,8 @@ pub struct SplitStats {
     pub moved_vectors: usize,
     /// Number of vectors where we had to search the head index again to find a new assigned centroid.
     pub searches: usize,
+    /// Number of unique centroids that split vectors were reassigned to.
+    pub unique_centroids: usize,
     /// The number of nearby vectors we examine for reassignment.
     pub nearby_seen: usize,
     /// The number of nearby vectors that were reassigned to a new centroid.
@@ -65,6 +70,7 @@ impl Add for SplitStats {
         Self {
             moved_vectors: self.moved_vectors + rhs.moved_vectors,
             searches: self.searches + rhs.searches,
+            unique_centroids: self.unique_centroids + rhs.unique_centroids,
             nearby_seen: self.nearby_seen + rhs.nearby_seen,
             nearby_moved: self.nearby_moved + rhs.nearby_moved,
         }
@@ -211,6 +217,12 @@ pub fn merge_centroid(
         )
         .collect::<Result<Vec<_>>>()?;
 
+    let unique_centroids = reassignments
+        .iter()
+        .map(|(_, a, _)| a.primary_id)
+        .collect::<HashSet<_>>()
+        .len();
+
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
     posting_cursor.reset()?;
     for (record_id, new_assignments, vector) in reassignments {
@@ -236,6 +248,7 @@ pub fn merge_centroid(
 
     Ok(MergeStats {
         moved_vectors: removed_vectors,
+        unique_centroids,
     })
 }
 
@@ -382,6 +395,12 @@ pub fn split_centroid(
         )
         .collect::<Result<Vec<_>>>()?;
 
+    let unique_centroids = split_reassignments
+        .iter()
+        .map(|(_, a, _, _)| a.primary_id)
+        .collect::<HashSet<_>>()
+        .len();
+
     for (record_id, new_assignments, vector, searched) in split_reassignments {
         searches += searched;
         let old_assignments =
@@ -525,6 +544,7 @@ pub fn split_centroid(
     Ok(SplitStats {
         moved_vectors,
         searches,
+        unique_centroids,
         nearby_seen,
         nearby_moved,
     })

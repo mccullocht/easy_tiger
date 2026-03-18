@@ -133,6 +133,10 @@ pub fn rebalance(
             "  Moved:        {:10}",
             rebalance_stats.merge_stats.moved_vectors
         );
+        println!(
+            "  Avg unique:   {:10.1}",
+            rebalance_stats.merge_stats.unique_centroids as f64 / rebalance_stats.merged as f64
+        );
     }
     println!("Split:          {:10}", rebalance_stats.split);
     if rebalance_stats.split > 0 {
@@ -143,6 +147,10 @@ pub fn rebalance(
         println!(
             "  Searches:     {:10}",
             rebalance_stats.split_stats.searches
+        );
+        println!(
+            "  Avg unique:   {:10.1}",
+            rebalance_stats.split_stats.unique_centroids as f64 / rebalance_stats.split as f64
         );
         println!(
             "  Nearby seen:  {:10}",

@@ -94,6 +94,11 @@ impl Error {
     pub fn not_found_error() -> Self {
         Error::WiredTiger(WiredTigerError::NotFound)
     }
+
+    /// Returns true if this is a rollback error.
+    pub fn is_rollback(&self) -> bool {
+        *self == Error::WiredTiger(WiredTigerError::Rollback)
+    }
 }
 
 impl From<NonZero<i32>> for Error {
@@ -870,5 +875,82 @@ mod test {
             std::io::Error::from(err).to_string(),
             std::io::Error::new(ErrorKind::NotFound, err).to_string()
         );
+    }
+
+    // Helper to set up two sessions on a shared index table and open transactions on both.
+    fn two_session_index_setup(tmpdir: &TempDir) -> (Session, Session) {
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        let session1 = conn.open_session().unwrap();
+        let session2 = conn.open_session().unwrap();
+        session1
+            .create_table("test", index_table_options())
+            .unwrap();
+        session1.begin_transaction(None).unwrap();
+        session2.begin_transaction(None).unwrap();
+        (session1, session2)
+    }
+
+    // WiredTiger may detect a write-write conflict either when the second writer
+    // calls set() or when it calls commit_transaction(). This helper asserts that
+    // one of those two results carries WT_ROLLBACK and cleans up accordingly.
+    fn assert_rollback(write: Result<()>, session: &Session) {
+        match write {
+            Err(Error::WiredTiger(WiredTigerError::Rollback)) => {
+                session.rollback_transaction(None).unwrap();
+            }
+            Ok(()) => assert_eq!(
+                session.commit_transaction(None),
+                Err(Error::WiredTiger(WiredTigerError::Rollback))
+            ),
+            Err(e) => panic!("unexpected error: {e:?}"),
+        }
+    }
+
+    /// Session 1 and session 2 both write different values to the same key.
+    /// Session 1 commits first (succeeds); session 2 gets WT_ROLLBACK.
+    #[test]
+    fn concurrent_write_conflict_different_values() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let (session1, session2) = two_session_index_setup(&tmpdir);
+        let mut cursor1 = session1.open_index_cursor("test").unwrap();
+        let mut cursor2 = session2.open_index_cursor("test").unwrap();
+
+        cursor1.set(&b"k".as_slice(), &b"x".as_slice()).unwrap();
+        let s2_write = cursor2.set(&b"k".as_slice(), &b"y".as_slice());
+
+        session1.commit_transaction(None).unwrap();
+        assert_rollback(s2_write, &session2);
+    }
+
+    /// Session 1 and session 2 both write the same value to the same key.
+    /// Session 1 commits first (succeeds); session 2 gets WT_ROLLBACK even
+    /// though the written value is identical.
+    #[test]
+    fn concurrent_write_conflict_same_value() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let (session1, session2) = two_session_index_setup(&tmpdir);
+        let mut cursor1 = session1.open_index_cursor("test").unwrap();
+        let mut cursor2 = session2.open_index_cursor("test").unwrap();
+
+        cursor1.set(&b"k".as_slice(), &b"x".as_slice()).unwrap();
+        let s2_write = cursor2.set(&b"k".as_slice(), &b"x".as_slice());
+
+        session1.commit_transaction(None).unwrap();
+        assert_rollback(s2_write, &session2);
+    }
+
+    /// Session 1 and session 2 write different keys; both commits succeed.
+    #[test]
+    fn concurrent_write_no_conflict_different_keys() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let (session1, session2) = two_session_index_setup(&tmpdir);
+        let mut cursor1 = session1.open_index_cursor("test").unwrap();
+        let mut cursor2 = session2.open_index_cursor("test").unwrap();
+
+        cursor1.set(&b"k".as_slice(), &b"v".as_slice()).unwrap();
+        cursor2.set(&b"l".as_slice(), &b"v".as_slice()).unwrap();
+
+        session1.commit_transaction(None).unwrap();
+        session2.commit_transaction(None).unwrap();
     }
 }

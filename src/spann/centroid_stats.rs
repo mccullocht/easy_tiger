@@ -23,6 +23,12 @@ pub enum Lifecycle {
     Tombstone,
 }
 
+impl Lifecycle {
+    pub fn is_alive(&self) -> bool {
+        *self != Self::Tombstone
+    }
+}
+
 impl From<Lifecycle> for u32 {
     fn from(value: Lifecycle) -> Self {
         match value {
@@ -302,14 +308,23 @@ impl<'a> CentroidAssignmentUpdater<'a> {
             .map(|()| existing_assignment)
     }
 
+    /// Returns the number of vectors assigned to `centroid_id`.
+    pub fn centroid_size(&mut self, centroid_id: u32) -> Result<usize> {
+        self.stats
+            .get_counts(centroid_id)
+            .map(|c| c.total() as usize)
+    }
+
     /// Return the lifecycle state for `centroid_id`.
     pub fn lifecycle(&mut self, centroid_id: u32) -> Result<Lifecycle> {
-        self.stats.get_lifecycle(centroid_id)
+        self.stats.get_counts(centroid_id).map(|c| c.lifecycle)
     }
 
     /// Set the lifecycle state for `centroid_id`.
     pub fn set_lifecycle(&mut self, centroid_id: u32, lifecycle: Lifecycle) -> Result<()> {
-        self.stats.set_lifecycle(centroid_id, lifecycle)
+        let c = self.stats.get_counts(centroid_id)?;
+        c.lifecycle = lifecycle;
+        Ok(())
     }
 
     /// Flush buffered stats updates back to the database.
@@ -357,15 +372,6 @@ impl<'a> CentroidStatsCache<'a> {
             CentroidAssignmentType::Primary => counts.primary -= 1,
             CentroidAssignmentType::Secondary => counts.secondary -= 1,
         };
-        Ok(())
-    }
-
-    fn get_lifecycle(&mut self, id: u32) -> Result<Lifecycle> {
-        Ok(self.get_counts(id)?.lifecycle)
-    }
-
-    fn set_lifecycle(&mut self, id: u32, lifecycle: Lifecycle) -> Result<()> {
-        self.get_counts(id)?.lifecycle = lifecycle;
         Ok(())
     }
 

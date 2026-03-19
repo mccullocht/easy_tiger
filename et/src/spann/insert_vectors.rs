@@ -14,6 +14,7 @@ use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
+use tracing::warn;
 use vectors::F32VectorCoder;
 use wt_mdb::{
     Connection, Result,
@@ -249,6 +250,103 @@ fn insert_batch(
     assignment_updater.flush()?;
     txn.commit(None)?;
     Ok(unique_centroids)
+}
+
+/// Insert a single vector into the index, retrying on `WT_ROLLBACK` conflicts.
+///
+/// Searches for the nearest centroid, encodes the vector, and writes assignment,
+/// postings, and optional rerank data in a single transaction. Logs a warning if
+/// the target centroid is out of policy (over- or under-sized) after insertion.
+fn insert_vector(
+    index: &TableIndex,
+    head_index: &SessionGraphVectorIndex,
+    record_id: i64,
+    vector: &[f32],
+    posting_coder: &dyn F32VectorCoder,
+    rerank_coder: Option<&dyn F32VectorCoder>,
+) -> Result<()> {
+    let posting_vector = posting_coder.encode(vector);
+    let rerank_vector = rerank_coder.map(|c| c.encode(vector));
+
+    loop {
+        let result = try_insert_vector(
+            index,
+            head_index,
+            record_id,
+            vector,
+            &posting_vector,
+            rerank_vector.as_deref(),
+        );
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) if e.is_rollback() => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn try_insert_vector(
+    index: &TableIndex,
+    head_index: &SessionGraphVectorIndex,
+    record_id: i64,
+    vector: &[f32],
+    posting_vector: &[u8],
+    rerank_vector: Option<&[u8]>,
+) -> Result<()> {
+    let txn = TransactionGuard::new(head_index.session(), None)?;
+
+    let session = head_index.session();
+    let mut assignment_updater = CentroidAssignmentUpdater::new(index, session)?;
+
+    let mut searcher = GraphSearcher::new(index.config().head_search_params);
+    let candidates = searcher.search(vector, head_index)?;
+    assert!(!candidates.is_empty());
+
+    // TODO: implement replica selection.
+    let candidates = candidates
+        .into_iter()
+        .filter_map(|n| {
+            let r = assignment_updater.lifecycle(n.vertex() as u32);
+            if r.is_ok_and(|l| !l.is_alive()) {
+                None
+            } else {
+                Some(r.map(|_| n))
+            }
+        })
+        .take(1)
+        .collect::<Result<Vec<_>>>()?;
+    assert!(!candidates.is_empty());
+
+    let mut posting_cursor =
+        session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
+    let mut rerank_cursor = if rerank_vector.is_some() {
+        Some(session.get_record_cursor(index.raw_vectors_table_name())?)
+    } else {
+        None
+    };
+
+    let assignment = CentroidAssignment::new(candidates[0].vertex() as u32, &[]);
+    assignment_updater.insert(record_id, assignment.to_formatted_ref())?;
+
+    let policy = index.config().centroid_len_range();
+    for (_, centroid_id) in assignment.iter() {
+        let key = PostingKey {
+            centroid_id,
+            record_id,
+        };
+        posting_cursor.set(key, posting_vector)?;
+        let count = assignment_updater.centroid_size(centroid_id)?;
+        if count < *policy.start() {
+            warn!("centroid {centroid_id} is under size after inserting record {record_id}");
+        } else if count > *policy.end() {
+            warn!("centroid {centroid_id} is over size after inserting record {record_id}");
+        }
+    }
+    if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(rerank_vector) {
+        cursor.set(record_id, vector)?;
+    }
+    assignment_updater.flush()?;
+    txn.commit(None)
 }
 
 fn rebalance(

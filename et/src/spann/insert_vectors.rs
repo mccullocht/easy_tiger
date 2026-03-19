@@ -2,13 +2,14 @@ use std::{collections::HashSet, fs::File, io, num::NonZero, ops::Range, path::Pa
 
 use clap::Args;
 use easy_tiger::{
-    input::{DerefVectorStore, VectorStore},
+    input::{DerefVectorStore, VecVectorStore, VectorStore},
+    kmeans,
     spann::{
         CentroidAssignment, PostingKey, TableIndex,
-        centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
+        centroid_stats::{CentroidAssignmentUpdater, CentroidStats, Lifecycle},
         rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
     },
-    vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
+    vamana::{mutate::upsert_vector, search::GraphSearcher, wt::SessionGraphVectorIndex},
 };
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::{Rng, SeedableRng};
@@ -264,6 +265,7 @@ fn insert_vector(
     vector: &[f32],
     posting_coder: &dyn F32VectorCoder,
     rerank_coder: Option<&dyn F32VectorCoder>,
+    rng: &mut impl Rng,
 ) -> Result<()> {
     let posting_vector = posting_coder.encode(vector);
     let rerank_vector = rerank_coder.map(|c| c.encode(vector));
@@ -276,6 +278,7 @@ fn insert_vector(
             vector,
             &posting_vector,
             rerank_vector.as_deref(),
+            rng,
         );
         match result {
             Ok(()) => return Ok(()),
@@ -292,6 +295,7 @@ fn try_insert_vector(
     vector: &[f32],
     posting_vector: &[u8],
     rerank_vector: Option<&[u8]>,
+    rng: &mut impl Rng,
 ) -> Result<()> {
     let txn = TransactionGuard::new(head_index.session(), None)?;
 
@@ -339,7 +343,13 @@ fn try_insert_vector(
         if count < *policy.start() {
             warn!("centroid {centroid_id} is under size after inserting record {record_id}");
         } else if count > *policy.end() {
-            warn!("centroid {centroid_id} is over size after inserting record {record_id}");
+            partition_oversized_centroid(
+                index,
+                head_index,
+                centroid_id,
+                &mut assignment_updater,
+                rng,
+            )?;
         }
     }
     if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(rerank_vector) {
@@ -347,6 +357,102 @@ fn try_insert_vector(
     }
     assignment_updater.flush()?;
     txn.commit(None)
+}
+
+/// Partition an over-sized centroid into two new centroids within the current transaction.
+///
+/// Drains all postings from `centroid_id`, runs binary k-means to produce two new centroids,
+/// writes them into the head index, sets their lifecycle to `Initializing`, marks the original
+/// centroid as `Tombstone`, and reassigns every posting to the closer of the two new centroids.
+fn partition_oversized_centroid(
+    index: &TableIndex,
+    head_index: &SessionGraphVectorIndex,
+    centroid_id: u32,
+    assignment_updater: &mut CentroidAssignmentUpdater<'_>,
+    rng: &mut impl Rng,
+) -> Result<()> {
+    // Allocate two new centroid IDs from the current stats snapshot.
+    let stats = CentroidStats::from_index_stats(head_index.session(), index)?;
+    let mut avail = stats.available_centroid_ids();
+    let new_id_0 = avail.next().unwrap() as u32;
+    let new_id_1 = avail.next().unwrap() as u32;
+    // Mark the new centroids as Initializing and tombstone the original.
+    // Do this early to trigger optimistic concurrency control in WT in the event that two
+    // threads decide to partition the centroid at the same time or choose the same ids.
+    assignment_updater.set_lifecycle(new_id_0, Lifecycle::Initializing)?;
+    assignment_updater.set_lifecycle(new_id_1, Lifecycle::Initializing)?;
+    assignment_updater.set_lifecycle(centroid_id, Lifecycle::Tombstone)?;
+
+    // Drain all postings from the over-sized centroid.
+    let session = head_index.session();
+    let mut posting_cursor =
+        session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
+    let mut vectors: Vec<(i64, Vec<u8>)> = vec![];
+    posting_cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
+    while let Some(r) = posting_cursor.next() {
+        let (key, vector) = r?;
+        vectors.push((key.record_id, vector));
+        posting_cursor.remove(key)?;
+    }
+
+    // Decode to f32 for clustering.
+    let posting_format = index.config().posting_coder;
+    let similarity = index.head_config().config().similarity;
+    let posting_coder = posting_format.new_coder(similarity);
+    let mut scratch = vec![0.0f32; index.head_config().config().dimensions.get()];
+    let mut clustering_vectors = VecVectorStore::with_capacity(scratch.len(), vectors.len());
+    for (_, vector) in vectors.iter() {
+        posting_coder.decode_to(vector, &mut scratch);
+        clustering_vectors.push(&scratch);
+    }
+
+    // Run binary k-means to find two new centroid vectors.
+    let centroids = match kmeans::balanced_binary_partition(
+        &clustering_vectors,
+        100,
+        index.config().min_centroid_len,
+        rng,
+    ) {
+        Ok(r) => r,
+        Err(r) => {
+            warn!(
+                "partition_oversized_centroid: binary partition of centroid {centroid_id} \
+                 (count {}) failed to converge!",
+                vectors.len()
+            );
+            r
+        }
+    };
+
+    // Insert the two new centroids into the head index.
+    upsert_vector(new_id_0 as i64, &centroids[0], head_index)?;
+    upsert_vector(new_id_1 as i64, &centroids[1], head_index)?;
+
+    // Reassign each posting to the closer of the two new centroids.
+    let c0_dist_fn = posting_format
+        .query_vector_distance_indexing(posting_coder.encode(&centroids[0]), similarity);
+    let c1_dist_fn = posting_format
+        .query_vector_distance_indexing(posting_coder.encode(&centroids[1]), similarity);
+
+    posting_cursor.reset()?;
+    for (record_id, vector) in vectors {
+        let new_centroid_id = if c0_dist_fn.distance(&vector) <= c1_dist_fn.distance(&vector) {
+            new_id_0
+        } else {
+            new_id_1
+        };
+        let new_assignment = CentroidAssignment::new(new_centroid_id, &[]);
+        assignment_updater.update(record_id, new_assignment.to_formatted_ref())?;
+        posting_cursor.set(
+            PostingKey {
+                centroid_id: new_centroid_id,
+                record_id,
+            },
+            &vector,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn rebalance(

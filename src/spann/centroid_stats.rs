@@ -10,12 +10,48 @@ use crate::spann::{
     CentroidAssignment, CentroidAssignmentRef, CentroidAssignmentType, PostingKey, TableIndex,
 };
 
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub enum Lifecycle {
+    /// This centroid is "alive" and will remain so as long as it is in-policy for size.
+    #[default]
+    Alive,
+    /// This centroid was just created but the split is not complete.
+    /// Such centroids are not eligible for merging for being undersized.
+    Initializing,
+    /// This centroid is under or over sized and will be removed. It is still searchable until the
+    /// relevant rebalance operation completes.
+    Tombstone,
+}
+
+impl From<Lifecycle> for u32 {
+    fn from(value: Lifecycle) -> Self {
+        match value {
+            Lifecycle::Initializing => 1 << 30,
+            Lifecycle::Tombstone => 1 << 31,
+            Lifecycle::Alive => 0,
+        }
+    }
+}
+
+impl From<u32> for Lifecycle {
+    fn from(value: u32) -> Self {
+        match value >> 30 {
+            0 => Lifecycle::Alive,
+            1 => Lifecycle::Initializing,
+            2 => Lifecycle::Tombstone,
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CentroidCounts {
     /// Number of vectors whose primary assigned centroid is this centroid.
     pub primary: u32,
     /// Number of vectors whose secondary+ assigned centroid is this centroid.
     pub secondary: u32,
+    /// Lifecycle state of the centroid.
+    pub lifecycle: Lifecycle,
 }
 
 impl CentroidCounts {
@@ -37,15 +73,17 @@ impl Formatted for CentroidCounts {
     fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
         packed.resize(8, 0);
         let packed_entries = packed.as_chunks_mut::<4>().0;
-        packed_entries[0] = value.primary.to_le_bytes();
+        packed_entries[0] = (value.primary | u32::from(value.lifecycle)).to_le_bytes();
         packed_entries[1] = value.secondary.to_le_bytes();
         Ok(())
     }
 
     fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
+        let raw_primary = u32::from_le_bytes(packed[0..4].try_into().unwrap());
         Ok(Self {
-            primary: u32::from_le_bytes(packed[0..4].try_into().unwrap()),
+            primary: raw_primary & 0x3FFF_FFFF,
             secondary: u32::from_le_bytes(packed[4..8].try_into().unwrap()),
+            lifecycle: Lifecycle::from(raw_primary),
         })
     }
 }
@@ -154,6 +192,12 @@ impl CentroidStats {
             .filter_map(|(i, c)| c.as_ref().map(|counts| (i, *counts)))
     }
 
+    /// Iterate over centroid identifiers and counts for all tombstoned centroids.
+    pub fn tombstoned_iter(&self) -> impl Iterator<Item = (usize, CentroidCounts)> + '_ {
+        self.counts_iter()
+            .filter(|(_, c)| c.lifecycle == Lifecycle::Tombstone)
+    }
+
     /// Iterate over available centroid ids. The returned iterator is effectively unbounded (up to
     /// `u32::MAX`) so callers should `take()` this iterator to mint the number of ids they need.
     pub fn available_centroid_ids(&self) -> impl Iterator<Item = usize> + '_ {
@@ -258,6 +302,16 @@ impl<'a> CentroidAssignmentUpdater<'a> {
             .map(|()| existing_assignment)
     }
 
+    /// Return the lifecycle state for `centroid_id`.
+    pub fn lifecycle(&mut self, centroid_id: u32) -> Result<Lifecycle> {
+        self.stats.get_lifecycle(centroid_id)
+    }
+
+    /// Set the lifecycle state for `centroid_id`.
+    pub fn set_lifecycle(&mut self, centroid_id: u32, lifecycle: Lifecycle) -> Result<()> {
+        self.stats.set_lifecycle(centroid_id, lifecycle)
+    }
+
     /// Flush buffered stats updates back to the database.
     ///
     /// Dropping the updater will also flush any buffered updates, but prefer this method to allow
@@ -303,6 +357,15 @@ impl<'a> CentroidStatsCache<'a> {
             CentroidAssignmentType::Primary => counts.primary -= 1,
             CentroidAssignmentType::Secondary => counts.secondary -= 1,
         };
+        Ok(())
+    }
+
+    fn get_lifecycle(&mut self, id: u32) -> Result<Lifecycle> {
+        Ok(self.get_counts(id)?.lifecycle)
+    }
+
+    fn set_lifecycle(&mut self, id: u32, lifecycle: Lifecycle) -> Result<()> {
+        self.get_counts(id)?.lifecycle = lifecycle;
         Ok(())
     }
 

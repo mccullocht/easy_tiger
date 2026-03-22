@@ -5,7 +5,7 @@ use std::{
     num::NonZero,
     ops::Range,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc::Receiver},
 };
 
 use clap::Args;
@@ -16,7 +16,7 @@ use easy_tiger::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
         rebalance::{
             BalanceSummary, RebalanceStats, merge_centroid, partition_oversized_centroid,
-            split_centroid,
+            split_centroid, split_centroid_post_partition,
         },
     },
     vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
@@ -25,6 +25,7 @@ use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
+use tracing::error;
 use vectors::F32VectorCoder;
 use wt_mdb::{
     Connection, Result,
@@ -386,6 +387,49 @@ fn try_insert_vector(
     }
     assignment_updater.flush()?;
     txn.commit(None).map(|()| ops)
+}
+
+fn rebalance_loop(
+    index: Arc<TableIndex>,
+    connection: Arc<Connection>,
+    rx: Receiver<Vec<RebalanceOp>>,
+) -> RebalanceStats {
+    let mut stats = RebalanceStats::default();
+    for ops in rx.recv() {
+        for op in ops {
+            match rebalance_op(index.as_ref(), &connection, op) {
+                Ok(op_stats) => stats += op_stats,
+                Err(e) => error!("Rebalance failed: {e}"),
+            }
+        }
+    }
+    stats
+}
+
+fn rebalance_op(
+    index: &TableIndex,
+    connection: &Arc<Connection>,
+    op: RebalanceOp,
+) -> Result<RebalanceStats> {
+    let session = connection.open_session()?;
+    let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
+    let txn = head_index.session().transaction(None)?;
+    let stats = match op {
+        RebalanceOp::Merge { centroid_id } => {
+            merge_centroid(index, &head_index, centroid_id as usize, 0).map(RebalanceStats::from)
+        }
+        RebalanceOp::Split {
+            src_centroid_id,
+            dst_centroid_ids,
+        } => split_centroid_post_partition(
+            index,
+            &head_index,
+            src_centroid_id as usize,
+            (dst_centroid_ids.0 as usize, dst_centroid_ids.1 as usize),
+        )
+        .map(RebalanceStats::from),
+    }?;
+    txn.commit(None).map(|()| stats)
 }
 
 fn rebalance(

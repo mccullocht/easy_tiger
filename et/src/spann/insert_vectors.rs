@@ -1,11 +1,14 @@
 use std::{
-    collections::HashSet,
     fs::File,
     io,
     num::NonZero,
-    ops::Range,
     path::PathBuf,
-    sync::{Arc, Mutex, mpsc::Receiver},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
+    thread,
+    time::Duration,
 };
 
 use clap::Args;
@@ -15,24 +18,23 @@ use easy_tiger::{
         CentroidAssignment, PostingKey, TableIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
         rebalance::{
-            BalanceSummary, RebalanceStats, merge_centroid, partition_oversized_centroid,
-            split_centroid, split_centroid_post_partition,
+            RebalanceStats, merge_centroid, partition_oversized_centroid,
+            split_centroid_post_partition,
         },
     },
     vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
 };
-use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
-use rayon::prelude::*;
-use tracing::error;
+use rayon::{ThreadPoolBuilder, prelude::*};
+use tracing::{error, info};
 use vectors::F32VectorCoder;
 use wt_mdb::{
     Connection, Result,
     session::{Formatted, TransactionGuard},
 };
 
-use crate::ui::progress_bar;
+use crate::ui::{progress_bar, progress_spinner};
 
 #[derive(Args)]
 pub struct InsertVectorsArgs {
@@ -64,8 +66,6 @@ pub fn insert_vectors(
     args: InsertVectorsArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    let session = connection.open_session()?;
-    let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
 
     // Map the input vectors.
     let f32_vectors = DerefVectorStore::new(
@@ -91,7 +91,7 @@ pub fn insert_vectors(
         ));
     }
 
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(args.seed);
+    let rng = Mutex::new(Xoshiro256PlusPlus::seed_from_u64(args.seed));
 
     let posting_format = index.config().posting_coder;
     let similarity = index.head_config().config().similarity;
@@ -101,40 +101,43 @@ pub fn insert_vectors(
         .rerank_format
         .map(|f| f.new_coder(similarity));
 
-    let batch_size = args.batch_size.get();
     let main_progress = progress_bar(args.count.get(), "inserting vectors");
-
-    let mut rebalance_stats = RebalanceStats::default();
-    let mut batches: usize = 0;
-    let mut total_batch_unique_centroids: usize = 0;
-
-    for batch_start in (args.start..end).step_by(batch_size) {
-        let batch_end = (batch_start + batch_size).min(end);
-
-        total_batch_unique_centroids += insert_batch(
-            &index,
-            &head_index,
-            &f32_vectors,
-            batch_start..batch_end,
-            posting_coder.as_ref(),
-            rerank_coder.as_ref().map(|c| c.as_ref()),
-            &main_progress,
-        )?;
-        batches += 1;
-
-        rebalance_stats += rebalance(&index, &head_index, &mut rng, &main_progress)?;
-    }
-
-    main_progress.set_message("inserting vectors");
+    main_progress.enable_steady_tick(Duration::from_millis(100));
+    let (tx, rx) = mpsc::channel();
+    let rebalance_handle = {
+        let index = Arc::clone(&index);
+        let connection = Arc::clone(&connection);
+        thread::spawn(move || rebalance_loop(index, connection, rx))
+    };
+    (args.start..end).into_par_iter().try_for_each_init(
+        || {
+            (
+                SessionGraphVectorIndex::new(
+                    Arc::clone(index.head_config()),
+                    connection.open_session().expect("open session"),
+                ),
+                tx.clone(),
+            )
+        },
+        |(head_index, tx), i| {
+            insert_vector(
+                index.as_ref(),
+                head_index,
+                i as i64,
+                &f32_vectors[i],
+                posting_coder.as_ref(),
+                rerank_coder.as_ref().map(|c| c.as_ref()),
+                &rng,
+                &tx,
+            )
+            .inspect(|_| main_progress.inc(1))
+        },
+    )?;
     main_progress.finish();
+    drop(tx);
 
-    println!("Batches:        {:10}", batches);
-    if batches > 0 {
-        println!(
-            "  Avg Unique:        {:10.1}",
-            total_batch_unique_centroids as f64 / batches as f64
-        );
-    }
+    let rebalance_progress = progress_spinner("rebalancing");
+    let rebalance_stats = rebalance_handle.join().expect("joined");
     println!("Merged:         {:10}", rebalance_stats.merged);
     if rebalance_stats.merged > 0 {
         println!(
@@ -170,97 +173,9 @@ pub fn insert_vectors(
             rebalance_stats.split_stats.nearby_moved
         );
     }
+    rebalance_progress.finish();
 
     Ok(())
-}
-
-fn insert_batch(
-    index: &TableIndex,
-    head_index: &SessionGraphVectorIndex,
-    f32_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
-    batch: Range<usize>,
-    posting_coder: &dyn F32VectorCoder,
-    rerank_coder: Option<&dyn F32VectorCoder>,
-    progress: &ProgressBar,
-) -> Result<usize> {
-    progress.set_message("inserting vectors");
-
-    let connection = Arc::clone(head_index.session().connection());
-    let vector_state = batch
-        .clone()
-        .into_par_iter()
-        .progress_with(progress.clone())
-        .map_init(
-            || {
-                let session = SessionGraphVectorIndex::new(
-                    Arc::clone(index.head_config()),
-                    connection.open_session().expect("open session"),
-                );
-                let searcher = GraphSearcher::new(index.config().head_search_params);
-                (session, searcher)
-            },
-            |(head_index, searcher), i| {
-                let vector = &f32_vectors[i];
-
-                // Search for centroid
-                let txn = head_index.session().transaction(None)?;
-                let candidates = searcher.search(vector, head_index)?;
-                assert!(!candidates.is_empty());
-                txn.commit(None)?;
-
-                // TODO: implement replica selection
-                let centroid_id = candidates[0].vertex() as u32;
-                Ok((
-                    i,
-                    CentroidAssignment::new(centroid_id, &[]),
-                    posting_coder.encode(vector),
-                    rerank_coder.map(|c| c.encode(vector)),
-                ))
-            },
-        )
-        .collect::<Result<Vec<_>>>()?;
-
-    let unique_centroids = vector_state
-        .iter()
-        .filter_map(|(_, a, _, _)| a.iter().next().map(|(_, id)| id))
-        .collect::<HashSet<_>>()
-        .len();
-
-    let txn = TransactionGuard::new(head_index.session(), None)?;
-    progress.set_message("writing postings");
-    let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
-    let mut posting_cursor = head_index
-        .session()
-        .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
-    let mut rerank_cursor = if rerank_coder.is_some() {
-        Some(
-            head_index
-                .session()
-                .get_record_cursor(index.raw_vectors_table_name())?,
-        )
-    } else {
-        None
-    };
-
-    for (i, assignment, posting_vector, rerank_vector) in vector_state.into_iter() {
-        assignment_updater.insert(i as i64, assignment.to_formatted_ref())?;
-
-        for (_, centroid_id) in assignment.iter() {
-            let key = PostingKey {
-                centroid_id,
-                record_id: i as i64,
-            };
-            posting_cursor.set(key, &posting_vector)?;
-        }
-
-        if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(rerank_vector) {
-            cursor.set(i as i64, &vector)?;
-        }
-    }
-
-    assignment_updater.flush()?;
-    txn.commit(None)?;
-    Ok(unique_centroids)
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -287,7 +202,8 @@ fn insert_vector(
     posting_coder: &dyn F32VectorCoder,
     rerank_coder: Option<&dyn F32VectorCoder>,
     rng: &Mutex<impl Rng>,
-) -> Result<Vec<RebalanceOp>> {
+    tx: &Sender<Vec<RebalanceOp>>,
+) -> Result<()> {
     let posting_vector = posting_coder.encode(vector);
     let rerank_vector = rerank_coder.map(|c| c.encode(vector));
 
@@ -302,7 +218,12 @@ fn insert_vector(
             rng,
         );
         match result {
-            Ok(ops) => return Ok(ops),
+            Ok(ops) => {
+                if !ops.is_empty() {
+                    tx.send(ops).expect("send rebalance ops");
+                }
+                return Ok(());
+            }
             Err(e) if e.is_rollback() => continue,
             Err(e) => return Err(e),
         }
@@ -362,7 +283,9 @@ fn try_insert_vector(
         };
         posting_cursor.set(key, posting_vector)?;
         let count = assignment_updater.centroid_size(centroid_id)?;
-        if count < *policy.start() {
+        if count < *policy.start()
+            && CentroidStats::from_index_stats(head_index.session(), index)?.centroid_count() > 64
+        {
             assignment_updater.set_lifecycle(
                 centroid_id,
                 easy_tiger::spann::centroid_stats::Lifecycle::Tombstone,
@@ -394,16 +317,26 @@ fn rebalance_loop(
     connection: Arc<Connection>,
     rx: Receiver<Vec<RebalanceOp>>,
 ) -> RebalanceStats {
-    let mut stats = RebalanceStats::default();
-    for ops in rx.recv() {
-        for op in ops {
-            match rebalance_op(index.as_ref(), &connection, op) {
-                Ok(op_stats) => stats += op_stats,
-                Err(e) => error!("Rebalance failed: {e}"),
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("rebalance pool");
+    pool.install(|| {
+        let mut stats = RebalanceStats::default();
+        for ops in rx {
+            // XXX this doesn't reattempt rebalancing if it fails due to conflict.
+            for op in ops {
+                info!("Begin rebalance op {op:?}");
+                // XXX this is failing in all cases with a "not found" error.
+                match rebalance_op(index.as_ref(), &connection, op) {
+                    Ok(op_stats) => stats += op_stats,
+                    Err(e) => error!("Rebalance failed: {e}"),
+                }
+                info!("End rebalance op {op:?}");
             }
         }
-    }
-    stats
+        stats
+    })
 }
 
 fn rebalance_op(
@@ -430,44 +363,4 @@ fn rebalance_op(
         .map(RebalanceStats::from),
     }?;
     txn.commit(None).map(|()| stats)
-}
-
-fn rebalance(
-    index: &TableIndex,
-    head_index: &SessionGraphVectorIndex,
-    rng: &mut impl Rng,
-    progress: &ProgressBar,
-) -> Result<RebalanceStats> {
-    let mut iter = 1;
-    let mut rebalance_stats = RebalanceStats::default();
-    loop {
-        // Need a new transaction for rebalancing steps
-        let txn_guard = TransactionGuard::new(head_index.session(), None)?;
-
-        let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
-        let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
-
-        match (summary.below_exemplar(), summary.above_exemplar()) {
-            (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
-                progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
-                rebalance_stats += merge_centroid(&index, &head_index, to_merge, len)?;
-            }
-            (_, Some((to_split, len))) => {
-                progress.set_message(format!("split {to_split} of {len} ({iter})"));
-                // TODO: split_centroid should allow splitting into multiple centroids.
-                // This requires allocating an arbitrary number of ids and accommodating these
-                // additional ids in the split of the centroid and updating of nearby centroids.
-                let mut it = stats.available_centroid_ids();
-                let target_centroid_ids = (it.next().unwrap(), it.next().unwrap());
-                rebalance_stats +=
-                    split_centroid(&index, &head_index, to_split, target_centroid_ids, len, rng)?;
-            }
-            _ => break,
-        }
-
-        txn_guard.commit(None)?;
-        iter += 1;
-    }
-
-    Ok(rebalance_stats)
 }

@@ -331,16 +331,8 @@ impl<'a> CentroidAssignmentUpdater<'a> {
     ///
     /// Dropping the updater will also flush any buffered updates, but prefer this method to allow
     /// observation of any errors.
-    pub fn flush(&mut self) -> Result<()> {
+    pub fn flush(self) -> Result<()> {
         self.stats.flush()
-    }
-}
-
-impl Drop for CentroidAssignmentUpdater<'_> {
-    fn drop(&mut self) {
-        if let Err(e) = self.flush() {
-            error!("Error flushing centroid assignment stats: {e}")
-        }
     }
 }
 
@@ -389,8 +381,9 @@ impl<'a> CentroidStatsCache<'a> {
         Ok(e.into_mut())
     }
 
-    fn flush(&mut self) -> Result<()> {
-        for (id, counts) in self.cache.drain() {
+    fn flush(mut self) -> Result<()> {
+        let cache = std::mem::take(&mut self.cache);
+        for (id, counts) in cache {
             self.cursor.set(id, counts)?;
         }
         Ok(())

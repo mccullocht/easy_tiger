@@ -178,12 +178,6 @@ pub fn merge_centroid(
         .session()
         .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
     let vectors = drain_centroid(centroid_id, &mut posting_cursor)?;
-    assert_eq!(
-        vectors.len(),
-        len,
-        "merge_centroid of {centroid_id} expected {len} vectors; actual {}",
-        vectors.len()
-    );
 
     // Remove the centroid from the graph.
     delete_vector(centroid_id as i64, head_index)?;
@@ -682,7 +676,15 @@ pub fn split_centroid_post_partition(
     // TODO: figure out if nearby update beam width needs to be configurable.
     params.beam_width = NonZero::new(64).unwrap();
     let mut searcher = GraphSearcher::new(params);
-    let nearby_clusters = searcher.search(&original_centroid, head_index)?;
+    let nearby_clusters = searcher.search_with_filter(
+        &original_centroid,
+        |i| {
+            i != centroid_id as i64
+                && i != target_centroid_ids.0 as i64
+                && i != target_centroid_ids.1 as i64
+        },
+        head_index,
+    )?;
 
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
     // TODO: skip decoding if head index and posting index format are the same.
@@ -695,6 +697,9 @@ pub fn split_centroid_post_partition(
     let mut searches = 0;
     let moved_vectors = vectors.len();
     let connection = Arc::clone(head_index.session().connection());
+    // XXX I think I might be deadlocking right here. Insertion threads are stalled or spinning
+    // because theres' nowhere to put anything and here I am trying to dump more work into the
+    // queue.
     let split_reassignments = vectors
         .into_par_iter()
         .map_init(

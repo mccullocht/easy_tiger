@@ -1,4 +1,9 @@
-use std::{collections::{BTreeSet, HashSet}, num::NonZero, ops::RangeInclusive, sync::{Arc, Mutex}};
+use std::{
+    collections::{BTreeSet, HashSet},
+    num::NonZero,
+    ops::RangeInclusive,
+    sync::{Arc, Mutex},
+};
 
 use rand::Rng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -6,7 +11,7 @@ use tracing::warn;
 use wt_mdb::{session::Formatted, Error, Result, TypedCursor};
 
 use crate::{
-    input::VecVectorStore,
+    input::{VecVectorStore, VectorStore},
     kmeans,
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats, Lifecycle},
@@ -561,9 +566,10 @@ pub fn partition_oversized_centroid(
     centroid_id: u32,
     assignment_updater: &mut CentroidAssignmentUpdater<'_>,
     rng: &Mutex<impl Rng>,
-) -> Result<()> {
+) -> Result<(u32, u32)> {
     // Allocate two new centroid IDs from the current stats snapshot.
-    let stats = CentroidStats::from_index_stats(head_index.session(), index)?;
+    let session = head_index.session();
+    let stats = CentroidStats::from_index_stats(session, index)?;
     let mut avail = stats.available_centroid_ids();
     let new_id_0 = avail.next().unwrap() as u32;
     let new_id_1 = avail.next().unwrap() as u32;
@@ -574,26 +580,18 @@ pub fn partition_oversized_centroid(
     assignment_updater.set_lifecycle(new_id_1, Lifecycle::Initializing)?;
     assignment_updater.set_lifecycle(centroid_id, Lifecycle::Tombstone)?;
 
-    // Drain all postings from the over-sized centroid.
-    let session = head_index.session();
+    // Read all postings from the over-sized centroid and decode them.
     let mut posting_cursor =
         session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
-    let mut vectors: Vec<(i64, Vec<u8>)> = vec![];
-    posting_cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
-    while let Some(r) = posting_cursor.next() {
-        let (key, vector) = r?;
-        vectors.push((key.record_id, vector));
-        posting_cursor.remove(key)?;
-    }
-
-    // Decode to f32 for clustering.
     let posting_format = index.config().posting_coder;
     let similarity = index.head_config().config().similarity;
     let posting_coder = posting_format.new_coder(similarity);
     let mut scratch = vec![0.0f32; index.head_config().config().dimensions.get()];
-    let mut clustering_vectors = VecVectorStore::with_capacity(scratch.len(), vectors.len());
-    for (_, vector) in vectors.iter() {
-        posting_coder.decode_to(vector, &mut scratch);
+    let mut clustering_vectors = VecVectorStore::new(scratch.len());
+    posting_cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
+    while let Some(r) = posting_cursor.next() {
+        let (_, vector) = r?;
+        posting_coder.decode_to(&vector, &mut scratch);
         clustering_vectors.push(&scratch);
     }
 
@@ -609,7 +607,7 @@ pub fn partition_oversized_centroid(
             warn!(
                 "partition_oversized_centroid: binary partition of centroid {centroid_id} \
                  (count {}) failed to converge!",
-                vectors.len()
+                clustering_vectors.len()
             );
             r
         }
@@ -619,25 +617,7 @@ pub fn partition_oversized_centroid(
     upsert_vector(new_id_0 as i64, &centroids[0], head_index)?;
     upsert_vector(new_id_1 as i64, &centroids[1], head_index)?;
 
-    // Reassign each posting to the closer of the two new centroids.
-    let c0_dist_fn = posting_format
-        .query_vector_distance_indexing(posting_coder.encode(&centroids[0]), similarity);
-    let c1_dist_fn = posting_format
-        .query_vector_distance_indexing(posting_coder.encode(&centroids[1]), similarity);
-
-    posting_cursor.reset()?;
-    for (record_id, vector) in vectors {
-        let new_centroid_id = if c0_dist_fn.distance(&vector) <= c1_dist_fn.distance(&vector) {
-            new_id_0
-        } else {
-            new_id_1
-        };
-        let new_assignment = CentroidAssignment::new(new_centroid_id, &[]);
-        assignment_updater.update(record_id, new_assignment.to_formatted_ref())?;
-        posting_cursor.set(PostingKey { centroid_id: new_centroid_id, record_id }, &vector)?;
-    }
-
-    Ok(())
+    Ok((new_id_0, new_id_1))
 }
 
 /// Remove all the vectors from `centroid_id` using `cursor` and return them.

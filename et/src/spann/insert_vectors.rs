@@ -1,4 +1,12 @@
-use std::{collections::HashSet, fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::{Arc, Mutex}};
+use std::{
+    collections::HashSet,
+    fs::File,
+    io,
+    num::NonZero,
+    ops::Range,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use clap::Args;
 use easy_tiger::{
@@ -6,7 +14,10 @@ use easy_tiger::{
     spann::{
         CentroidAssignment, PostingKey, TableIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
-        rebalance::{BalanceSummary, RebalanceStats, merge_centroid, partition_oversized_centroid, split_centroid},
+        rebalance::{
+            BalanceSummary, RebalanceStats, merge_centroid, partition_oversized_centroid,
+            split_centroid,
+        },
     },
     vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
 };
@@ -14,7 +25,6 @@ use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
-use tracing::warn;
 use vectors::F32VectorCoder;
 use wt_mdb::{
     Connection, Result,
@@ -252,6 +262,17 @@ fn insert_batch(
     Ok(unique_centroids)
 }
 
+#[derive(Debug, Copy, Clone)]
+enum RebalanceOp {
+    Merge {
+        centroid_id: u32,
+    },
+    Split {
+        src_centroid_id: u32,
+        dst_centroid_ids: (u32, u32),
+    },
+}
+
 /// Insert a single vector into the index, retrying on `WT_ROLLBACK` conflicts.
 ///
 /// Searches for the nearest centroid, encodes the vector, and writes assignment,
@@ -265,7 +286,7 @@ fn insert_vector(
     posting_coder: &dyn F32VectorCoder,
     rerank_coder: Option<&dyn F32VectorCoder>,
     rng: &Mutex<impl Rng>,
-) -> Result<()> {
+) -> Result<Vec<RebalanceOp>> {
     let posting_vector = posting_coder.encode(vector);
     let rerank_vector = rerank_coder.map(|c| c.encode(vector));
 
@@ -280,7 +301,7 @@ fn insert_vector(
             rng,
         );
         match result {
-            Ok(()) => return Ok(()),
+            Ok(ops) => return Ok(ops),
             Err(e) if e.is_rollback() => continue,
             Err(e) => return Err(e),
         }
@@ -295,7 +316,7 @@ fn try_insert_vector(
     posting_vector: &[u8],
     rerank_vector: Option<&[u8]>,
     rng: &Mutex<impl Rng>,
-) -> Result<()> {
+) -> Result<Vec<RebalanceOp>> {
     let txn = TransactionGuard::new(head_index.session(), None)?;
 
     let session = head_index.session();
@@ -331,6 +352,7 @@ fn try_insert_vector(
     let assignment = CentroidAssignment::new(candidates[0].vertex() as u32, &[]);
     assignment_updater.insert(record_id, assignment.to_formatted_ref())?;
 
+    let mut ops = vec![];
     let policy = index.config().centroid_len_range();
     for (_, centroid_id) in assignment.iter() {
         let key = PostingKey {
@@ -340,22 +362,30 @@ fn try_insert_vector(
         posting_cursor.set(key, posting_vector)?;
         let count = assignment_updater.centroid_size(centroid_id)?;
         if count < *policy.start() {
-            warn!("centroid {centroid_id} is under size after inserting record {record_id}");
+            assignment_updater.set_lifecycle(
+                centroid_id,
+                easy_tiger::spann::centroid_stats::Lifecycle::Tombstone,
+            )?;
+            ops.push(RebalanceOp::Merge { centroid_id });
         } else if count > *policy.end() {
-            partition_oversized_centroid(
+            let dst = partition_oversized_centroid(
                 index,
                 head_index,
                 centroid_id,
                 &mut assignment_updater,
                 rng,
             )?;
+            ops.push(RebalanceOp::Split {
+                src_centroid_id: centroid_id,
+                dst_centroid_ids: dst,
+            });
         }
     }
     if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(rerank_vector) {
         cursor.set(record_id, vector)?;
     }
     assignment_updater.flush()?;
-    txn.commit(None)
+    txn.commit(None).map(|()| ops)
 }
 
 fn rebalance(

@@ -697,9 +697,7 @@ pub fn split_centroid_post_partition(
     let mut searches = 0;
     let moved_vectors = vectors.len();
     let connection = Arc::clone(head_index.session().connection());
-    // XXX I think I might be deadlocking right here. Insertion threads are stalled or spinning
-    // because theres' nowhere to put anything and here I am trying to dump more work into the
-    // queue.
+    posting_cursor.reset()?;
     let split_reassignments = vectors
         .into_par_iter()
         .map_init(

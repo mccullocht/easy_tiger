@@ -27,10 +27,10 @@ use easy_tiger::{
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::{ThreadPoolBuilder, prelude::*};
-use tracing::{error, info};
+use tracing::error;
 use vectors::F32VectorCoder;
 use wt_mdb::{
-    Connection, Result,
+    Connection, Error, Result,
     session::{Formatted, TransactionGuard},
 };
 
@@ -324,15 +324,20 @@ fn rebalance_loop(
     pool.install(|| {
         let mut stats = RebalanceStats::default();
         for ops in rx {
-            // XXX this doesn't reattempt rebalancing if it fails due to conflict.
             for op in ops {
-                info!("Begin rebalance op {op:?}");
-                // XXX this is failing in all cases with a "not found" error.
-                match rebalance_op(index.as_ref(), &connection, op) {
-                    Ok(op_stats) => stats += op_stats,
-                    Err(e) => error!("Rebalance failed: {e}"),
+                loop {
+                    match rebalance_op(index.as_ref(), &connection, op) {
+                        Ok(op_stats) => {
+                            stats += op_stats;
+                            break;
+                        }
+                        Err(e) if e.is_rollback() => continue,
+                        Err(e) => {
+                            error!("Rebalance failed: {e}");
+                            break;
+                        }
+                    }
                 }
-                info!("End rebalance op {op:?}");
             }
         }
         stats

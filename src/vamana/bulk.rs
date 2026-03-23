@@ -26,7 +26,7 @@ use rustix::io::Errno;
 use thread_local::ThreadLocal;
 use tracing::warn;
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{session::CreateOptionsBuilder, Connection, Error, Result, Session};
+use wt_mdb::{connection::CreateOptionsBuilder, Connection, Error, Result, Session};
 
 use crate::{
     input::{DerefVectorStore, VectorStore},

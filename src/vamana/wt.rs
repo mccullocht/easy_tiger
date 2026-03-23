@@ -10,7 +10,7 @@ use rustix::io::Errno;
 use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity};
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
-    session::{CreateOptionsBuilder, DropOptions},
+    connection::{CreateOptionsBuilder, DropOptions},
     Connection, Error, RecordCursorGuard, Result, Session,
 };
 
@@ -252,8 +252,7 @@ impl TableGraphVectorIndex {
         index_name: &str,
     ) -> io::Result<Self> {
         let index = Self::from_init(config, index_name)?;
-        let session = connection.open_session()?;
-        session.create_table(
+        connection.create_table(
             &index.graph_table_name,
             Some(
                 CreateOptionsBuilder::default()
@@ -262,9 +261,9 @@ impl TableGraphVectorIndex {
             ),
         )?;
         if let Some(rerank_table) = index.rerank_table() {
-            session.create_table(rerank_table.name(), None)?;
+            connection.create_table(rerank_table.name(), None)?;
         }
-        session.create_table(&index.nav_table.table_name, None)?;
+        connection.create_table(&index.nav_table.table_name, None)?;
         Ok(index)
     }
 
@@ -275,7 +274,7 @@ impl TableGraphVectorIndex {
         options: &Option<DropOptions>,
     ) -> Result<()> {
         for table_name in Self::generate_table_names(index_name) {
-            session.drop_table(&table_name, options.clone())?;
+            session.connection().drop_table(&table_name, options.clone())?;
         }
         Ok(())
     }

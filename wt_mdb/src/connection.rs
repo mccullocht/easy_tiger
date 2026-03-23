@@ -1,5 +1,5 @@
 use crate::{
-    make_result, session::Session, wt_call, ConfigurationString, Error, Result, Statistics,
+    make_result, session::{FormatString, Formatted, Session}, wt_call, ConfigurationString, Error, Result, Statistics,
 };
 use std::{
     ffi::{CStr, CString},
@@ -145,6 +145,111 @@ impl ConfigurationString for Options {
     }
 }
 
+/// An options builder for creating a table, column group, index, or file in WiredTiger.
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+pub struct CreateOptionsBuilder {
+    key_format: FormatString,
+    value_format: FormatString,
+    app_metadata: Option<String>,
+}
+
+impl Default for CreateOptionsBuilder {
+    fn default() -> Self {
+        Self {
+            key_format: FormatString::new(c"q"),
+            value_format: FormatString::new(c"u"),
+            app_metadata: None,
+        }
+    }
+}
+
+impl CreateOptionsBuilder {
+    /// Set the format for the key.
+    pub fn key_format<K: Formatted>(mut self) -> Self {
+        self.key_format = K::FORMAT;
+        self
+    }
+
+    /// Set the format for the value.
+    pub fn value_format<V: Formatted>(mut self) -> Self {
+        self.value_format = V::FORMAT;
+        self
+    }
+
+    /// Attach metadata that can be read from the metadata table as the value for this table.
+    pub fn app_metadata(mut self, metadata: &str) -> Self {
+        assert!(
+            !metadata.as_bytes().contains(&0),
+            "metadata may not contain a NULL character"
+        );
+        self.app_metadata = Some(metadata.to_owned());
+        self
+    }
+}
+
+/// Options when creating a table, column group, index, or file in WiredTiger.
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+pub struct CreateOptions(CString);
+
+impl Default for CreateOptions {
+    fn default() -> Self {
+        CreateOptionsBuilder::default().into()
+    }
+}
+
+impl From<CreateOptionsBuilder> for CreateOptions {
+    fn from(value: CreateOptionsBuilder) -> Self {
+        let mut parts = vec![
+            format!("key_format={}", value.key_format.format_str()),
+            format!("value_format={}", value.value_format.format_str()),
+        ];
+        if let Some(metadata) = value.app_metadata {
+            parts.push(format!("app_metadata={metadata}"));
+        }
+        Self(CString::new(parts.join(",")).expect("no nulls"))
+    }
+}
+
+impl ConfigurationString for CreateOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        Some(self.0.as_c_str())
+    }
+}
+
+/// An options builder for dropping a table, column group, index, or file in WiredTiger.
+#[derive(Default)]
+pub struct DropOptionsBuilder {
+    force: bool,
+}
+
+impl DropOptionsBuilder {
+    /// If set, return success even if the object does not exist.
+    pub fn set_force(mut self) -> Self {
+        self.force = true;
+        self
+    }
+}
+
+/// Options for dropping a table, column group, index, or file in WiredTiger.
+#[derive(Default, Debug, Clone)]
+pub struct DropOptions(Option<CString>);
+
+impl From<DropOptionsBuilder> for DropOptions {
+    fn from(value: DropOptionsBuilder) -> Self {
+        DropOptions(if value.force {
+            Some(CString::from(c"force=true"))
+        } else {
+            None
+        })
+    }
+}
+
+impl ConfigurationString for DropOptions {
+    fn as_config_string(&self) -> Option<&CStr> {
+        self.0.as_deref()
+    }
+}
+
 /// A connection to a WiredTiger database.
 ///
 /// There is typically only one connection per database per process.
@@ -213,6 +318,19 @@ impl Connection {
     pub fn set_timestamp(&self, tt: SetGlobalTimestampType, ts: u64) -> Result<()> {
         let config_str = tt.config_str(ts);
         unsafe { wt_call!(self.0, set_timestamp, config_str.as_ptr()) }
+    }
+
+    /// Create a new table.
+    pub fn create_table(self: &Arc<Self>, table_name: &str, config: Option<CreateOptions>) -> Result<()> {
+        self.open_session()?.create_table(table_name, config)
+    }
+
+    /// Drop a table.
+    ///
+    /// This requires exclusive access -- if any cursors are open on the specified table the call will fail
+    /// and return an EBUSY posix error.
+    pub fn drop_table(self: &Arc<Self>, table_name: &str, config: Option<DropOptions>) -> Result<()> {
+        self.open_session()?.drop_table(table_name, config)
     }
 }
 

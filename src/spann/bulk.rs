@@ -11,7 +11,8 @@ use crate::{
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
 use wt_mdb::{
-    session::{CreateOptionsBuilder, Formatted},
+    connection::CreateOptionsBuilder,
+    session::Formatted,
     Connection, Result, Session,
 };
 

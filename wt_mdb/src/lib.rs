@@ -247,10 +247,12 @@ mod test {
     use tempfile::TempDir;
 
     use crate::{
-        connection::{Connection, QueryGlobalTimestampType, SetGlobalTimestampType},
+        connection::{
+            Connection, CreateOptions, CreateOptionsBuilder, QueryGlobalTimestampType,
+            SetGlobalTimestampType,
+        },
         session::{
-            CreateOptions, CreateOptionsBuilder, Formatted, QueryTransactionTimestampType,
-            SetTransactionTimestampType, TransactionGuard,
+            Formatted, QueryTransactionTimestampType, SetTransactionTimestampType, TransactionGuard,
         },
         Error, RecordCursor, Result, Session, Statistics, WiredTigerError,
     };
@@ -273,7 +275,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(11, b"bar"), Ok(()));
         assert_eq!(cursor.set(7, b"foo"), Ok(()));
@@ -287,7 +289,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", index_table_options()).unwrap();
+        conn.create_table("test", index_table_options()).unwrap();
         let mut cursor = session.open_index_cursor("test").unwrap();
         assert_eq!(cursor.set(&b"b".as_slice(), &b"bar".as_slice()), Ok(()));
         assert_eq!(cursor.set(&b"a".as_slice(), &b"foo".as_slice()), Ok(()));
@@ -301,7 +303,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         let value: &[u8] = b"bar";
         assert_eq!(cursor.set(7, value), Ok(()));
@@ -315,7 +317,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", index_table_options()).unwrap();
+        conn.create_table("test", index_table_options()).unwrap();
         let mut cursor = session.open_index_cursor("test").unwrap();
         let value = b"bar".to_vec();
         assert_eq!(cursor.set(&b"a".as_slice(), &value.as_slice()), Ok(()));
@@ -329,7 +331,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(11, b"bar"), Ok(()));
         assert_eq!(cursor.set(7, b"foo"), Ok(()));
@@ -347,7 +349,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", index_table_options()).unwrap();
+        conn.create_table("test", index_table_options()).unwrap();
         let mut cursor = session.open_index_cursor("test").unwrap();
         assert_eq!(cursor.set(&b"b".as_slice(), &b"bar".as_slice()), Ok(()));
         assert_eq!(cursor.set(&b"a".as_slice(), &b"foo".as_slice()), Ok(()));
@@ -365,7 +367,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.largest_key(), None);
         assert_eq!(cursor.set(-1, b"bar"), Ok(()));
@@ -379,7 +381,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", index_table_options()).unwrap();
+        conn.create_table("test", index_table_options()).unwrap();
         let mut cursor = session.open_index_cursor("test").unwrap();
         assert_eq!(cursor.largest_key(), None);
         assert_eq!(cursor.set(&b"a".as_slice(), &b"bar".as_slice()), Ok(()));
@@ -393,7 +395,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
         let read_session = conn.open_session().unwrap();
         let mut read_cursor = read_session.open_record_cursor("test").unwrap();
 
@@ -412,7 +414,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
 
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(session.begin_transaction(None), Ok(()));
@@ -427,7 +429,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test")?;
 
         let read_session = conn.open_session().unwrap();
@@ -449,7 +451,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
 
         let mut cursor = session.open_record_cursor("test")?;
         let guard = TransactionGuard::new(&session, None)?;
@@ -465,7 +467,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
 
         let mut cursor = session.open_record_cursor("test")?;
         let guard = TransactionGuard::new(&session, None)?;
@@ -481,7 +483,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
 
         let mut cursor = session.get_record_cursor("test").unwrap();
         assert_eq!(cursor.set(1, b"foo"), Ok(()));
@@ -522,7 +524,7 @@ mod test {
         let session = conn.open_session().unwrap();
 
         // Bulk load will happily load into an empty table, so to get it to fail we insert a record.
-        assert_eq!(session.create_table("test", None), Ok(()));
+        assert_eq!(conn.create_table("test", None), Ok(()));
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(1, b"bar"), Ok(()));
         assert_eq!(
@@ -552,7 +554,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
         session.checkpoint().unwrap();
     }
 
@@ -570,7 +572,7 @@ mod test {
         )
         .unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(11, b"bar"), Ok(()));
         assert_eq!(cursor.set(7, b"foo"), Ok(()));
@@ -608,7 +610,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
-        session.create_table("test", None).unwrap();
+        conn.create_table("test", None).unwrap();
         let cursor = session.open_metadata_cursor().unwrap();
         assert_eq!(
             cursor

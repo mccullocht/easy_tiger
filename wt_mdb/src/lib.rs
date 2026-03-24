@@ -253,9 +253,7 @@ mod test {
             Connection, CreateOptions, CreateOptionsBuilder, QueryGlobalTimestampType,
             SetGlobalTimestampType,
         },
-        session::{
-            Formatted, QueryTransactionTimestampType, SetTransactionTimestampType, TransactionGuard,
-        },
+        session::{Formatted, QueryTransactionTimestampType, SetTransactionTimestampType},
         Error, RecordCursor, Result, Session, Statistics, WiredTigerError,
     };
 
@@ -424,60 +422,6 @@ mod test {
         assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
         assert_eq!(session.rollback_transaction(None), Ok(()));
         assert_eq!(cursor.next(), None);
-    }
-
-    #[test]
-    fn transaction_guard_commit() -> Result<()> {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
-        conn.create_table("test", None).unwrap();
-        let mut cursor = session.open_record_cursor("test")?;
-
-        let read_session = conn.open_session().unwrap();
-        let mut read_cursor = read_session.open_record_cursor("test").unwrap();
-
-        let guard = TransactionGuard::new(&session, None)?;
-        cursor.set(1, b"foo")?;
-        cursor.set(2, b"bar")?;
-        assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
-        assert_eq!(read_cursor.next(), None);
-
-        assert_eq!(guard.commit(None), Ok(()));
-        assert_eq!(read_cursor.next(), Some(Ok((1, b"foo".to_vec()))));
-        Ok(())
-    }
-
-    #[test]
-    fn transaction_guard_rollback_explicit() -> Result<()> {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
-        conn.create_table("test", None).unwrap();
-
-        let mut cursor = session.open_record_cursor("test")?;
-        let guard = TransactionGuard::new(&session, None)?;
-        assert_eq!(cursor.set(1, b"foo"), Ok(()));
-        assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
-        guard.rollback(None)?;
-        assert_eq!(cursor.next(), None);
-        Ok(())
-    }
-
-    #[test]
-    fn transaction_guard_rollback_implicit() -> Result<()> {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
-        conn.create_table("test", None).unwrap();
-
-        let mut cursor = session.open_record_cursor("test")?;
-        let guard = TransactionGuard::new(&session, None)?;
-        assert_eq!(cursor.set(1, b"foo"), Ok(()));
-        assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
-        drop(guard);
-        assert_eq!(cursor.next(), None);
-        Ok(())
     }
 
     #[test]

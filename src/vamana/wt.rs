@@ -11,7 +11,7 @@ use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity}
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
     connection::{CreateOptionsBuilder, DropOptions},
-    Connection, Error, RecordCursorGuard, Result, Session,
+    Connection, Error, RecordCursorGuard, Result, Session, Transaction,
 };
 
 use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore};
@@ -274,7 +274,9 @@ impl TableGraphVectorIndex {
         options: &Option<DropOptions>,
     ) -> Result<()> {
         for table_name in Self::generate_table_names(index_name) {
-            session.connection().drop_table(&table_name, options.clone())?;
+            session
+                .connection()
+                .drop_table(&table_name, options.clone())?;
         }
         Ok(())
     }
@@ -373,6 +375,72 @@ impl GraphVectorIndex for SessionGraphVectorIndex {
         self.index.rerank_table().map(|t| {
             self.session
                 .get_record_cursor(t.name())
+                .map(|c| CursorVectorStore::new(c, self.index.config().similarity, t.format()))
+        })
+    }
+}
+
+/// A `GraphVectorIndex` implementation that operates within a WiredTiger transaction.
+pub struct TransactionGraphVectorIndex {
+    index: Arc<TableGraphVectorIndex>,
+    transaction: Transaction,
+}
+
+impl TransactionGraphVectorIndex {
+    /// Create a new instance over `index` using `transaction` for db access.
+    pub fn new(index: Arc<TableGraphVectorIndex>, transaction: Transaction) -> Self {
+        Self { index, transaction }
+    }
+
+    pub fn index(&self) -> &Arc<TableGraphVectorIndex> {
+        &self.index
+    }
+
+    /// Return a reference to the underlying `Transaction`.
+    pub fn transaction(&self) -> &Transaction {
+        &self.transaction
+    }
+
+    /// Unwrap into the inner `Transaction`.
+    pub fn into_transaction(self) -> Transaction {
+        self.transaction
+    }
+}
+
+impl GraphVectorIndex for TransactionGraphVectorIndex {
+    type Graph<'a>
+        = CursorGraph<'a>
+    where
+        Self: 'a;
+    type VectorStore<'a>
+        = CursorVectorStore<'a>
+    where
+        Self: 'a;
+
+    fn config(&self) -> &GraphConfig {
+        &self.index.config
+    }
+
+    fn graph(&self) -> Result<Self::Graph<'_>> {
+        Ok(CursorGraph::new(
+            self.transaction
+                .open_record_cursor(self.index.graph_table_name())?,
+        ))
+    }
+
+    fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
+        Ok(CursorVectorStore::new(
+            self.transaction
+                .open_record_cursor(self.index.nav_table().name())?,
+            self.index.config.similarity,
+            self.index.config().nav_format,
+        ))
+    }
+
+    fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
+        self.index.rerank_table().map(|t| {
+            self.transaction
+                .open_record_cursor(t.name())
                 .map(|c| CursorVectorStore::new(c, self.index.config().similarity, t.format()))
         })
     }

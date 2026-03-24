@@ -19,7 +19,8 @@ use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding};
 use wt_mdb::{
-    session::{CreateOptionsBuilder, DropOptions, FormatString, Formatted},
+    connection::{CreateOptionsBuilder, DropOptions},
+    session::{FormatString, Formatted},
     Connection, Error, Result, Session,
 };
 
@@ -212,9 +213,8 @@ impl TableIndex {
             &Self::head_name(index_name),
         )?);
         let table_names = TableNames::from_index_name(index_name);
-        let session = connection.open_session()?;
         for table_name in table_names.record_table_names() {
-            session.create_table(
+            connection.create_table(
                 table_name,
                 Some(
                     CreateOptionsBuilder::default()
@@ -224,7 +224,7 @@ impl TableIndex {
                 ),
             )?;
         }
-        session.create_table(
+        connection.create_table(
             &table_names.centroid_stats,
             Some(
                 CreateOptionsBuilder::default()
@@ -233,7 +233,7 @@ impl TableIndex {
                     .into(),
             ),
         )?;
-        session.create_table(
+        connection.create_table(
             &table_names.postings,
             Some(
                 CreateOptionsBuilder::default()
@@ -257,7 +257,7 @@ impl TableIndex {
     ) -> Result<()> {
         TableGraphVectorIndex::drop_tables(session, &Self::head_name(index_name), options)?;
         for table_name in TableNames::from_index_name(index_name).all_names() {
-            session.drop_table(table_name, options.clone())?;
+            session.connection().drop_table(table_name, options.clone())?;
         }
         Ok(())
     }

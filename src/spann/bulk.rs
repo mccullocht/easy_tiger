@@ -10,10 +10,7 @@ use crate::{
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{
-    session::{CreateOptionsBuilder, Formatted},
-    Connection, Result, Session,
-};
+use wt_mdb::{connection::CreateOptionsBuilder, session::Formatted, Connection, Result, Session};
 
 /// Assign all the vectors to one or more centroids in the head index. This performs the same search
 /// and pruning as [`super::SessionIndexWriter`] does.
@@ -62,9 +59,10 @@ pub fn load_centroids(
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     let mut bulk_cursor = session
+        .connection()
         .new_bulk_load_cursor::<i64, CentroidAssignment>(&index.table_names.centroids, None)?;
     for (record_id, centroids) in centroid_assignments.iter().enumerate() {
-        bulk_cursor.insert(record_id as i64, centroids.to_formatted_ref())?;
+        bulk_cursor.append(record_id as i64, centroids.to_formatted_ref())?;
         progress(1);
     }
     Ok(())
@@ -102,10 +100,11 @@ pub fn load_centroid_stats(
     stats.sort_by_key(|(id, _)| *id);
     // Bulk load the stats
     let mut bulk_cursor = session
+        .connection()
         .new_bulk_load_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats, None)?;
 
     for (centroid_id, counts) in stats {
-        bulk_cursor.insert(centroid_id, counts)?;
+        bulk_cursor.append(centroid_id, counts)?;
         progress(1);
     }
 
@@ -141,13 +140,15 @@ pub fn load_postings(
         .config()
         .posting_coder
         .new_coder(index.head_config().config().similarity);
-    let mut bulk_cursor = session.new_bulk_load_cursor::<PostingKey, Vec<u8>>(
-        &index.table_names.postings,
-        Some(
-            CreateOptionsBuilder::default()
-                .app_metadata(&serde_json::to_string(&index.config).unwrap()),
-        ),
-    )?;
+    let mut bulk_cursor = session
+        .connection()
+        .new_bulk_load_cursor::<PostingKey, Vec<u8>>(
+            &index.table_names.postings,
+            Some(
+                CreateOptionsBuilder::default()
+                    .app_metadata(&serde_json::to_string(&index.config).unwrap()),
+            ),
+        )?;
     // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
     // this will also allow us to parallelize IO.
     let mut encoded_buffer =
@@ -160,7 +161,7 @@ pub fn load_postings(
                 coder.encode_to(&vectors[pk.record_id as usize], buf);
             });
         for (pk, buf) in batch.iter().zip(encoded_buffer.iter()) {
-            bulk_cursor.insert(*pk, buf)?;
+            bulk_cursor.append(*pk, buf)?;
         }
         progress(batch.len() as u64);
     }
@@ -175,8 +176,9 @@ pub fn load_raw_vectors(
     limit: usize,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
-    let mut bulk_cursor =
-        session.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
+    let mut bulk_cursor = session
+        .connection()
+        .new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
     let coder = index
         .config()
         .rerank_format
@@ -185,7 +187,7 @@ pub fn load_raw_vectors(
     let mut encoded = vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())];
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {
         coder.encode_to(vector, &mut encoded);
-        bulk_cursor.insert(record_id as i64, &encoded)?;
+        bulk_cursor.append(record_id as i64, &encoded)?;
         progress(1);
     }
     Ok(())

@@ -26,7 +26,7 @@ use rustix::io::Errno;
 use thread_local::ThreadLocal;
 use tracing::warn;
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{session::CreateOptionsBuilder, Connection, Error, Result, Session};
+use wt_mdb::{connection::CreateOptionsBuilder, Connection, Error, Result, Session};
 
 use crate::{
     input::{DerefVectorStore, VectorStore},
@@ -175,7 +175,6 @@ where
 
     /// Load nav and rerank vectors into tables.
     fn load_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
-        let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
         let nav_coder = self.index.nav_table().new_coder();
         let mut nav_vector = vec![0u8; nav_coder.byte_len(dim)];
@@ -185,14 +184,16 @@ where
         } else {
             None
         };
-        let mut nav_cursor =
-            session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table().name(), None)?;
+        let mut nav_cursor = self
+            .connection
+            .new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table().name(), None)?;
 
         let mut rerank = if let Some(rerank_table) = self.index.rerank_table() {
             let rerank_coder = rerank_table.new_coder();
             let rerank_vector = vec![0u8; rerank_coder.byte_len(dim)];
-            let rerank_cursor =
-                session.new_bulk_load_cursor::<i64, Vec<u8>>(rerank_table.name(), None)?;
+            let rerank_cursor = self
+                .connection
+                .new_bulk_load_cursor::<i64, Vec<u8>>(rerank_table.name(), None)?;
             Some((rerank_coder, rerank_vector, rerank_cursor))
         } else {
             None
@@ -207,11 +208,11 @@ where
                 let start = i * nav_vector.len();
                 q[start..(start + nav_vector.len())].copy_from_slice(&nav_vector);
             }
-            nav_cursor.insert(i as i64, &nav_vector)?;
+            nav_cursor.append(i as i64, &nav_vector)?;
 
             if let Some((coder, vector, cursor)) = rerank.as_mut() {
                 coder.encode_to(v, vector);
-                cursor.insert(i as i64, vector)?;
+                cursor.append(i as i64, vector)?;
             }
             progress(1);
         }
@@ -380,15 +381,14 @@ where
             edges: 0,
             unconnected: 0,
         };
-        let session = self.connection.open_session()?;
-        let mut cursor = session.new_bulk_load_cursor::<i64, Vec<u8>>(
+        let mut cursor = self.connection.new_bulk_load_cursor::<i64, Vec<u8>>(
             self.index.graph_table_name(),
             Some(
                 CreateOptionsBuilder::default()
                     .app_metadata(&serde_json::to_string(&self.index.config()).unwrap()),
             ),
         )?;
-        cursor.insert(
+        cursor.append(
             ENTRY_POINT_KEY,
             &self
                 .entry_vertex
@@ -411,7 +411,7 @@ where
                 stats.unconnected += 1;
             }
             let edges = encode_graph_vertex(edges);
-            cursor.insert(i as i64, &edges)?;
+            cursor.append(i as i64, &edges)?;
             progress(1);
         }
         Ok(stats)

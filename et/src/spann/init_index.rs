@@ -9,7 +9,7 @@ use easy_tiger::{
     },
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{session::DropOptionsBuilder, Connection};
+use wt_mdb::{connection::DropOptionsBuilder, Connection};
 
 use crate::vamana::EdgePruningArgs;
 

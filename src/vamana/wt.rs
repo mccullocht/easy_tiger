@@ -20,8 +20,8 @@ use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore};
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
 
-fn read_app_metadata_internal(session: &Session, table_name: &str) -> Result<String> {
-    let mut cursor = session.open_metadata_cursor()?;
+fn read_app_metadata_internal(txn: &Transaction, table_name: &str) -> Result<String> {
+    let mut cursor = txn.open_metadata_cursor()?;
     let metadata = cursor
         .seek_exact(&CString::new([b"table:", table_name.as_bytes()].concat()).expect("no nulls"))
         .ok_or(Error::not_found_error())??;
@@ -39,8 +39,8 @@ fn read_app_metadata_internal(session: &Session, table_name: &str) -> Result<Str
 /// Read the `app_metadata` config field associated with the named table.
 ///
 /// Returns `None` if table or app_metadata config field could not be found.
-pub fn read_app_metadata(session: &Session, table_name: &str) -> Option<Result<String>> {
-    match read_app_metadata_internal(session, table_name) {
+pub fn read_app_metadata(txn: &Transaction, table_name: &str) -> Option<Result<String>> {
+    match read_app_metadata_internal(txn, table_name) {
         Ok(m) => Some(Ok(m)),
         Err(e) if e == Error::not_found_error() => None,
         Err(e) => Some(Err(e)),
@@ -204,11 +204,11 @@ impl TableGraphVectorIndex {
     /// Create a new `TableGraphVectorIndex` from the relevant db tables, extracting
     /// immutable graph metadata that can be used across operations.
     pub fn from_db(connection: &Arc<Connection>, table_basename: &str) -> io::Result<Self> {
-        let session = connection.open_session()?;
+        let txn = connection.begin_transaction(None)?;
         let [graph_table_name, rerank_table_name, nav_table_name] =
             Self::generate_table_names(table_basename);
         let config: GraphConfig = serde_json::from_str(
-            &read_app_metadata(&session, &graph_table_name).ok_or(Error::not_found_error())??,
+            &read_app_metadata(&txn, &graph_table_name).ok_or(Error::not_found_error())??,
         )?;
         Self::new(config, graph_table_name, nav_table_name, rerank_table_name)
     }

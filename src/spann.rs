@@ -174,10 +174,9 @@ impl TableIndex {
         )?);
 
         let table_names = TableNames::from_index_name(index_name);
-        let session = connection.open_session()?;
+        let txn = connection.begin_transaction(None)?;
         let config: IndexConfig = serde_json::from_str(
-            &read_app_metadata(&session, &table_names.postings)
-                .ok_or(Error::not_found_error())??,
+            &read_app_metadata(&txn, &table_names.postings).ok_or(Error::not_found_error())??,
         )?;
         Ok(Self {
             head,

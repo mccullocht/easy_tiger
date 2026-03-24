@@ -20,9 +20,9 @@ use crate::{
 pub use format::{pack1, pack2, pack3, unpack1, unpack2, unpack3, FormatString, Formatted};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard};
 
-const METADATA_URI: &CStr = c"metadata:";
+pub(crate) const METADATA_URI: &CStr = c"metadata:";
 
-fn table_uri(name: &str) -> CString {
+pub(crate) fn table_uri(name: &str) -> CString {
     CString::new([b"table:", name.as_bytes()].concat()).expect("no nulls")
 }
 
@@ -318,7 +318,11 @@ impl Session {
     }
 
     /// Create a new table.
-    pub(crate) fn create_table(&self, table_name: &str, config: Option<CreateOptions>) -> Result<()> {
+    pub(crate) fn create_table(
+        &self,
+        table_name: &str,
+        config: Option<CreateOptions>,
+    ) -> Result<()> {
         let uri = table_uri(table_name);
         unsafe {
             wt_call!(
@@ -424,7 +428,7 @@ impl Session {
     }
 
     // NB: this doesn't accept options because we don't check options when serving from the cache.
-    fn get_or_create_typed_cursor_uri<K: Formatted, V: Formatted>(
+    pub(crate) fn get_or_create_typed_cursor_uri<K: Formatted, V: Formatted>(
         &self,
         uri: &CStr,
     ) -> Result<TypedCursorGuard<'_, K, V>> {
@@ -448,7 +452,7 @@ impl Session {
         self.cached_cursors.borrow_mut().clear();
     }
 
-    fn new_typed_cursor_uri<K: Formatted, V: Formatted>(
+    pub(crate) fn new_typed_cursor_uri<K: Formatted, V: Formatted>(
         &self,
         uri: &CStr,
         options: Option<&CStr>,

@@ -9,6 +9,7 @@
 pub mod config;
 pub mod connection;
 pub mod session;
+pub mod transaction;
 
 use rustix::io::Errno;
 use wt_sys::wiredtiger_strerror;
@@ -129,6 +130,7 @@ pub use session::{
     IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, Session, StatCursor,
     TypedCursor, TypedCursorGuard,
 };
+pub use transaction::Transaction;
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {

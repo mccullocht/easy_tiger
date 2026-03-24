@@ -1,5 +1,8 @@
 use crate::{
-    make_result, session::{FormatString, Formatted, Session}, wt_call, ConfigurationString, Error, Result, Statistics,
+    make_result,
+    session::{BeginTransactionOptions, FormatString, Formatted, Session},
+    transaction::Transaction,
+    wt_call, ConfigurationString, Error, Result, Statistics,
 };
 use std::{
     ffi::{CStr, CString},
@@ -295,6 +298,7 @@ impl Connection {
             .map(|session| Session::new(session, self))
     }
 
+    /// Query a connection global timestamp value maintained by WiredTiger.
     pub fn query_timestamp(&self, tt: QueryGlobalTimestampType) -> Result<u64> {
         let mut buf = [0u8; 17];
         unsafe {
@@ -315,13 +319,27 @@ impl Connection {
         .expect("valid hex"))
     }
 
+    /// Set a connection global timestamp value maintained by WiredTiger.
     pub fn set_timestamp(&self, tt: SetGlobalTimestampType, ts: u64) -> Result<()> {
         let config_str = tt.config_str(ts);
         unsafe { wt_call!(self.0, set_timestamp, config_str.as_ptr()) }
     }
 
+    /// Begin a new transaction with the specified options.
+    pub fn begin_transaction(
+        self: &Arc<Self>,
+        // XXX move this into connection or transaction modules.
+        options: Option<BeginTransactionOptions>,
+    ) -> Result<Transaction> {
+        Transaction::new(self, options)
+    }
+
     /// Create a new table.
-    pub fn create_table(self: &Arc<Self>, table_name: &str, config: Option<CreateOptions>) -> Result<()> {
+    pub fn create_table(
+        self: &Arc<Self>,
+        table_name: &str,
+        config: Option<CreateOptions>,
+    ) -> Result<()> {
         self.open_session()?.create_table(table_name, config)
     }
 
@@ -329,7 +347,11 @@ impl Connection {
     ///
     /// This requires exclusive access -- if any cursors are open on the specified table the call will fail
     /// and return an EBUSY posix error.
-    pub fn drop_table(self: &Arc<Self>, table_name: &str, config: Option<DropOptions>) -> Result<()> {
+    pub fn drop_table(
+        self: &Arc<Self>,
+        table_name: &str,
+        config: Option<DropOptions>,
+    ) -> Result<()> {
         self.open_session()?.drop_table(table_name, config)
     }
 }

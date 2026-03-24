@@ -125,7 +125,7 @@ impl From<Error> for std::io::Error {
     }
 }
 
-pub use connection::Connection;
+pub use connection::{BulkLoadCursor, Connection};
 pub use session::{
     IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, Session, StatCursor,
     TypedCursor, TypedCursorGuard,
@@ -502,14 +502,14 @@ mod test {
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
         let session = conn.open_session().unwrap();
 
-        // Create Vec<Record>, bulk_load() into session, compare cursors.
+        // Create Vec<Record>, bulk_load() into conn, compare cursors.
         let records = vec![
             (7, b"foo".to_vec()),
             (11, b"bar".to_vec()),
             (19, b"quux".to_vec()),
         ];
         assert_eq!(
-            session.bulk_load("test", None, records.clone().into_iter()),
+            conn.bulk_load::<i64, Vec<u8>, _>("test", None, records.clone().into_iter()),
             Ok(())
         );
 
@@ -530,7 +530,7 @@ mod test {
         let mut cursor = session.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(1, b"bar"), Ok(()));
         assert_eq!(
-            session.bulk_load("test", None, [(7, b"foo".to_vec())].into_iter()),
+            conn.bulk_load::<i64, Vec<u8>, _>("test", None, [(7, b"foo".to_vec())].into_iter()),
             Err(Error::Errno(Errno::BUSY))
         );
     }
@@ -539,10 +539,9 @@ mod test {
     fn bulk_load_out_of_order() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
 
         assert_eq!(
-            session.bulk_load(
+            conn.bulk_load::<i64, Vec<u8>, _>(
                 "test",
                 None,
                 [(11, b"bar".to_vec()), (7, b"foo".to_vec())].into_iter()
@@ -642,11 +641,11 @@ mod test {
             let connection =
                 Connection::open(dir.path().to_str().unwrap(), conn_options()).unwrap();
             let session = connection.open_session().unwrap();
-            let mut bulk_cursor = session
+            let mut bulk_cursor = connection
                 .new_bulk_load_cursor::<i64, Vec<u8>>(table_name, None)
                 .unwrap();
             for (k, v) in data {
-                bulk_cursor.insert(*k, v.to_formatted_ref()).unwrap()
+                bulk_cursor.append(*k, v.to_formatted_ref()).unwrap()
             }
             Self {
                 table_name: table_name.to_string(),

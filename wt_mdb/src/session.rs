@@ -13,7 +13,7 @@ use tracing::error;
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
 
 use crate::{
-    connection::{Connection, CreateOptions, CreateOptionsBuilder, DropOptions},
+    connection::{Connection, CreateOptions, DropOptions},
     wt_call, ConfigurationString, Error, Result, Statistics,
 };
 
@@ -28,7 +28,7 @@ pub(crate) fn table_uri(name: &str) -> CString {
 
 /// Wrapper around [wt_sys::WT_ITEM].
 #[derive(Debug, Copy, Clone)]
-struct Item(WT_ITEM);
+pub(crate) struct Item(pub(crate) WT_ITEM);
 
 // Use an empty slice so that the default pointer is not null.
 const EMPTY_ITEM: &[u8] = &[];
@@ -60,7 +60,7 @@ impl From<Item> for &[u8] {
 /// Inner representation of a cursor.
 ///
 /// This inner representation is used by TypedCursor but also may be cached by Session.
-struct InnerCursor(NonNull<WT_CURSOR>);
+pub(crate) struct InnerCursor(pub(crate) NonNull<WT_CURSOR>);
 
 impl InnerCursor {
     fn uri(&self) -> &CStr {
@@ -452,11 +452,11 @@ impl Session {
         self.cached_cursors.borrow_mut().clear();
     }
 
-    pub(crate) fn new_typed_cursor_uri<K: Formatted, V: Formatted>(
+    pub(crate) fn open_raw_cursor(
         &self,
         uri: &CStr,
         options: Option<&CStr>,
-    ) -> Result<TypedCursor<'_, K, V>> {
+    ) -> Result<InnerCursor> {
         let options: Cow<'_, CStr> = if let Some(o) = options {
             CString::new([o.to_bytes(), b",raw"].concat())
                 .expect("no nulls")
@@ -475,9 +475,17 @@ impl Session {
                 &mut cursorp
             )
         }?;
-        let inner = NonNull::new(cursorp)
+        NonNull::new(cursorp)
             .ok_or(Error::generic_error())
-            .map(InnerCursor)?;
+            .map(InnerCursor)
+    }
+
+    pub(crate) fn new_typed_cursor_uri<K: Formatted, V: Formatted>(
+        &self,
+        uri: &CStr,
+        options: Option<&CStr>,
+    ) -> Result<TypedCursor<'_, K, V>> {
+        let inner = self.open_raw_cursor(uri, options)?;
         TypedCursor::new(inner, self)
     }
 
@@ -551,46 +559,6 @@ impl Session {
                 timestamp
             )
         }
-    }
-
-    /// Create a new table `table_name` and bulk load input from `iter` with key format `K` and
-    /// value format `V`.
-    ///
-    /// This requires that `table_name` not exist or be empty and that `iter` yields records in
-    /// order by `K` or an error may occur.
-    pub fn bulk_load<K, V, I>(
-        &self,
-        table_name: &str,
-        create_options: Option<CreateOptionsBuilder>,
-        iter: I,
-    ) -> Result<()>
-    where
-        K: Formatted,
-        V: Formatted,
-        I: Iterator<Item = (K, V)>,
-    {
-        let mut cursor = self.new_bulk_load_cursor::<K, V>(table_name, create_options)?;
-        for (k, v) in iter {
-            cursor.insert(k.to_formatted_ref(), v.to_formatted_ref())?;
-        }
-        Ok(())
-    }
-
-    /// Create a new table `table_name` with `create_options`, key format `K` and value format `V`,
-    /// then return a cursor that may only be used to bulk insert records in order by key.
-    pub fn new_bulk_load_cursor<K: Formatted, V: Formatted>(
-        &self,
-        table_name: &str,
-        create_options: Option<CreateOptionsBuilder>,
-    ) -> Result<BulkLoadCursor<'_, K, V>> {
-        let create_options: CreateOptions = create_options
-            .unwrap_or_default()
-            .key_format::<K>()
-            .value_format::<V>()
-            .into();
-        self.create_table(table_name, Some(create_options))?;
-        self.new_typed_cursor::<K, V>(table_name, Some(c"bulk"))
-            .map(BulkLoadCursor)
     }
 
     /// Checkpoint the database.
@@ -709,19 +677,6 @@ pub type IndexCursorGuard<'a> = TypedCursorGuard<'a, Vec<u8>, Vec<u8>>;
 pub type MetadataCursor<'a> = TypedCursor<'a, CString, CString>;
 pub type MetadataCursorGuard<'a> = TypedCursorGuard<'a, CString, CString>;
 pub type StatCursor<'a> = TypedCursor<'a, i32, StatValue>;
-
-/// A bulk load cursor may only be used for inserting new entries in order by key.
-pub struct BulkLoadCursor<'a, K, V>(TypedCursor<'a, K, V>);
-
-impl<'a, K: Formatted, V: Formatted> BulkLoadCursor<'a, K, V> {
-    pub fn session(&self) -> &'a Session {
-        self.0.session()
-    }
-
-    pub fn insert(&mut self, key: K::Ref<'_>, value: V::Ref<'_>) -> Result<()> {
-        self.0.set(key, value)
-    }
-}
 
 enum TxnState<'a> {
     Open(&'a Session),

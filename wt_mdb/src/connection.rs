@@ -1,11 +1,14 @@
 use crate::{
     make_result,
-    session::{BeginTransactionOptions, FormatString, Formatted, Session},
+    session::{
+        table_uri, BeginTransactionOptions, FormatString, Formatted, InnerCursor, Item, Session,
+    },
     transaction::Transaction,
     wt_call, ConfigurationString, Error, Result, Statistics,
 };
 use std::{
     ffi::{CStr, CString},
+    marker::PhantomData,
     num::NonZero,
     ptr::{self, NonNull},
     sync::Arc,
@@ -354,10 +357,87 @@ impl Connection {
     ) -> Result<()> {
         self.open_session()?.drop_table(table_name, config)
     }
+
+    /// Create a new table `table_name` with `create_options`, key format `K` and value format `V`,
+    /// then return a cursor that may only be used to bulk insert records in order by key.
+    pub fn new_bulk_load_cursor<K: Formatted, V: Formatted>(
+        self: &Arc<Self>,
+        table_name: &str,
+        create_options: Option<CreateOptionsBuilder>,
+    ) -> Result<BulkLoadCursor<K, V>> {
+        let create_options: CreateOptions = create_options
+            .unwrap_or_default()
+            .key_format::<K>()
+            .value_format::<V>()
+            .into();
+        let session = self.open_session()?;
+        session.create_table(table_name, Some(create_options))?;
+        let uri = table_uri(table_name);
+        let inner = session.open_raw_cursor(&uri, Some(c"bulk"))?;
+        Ok(BulkLoadCursor {
+            inner,
+            session,
+            key_buf: vec![],
+            value_buf: vec![],
+            _km: PhantomData,
+            _vm: PhantomData,
+        })
+    }
+
+    /// Create a new table `table_name` and bulk load input from `iter` with key format `K` and
+    /// value format `V`.
+    ///
+    /// This requires that `table_name` not exist or be empty and that `iter` yields records in
+    /// order by `K` or an error may occur.
+    pub fn bulk_load<K, V, I>(
+        self: &Arc<Self>,
+        table_name: &str,
+        create_options: Option<CreateOptionsBuilder>,
+        iter: I,
+    ) -> Result<()>
+    where
+        K: Formatted,
+        V: Formatted,
+        I: Iterator<Item = (K, V)>,
+    {
+        let mut cursor = self.new_bulk_load_cursor::<K, V>(table_name, create_options)?;
+        for (k, v) in iter {
+            cursor.append(k.to_formatted_ref(), v.to_formatted_ref())?;
+        }
+        Ok(())
+    }
 }
 
 unsafe impl Send for Connection {}
 unsafe impl Sync for Connection {}
+
+/// A bulk load cursor may only be used for inserting new entries in order by key.
+pub struct BulkLoadCursor<K, V> {
+    inner: InnerCursor,
+    // Session must be dropped after inner, so it is declared after inner.
+    #[allow(dead_code)]
+    session: Session,
+    key_buf: Vec<u8>,
+    value_buf: Vec<u8>,
+    _km: PhantomData<K>,
+    _vm: PhantomData<V>,
+}
+
+impl<K: Formatted, V: Formatted> BulkLoadCursor<K, V> {
+    /// Append a new record to the table. Records must be inserted in order by key or an error may
+    /// occur.
+    pub fn append(&mut self, key: K::Ref<'_>, value: V::Ref<'_>) -> Result<()> {
+        K::pack(key, &mut self.key_buf)?;
+        V::pack(value, &mut self.value_buf)?;
+        // safety: the memory passed to set_{key,value} need only be valid until a modifying
+        // call like insert().
+        unsafe {
+            wt_call!(void self.inner.0, set_key, &Item::from(self.key_buf.as_slice()).0)?;
+            wt_call!(void self.inner.0, set_value, &Item::from(self.value_buf.as_slice()).0)?;
+            wt_call!(self.inner.0, insert)
+        }
+    }
+}
 
 impl Drop for Connection {
     fn drop(&mut self) {

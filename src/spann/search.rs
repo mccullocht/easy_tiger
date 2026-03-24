@@ -14,10 +14,10 @@ use vectors::QueryVectorDistance;
 use wt_mdb::{Result, Session};
 
 use crate::{
-    spann::{centroid_stats::CentroidStats, PostingKey, SessionIndexReader, TableIndex},
+    spann::{centroid_stats::CentroidStats, PostingKey, TableIndex, TransactionIndex},
     vamana::{
         search::{GraphSearchStats, GraphSearcher},
-        {GraphSearchParams, GraphVectorIndex},
+        GraphSearchParams, GraphVectorIndex,
     },
     Neighbor,
 };
@@ -198,11 +198,7 @@ impl Searcher {
         self.stats
     }
 
-    pub fn search(
-        &mut self,
-        query: &[f32],
-        reader: &mut SessionIndexReader,
-    ) -> Result<Vec<Neighbor>> {
+    pub fn search(&mut self, query: &[f32], reader: &TransactionIndex) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 
         let mut centroids = self.head_searcher.search(query, &reader.head_reader)?;
@@ -227,10 +223,8 @@ impl Searcher {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
             // TODO: if I can't read a posting list then skip and warn rather than exiting early.
             let mut cursor = reader
-                .session()
-                .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
-                    &reader.index().table_names.postings,
-                )?;
+                .transaction()
+                .open_cursor::<PostingKey, Vec<u8>>(&reader.index().table_names.postings)?;
             cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
             while let Some(r) = unsafe { cursor.next_unsafe() } {
                 self.stats.posting_vectors_read += 1;
@@ -263,7 +257,7 @@ impl Searcher {
         &mut self,
         query: &[f32],
         result_queue: ResultQueue<'_>,
-        reader: &mut SessionIndexReader,
+        reader: &TransactionIndex,
     ) -> Result<Vec<Neighbor>> {
         if self.params.num_rerank == 0 || reader.index().config().rerank_format.is_none() {
             return Ok(result_queue.into_results());
@@ -276,7 +270,7 @@ impl Searcher {
             .expect("rerank format is set");
         let query = format.query_vector_distance_f32(query, reader.head_reader.config().similarity);
         let mut raw_cursor = reader
-            .session()
+            .transaction()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;
         let mut reranked = result_queue
             .into_results()

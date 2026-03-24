@@ -20,15 +20,15 @@ use serde::{Deserialize, Serialize};
 use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding};
 use wt_mdb::{
     connection::{CreateOptionsBuilder, DropOptions},
-    session::{FormatString, Formatted},
-    Connection, Error, Result, Session,
+    session::{CommitTransactionOptions, FormatString, Formatted, RollbackTransactionOptions},
+    Connection, Error, Result, Session, Transaction,
 };
 
 use crate::{
     spann::centroid_stats::CentroidCounts,
     vamana::{
         prune_edges,
-        wt::{read_app_metadata, SessionGraphVectorIndex, TableGraphVectorIndex},
+        wt::{read_app_metadata, TableGraphVectorIndex, TransactionGraphVectorIndex},
         EdgePruningConfig, EdgeSetDistanceComputer, GraphConfig, GraphSearchParams,
         GraphVectorIndex, GraphVectorStore,
     },
@@ -257,7 +257,9 @@ impl TableIndex {
     ) -> Result<()> {
         TableGraphVectorIndex::drop_tables(session, &Self::head_name(index_name), options)?;
         for table_name in TableNames::from_index_name(index_name).all_names() {
-            session.connection().drop_table(table_name, options.clone())?;
+            session
+                .connection()
+                .drop_table(table_name, options.clone())?;
         }
         Ok(())
     }
@@ -570,29 +572,36 @@ fn select_centroids_soar(
     ))
 }
 
-pub struct SessionIndexReader {
+pub struct TransactionIndex {
     index: Arc<TableIndex>,
-    head_reader: SessionGraphVectorIndex,
+    head_reader: TransactionGraphVectorIndex,
 }
 
-impl SessionIndexReader {
-    pub fn new(index: &Arc<TableIndex>, session: Session) -> Self {
-        let head_reader = SessionGraphVectorIndex::new(index.head_config().clone(), session);
+impl TransactionIndex {
+    pub fn new(index: &Arc<TableIndex>, transaction: Transaction) -> Self {
+        let head_reader =
+            TransactionGraphVectorIndex::new(Arc::clone(index.head_config()), transaction);
         Self {
             index: index.clone(),
             head_reader,
         }
     }
 
-    pub fn session(&self) -> &Session {
-        self.head_reader.session()
+    pub fn transaction(&self) -> &Transaction {
+        self.head_reader.transaction()
     }
 
     pub fn index(&self) -> &TableIndex {
         self.index.as_ref()
     }
 
-    pub fn head_reader(&self) -> &SessionGraphVectorIndex {
-        &self.head_reader
+    /// Commit the underlying [`Transaction`] with the provided options.
+    pub fn commit(self, options: Option<CommitTransactionOptions>) -> Result<()> {
+        self.head_reader.commit(options)
+    }
+
+    /// Rollback the underlying [`Transaction`] with the provided options.
+    pub fn rollback(self, options: Option<RollbackTransactionOptions>) -> Result<()> {
+        self.head_reader.rollback(options)
     }
 }

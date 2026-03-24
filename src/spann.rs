@@ -574,34 +574,37 @@ fn select_centroids_soar(
 
 pub struct TransactionIndex {
     index: Arc<TableIndex>,
-    head_reader: TransactionGraphVectorIndex,
+    head: TransactionGraphVectorIndex,
 }
 
 impl TransactionIndex {
     pub fn new(index: &Arc<TableIndex>, transaction: Transaction) -> Self {
-        let head_reader =
-            TransactionGraphVectorIndex::new(Arc::clone(index.head_config()), transaction);
+        let head = TransactionGraphVectorIndex::new(Arc::clone(index.head_config()), transaction);
         Self {
             index: index.clone(),
-            head_reader,
+            head,
         }
     }
 
     pub fn transaction(&self) -> &Transaction {
-        self.head_reader.transaction()
+        self.head.transaction()
     }
 
-    pub fn index(&self) -> &TableIndex {
-        self.index.as_ref()
+    pub fn head(&self) -> &TransactionGraphVectorIndex {
+        &self.head
+    }
+
+    pub fn index(&self) -> &Arc<TableIndex> {
+        &self.index
     }
 
     /// Commit the underlying [`Transaction`] with the provided options.
     pub fn commit(self, options: Option<CommitTransactionOptions>) -> Result<()> {
-        self.head_reader.commit(options)
+        self.head.commit(options)
     }
 
     /// Rollback the underlying [`Transaction`] with the provided options.
     pub fn rollback(self, options: Option<RollbackTransactionOptions>) -> Result<()> {
-        self.head_reader.rollback(options)
+        self.head.rollback(options)
     }
 }

@@ -201,7 +201,7 @@ impl Searcher {
     pub fn search(&mut self, query: &[f32], reader: &TransactionIndex) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 
-        let mut centroids = self.head_searcher.search(query, &reader.head_reader)?;
+        let mut centroids = self.head_searcher.search(query, reader.head())?;
         self.stats.head = self.head_searcher.stats();
         if centroids.is_empty() {
             return Ok(vec![]);
@@ -268,7 +268,7 @@ impl Searcher {
             .config()
             .rerank_format
             .expect("rerank format is set");
-        let query = format.query_vector_distance_f32(query, reader.head_reader.config().similarity);
+        let query = format.query_vector_distance_f32(query, reader.head().config().similarity);
         let mut raw_cursor = reader
             .transaction()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;

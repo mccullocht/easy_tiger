@@ -128,12 +128,6 @@ impl Transaction {
         self.open = false;
         self.session.rollback_transaction(options)
     }
-
-    /// Get a reference to the session underlying this transaction.
-    // TODO(txn): remove all references to this method. Session shouldn't be an exported type.
-    pub fn session(&self) -> &Session {
-        &self.session
-    }
 }
 
 impl Drop for Transaction {

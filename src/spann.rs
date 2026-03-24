@@ -21,7 +21,7 @@ use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding};
 use wt_mdb::{
     connection::{CreateOptionsBuilder, DropOptions},
     session::{CommitTransactionOptions, FormatString, Formatted, RollbackTransactionOptions},
-    Connection, Error, Result, Session, Transaction,
+    Connection, Error, Result, Transaction,
 };
 
 use crate::{
@@ -250,19 +250,13 @@ impl TableIndex {
     }
 
     pub fn drop_tables(
-        session: &Session,
+        connection: &Arc<Connection>,
         index_name: &str,
         options: &Option<DropOptions>,
     ) -> Result<()> {
-        TableGraphVectorIndex::drop_tables(
-            session.connection(),
-            &Self::head_name(index_name),
-            options,
-        )?;
+        TableGraphVectorIndex::drop_tables(connection, &Self::head_name(index_name), options)?;
         for table_name in TableNames::from_index_name(index_name).all_names() {
-            session
-                .connection()
-                .drop_table(table_name, options.clone())?;
+            connection.drop_table(table_name, options.clone())?;
         }
         Ok(())
     }

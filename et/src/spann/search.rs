@@ -92,8 +92,8 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
     );
-    let session = connection.open_session()?;
-    let centroid_selector = CentroidSelector::new(args.centroid_selector, &index, &session)?;
+    let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
+    let centroid_selector = CentroidSelector::new(args.centroid_selector, &txn_idx)?;
     let search_params = SearchParams {
         head_params: GraphSearchParams {
             beam_width: args.head_candidates,

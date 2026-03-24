@@ -26,7 +26,7 @@ use rustix::io::Errno;
 use thread_local::ThreadLocal;
 use tracing::warn;
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{connection::CreateOptionsBuilder, Connection, Error, Result, Session};
+use wt_mdb::{connection::CreateOptionsBuilder, Connection, Error, Result, Transaction};
 
 use crate::{
     input::{DerefVectorStore, VectorStore},
@@ -243,8 +243,8 @@ where
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
         let distance_fn = self.index.high_fidelity_table().new_distance_function();
         let apply_mu = {
-            let session = self.connection.open_session()?;
-            let reader = BulkLoadGraphVectorIndexReader(self, &session);
+            let txn = self.connection.begin_transaction(None)?;
+            let reader = BulkLoadGraphVectorIndexReader(self, &txn);
             let mut vectors = reader.high_fidelity_vectors()?;
             Mutex::new((
                 0i64,
@@ -270,7 +270,7 @@ where
                         RefCell::new(GraphSearcher::new(self.index.config().index_search_params))
                     })
                     .borrow_mut();
-                let mut reader = BulkLoadGraphVectorIndexReader(self, &txn.session());
+                let mut reader = BulkLoadGraphVectorIndexReader(self, &txn);
                 in_flight.insert(v);
                 let mut edges = self.search_for_insert(v, &mut searcher, &mut reader)?;
                 let centroid_distance = {
@@ -352,7 +352,7 @@ where
 
         (0..self.limit).into_par_iter().try_for_each(|v| {
             let txn = self.connection.begin_transaction(None)?;
-            let mut reader = BulkLoadGraphVectorIndexReader(self, txn.session());
+            let mut reader = BulkLoadGraphVectorIndexReader(self, &txn);
             self.prune_and_apply(v, &mut reader, &apply_mu)?;
             progress(1);
             Ok::<_, wt_mdb::Error>(())
@@ -564,7 +564,7 @@ where
     }
 }
 
-struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Session);
+struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Transaction);
 
 impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
     for BulkLoadGraphVectorIndexReader<'_, '_, D>
@@ -595,7 +595,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
             ))
         } else {
             Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
-                self.1.get_record_cursor(self.0.index.nav_table().name())?,
+                self.1.open_record_cursor(self.0.index.nav_table().name())?,
                 self.config().similarity,
                 self.config().nav_format,
             )))
@@ -604,7 +604,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
 
     fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
         self.0.index.rerank_table().map(|t| {
-            self.1.get_record_cursor(t.name()).map(|c| {
+            self.1.open_record_cursor(t.name()).map(|c| {
                 BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
                     c,
                     self.0.index.config().similarity,

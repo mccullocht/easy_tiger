@@ -11,7 +11,8 @@ use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity}
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
     connection::{CreateOptionsBuilder, DropOptions},
-    Connection, Error, RecordCursorGuard, Result, Session,
+    session::{CommitTransactionOptions, RollbackTransactionOptions},
+    Connection, Error, RecordCursorGuard, Result, Session, Transaction,
 };
 
 use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore};
@@ -274,7 +275,9 @@ impl TableGraphVectorIndex {
         options: &Option<DropOptions>,
     ) -> Result<()> {
         for table_name in Self::generate_table_names(index_name) {
-            session.connection().drop_table(&table_name, options.clone())?;
+            session
+                .connection()
+                .drop_table(&table_name, options.clone())?;
         }
         Ok(())
     }
@@ -311,35 +314,44 @@ impl TableGraphVectorIndex {
     }
 }
 
-/// A `GraphVectorIndex` implementation that operates on a WiredTiger store.
-pub struct SessionGraphVectorIndex {
+/// A `GraphVectorIndex` implementation that operates within a WiredTiger transaction.
+pub struct TransactionGraphVectorIndex {
     index: Arc<TableGraphVectorIndex>,
-    session: Session,
+    transaction: Transaction,
 }
 
-impl SessionGraphVectorIndex {
-    /// Create a new `TableGraphVectorIndex` given a named index and a session to access that data.
-    pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
-        Self { index, session }
+impl TransactionGraphVectorIndex {
+    /// Create a new instance over `index` using `transaction` for db access.
+    pub fn new(index: Arc<TableGraphVectorIndex>, transaction: Transaction) -> Self {
+        Self { index, transaction }
     }
 
-    /// Return a reference to the underlying `Session`.
-    pub fn session(&self) -> &Session {
-        &self.session
-    }
-
-    /// Return a reference to the index in use.
-    pub fn index(&self) -> &TableGraphVectorIndex {
+    pub fn index(&self) -> &Arc<TableGraphVectorIndex> {
         &self.index
     }
 
-    /// Unwrap into the inner `Session`.
-    pub fn into_session(self) -> Session {
-        self.session
+    /// Return a reference to the underlying `Transaction`.
+    pub fn transaction(&self) -> &Transaction {
+        &self.transaction
+    }
+
+    /// Unwrap into the inner `Transaction`.
+    pub fn into_transaction(self) -> Transaction {
+        self.transaction
+    }
+
+    /// Commit the underlying [`Transaction`] with the provided options.
+    pub fn commit(self, options: Option<CommitTransactionOptions>) -> Result<()> {
+        self.transaction.commit(options)
+    }
+
+    /// Rollback the underlying [`Transaction`] with the provided options.
+    pub fn rollback(self, options: Option<RollbackTransactionOptions>) -> Result<()> {
+        self.transaction.rollback(options)
     }
 }
 
-impl GraphVectorIndex for SessionGraphVectorIndex {
+impl GraphVectorIndex for TransactionGraphVectorIndex {
     type Graph<'a>
         = CursorGraph<'a>
     where
@@ -355,15 +367,15 @@ impl GraphVectorIndex for SessionGraphVectorIndex {
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
         Ok(CursorGraph::new(
-            self.session
-                .get_record_cursor(self.index.graph_table_name())?,
+            self.transaction
+                .open_record_cursor(self.index.graph_table_name())?,
         ))
     }
 
     fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
         Ok(CursorVectorStore::new(
-            self.session
-                .get_record_cursor(self.index.nav_table().name())?,
+            self.transaction
+                .open_record_cursor(self.index.nav_table().name())?,
             self.index.config.similarity,
             self.index.config().nav_format,
         ))
@@ -371,8 +383,8 @@ impl GraphVectorIndex for SessionGraphVectorIndex {
 
     fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
         self.index.rerank_table().map(|t| {
-            self.session
-                .get_record_cursor(t.name())
+            self.transaction
+                .open_record_cursor(t.name())
                 .map(|c| CursorVectorStore::new(c, self.index.config().similarity, t.format()))
         })
     }

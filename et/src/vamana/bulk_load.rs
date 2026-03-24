@@ -4,18 +4,18 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
+        GraphConfig, GraphSearchParams, PatienceParams,
         bulk::{BulkLoadBuilder, Options},
         wt::TableGraphVectorIndex,
-        GraphConfig, GraphSearchParams, PatienceParams,
     },
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{Connection, Result, Session};
-use wt_sys::{WT_STAT_CONN_CACHE_BYTES_READ, WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_READ_IO};
+use wt_mdb::Connection;
 
 use crate::{
     ui::progress_bar,
-    vamana::{drop_index::drop_index, EdgePruningArgs},
+    vamana::{EdgePruningArgs, drop_index::drop_index},
+    wt_stats::WiredTigerConnectionStats,
 };
 
 #[derive(Args)]
@@ -128,7 +128,7 @@ pub fn bulk_load(
     }
     println!("{:?}", builder.graph_stats().unwrap());
 
-    let stats = wired_tiger_stats(&connection.open_session()?)?;
+    let stats = WiredTigerConnectionStats::try_from(&connection)?;
     println!(
         "cache hit rate {:.2}% ({} reads, {} lookups); {} bytes read into cache",
         (stats.search_calls - stats.read_ios) as f64 * 100.0 / stats.search_calls as f64,
@@ -138,29 +138,4 @@ pub fn bulk_load(
     );
 
     Ok(())
-}
-
-struct WiredTigerStats {
-    search_calls: i64,
-    read_ios: i64,
-    read_bytes: i64,
-}
-
-/// Count lookup calls and read IOs. This can be used to estimate cache hit rate.
-fn wired_tiger_stats(session: &Session) -> Result<WiredTigerStats> {
-    let mut stat_cursor = session.new_stats_cursor(wt_mdb::Statistics::Fast, None)?;
-    Ok(WiredTigerStats {
-        search_calls: stat_cursor
-            .seek_exact(WT_STAT_CONN_CURSOR_SEARCH as i32)
-            .expect("WT_STAT_CONN_CURSOR_SEARCH")?
-            .value,
-        read_ios: stat_cursor
-            .seek_exact(WT_STAT_CONN_READ_IO as i32)
-            .expect("WT_STAT_CONN_READ_IO")?
-            .value,
-        read_bytes: stat_cursor
-            .seek_exact(WT_STAT_CONN_CACHE_BYTES_READ as i32)
-            .expect("WT_STATE_CONN_CACHE_BYTES_READ")?
-            .value,
-    })
 }

@@ -10,10 +10,10 @@ use crate::{
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{connection::CreateOptionsBuilder, session::Formatted, Connection, Result, Session};
+use wt_mdb::{connection::CreateOptionsBuilder, session::Formatted, Connection, Result};
 
 /// Assign all the vectors to one or more centroids in the head index. This performs the same search
-/// and pruning as [`super::SessionIndexWriter`] does.
+/// and pruning as [`super::TransactionIndex`] does.
 pub fn assign_to_centroids(
     index: &TableIndex,
     connection: &Arc<Connection>,
@@ -49,12 +49,11 @@ pub fn assign_to_centroids(
 /// Load all centroid assignments into a record id keyed table.
 pub fn load_centroids(
     index: &TableIndex,
-    session: &Session,
+    connection: &Arc<Connection>,
     centroid_assignments: &[CentroidAssignment],
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
-    let mut bulk_cursor = session
-        .connection()
+    let mut bulk_cursor = connection
         .new_bulk_load_cursor::<i64, CentroidAssignment>(&index.table_names.centroids, None)?;
     for (record_id, centroids) in centroid_assignments.iter().enumerate() {
         bulk_cursor.append(record_id as i64, centroids.to_formatted_ref())?;
@@ -69,7 +68,7 @@ pub fn load_centroids(
 /// assigned vectors for efficient statistics queries.
 pub fn load_centroid_stats(
     index: &TableIndex,
-    session: &Session,
+    connection: &Arc<Connection>,
     centroid_assignments: &[CentroidAssignment],
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
@@ -94,8 +93,7 @@ pub fn load_centroid_stats(
     let mut stats = stats.into_iter().collect::<Vec<_>>();
     stats.sort_by_key(|(id, _)| *id);
     // Bulk load the stats
-    let mut bulk_cursor = session
-        .connection()
+    let mut bulk_cursor = connection
         .new_bulk_load_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats, None)?;
 
     for (centroid_id, counts) in stats {
@@ -114,7 +112,7 @@ pub fn load_centroid_stats(
 /// pages. Bulk uploading also avoids checkpointing.
 pub fn load_postings(
     index: &TableIndex,
-    session: &Session,
+    connection: &Arc<Connection>,
     centroid_assignments: &[CentroidAssignment],
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     progress: impl Fn(u64) + Send + Sync,
@@ -135,15 +133,13 @@ pub fn load_postings(
         .config()
         .posting_coder
         .new_coder(index.head_config().config().similarity);
-    let mut bulk_cursor = session
-        .connection()
-        .new_bulk_load_cursor::<PostingKey, Vec<u8>>(
-            &index.table_names.postings,
-            Some(
-                CreateOptionsBuilder::default()
-                    .app_metadata(&serde_json::to_string(&index.config).unwrap()),
-            ),
-        )?;
+    let mut bulk_cursor = connection.new_bulk_load_cursor::<PostingKey, Vec<u8>>(
+        &index.table_names.postings,
+        Some(
+            CreateOptionsBuilder::default()
+                .app_metadata(&serde_json::to_string(&index.config).unwrap()),
+        ),
+    )?;
     // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
     // this will also allow us to parallelize IO.
     let mut encoded_buffer =
@@ -166,14 +162,13 @@ pub fn load_postings(
 /// Bulk load raw vector data into the raw vectors table for re-ranking.
 pub fn load_raw_vectors(
     index: &TableIndex,
-    session: &Session,
+    connection: &Arc<Connection>,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     limit: usize,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
-    let mut bulk_cursor = session
-        .connection()
-        .new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
+    let mut bulk_cursor =
+        connection.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
     let coder = index
         .config()
         .rerank_format

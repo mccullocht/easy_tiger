@@ -64,7 +64,7 @@ pub fn rebalance(
     let mut rebalance_stats = RebalanceStats::default();
     for _ in 0..args.iterations.get() {
         let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
-        let stats = CentroidStats::from_index_stats(txn_idx.transaction().session(), &index)?;
+        let stats = CentroidStats::from_index_stats(&txn_idx)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
 
         if let Some(ref progress) = progress {
@@ -101,7 +101,7 @@ pub fn rebalance(
 
     let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
     if let Some(progress) = progress {
-        let stats = CentroidStats::from_index_stats(txn_idx.transaction().session(), &index)?;
+        let stats = CentroidStats::from_index_stats(&txn_idx)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
         progress.set_message(format!(
             "rebalancing {}/{} {:.2}% clusters in policy",
@@ -111,7 +111,7 @@ pub fn rebalance(
         ));
         progress.finish_using_style();
     }
-    let stats = CentroidStats::from_index_stats(txn_idx.transaction().session(), &index)?;
+    let stats = CentroidStats::from_index_stats(&txn_idx)?;
     let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
     if summary.in_policy_fraction() < 1.0 {
         print_balance_summary(&summary);

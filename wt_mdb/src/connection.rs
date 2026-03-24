@@ -283,9 +283,7 @@ impl Connection {
             .map(|conn| Arc::new(Connection(conn)))
     }
 
-    /// Create a new `Session`. These can be used to obtain cursors to read and write data
-    /// as well as manage transaction.
-    pub fn open_session(self: &Arc<Self>) -> Result<Session> {
+    pub(crate) fn open_session(self: &Arc<Self>) -> Result<Session> {
         let mut sessionp: *mut WT_SESSION = ptr::null_mut();
         unsafe {
             wt_call!(
@@ -299,6 +297,12 @@ impl Connection {
         NonNull::new(sessionp)
             .ok_or(Error::generic_error())
             .map(|session| Session::new(session, self))
+    }
+
+    /// Write a checkpoint of the database to disk. This may also be configured to occur
+    /// automatically at some interval or log size via the `Options` passed to `Connection::open`.
+    pub fn checkpoint(self: &Arc<Self>) -> Result<()> {
+        self.open_session()?.checkpoint()
     }
 
     /// Query a connection global timestamp value maintained by WiredTiger.

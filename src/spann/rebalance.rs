@@ -228,8 +228,7 @@ pub fn merge_centroid(
         .collect::<HashSet<_>>()
         .len();
 
-    let mut assignment_updater =
-        CentroidAssignmentUpdater::new(&index, txn_idx.transaction().session())?;
+    let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
     posting_cursor.reset()?;
     for (record_id, new_assignments, vector) in reassignments {
         let old_assignments =
@@ -327,9 +326,7 @@ pub fn split_centroid(
     upsert_vector(target_centroid_ids.0 as i64, &centroids[0], txn_idx.head())?;
     upsert_vector(target_centroid_ids.1 as i64, &centroids[1], txn_idx.head())?;
 
-    // TODO(txn): stop passing Session to CentroidAssignmentUpdater.
-    let mut assignment_updater =
-        CentroidAssignmentUpdater::new(txn_idx.index(), txn_idx.transaction().session())?;
+    let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
     // TODO: skip decoding if head index and posting index format are the same.
     let c0_dist_fn = posting_format
         .query_vector_distance_indexing(posting_coder.encode(&original_centroid), similarity);

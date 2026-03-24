@@ -14,7 +14,7 @@ use crate::ui::progress_bar;
 pub fn verify_primary_assignments(connection: Arc<Connection>, index_name: &str) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
     let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
-    let stats = CentroidStats::from_index_stats(&txn_idx.transaction().session(), &index)?;
+    let stats = CentroidStats::from_index_stats(&txn_idx)?;
 
     // Read primary assignments and head vectors. Re-encode the head vectors in the same format as
     // the postings to make comparisons cheaper since we will be doing this exhaustively.
@@ -75,10 +75,7 @@ fn read_primary_assignments(
 ) -> Result<Vec<PostingKey>> {
     let cursor = txn_idx
         .transaction()
-        .session()
-        .get_or_create_typed_cursor::<i64, Vec<u8>>(
-            &txn_idx.index().centroid_assignments_table_name(),
-        )?;
+        .open_cursor::<i64, Vec<u8>>(&txn_idx.index().centroid_assignments_table_name())?;
     let primary_assignments = stats
         .primary_assignment_counts_iter()
         .map(|(_, c)| c as usize)

@@ -3,10 +3,10 @@ use std::{ffi::CString, sync::Arc};
 use crate::{
     session::{
         table_uri, BeginTransactionOptions, CommitTransactionOptions, Formatted,
-        MetadataCursorGuard, QueryTransactionTimestampType, RollbackTransactionOptions,
+        MetadataCursorGuard, QueryTransactionTimestampType, RollbackTransactionOptions, Session,
         SetTransactionTimestampType, StatValue, METADATA_URI,
     },
-    Connection, IndexCursorGuard, RecordCursorGuard, Result, Session, StatCursor, Statistics,
+    Connection, IndexCursorGuard, RecordCursorGuard, Result, StatCursor, Statistics,
     TypedCursorGuard,
 };
 
@@ -127,12 +127,6 @@ impl Transaction {
     pub fn rollback(mut self, options: Option<RollbackTransactionOptions>) -> Result<()> {
         self.open = false;
         self.session.rollback_transaction(options)
-    }
-
-    /// Get a reference to the session underlying this transaction.
-    // TODO(txn): remove all references to this method. Session shouldn't be an exported type.
-    pub fn session(&self) -> &Session {
-        &self.session
     }
 }
 

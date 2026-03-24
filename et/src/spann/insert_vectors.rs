@@ -210,8 +210,7 @@ fn insert_batch(
 
     let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
     progress.set_message("writing postings");
-    let mut assignment_updater =
-        CentroidAssignmentUpdater::new(index, txn_idx.transaction().session())?;
+    let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
     let mut posting_cursor = txn_idx
         .transaction()
         .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
@@ -261,7 +260,7 @@ fn rebalance(
         // Need a new transaction for rebalancing steps
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
 
-        let stats = CentroidStats::from_index_stats(txn_idx.transaction().session(), &index)?;
+        let stats = CentroidStats::from_index_stats(&txn_idx)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
 
         match (summary.below_exemplar(), summary.above_exemplar()) {

@@ -127,8 +127,8 @@ impl From<Error> for std::io::Error {
 
 pub use connection::{BulkLoadCursor, Connection};
 pub use session::{
-    IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, Session, StatCursor,
-    TypedCursor, TypedCursorGuard,
+    IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, StatCursor, TypedCursor,
+    TypedCursorGuard,
 };
 pub use transaction::Transaction;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -254,7 +254,7 @@ mod test {
             SetGlobalTimestampType,
         },
         session::{Formatted, QueryTransactionTimestampType, SetTransactionTimestampType},
-        Error, RecordCursor, Result, Session, Statistics, WiredTigerError,
+        Error, RecordCursorGuard, Result, Statistics, Transaction, WiredTigerError,
     };
 
     fn conn_options() -> Option<crate::connection::Options> {
@@ -274,9 +274,9 @@ mod test {
     fn record_insert_and_iterate() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", None).unwrap();
-        let mut cursor = session.open_record_cursor("test").unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(11, b"bar"), Ok(()));
         assert_eq!(cursor.set(7, b"foo"), Ok(()));
         assert_eq!(cursor.next(), Some(Ok((7, b"foo".to_vec()))));
@@ -288,9 +288,9 @@ mod test {
     fn index_insert_and_iterate() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", index_table_options()).unwrap();
-        let mut cursor = session.open_index_cursor("test").unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_index_cursor("test").unwrap();
         assert_eq!(cursor.set(&b"b".as_slice(), &b"bar".as_slice()), Ok(()));
         assert_eq!(cursor.set(&b"a".as_slice(), &b"foo".as_slice()), Ok(()));
         assert_eq!(cursor.next(), Some(Ok((b"a".to_vec(), b"foo".to_vec()))));
@@ -302,9 +302,9 @@ mod test {
     fn record_insert_and_search() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", None).unwrap();
-        let mut cursor = session.open_record_cursor("test").unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
         let value: &[u8] = b"bar";
         assert_eq!(cursor.set(7, value), Ok(()));
         assert_eq!(cursor.set(11, value), Ok(()));
@@ -316,9 +316,9 @@ mod test {
     fn index_insert_and_search() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", index_table_options()).unwrap();
-        let mut cursor = session.open_index_cursor("test").unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_index_cursor("test").unwrap();
         let value = b"bar".to_vec();
         assert_eq!(cursor.set(&b"a".as_slice(), &value.as_slice()), Ok(()));
         assert_eq!(cursor.set(&b"b".as_slice(), &value.as_slice()), Ok(()));
@@ -330,9 +330,9 @@ mod test {
     fn record_insert_and_remove() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", None).unwrap();
-        let mut cursor = session.open_record_cursor("test").unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
         assert_eq!(cursor.set(11, b"bar"), Ok(()));
         assert_eq!(cursor.set(7, b"foo"), Ok(()));
         assert_eq!(cursor.remove(7), Ok(()));
@@ -348,9 +348,9 @@ mod test {
     fn index_insert_and_remove() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", index_table_options()).unwrap();
-        let mut cursor = session.open_index_cursor("test").unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_index_cursor("test").unwrap();
         assert_eq!(cursor.set(&b"b".as_slice(), &b"bar".as_slice()), Ok(()));
         assert_eq!(cursor.set(&b"a".as_slice(), &b"foo".as_slice()), Ok(()));
         assert_eq!(cursor.remove(&b"a".as_slice()), Ok(()));
@@ -366,9 +366,9 @@ mod test {
     fn record_largest_key() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", None).unwrap();
-        let mut cursor = session.open_record_cursor("test").unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
         assert_eq!(cursor.largest_key(), None);
         assert_eq!(cursor.set(-1, b"bar"), Ok(()));
         assert_eq!(cursor.largest_key(), Some(Ok(-1)));
@@ -380,9 +380,9 @@ mod test {
     fn index_largest_key() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", index_table_options()).unwrap();
-        let mut cursor = session.open_index_cursor("test").unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_index_cursor("test").unwrap();
         assert_eq!(cursor.largest_key(), None);
         assert_eq!(cursor.set(&b"a".as_slice(), &b"bar".as_slice()), Ok(()));
         assert_eq!(cursor.largest_key(), Some(Ok(b"a".to_vec())));
@@ -394,18 +394,27 @@ mod test {
     fn transaction_commit() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", None).unwrap();
-        let read_session = conn.open_session().unwrap();
-        let mut read_cursor = read_session.open_record_cursor("test").unwrap();
 
-        let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(session.begin_transaction(None), Ok(()));
-        assert_eq!(cursor.set(1, b"foo"), Ok(()));
-        assert_eq!(cursor.set(2, b"bar"), Ok(()));
-        assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
-        assert_eq!(read_cursor.next(), None);
-        assert_eq!(session.commit_transaction(None), Ok(()));
+        let write_txn = conn.begin_transaction(None).unwrap();
+        {
+            let mut cursor = write_txn.open_record_cursor("test").unwrap();
+            assert_eq!(cursor.set(1, b"foo"), Ok(()));
+            assert_eq!(cursor.set(2, b"bar"), Ok(()));
+            assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
+
+            // Concurrent transaction does not see uncommitted writes.
+            let read_txn = conn.begin_transaction(None).unwrap();
+            {
+                let mut read_cursor = read_txn.open_record_cursor("test").unwrap();
+                assert_eq!(read_cursor.next(), None);
+            }
+        }
+        write_txn.commit(None).unwrap();
+
+        // After commit, a new transaction sees the written data.
+        let read_txn = conn.begin_transaction(None).unwrap();
+        let mut read_cursor = read_txn.open_record_cursor("test").unwrap();
         assert_eq!(read_cursor.next(), Some(Ok((1, b"foo".to_vec()))));
     }
 
@@ -413,29 +422,35 @@ mod test {
     fn transaction_rollback() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", None).unwrap();
 
-        let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(session.begin_transaction(None), Ok(()));
-        assert_eq!(cursor.set(1, b"foo"), Ok(()));
-        assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
-        assert_eq!(session.rollback_transaction(None), Ok(()));
-        assert_eq!(cursor.next(), None);
+        let txn = conn.begin_transaction(None).unwrap();
+        {
+            let mut cursor = txn.open_record_cursor("test").unwrap();
+            assert_eq!(cursor.set(1, b"foo"), Ok(()));
+            assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
+        }
+        txn.rollback(None).unwrap();
+
+        // After rollback, the write is not visible.
+        let read_txn = conn.begin_transaction(None).unwrap();
+        let mut read_cursor = read_txn.open_record_cursor("test").unwrap();
+        assert_eq!(read_cursor.next(), None);
     }
 
     #[test]
     fn cursor_cache() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", None).unwrap();
 
-        let mut cursor = session.get_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(1, b"foo"), Ok(()));
-        drop(cursor);
+        let txn = conn.begin_transaction(None).unwrap();
+        {
+            let mut cursor = txn.open_record_cursor("test").unwrap();
+            assert_eq!(cursor.set(1, b"foo"), Ok(()));
+        }
 
-        cursor = session.get_record_cursor("test").unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
         assert_eq!(cursor.next(), Some(Ok((1, b"foo".to_vec()))));
         assert_eq!(cursor.next(), None);
     }
@@ -444,7 +459,6 @@ mod test {
     fn bulk_load() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
 
         // Create Vec<Record>, bulk_load() into conn, compare cursors.
         let records = vec![
@@ -457,7 +471,8 @@ mod test {
             Ok(())
         );
 
-        let cursor = session.open_record_cursor("test").unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let cursor = txn.open_record_cursor("test").unwrap();
         for (expected, actual) in records.iter().zip(cursor) {
             assert_eq!(Ok((expected.0, expected.1.clone())), actual);
         }
@@ -467,12 +482,15 @@ mod test {
     fn bulk_load_existing_table() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
 
         // Bulk load will happily load into an empty table, so to get it to fail we insert a record.
         assert_eq!(conn.create_table("test", None), Ok(()));
-        let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(1, b"bar"), Ok(()));
+        let txn = conn.begin_transaction(None).unwrap();
+        {
+            let mut cursor = txn.open_record_cursor("test").unwrap();
+            assert_eq!(cursor.set(1, b"bar"), Ok(()));
+        }
+        txn.commit(None).unwrap();
         assert_eq!(
             conn.bulk_load::<i64, Vec<u8>, _>("test", None, [(7, b"foo".to_vec())].into_iter()),
             Err(Error::Errno(Errno::BUSY))
@@ -498,9 +516,8 @@ mod test {
     fn checkpoint() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", None).unwrap();
-        session.checkpoint().unwrap();
+        conn.checkpoint().unwrap();
     }
 
     #[test]
@@ -516,22 +533,26 @@ mod test {
             ),
         )
         .unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", None).unwrap();
-        let mut cursor = session.open_record_cursor("test").unwrap();
-        assert_eq!(cursor.set(11, b"bar"), Ok(()));
-        assert_eq!(cursor.set(7, b"foo"), Ok(()));
+        let txn = conn.begin_transaction(None).unwrap();
+        {
+            let mut cursor = txn.open_record_cursor("test").unwrap();
+            assert_eq!(cursor.set(11, b"bar"), Ok(()));
+            assert_eq!(cursor.set(7, b"foo"), Ok(()));
+        }
+        txn.commit(None).unwrap();
 
-        for stat in session
-            .new_stats_cursor(Statistics::Fast, None)
+        let stats_txn = conn.begin_transaction(None).unwrap();
+        for stat in stats_txn
+            .open_stats_cursor(Statistics::Fast, None)
             .expect("new cursor")
         {
             let (_, stat) = stat.unwrap();
             assert!(stat.value >= 0, "{}", stat.description.to_string_lossy());
         }
 
-        for stat in session
-            .new_stats_cursor(Statistics::Fast, Some("test"))
+        for stat in stats_txn
+            .open_stats_cursor(Statistics::Fast, Some("test"))
             .unwrap()
         {
             let (_, stat) = stat.unwrap();
@@ -539,8 +560,8 @@ mod test {
         }
 
         assert!(
-            session
-                .new_stats_cursor(Statistics::Fast, None)
+            stats_txn
+                .open_stats_cursor(Statistics::Fast, None)
                 .unwrap()
                 .seek_exact(wt_sys::WT_STAT_CONN_READ_IO as i32)
                 .unwrap()
@@ -554,9 +575,9 @@ mod test {
     fn metadata_cursors() {
         let tmpdir = tempfile::tempdir().unwrap();
         let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
-        let session = conn.open_session().unwrap();
         conn.create_table("test", None).unwrap();
-        let cursor = session.open_metadata_cursor().unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let cursor = txn.open_metadata_cursor().unwrap();
         assert_eq!(
             cursor
                 .map(|e| e.map(|(k, _)| k.into_string().expect("key into string")))
@@ -574,7 +595,7 @@ mod test {
 
     struct RecordTableFixture {
         table_name: String,
-        session: Session,
+        txn: Transaction,
         connection: Arc<Connection>,
         _dir: TempDir,
     }
@@ -584,23 +605,25 @@ mod test {
             let dir = tempfile::tempdir().unwrap();
             let connection =
                 Connection::open(dir.path().to_str().unwrap(), conn_options()).unwrap();
-            let session = connection.open_session().unwrap();
-            let mut bulk_cursor = connection
-                .new_bulk_load_cursor::<i64, Vec<u8>>(table_name, None)
-                .unwrap();
-            for (k, v) in data {
-                bulk_cursor.append(*k, v.to_formatted_ref()).unwrap()
+            {
+                let mut bulk_cursor = connection
+                    .new_bulk_load_cursor::<i64, Vec<u8>>(table_name, None)
+                    .unwrap();
+                for (k, v) in data {
+                    bulk_cursor.append(*k, v.to_formatted_ref()).unwrap()
+                }
             }
+            let txn = connection.begin_transaction(None).unwrap();
             Self {
                 table_name: table_name.to_string(),
-                session,
+                txn,
                 connection,
                 _dir: dir,
             }
         }
 
-        fn open_cursor(&self) -> Result<RecordCursor<'_>> {
-            self.session.open_record_cursor(&self.table_name)
+        fn open_cursor(&self) -> Result<RecordCursorGuard<'_>> {
+            self.txn.open_record_cursor(&self.table_name)
         }
     }
 
@@ -706,25 +729,25 @@ mod test {
         let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
         assert_eq!(
             fixture
-                .session
+                .txn
                 .query_transaction_timestamp(QueryTransactionTimestampType::Read),
             Ok(0)
         );
         assert_eq!(
             fixture
-                .session
+                .txn
                 .query_transaction_timestamp(QueryTransactionTimestampType::Commit),
             Ok(0)
         );
         assert_eq!(
             fixture
-                .session
+                .txn
                 .query_transaction_timestamp(QueryTransactionTimestampType::FirstCommit),
             Ok(0)
         );
         assert_eq!(
             fixture
-                .session
+                .txn
                 .query_transaction_timestamp(QueryTransactionTimestampType::Prepare),
             Ok(0)
         );
@@ -734,21 +757,17 @@ mod test {
     #[test]
     fn set_transaction_timestamp() -> Result<()> {
         let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
-        fixture.session.begin_transaction(None)?;
-        let mut cursor = fixture.open_cursor()?;
-        cursor.set(1, b"a")?;
-        fixture
-            .session
-            .set_transaction_timestamp(SetTransactionTimestampType::Commit, 1)?;
-        fixture.session.commit_transaction(None)?;
-
-        fixture.session.reset()?;
+        let txn = fixture.connection.begin_transaction(None)?;
+        {
+            let mut cursor = txn.open_record_cursor(&fixture.table_name)?;
+            cursor.set(1, b"a")?;
+        }
+        txn.set_transaction_timestamp(SetTransactionTimestampType::Commit, 1)?;
         assert_eq!(
-            fixture
-                .session
-                .query_transaction_timestamp(QueryTransactionTimestampType::Commit),
+            txn.query_transaction_timestamp(QueryTransactionTimestampType::Commit),
             Ok(1)
         );
+        txn.commit(None)?;
         Ok(())
     }
 
@@ -774,13 +793,13 @@ mod test {
     #[test]
     fn set_global_timestamp() -> Result<()> {
         let fixture = RecordTableFixture::with_data("test", &[(0, b"a".to_vec())]);
-        fixture.session.begin_transaction(None)?;
-        let mut cursor = fixture.open_cursor()?;
-        cursor.set(1, b"a")?;
-        fixture
-            .session
-            .set_transaction_timestamp(SetTransactionTimestampType::Commit, 1)?;
-        fixture.session.commit_transaction(None)?;
+        let txn = fixture.connection.begin_transaction(None)?;
+        {
+            let mut cursor = txn.open_record_cursor(&fixture.table_name)?;
+            cursor.set(1, b"a")?;
+        }
+        txn.set_transaction_timestamp(SetTransactionTimestampType::Commit, 1)?;
+        txn.commit(None)?;
 
         fixture
             .connection

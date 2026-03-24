@@ -14,7 +14,7 @@ use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
 
 use crate::{
     connection::{Connection, CreateOptions, DropOptions},
-    wt_call, ConfigurationString, Error, Result, Statistics,
+    wt_call, ConfigurationString, Error, Result,
 };
 
 pub use format::{pack1, pack2, pack3, unpack1, unpack2, unpack3, FormatString, Formatted};
@@ -297,7 +297,7 @@ impl ConfigurationString for RollbackTransactionOptions {
 /// unsafe to access without synchronization. `RecordCursor`s reference their parent `Session` so
 /// it is not possible to `Send` a `Session` with open cursors. Some `Session` APIs support cursor
 /// caching to try to mitigate the costs of opening/closing cursors to perform a `Send`.
-pub struct Session {
+pub(crate) struct Session {
     ptr: NonNull<WT_SESSION>,
     connection: Arc<Connection>,
     cached_cursors: RefCell<Vec<InnerCursor>>,
@@ -348,83 +348,6 @@ impl Session {
                 config.unwrap_or_default().as_config_ptr()
             )
         }
-    }
-
-    /// Open a record cursor over the named table.
-    ///
-    /// Returns [rustix::io::Errno::INVAL] if the underlying table is not a record table.
-    pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursor<'_>> {
-        self.new_typed_cursor::<i64, Vec<u8>>(table_name, None)
-    }
-
-    /// Open an index cursor over the named table.
-    ///
-    /// Returns [rustix::io::Errno::INVAL] if the underlying table is not an index table.
-    pub fn open_index_cursor(&self, table_name: &str) -> Result<IndexCursor<'_>> {
-        self.new_typed_cursor::<Vec<u8>, Vec<u8>>(table_name, None)
-    }
-
-    /// Open a cursor over database metadata.
-    pub fn open_metadata_cursor(&self) -> Result<MetadataCursor<'_>> {
-        self.new_typed_cursor_uri::<CString, CString>(METADATA_URI, None)
-    }
-
-    /// Return a new cursor that provides statistics keyed by WT constants.
-    ///
-    /// Accepts a level which may be no higher than the connection level, and optionally a table
-    /// name to observe the stats of.
-    pub fn new_stats_cursor(
-        &self,
-        level: Statistics,
-        table: Option<&str>,
-    ) -> Result<StatCursor<'_>> {
-        let table_stats_uri = table.map(|t| {
-            CString::new(format!("statistics:table:{t}")).expect("no nulls in table name")
-        });
-        let uri = table_stats_uri.as_deref().unwrap_or(c"statistics:");
-        let options = level
-            .to_config_string_clause()
-            .map(|s| CString::new(s.into_bytes()).expect("no nulls"));
-        self.new_typed_cursor_uri::<i32, StatValue>(uri, options.as_deref())
-    }
-
-    /// Create a new cursor over `table_name` with the given `options` where `K` and `V` are formats
-    /// used for the key and value.
-    ///
-    /// May fail if the table does not exist or if the key or value formats do not match.
-    pub fn new_typed_cursor<K: Formatted, V: Formatted>(
-        &self,
-        table_name: &str,
-        options: Option<&CStr>,
-    ) -> Result<TypedCursor<'_, K, V>> {
-        let uri = table_uri(table_name);
-        self.new_typed_cursor_uri::<K, V>(&uri, options)
-    }
-
-    /// Get a cached [RecordCursor] or create a new cursor over `table_name`.
-    pub fn get_record_cursor(&self, table_name: &str) -> Result<RecordCursorGuard<'_>> {
-        let table_uri = table_uri(table_name);
-        self.get_or_create_typed_cursor_uri::<i64, Vec<u8>>(&table_uri)
-    }
-
-    /// Get a cached [IndexCursor] or create a new cursor over `table_name`.
-    pub fn get_index_cursor(&self, table_name: &str) -> Result<IndexCursorGuard<'_>> {
-        let table_uri = table_uri(table_name);
-        self.get_or_create_typed_cursor_uri::<Vec<u8>, Vec<u8>>(&table_uri)
-    }
-
-    /// Get a cached [MetadataCursor] or create a new metadata cursor.
-    pub fn get_metadata_cursor(&self) -> Result<MetadataCursorGuard<'_>> {
-        self.get_or_create_typed_cursor_uri(METADATA_URI)
-    }
-
-    /// Get a cached typed cursor or create a new typed cursor.
-    pub fn get_or_create_typed_cursor<K: Formatted, V: Formatted>(
-        &self,
-        table_name: &str,
-    ) -> Result<TypedCursorGuard<'_, K, V>> {
-        let table_uri = table_uri(table_name);
-        self.get_or_create_typed_cursor_uri(&table_uri)
     }
 
     // NB: this doesn't accept options because we don't check options when serving from the cache.
@@ -581,11 +504,6 @@ impl Session {
             16,
         )
         .expect("valid hex string"))
-    }
-
-    /// Reset this session, which also resets any outstanding cursors.
-    pub fn reset(&self) -> Result<()> {
-        unsafe { wt_call!(self.ptr, reset) }
     }
 }
 

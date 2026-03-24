@@ -101,7 +101,7 @@ pub fn init_index(
 ) -> io::Result<()> {
     if args.drop_tables {
         TableIndex::drop_tables(
-            &connection.open_session()?,
+            &connection,
             index_name,
             &Some(DropOptionsBuilder::default().set_force().into()),
         )?;

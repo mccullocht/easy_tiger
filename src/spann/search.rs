@@ -11,10 +11,10 @@ use std::{
 use min_max_heap::MinMaxHeap;
 use tracing::warn;
 use vectors::QueryVectorDistance;
-use wt_mdb::{Result, Session};
+use wt_mdb::Result;
 
 use crate::{
-    spann::{centroid_stats::CentroidStats, PostingKey, TableIndex, TransactionIndex},
+    spann::{centroid_stats::CentroidStats, PostingKey, TransactionIndex},
     vamana::{
         search::{GraphSearchStats, GraphSearcher},
         GraphSearchParams, GraphVectorIndex,
@@ -82,15 +82,11 @@ pub enum CentroidSelector {
 impl CentroidSelector {
     /// Create a new centroid selector based on the algorithm and data that can be derived from the
     /// index.
-    pub fn new(
-        algorithm: CentroidSelectorAlgorithm,
-        index: &TableIndex,
-        session: &Session,
-    ) -> Result<Self> {
+    pub fn new(algorithm: CentroidSelectorAlgorithm, txn_idx: &TransactionIndex) -> Result<Self> {
         match algorithm {
             CentroidSelectorAlgorithm::TopN(n) => Ok(Self::TopN(n)),
             CentroidSelectorAlgorithm::VectorCount(n) => {
-                let stats = CentroidStats::from_index_stats(session, index)?;
+                let stats = CentroidStats::from_index_stats(txn_idx)?;
                 Ok(Self::VectorCount { count: n, stats })
             }
         }

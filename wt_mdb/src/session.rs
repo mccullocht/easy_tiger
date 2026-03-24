@@ -297,7 +297,7 @@ impl ConfigurationString for RollbackTransactionOptions {
 /// unsafe to access without synchronization. `RecordCursor`s reference their parent `Session` so
 /// it is not possible to `Send` a `Session` with open cursors. Some `Session` APIs support cursor
 /// caching to try to mitigate the costs of opening/closing cursors to perform a `Send`.
-pub struct Session {
+pub(crate) struct Session {
     ptr: NonNull<WT_SESSION>,
     connection: Arc<Connection>,
     cached_cursors: RefCell<Vec<InnerCursor>>,

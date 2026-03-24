@@ -7,7 +7,7 @@ mod rebalance;
 mod search;
 mod verify_primary_assignments;
 
-use std::io;
+use std::{io, sync::Arc};
 
 use clap::{Args, Subcommand};
 
@@ -51,8 +51,8 @@ pub enum Command {
 }
 
 pub fn spann_command(args: SpannArgs) -> io::Result<()> {
-    let connection = args.wt.open_connection()?;
-    let session = connection.open_session()?;
+    let cmd_connection = args.wt.open_connection()?;
+    let connection = Arc::clone(&cmd_connection);
     let index_name = args.wt.index_name();
     match args.command {
         Command::BulkLoad(args) => bulk_load(connection, index_name, args),
@@ -64,6 +64,6 @@ pub fn spann_command(args: SpannArgs) -> io::Result<()> {
         Command::DropIndex => drop_index(connection, index_name),
         Command::VerifyPrimaryAssignments => verify_primary_assignments(connection, index_name),
     }?;
-    session.checkpoint()?;
+    cmd_connection.checkpoint()?;
     Ok(())
 }

@@ -127,8 +127,8 @@ impl From<Error> for std::io::Error {
 
 pub use connection::{BulkLoadCursor, Connection};
 pub use session::{
-    IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, Session, StatCursor,
-    TypedCursor, TypedCursorGuard,
+    IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, StatCursor, TypedCursor,
+    TypedCursorGuard,
 };
 pub use transaction::Transaction;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -253,8 +253,8 @@ mod test {
             Connection, CreateOptions, CreateOptionsBuilder, QueryGlobalTimestampType,
             SetGlobalTimestampType,
         },
-        session::{Formatted, QueryTransactionTimestampType, SetTransactionTimestampType},
-        Error, RecordCursor, Result, Session, Statistics, WiredTigerError,
+        session::{Formatted, QueryTransactionTimestampType, Session, SetTransactionTimestampType},
+        Error, RecordCursor, Result, Statistics, WiredTigerError,
     };
 
     fn conn_options() -> Option<crate::connection::Options> {
@@ -572,6 +572,7 @@ mod test {
         );
     }
 
+    // TODO(txn): tests only use public API no Session.
     struct RecordTableFixture {
         table_name: String,
         session: Session,

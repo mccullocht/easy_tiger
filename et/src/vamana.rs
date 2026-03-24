@@ -1,23 +1,21 @@
 mod bulk_load;
-mod delete;
 mod drop_index;
 mod init_index;
 mod insert;
 mod lookup;
 mod search;
 
-use std::{io, num::NonZero};
+use std::{io, num::NonZero, sync::Arc};
 
 use clap::{Args, Subcommand};
 
-use bulk_load::{bulk_load, BulkLoadArgs};
-use delete::{delete, DeleteArgs};
+use bulk_load::{BulkLoadArgs, bulk_load};
 use drop_index::drop_index;
 use easy_tiger::vamana::EdgePruningConfig;
-use init_index::{init_index, InitIndexArgs};
-use insert::{insert, InsertArgs};
-use lookup::{lookup, LookupArgs};
-use search::{search, SearchArgs};
+use init_index::{InitIndexArgs, init_index};
+use insert::{InsertArgs, insert};
+use lookup::{LookupArgs, lookup};
+use search::{SearchArgs, search};
 
 use crate::wt_args::WiredTigerArgs;
 
@@ -73,13 +71,11 @@ pub enum Command {
     Lookup(LookupArgs),
     /// Insert a vectors from a file into the index.
     Insert(InsertArgs),
-    /// Delete vectors by key range.
-    Delete(DeleteArgs),
 }
 
 pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
-    let connection = args.wt.open_connection()?;
-    let session = connection.open_session()?;
+    let cmd_connection = args.wt.open_connection()?;
+    let connection = Arc::clone(&cmd_connection);
     let index_name = args.wt.index_name();
     match args.command {
         Command::BulkLoad(args) => bulk_load(connection, index_name, args),
@@ -88,8 +84,7 @@ pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
         Command::DropIndex => drop_index(connection, index_name),
         Command::Lookup(args) => lookup(connection, index_name, args),
         Command::Insert(args) => insert(connection, index_name, args),
-        Command::Delete(args) => delete(connection, index_name, args),
     }?;
-    session.checkpoint()?;
+    cmd_connection.checkpoint()?;
     Ok(())
 }

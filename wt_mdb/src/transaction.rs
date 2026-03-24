@@ -3,10 +3,10 @@ use std::{ffi::CString, sync::Arc};
 use crate::{
     session::{
         table_uri, BeginTransactionOptions, CommitTransactionOptions, Formatted,
-        MetadataCursorGuard, QueryTransactionTimestampType, RollbackTransactionOptions,
+        MetadataCursorGuard, QueryTransactionTimestampType, RollbackTransactionOptions, Session,
         SetTransactionTimestampType, StatValue, METADATA_URI,
     },
-    Connection, IndexCursorGuard, RecordCursorGuard, Result, Session, StatCursor, Statistics,
+    Connection, IndexCursorGuard, RecordCursorGuard, Result, StatCursor, Statistics,
     TypedCursorGuard,
 };
 

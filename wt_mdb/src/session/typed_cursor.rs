@@ -60,10 +60,6 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         }
     }
 
-    pub fn session(&self) -> &'a Session {
-        self.session
-    }
-
     /// Set the contents of `record` in the collection.
     pub fn set(&mut self, key: K::Ref<'_>, value: V::Ref<'_>) -> Result<()> {
         let key = format_to_buf!(key, K, self.key_buf)?;

@@ -12,7 +12,7 @@ use core::f64;
 use std::{
     cell::RefCell,
     num::NonZero,
-    ops::{Deref, Range},
+    ops::Range,
     sync::{
         atomic::{self, AtomicI64},
         Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
@@ -253,10 +253,7 @@ where
         };
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
-        // Use thread locals to avoid recreating Session and GraphSearcher per vector. Rayon
-        // doesn't provide a good way to initialize something falliable once per thread, and the
-        // alternative is chunking which limits work-stealing.
-        let tl_session = ThreadLocalSession::new(self.connection.clone());
+        // Use thread locals to avoid recreating GraphSearcher per vector.
         let tl_searcher = ThreadLocal::new();
 
         // Keep track of all in-flight concurrent insertions. These nodes will be processed at the
@@ -267,17 +264,13 @@ where
             .into_par_iter()
             .filter(|&i| i != 0)
             .try_for_each(|v| {
-                let session = tl_session.get()?;
+                let txn = self.connection.begin_transaction(None)?;
                 let mut searcher = tl_searcher
                     .get_or(|| {
                         RefCell::new(GraphSearcher::new(self.index.config().index_search_params))
                     })
                     .borrow_mut();
-                // Use a transaction for each search. Without this each lookup will be a separate transaction
-                // which obtains a reader lock inside the session. Overhead for that is ~10x.
-                // TODO: add session.do_in_transaction() or similar to avoid getting session into a bad state.
-                session.begin_transaction(None)?;
-                let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
+                let mut reader = BulkLoadGraphVectorIndexReader(self, &txn.session());
                 in_flight.insert(v);
                 let mut edges = self.search_for_insert(v, &mut searcher, &mut reader)?;
                 let centroid_distance = {
@@ -342,8 +335,6 @@ where
                     }
                 }
 
-                // Close out the transaction. There should be no conflicts as we did not write to the database.
-                session.rollback_transaction(None)?;
                 in_flight.remove(&v);
                 progress(1);
 
@@ -359,14 +350,10 @@ where
         // this is necessary to ensure the graph remains undirected.
         let apply_mu = Mutex::new(());
 
-        let tl_session = ThreadLocalSession::new(self.connection.clone());
-
         (0..self.limit).into_par_iter().try_for_each(|v| {
-            let session = tl_session.get()?;
-            session.begin_transaction(None)?;
-            let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
+            let txn = self.connection.begin_transaction(None)?;
+            let mut reader = BulkLoadGraphVectorIndexReader(self, txn.session());
             self.prune_and_apply(v, &mut reader, &apply_mu)?;
-            session.rollback_transaction(None)?;
             progress(1);
             Ok::<_, wt_mdb::Error>(())
         })
@@ -574,43 +561,6 @@ where
             let g1 = self.graph[vertex1].write().unwrap();
             (self.graph[vertex0].write().unwrap(), g1)
         }
-    }
-}
-
-// TODO: move this, it could be useful elsewhere.
-struct ThreadLocalSession {
-    connection: Arc<Connection>,
-    tl_session: ThreadLocal<Session>,
-}
-
-impl ThreadLocalSession {
-    fn new(connection: Arc<Connection>) -> Self {
-        ThreadLocalSession {
-            connection,
-            tl_session: ThreadLocal::new(),
-        }
-    }
-
-    fn get(&self) -> Result<SessionGuard<'_>> {
-        self.tl_session
-            .get_or_try(|| self.connection.open_session())
-            .map(SessionGuard)
-    }
-}
-
-struct SessionGuard<'a>(&'a Session);
-
-impl Deref for SessionGuard<'_> {
-    type Target = Session;
-
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-impl Drop for SessionGuard<'_> {
-    fn drop(&mut self) {
-        let _ = self.0.reset();
     }
 }
 

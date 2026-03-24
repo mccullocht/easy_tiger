@@ -11,6 +11,7 @@ use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity}
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
     connection::{CreateOptionsBuilder, DropOptions},
+    session::{CommitTransactionOptions, RollbackTransactionOptions},
     Connection, Error, RecordCursorGuard, Result, Session, Transaction,
 };
 
@@ -404,6 +405,16 @@ impl TransactionGraphVectorIndex {
     /// Unwrap into the inner `Transaction`.
     pub fn into_transaction(self) -> Transaction {
         self.transaction
+    }
+
+    /// Commit the underlying [`Transaction`] with the provided options.
+    pub fn commit(self, options: Option<CommitTransactionOptions>) -> Result<()> {
+        self.transaction.commit(options)
+    }
+
+    /// Rollback the underlying [`Transaction`] with the provided options.
+    pub fn rollback(self, options: Option<RollbackTransactionOptions>) -> Result<()> {
+        self.transaction.rollback(options)
     }
 }
 

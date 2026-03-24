@@ -1,4 +1,4 @@
-use std::{cell::RefCell, ops::DerefMut, sync::Arc};
+use std::{cell::RefCell, sync::Arc};
 
 use crate::{
     input::VectorStore,
@@ -6,7 +6,7 @@ use crate::{
         centroid_stats::CentroidCounts, select_centroids, CentroidAssignment,
         CentroidAssignmentType, PostingKey, TableIndex,
     },
-    vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
+    vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
@@ -21,29 +21,24 @@ pub fn assign_to_centroids(
     limit: usize,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<Vec<CentroidAssignment>> {
-    let tl_head_reader = ThreadLocal::new();
     let tl_searcher = ThreadLocal::new();
     (0..limit)
         .into_par_iter()
         .map(|i| {
-            let mut head_reader = tl_head_reader
-                .get_or_try(|| {
-                    Ok::<_, wt_mdb::Error>(RefCell::new(SessionGraphVectorIndex::new(
-                        Arc::clone(&index.head),
-                        connection.open_session()?,
-                    )))
-                })?
-                .borrow_mut();
+            let head_reader = TransactionGraphVectorIndex::new(
+                Arc::clone(index.head_config()),
+                connection.begin_transaction(None)?,
+            );
             let mut searcher = tl_searcher
                 .get_or(|| RefCell::new(GraphSearcher::new(index.config().head_search_params)))
                 .borrow_mut();
-            let candidates = searcher.search(&vectors[i], head_reader.deref_mut())?;
+            let candidates = searcher.search(&vectors[i], &head_reader)?;
             let selected = select_centroids(
                 index.config().replica_selection,
                 index.config().replica_count,
                 candidates,
                 &vectors[i],
-                head_reader.deref_mut(),
+                &head_reader,
             );
             progress(1);
             selected

@@ -12,7 +12,7 @@ use wt_mdb::{
     config::{ConfigItem, ConfigParser},
     connection::{CreateOptionsBuilder, DropOptions},
     session::{CommitTransactionOptions, RollbackTransactionOptions},
-    Connection, Error, RecordCursorGuard, Result, Session, Transaction,
+    Connection, Error, RecordCursorGuard, Result, Transaction,
 };
 
 use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore};
@@ -270,14 +270,12 @@ impl TableGraphVectorIndex {
 
     /// Drop all tables for `index_name`.
     pub fn drop_tables(
-        session: &Session,
+        connection: &Arc<Connection>,
         index_name: &str,
         options: &Option<DropOptions>,
     ) -> Result<()> {
         for table_name in Self::generate_table_names(index_name) {
-            session
-                .connection()
-                .drop_table(&table_name, options.clone())?;
+            connection.drop_table(&table_name, options.clone())?;
         }
         Ok(())
     }

@@ -254,7 +254,11 @@ impl TableIndex {
         index_name: &str,
         options: &Option<DropOptions>,
     ) -> Result<()> {
-        TableGraphVectorIndex::drop_tables(session, &Self::head_name(index_name), options)?;
+        TableGraphVectorIndex::drop_tables(
+            session.connection(),
+            &Self::head_name(index_name),
+            options,
+        )?;
         for table_name in TableNames::from_index_name(index_name).all_names() {
             session
                 .connection()

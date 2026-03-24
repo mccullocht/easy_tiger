@@ -130,7 +130,7 @@ impl Transaction {
     }
 
     /// Get a reference to the session underlying this transaction.
-    // XXX remove all references to this method. Session shouldn't be an exported type.
+    // TODO(txn): remove all references to this method. Session shouldn't be an exported type.
     pub fn session(&self) -> &Session {
         &self.session
     }

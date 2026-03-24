@@ -331,7 +331,7 @@ impl Connection {
     /// Begin a new transaction with the specified options.
     pub fn begin_transaction(
         self: &Arc<Self>,
-        // XXX move this into connection or transaction modules.
+        // TODO(txn): move this into connection or transaction modules.
         options: Option<BeginTransactionOptions>,
     ) -> Result<Transaction> {
         Transaction::new(self, options)

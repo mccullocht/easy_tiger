@@ -119,7 +119,9 @@ pub fn recall(
         }
     };
 
-    let coder = args.format.new_coder(args.similarity);
+    let coder = args
+        .format
+        .coder(args.similarity, doc_vectors.elem_stride());
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| match centers.as_ref() {

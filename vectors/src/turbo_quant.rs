@@ -3,6 +3,11 @@
 //! This uses separate implementations for MSE optimization (L2/Euclidean distance) and angular
 //! (dot product) distance.
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, RwLock},
+};
+
 use ndarray::{Array2, ArrayView1};
 use ndarray_linalg::QR;
 use ndarray_rand::RandomExt;
@@ -35,17 +40,33 @@ impl JLTrans {
     }
 }
 
+static JL_CACHE: LazyLock<RwLock<HashMap<(usize, u64), Arc<JLTrans>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn cached_jl_trans(d: usize, seed: u64) -> Arc<JLTrans> {
+    {
+        let m = JL_CACHE.read().expect("not poisoned");
+        if let Some(jlt) = m.get(&(d, seed)) {
+            return Arc::clone(jlt);
+        }
+    }
+
+    let jlt = Arc::new(JLTrans::new(d, seed));
+    let mut m = JL_CACHE.write().expect("not poisoned");
+    Arc::clone(m.entry((d, seed)).or_insert(jlt))
+}
+
 /// TurboQuant coder for 1-bit quantization that minimizes MSE. This is most suitable for l2
 /// distance where minimizing MSE is equivalent to minimizing distance distortion.
 pub struct MSE1Coder {
     dim: usize,
-    t: JLTrans,
+    t: Arc<JLTrans>,
     codebook: Vec<f32>,
 }
 
 impl MSE1Coder {
     pub fn new(dim: usize, seed: u64) -> Self {
-        let t = JLTrans::new(dim, seed);
+        let t = cached_jl_trans(dim, seed);
         let codebook = vec![
             -(2.0 / (std::f64::consts::PI * dim as f64)).sqrt() as f32,
             (2.0 / (std::f64::consts::PI * dim as f64)).sqrt() as f32,
@@ -123,9 +144,8 @@ impl MSE1QueryDistance {
         let normalized: Vec<f32> = query.iter().map(|&x| x * inv_norm).collect();
 
         // XXX seed should be passed.
-        // XXX I think recomputing this every time is hosing me in distance-loss
-        let jl = JLTrans::new(query.len(), 42); // seed doesn't matter as long as it's consistent with the coder
-        let tquery = jl.transform(&normalized);
+        let jlt = cached_jl_trans(query.len(), 42);
+        let tquery = jlt.transform(&normalized);
         let codebook = vec![
             -(2.0 / (std::f64::consts::PI * query.len() as f64)).sqrt() as f32,
             (2.0 / (std::f64::consts::PI * query.len() as f64)).sqrt() as f32,

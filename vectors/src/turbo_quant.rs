@@ -1,3 +1,8 @@
+//! TurboQuant quantizers: https://arxiv.org/pdf/2504.19874
+//!
+//! This uses separate implementations for MSE optimization (L2/Euclidean distance) and angular
+//! (dot product) distance.
+
 use ndarray::{Array2, ArrayView1};
 use ndarray_linalg::QR;
 use ndarray_rand::RandomExt;

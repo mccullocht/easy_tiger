@@ -176,11 +176,20 @@ pub enum F32VectorCoding {
     ///
     /// This encoding is optimized for cases where dimensionality is a multiple of 16.
     TLVQ8x8,
+    /// TurboQuant with 1 bit per dimension.
+    TurboQuant1,
 }
 
 impl F32VectorCoding {
     /// Create a new coder for this format.
     pub fn new_coder(&self, similarity: VectorSimilarity) -> Box<dyn F32VectorCoder> {
+        match self {
+            Self::TurboQuant1 => unimplemented!(),
+            _ => self.coder(similarity, 0),
+        }
+    }
+
+    pub fn coder(&self, similarity: VectorSimilarity, dim: usize) -> Box<dyn F32VectorCoder> {
         match self {
             Self::F32 => Box::new(float32::VectorCoder::new(similarity)),
             Self::F16 => Box::new(float16::VectorCoder::new(similarity)),
@@ -193,6 +202,7 @@ impl F32VectorCoding {
             Self::TLVQ2x8 => Box::new(lvq::TurboResidualCoder::<2>::default()),
             Self::TLVQ4x8 => Box::new(lvq::TurboResidualCoder::<4>::default()),
             Self::TLVQ8x8 => Box::new(lvq::TurboResidualCoder::<8>::default()),
+            Self::TurboQuant1 => Box::new(turbo_quant::MSE1Coder::new(dim, 42)),
         }
     }
 
@@ -217,6 +227,7 @@ impl F32VectorCoding {
             (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualDistance::<2>::new(similarity)),
             (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualDistance::<4>::new(similarity)),
             (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualDistance::<8>::new(similarity)),
+            (Self::TurboQuant1, _) => todo!(),
         }
     }
 
@@ -276,6 +287,7 @@ impl F32VectorCoding {
                 similarity,
                 query.into(),
             )),
+            (_, F32VectorCoding::TurboQuant1) => unimplemented!(),
         }
     }
 
@@ -335,6 +347,9 @@ impl F32VectorCoding {
             (_, F32VectorCoding::TLVQ8x8) => {
                 quantized_qvd!(lvq::TurboResidualDistance::<8>::new(similarity), query)
             }
+            (_, F32VectorCoding::TurboQuant1) => {
+                todo!()
+            }
         }
     }
 }
@@ -356,6 +371,7 @@ impl FromStr for F32VectorCoding {
             "tlvq2x8" => Ok(Self::TLVQ2x8),
             "tlvq4x8" => Ok(Self::TLVQ4x8),
             "tlvq8x8" => Ok(Self::TLVQ8x8),
+            "tq1" => Ok(Self::TurboQuant1),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -375,6 +391,7 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TLVQ2x8 => write!(f, "tlvq2x8"),
             Self::TLVQ4x8 => write!(f, "tlvq4x8"),
             Self::TLVQ8x8 => write!(f, "tlvq8x8"),
+            Self::TurboQuant1 => write!(f, "tq1"),
         }
     }
 }

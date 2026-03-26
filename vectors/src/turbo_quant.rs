@@ -56,21 +56,23 @@ fn cached_jl_trans(d: usize, seed: u64) -> Arc<JLTrans> {
     Arc::clone(m.entry((d, seed)).or_insert(jlt))
 }
 
+fn codebook_bit(dim: usize) -> [f32; 2] {
+    let v = (2.0 / (std::f64::consts::PI * dim as f64)).sqrt() as f32;
+    [-v, v]
+}
+
 /// TurboQuant coder for 1-bit quantization that minimizes MSE. This is most suitable for l2
 /// distance where minimizing MSE is equivalent to minimizing distance distortion.
 pub struct MSE1Coder {
     dim: usize,
     t: Arc<JLTrans>,
-    codebook: Vec<f32>,
+    codebook: [f32; 2],
 }
 
 impl MSE1Coder {
     pub fn new(dim: usize, seed: u64) -> Self {
         let t = cached_jl_trans(dim, seed);
-        let codebook = vec![
-            -(2.0 / (std::f64::consts::PI * dim as f64)).sqrt() as f32,
-            (2.0 / (std::f64::consts::PI * dim as f64)).sqrt() as f32,
-        ];
+        let codebook = codebook_bit(dim);
         MSE1Coder { dim, t, codebook }
     }
 }
@@ -133,8 +135,10 @@ pub struct MSE1QueryDistance {
     /// The query vector after l2 normalization and JL transformation. This places the query in the
     /// same space as the quantized vectors which makes computation cheaper.
     tquery: Vec<f32>,
+    /// L2 norm of the input vector before JLT.
+    norm: f32,
     /// Codebook used to decode quantized vectors for comparison.
-    codebook: Vec<f32>,
+    codebook: [f32; 2],
 }
 
 impl MSE1QueryDistance {
@@ -146,27 +150,32 @@ impl MSE1QueryDistance {
         // XXX seed should be passed.
         let jlt = cached_jl_trans(query.len(), 42);
         let tquery = jlt.transform(&normalized);
-        let codebook = vec![
-            -(2.0 / (std::f64::consts::PI * query.len() as f64)).sqrt() as f32,
-            (2.0 / (std::f64::consts::PI * query.len() as f64)).sqrt() as f32,
-        ];
-        MSE1QueryDistance { tquery, codebook }
+        let codebook = codebook_bit(query.len());
+        MSE1QueryDistance {
+            tquery,
+            norm,
+            codebook,
+        }
     }
 }
 
 impl QueryVectorDistance for MSE1QueryDistance {
     fn distance(&self, encoded: &[u8]) -> f64 {
+        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
         let bits = &encoded[4..];
-        let qit =
-            (0..self.tquery.len()).map(|i| self.codebook[((bits[i / 8] >> (i % 8)) & 1) as usize]);
-        let normalized_distance = self
+        // Compute dot product between the JL-transformed query and the quantized db vector.
+        // Each codebook entry is ±√(2/πd), chosen to minimize MSE of reconstruction.
+        // However, ⟨JL(q̂), codebook⟩ ≈ (2/π)·⟨q̂, db̂⟩ — biased low by 2/π.
+        // Applying the asymmetric form with the exact stored norms:
+        //   ‖q − db‖² = ‖q‖² + ‖db‖² − 2·⟨q, db⟩
+        //              ≈ ‖q‖² + ‖db‖² − π·‖q‖·‖db‖·⟨JL(q̂), codebook⟩
+        let dot: f32 = self
             .tquery
             .iter()
-            .zip(qit)
-            .map(|(&q, c)| (q - c) * (q - c))
-            .sum::<f32>();
-        // XXX this is all probably wrong in the context of non-unit vectors.
-        normalized_distance as f64
+            .enumerate()
+            .map(|(i, &q)| q * self.codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
+            .sum();
+        (self.norm * self.norm + norm * norm - std::f32::consts::PI * self.norm * norm * dot) as f64
     }
 }
 

@@ -30,7 +30,9 @@ pub fn loss(
 
     // Assume Euclidean. It might be best to make this configurable as some encodings might perform
     // better when the inputs are l2 normalized.
-    let coder = args.format.new_coder(VectorSimilarity::Euclidean);
+    let coder = args
+        .format
+        .coder(VectorSimilarity::Euclidean, vectors.elem_stride());
     let (abs_error, sq_error) = (0..vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "loss"))

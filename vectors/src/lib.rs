@@ -287,6 +287,9 @@ impl F32VectorCoding {
                 similarity,
                 query.into(),
             )),
+            (Euclidean, F32VectorCoding::TurboQuant1) => {
+                Box::new(turbo_quant::MSE1QueryDistance::new(query.into().to_vec()))
+            }
             (_, F32VectorCoding::TurboQuant1) => unimplemented!(),
         }
     }

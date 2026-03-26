@@ -9,7 +9,7 @@ use ndarray_rand::RandomExt;
 use ndarray_rand::rand_distr::StandardNormal;
 use rand::SeedableRng;
 
-use crate::F32VectorCoder;
+use crate::{F32VectorCoder, QueryVectorDistance};
 
 /// Codebook for 1-bit quantization; each entry must be divided by sqrt(D).
 const CODEBOOK_TMPL_1: [f32; 2] = [
@@ -103,11 +103,64 @@ impl F32VectorCoder for MSE1Coder {
     }
 }
 
+// XXX what do I need to perform asymmetric l2 distance?
+// - simplest: transform the vector, use the codebook to generate f32 vectors, compute l2 dist.
+// - more complex: LUT it
+//   * for each byte of input generate l2 dist to a sequence of 8 codebook entries.
+//     256 entries * 4 bytes = 1KB per 8 dim. 256KB for 2048 dims. Sounds bad.
+//   * for each nibble of input generate l2 dist to a sequence of 4 codebook entries.
+//     16 entries * 4 bytes = 64 per 4 dim. 32KB for 2048 dims. Less bad!
+//   * nibble but SQ the codebook entries. 8 KB for 2048 dims.
+//   * LUT it just shuffle + add for each entry, but we probably also have to widen. multiply by 1
+//     and just DOT it lol.
+
+pub struct MSE1QueryDistance {
+    /// The query vector after l2 normalization and JL transformation. This places the query in the
+    /// same space as the quantized vectors which makes computation cheaper.
+    tquery: Vec<f32>,
+    /// Codebook used to decode quantized vectors for comparison.
+    codebook: Vec<f32>,
+}
+
+impl MSE1QueryDistance {
+    pub fn new(query: Vec<f32>) -> Self {
+        let norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+        let normalized: Vec<f32> = query.iter().map(|&x| x * inv_norm).collect();
+
+        let jl = JLTrans::new(query.len(), 42); // seed doesn't matter as long as it's consistent with the coder
+        let tquery = jl.transform(&normalized);
+        MSE1QueryDistance {
+            tquery,
+            codebook: CODEBOOK_TMPL_1
+                .iter()
+                .map(|&x| x / (query.len() as f32).sqrt())
+                .collect(),
+        }
+    }
+}
+
+impl QueryVectorDistance for MSE1QueryDistance {
+    fn distance(&self, encoded: &[u8]) -> f64 {
+        let bits = &encoded[4..];
+        let qit =
+            (0..self.tquery.len()).map(|i| self.codebook[((bits[i / 8] >> (i % 8)) & 1) as usize]);
+        let normalized_distance = self
+            .tquery
+            .iter()
+            .zip(qit)
+            .map(|(&q, c)| (q - c) * (q - c))
+            .sum::<f32>();
+        // XXX this is all probably wrong in the context of non-unit vectors.
+        normalized_distance as f64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use approx::assert_abs_diff_eq;
 
-    use crate::{F32VectorCoder, l2_normalize};
+    use crate::F32VectorCoder;
 
     use super::MSE1Coder;
 

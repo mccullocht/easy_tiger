@@ -7,6 +7,7 @@ mod float16;
 mod float32;
 mod lvq;
 pub mod soar;
+mod turbo_quant;
 
 use serde::{Deserialize, Serialize};
 

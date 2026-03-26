@@ -11,12 +11,6 @@ use rand::SeedableRng;
 
 use crate::{F32VectorCoder, QueryVectorDistance};
 
-/// Codebook for 1-bit quantization; each entry must be divided by sqrt(D).
-const CODEBOOK_TMPL_1: [f32; 2] = [
-    (-2.0 / std::f64::consts::PI) as f32,
-    (2.0 / std::f64::consts::PI) as f32,
-];
-
 struct JLTrans {
     q: Array2<f32>,
     q_inv: Array2<f32>,
@@ -52,10 +46,10 @@ pub struct MSE1Coder {
 impl MSE1Coder {
     pub fn new(dim: usize, seed: u64) -> Self {
         let t = JLTrans::new(dim, seed);
-        let codebook = CODEBOOK_TMPL_1
-            .iter()
-            .map(|&x| x / (dim as f32).sqrt())
-            .collect();
+        let codebook = vec![
+            -(2.0 / (std::f64::consts::PI * dim as f64)).sqrt() as f32,
+            (2.0 / (std::f64::consts::PI * dim as f64)).sqrt() as f32,
+        ];
         MSE1Coder { dim, t, codebook }
     }
 }
@@ -128,15 +122,15 @@ impl MSE1QueryDistance {
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
         let normalized: Vec<f32> = query.iter().map(|&x| x * inv_norm).collect();
 
+        // XXX seed should be passed.
+        // XXX I think recomputing this every time is hosing me in distance-loss
         let jl = JLTrans::new(query.len(), 42); // seed doesn't matter as long as it's consistent with the coder
         let tquery = jl.transform(&normalized);
-        MSE1QueryDistance {
-            tquery,
-            codebook: CODEBOOK_TMPL_1
-                .iter()
-                .map(|&x| x / (query.len() as f32).sqrt())
-                .collect(),
-        }
+        let codebook = vec![
+            -(2.0 / (std::f64::consts::PI * query.len() as f64)).sqrt() as f32,
+            (2.0 / (std::f64::consts::PI * query.len() as f64)).sqrt() as f32,
+        ];
+        MSE1QueryDistance { tquery, codebook }
     }
 }
 
@@ -196,25 +190,25 @@ mod tests {
         assert_abs_diff_eq!(
             decoded.as_slice(),
             [
-                -0.26178184,
-                -0.14313741,
-                0.39804158,
-                0.20089844,
-                0.1558077,
-                -0.13278092,
-                0.5922933,
-                0.068376765,
-                -0.31128713,
-                -0.41694096,
-                0.12362386,
-                -0.4167808,
-                0.3249947,
-                0.3827706,
-                -0.52166396,
-                -0.113659464,
-                0.6446552,
-                0.6442601,
-                0.25760773
+                -0.3280949,
+                -0.17939623,
+                0.49887112,
+                0.25178882,
+                0.19527599,
+                -0.16641621,
+                0.74232966,
+                0.08569759,
+                -0.39014056,
+                -0.5225581,
+                0.15493955,
+                -0.5223572,
+                0.40732047,
+                0.47973183,
+                -0.65380883,
+                -0.14245099,
+                0.8079555,
+                0.8074604,
+                0.32286346
             ]
             .as_ref(),
             epsilon = 0.00001

@@ -97,3 +97,69 @@ impl F32VectorCoder for MSE1Coder {
         (byte_len - std::mem::size_of::<f32>()) * 8
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use approx::assert_abs_diff_eq;
+
+    use crate::{F32VectorCoder, l2_normalize};
+
+    use super::MSE1Coder;
+
+    // This test vector contains randomly generated numbers in [-1,1] but is not l2 normalized.
+    // It has 19 elements -- long enough to trigger SIMD optimizations but with some remainder to
+    // test scalar tail paths.
+    const TEST_VECTOR: [f32; 19] = [
+        -0.921, -0.061, 0.659, 0.67, 0.573, 0.431, 0.646, 0.001, -0.2, -0.428, 0.73, -0.704,
+        -0.273, 0.539, -0.731, 0.436, 0.913, 0.694, 0.202,
+    ];
+
+    #[test]
+    fn mse1_null_vector_decode() {
+        let coder = MSE1Coder::new(256, 42);
+        let vector = vec![0.0f32; 256];
+        let decoded = coder.decode(&coder.encode(&vector));
+        assert_abs_diff_eq!(decoded.as_slice(), vector.as_slice());
+    }
+
+    #[test]
+    fn mse1_coding() {
+        let coder = MSE1Coder::new(TEST_VECTOR.len(), 42);
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_eq!(encoded.len(), coder.byte_len(TEST_VECTOR.len()));
+        let encoded_norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        assert_abs_diff_eq!(
+            encoded_norm,
+            TEST_VECTOR.iter().map(|&x| x * x).sum::<f32>().sqrt(),
+            epsilon = 0.00001
+        );
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_slice(),
+            [
+                -0.26178184,
+                -0.14313741,
+                0.39804158,
+                0.20089844,
+                0.1558077,
+                -0.13278092,
+                0.5922933,
+                0.068376765,
+                -0.31128713,
+                -0.41694096,
+                0.12362386,
+                -0.4167808,
+                0.3249947,
+                0.3827706,
+                -0.52166396,
+                -0.113659464,
+                0.6446552,
+                0.6442601,
+                0.25760773
+            ]
+            .as_ref(),
+            epsilon = 0.00001
+        );
+    }
+}

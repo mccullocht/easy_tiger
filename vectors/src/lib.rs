@@ -316,9 +316,12 @@ impl F32VectorCoding {
                     Self::QJL_SEED,
                 ))
             }
-            (_, F32VectorCoding::TurboQuant2) => {
-                todo!()
-            }
+            (_, F32VectorCoding::TurboQuant2) => Box::new(turbo_quant::Prod2QueryDistance::new(
+                similarity,
+                query.into().to_vec(),
+                Self::MSE_SEED,
+                Self::QJL_SEED,
+            )),
         }
     }
 

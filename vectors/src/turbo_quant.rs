@@ -14,7 +14,7 @@ use ndarray_rand::RandomExt;
 use ndarray_rand::rand_distr::StandardNormal;
 use rand::SeedableRng;
 
-use crate::{F32VectorCoder, QueryVectorDistance};
+use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
 
 #[derive(Debug)]
 struct JLTrans {
@@ -375,6 +375,89 @@ impl F32VectorCoder for Prod2Coder {
 
     fn dimensions(&self, byte_len: usize) -> usize {
         (byte_len - std::mem::size_of::<f32>() * 2) * 4
+    }
+}
+
+pub struct Prod2QueryDistance {
+    similarity: VectorSimilarity,
+    mse_query: Vec<f32>,
+    qjl_query: Vec<f32>,
+    norm: f32,
+    scale: f32,
+}
+
+impl Prod2QueryDistance {
+    pub fn new(
+        similarity: VectorSimilarity,
+        mut query: Vec<f32>,
+        mse_seed: u64,
+        qjl_seed: u64,
+    ) -> Self {
+        let norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+        for d in query.iter_mut() {
+            *d *= inv_norm;
+        }
+
+        let mse = cached_jl_trans(query.len(), mse_seed);
+        let mse_query = mse.transform(&query);
+        let qjl = cached_jl_trans(query.len(), qjl_seed);
+        let qjl_query = qjl.transform(&query);
+        let scale = SQRT_PI_FRAC_2 / (query.len() as f32).sqrt();
+
+        Self {
+            similarity,
+            mse_query,
+            qjl_query,
+            norm,
+            scale,
+        }
+    }
+
+    fn dim(&self) -> usize {
+        self.mse_query.len()
+    }
+
+    fn decode_vector<'a>(&self, encoded: &'a [u8]) -> (f32, f32, &'a [u8], &'a [u8]) {
+        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let residual_norm = f32::from_le_bytes(encoded[4..8].try_into().unwrap());
+
+        let bitvec_len = self.dim().div_ceil(8);
+        let mse_bits = &encoded[8..(8 + bitvec_len)];
+        let qjl_bits = &encoded[(8 + bitvec_len)..];
+        (norm, residual_norm, mse_bits, qjl_bits)
+    }
+
+    fn dot_unnormalized(&self, mse_bits: &[u8], qjl_bits: &[u8], residual_norm: f32) -> f32 {
+        let mse_codebook = codebook_bit(self.dim());
+        let qjl_codebook = [-1.0f32, 1.0f32];
+
+        let mut mse_dot = 0.0f32;
+        let mut qjl_dot = 0.0f32;
+        for (i, (&qm, &qq)) in self.mse_query.iter().zip(self.qjl_query.iter()).enumerate() {
+            let dm = mse_codebook[((mse_bits[i / 8] >> (i % 8)) & 1) as usize];
+            mse_dot += qm * dm;
+
+            let dq = qjl_codebook[((qjl_bits[i / 8] >> (i % 8)) & 1) as usize];
+            qjl_dot += qq * dq;
+        }
+
+        // Scale and the residual norm can be factored out and applied at the end.
+        // Result estimates ⟨y_norm, x_norm⟩ (cosine similarity).
+        mse_dot + qjl_dot * self.scale * residual_norm
+    }
+}
+
+impl QueryVectorDistance for Prod2QueryDistance {
+    fn distance(&self, encoded: &[u8]) -> f64 {
+        let (norm, residual_norm, mse_bits, qjl_bits) = self.decode_vector(encoded);
+        // dot_cos estimates ⟨y_norm, x_norm⟩ (cosine similarity).
+        let dot_cos = self.dot_unnormalized(mse_bits, qjl_bits, residual_norm);
+        match self.similarity {
+            VectorSimilarity::Euclidean => self.norm * self.norm + norm * norm - 2.0 * dot_cos,
+            VectorSimilarity::Dot | VectorSimilarity::Cosine => dot_cos.mul_add(-0.5, 0.5),
+        }
+        .into()
     }
 }
 

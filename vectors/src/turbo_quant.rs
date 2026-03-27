@@ -254,10 +254,9 @@ impl Prod1QueryDistance {
             *d *= inv_norm;
         }
 
-        // XXX seed should be passed.
         let qjl = cached_jl_trans(query.len(), qjl_seed);
         let qjl_query = qjl.transform(&query);
-        let scale = (std::f32::consts::PI / (2.0 * query.len() as f32)).sqrt() / norm;
+        let scale = (std::f32::consts::PI / (2.0 * query.len() as f32)).sqrt() * norm;
 
         Self { qjl_query, scale }
     }
@@ -268,13 +267,14 @@ impl QueryVectorDistance for Prod1QueryDistance {
         let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
         let codebook = [-1.0f32, 1.0f32];
         let bits = &encoded[4..];
-        let dot: f32 = self
+        let dot_unnormalized: f32 = self
             .qjl_query
             .iter()
             .enumerate()
             .map(|(i, &q)| q * codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
             .sum();
-        (dot * self.scale * norm).into()
+        let dot = dot_unnormalized * self.scale * norm;
+        dot.mul_add(-0.5, 0.5).into()
     }
 }
 

@@ -16,6 +16,7 @@ use rand::SeedableRng;
 
 use crate::{F32VectorCoder, QueryVectorDistance};
 
+#[derive(Debug)]
 struct JLTrans {
     q: Array2<f32>,
     q_inv: Array2<f32>,
@@ -179,11 +180,109 @@ impl QueryVectorDistance for MSE1QueryDistance {
     }
 }
 
+// XXX docs
+pub struct Prod1Coder {
+    dim: usize,
+    qjl: Arc<JLTrans>,
+}
+
+impl Prod1Coder {
+    // sqrt(pi/2) is used for scaling the decoded vector.
+    const SQRT_PI_FRAC_2: f32 = 1.25331414;
+
+    pub fn new(dim: usize, seed: u64) -> Self {
+        let qjl = cached_jl_trans(dim, seed);
+        Self { dim, qjl }
+    }
+}
+
+impl F32VectorCoder for Prod1Coder {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        assert_eq!(vector.len(), self.dim);
+        let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        out[..4].copy_from_slice(&norm.to_le_bytes());
+
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+        let normalized: Vec<f32> = vector.iter().map(|&x| x * inv_norm).collect();
+        let transformed = self.qjl.transform(&normalized);
+
+        let bits = &mut out[4..];
+        bits.fill(0);
+        for (i, &v) in transformed.iter().enumerate() {
+            if v > 0.0 {
+                bits[i / 8] |= 1 << (i % 8);
+            }
+        }
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        std::mem::size_of::<f32>() + dimensions.div_ceil(8)
+    }
+
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        assert_eq!(out.len(), self.dim);
+        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let bits = &encoded[4..];
+
+        let codebook = [-1.0f32, 1.0f32];
+        let quantized: Vec<f32> = (0..self.dim)
+            .map(|i| codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
+            .collect();
+
+        let inverted = self.qjl.invert(&quantized);
+        let scale = Self::SQRT_PI_FRAC_2 * norm / (self.dim as f32).sqrt();
+        for (o, v) in out.iter_mut().zip(inverted.iter()) {
+            *o = v * scale;
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        (byte_len - std::mem::size_of::<f32>()) * 8
+    }
+}
+
+pub struct Prod1QueryDistance {
+    qjl_query: Vec<f32>,
+    scale: f32,
+}
+
+impl Prod1QueryDistance {
+    pub fn new(mut query: Vec<f32>, qjl_seed: u64) -> Self {
+        let norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+        for d in query.iter_mut() {
+            *d *= inv_norm;
+        }
+
+        // XXX seed should be passed.
+        let qjl = cached_jl_trans(query.len(), qjl_seed);
+        let qjl_query = qjl.transform(&query);
+        let scale = (std::f32::consts::PI / (2.0 * query.len() as f32)).sqrt() / norm;
+
+        Self { qjl_query, scale }
+    }
+}
+
+impl QueryVectorDistance for Prod1QueryDistance {
+    fn distance(&self, encoded: &[u8]) -> f64 {
+        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let codebook = [-1.0f32, 1.0f32];
+        let bits = &encoded[4..];
+        let dot: f32 = self
+            .qjl_query
+            .iter()
+            .enumerate()
+            .map(|(i, &q)| q * codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
+            .sum();
+        (dot * self.scale * norm).into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use approx::assert_abs_diff_eq;
 
-    use crate::F32VectorCoder;
+    use crate::{F32VectorCoder, turbo_quant::Prod1Coder};
 
     use super::MSE1Coder;
 
@@ -238,6 +337,47 @@ mod tests {
                 0.8079555,
                 0.8074604,
                 0.32286346
+            ]
+            .as_ref(),
+            epsilon = 0.00001
+        );
+    }
+
+    #[test]
+    fn prod1_coding() {
+        let coder = Prod1Coder::new(TEST_VECTOR.len(), 42);
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_eq!(encoded.len(), coder.byte_len(TEST_VECTOR.len()));
+        let encoded_norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        assert_abs_diff_eq!(
+            encoded_norm,
+            TEST_VECTOR.iter().map(|&x| x * x).sum::<f32>().sqrt(),
+            epsilon = 0.00001
+        );
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_slice(),
+            [
+                -0.11823406,
+                -0.064648196,
+                0.1797759,
+                0.09073599,
+                0.07037071,
+                -0.05997065,
+                0.2675099,
+                0.030882455,
+                -0.14059314,
+                -0.18831186,
+                0.055834852,
+                -0.18823946,
+                0.14678425,
+                0.17287876,
+                -0.23561007,
+                -0.051334415,
+                0.2911592,
+                0.2909808,
+                0.11634883
             ]
             .as_ref(),
             epsilon = 0.00001

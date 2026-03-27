@@ -181,6 +181,9 @@ pub enum F32VectorCoding {
 }
 
 impl F32VectorCoding {
+    const MSE_SEED: u64 = 42;
+    const QJL_SEED: u64 = 71;
+
     /// Create a new coder for this format.
     pub fn new_coder(&self, similarity: VectorSimilarity) -> Box<dyn F32VectorCoder> {
         match self {
@@ -202,7 +205,14 @@ impl F32VectorCoding {
             Self::TLVQ2x8 => Box::new(lvq::TurboResidualCoder::<2>::default()),
             Self::TLVQ4x8 => Box::new(lvq::TurboResidualCoder::<4>::default()),
             Self::TLVQ8x8 => Box::new(lvq::TurboResidualCoder::<8>::default()),
-            Self::TurboQuant1 => Box::new(turbo_quant::MSE1Coder::new(dim, 42)),
+            Self::TurboQuant1 => match similarity {
+                VectorSimilarity::Euclidean => {
+                    Box::new(turbo_quant::MSE1Coder::new(dim, Self::MSE_SEED))
+                }
+                VectorSimilarity::Dot | VectorSimilarity::Cosine => {
+                    Box::new(turbo_quant::Prod1Coder::new(dim, Self::QJL_SEED))
+                }
+            },
         }
     }
 
@@ -290,7 +300,12 @@ impl F32VectorCoding {
             (Euclidean, F32VectorCoding::TurboQuant1) => {
                 Box::new(turbo_quant::MSE1QueryDistance::new(query.into().to_vec()))
             }
-            (_, F32VectorCoding::TurboQuant1) => unimplemented!(),
+            (Dot, F32VectorCoding::TurboQuant1) | (Cosine, F32VectorCoding::TurboQuant1) => {
+                Box::new(turbo_quant::Prod1QueryDistance::new(
+                    query.into().to_vec(),
+                    Self::QJL_SEED,
+                ))
+            }
         }
     }
 

@@ -13,6 +13,10 @@ pub struct LossArgs {
     /// Target format to measure the quantization loss of.
     #[arg(short, long)]
     format: F32VectorCoding,
+
+    #[arg(long, default_value_t = VectorSimilarity::Euclidean)]
+    similarity: VectorSimilarity,
+
     /// If set, compute the center of the dataset and apply before quantizing.
     #[arg(long, default_value_t = false)]
     center: bool,
@@ -30,9 +34,7 @@ pub fn loss(
 
     // Assume Euclidean. It might be best to make this configurable as some encodings might perform
     // better when the inputs are l2 normalized.
-    let coder = args
-        .format
-        .coder(VectorSimilarity::Euclidean, vectors.elem_stride());
+    let coder = args.format.coder(args.similarity, vectors.elem_stride());
     let (abs_error, sq_error) = (0..vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "loss"))

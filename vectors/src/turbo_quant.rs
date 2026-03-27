@@ -304,24 +304,30 @@ impl F32VectorCoder for Prod2Coder {
         out[..4].copy_from_slice(&norm.to_le_bytes());
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
         let mut scratch: Vec<f32> = vector.iter().map(|&x| x * inv_norm).collect();
-        let mse_vec = self.mse.transform(&scratch);
+        let mut mse_vec = self.mse.transform(&scratch);
 
         let bitvec_len = self.dim.div_ceil(8);
         let mse_bytes = &mut out[8..(8 + bitvec_len)];
         mse_bytes.fill(0);
 
-        // Compute the MSE 1-bit sign vector of the transformed vector.
-        // At the same time fill the residual vector and compute its l2 norm.
+        // Compute the MSE 1-bit sign vector of mse_vec and replace it's contents with the
+        // dequantized value. This vector must be inverted before computing the residual.
         let codebook = codebook_bit(self.dim);
-        let mut residual_dot = 0.0f32;
-        for (i, (&v, r)) in mse_vec.iter().zip(scratch.iter_mut()).enumerate() {
-            let dq = if v > 0.0 {
+        for (i, v) in mse_vec.iter_mut().enumerate() {
+            if *v > 0.0 {
                 mse_bytes[i / 8] |= 1 << (i % 8);
-                codebook[1]
+                *v = codebook[1];
             } else {
-                codebook[0]
-            };
-            *r = v - dq;
+                *v = codebook[0];
+            }
+        }
+        let mse_reconstructed = self.mse.invert(&mse_vec);
+
+        // Compute the residual vector for QJL encoding. Compute the dot product as we will need
+        // to store the l2 norm of the residual.
+        let mut residual_dot = 0.0f32;
+        for (r, &rec) in scratch.iter_mut().zip(mse_reconstructed.iter()) {
+            *r -= rec;
             residual_dot += *r * *r;
         }
 
@@ -356,14 +362,14 @@ impl F32VectorCoder for Prod2Coder {
 
         let qjl_bits = &encoded[(8 + bitvec_len)..];
         let qjl_codebook = [-1.0f32, 1.0f32];
-        let scale = SQRT_PI_FRAC_2 * residual_norm / (self.dim as f32).sqrt();
+        let qjl_scale = SQRT_PI_FRAC_2 * residual_norm / (self.dim as f32).sqrt();
         for (i, o) in out.iter_mut().enumerate() {
             *o = qjl_codebook[((qjl_bits[i / 8] >> (i % 8)) & 1) as usize];
         }
         let qjl_vec = self.qjl.invert(out);
 
         for ((mse, qjl), o) in mse_vec.iter().zip(qjl_vec.iter()).zip(out.iter_mut()) {
-            *o = mse * norm + qjl * scale;
+            *o = (mse + qjl * qjl_scale) * norm;
         }
     }
 
@@ -376,7 +382,10 @@ impl F32VectorCoder for Prod2Coder {
 mod tests {
     use approx::assert_abs_diff_eq;
 
-    use crate::{F32VectorCoder, turbo_quant::Prod1Coder};
+    use crate::{
+        F32VectorCoder,
+        turbo_quant::{Prod1Coder, Prod2Coder},
+    };
 
     use super::MSE1Coder;
 
@@ -453,25 +462,68 @@ mod tests {
         assert_abs_diff_eq!(
             decoded.as_slice(),
             [
-                -0.11823406,
-                -0.064648196,
-                0.1797759,
-                0.09073599,
-                0.07037071,
-                -0.05997065,
-                0.2675099,
-                0.030882455,
-                -0.14059314,
-                -0.18831186,
-                0.055834852,
-                -0.18823946,
-                0.14678425,
-                0.17287876,
-                -0.23561007,
-                -0.051334415,
-                0.2911592,
-                0.2909808,
-                0.11634883
+                -0.5153703,
+                -0.28179494,
+                0.78362495,
+                0.39550897,
+                0.3067388,
+                -0.26140597,
+                1.1660486,
+                0.1346135,
+                -0.6128313,
+                -0.82083225,
+                0.24337846,
+                -0.82051665,
+                0.63981766,
+                0.75356096,
+                -1.0270004,
+                -0.22376151,
+                1.2691334,
+                1.2683558,
+                0.50715274
+            ]
+            .as_ref(),
+            epsilon = 0.00001
+        );
+    }
+
+    #[test]
+    fn prod2_coding() {
+        let coder = Prod2Coder::new(TEST_VECTOR.len(), 42, 43);
+        let encoded = coder.encode(&TEST_VECTOR);
+        assert_eq!(encoded.len(), coder.byte_len(TEST_VECTOR.len()));
+        let encoded_norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let encoded_residual_norm = f32::from_le_bytes(encoded[4..8].try_into().unwrap());
+        assert_abs_diff_eq!(
+            encoded_norm,
+            TEST_VECTOR.iter().map(|&x| x * x).sum::<f32>().sqrt(),
+            epsilon = 0.00001
+        );
+        assert!(encoded_residual_norm < 1.0);
+        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+        coder.decode_to(&encoded, &mut decoded);
+        assert_abs_diff_eq!(
+            decoded.as_slice(),
+            [
+                -1.0868338,
+                0.069815524,
+                0.61763537,
+                1.2284997,
+                0.6587493,
+                0.25813597,
+                1.0347325,
+                -0.18683682,
+                -0.3129965,
+                -0.406053,
+                0.74326444,
+                -0.54105914,
+                -0.025382556,
+                0.56268257,
+                -0.43888098,
+                0.63369685,
+                0.93936765,
+                0.4219962,
+                -0.044104088
             ]
             .as_ref(),
             epsilon = 0.00001

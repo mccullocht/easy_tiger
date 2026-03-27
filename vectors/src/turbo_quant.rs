@@ -180,16 +180,16 @@ impl QueryVectorDistance for MSE1QueryDistance {
     }
 }
 
-// XXX docs
+// sqrt(pi/2) is used for scaling the decoded qjl vector.
+const SQRT_PI_FRAC_2: f32 = 1.25331414;
+
+/// Produces a 1-bit quantization optimized for inner product (angular) similarity.
 pub struct Prod1Coder {
     dim: usize,
     qjl: Arc<JLTrans>,
 }
 
 impl Prod1Coder {
-    // sqrt(pi/2) is used for scaling the decoded vector.
-    const SQRT_PI_FRAC_2: f32 = 1.25331414;
-
     pub fn new(dim: usize, seed: u64) -> Self {
         let qjl = cached_jl_trans(dim, seed);
         Self { dim, qjl }
@@ -230,7 +230,7 @@ impl F32VectorCoder for Prod1Coder {
             .collect();
 
         let inverted = self.qjl.invert(&quantized);
-        let scale = Self::SQRT_PI_FRAC_2 * norm / (self.dim as f32).sqrt();
+        let scale = SQRT_PI_FRAC_2 * norm / (self.dim as f32).sqrt();
         for (o, v) in out.iter_mut().zip(inverted.iter()) {
             *o = v * scale;
         }
@@ -275,6 +275,100 @@ impl QueryVectorDistance for Prod1QueryDistance {
             .sum();
         let dot = dot_unnormalized * self.scale * norm;
         dot.mul_add(-0.5, 0.5).into()
+    }
+}
+
+/// Produces a 2-bit quantization suitable for either l2 or angular similarity.
+///
+/// The vector is split into two parts: a 1-bit representation optimized for MSE, and a 1-bit
+/// representation of the residuals optimized for inner product. These parts can be combined
+/// to decode the vector or for asymmetric distance computation.
+pub struct Prod2Coder {
+    dim: usize,
+    mse: Arc<JLTrans>,
+    qjl: Arc<JLTrans>,
+}
+
+impl Prod2Coder {
+    pub fn new(dim: usize, mse_seed: u64, qjl_seed: u64) -> Self {
+        let mse = cached_jl_trans(dim, mse_seed);
+        let qjl = cached_jl_trans(dim, qjl_seed);
+        Self { dim, mse, qjl }
+    }
+}
+
+impl F32VectorCoder for Prod2Coder {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        assert_eq!(vector.len(), self.dim);
+        let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        out[..4].copy_from_slice(&norm.to_le_bytes());
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+        let mut scratch: Vec<f32> = vector.iter().map(|&x| x * inv_norm).collect();
+        let mse_vec = self.mse.transform(&scratch);
+
+        let bitvec_len = self.dim.div_ceil(8);
+        let mse_bytes = &mut out[8..(8 + bitvec_len)];
+        mse_bytes.fill(0);
+
+        // Compute the MSE 1-bit sign vector of the transformed vector.
+        // At the same time fill the residual vector and compute its l2 norm.
+        let codebook = codebook_bit(self.dim);
+        let mut residual_dot = 0.0f32;
+        for (i, (&v, r)) in mse_vec.iter().zip(scratch.iter_mut()).enumerate() {
+            let dq = if v > 0.0 {
+                mse_bytes[i / 8] |= 1 << (i % 8);
+                codebook[1]
+            } else {
+                codebook[0]
+            };
+            *r = v - dq;
+            residual_dot += *r * *r;
+        }
+
+        let residual_norm = residual_dot.sqrt();
+        out[4..8].copy_from_slice(&residual_norm.to_le_bytes());
+        let qjl_vec = self.qjl.transform(&scratch);
+        let qjl_bytes = &mut out[(8 + bitvec_len)..];
+        qjl_bytes.fill(0);
+        for (i, &v) in qjl_vec.iter().enumerate() {
+            if v > 0.0 {
+                qjl_bytes[i / 8] |= 1 << (i % 8);
+            }
+        }
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        (std::mem::size_of::<f32>() + dimensions.div_ceil(8)) * 2
+    }
+
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        assert_eq!(out.len(), self.dim);
+        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let residual_norm = f32::from_le_bytes(encoded[4..8].try_into().unwrap());
+
+        let bitvec_len = self.dim.div_ceil(8);
+        let mse_bits = &encoded[8..(8 + bitvec_len)];
+        let mse_codebook = codebook_bit(self.dim);
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = mse_codebook[((mse_bits[i / 8] >> (i % 8)) & 1) as usize];
+        }
+        let mse_vec = self.mse.invert(out);
+
+        let qjl_bits = &encoded[(8 + bitvec_len)..];
+        let qjl_codebook = [-1.0f32, 1.0f32];
+        let scale = SQRT_PI_FRAC_2 * residual_norm / (self.dim as f32).sqrt();
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = qjl_codebook[((qjl_bits[i / 8] >> (i % 8)) & 1) as usize];
+        }
+        let qjl_vec = self.qjl.invert(out);
+
+        for ((mse, qjl), o) in mse_vec.iter().zip(qjl_vec.iter()).zip(out.iter_mut()) {
+            *o = mse * norm + qjl * scale;
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        (byte_len - std::mem::size_of::<f32>() * 2) * 4
     }
 }
 

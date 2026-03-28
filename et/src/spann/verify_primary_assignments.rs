@@ -1,25 +1,25 @@
 use std::{io, sync::Arc};
 
 use easy_tiger::{
-    input::{VecVectorStore, VectorStore},
-    spann::{centroid_stats::CentroidStats, PostingKey, TableIndex},
     Neighbor,
+    input::{VecVectorStore, VectorStore},
+    spann::{PostingKey, TableIndex, TransactionIndex, centroid_stats::CentroidStats},
 };
 use indicatif::ProgressIterator;
 use rayon::prelude::*;
-use wt_mdb::{session::TransactionGuard, Connection, Error, Result, Session};
+use wt_mdb::{Connection, Error, Result};
 
 use crate::ui::progress_bar;
 
 pub fn verify_primary_assignments(connection: Arc<Connection>, index_name: &str) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    let session = connection.open_session()?;
-    let stats = CentroidStats::from_index_stats(&session, &index)?;
+    let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
+    let stats = CentroidStats::from_index_stats(&txn_idx)?;
 
     // Read primary assignments and head vectors. Re-encode the head vectors in the same format as
     // the postings to make comparisons cheaper since we will be doing this exhaustively.
-    let primary_assignments = read_primary_assignments(&session, &index, &stats)?;
-    let (centroid_ids, head_vectors) = read_head_vectors(&session, &index)?;
+    let primary_assignments = read_primary_assignments(&txn_idx, &stats)?;
+    let (centroid_ids, head_vectors) = read_head_vectors(&txn_idx)?;
     // Get the list of centroid ids with primary assignments. This will be our unit of parallelism
     // to avoid high overhead in rayon.
     let mut primary_centroid_ids = primary_assignments
@@ -32,11 +32,15 @@ pub fn verify_primary_assignments(connection: Arc<Connection>, index_name: &str)
     let (correct, total) = primary_centroid_ids
         .into_par_iter()
         .map_init(
-            || connection.open_session().expect("failed to open session"),
-            |session, centroid_id| {
-                count_primary_assigned_vectors(
-                    session,
+            || {
+                TransactionIndex::new(
                     &index,
+                    connection.begin_transaction(None).expect("open session"),
+                )
+            },
+            |txn_idx, centroid_id| {
+                count_primary_assigned_vectors(
+                    txn_idx,
                     centroid_id,
                     &primary_assignments,
                     &centroid_ids,
@@ -66,12 +70,12 @@ pub fn verify_primary_assignments(connection: Arc<Connection>, index_name: &str)
 }
 
 fn read_primary_assignments(
-    session: &Session,
-    index: &TableIndex,
+    txn_idx: &TransactionIndex,
     stats: &CentroidStats,
 ) -> Result<Vec<PostingKey>> {
-    let cursor = session
-        .get_or_create_typed_cursor::<i64, Vec<u8>>(&index.centroid_assignments_table_name())?;
+    let cursor = txn_idx
+        .transaction()
+        .open_cursor::<i64, Vec<u8>>(&txn_idx.index().centroid_assignments_table_name())?;
     let primary_assignments = stats
         .primary_assignment_counts_iter()
         .map(|(_, c)| c as usize)
@@ -93,10 +97,8 @@ fn read_primary_assignments(
     Ok(assignments)
 }
 
-fn read_head_vectors(
-    session: &Session,
-    index: &TableIndex,
-) -> Result<(Vec<u32>, VecVectorStore<u8>)> {
+fn read_head_vectors(txn_idx: &TransactionIndex) -> Result<(Vec<u32>, VecVectorStore<u8>)> {
+    let index = txn_idx.index();
     let vector_table = index.head_config().high_fidelity_table();
     let dim = index.head_config().config().dimensions.get();
     let head_coder = vector_table.new_coder();
@@ -105,7 +107,9 @@ fn read_head_vectors(
         .posting_coder
         .new_coder(index.head_config().config().similarity);
 
-    let mut cursor = session.get_or_create_typed_cursor::<i64, Vec<u8>>(&vector_table.name())?;
+    let mut cursor = txn_idx
+        .transaction()
+        .open_cursor::<i64, Vec<u8>>(&vector_table.name())?;
     let mut f32_buffer = vec![0.0f32; dim];
     let mut posting_buffer = vec![0u8; posting_coder.byte_len(dim)];
     let cap = cursor
@@ -125,19 +129,19 @@ fn read_head_vectors(
 }
 
 fn count_primary_assigned_vectors(
-    session: &Session,
-    index: &TableIndex,
+    txn_idx: &TransactionIndex,
     centroid_id: u32,
     posting_keys: &[PostingKey],
     head_centroid_ids: &[u32],
     head_vectors: &VecVectorStore<u8>,
 ) -> Result<(usize, usize)> {
+    let index = txn_idx.index();
     let posting_keys = &posting_keys[posting_keys.partition_point(|pk| pk.centroid_id < centroid_id)
         ..posting_keys.partition_point(|pk| pk.centroid_id < centroid_id + 1)];
     let mut pk_iter = posting_keys.iter().peekable();
-    let _txn_guard = TransactionGuard::new(session, None)?;
-    let mut postings_cursor =
-        session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(&index.postings_table_name())?;
+    let mut postings_cursor = txn_idx
+        .transaction()
+        .open_cursor::<PostingKey, Vec<u8>>(&txn_idx.index().postings_table_name())?;
     postings_cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
     let dist_fn = index
         .config()

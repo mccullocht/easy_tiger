@@ -3,22 +3,22 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc, time::Duration};
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
-    kmeans::{hierarchical_kmeans, HierarchicalKMeansParams, Params},
+    kmeans::{HierarchicalKMeansParams, Params, hierarchical_kmeans},
     spann::{
+        IndexConfig, ReplicaSelectionAlgorithm, TableIndex,
         bulk::{
             assign_to_centroids, load_centroid_stats, load_centroids, load_postings,
             load_raw_vectors,
         },
-        IndexConfig, ReplicaSelectionAlgorithm, TableIndex,
     },
     vamana::{
-        bulk::{self, BulkLoadBuilder},
         GraphConfig, GraphSearchParams, PatienceParams,
+        bulk::{self, BulkLoadBuilder},
     },
 };
-use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
+use rand_xoshiro::{Xoshiro128PlusPlus, rand_core::SeedableRng};
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{session::DropOptionsBuilder, Connection};
+use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
 use crate::{ui::progress_bar, vamana::EdgePruningArgs};
 
@@ -142,7 +142,7 @@ pub fn bulk_load(
 
     if args.drop_tables {
         TableIndex::drop_tables(
-            &connection.open_session()?,
+            &connection,
             index_name,
             &Some(DropOptionsBuilder::default().set_force().into()),
         )?;
@@ -237,10 +237,9 @@ pub fn bulk_load(
         }
     }
 
-    let session = connection.open_session()?;
     if index.config().rerank_format.is_some() {
         let progress = progress_bar(limit, "tail load raw vectors");
-        load_raw_vectors(index.as_ref(), &session, &f32_vectors, limit, |i| {
+        load_raw_vectors(index.as_ref(), &connection, &f32_vectors, limit, |i| {
             progress.inc(i)
         })?
     }
@@ -253,14 +252,14 @@ pub fn bulk_load(
     };
     {
         let progress = progress_bar(limit, "tail load centroids");
-        load_centroids(index.as_ref(), &session, &centroid_assignments, |i| {
+        load_centroids(index.as_ref(), &connection, &centroid_assignments, |i| {
             progress.inc(i)
         })?;
     }
 
     {
         let progress = progress_bar(centroids_len, "tail load centroid stats");
-        load_centroid_stats(index.as_ref(), &session, &centroid_assignments, |i| {
+        load_centroid_stats(index.as_ref(), &connection, &centroid_assignments, |i| {
             progress.inc(i)
         })?;
     }
@@ -270,7 +269,7 @@ pub fn bulk_load(
         let progress = progress_bar(posting_count, "tail load postings");
         load_postings(
             index.as_ref(),
-            &session,
+            &connection,
             &centroid_assignments,
             &f32_vectors,
             |i| progress.inc(i),

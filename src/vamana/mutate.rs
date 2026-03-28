@@ -314,14 +314,13 @@ mod tests {
     use crate::vamana::{
         mutate::{delete_vector, insert_vector, upsert_vector},
         search::GraphSearcher,
-        wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
+        wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
         EdgePruningConfig, Graph, GraphConfig, GraphSearchParams, GraphVectorIndex,
     };
 
     struct Fixture {
         index: Arc<TableGraphVectorIndex>,
         conn: Arc<Connection>,
-        wt_index: SessionGraphVectorIndex,
         _dir: tempfile::TempDir,
     }
 
@@ -334,22 +333,27 @@ mod tests {
             }
         }
 
-        fn new_reader(&self) -> SessionGraphVectorIndex {
-            SessionGraphVectorIndex::new(self.index.clone(), self.conn.open_session().unwrap())
+        fn new_txn_index(&self) -> TransactionGraphVectorIndex {
+            TransactionGraphVectorIndex::new(
+                self.index.clone(),
+                self.conn.begin_transaction(None).unwrap(),
+            )
         }
 
         fn insert_many(&self, vectors: &[[f32; 2]]) -> Result<Vec<i64>> {
+            let index = self.new_txn_index();
             vectors
                 .iter()
-                .map(|v| insert_vector(v.as_ref(), &self.wt_index))
+                .map(|v| insert_vector(v.as_ref(), &index))
                 .collect::<Result<Vec<_>>>()
+                .and_then(|ids| index.commit(None).map(|_| ids))
         }
 
         fn search(&self, query: &[f32]) -> Result<Vec<i64>> {
             let mut searcher = GraphSearcher::new(Self::search_params());
-            let mut reader = self.new_reader();
+            let reader = self.new_txn_index();
             searcher
-                .search(query, &mut reader)
+                .search(query, &reader)
                 .map(|neighbors| neighbors.into_iter().map(|n| n.vertex()).collect())
         }
     }
@@ -381,13 +385,10 @@ mod tests {
                 )
                 .unwrap(),
             );
-            let wt_index =
-                SessionGraphVectorIndex::new(index.clone(), conn.open_session().unwrap());
             Self {
                 _dir: dir,
                 conn,
                 index,
-                wt_index,
             }
         }
     }
@@ -396,10 +397,10 @@ mod tests {
     fn empty_graph() -> Result<()> {
         let fixture = Fixture::default();
 
-        let mut reader = fixture.new_reader();
+        let reader = fixture.new_txn_index();
         assert_eq!(reader.graph()?.entry_point(), None);
         let mut searcher = GraphSearcher::new(Fixture::search_params());
-        assert_eq!(searcher.search(&[0.5, -0.5], &mut reader), Ok(vec![]));
+        assert_eq!(searcher.search(&[0.5, -0.5], &reader), Ok(vec![]));
         Ok(())
     }
 
@@ -407,9 +408,12 @@ mod tests {
     fn insert_one() -> Result<()> {
         let fixture = Fixture::default();
 
-        let id = insert_vector(&[0.0, 0.0], &fixture.wt_index)?;
+        let index = fixture.new_txn_index();
+        let id = insert_vector(&[0.0, 0.0], &index)?;
+        index.commit(None)?;
+
         assert_eq!(id, 0);
-        assert_eq!(fixture.new_reader().graph()?.entry_point(), Some(Ok(id)));
+        assert_eq!(fixture.new_txn_index().graph()?.entry_point(), Some(Ok(id)));
         assert_eq!(fixture.search(&[1.0, 1.0]), Ok(vec![id]));
         Ok(())
     }
@@ -437,7 +441,7 @@ mod tests {
             [-0.1, -0.1],
         ])?;
 
-        let reader = &fixture.wt_index;
+        let reader = fixture.new_txn_index();
         let mut graph = reader.graph()?;
         assert_eq!(
             graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>(),
@@ -453,7 +457,10 @@ mod tests {
         let fixture = Fixture::default();
 
         let vertex_ids = fixture.insert_many(&[[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])?;
-        delete_vector(vertex_ids[1], &fixture.wt_index)?;
+        let txn_index = fixture.new_txn_index();
+        delete_vector(vertex_ids[1], &txn_index)?;
+        txn_index.commit(None)?;
+
         assert_eq!(
             fixture.search(&[0.0, 0.0])?,
             vertex_ids
@@ -480,7 +487,7 @@ mod tests {
             [-0.1, -0.1],
         ])?;
 
-        let reader = fixture.new_reader();
+        let reader = fixture.new_txn_index();
         let mut graph = reader.graph()?;
         assert_eq!(
             graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>(),
@@ -488,8 +495,11 @@ mod tests {
         );
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
 
-        delete_vector(1, &fixture.wt_index)?;
-        let reader = fixture.new_reader();
+        let txn_index = fixture.new_txn_index();
+        delete_vector(1, &txn_index)?;
+        txn_index.commit(None)?;
+
+        let reader = fixture.new_txn_index();
         let mut graph = reader.graph()?;
         assert_eq!(
             graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>(),
@@ -504,15 +514,15 @@ mod tests {
     fn delete_entry_point() -> Result<()> {
         let fixture = Fixture::default();
 
-        let entry_id = insert_vector(&[0.0, 0.0], &fixture.wt_index)?;
-        let next_entry_id = insert_vector(&[0.5, 0.5], &fixture.wt_index)?;
-        insert_vector(&[1.0, 1.0], &fixture.wt_index)?;
+        let txn_index = fixture.new_txn_index();
+        let entry_id = insert_vector(&[0.0, 0.0], &txn_index)?;
+        let next_entry_id = insert_vector(&[0.5, 0.5], &txn_index)?;
+        insert_vector(&[1.0, 1.0], &txn_index)?;
 
-        delete_vector(entry_id, &fixture.wt_index)?;
-        assert_eq!(
-            fixture.new_reader().graph()?.entry_point(),
-            Some(Ok(next_entry_id))
-        );
+        delete_vector(entry_id, &txn_index)?;
+        assert_eq!(txn_index.graph()?.entry_point(), Some(Ok(next_entry_id)));
+        txn_index.commit(None)?;
+
         assert_eq!(fixture.search(&[0.0, 0.0])?, vec![1, 2]);
 
         Ok(())
@@ -522,9 +532,14 @@ mod tests {
     fn delete_only_point() -> Result<()> {
         let fixture = Fixture::default();
 
-        let id = insert_vector(&[0.0, 0.0], &fixture.wt_index)?;
+        let txn_index = fixture.new_txn_index();
+        let id = insert_vector(&[0.0, 0.0], &txn_index)?;
+        txn_index.commit(None)?;
         assert_eq!(fixture.search(&[0.0, 0.0])?, vec![id]);
-        delete_vector(id, &fixture.wt_index)?;
+
+        let txn_index = fixture.new_txn_index();
+        delete_vector(id, &txn_index)?;
+        txn_index.commit(None)?;
         assert_eq!(fixture.search(&[0.0, 0.0])?, Vec::<i64>::new());
 
         Ok(())
@@ -543,7 +558,11 @@ mod tests {
             [-0.1, -0.1],
         ])?;
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
-        upsert_vector(vertex_ids[0], &[1.0, 1.0], &fixture.wt_index)?;
+
+        let txn_index = fixture.new_txn_index();
+        upsert_vector(vertex_ids[0], &[1.0, 1.0], &txn_index)?;
+        txn_index.commit(None)?;
+
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![1, 2, 3, 5, 4, 0]));
 
         Ok(())

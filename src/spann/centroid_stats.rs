@@ -3,11 +3,12 @@ use tracing::error;
 
 use wt_mdb::{
     session::{FormatString, Formatted},
-    Error, Result, Session, TypedCursorGuard,
+    Error, Result, Transaction, TypedCursorGuard,
 };
 
 use crate::spann::{
     CentroidAssignment, CentroidAssignmentRef, CentroidAssignmentType, PostingKey, TableIndex,
+    TransactionIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -105,13 +106,12 @@ impl CentroidStats {
     /// require a full scan of the centroids table. Callers should prefer `from_index_stats`.
     ///
     /// Callers should open a transaction for this sequence of reads.
-    pub fn from_centroid_assignments(session: &Session, index: &TableIndex) -> Result<Self> {
-        let mut head_cursor = session.get_record_cursor(index.head.graph_table_name())?;
+    pub fn from_centroid_assignments(txn: &Transaction, index: &TableIndex) -> Result<Self> {
+        let mut head_cursor = txn.open_record_cursor(index.head.graph_table_name())?;
         let centroid_len = head_cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
 
         let mut counts: Vec<Option<CentroidCounts>> = vec![None; centroid_len];
-        let centroid_cursor =
-            session.get_or_create_typed_cursor::<i64, Vec<u8>>(&index.table_names.centroids)?;
+        let centroid_cursor = txn.open_cursor::<i64, Vec<u8>>(&index.table_names.centroids)?;
         for r in centroid_cursor {
             let centroid_bytes = r.map(|(_, c)| c)?;
             let mut centroid_it = centroid_bytes
@@ -146,9 +146,10 @@ impl CentroidStats {
     /// a large amount of data.
     ///
     /// Callers should open a transaction for this sequence of reads.
-    pub fn from_index_stats(session: &Session, index: &TableIndex) -> Result<Self> {
-        let mut cursor = session
-            .get_or_create_typed_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats)?;
+    pub fn from_index_stats(txn_idx: &TransactionIndex) -> Result<Self> {
+        let mut cursor = txn_idx
+            .transaction()
+            .open_cursor::<u32, CentroidCounts>(&txn_idx.index().table_names.centroid_stats)?;
         let centroid_len = cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
         let mut counts = vec![None; centroid_len];
         for r in cursor {
@@ -224,17 +225,19 @@ pub struct CentroidAssignmentUpdater<'a> {
 
 impl<'a> CentroidAssignmentUpdater<'a> {
     /// Create a new updater for `index` using `session` for WT access.
-    pub fn new(index: &TableIndex, session: &'a Session) -> Result<Self> {
-        let assignments_cursor = session
-            .get_or_create_typed_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
-        let stats =
-            CentroidStatsCache::new(session.get_or_create_typed_cursor::<u32, CentroidCounts>(
-                &index.table_names.centroid_stats,
-            )?);
+    pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
+        let assignments_cursor = txn_idx
+            .transaction()
+            .open_cursor::<i64, CentroidAssignment>(&txn_idx.index().table_names.centroids)?;
+        let stats = CentroidStatsCache::new(
+            txn_idx
+                .transaction()
+                .open_cursor::<u32, CentroidCounts>(&txn_idx.index().table_names.centroid_stats)?,
+        );
         Ok(Self {
             assignments_cursor,
             stats,
-            replica_count: index.config().replica_count,
+            replica_count: txn_idx.index().config().replica_count,
         })
     }
 

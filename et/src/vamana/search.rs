@@ -12,9 +12,9 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
-        search::{GraphSearchStats, GraphSearcher},
-        wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
         GraphSearchParams, PatienceParams,
+        search::{GraphSearchStats, GraphSearcher},
+        wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
     },
 };
 use memmap2::Mmap;
@@ -210,7 +210,8 @@ fn search_phase<Q: Send + Sync>(
 }
 
 struct SearcherState {
-    reader: SessionGraphVectorIndex,
+    connection: Arc<Connection>,
+    index: Arc<TableGraphVectorIndex>,
     searcher: GraphSearcher,
 }
 
@@ -221,7 +222,8 @@ impl SearcherState {
         search_params: GraphSearchParams,
     ) -> io::Result<Self> {
         Ok(Self {
-            reader: SessionGraphVectorIndex::new(index.clone(), connection.open_session()?),
+            connection: Arc::clone(connection),
+            index: Arc::clone(index),
             searcher: GraphSearcher::new(search_params),
         })
     }
@@ -233,13 +235,15 @@ impl SearcherState {
         record_limit: i64,
         recall_computer: Option<&RecallComputer>,
     ) -> io::Result<AggregateSearchStats> {
-        self.reader.session().begin_transaction(None)?;
+        let reader = TransactionGraphVectorIndex::new(
+            Arc::clone(&self.index),
+            self.connection.begin_transaction(None)?,
+        );
         let start = Instant::now();
-        let results =
-            self.searcher
-                .search_with_filter(query, |i| i < record_limit, &mut self.reader)?;
+        let results = self
+            .searcher
+            .search_with_filter(query, |i| i < record_limit, &reader)?;
         let duration = Instant::now() - start;
-        self.reader.session().rollback_transaction(None)?;
         Ok(AggregateSearchStats::new(
             duration,
             self.searcher.stats(),

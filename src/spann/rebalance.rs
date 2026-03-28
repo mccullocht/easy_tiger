@@ -15,12 +15,12 @@ use crate::{
     kmeans,
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats, Lifecycle},
-        select_centroids, CentroidAssignment, PostingKey, TableIndex,
+        select_centroids, CentroidAssignment, PostingKey, TransactionIndex,
     },
     vamana::{
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
-        wt::SessionGraphVectorIndex,
+        wt::TransactionGraphVectorIndex,
         GraphVectorIndex, GraphVectorStore,
     },
 };
@@ -168,25 +168,25 @@ impl From<SplitStats> for RebalanceStats {
 
 /// Remove `centroid_id` and merge each of its vectors into the next closest centroid.
 pub fn merge_centroid(
-    index: &TableIndex,
-    head_index: &SessionGraphVectorIndex,
+    txn_idx: &TransactionIndex,
     centroid_id: usize,
     len: usize,
 ) -> Result<MergeStats> {
     // Collect all of the vectors for the centroid to merge.
-    let mut posting_cursor = head_index
-        .session()
-        .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
+    let index = Arc::clone(txn_idx.index());
+    let mut posting_cursor = txn_idx
+        .transaction()
+        .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
     let vectors = drain_centroid(centroid_id, &mut posting_cursor)?;
 
     // Remove the centroid from the graph.
-    delete_vector(centroid_id as i64, head_index)?;
+    delete_vector(centroid_id as i64, txn_idx.head())?;
 
     // If the centroid is already empty then there is nothing to do.
     if vectors.is_empty() {
-        head_index
-            .session()
-            .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
+        txn_idx
+            .transaction()
+            .open_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
             .remove(centroid_id as u32)?;
         return Ok(MergeStats::default());
     }
@@ -194,15 +194,15 @@ pub fn merge_centroid(
     // Query the head index for each vector and assign a new centroid.
     let coder = index.new_posting_coder();
     let removed_vectors = vectors.len();
-    let connection = Arc::clone(head_index.session().connection());
+    let connection = Arc::clone(txn_idx.transaction().connection());
     let reassignments = vectors
         .into_par_iter()
         .map_init(
             || {
                 (
-                    SessionGraphVectorIndex::new(
+                    TransactionGraphVectorIndex::new(
                         Arc::clone(index.head_config()),
-                        connection.open_session().expect("open session"),
+                        connection.begin_transaction(None).expect("open session"),
                     ),
                     GraphSearcher::new(index.config().head_search_params),
                     vec![0.0f32; index.head_config().config().dimensions.get()],
@@ -234,7 +234,7 @@ pub fn merge_centroid(
         .collect::<HashSet<_>>()
         .len();
 
-    let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
+    let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
     posting_cursor.reset()?;
     for (record_id, new_assignments, vector) in reassignments {
         let old_assignments =
@@ -252,9 +252,9 @@ pub fn merge_centroid(
     }
 
     assignment_updater.flush()?;
-    head_index
-        .session()
-        .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
+    txn_idx
+        .transaction()
+        .open_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
         .remove(centroid_id as u32)?;
 
     Ok(MergeStats {
@@ -267,16 +267,15 @@ pub fn merge_centroid(
 ///
 /// `rng` is used to partition the input centroid into two clusters.
 pub fn split_centroid(
-    index: &TableIndex,
-    head_index: &SessionGraphVectorIndex,
+    txn_idx: &TransactionIndex,
     centroid_id: usize,
     target_centroid_ids: (usize, usize),
     len: usize,
     rng: &mut impl Rng,
 ) -> Result<SplitStats> {
-    let mut posting_cursor = head_index
-        .session()
-        .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
+    let mut posting_cursor = txn_idx
+        .transaction()
+        .open_cursor::<PostingKey, Vec<u8>>(txn_idx.index().postings_table_name())?;
     let vectors = drain_centroid(centroid_id, &mut posting_cursor)?;
     assert_eq!(
         vectors.len(),
@@ -286,10 +285,10 @@ pub fn split_centroid(
     );
 
     // Unpack all of the vectors as floats and split into two clusters.
-    let posting_format = index.config().posting_coder;
-    let similarity = index.head_config().config().similarity;
+    let posting_format = txn_idx.index().config().posting_coder;
+    let similarity = txn_idx.index().head_config().config().similarity;
     let posting_coder = posting_format.new_coder(similarity);
-    let mut scratch_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
+    let mut scratch_vector = vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
     let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), vectors.len());
     for (_, vector) in vectors.iter() {
         posting_coder.decode_to(vector, &mut scratch_vector);
@@ -300,7 +299,7 @@ pub fn split_centroid(
     let centroids = match kmeans::balanced_binary_partition(
         &clustering_vectors,
         100,
-        index.config().min_centroid_len,
+        txn_idx.index().config().min_centroid_len,
         rng,
     ) {
         Ok(r) => r,
@@ -311,29 +310,29 @@ pub fn split_centroid(
     };
 
     // Extract the original centroid vector from the head index and delete original centroid.
-    let mut head_vectors = head_index.high_fidelity_vectors()?;
+    let mut head_vectors = txn_idx.head().high_fidelity_vectors()?;
     let head_coder = head_vectors.new_coder();
     let original_centroid = head_coder.decode(
         head_vectors
             .get(centroid_id as i64)
             .unwrap_or(Err(Error::not_found_error()))?,
     );
-    delete_vector(centroid_id as i64, head_index)?;
+    delete_vector(centroid_id as i64, txn_idx.head())?;
 
     // For each vector if it is closer to the original centroid than either of the new centroids
     // then query the whole index to select a new assignment. Otherwise assign it to the closest
     // of the two new centroids.
-    let mut params = index.config().head_search_params;
+    let mut params = txn_idx.index().config().head_search_params;
     // TODO: figure out if nearby update beam width needs to be configurable.
     params.beam_width = NonZero::new(64).unwrap();
     let mut searcher = GraphSearcher::new(params);
-    let nearby_clusters = searcher.search(&original_centroid, head_index)?;
+    let nearby_clusters = searcher.search(&original_centroid, txn_idx.head())?;
 
     // Write the new centroids back into the index.
-    upsert_vector(target_centroid_ids.0 as i64, &centroids[0], head_index)?;
-    upsert_vector(target_centroid_ids.1 as i64, &centroids[1], head_index)?;
+    upsert_vector(target_centroid_ids.0 as i64, &centroids[0], txn_idx.head())?;
+    upsert_vector(target_centroid_ids.1 as i64, &centroids[1], txn_idx.head())?;
 
-    let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
+    let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
     // TODO: skip decoding if head index and posting index format are the same.
     let c0_dist_fn = posting_format
         .query_vector_distance_indexing(posting_coder.encode(&original_centroid), similarity);
@@ -343,16 +342,16 @@ pub fn split_centroid(
         .query_vector_distance_indexing(posting_coder.encode(&centroids[1]), similarity);
     let mut searches = 0;
     let moved_vectors = vectors.len();
-    let connection = Arc::clone(head_index.session().connection());
-    // XXX this won't observe the deletion of the head vector.
+    let connection = Arc::clone(txn_idx.transaction().connection());
+    let index = Arc::clone(txn_idx.index());
     let split_reassignments = vectors
         .into_par_iter()
         .map_init(
             || {
                 (
-                    SessionGraphVectorIndex::new(
+                    TransactionGraphVectorIndex::new(
                         Arc::clone(index.head_config()),
-                        connection.open_session().expect("open session"),
+                        connection.begin_transaction(None).expect("open session"),
                     ),
                     GraphSearcher::new(index.config().head_search_params),
                     vec![0.0f32; index.head_config().config().dimensions.get()],
@@ -389,10 +388,8 @@ pub fn split_centroid(
                         CentroidAssignment::new(updated_centroid_id as u32, &[])
                     } else {
                         let mut cursor = head_index
-                            .session()
-                            .get_or_create_typed_cursor::<i64, CentroidAssignment>(
-                                &index.table_names.centroids,
-                            )?;
+                            .transaction()
+                            .open_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
                         let mut current_assignments = cursor
                             .seek_exact(record_id)
                             .unwrap_or(Err(Error::not_found_error()))?;
@@ -433,15 +430,15 @@ pub fn split_centroid(
     let mut nearby_moved = 0;
     // For a list of nearby centroids, examine all vectors and reassign them if they are closer
     // to one of the new centroids than they are to the current centroid.
-    let connection = Arc::clone(head_index.session().connection());
+    let connection = Arc::clone(txn_idx.transaction().connection());
     let reassignments = nearby_clusters
         .into_par_iter()
         .map_init(
             || {
                 (
-                    SessionGraphVectorIndex::new(
+                    TransactionGraphVectorIndex::new(
                         Arc::clone(index.head_config()),
-                        connection.open_session().expect("open session"),
+                        connection.begin_transaction(None).expect("open session"),
                     ),
                     GraphSearcher::new(index.config().head_search_params),
                     scratch_vector.clone(),
@@ -460,13 +457,11 @@ pub fn split_centroid(
                     similarity,
                 );
                 let mut posting_cursor = head_index
-                    .session()
-                    .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
-                        index.postings_table_name(),
-                    )?;
+                    .transaction()
+                    .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
                 let mut assignment_cursor = head_index
-                    .session()
-                    .get_or_create_typed_cursor::<i64, CentroidAssignment>(
+                    .transaction()
+                    .open_cursor::<i64, CentroidAssignment>(
                         index.centroid_assignments_table_name(),
                     )?;
 
@@ -547,9 +542,9 @@ pub fn split_centroid(
     }
 
     assignment_updater.flush()?;
-    head_index
-        .session()
-        .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
+    txn_idx
+        .transaction()
+        .open_cursor::<u32, CentroidCounts>(txn_idx.index().centroid_stats_table_name())?
         .remove(centroid_id as u32)?;
 
     Ok(SplitStats {
@@ -567,15 +562,14 @@ pub fn split_centroid(
 /// writes them into the head index, sets their lifecycle to `Initializing`, marks the original
 /// centroid as `Tombstone`, and reassigns every posting to the closer of the two new centroids.
 pub fn partition_oversized_centroid(
-    index: &TableIndex,
-    head_index: &SessionGraphVectorIndex,
+    txn_idx: &TransactionIndex,
     centroid_id: u32,
     assignment_updater: &mut CentroidAssignmentUpdater<'_>,
     rng: &Mutex<impl Rng>,
 ) -> Result<(u32, u32)> {
+    let index = txn_idx.index();
     // Allocate two new centroid IDs from the current stats snapshot.
-    let session = head_index.session();
-    let stats = CentroidStats::from_index_stats(session, index)?;
+    let stats = CentroidStats::from_index_stats(txn_idx)?;
     let mut avail = stats.available_centroid_ids();
     let new_id_0 = avail.next().unwrap() as u32;
     let new_id_1 = avail.next().unwrap() as u32;
@@ -587,15 +581,16 @@ pub fn partition_oversized_centroid(
     assignment_updater.set_lifecycle(centroid_id, Lifecycle::Tombstone)?;
 
     // Read all postings from the over-sized centroid and decode them.
-    let mut posting_cursor =
-        session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
+    let mut posting_cursor = txn_idx
+        .transaction()
+        .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
     let posting_format = index.config().posting_coder;
     let similarity = index.head_config().config().similarity;
     let posting_coder = posting_format.new_coder(similarity);
     let mut scratch = vec![0.0f32; index.head_config().config().dimensions.get()];
     let mut clustering_vectors = VecVectorStore::new(scratch.len());
     posting_cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
-    while let Some(r) = posting_cursor.next() {
+    for r in posting_cursor {
         let (_, vector) = r?;
         posting_coder.decode_to(&vector, &mut scratch);
         clustering_vectors.push(&scratch);
@@ -620,8 +615,8 @@ pub fn partition_oversized_centroid(
     };
 
     // Insert the two new centroids into the head index.
-    upsert_vector(new_id_0 as i64, &centroids[0], head_index)?;
-    upsert_vector(new_id_1 as i64, &centroids[1], head_index)?;
+    upsert_vector(new_id_0 as i64, &centroids[0], txn_idx.head())?;
+    upsert_vector(new_id_1 as i64, &centroids[1], txn_idx.head())?;
 
     Ok((new_id_0, new_id_1))
 }
@@ -630,14 +625,14 @@ pub fn partition_oversized_centroid(
 ///
 /// `rng` is used to partition the input centroid into two clusters.
 pub fn split_centroid_post_partition(
-    index: &TableIndex,
-    head_index: &SessionGraphVectorIndex,
+    txn_idx: &TransactionIndex,
     centroid_id: usize,
     target_centroid_ids: (usize, usize),
 ) -> Result<SplitStats> {
-    let mut posting_cursor = head_index
-        .session()
-        .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
+    let index = Arc::clone(txn_idx.index());
+    let mut posting_cursor = txn_idx
+        .transaction()
+        .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
     let vectors = drain_centroid(centroid_id, &mut posting_cursor)?;
 
     // Unpack all of the vectors as floats and split into two clusters.
@@ -647,14 +642,14 @@ pub fn split_centroid_post_partition(
     let scratch_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
 
     // Extract the original centroid vector from the head index and delete original centroid.
-    let mut head_vectors = head_index.high_fidelity_vectors()?;
+    let mut head_vectors = txn_idx.head().high_fidelity_vectors()?;
     let head_coder = head_vectors.new_coder();
     let original_centroid = head_coder.decode(
         head_vectors
             .get(centroid_id as i64)
             .unwrap_or(Err(Error::not_found_error()))?,
     );
-    delete_vector(centroid_id as i64, head_index)?;
+    delete_vector(centroid_id as i64, txn_idx.head())?;
 
     let centroids = [
         head_coder.decode(
@@ -683,10 +678,10 @@ pub fn split_centroid_post_partition(
                 && i != target_centroid_ids.0 as i64
                 && i != target_centroid_ids.1 as i64
         },
-        head_index,
+        txn_idx.head(),
     )?;
 
-    let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
+    let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
     // TODO: skip decoding if head index and posting index format are the same.
     let c0_dist_fn = posting_format
         .query_vector_distance_indexing(posting_coder.encode(&original_centroid), similarity);
@@ -696,16 +691,19 @@ pub fn split_centroid_post_partition(
         .query_vector_distance_indexing(posting_coder.encode(&centroids[1]), similarity);
     let mut searches = 0;
     let moved_vectors = vectors.len();
-    let connection = Arc::clone(head_index.session().connection());
+    let connection = Arc::clone(txn_idx.transaction().connection());
+    let head_config = Arc::clone(index.head_config());
     posting_cursor.reset()?;
     let split_reassignments = vectors
         .into_par_iter()
         .map_init(
             || {
                 (
-                    SessionGraphVectorIndex::new(
-                        Arc::clone(index.head_config()),
-                        connection.open_session().expect("open session"),
+                    TransactionGraphVectorIndex::new(
+                        Arc::clone(&head_config),
+                        connection
+                            .begin_transaction(None)
+                            .expect("begin transaction"),
                     ),
                     GraphSearcher::new(index.config().head_search_params),
                     vec![0.0f32; index.head_config().config().dimensions.get()],
@@ -742,10 +740,8 @@ pub fn split_centroid_post_partition(
                         CentroidAssignment::new(updated_centroid_id as u32, &[])
                     } else {
                         let mut cursor = head_index
-                            .session()
-                            .get_or_create_typed_cursor::<i64, CentroidAssignment>(
-                                &index.table_names.centroids,
-                            )?;
+                            .transaction()
+                            .open_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
                         let mut current_assignments = cursor
                             .seek_exact(record_id)
                             .unwrap_or(Err(Error::not_found_error()))?;
@@ -786,15 +782,16 @@ pub fn split_centroid_post_partition(
     let mut nearby_moved = 0;
     // For a list of nearby centroids, examine all vectors and reassign them if they are closer
     // to one of the new centroids than they are to the current centroid.
-    let connection = Arc::clone(head_index.session().connection());
     let reassignments = nearby_clusters
         .into_par_iter()
         .map_init(
             || {
                 (
-                    SessionGraphVectorIndex::new(
-                        Arc::clone(index.head_config()),
-                        connection.open_session().expect("open session"),
+                    TransactionGraphVectorIndex::new(
+                        Arc::clone(&head_config),
+                        connection
+                            .begin_transaction(None)
+                            .expect("begin transaction"),
                     ),
                     GraphSearcher::new(index.config().head_search_params),
                     scratch_vector.clone(),
@@ -813,13 +810,11 @@ pub fn split_centroid_post_partition(
                     similarity,
                 );
                 let mut posting_cursor = head_index
-                    .session()
-                    .get_or_create_typed_cursor::<PostingKey, Vec<u8>>(
-                        index.postings_table_name(),
-                    )?;
+                    .transaction()
+                    .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
                 let mut assignment_cursor = head_index
-                    .session()
-                    .get_or_create_typed_cursor::<i64, CentroidAssignment>(
+                    .transaction()
+                    .open_cursor::<i64, CentroidAssignment>(
                         index.centroid_assignments_table_name(),
                     )?;
 
@@ -900,9 +895,9 @@ pub fn split_centroid_post_partition(
     }
 
     assignment_updater.flush()?;
-    head_index
-        .session()
-        .get_or_create_typed_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
+    txn_idx
+        .transaction()
+        .open_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?
         .remove(centroid_id as u32)?;
 
     Ok(SplitStats {

@@ -15,24 +15,21 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        CentroidAssignment, PostingKey, TableIndex,
+        CentroidAssignment, PostingKey, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
         rebalance::{
             RebalanceStats, merge_centroid, partition_oversized_centroid,
             split_centroid_post_partition,
         },
     },
-    vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
+    vamana::search::GraphSearcher,
 };
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::{ThreadPoolBuilder, prelude::*};
 use tracing::error;
 use vectors::F32VectorCoder;
-use wt_mdb::{
-    Connection, Error, Result,
-    session::{Formatted, TransactionGuard},
-};
+use wt_mdb::{Connection, Result};
 
 use crate::ui::{progress_bar, progress_spinner};
 
@@ -110,25 +107,17 @@ pub fn insert_vectors(
         thread::spawn(move || rebalance_loop(index, connection, rx))
     };
     (args.start..end).into_par_iter().try_for_each_init(
-        || {
-            (
-                SessionGraphVectorIndex::new(
-                    Arc::clone(index.head_config()),
-                    connection.open_session().expect("open session"),
-                ),
-                tx.clone(),
-            )
-        },
-        |(head_index, tx), i| {
+        || tx.clone(),
+        |tx, i| {
             insert_vector(
-                index.as_ref(),
-                head_index,
+                &index,
+                &connection,
                 i as i64,
                 &f32_vectors[i],
                 posting_coder.as_ref(),
                 rerank_coder.as_ref().map(|c| c.as_ref()),
                 &rng,
-                &tx,
+                tx,
             )
             .inspect(|_| main_progress.inc(1))
         },
@@ -195,8 +184,8 @@ enum RebalanceOp {
 /// postings, and optional rerank data in a single transaction. Logs a warning if
 /// the target centroid is out of policy (over- or under-sized) after insertion.
 fn insert_vector(
-    index: &TableIndex,
-    head_index: &SessionGraphVectorIndex,
+    index: &Arc<TableIndex>,
+    connection: &Arc<Connection>,
     record_id: i64,
     vector: &[f32],
     posting_coder: &dyn F32VectorCoder,
@@ -210,7 +199,7 @@ fn insert_vector(
     loop {
         let result = try_insert_vector(
             index,
-            head_index,
+            connection,
             record_id,
             vector,
             &posting_vector,
@@ -231,21 +220,20 @@ fn insert_vector(
 }
 
 fn try_insert_vector(
-    index: &TableIndex,
-    head_index: &SessionGraphVectorIndex,
+    index: &Arc<TableIndex>,
+    connection: &Arc<Connection>,
     record_id: i64,
     vector: &[f32],
     posting_vector: &[u8],
     rerank_vector: Option<&[u8]>,
     rng: &Mutex<impl Rng>,
 ) -> Result<Vec<RebalanceOp>> {
-    let txn = TransactionGuard::new(head_index.session(), None)?;
+    let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
 
-    let session = head_index.session();
-    let mut assignment_updater = CentroidAssignmentUpdater::new(index, session)?;
+    let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
 
     let mut searcher = GraphSearcher::new(index.config().head_search_params);
-    let candidates = searcher.search(vector, head_index)?;
+    let candidates = searcher.search(vector, txn_idx.head())?;
     assert!(!candidates.is_empty());
 
     // TODO: implement replica selection.
@@ -263,10 +251,11 @@ fn try_insert_vector(
         .collect::<Result<Vec<_>>>()?;
     assert!(!candidates.is_empty());
 
-    let mut posting_cursor =
-        session.get_or_create_typed_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
+    let mut posting_cursor = txn_idx
+        .transaction()
+        .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
     let mut rerank_cursor = if rerank_vector.is_some() {
-        Some(session.get_record_cursor(index.raw_vectors_table_name())?)
+        Some(txn_idx.transaction().open_record_cursor(index.raw_vectors_table_name())?)
     } else {
         None
     };
@@ -284,7 +273,7 @@ fn try_insert_vector(
         posting_cursor.set(key, posting_vector)?;
         let count = assignment_updater.centroid_size(centroid_id)?;
         if count < *policy.start()
-            && CentroidStats::from_index_stats(head_index.session(), index)?.centroid_count() > 64
+            && CentroidStats::from_index_stats(&txn_idx)?.centroid_count() > 64
         {
             assignment_updater.set_lifecycle(
                 centroid_id,
@@ -293,8 +282,7 @@ fn try_insert_vector(
             ops.push(RebalanceOp::Merge { centroid_id });
         } else if count > *policy.end() {
             let dst = partition_oversized_centroid(
-                index,
-                head_index,
+                &txn_idx,
                 centroid_id,
                 &mut assignment_updater,
                 rng,
@@ -309,7 +297,7 @@ fn try_insert_vector(
         cursor.set(record_id, vector)?;
     }
     assignment_updater.flush()?;
-    txn.commit(None).map(|()| ops)
+    txn_idx.commit(None).map(|()| ops)
 }
 
 fn rebalance_loop(
@@ -326,7 +314,7 @@ fn rebalance_loop(
         for ops in rx {
             for op in ops {
                 loop {
-                    match rebalance_op(index.as_ref(), &connection, op) {
+                    match rebalance_op(&index, &connection, op) {
                         Ok(op_stats) => {
                             stats += op_stats;
                             break;
@@ -345,27 +333,24 @@ fn rebalance_loop(
 }
 
 fn rebalance_op(
-    index: &TableIndex,
+    index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
     op: RebalanceOp,
 ) -> Result<RebalanceStats> {
-    let session = connection.open_session()?;
-    let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
-    let txn = head_index.session().transaction(None)?;
+    let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
     let stats = match op {
         RebalanceOp::Merge { centroid_id } => {
-            merge_centroid(index, &head_index, centroid_id as usize, 0).map(RebalanceStats::from)
+            merge_centroid(&txn_idx, centroid_id as usize, 0).map(RebalanceStats::from)
         }
         RebalanceOp::Split {
             src_centroid_id,
             dst_centroid_ids,
         } => split_centroid_post_partition(
-            index,
-            &head_index,
+            &txn_idx,
             src_centroid_id as usize,
             (dst_centroid_ids.0 as usize, dst_centroid_ids.1 as usize),
         )
         .map(RebalanceStats::from),
     }?;
-    txn.commit(None).map(|()| stats)
+    txn_idx.commit(None).map(|()| stats)
 }

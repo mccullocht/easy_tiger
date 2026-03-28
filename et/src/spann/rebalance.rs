@@ -1,16 +1,13 @@
 use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
-use easy_tiger::{
-    spann::{
-        centroid_stats::CentroidStats,
-        rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
-        TableIndex,
-    },
-    vamana::wt::SessionGraphVectorIndex,
+use easy_tiger::spann::{
+    TableIndex, TransactionIndex,
+    centroid_stats::CentroidStats,
+    rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
 };
 use rand::SeedableRng;
-use wt_mdb::{session::TransactionGuard, Connection};
+use wt_mdb::Connection;
 
 use crate::ui::progress_spinner;
 
@@ -57,8 +54,6 @@ pub fn rebalance(
 ) -> io::Result<()> {
     // TODO: store rng state in the index. Requires rand_xoshiro serde feature.
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    let session = connection.open_session()?;
-    let head_index = SessionGraphVectorIndex::new(Arc::clone(index.head_config()), session);
     let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(args.seed);
 
     let progress = if args.commit {
@@ -68,8 +63,8 @@ pub fn rebalance(
     };
     let mut rebalance_stats = RebalanceStats::default();
     for _ in 0..args.iterations.get() {
-        let txn_guard = TransactionGuard::new(head_index.session(), None)?;
-        let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
+        let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
+        let stats = CentroidStats::from_index_stats(&txn_idx)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
 
         if let Some(ref progress) = progress {
@@ -86,32 +81,27 @@ pub fn rebalance(
                 break;
             }
             (Some((to_merge, len)), None) => {
-                rebalance_stats += merge_centroid(&index, &head_index, to_merge, len)?;
+                rebalance_stats += merge_centroid(&txn_idx, to_merge, len)?;
             }
             (_, Some((to_split, len))) => {
                 let mut it = stats.available_centroid_ids();
                 let target_centroid_ids = (it.next().unwrap(), it.next().unwrap());
-                rebalance_stats += split_centroid(
-                    &index,
-                    &head_index,
-                    to_split,
-                    target_centroid_ids,
-                    len,
-                    &mut rng,
-                )?;
+                rebalance_stats +=
+                    split_centroid(&txn_idx, to_split, target_centroid_ids, len, &mut rng)?;
             }
         }
 
         if let Some(ref progress) = progress {
-            txn_guard.commit(None)?;
+            txn_idx.commit(None)?;
             progress.inc(1);
         } else {
             break; // only ever one iteration if not committing.
         }
     }
 
+    let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
     if let Some(progress) = progress {
-        let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
+        let stats = CentroidStats::from_index_stats(&txn_idx)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
         progress.set_message(format!(
             "rebalancing {}/{} {:.2}% clusters in policy",
@@ -121,7 +111,7 @@ pub fn rebalance(
         ));
         progress.finish_using_style();
     }
-    let stats = CentroidStats::from_index_stats(head_index.session(), &index)?;
+    let stats = CentroidStats::from_index_stats(&txn_idx)?;
     let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
     if summary.in_policy_fraction() < 1.0 {
         print_balance_summary(&summary);

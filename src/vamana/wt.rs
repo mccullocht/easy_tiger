@@ -10,8 +10,9 @@ use rustix::io::Errno;
 use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity};
 use wt_mdb::{
     config::{ConfigItem, ConfigParser},
-    session::{CreateOptionsBuilder, DropOptions},
-    Connection, Error, RecordCursorGuard, Result, Session,
+    connection::{CreateOptionsBuilder, DropOptions},
+    session::{CommitTransactionOptions, RollbackTransactionOptions},
+    Connection, Error, RecordCursorGuard, Result, Transaction,
 };
 
 use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore};
@@ -19,8 +20,8 @@ use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore};
 /// Key in the graph table containing the entry point.
 pub const ENTRY_POINT_KEY: i64 = -1;
 
-fn read_app_metadata_internal(session: &Session, table_name: &str) -> Result<String> {
-    let mut cursor = session.open_metadata_cursor()?;
+fn read_app_metadata_internal(txn: &Transaction, table_name: &str) -> Result<String> {
+    let mut cursor = txn.open_metadata_cursor()?;
     let metadata = cursor
         .seek_exact(&CString::new([b"table:", table_name.as_bytes()].concat()).expect("no nulls"))
         .ok_or(Error::not_found_error())??;
@@ -38,8 +39,8 @@ fn read_app_metadata_internal(session: &Session, table_name: &str) -> Result<Str
 /// Read the `app_metadata` config field associated with the named table.
 ///
 /// Returns `None` if table or app_metadata config field could not be found.
-pub fn read_app_metadata(session: &Session, table_name: &str) -> Option<Result<String>> {
-    match read_app_metadata_internal(session, table_name) {
+pub fn read_app_metadata(txn: &Transaction, table_name: &str) -> Option<Result<String>> {
+    match read_app_metadata_internal(txn, table_name) {
         Ok(m) => Some(Ok(m)),
         Err(e) if e == Error::not_found_error() => None,
         Err(e) => Some(Err(e)),
@@ -203,11 +204,11 @@ impl TableGraphVectorIndex {
     /// Create a new `TableGraphVectorIndex` from the relevant db tables, extracting
     /// immutable graph metadata that can be used across operations.
     pub fn from_db(connection: &Arc<Connection>, table_basename: &str) -> io::Result<Self> {
-        let session = connection.open_session()?;
+        let txn = connection.begin_transaction(None)?;
         let [graph_table_name, rerank_table_name, nav_table_name] =
             Self::generate_table_names(table_basename);
         let config: GraphConfig = serde_json::from_str(
-            &read_app_metadata(&session, &graph_table_name).ok_or(Error::not_found_error())??,
+            &read_app_metadata(&txn, &graph_table_name).ok_or(Error::not_found_error())??,
         )?;
         Self::new(config, graph_table_name, nav_table_name, rerank_table_name)
     }
@@ -252,8 +253,7 @@ impl TableGraphVectorIndex {
         index_name: &str,
     ) -> io::Result<Self> {
         let index = Self::from_init(config, index_name)?;
-        let session = connection.open_session()?;
-        session.create_table(
+        connection.create_table(
             &index.graph_table_name,
             Some(
                 CreateOptionsBuilder::default()
@@ -262,20 +262,20 @@ impl TableGraphVectorIndex {
             ),
         )?;
         if let Some(rerank_table) = index.rerank_table() {
-            session.create_table(rerank_table.name(), None)?;
+            connection.create_table(rerank_table.name(), None)?;
         }
-        session.create_table(&index.nav_table.table_name, None)?;
+        connection.create_table(&index.nav_table.table_name, None)?;
         Ok(index)
     }
 
     /// Drop all tables for `index_name`.
     pub fn drop_tables(
-        session: &Session,
+        connection: &Arc<Connection>,
         index_name: &str,
         options: &Option<DropOptions>,
     ) -> Result<()> {
         for table_name in Self::generate_table_names(index_name) {
-            session.drop_table(&table_name, options.clone())?;
+            connection.drop_table(&table_name, options.clone())?;
         }
         Ok(())
     }
@@ -312,35 +312,44 @@ impl TableGraphVectorIndex {
     }
 }
 
-/// A `GraphVectorIndex` implementation that operates on a WiredTiger store.
-pub struct SessionGraphVectorIndex {
+/// A `GraphVectorIndex` implementation that operates within a WiredTiger transaction.
+pub struct TransactionGraphVectorIndex {
     index: Arc<TableGraphVectorIndex>,
-    session: Session,
+    transaction: Transaction,
 }
 
-impl SessionGraphVectorIndex {
-    /// Create a new `TableGraphVectorIndex` given a named index and a session to access that data.
-    pub fn new(index: Arc<TableGraphVectorIndex>, session: Session) -> Self {
-        Self { index, session }
+impl TransactionGraphVectorIndex {
+    /// Create a new instance over `index` using `transaction` for db access.
+    pub fn new(index: Arc<TableGraphVectorIndex>, transaction: Transaction) -> Self {
+        Self { index, transaction }
     }
 
-    /// Return a reference to the underlying `Session`.
-    pub fn session(&self) -> &Session {
-        &self.session
-    }
-
-    /// Return a reference to the index in use.
-    pub fn index(&self) -> &TableGraphVectorIndex {
+    pub fn index(&self) -> &Arc<TableGraphVectorIndex> {
         &self.index
     }
 
-    /// Unwrap into the inner `Session`.
-    pub fn into_session(self) -> Session {
-        self.session
+    /// Return a reference to the underlying `Transaction`.
+    pub fn transaction(&self) -> &Transaction {
+        &self.transaction
+    }
+
+    /// Unwrap into the inner `Transaction`.
+    pub fn into_transaction(self) -> Transaction {
+        self.transaction
+    }
+
+    /// Commit the underlying [`Transaction`] with the provided options.
+    pub fn commit(self, options: Option<CommitTransactionOptions>) -> Result<()> {
+        self.transaction.commit(options)
+    }
+
+    /// Rollback the underlying [`Transaction`] with the provided options.
+    pub fn rollback(self, options: Option<RollbackTransactionOptions>) -> Result<()> {
+        self.transaction.rollback(options)
     }
 }
 
-impl GraphVectorIndex for SessionGraphVectorIndex {
+impl GraphVectorIndex for TransactionGraphVectorIndex {
     type Graph<'a>
         = CursorGraph<'a>
     where
@@ -356,15 +365,15 @@ impl GraphVectorIndex for SessionGraphVectorIndex {
 
     fn graph(&self) -> Result<Self::Graph<'_>> {
         Ok(CursorGraph::new(
-            self.session
-                .get_record_cursor(self.index.graph_table_name())?,
+            self.transaction
+                .open_record_cursor(self.index.graph_table_name())?,
         ))
     }
 
     fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
         Ok(CursorVectorStore::new(
-            self.session
-                .get_record_cursor(self.index.nav_table().name())?,
+            self.transaction
+                .open_record_cursor(self.index.nav_table().name())?,
             self.index.config.similarity,
             self.index.config().nav_format,
         ))
@@ -372,8 +381,8 @@ impl GraphVectorIndex for SessionGraphVectorIndex {
 
     fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
         self.index.rerank_table().map(|t| {
-            self.session
-                .get_record_cursor(t.name())
+            self.transaction
+                .open_record_cursor(t.name())
                 .map(|c| CursorVectorStore::new(c, self.index.config().similarity, t.format()))
         })
     }

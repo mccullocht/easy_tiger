@@ -14,10 +14,10 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
+        TableIndex, TransactionIndex,
         search::{
             CentroidSelector, CentroidSelectorAlgorithm, SearchParams, SearchStats, Searcher,
         },
-        SessionIndexReader, TableIndex,
     },
     vamana::{GraphSearchParams, PatienceParams},
 };
@@ -92,8 +92,8 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
     );
-    let session = connection.open_session()?;
-    let centroid_selector = CentroidSelector::new(args.centroid_selector, &index, &session)?;
+    let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
+    let centroid_selector = CentroidSelector::new(args.centroid_selector, &txn_idx)?;
     let search_params = SearchParams {
         head_params: GraphSearchParams {
             beam_width: args.head_candidates,
@@ -233,7 +233,8 @@ fn search_phase<Q: Send + Sync>(
 }
 
 struct SearcherState {
-    reader: SessionIndexReader,
+    connection: Arc<Connection>,
+    index: Arc<TableIndex>,
     searcher: Searcher,
 }
 
@@ -244,7 +245,8 @@ impl SearcherState {
         search_params: SearchParams,
     ) -> io::Result<Self> {
         Ok(Self {
-            reader: SessionIndexReader::new(index, connection.open_session()?),
+            connection: Arc::clone(connection),
+            index: Arc::clone(index),
             searcher: Searcher::new(search_params),
         })
     }
@@ -255,11 +257,10 @@ impl SearcherState {
         query: &[f32],
         recall_computer: Option<&RecallComputer>,
     ) -> io::Result<AggregateSearchStats> {
-        self.reader.session().begin_transaction(None)?;
+        let reader = TransactionIndex::new(&self.index, self.connection.begin_transaction(None)?);
         let start = Instant::now();
-        let results = self.searcher.search(query, &mut self.reader)?;
+        let results = self.searcher.search(query, &reader)?;
         let duration = Instant::now() - start;
-        self.reader.session().rollback_transaction(None)?;
         Ok(AggregateSearchStats::new(
             duration,
             self.searcher.stats(),

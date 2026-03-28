@@ -1,5 +1,7 @@
 use std::{ffi::CString, sync::Arc};
 
+use thread_local::ThreadLocal;
+
 use crate::{
     session::{
         table_uri, BeginTransactionOptions, CommitTransactionOptions, Formatted,
@@ -138,5 +140,53 @@ impl Drop for Transaction {
         }
 
         // TODO: pool sessions in the connection.
+    }
+}
+
+/// A transaction that can be shared across threads for concurrent reads.
+///
+/// WiredTiger's underlying session and cursor infrastructure is not thread safe so it can be
+/// challenging to perform concurrent reads. This struct provides a wrapper that provides consistent
+/// reads across multiple threads by propagating the read timestamp from your write transaction to
+/// thread-local read transactions.
+///
+/// These transactions are functionally read-only as they cannot be committed and will be rolled
+/// back on drop, but attempts to write may succed and will be visible in the transaction itself.
+///
+/// *SAFETY*: this struct may defeat WiredTiger's conflict detection for write transactions. Reads
+/// on values that are modified in another transaction that commits first may succeed even though
+/// in a single-threaded context they would have been rolled back.
+// TODO: utilize read-only cursor support and only provide read-only transactions from this struct.
+pub struct ConcurrentReadTransaction {
+    conn: Arc<Connection>,
+    ts: u64,
+    txns: ThreadLocal<Transaction>,
+}
+
+impl ConcurrentReadTransaction {
+    /// Create a new concurrent read transaction with the provided timestamp.
+    pub fn new(conn: &Arc<Connection>, ts: u64) -> Self {
+        Self {
+            conn: Arc::clone(conn),
+            ts,
+            txns: ThreadLocal::new(),
+        }
+    }
+
+    pub fn from_write_transaction(txn: &Transaction) -> Result<Self> {
+        Ok(Self::new(
+            txn.connection(),
+            txn.query_transaction_timestamp(QueryTransactionTimestampType::Read)?,
+        ))
+    }
+
+    /// Get a transaction for the current thread.
+    pub fn get(&self) -> Result<&Transaction> {
+        self.txns.get_or_try(|| {
+            Transaction::new(
+                &self.conn,
+                Some(BeginTransactionOptions::with_read_timestamp(self.ts)),
+            )
+        })
     }
 }

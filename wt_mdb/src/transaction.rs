@@ -1,7 +1,5 @@
 use std::{ffi::CString, sync::Arc};
 
-use thread_local::ThreadLocal;
-
 use crate::{
     session::{
         table_uri, BeginTransactionOptions, CommitTransactionOptions, Formatted,
@@ -90,6 +88,28 @@ impl Transaction {
             .new_typed_cursor_uri::<i32, StatValue>(uri, options.as_deref())
     }
 
+    /// Create a new transaction that can be used to perform concurrent reads with the same read
+    /// timestamp as this transaction. This can be useful for parallelizing read heavy workloads
+    /// where there are no other options for concurrency within WiredTiger.
+    ///
+    /// There are several important caveats to be aware of when using this method:
+    /// * This may defeat WiredTiger's conflict detection for write transactions. Read on values
+    ///   that are modified in another transaction that commits first may succeed even though in a
+    ///   single-threaded context they would have been rolled back.
+    /// * The returned transaction cannot observe any writes performed in this transaction.
+    /// * Cursors returned by this transaction are read-only. This is enforced by WiredTiger so
+    ///   attempts to write will fail immediately with an error.
+    pub fn concurrent_read_transaction(&self) -> Result<Transaction> {
+        let ts = self.query_transaction_timestamp(QueryTransactionTimestampType::Read)?;
+        let mut session = self.session.connection().open_session()?;
+        session.set_read_only(true);
+        session.begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(ts)))?;
+        Ok(Transaction {
+            session,
+            open: true,
+        })
+    }
+
     /// Set the transaction timestamp for the current transaction.
     ///
     /// This should be called on a session with an active transaction. This may be called in the
@@ -140,53 +160,5 @@ impl Drop for Transaction {
         }
 
         // TODO: pool sessions in the connection.
-    }
-}
-
-/// A transaction that can be shared across threads for concurrent reads.
-///
-/// WiredTiger's underlying session and cursor infrastructure is not thread safe so it can be
-/// challenging to perform concurrent reads. This struct provides a wrapper that provides consistent
-/// reads across multiple threads by propagating the read timestamp from your write transaction to
-/// thread-local read transactions.
-///
-/// These transactions are functionally read-only as they cannot be committed and will be rolled
-/// back on drop, but attempts to write may succed and will be visible in the transaction itself.
-///
-/// *SAFETY*: this struct may defeat WiredTiger's conflict detection for write transactions. Reads
-/// on values that are modified in another transaction that commits first may succeed even though
-/// in a single-threaded context they would have been rolled back.
-// TODO: utilize read-only cursor support and only provide read-only transactions from this struct.
-pub struct ConcurrentReadTransaction {
-    conn: Arc<Connection>,
-    ts: u64,
-    txns: ThreadLocal<Transaction>,
-}
-
-impl ConcurrentReadTransaction {
-    /// Create a new concurrent read transaction with the provided timestamp.
-    pub fn new(conn: &Arc<Connection>, ts: u64) -> Self {
-        Self {
-            conn: Arc::clone(conn),
-            ts,
-            txns: ThreadLocal::new(),
-        }
-    }
-
-    pub fn from_write_transaction(txn: &Transaction) -> Result<Self> {
-        Ok(Self::new(
-            txn.connection(),
-            txn.query_transaction_timestamp(QueryTransactionTimestampType::Read)?,
-        ))
-    }
-
-    /// Get a transaction for the current thread.
-    pub fn get(&self) -> Result<&Transaction> {
-        self.txns.get_or_try(|| {
-            Transaction::new(
-                &self.conn,
-                Some(BeginTransactionOptions::with_read_timestamp(self.ts)),
-            )
-        })
     }
 }

@@ -4,22 +4,22 @@ use std::sync::atomic::AtomicU64;
 
 use crate::Connection;
 
-// XXX this name sucks.
-
-/// A generic timestamp provider.
+/// A generic timestamp clock.
 ///
 /// Timestamps can be be used to get a timestamp for reading or choose a timestamp for committing a
 /// transaction. The exact semantics of the timestamps are determined by the implementation, with
 /// the understanding that timestamps are expected to be monotonically increasing and that
 /// `current()` will always be less than `next()`.
-pub trait Timestamp: Send + Sync {
+pub trait TimestampClock: Send + Sync {
     fn current(&self) -> u64;
     fn next(&self) -> u64;
 }
 
-pub struct MontonicTimestamp(AtomicU64);
+/// A timestamp clock that returns monotonically increasing timestamps starting from the current
+/// global durable timestamp in the system. The timestamps are otherwise completely meaningless.
+pub struct MontonicTimestampClock(AtomicU64);
 
-impl TryFrom<&Connection> for MontonicTimestamp {
+impl TryFrom<&Connection> for MontonicTimestampClock {
     type Error = crate::Error;
 
     fn try_from(conn: &Connection) -> Result<Self, Self::Error> {
@@ -34,7 +34,7 @@ impl TryFrom<&Connection> for MontonicTimestamp {
     }
 }
 
-impl Timestamp for MontonicTimestamp {
+impl TimestampClock for MontonicTimestampClock {
     fn current(&self) -> u64 {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
     }

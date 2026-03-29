@@ -18,7 +18,7 @@ use vectors::F32VectorCoder;
 use wt_mdb::{
     Connection, Result,
     session::{BeginTransactionOptions, CommitTransactionOptions, Formatted},
-    timestamp::{MontonicTimestamp, Timestamp},
+    timestamp::{MontonicTimestampClock, TimestampClock},
 };
 
 use crate::ui::progress_bar;
@@ -91,7 +91,7 @@ pub fn insert_vectors(
     let batch_size = args.batch_size.get();
     let main_progress = progress_bar(args.count.get(), "inserting vectors");
 
-    let timestamp = MontonicTimestamp::try_from(connection.as_ref())?;
+    let timestamp = MontonicTimestampClock::try_from(connection.as_ref())?;
     let mut rebalance_stats = RebalanceStats::default();
     let mut batches: usize = 0;
     let mut total_batch_unique_centroids: usize = 0;
@@ -166,7 +166,7 @@ pub fn insert_vectors(
 fn insert_batch(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
-    timestamp: &impl Timestamp,
+    timestamp: &impl TimestampClock,
     f32_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     batch: Range<usize>,
     posting_coder: &dyn F32VectorCoder,
@@ -267,7 +267,7 @@ fn insert_batch(
 fn rebalance(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
-    timestamp: &impl Timestamp,
+    timestamp: &impl TimestampClock,
     rng: &mut impl Rng,
     progress: &ProgressBar,
 ) -> Result<RebalanceStats> {

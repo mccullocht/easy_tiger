@@ -95,6 +95,8 @@ pub fn insert_vectors(
     let mut rebalance_stats = RebalanceStats::default();
     let mut batches: usize = 0;
     let mut total_batch_unique_centroids: usize = 0;
+    // Advance timestamps every ~4k vectors to keep checkpoint sizes manageable.
+    let ts_interval = 4096 / batch_size * batch_size;
 
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
@@ -112,7 +114,18 @@ pub fn insert_vectors(
         batches += 1;
 
         rebalance_stats += rebalance(&index, &connection, &timestamp, &mut rng, &main_progress)?;
+
+        // Periodically advance global timestamps to reduce checkpoint size and cache pressure.
+        if batch_end % ts_interval == 0 {
+            let ts = timestamp.current();
+            connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Stable, ts)?;
+            connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Oldest, ts)?;
+        }
     }
+
+    let ts = timestamp.current();
+    connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Stable, ts)?;
+    connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Oldest, ts)?;
 
     main_progress.set_message("inserting vectors");
     main_progress.finish();

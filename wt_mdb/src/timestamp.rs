@@ -25,7 +25,7 @@ impl TryFrom<&Connection> for MontonicTimestampClock {
     type Error = crate::Error;
 
     fn try_from(conn: &Connection) -> Result<Self, Self::Error> {
-        let mut ts = conn.query_timestamp(crate::connection::QueryGlobalTimestampType::Stable)?;
+        let mut ts = conn.query_timestamp(crate::connection::QueryGlobalTimestampType::Recovery)?;
         if ts == 0 {
             // Start at 1 if there are no timestamps in the system since 0 is a reserved value.
             // Reading at zero may indicate "most recent" in some contexts, so we want to avoid that.

@@ -162,3 +162,41 @@ impl Drop for Transaction {
         // TODO: pool sessions in the connection.
     }
 }
+
+/// A factory for creating concurrent read-only transactions to consistently read the same
+/// timestamp as a write transaction. This is useful for parallelizing read heavy workloads as
+/// WiredTiger's Session/Cursor model does not allow for multiple threads to read concurrently.
+///
+/// There are several important caveats to be aware of when using this method:
+/// * This may defeat WiredTiger's conflict detection for write transactions. Read on values
+///   that are modified in another transaction that commits first may succeed even though in a
+///   single-threaded context they would have been rolled back.
+/// * The returned transaction cannot observe any writes performed in this transaction.
+/// * Cursors returned by this transaction are read-only. This is enforced by WiredTiger so
+///   attempts to write will fail immediately with an error.
+pub struct ReadTransactionFactory {
+    connection: Arc<Connection>,
+    ts: u64,
+}
+
+impl ReadTransactionFactory {
+    /// Create a new factory that reads at the same timestamp as `txn`.
+    pub fn from_transaction(txn: &Transaction) -> Self {
+        let connection = Arc::clone(txn.connection());
+        let ts = txn
+            .query_transaction_timestamp(QueryTransactionTimestampType::Read)
+            .expect("query read timestamp");
+        Self { connection, ts }
+    }
+
+    /// Create a new read-only transaction.
+    pub fn create(&self) -> Result<Transaction> {
+        let mut session = self.connection.open_session()?;
+        session.set_read_only(true);
+        session.begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(self.ts)))?;
+        Ok(Transaction {
+            session,
+            open: true,
+        })
+    }
+}

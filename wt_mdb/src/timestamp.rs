@@ -11,7 +11,9 @@ use crate::Connection;
 /// the understanding that timestamps are expected to be monotonically increasing and that
 /// `current()` will always be less than `next()`.
 pub trait TimestampClock: Send + Sync {
+    /// Return the current timestamp without advancing the clock.
     fn current(&self) -> u64;
+    /// Return the next timestamp and advance the clock.
     fn next(&self) -> u64;
 }
 
@@ -23,8 +25,7 @@ impl TryFrom<&Connection> for MontonicTimestampClock {
     type Error = crate::Error;
 
     fn try_from(conn: &Connection) -> Result<Self, Self::Error> {
-        let mut ts =
-            conn.query_timestamp(crate::connection::QueryGlobalTimestampType::AllDurable)?;
+        let mut ts = conn.query_timestamp(crate::connection::QueryGlobalTimestampType::Stable)?;
         if ts == 0 {
             // Start at 1 if there are no timestamps in the system since 0 is a reserved value.
             // Reading at zero may indicate "most recent" in some contexts, so we want to avoid that.

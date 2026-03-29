@@ -290,7 +290,7 @@ impl ConfigurationString for RollbackTransactionOptions {
 }
 
 const DEFAULT_CURSOR_OPTIONS: &CStr = c"raw";
-const DEFAULT_RO_CURSOR_OPTIONS: &CStr = c"raw,read_only";
+const DEFAULT_RO_CURSOR_OPTIONS: &CStr = c"raw,readonly";
 
 /// A WiredTiger session.
 ///

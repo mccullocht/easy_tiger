@@ -4,13 +4,15 @@ use std::sync::atomic::AtomicU64;
 
 use crate::Connection;
 
+// XXX this name sucks.
+
 /// A generic timestamp provider.
 ///
 /// Timestamps can be be used to get a timestamp for reading or choose a timestamp for committing a
 /// transaction. The exact semantics of the timestamps are determined by the implementation, with
 /// the understanding that timestamps are expected to be monotonically increasing and that
 /// `current()` will always be less than `next()`.
-pub trait Timestamp {
+pub trait Timestamp: Send + Sync {
     fn current(&self) -> u64;
     fn next(&self) -> u64;
 }

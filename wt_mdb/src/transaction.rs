@@ -181,12 +181,10 @@ pub struct ReadTransactionFactory {
 
 impl ReadTransactionFactory {
     /// Create a new factory that reads at the same timestamp as `txn`.
-    pub fn from_transaction(txn: &Transaction) -> Self {
+    pub fn try_from_transaction(txn: &Transaction) -> Result<Self> {
         let connection = Arc::clone(txn.connection());
-        let ts = txn
-            .query_transaction_timestamp(QueryTransactionTimestampType::Read)
-            .expect("query read timestamp");
-        Self { connection, ts }
+        txn.query_transaction_timestamp(QueryTransactionTimestampType::Read)
+            .map(|ts| Self { connection, ts })
     }
 
     /// Create a new read-only transaction.

@@ -9,6 +9,7 @@
 pub mod config;
 pub mod connection;
 pub mod session;
+pub mod timestamp;
 pub mod transaction;
 
 use rustix::io::Errno;

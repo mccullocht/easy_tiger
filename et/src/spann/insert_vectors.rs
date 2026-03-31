@@ -29,7 +29,11 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::{ThreadPoolBuilder, prelude::*};
 use tracing::error;
 use vectors::F32VectorCoder;
-use wt_mdb::{Connection, Result};
+use wt_mdb::{
+    Connection, Result,
+    session::{BeginTransactionOptions, CommitTransactionOptions, Formatted},
+    timestamp::{MontonicTimestampClock, TimestampClock},
+};
 
 use crate::ui::{progress_bar, progress_spinner};
 
@@ -100,11 +104,14 @@ pub fn insert_vectors(
 
     let main_progress = progress_bar(args.count.get(), "inserting vectors");
     main_progress.enable_steady_tick(Duration::from_millis(100));
+
+    let timestamp = Arc::new(MontonicTimestampClock::try_from(connection.as_ref())?);
     let (tx, rx) = mpsc::channel();
     let rebalance_handle = {
         let index = Arc::clone(&index);
         let connection = Arc::clone(&connection);
-        thread::spawn(move || rebalance_loop(index, connection, rx))
+        let timestamp = Arc::clone(&timestamp);
+        thread::spawn(move || rebalance_loop(index, connection, timestamp.as_ref(), rx))
     };
     (args.start..end).into_par_iter().try_for_each_init(
         || tx.clone(),
@@ -112,16 +119,27 @@ pub fn insert_vectors(
             insert_vector(
                 &index,
                 &connection,
+                timestamp.as_ref(),
                 i as i64,
                 &f32_vectors[i],
                 posting_coder.as_ref(),
                 rerank_coder.as_ref().map(|c| c.as_ref()),
                 &rng,
                 tx,
-            )
-            .inspect(|_| main_progress.inc(1))
+            )?;
+            main_progress.inc(1);
+            if i % 4096 == 4095 {
+                let ts = timestamp.current();
+                connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Stable, ts)?;
+                connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Oldest, ts)?;
+            }
+            Ok::<_, wt_mdb::Error>(())
         },
     )?;
+
+    let ts = timestamp.current();
+    connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Stable, ts)?;
+    connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Oldest, ts)?;
     main_progress.finish();
     drop(tx);
 
@@ -186,6 +204,7 @@ enum RebalanceOp {
 fn insert_vector(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
+    timestamp: &impl TimestampClock,
     record_id: i64,
     vector: &[f32],
     posting_coder: &dyn F32VectorCoder,
@@ -200,6 +219,7 @@ fn insert_vector(
         let result = try_insert_vector(
             index,
             connection,
+            timestamp,
             record_id,
             vector,
             &posting_vector,
@@ -222,13 +242,19 @@ fn insert_vector(
 fn try_insert_vector(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
+    timestamp: &impl TimestampClock,
     record_id: i64,
     vector: &[f32],
     posting_vector: &[u8],
     rerank_vector: Option<&[u8]>,
     rng: &Mutex<impl Rng>,
 ) -> Result<Vec<RebalanceOp>> {
-    let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+    let txn_idx = TransactionIndex::new(
+        index,
+        connection.begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(
+            timestamp.current(),
+        )))?,
+    );
 
     let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
 
@@ -255,7 +281,11 @@ fn try_insert_vector(
         .transaction()
         .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
     let mut rerank_cursor = if rerank_vector.is_some() {
-        Some(txn_idx.transaction().open_record_cursor(index.raw_vectors_table_name())?)
+        Some(
+            txn_idx
+                .transaction()
+                .open_record_cursor(index.raw_vectors_table_name())?,
+        )
     } else {
         None
     };
@@ -281,12 +311,8 @@ fn try_insert_vector(
             )?;
             ops.push(RebalanceOp::Merge { centroid_id });
         } else if count > *policy.end() {
-            let dst = partition_oversized_centroid(
-                &txn_idx,
-                centroid_id,
-                &mut assignment_updater,
-                rng,
-            )?;
+            let dst =
+                partition_oversized_centroid(&txn_idx, centroid_id, &mut assignment_updater, rng)?;
             ops.push(RebalanceOp::Split {
                 src_centroid_id: centroid_id,
                 dst_centroid_ids: dst,
@@ -297,12 +323,21 @@ fn try_insert_vector(
         cursor.set(record_id, vector)?;
     }
     assignment_updater.flush()?;
-    txn_idx.commit(None).map(|()| ops)
+
+    drop(posting_cursor);
+    drop(rerank_cursor);
+
+    txn_idx
+        .commit(Some(CommitTransactionOptions::with_commit_timestamp(
+            timestamp.next(),
+        )))
+        .map(|()| ops)
 }
 
 fn rebalance_loop(
     index: Arc<TableIndex>,
     connection: Arc<Connection>,
+    timestamp: &impl TimestampClock,
     rx: Receiver<Vec<RebalanceOp>>,
 ) -> RebalanceStats {
     let pool = ThreadPoolBuilder::new()
@@ -314,7 +349,7 @@ fn rebalance_loop(
         for ops in rx {
             for op in ops {
                 loop {
-                    match rebalance_op(&index, &connection, op) {
+                    match rebalance_op(&index, &connection, timestamp, op) {
                         Ok(op_stats) => {
                             stats += op_stats;
                             break;
@@ -335,9 +370,15 @@ fn rebalance_loop(
 fn rebalance_op(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
+    timestamp: &impl TimestampClock,
     op: RebalanceOp,
 ) -> Result<RebalanceStats> {
-    let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+    let txn_idx = TransactionIndex::new(
+        index,
+        connection.begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(
+            timestamp.current(),
+        )))?,
+    );
     let stats = match op {
         RebalanceOp::Merge { centroid_id } => {
             merge_centroid(&txn_idx, centroid_id as usize, 0).map(RebalanceStats::from)
@@ -352,5 +393,9 @@ fn rebalance_op(
         )
         .map(RebalanceStats::from),
     }?;
-    txn_idx.commit(None).map(|()| stats)
+    txn_idx
+        .commit(Some(CommitTransactionOptions::with_commit_timestamp(
+            timestamp.next(),
+        )))
+        .map(|()| stats)
 }

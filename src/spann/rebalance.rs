@@ -8,7 +8,7 @@ use std::{
 use rand::Rng;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tracing::warn;
-use wt_mdb::{session::Formatted, Error, Result, TypedCursor};
+use wt_mdb::{session::Formatted, transaction::ReadTransactionFactory, Error, Result, TypedCursor};
 
 use crate::{
     input::{VecVectorStore, VectorStore},
@@ -194,7 +194,7 @@ pub fn merge_centroid(
     // Query the head index for each vector and assign a new centroid.
     let coder = index.new_posting_coder();
     let removed_vectors = vectors.len();
-    let connection = Arc::clone(txn_idx.transaction().connection());
+    let txn_factory = ReadTransactionFactory::try_from_transaction(txn_idx.transaction())?;
     let reassignments = vectors
         .into_par_iter()
         .map_init(
@@ -202,7 +202,7 @@ pub fn merge_centroid(
                 (
                     TransactionGraphVectorIndex::new(
                         Arc::clone(index.head_config()),
-                        connection.begin_transaction(None).expect("open session"),
+                        txn_factory.create().expect("open session"),
                     ),
                     GraphSearcher::new(index.config().head_search_params),
                     vec![0.0f32; index.head_config().config().dimensions.get()],
@@ -342,7 +342,7 @@ pub fn split_centroid(
         .query_vector_distance_indexing(posting_coder.encode(&centroids[1]), similarity);
     let mut searches = 0;
     let moved_vectors = vectors.len();
-    let connection = Arc::clone(txn_idx.transaction().connection());
+    let txn_factory = ReadTransactionFactory::try_from_transaction(txn_idx.transaction())?;
     let index = Arc::clone(txn_idx.index());
     let split_reassignments = vectors
         .into_par_iter()
@@ -351,7 +351,7 @@ pub fn split_centroid(
                 (
                     TransactionGraphVectorIndex::new(
                         Arc::clone(index.head_config()),
-                        connection.begin_transaction(None).expect("open session"),
+                        txn_factory.create().expect("open session"),
                     ),
                     GraphSearcher::new(index.config().head_search_params),
                     vec![0.0f32; index.head_config().config().dimensions.get()],
@@ -430,7 +430,6 @@ pub fn split_centroid(
     let mut nearby_moved = 0;
     // For a list of nearby centroids, examine all vectors and reassign them if they are closer
     // to one of the new centroids than they are to the current centroid.
-    let connection = Arc::clone(txn_idx.transaction().connection());
     let reassignments = nearby_clusters
         .into_par_iter()
         .map_init(
@@ -438,7 +437,7 @@ pub fn split_centroid(
                 (
                     TransactionGraphVectorIndex::new(
                         Arc::clone(index.head_config()),
-                        connection.begin_transaction(None).expect("open session"),
+                        txn_factory.create().expect("open session"),
                     ),
                     GraphSearcher::new(index.config().head_search_params),
                     scratch_vector.clone(),

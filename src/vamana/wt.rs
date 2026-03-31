@@ -389,10 +389,7 @@ impl GraphVectorIndex for TransactionGraphVectorIndex {
 }
 
 /// Encode the contents of a graph vertex to use as a WiredTiger table value.
-///
-/// Vector ought to be provided if using [crate::graph::GraphLayout::VectorInGraph],
-/// in which case the vector is
-pub fn encode_graph_vertex(mut edges: Vec<i64>) -> Vec<u8> {
+pub(super) fn encode_graph_vertex(mut edges: Vec<i64>) -> Vec<u8> {
     // A 64-bit value may occupy up to 10 bytes when leb128 encoded so reserve enough space for that.
     // There is unfortunately no constant for this in the leb128 crate.
     let mut out: Vec<u8> = Vec::with_capacity(edges.len() * 10);

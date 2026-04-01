@@ -68,15 +68,19 @@ fn codebook_bit(dim: usize) -> [f32; 2] {
 /// distance where minimizing MSE is equivalent to minimizing distance distortion.
 pub struct MSE1Coder {
     dim: usize,
-    t: Arc<JLTrans>,
+    rotator: rotate::Rotator,
     codebook: [f32; 2],
 }
 
 impl MSE1Coder {
     pub fn new(dim: usize, seed: u64) -> Self {
-        let t = cached_jl_trans(dim, seed);
+        let rotator = rotate::Rotator::new(dim, seed);
         let codebook = codebook_bit(dim);
-        MSE1Coder { dim, t, codebook }
+        MSE1Coder {
+            dim,
+            rotator,
+            codebook,
+        }
     }
 }
 
@@ -88,7 +92,7 @@ impl F32VectorCoder for MSE1Coder {
 
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
         let normalized: Vec<f32> = vector.iter().map(|&x| x * inv_norm).collect();
-        let transformed = self.t.transform(&normalized);
+        let transformed = self.rotator.forward(&normalized);
 
         let bits = &mut out[4..];
         bits.fill(0);
@@ -112,7 +116,7 @@ impl F32VectorCoder for MSE1Coder {
             .map(|i| self.codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
             .collect();
 
-        let inverted = self.t.invert(&quantized);
+        let inverted = self.rotator.backward(&quantized);
         for (o, v) in out.iter_mut().zip(inverted.iter()) {
             *o = v * norm;
         }
@@ -135,9 +139,9 @@ impl F32VectorCoder for MSE1Coder {
 //     and just DOT it lol.
 
 pub struct MSE1QueryDistance {
-    /// The query vector after l2 normalization and JL transformation. This places the query in the
+    /// The query vector after l2 normalization and rotation. This places the query in the
     /// same space as the quantized vectors which makes computation cheaper.
-    tquery: Vec<f32>,
+    rquery: Vec<f32>,
     /// L2 norm of the input vector before JLT.
     norm: f32,
     /// Codebook used to decode quantized vectors for comparison.
@@ -151,11 +155,11 @@ impl MSE1QueryDistance {
         let normalized: Vec<f32> = query.iter().map(|&x| x * inv_norm).collect();
 
         // XXX seed should be passed.
-        let jlt = cached_jl_trans(query.len(), 42);
-        let tquery = jlt.transform(&normalized);
+        let rotator = rotate::Rotator::new(query.len(), 42);
+        let rquery = rotator.forward(&normalized);
         let codebook = codebook_bit(query.len());
         MSE1QueryDistance {
-            tquery,
+            rquery,
             norm,
             codebook,
         }
@@ -173,7 +177,7 @@ impl QueryVectorDistance for MSE1QueryDistance {
         //   ‖q − db‖² = ‖q‖² + ‖db‖² − 2·⟨q, db⟩
         //              ≈ ‖q‖² + ‖db‖² − π·‖q‖·‖db‖·⟨JL(q̂), codebook⟩
         let dot: f32 = self
-            .tquery
+            .rquery
             .iter()
             .enumerate()
             .map(|(i, &q)| q * self.codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])

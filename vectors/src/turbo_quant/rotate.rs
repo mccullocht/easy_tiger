@@ -3,8 +3,6 @@ use std::ops::Range;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
-use crate::turbo_quant::rotate;
-
 /// Implement orthogonal rotation of a vector for quantization to preserve distances and inner
 /// products while changing the distribution of the vector's components to minimize quantization
 /// error.
@@ -28,9 +26,10 @@ impl Rotator {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         let mut forward_permutation = (0..dims).collect::<Vec<usize>>();
         forward_permutation.shuffle(&mut rng);
-        let backward_permutation = (0..dims)
-            .map(|i| forward_permutation[i])
-            .collect::<Vec<usize>>();
+        let mut backward_permutation = vec![0; dims];
+        for (i, &j) in forward_permutation.iter().enumerate() {
+            backward_permutation[j] = i;
+        }
         let sign_flips = (0..dims)
             .map(|_| if rng.random_bool(0.5) { 1.0 } else { -1.0 })
             .collect::<Vec<f32>>();
@@ -39,7 +38,7 @@ impl Rotator {
         let mut d = dims;
         while d > 0 {
             let start = blocks.last().map(|b| b.end).unwrap_or(0);
-            let len = 1usize << (32 - d.leading_zeros());
+            let len = 1usize << (63 - d.leading_zeros());
             blocks.push(start..(start + len));
             d ^= len;
         }
@@ -55,11 +54,17 @@ impl Rotator {
     /// Rotate forward for quantization.
     ///
     /// This applies sign flips, then permutation, then block diagonal Hadamard transforms.
-    fn forward(&self, v: &[f32]) -> Vec<f32> {
+    pub fn forward(&self, v: &[f32]) -> Vec<f32> {
+        let signed = self
+            .sign_flips
+            .iter()
+            .zip(v.iter())
+            .map(|(s, &x)| s * x)
+            .collect::<Vec<f32>>();
         let mut rotated = self
             .forward_permutation
             .iter()
-            .map(|&i| v[i] * self.sign_flips[i])
+            .map(|&i| signed[i])
             .collect::<Vec<f32>>();
 
         for block in self.blocks.iter() {
@@ -72,7 +77,7 @@ impl Rotator {
     /// Rotate backward for dequantization.
     ///
     /// Thie applies block diagonal Hadamard transforms, then inverse permutation, then sign flips.
-    fn backward(&self, v: &[f32]) -> Vec<f32> {
+    pub fn backward(&self, v: &[f32]) -> Vec<f32> {
         let mut tmp = v.to_vec();
         for block in self.blocks.iter() {
             Self::walsh_hadamard_transform(&mut tmp[block.clone()]);
@@ -83,8 +88,8 @@ impl Rotator {
             .iter()
             .map(|&i| tmp[i])
             .collect::<Vec<f32>>();
-        for v in b.iter_mut() {
-            *v *= self.sign_flips[*v as usize];
+        for (i, v) in b.iter_mut().enumerate() {
+            *v *= self.sign_flips[i];
         }
         b
     }

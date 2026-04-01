@@ -3,6 +3,8 @@
 //! This uses separate implementations for MSE optimization (L2/Euclidean distance) and angular
 //! (dot product) distance.
 
+mod rotate;
+
 use std::{
     collections::HashMap,
     sync::{Arc, LazyLock, RwLock},

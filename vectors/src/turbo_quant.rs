@@ -149,13 +149,12 @@ pub struct MSE1QueryDistance {
 }
 
 impl MSE1QueryDistance {
-    pub fn new(query: Vec<f32>) -> Self {
+    pub fn new(query: Vec<f32>, seed: u64) -> Self {
         let norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt();
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
         let normalized: Vec<f32> = query.iter().map(|&x| x * inv_norm).collect();
 
-        // XXX seed should be passed.
-        let rotator = rotate::Rotator::new(query.len(), 42);
+        let rotator = rotate::Rotator::new(query.len(), seed);
         let rquery = rotator.forward(&normalized);
         let codebook = codebook_bit(query.len());
         MSE1QueryDistance {

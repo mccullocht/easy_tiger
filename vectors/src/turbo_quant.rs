@@ -193,6 +193,27 @@ pub struct MSEQueryDistance<const B: usize, const N: usize> {
     norm: f32,
     /// Codebook used to decode quantized vectors for comparison.
     codebook: [f32; N],
+    /// `2 / A` where `A = E[Q(z)·z]` for `z ~ N(0,1)` with this codebook. Corrects for the
+    /// inner product bias introduced by MSE-optimal quantizers in the Euclidean distance formula.
+    euclidean_scale: f32,
+}
+
+/// Computes `A = E[Q(z)·z]` for `z ~ N(0,1)` using the given (unscaled) codebook.
+///
+/// MSE-optimal quantizers are biased for inner product estimation: `⟨q, Q(x)⟩ ≈ A·⟨q, x⟩`
+/// where `A < 1`. The Euclidean correction factor is `2/A`.
+fn inner_product_bias<const N: usize>(codebook: &[f32; N]) -> f32 {
+    let inv_sqrt_2pi = (0.5f32 / std::f32::consts::PI).sqrt();
+    let normal_pdf = |x: f32| -> f32 {
+        if x.is_infinite() { 0.0 } else { inv_sqrt_2pi * (-x * x * 0.5).exp() }
+    };
+    let mut a = 0.0f32;
+    for (k, &c) in codebook.iter().enumerate() {
+        let t_prev = if k == 0 { f32::NEG_INFINITY } else { (codebook[k - 1] + c) * 0.5 };
+        let t_next = if k == N - 1 { f32::INFINITY } else { (c + codebook[k + 1]) * 0.5 };
+        a += c * (normal_pdf(t_prev) - normal_pdf(t_next));
+    }
+    a
 }
 
 impl<const B: usize, const N: usize> MSEQueryDistance<B, N> {
@@ -210,12 +231,14 @@ impl<const B: usize, const N: usize> MSEQueryDistance<B, N> {
 
         let rotator = rotate::Rotator::new(query.len(), seed);
         let rquery = rotator.forward(&query);
+        let euclidean_scale = 2.0 / inner_product_bias(codebook);
         let codebook = codebook::scale(codebook, rquery.len());
         Self {
             similarity,
             rquery,
             norm,
             codebook,
+            euclidean_scale,
         }
     }
 }
@@ -224,6 +247,9 @@ impl<const B: usize, const N: usize> QueryVectorDistance for MSEQueryDistance<B,
     fn distance(&self, encoded: &[u8]) -> f64 {
         let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
         let bits = &encoded[4..];
+        // dot estimates A·⟨q̂, db̂⟩ where A = E[Q(z)·z] < 1 for MSE-optimal codebooks.
+        // ‖q − db‖² = ‖q‖² + ‖db‖² − 2·‖q‖·‖db‖·⟨q̂, db̂⟩
+        //            ≈ ‖q‖² + ‖db‖² − (2/A)·‖q‖·‖db‖·dot
         let dot: f32 = self
             .rquery
             .iter()
@@ -231,7 +257,10 @@ impl<const B: usize, const N: usize> QueryVectorDistance for MSEQueryDistance<B,
             .map(|(&q, d)| q * self.codebook[d as usize])
             .sum();
         match self.similarity {
-            VectorSimilarity::Euclidean => (self.norm * self.norm + norm * norm - 2.0 * dot) as f64,
+            VectorSimilarity::Euclidean => {
+                (self.norm * self.norm + norm * norm - self.euclidean_scale * self.norm * norm * dot)
+                    as f64
+            }
             // The query and the doc were already normalized so the dot product is sufficient.
             VectorSimilarity::Cosine | VectorSimilarity::Dot => dot.mul_add(-0.5, 0.5).into(),
         }

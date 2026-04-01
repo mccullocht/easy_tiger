@@ -182,6 +182,16 @@ pub enum F32VectorCoding {
     ///
     /// This uses one bit to minimize MSE and one bit to minimize inner product loss.
     TurboQuant2,
+    /// TurboQuantMSE with 1 bit per dimension.
+    TurboQuantM1,
+    /// TurboQuantMSE with 2 bits per dimension.
+    TurboQuantM2,
+    /// TurboQuantMSE with 3 bits per dimension.
+    TurboQuantM3,
+    /// TurboQuantMSE with 4 bits per dimension.
+    TurboQuantM4,
+    /// TurboQuantMSE with 8 bits per dimension.
+    TurboQuantM8,
 }
 
 impl F32VectorCoding {
@@ -222,6 +232,31 @@ impl F32VectorCoding {
                 Self::MSE_SEED,
                 Self::QJL_SEED,
             )),
+            Self::TurboQuantM1 => Box::new(turbo_quant::MSECoder::<1, 2>::new(
+                dim,
+                Self::MSE_SEED,
+                &turbo_quant::codebook::CENTROIDS_1,
+            )),
+            Self::TurboQuantM2 => Box::new(turbo_quant::MSECoder::<2, 4>::new(
+                dim,
+                Self::MSE_SEED,
+                &turbo_quant::codebook::CENTROIDS_2,
+            )),
+            Self::TurboQuantM3 => Box::new(turbo_quant::MSECoder::<3, 8>::new(
+                dim,
+                Self::MSE_SEED,
+                &turbo_quant::codebook::CENTROIDS_3,
+            )),
+            Self::TurboQuantM4 => Box::new(turbo_quant::MSECoder::<4, 16>::new(
+                dim,
+                Self::MSE_SEED,
+                &turbo_quant::codebook::CENTROIDS_4,
+            )),
+            Self::TurboQuantM8 => Box::new(turbo_quant::MSECoder::<8, 256>::new(
+                dim,
+                Self::MSE_SEED,
+                &turbo_quant::codebook::CENTROIDS_8,
+            )),
         }
     }
 
@@ -248,6 +283,11 @@ impl F32VectorCoding {
             (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualDistance::<8>::new(similarity)),
             (Self::TurboQuant1, _) => todo!(),
             (Self::TurboQuant2, _) => todo!(),
+            (Self::TurboQuantM1, _) => todo!(),
+            (Self::TurboQuantM2, _) => todo!(),
+            (Self::TurboQuantM3, _) => todo!(),
+            (Self::TurboQuantM4, _) => todo!(),
+            (Self::TurboQuantM8, _) => todo!(),
         }
     }
 
@@ -322,6 +362,11 @@ impl F32VectorCoding {
                 Self::MSE_SEED,
                 Self::QJL_SEED,
             )),
+            (_, F32VectorCoding::TurboQuantM1) => todo!(),
+            (_, F32VectorCoding::TurboQuantM2) => todo!(),
+            (_, F32VectorCoding::TurboQuantM3) => todo!(),
+            (_, F32VectorCoding::TurboQuantM4) => todo!(),
+            (_, F32VectorCoding::TurboQuantM8) => todo!(),
         }
     }
 
@@ -387,6 +432,11 @@ impl F32VectorCoding {
             (_, F32VectorCoding::TurboQuant2) => {
                 todo!()
             }
+            (_, F32VectorCoding::TurboQuantM1) => todo!(),
+            (_, F32VectorCoding::TurboQuantM2) => todo!(),
+            (_, F32VectorCoding::TurboQuantM3) => todo!(),
+            (_, F32VectorCoding::TurboQuantM4) => todo!(),
+            (_, F32VectorCoding::TurboQuantM8) => todo!(),
         }
     }
 }
@@ -410,6 +460,11 @@ impl FromStr for F32VectorCoding {
             "tlvq8x8" => Ok(Self::TLVQ8x8),
             "tq1" => Ok(Self::TurboQuant1),
             "tq2" => Ok(Self::TurboQuant2),
+            "tqm1" => Ok(Self::TurboQuantM1),
+            "tqm2" => Ok(Self::TurboQuantM2),
+            "tqm3" => Ok(Self::TurboQuantM3),
+            "tqm4" => Ok(Self::TurboQuantM4),
+            "tqm8" => Ok(Self::TurboQuantM8),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -431,6 +486,11 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TLVQ8x8 => write!(f, "tlvq8x8"),
             Self::TurboQuant1 => write!(f, "tq1"),
             Self::TurboQuant2 => write!(f, "tq2"),
+            Self::TurboQuantM1 => write!(f, "tqm1"),
+            Self::TurboQuantM2 => write!(f, "tqm2"),
+            Self::TurboQuantM3 => write!(f, "tqm3"),
+            Self::TurboQuantM4 => write!(f, "tqm4"),
+            Self::TurboQuantM8 => write!(f, "tqm8"),
         }
     }
 }

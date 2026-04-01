@@ -2,17 +2,17 @@
 //!
 //! These are based on the optimal quantization of a standard normal distribution symmetric around
 //! 0. These will be scaled by 1/sqrt(D) at runtime.
-const CENTROIDS_1: [f32; 2] = [-1.12837917, 1.12837917];
-const CENTROIDS_2: [f32; 4] = [-1.510418, -0.452780, 0.452780, 1.510418];
-const CENTROIDS_3: [f32; 8] = [
+pub const CENTROIDS_1: [f32; 2] = [-1.12837917, 1.12837917];
+pub const CENTROIDS_2: [f32; 4] = [-1.510418, -0.452780, 0.452780, 1.510418];
+pub const CENTROIDS_3: [f32; 8] = [
     -2.151946, -1.343909, -0.756005, -0.245094, 0.245094, 0.756005, 1.343909, 2.151946,
 ];
-const CENTROIDS_4: [f32; 16] = [
+pub const CENTROIDS_4: [f32; 16] = [
     -2.732590, -2.069017, -1.618046, -1.256231, -0.942340, -0.656759, -0.388048, -0.128395,
     0.128395, 0.388048, 0.656759, 0.942340, 1.256231, 1.618046, 2.069017, 2.732590,
 ];
 #[rustfmt::skip]
-const CENTROIDS_8: [f32; 256] = [
+pub const CENTROIDS_8: [f32; 256] = [
     -4.035480, -3.565625, -3.268187, -3.045475, -2.865491, -2.713551, -2.581644, -2.464895,
     -2.360107, -2.265066, -2.178166, -2.098206, -2.024257, -1.955584, -1.891595, -1.831799,
     -1.775785, -1.723203, -1.673751, -1.627164, -1.583207, -1.541672, -1.502368, -1.465126,
@@ -47,7 +47,8 @@ const CENTROIDS_8: [f32; 256] = [
      2.464895,  2.581644,  2.713551,  2.865491,  3.045475,  3.268187,  3.565625,  4.035480
 ];
 
-fn scale_codebook<const N: usize>(codebook: &[f32; N], dim: usize) -> [f32; N] {
+/// Scale all entries of a codebook by 1/sqrt(dim).
+pub fn scale<const N: usize>(codebook: &[f32; N], dim: usize) -> [f32; N] {
     let scale = 1.0 / (dim as f32).sqrt();
     let mut scaled = [0.0; N];
     for (i, &c) in codebook.iter().enumerate() {
@@ -58,5 +59,29 @@ fn scale_codebook<const N: usize>(codebook: &[f32; N], dim: usize) -> [f32; N] {
 
 /// Codebook for MSE vectors with 1 bit per dimension.
 pub fn mse1(dim: usize) -> [f32; 2] {
-    scale_codebook(&CENTROIDS_1, dim)
+    scale(&CENTROIDS_1, dim)
+}
+
+/// Select the closest code (index) from codebook for value.
+pub fn select_code<const N: usize>(codebook: &[f32; N], value: f32) -> u8 {
+    if N == 2 {
+        return if value > 0.0 { 1 } else { 0 };
+    }
+
+    let c = match codebook.binary_search_by(|c| c.total_cmp(&value)) {
+        Ok(i) => i,
+        Err(i) => {
+            // i is the first entry greater than value
+            if i == 0 {
+                0 // value is smaller than the minimum codebook value
+            } else if i == N {
+                N - 1 // value is larger than the maximum codebook value
+            } else {
+                let lo = value - codebook[i - 1];
+                let hi = codebook[i] - value;
+                if lo <= hi { i - 1 } else { i }
+            }
+        }
+    };
+    c as u8
 }

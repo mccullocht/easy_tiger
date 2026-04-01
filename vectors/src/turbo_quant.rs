@@ -3,7 +3,8 @@
 //! This uses separate implementations for MSE optimization (L2/Euclidean distance) and angular
 //! (dot product) distance.
 
-mod codebook;
+pub mod codebook;
+mod packing;
 mod rotate;
 
 use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
@@ -131,6 +132,64 @@ impl QueryVectorDistance for MSE1QueryDistance {
             .map(|(i, &q)| q * self.codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
             .sum();
         (self.norm * self.norm + norm * norm - std::f32::consts::PI * self.norm * norm * dot) as f64
+    }
+}
+
+pub struct MSECoder<const B: usize, const N: usize> {
+    dim: usize,
+    rotator: rotate::Rotator,
+    codebook: [f32; N],
+}
+
+impl<const B: usize, const N: usize> MSECoder<B, N> {
+    pub fn new(dim: usize, seed: u64, codebook: &[f32; N]) -> Self {
+        Self {
+            dim,
+            rotator: rotate::Rotator::new(dim, seed),
+            codebook: codebook::scale(codebook, dim),
+        }
+    }
+}
+
+impl<const B: usize, const N: usize> F32VectorCoder for MSECoder<B, N> {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        assert_eq!(vector.len(), self.dim);
+        let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        out[..4].copy_from_slice(&norm.to_le_bytes());
+
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+        let normalized: Vec<f32> = vector.iter().map(|&x| x * inv_norm).collect();
+        let transformed = self.rotator.forward(&normalized);
+
+        let bits = &mut out[4..];
+        bits.fill(0);
+        packing::pack::<B>(
+            transformed
+                .iter()
+                .map(|v| codebook::select_code(&self.codebook, *v)),
+            bits,
+        );
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        std::mem::size_of::<f32>() + (dimensions * B).div_ceil(8)
+    }
+
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let bits = &encoded[4..];
+
+        let quantized: Vec<f32> = packing::unpack::<B>(bits)
+            .map(|i| self.codebook[i as usize])
+            .collect();
+        let inverted = self.rotator.backward(&quantized);
+        for (o, v) in out.iter_mut().zip(inverted.iter()) {
+            *o = v * norm;
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        ((byte_len - std::mem::size_of::<f32>()) * 8).div_ceil(B)
     }
 }
 
@@ -497,7 +556,11 @@ mod tests {
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
         coder.decode_to(&encoded, &mut decoded);
         // Check that cosine similarity between decoded and original is reasonable for 1-bit.
-        let dot: f32 = decoded.iter().zip(TEST_VECTOR.iter()).map(|(d, &v)| d * v).sum();
+        let dot: f32 = decoded
+            .iter()
+            .zip(TEST_VECTOR.iter())
+            .map(|(d, &v)| d * v)
+            .sum();
         let decoded_norm: f32 = decoded.iter().map(|&x| x * x).sum::<f32>().sqrt();
         let input_norm: f32 = TEST_VECTOR.iter().map(|&x| x * x).sum::<f32>().sqrt();
         assert!(dot / (decoded_norm * input_norm) > 0.5);
@@ -518,7 +581,11 @@ mod tests {
         assert!(encoded_residual_norm < 1.0);
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
         coder.decode_to(&encoded, &mut decoded);
-        let dot: f32 = decoded.iter().zip(TEST_VECTOR.iter()).map(|(d, &v)| d * v).sum();
+        let dot: f32 = decoded
+            .iter()
+            .zip(TEST_VECTOR.iter())
+            .map(|(d, &v)| d * v)
+            .sum();
         let decoded_norm: f32 = decoded.iter().map(|&x| x * x).sum::<f32>().sqrt();
         let input_norm: f32 = TEST_VECTOR.iter().map(|&x| x * x).sum::<f32>().sqrt();
         assert!(dot / (decoded_norm * input_norm) > 0.5);

@@ -3,6 +3,7 @@
 //! This uses separate implementations for MSE optimization (L2/Euclidean distance) and angular
 //! (dot product) distance.
 
+mod codebook;
 mod rotate;
 
 use std::{
@@ -75,7 +76,7 @@ pub struct MSE1Coder {
 impl MSE1Coder {
     pub fn new(dim: usize, seed: u64) -> Self {
         let rotator = rotate::Rotator::new(dim, seed);
-        let codebook = codebook_bit(dim);
+        let codebook = codebook::mse1(dim);
         MSE1Coder {
             dim,
             rotator,
@@ -156,7 +157,7 @@ impl MSE1QueryDistance {
 
         let rotator = rotate::Rotator::new(query.len(), seed);
         let rquery = rotator.forward(&normalized);
-        let codebook = codebook_bit(query.len());
+        let codebook = codebook::mse1(rquery.len());
         MSE1QueryDistance {
             rquery,
             norm,

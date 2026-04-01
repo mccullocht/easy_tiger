@@ -3,6 +3,8 @@
 //! This uses separate implementations for MSE optimization (L2/Euclidean distance) and angular
 //! (dot product) distance.
 
+// TODO: optimize vector comparison using lookup tables.
+
 pub mod codebook;
 mod packing;
 mod rotate;
@@ -76,17 +78,6 @@ impl F32VectorCoder for MSE1Coder {
         (byte_len - std::mem::size_of::<f32>()) * 8
     }
 }
-
-// XXX what do I need to perform asymmetric l2 distance?
-// - simplest: transform the vector, use the codebook to generate f32 vectors, compute l2 dist.
-// - more complex: LUT it
-//   * for each byte of input generate l2 dist to a sequence of 8 codebook entries.
-//     256 entries * 4 bytes = 1KB per 8 dim. 256KB for 2048 dims. Sounds bad.
-//   * for each nibble of input generate l2 dist to a sequence of 4 codebook entries.
-//     16 entries * 4 bytes = 64 per 4 dim. 32KB for 2048 dims. Less bad!
-//   * nibble but SQ the codebook entries. 8 KB for 2048 dims.
-//   * LUT it just shuffle + add for each entry, but we probably also have to widen. multiply by 1
-//     and just DOT it lol.
 
 pub struct MSE1QueryDistance {
     /// The query vector after l2 normalization and rotation. This places the query in the
@@ -190,6 +181,60 @@ impl<const B: usize, const N: usize> F32VectorCoder for MSECoder<B, N> {
 
     fn dimensions(&self, byte_len: usize) -> usize {
         ((byte_len - std::mem::size_of::<f32>()) * 8).div_ceil(B)
+    }
+}
+
+pub struct MSEQueryDistance<const B: usize, const N: usize> {
+    similarity: VectorSimilarity,
+    /// The query vector after l2 normalization and rotation. This places the query in the
+    /// same space as the quantized vectors which makes computation cheaper.
+    rquery: Vec<f32>,
+    /// L2 norm of the input vector before transform.
+    norm: f32,
+    /// Codebook used to decode quantized vectors for comparison.
+    codebook: [f32; N],
+}
+
+impl<const B: usize, const N: usize> MSEQueryDistance<B, N> {
+    pub fn new(
+        similarity: VectorSimilarity,
+        mut query: Vec<f32>,
+        seed: u64,
+        codebook: &[f32; N],
+    ) -> Self {
+        let norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+        for d in query.iter_mut() {
+            *d = *d * inv_norm
+        }
+
+        let rotator = rotate::Rotator::new(query.len(), seed);
+        let rquery = rotator.forward(&query);
+        let codebook = codebook::scale(codebook, rquery.len());
+        Self {
+            similarity,
+            rquery,
+            norm,
+            codebook,
+        }
+    }
+}
+
+impl<const B: usize, const N: usize> QueryVectorDistance for MSEQueryDistance<B, N> {
+    fn distance(&self, encoded: &[u8]) -> f64 {
+        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let bits = &encoded[4..];
+        let dot: f32 = self
+            .rquery
+            .iter()
+            .zip(packing::unpack::<B>(bits))
+            .map(|(&q, d)| q * self.codebook[d as usize])
+            .sum();
+        match self.similarity {
+            VectorSimilarity::Euclidean => (self.norm * self.norm + norm * norm - 2.0 * dot) as f64,
+            // The query and the doc were already normalized so the dot product is sufficient.
+            VectorSimilarity::Cosine | VectorSimilarity::Dot => dot.mul_add(-0.5, 0.5).into(),
+        }
     }
 }
 

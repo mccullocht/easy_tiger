@@ -362,11 +362,46 @@ impl F32VectorCoding {
                 Self::MSE_SEED,
                 Self::QJL_SEED,
             )),
-            (_, F32VectorCoding::TurboQuantM1) => todo!(),
-            (_, F32VectorCoding::TurboQuantM2) => todo!(),
-            (_, F32VectorCoding::TurboQuantM3) => todo!(),
-            (_, F32VectorCoding::TurboQuantM4) => todo!(),
-            (_, F32VectorCoding::TurboQuantM8) => todo!(),
+            (_, F32VectorCoding::TurboQuantM1) => {
+                Box::new(turbo_quant::MSEQueryDistance::<1, 2>::new(
+                    similarity,
+                    query.into().to_vec(),
+                    Self::MSE_SEED,
+                    &turbo_quant::codebook::CENTROIDS_1,
+                ))
+            }
+            (_, F32VectorCoding::TurboQuantM2) => {
+                Box::new(turbo_quant::MSEQueryDistance::<2, 4>::new(
+                    similarity,
+                    query.into().to_vec(),
+                    Self::MSE_SEED,
+                    &turbo_quant::codebook::CENTROIDS_2,
+                ))
+            }
+            (_, F32VectorCoding::TurboQuantM3) => {
+                Box::new(turbo_quant::MSEQueryDistance::<2, 4>::new(
+                    similarity,
+                    query.into().to_vec(),
+                    Self::MSE_SEED,
+                    &turbo_quant::codebook::CENTROIDS_2,
+                ))
+            }
+            (_, F32VectorCoding::TurboQuantM4) => {
+                Box::new(turbo_quant::MSEQueryDistance::<4, 16>::new(
+                    similarity,
+                    query.into().to_vec(),
+                    Self::MSE_SEED,
+                    &turbo_quant::codebook::CENTROIDS_4,
+                ))
+            }
+            (_, F32VectorCoding::TurboQuantM8) => {
+                Box::new(turbo_quant::MSEQueryDistance::<8, 256>::new(
+                    similarity,
+                    query.into().to_vec(),
+                    Self::MSE_SEED,
+                    &turbo_quant::codebook::CENTROIDS_8,
+                ))
+            }
         }
     }
 

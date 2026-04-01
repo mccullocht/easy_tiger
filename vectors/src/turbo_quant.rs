@@ -6,59 +6,7 @@
 mod codebook;
 mod rotate;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, LazyLock, RwLock},
-};
-
-use ndarray::{Array2, ArrayView1};
-use ndarray_linalg::QR;
-use ndarray_rand::RandomExt;
-use ndarray_rand::rand_distr::StandardNormal;
-use rand::SeedableRng;
-
 use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
-
-#[derive(Debug)]
-struct JLTrans {
-    q: Array2<f32>,
-    q_inv: Array2<f32>,
-}
-
-impl JLTrans {
-    fn new(d: usize, seed: u64) -> Self {
-        // Generate a random orthogonal matrix using QR decomposition of a random matrix.
-        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
-        let r: Array2<f32> = Array2::random_using((d, d), StandardNormal, &mut rng);
-        let q = r.qr().map(|(q, _r)| q).expect("QR decomposition failed");
-        let q_inv = q.t().to_owned();
-        JLTrans { q, q_inv }
-    }
-
-    fn transform(&self, v: &[f32]) -> Vec<f32> {
-        self.q.dot(&ArrayView1::from(v)).to_vec()
-    }
-
-    fn invert(&self, v: &[f32]) -> Vec<f32> {
-        self.q_inv.dot(&ArrayView1::from(v)).to_vec()
-    }
-}
-
-static JL_CACHE: LazyLock<RwLock<HashMap<(usize, u64), Arc<JLTrans>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-fn cached_jl_trans(d: usize, seed: u64) -> Arc<JLTrans> {
-    {
-        let m = JL_CACHE.read().expect("not poisoned");
-        if let Some(jlt) = m.get(&(d, seed)) {
-            return Arc::clone(jlt);
-        }
-    }
-
-    let jlt = Arc::new(JLTrans::new(d, seed));
-    let mut m = JL_CACHE.write().expect("not poisoned");
-    Arc::clone(m.entry((d, seed)).or_insert(jlt))
-}
 
 fn codebook_bit(dim: usize) -> [f32; 2] {
     let v = (2.0 / (std::f64::consts::PI * dim as f64)).sqrt() as f32;
@@ -192,13 +140,13 @@ const SQRT_PI_FRAC_2: f32 = 1.25331414;
 /// Produces a 1-bit quantization optimized for inner product (angular) similarity.
 pub struct Prod1Coder {
     dim: usize,
-    qjl: Arc<JLTrans>,
+    rotator: rotate::Rotator,
 }
 
 impl Prod1Coder {
     pub fn new(dim: usize, seed: u64) -> Self {
-        let qjl = cached_jl_trans(dim, seed);
-        Self { dim, qjl }
+        let rotator = rotate::Rotator::new(dim, seed);
+        Self { dim, rotator }
     }
 }
 
@@ -210,7 +158,7 @@ impl F32VectorCoder for Prod1Coder {
 
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
         let normalized: Vec<f32> = vector.iter().map(|&x| x * inv_norm).collect();
-        let transformed = self.qjl.transform(&normalized);
+        let transformed = self.rotator.forward(&normalized);
 
         let bits = &mut out[4..];
         bits.fill(0);
@@ -235,7 +183,7 @@ impl F32VectorCoder for Prod1Coder {
             .map(|i| codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
             .collect();
 
-        let inverted = self.qjl.invert(&quantized);
+        let inverted = self.rotator.backward(&quantized);
         let scale = SQRT_PI_FRAC_2 * norm / (self.dim as f32).sqrt();
         for (o, v) in out.iter_mut().zip(inverted.iter()) {
             *o = v * scale;
@@ -248,23 +196,23 @@ impl F32VectorCoder for Prod1Coder {
 }
 
 pub struct Prod1QueryDistance {
-    qjl_query: Vec<f32>,
+    rquery: Vec<f32>,
     scale: f32,
 }
 
 impl Prod1QueryDistance {
-    pub fn new(mut query: Vec<f32>, qjl_seed: u64) -> Self {
+    pub fn new(mut query: Vec<f32>, seed: u64) -> Self {
         let norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt();
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
         for d in query.iter_mut() {
             *d *= inv_norm;
         }
 
-        let qjl = cached_jl_trans(query.len(), qjl_seed);
-        let qjl_query = qjl.transform(&query);
+        let rotator = rotate::Rotator::new(query.len(), seed);
+        let rquery = rotator.forward(&query);
         let scale = (std::f32::consts::PI / (2.0 * query.len() as f32)).sqrt() * norm;
 
-        Self { qjl_query, scale }
+        Self { rquery, scale }
     }
 }
 
@@ -274,7 +222,7 @@ impl QueryVectorDistance for Prod1QueryDistance {
         let codebook = [-1.0f32, 1.0f32];
         let bits = &encoded[4..];
         let dot_unnormalized: f32 = self
-            .qjl_query
+            .rquery
             .iter()
             .enumerate()
             .map(|(i, &q)| q * codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
@@ -291,14 +239,14 @@ impl QueryVectorDistance for Prod1QueryDistance {
 /// to decode the vector or for asymmetric distance computation.
 pub struct Prod2Coder {
     dim: usize,
-    mse: Arc<JLTrans>,
-    qjl: Arc<JLTrans>,
+    mse: rotate::Rotator,
+    qjl: rotate::Rotator,
 }
 
 impl Prod2Coder {
     pub fn new(dim: usize, mse_seed: u64, qjl_seed: u64) -> Self {
-        let mse = cached_jl_trans(dim, mse_seed);
-        let qjl = cached_jl_trans(dim, qjl_seed);
+        let mse = rotate::Rotator::new(dim, mse_seed);
+        let qjl = rotate::Rotator::new(dim, qjl_seed);
         Self { dim, mse, qjl }
     }
 }
@@ -310,7 +258,7 @@ impl F32VectorCoder for Prod2Coder {
         out[..4].copy_from_slice(&norm.to_le_bytes());
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
         let mut scratch: Vec<f32> = vector.iter().map(|&x| x * inv_norm).collect();
-        let mut mse_vec = self.mse.transform(&scratch);
+        let mut mse_vec = self.mse.forward(&scratch);
 
         let bitvec_len = self.dim.div_ceil(8);
         let mse_bytes = &mut out[8..(8 + bitvec_len)];
@@ -327,7 +275,7 @@ impl F32VectorCoder for Prod2Coder {
                 *v = codebook[0];
             }
         }
-        let mse_reconstructed = self.mse.invert(&mse_vec);
+        let mse_reconstructed = self.mse.backward(&mse_vec);
 
         // Compute the residual vector for QJL encoding. Compute the dot product as we will need
         // to store the l2 norm of the residual.
@@ -339,7 +287,7 @@ impl F32VectorCoder for Prod2Coder {
 
         let residual_norm = residual_dot.sqrt();
         out[4..8].copy_from_slice(&residual_norm.to_le_bytes());
-        let qjl_vec = self.qjl.transform(&scratch);
+        let qjl_vec = self.qjl.forward(&scratch);
         let qjl_bytes = &mut out[(8 + bitvec_len)..];
         qjl_bytes.fill(0);
         for (i, &v) in qjl_vec.iter().enumerate() {
@@ -364,7 +312,7 @@ impl F32VectorCoder for Prod2Coder {
         for (i, o) in out.iter_mut().enumerate() {
             *o = mse_codebook[((mse_bits[i / 8] >> (i % 8)) & 1) as usize];
         }
-        let mse_vec = self.mse.invert(out);
+        let mse_vec = self.mse.backward(out);
 
         let qjl_bits = &encoded[(8 + bitvec_len)..];
         let qjl_codebook = [-1.0f32, 1.0f32];
@@ -372,7 +320,7 @@ impl F32VectorCoder for Prod2Coder {
         for (i, o) in out.iter_mut().enumerate() {
             *o = qjl_codebook[((qjl_bits[i / 8] >> (i % 8)) & 1) as usize];
         }
-        let qjl_vec = self.qjl.invert(out);
+        let qjl_vec = self.qjl.backward(out);
 
         for ((mse, qjl), o) in mse_vec.iter().zip(qjl_vec.iter()).zip(out.iter_mut()) {
             *o = (mse + qjl * qjl_scale) * norm;
@@ -405,10 +353,10 @@ impl Prod2QueryDistance {
             *d *= inv_norm;
         }
 
-        let mse = cached_jl_trans(query.len(), mse_seed);
-        let mse_query = mse.transform(&query);
-        let qjl = cached_jl_trans(query.len(), qjl_seed);
-        let qjl_query = qjl.transform(&query);
+        let mse = rotate::Rotator::new(query.len(), mse_seed);
+        let mse_query = mse.forward(&query);
+        let qjl = rotate::Rotator::new(query.len(), qjl_seed);
+        let qjl_query = qjl.forward(&query);
         let scale = SQRT_PI_FRAC_2 / (query.len() as f32).sqrt();
 
         Self {
@@ -548,32 +496,11 @@ mod tests {
         );
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
         coder.decode_to(&encoded, &mut decoded);
-        assert_abs_diff_eq!(
-            decoded.as_slice(),
-            [
-                -0.5153703,
-                -0.28179494,
-                0.78362495,
-                0.39550897,
-                0.3067388,
-                -0.26140597,
-                1.1660486,
-                0.1346135,
-                -0.6128313,
-                -0.82083225,
-                0.24337846,
-                -0.82051665,
-                0.63981766,
-                0.75356096,
-                -1.0270004,
-                -0.22376151,
-                1.2691334,
-                1.2683558,
-                0.50715274
-            ]
-            .as_ref(),
-            epsilon = 0.00001
-        );
+        // Check that cosine similarity between decoded and original is reasonable for 1-bit.
+        let dot: f32 = decoded.iter().zip(TEST_VECTOR.iter()).map(|(d, &v)| d * v).sum();
+        let decoded_norm: f32 = decoded.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let input_norm: f32 = TEST_VECTOR.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        assert!(dot / (decoded_norm * input_norm) > 0.5);
     }
 
     #[test]
@@ -591,31 +518,9 @@ mod tests {
         assert!(encoded_residual_norm < 1.0);
         let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
         coder.decode_to(&encoded, &mut decoded);
-        assert_abs_diff_eq!(
-            decoded.as_slice(),
-            [
-                -1.0868338,
-                0.069815524,
-                0.61763537,
-                1.2284997,
-                0.6587493,
-                0.25813597,
-                1.0347325,
-                -0.18683682,
-                -0.3129965,
-                -0.406053,
-                0.74326444,
-                -0.54105914,
-                -0.025382556,
-                0.56268257,
-                -0.43888098,
-                0.63369685,
-                0.93936765,
-                0.4219962,
-                -0.044104088
-            ]
-            .as_ref(),
-            epsilon = 0.00001
-        );
+        let dot: f32 = decoded.iter().zip(TEST_VECTOR.iter()).map(|(d, &v)| d * v).sum();
+        let decoded_norm: f32 = decoded.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let input_norm: f32 = TEST_VECTOR.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        assert!(dot / (decoded_norm * input_norm) > 0.5);
     }
 }

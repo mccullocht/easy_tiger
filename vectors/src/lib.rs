@@ -397,11 +397,11 @@ impl F32VectorCoding {
                 ))
             }
             (_, F32VectorCoding::TurboQuantM3) => {
-                Box::new(turbo_quant::MSEQueryDistance::<2, 4>::new(
+                Box::new(turbo_quant::MSEQueryDistance::<3, 8>::new(
                     similarity,
                     query.into().to_vec(),
                     Self::MSE_SEED,
-                    &turbo_quant::codebook::CENTROIDS_2,
+                    &turbo_quant::codebook::CENTROIDS_3,
                 ))
             }
             (_, F32VectorCoding::TurboQuantM4) => {
@@ -439,12 +439,12 @@ impl F32VectorCoding {
                 ))
             }
             (_, F32VectorCoding::TurboQuantP4) => {
-                Box::new(turbo_quant::ProdQueryDistance::<2, 4>::new(
+                Box::new(turbo_quant::ProdQueryDistance::<3, 8>::new(
                     similarity,
                     query.into().to_vec(),
                     Self::MSE_SEED,
                     Self::QJL_SEED,
-                    &turbo_quant::codebook::CENTROIDS_2,
+                    &turbo_quant::codebook::CENTROIDS_3,
                 ))
             }
             (_, F32VectorCoding::TurboQuantP5) => {

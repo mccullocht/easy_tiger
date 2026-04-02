@@ -23,6 +23,11 @@ pub fn pack<const B: usize>(it: impl ExactSizeIterator<Item = u8>, out: &mut [u8
             nbuf -= 8;
         }
     }
+
+    // Flush any remaining buffered bits.
+    if nbuf > 0 {
+        *out_it.next().unwrap() = buf as u8;
+    }
 }
 
 pub struct UnpackIter<'a, const B: usize> {

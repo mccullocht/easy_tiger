@@ -192,6 +192,16 @@ pub enum F32VectorCoding {
     TurboQuantM4,
     /// TurboQuantMSE with 8 bits per dimension.
     TurboQuantM8,
+    /// TurboQuantProd with 1 MSE bit and 1 QJL bit per dimension.
+    TurboQuantP2,
+    /// TurboQuantProd with 2 MSE bits and 1 QJL bit per dimension.
+    TurboQuantP3,
+    /// TurboQuantProd with 3 MSE bits and 1 QJL bit per dimension.
+    TurboQuantP4,
+    /// TurboQuantProd with 4 MSE bits and 1 QJL bit per dimension.
+    TurboQuantP5,
+    /// TurboQuantProd with 8 MSE bits and 1 QJL bit per dimension.
+    TurboQuantP9,
 }
 
 impl F32VectorCoding {
@@ -250,6 +260,36 @@ impl F32VectorCoding {
                 Self::MSE_SEED,
                 &turbo_quant::codebook::CENTROIDS_8,
             )),
+            Self::TurboQuantP2 => Box::new(turbo_quant::ProdCoder::<1, 2>::new(
+                dim,
+                Self::MSE_SEED,
+                Self::QJL_SEED,
+                &turbo_quant::codebook::CENTROIDS_1,
+            )),
+            Self::TurboQuantP3 => Box::new(turbo_quant::ProdCoder::<2, 4>::new(
+                dim,
+                Self::MSE_SEED,
+                Self::QJL_SEED,
+                &turbo_quant::codebook::CENTROIDS_2,
+            )),
+            Self::TurboQuantP4 => Box::new(turbo_quant::ProdCoder::<3, 8>::new(
+                dim,
+                Self::MSE_SEED,
+                Self::QJL_SEED,
+                &turbo_quant::codebook::CENTROIDS_3,
+            )),
+            Self::TurboQuantP5 => Box::new(turbo_quant::ProdCoder::<4, 16>::new(
+                dim,
+                Self::MSE_SEED,
+                Self::QJL_SEED,
+                &turbo_quant::codebook::CENTROIDS_4,
+            )),
+            Self::TurboQuantP9 => Box::new(turbo_quant::ProdCoder::<8, 256>::new(
+                dim,
+                Self::MSE_SEED,
+                Self::QJL_SEED,
+                &turbo_quant::codebook::CENTROIDS_8,
+            )),
         }
     }
 
@@ -281,6 +321,11 @@ impl F32VectorCoding {
             (Self::TurboQuantM3, _) => todo!(),
             (Self::TurboQuantM4, _) => todo!(),
             (Self::TurboQuantM8, _) => todo!(),
+            (Self::TurboQuantP2, _) => todo!(),
+            (Self::TurboQuantP3, _) => todo!(),
+            (Self::TurboQuantP4, _) => todo!(),
+            (Self::TurboQuantP5, _) => todo!(),
+            (Self::TurboQuantP9, _) => todo!(),
         }
     }
 
@@ -391,6 +436,51 @@ impl F32VectorCoding {
                     &turbo_quant::codebook::CENTROIDS_8,
                 ))
             }
+            (_, F32VectorCoding::TurboQuantP2) => {
+                Box::new(turbo_quant::ProdQueryDistance::<1, 2>::new(
+                    similarity,
+                    query.into().to_vec(),
+                    Self::MSE_SEED,
+                    Self::QJL_SEED,
+                    &turbo_quant::codebook::CENTROIDS_1,
+                ))
+            }
+            (_, F32VectorCoding::TurboQuantP3) => {
+                Box::new(turbo_quant::ProdQueryDistance::<2, 4>::new(
+                    similarity,
+                    query.into().to_vec(),
+                    Self::MSE_SEED,
+                    Self::QJL_SEED,
+                    &turbo_quant::codebook::CENTROIDS_2,
+                ))
+            }
+            (_, F32VectorCoding::TurboQuantP4) => {
+                Box::new(turbo_quant::ProdQueryDistance::<2, 4>::new(
+                    similarity,
+                    query.into().to_vec(),
+                    Self::MSE_SEED,
+                    Self::QJL_SEED,
+                    &turbo_quant::codebook::CENTROIDS_2,
+                ))
+            }
+            (_, F32VectorCoding::TurboQuantP5) => {
+                Box::new(turbo_quant::ProdQueryDistance::<4, 16>::new(
+                    similarity,
+                    query.into().to_vec(),
+                    Self::MSE_SEED,
+                    Self::QJL_SEED,
+                    &turbo_quant::codebook::CENTROIDS_4,
+                ))
+            }
+            (_, F32VectorCoding::TurboQuantP9) => {
+                Box::new(turbo_quant::ProdQueryDistance::<8, 256>::new(
+                    similarity,
+                    query.into().to_vec(),
+                    Self::MSE_SEED,
+                    Self::QJL_SEED,
+                    &turbo_quant::codebook::CENTROIDS_8,
+                ))
+            }
         }
     }
 
@@ -461,6 +551,11 @@ impl F32VectorCoding {
             (_, F32VectorCoding::TurboQuantM3) => todo!(),
             (_, F32VectorCoding::TurboQuantM4) => todo!(),
             (_, F32VectorCoding::TurboQuantM8) => todo!(),
+            (_, F32VectorCoding::TurboQuantP2) => todo!(),
+            (_, F32VectorCoding::TurboQuantP3) => todo!(),
+            (_, F32VectorCoding::TurboQuantP4) => todo!(),
+            (_, F32VectorCoding::TurboQuantP5) => todo!(),
+            (_, F32VectorCoding::TurboQuantP9) => todo!(),
         }
     }
 }
@@ -489,6 +584,11 @@ impl FromStr for F32VectorCoding {
             "tqm3" => Ok(Self::TurboQuantM3),
             "tqm4" => Ok(Self::TurboQuantM4),
             "tqm8" => Ok(Self::TurboQuantM8),
+            "tqp2" => Ok(Self::TurboQuantP2),
+            "tqp3" => Ok(Self::TurboQuantP3),
+            "tqp4" => Ok(Self::TurboQuantP4),
+            "tqp5" => Ok(Self::TurboQuantP5),
+            "tqp9" => Ok(Self::TurboQuantP9),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -515,6 +615,11 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TurboQuantM3 => write!(f, "tqm3"),
             Self::TurboQuantM4 => write!(f, "tqm4"),
             Self::TurboQuantM8 => write!(f, "tqm8"),
+            Self::TurboQuantP2 => write!(f, "tqp2"),
+            Self::TurboQuantP3 => write!(f, "tqp3"),
+            Self::TurboQuantP4 => write!(f, "tqp4"),
+            Self::TurboQuantP5 => write!(f, "tqp5"),
+            Self::TurboQuantP9 => write!(f, "tqp9"),
         }
     }
 }

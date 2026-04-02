@@ -9,6 +9,8 @@ pub mod codebook;
 mod packing;
 mod rotate;
 
+use std::ops::Range;
+
 use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
 
 fn codebook_bit(dim: usize) -> [f32; 2] {
@@ -463,6 +465,197 @@ impl QueryVectorDistance for Prod2QueryDistance {
         match self.similarity {
             VectorSimilarity::Euclidean => self.norm * self.norm + norm * norm - 2.0 * dot_cos,
             VectorSimilarity::Dot | VectorSimilarity::Cosine => dot_cos.mul_add(-0.5, 0.5),
+        }
+        .into()
+    }
+}
+
+fn prod_vec_bounds(dim: usize, mse_bits: usize) -> (Range<usize>, Range<usize>) {
+    let mse_bitvec_len = (dim * mse_bits).div_ceil(8);
+    let mse_range = 8..(8 + mse_bitvec_len);
+    let qjl_range = (8 + mse_bitvec_len)..(8 + mse_bitvec_len + dim.div_ceil(8));
+    (mse_range, qjl_range)
+}
+
+struct ProdVector<'a> {
+    norm: f32,
+    residual_norm: f32,
+    mse_vec: &'a [u8],
+    qjl_vec: &'a [u8],
+}
+
+impl<'a> ProdVector<'a> {
+    fn from_encoded<const B: usize>(encoded: &'a [u8], dim: usize) -> Self {
+        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let residual_norm = f32::from_le_bytes(encoded[4..8].try_into().unwrap());
+
+        let (mse_range, qjl_range) = prod_vec_bounds(dim, B);
+        let mse_vec = &encoded[mse_range];
+        let qjl_vec = &encoded[qjl_range];
+        Self {
+            norm,
+            residual_norm,
+            mse_vec,
+            qjl_vec,
+        }
+    }
+}
+
+const QJL_CODEBOOK: [f32; 2] = [-1.0f32, 1.0f32];
+
+pub struct ProdCoder<const B: usize, const N: usize> {
+    dim: usize,
+    mse: rotate::Rotator,
+    mse_codebook: [f32; N],
+    qjl: rotate::Rotator,
+}
+
+impl<const B: usize, const N: usize> ProdCoder<B, N> {
+    pub fn new(dim: usize, mse_seed: u64, qjl_seed: u64, codebook: &[f32; N]) -> Self {
+        let mse = rotate::Rotator::new(dim, mse_seed);
+        let qjl = rotate::Rotator::new(dim, qjl_seed);
+        Self {
+            dim,
+            mse,
+            mse_codebook: codebook::scale::<N>(codebook, dim),
+            qjl,
+        }
+    }
+}
+
+impl<const B: usize, const N: usize> F32VectorCoder for ProdCoder<B, N> {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        assert_eq!(vector.len(), self.dim);
+        let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        out[..4].copy_from_slice(&norm.to_le_bytes());
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+        let mut scratch: Vec<f32> = vector.iter().map(|&x| x * inv_norm).collect();
+        let mut mse_vec = self.mse.forward(&scratch);
+
+        let (mse_bounds, qjl_bounds) = prod_vec_bounds(self.dim, B);
+        let mse_bytes = &mut out[mse_bounds];
+        mse_bytes.fill(0);
+        packing::pack::<B>(
+            mse_vec.iter_mut().map(|v| {
+                let code = codebook::select_code(&self.mse_codebook, *v);
+                *v = self.mse_codebook[code as usize];
+                code as u8
+            }),
+            mse_bytes,
+        );
+        let mse_reconstructed = self.mse.backward(&mse_vec);
+
+        // Compute the residual vector for QJL encoding. Compute the dot product as we will need
+        // to store the l2 norm of the residual.
+        let mut residual_dot = 0.0f32;
+        for (r, &rec) in scratch.iter_mut().zip(mse_reconstructed.iter()) {
+            *r -= rec;
+            residual_dot += *r * *r;
+        }
+
+        let residual_norm = residual_dot.sqrt();
+        out[4..8].copy_from_slice(&residual_norm.to_le_bytes());
+        let qjl_vec = self.qjl.forward(&scratch);
+        let qjl_bytes = &mut out[qjl_bounds];
+        qjl_bytes.fill(0);
+        packing::pack::<1>(
+            qjl_vec.iter().map(|&v| if v > 0.0 { 1 } else { 0 }),
+            qjl_bytes,
+        );
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        std::mem::size_of::<f32>() * 2 + (dimensions * B).div_ceil(8) + dimensions.div_ceil(8)
+    }
+
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        assert_eq!(out.len(), self.dim);
+        let vec = ProdVector::from_encoded::<B>(encoded, self.dim);
+
+        for (c, o) in packing::unpack::<B>(vec.mse_vec).zip(out.iter_mut()) {
+            *o = self.mse_codebook[c as usize];
+        }
+        let mse_vec = self.mse.backward(out);
+
+        let qjl_scale = SQRT_PI_FRAC_2 * vec.residual_norm / (self.dim as f32).sqrt();
+        for (c, o) in packing::unpack::<1>(vec.qjl_vec).zip(out.iter_mut()) {
+            *o = QJL_CODEBOOK[c as usize];
+        }
+        let qjl_vec = self.qjl.backward(out);
+
+        for ((mse, qjl), o) in mse_vec.iter().zip(qjl_vec.iter()).zip(out.iter_mut()) {
+            *o = (mse + qjl * qjl_scale) * vec.norm;
+        }
+    }
+
+    fn dimensions(&self, _byte_len: usize) -> usize {
+        self.dim
+    }
+}
+
+pub struct ProdQueryDistance<const B: usize, const N: usize> {
+    similarity: VectorSimilarity,
+    mse_query: Vec<f32>,
+    mse_codebook: [f32; N],
+    qjl_query: Vec<f32>,
+    norm: f32,
+    scale: f32,
+}
+
+impl<const B: usize, const N: usize> ProdQueryDistance<B, N> {
+    pub fn new(
+        similarity: VectorSimilarity,
+        mut query: Vec<f32>,
+        mse_seed: u64,
+        qjl_seed: u64,
+        mse_codebook: &[f32; N],
+    ) -> Self {
+        let norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+        for d in query.iter_mut() {
+            *d *= inv_norm;
+        }
+
+        let mse = rotate::Rotator::new(query.len(), mse_seed);
+        let mse_query = mse.forward(&query);
+        let qjl = rotate::Rotator::new(query.len(), qjl_seed);
+        let qjl_query = qjl.forward(&query);
+        let scale = SQRT_PI_FRAC_2 / (query.len() as f32).sqrt();
+
+        Self {
+            similarity,
+            mse_query,
+            mse_codebook: codebook::scale(mse_codebook, query.len()),
+            qjl_query,
+            norm,
+            scale,
+        }
+    }
+
+    fn dim(&self) -> usize {
+        self.mse_query.len()
+    }
+}
+
+impl<const B: usize, const N: usize> QueryVectorDistance for ProdQueryDistance<B, N> {
+    fn distance(&self, encoded: &[u8]) -> f64 {
+        let vec = ProdVector::from_encoded::<B>(encoded, self.dim());
+        let mse_dot: f32 = self
+            .mse_query
+            .iter()
+            .zip(packing::unpack::<B>(vec.mse_vec))
+            .map(|(&q, c)| q * self.mse_codebook[c as usize])
+            .sum();
+        let qjl_dot: f32 = self
+            .qjl_query
+            .iter()
+            .zip(packing::unpack::<1>(vec.qjl_vec))
+            .map(|(&q, c)| q * QJL_CODEBOOK[c as usize])
+            .sum();
+        let dot = mse_dot + qjl_dot * self.scale * vec.residual_norm;
+        match self.similarity {
+            VectorSimilarity::Euclidean => self.norm * self.norm + vec.norm * vec.norm - 2.0 * dot,
+            VectorSimilarity::Dot | VectorSimilarity::Cosine => dot.mul_add(-0.5, 0.5),
         }
         .into()
     }

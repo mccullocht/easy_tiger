@@ -2,7 +2,13 @@
 
 /// Pack a stream of B bit entries into out.
 pub fn pack<const B: usize>(it: impl ExactSizeIterator<Item = u8>, out: &mut [u8]) {
-    assert!((it.len() * B).div_ceil(8) <= out.len());
+    assert!(
+        (it.len() * B).div_ceil(8) <= out.len(),
+        "output buffer too small input={} B={} out={}",
+        it.len(),
+        B,
+        out.len()
+    );
 
     let mut buf = 0u16;
     let mut nbuf = 0;

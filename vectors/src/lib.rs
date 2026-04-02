@@ -178,10 +178,6 @@ pub enum F32VectorCoding {
     TLVQ8x8,
     /// TurboQuant with 1 bit per dimension.
     TurboQuant1,
-    /// TurboQuant with 2 bits per dimension.
-    ///
-    /// This uses one bit to minimize MSE and one bit to minimize inner product loss.
-    TurboQuant2,
     /// TurboQuantMSE with 1 bit per dimension.
     TurboQuantM1,
     /// TurboQuantMSE with 2 bits per dimension.
@@ -230,11 +226,6 @@ impl F32VectorCoding {
             Self::TLVQ4x8 => Box::new(lvq::TurboResidualCoder::<4>::default()),
             Self::TLVQ8x8 => Box::new(lvq::TurboResidualCoder::<8>::default()),
             Self::TurboQuant1 => Box::new(turbo_quant::Prod1Coder::new(dim, Self::QJL_SEED)),
-            Self::TurboQuant2 => Box::new(turbo_quant::Prod2Coder::new(
-                dim,
-                Self::MSE_SEED,
-                Self::QJL_SEED,
-            )),
             Self::TurboQuantM1 => Box::new(turbo_quant::MSECoder::<1, 2>::new(
                 dim,
                 Self::MSE_SEED,
@@ -315,7 +306,6 @@ impl F32VectorCoding {
             (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualDistance::<4>::new(similarity)),
             (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualDistance::<8>::new(similarity)),
             (Self::TurboQuant1, _) => todo!(),
-            (Self::TurboQuant2, _) => todo!(),
             (Self::TurboQuantM1, _) => todo!(),
             (Self::TurboQuantM2, _) => todo!(),
             (Self::TurboQuantM3, _) => todo!(),
@@ -388,12 +378,6 @@ impl F32VectorCoding {
             (_, F32VectorCoding::TurboQuant1) => Box::new(turbo_quant::Prod1QueryDistance::new(
                 similarity,
                 query.into().to_vec(),
-                Self::QJL_SEED,
-            )),
-            (_, F32VectorCoding::TurboQuant2) => Box::new(turbo_quant::Prod2QueryDistance::new(
-                similarity,
-                query.into().to_vec(),
-                Self::MSE_SEED,
                 Self::QJL_SEED,
             )),
             (_, F32VectorCoding::TurboQuantM1) => {
@@ -543,9 +527,6 @@ impl F32VectorCoding {
             (_, F32VectorCoding::TurboQuant1) => {
                 todo!()
             }
-            (_, F32VectorCoding::TurboQuant2) => {
-                todo!()
-            }
             (_, F32VectorCoding::TurboQuantM1) => todo!(),
             (_, F32VectorCoding::TurboQuantM2) => todo!(),
             (_, F32VectorCoding::TurboQuantM3) => todo!(),
@@ -578,7 +559,6 @@ impl FromStr for F32VectorCoding {
             "tlvq4x8" => Ok(Self::TLVQ4x8),
             "tlvq8x8" => Ok(Self::TLVQ8x8),
             "tq1" => Ok(Self::TurboQuant1),
-            "tq2" => Ok(Self::TurboQuant2),
             "tqm1" => Ok(Self::TurboQuantM1),
             "tqm2" => Ok(Self::TurboQuantM2),
             "tqm3" => Ok(Self::TurboQuantM3),
@@ -609,7 +589,6 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TLVQ4x8 => write!(f, "tlvq4x8"),
             Self::TLVQ8x8 => write!(f, "tlvq8x8"),
             Self::TurboQuant1 => write!(f, "tq1"),
-            Self::TurboQuant2 => write!(f, "tq2"),
             Self::TurboQuantM1 => write!(f, "tqm1"),
             Self::TurboQuantM2 => write!(f, "tqm2"),
             Self::TurboQuantM3 => write!(f, "tqm3"),

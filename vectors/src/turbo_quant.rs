@@ -16,116 +16,6 @@ fn codebook_bit(dim: usize) -> [f32; 2] {
     [-v, v]
 }
 
-/// TurboQuant coder for 1-bit quantization that minimizes MSE. This is most suitable for l2
-/// distance where minimizing MSE is equivalent to minimizing distance distortion.
-pub struct MSE1Coder {
-    dim: usize,
-    rotator: rotate::Rotator,
-    codebook: [f32; 2],
-}
-
-impl MSE1Coder {
-    pub fn new(dim: usize, seed: u64) -> Self {
-        let rotator = rotate::Rotator::new(dim, seed);
-        let codebook = codebook::mse1(dim);
-        MSE1Coder {
-            dim,
-            rotator,
-            codebook,
-        }
-    }
-}
-
-impl F32VectorCoder for MSE1Coder {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        assert_eq!(vector.len(), self.dim);
-        let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
-        out[..4].copy_from_slice(&norm.to_le_bytes());
-
-        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
-        let normalized: Vec<f32> = vector.iter().map(|&x| x * inv_norm).collect();
-        let transformed = self.rotator.forward(&normalized);
-
-        let bits = &mut out[4..];
-        bits.fill(0);
-        for (i, &v) in transformed.iter().enumerate() {
-            if v > 0.0 {
-                bits[i / 8] |= 1 << (i % 8);
-            }
-        }
-    }
-
-    fn byte_len(&self, dimensions: usize) -> usize {
-        std::mem::size_of::<f32>() + dimensions.div_ceil(8)
-    }
-
-    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
-        assert_eq!(out.len(), self.dim);
-        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
-        let bits = &encoded[4..];
-
-        let quantized: Vec<f32> = (0..self.dim)
-            .map(|i| self.codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
-            .collect();
-
-        let inverted = self.rotator.backward(&quantized);
-        for (o, v) in out.iter_mut().zip(inverted.iter()) {
-            *o = v * norm;
-        }
-    }
-
-    fn dimensions(&self, byte_len: usize) -> usize {
-        (byte_len - std::mem::size_of::<f32>()) * 8
-    }
-}
-
-pub struct MSE1QueryDistance {
-    /// The query vector after l2 normalization and rotation. This places the query in the
-    /// same space as the quantized vectors which makes computation cheaper.
-    rquery: Vec<f32>,
-    /// L2 norm of the input vector before JLT.
-    norm: f32,
-    /// Codebook used to decode quantized vectors for comparison.
-    codebook: [f32; 2],
-}
-
-impl MSE1QueryDistance {
-    pub fn new(query: Vec<f32>, seed: u64) -> Self {
-        let norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt();
-        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
-        let normalized: Vec<f32> = query.iter().map(|&x| x * inv_norm).collect();
-
-        let rotator = rotate::Rotator::new(query.len(), seed);
-        let rquery = rotator.forward(&normalized);
-        let codebook = codebook::mse1(rquery.len());
-        MSE1QueryDistance {
-            rquery,
-            norm,
-            codebook,
-        }
-    }
-}
-
-impl QueryVectorDistance for MSE1QueryDistance {
-    fn distance(&self, encoded: &[u8]) -> f64 {
-        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
-        let bits = &encoded[4..];
-        // Compute dot product between the JL-transformed query and the quantized db vector.
-        // Each codebook entry is ±√(2/πd), chosen to minimize MSE of reconstruction.
-        // However, ⟨JL(q̂), codebook⟩ ≈ (2/π)·⟨q̂, db̂⟩ — biased low by 2/π.
-        // Applying the asymmetric form with the exact stored norms:
-        //   ‖q − db‖² = ‖q‖² + ‖db‖² − 2·⟨q, db⟩
-        //              ≈ ‖q‖² + ‖db‖² − π·‖q‖·‖db‖·⟨JL(q̂), codebook⟩
-        let dot: f32 = self
-            .rquery
-            .iter()
-            .enumerate()
-            .map(|(i, &q)| q * self.codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
-            .sum();
-        (self.norm * self.norm + norm * norm - std::f32::consts::PI * self.norm * norm * dot) as f64
-    }
-}
-
 pub struct MSECoder<const B: usize, const N: usize> {
     dim: usize,
     rotator: rotate::Rotator,
@@ -205,12 +95,24 @@ pub struct MSEQueryDistance<const B: usize, const N: usize> {
 fn inner_product_bias<const N: usize>(codebook: &[f32; N]) -> f32 {
     let inv_sqrt_2pi = (0.5f32 / std::f32::consts::PI).sqrt();
     let normal_pdf = |x: f32| -> f32 {
-        if x.is_infinite() { 0.0 } else { inv_sqrt_2pi * (-x * x * 0.5).exp() }
+        if x.is_infinite() {
+            0.0
+        } else {
+            inv_sqrt_2pi * (-x * x * 0.5).exp()
+        }
     };
     let mut a = 0.0f32;
     for (k, &c) in codebook.iter().enumerate() {
-        let t_prev = if k == 0 { f32::NEG_INFINITY } else { (codebook[k - 1] + c) * 0.5 };
-        let t_next = if k == N - 1 { f32::INFINITY } else { (c + codebook[k + 1]) * 0.5 };
+        let t_prev = if k == 0 {
+            f32::NEG_INFINITY
+        } else {
+            (codebook[k - 1] + c) * 0.5
+        };
+        let t_next = if k == N - 1 {
+            f32::INFINITY
+        } else {
+            (c + codebook[k + 1]) * 0.5
+        };
         a += c * (normal_pdf(t_prev) - normal_pdf(t_next));
     }
     a
@@ -258,8 +160,8 @@ impl<const B: usize, const N: usize> QueryVectorDistance for MSEQueryDistance<B,
             .sum();
         match self.similarity {
             VectorSimilarity::Euclidean => {
-                (self.norm * self.norm + norm * norm - self.euclidean_scale * self.norm * norm * dot)
-                    as f64
+                (self.norm * self.norm + norm * norm
+                    - self.euclidean_scale * self.norm * norm * dot) as f64
             }
             // The query and the doc were already normalized so the dot product is sufficient.
             VectorSimilarity::Cosine | VectorSimilarity::Dot => dot.mul_add(-0.5, 0.5).into(),
@@ -329,12 +231,16 @@ impl F32VectorCoder for Prod1Coder {
 }
 
 pub struct Prod1QueryDistance {
+    similarity: VectorSimilarity,
     rquery: Vec<f32>,
+    /// L2 norm of the query vector before normalization and rotation.
+    norm: f32,
+    /// `sqrt(π / (2d)) * query_norm` — scales the raw dot product to estimate `⟨q, db⟩`.
     scale: f32,
 }
 
 impl Prod1QueryDistance {
-    pub fn new(mut query: Vec<f32>, seed: u64) -> Self {
+    pub fn new(similarity: VectorSimilarity, mut query: Vec<f32>, seed: u64) -> Self {
         let norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt();
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
         for d in query.iter_mut() {
@@ -345,13 +251,18 @@ impl Prod1QueryDistance {
         let rquery = rotator.forward(&query);
         let scale = (std::f32::consts::PI / (2.0 * query.len() as f32)).sqrt() * norm;
 
-        Self { rquery, scale }
+        Self {
+            similarity,
+            rquery,
+            norm,
+            scale,
+        }
     }
 }
 
 impl QueryVectorDistance for Prod1QueryDistance {
     fn distance(&self, encoded: &[u8]) -> f64 {
-        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let db_norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
         let codebook = [-1.0f32, 1.0f32];
         let bits = &encoded[4..];
         let dot_unnormalized: f32 = self
@@ -360,8 +271,17 @@ impl QueryVectorDistance for Prod1QueryDistance {
             .enumerate()
             .map(|(i, &q)| q * codebook[((bits[i / 8] >> (i % 8)) & 1) as usize])
             .sum();
-        let dot = dot_unnormalized * self.scale * norm;
-        dot.mul_add(-0.5, 0.5).into()
+        // dot_unnormalized * scale * db_norm ≈ ⟨q, db⟩
+        match self.similarity {
+            VectorSimilarity::Euclidean => {
+                let dot = dot_unnormalized * self.scale * db_norm;
+                (self.norm * self.norm + db_norm * db_norm - 2.0 * dot) as f64
+            }
+            VectorSimilarity::Dot | VectorSimilarity::Cosine => {
+                let dot = dot_unnormalized * self.scale * db_norm;
+                dot.mul_add(-0.5, 0.5).into()
+            }
+        }
     }
 }
 
@@ -557,8 +477,6 @@ mod tests {
         turbo_quant::{Prod1Coder, Prod2Coder},
     };
 
-    use super::MSE1Coder;
-
     // This test vector contains randomly generated numbers in [-1,1] but is not l2 normalized.
     // It has 19 elements -- long enough to trigger SIMD optimizations but with some remainder to
     // test scalar tail paths.
@@ -566,55 +484,6 @@ mod tests {
         -0.921, -0.061, 0.659, 0.67, 0.573, 0.431, 0.646, 0.001, -0.2, -0.428, 0.73, -0.704,
         -0.273, 0.539, -0.731, 0.436, 0.913, 0.694, 0.202,
     ];
-
-    #[test]
-    fn mse1_null_vector_decode() {
-        let coder = MSE1Coder::new(256, 42);
-        let vector = vec![0.0f32; 256];
-        let decoded = coder.decode(&coder.encode(&vector));
-        assert_abs_diff_eq!(decoded.as_slice(), vector.as_slice());
-    }
-
-    #[test]
-    fn mse1_coding() {
-        let coder = MSE1Coder::new(TEST_VECTOR.len(), 42);
-        let encoded = coder.encode(&TEST_VECTOR);
-        assert_eq!(encoded.len(), coder.byte_len(TEST_VECTOR.len()));
-        let encoded_norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
-        assert_abs_diff_eq!(
-            encoded_norm,
-            TEST_VECTOR.iter().map(|&x| x * x).sum::<f32>().sqrt(),
-            epsilon = 0.00001
-        );
-        let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
-        coder.decode_to(&encoded, &mut decoded);
-        assert_abs_diff_eq!(
-            decoded.as_slice(),
-            [
-                -0.3280949,
-                -0.17939623,
-                0.49887112,
-                0.25178882,
-                0.19527599,
-                -0.16641621,
-                0.74232966,
-                0.08569759,
-                -0.39014056,
-                -0.5225581,
-                0.15493955,
-                -0.5223572,
-                0.40732047,
-                0.47973183,
-                -0.65380883,
-                -0.14245099,
-                0.8079555,
-                0.8074604,
-                0.32286346
-            ]
-            .as_ref(),
-            epsilon = 0.00001
-        );
-    }
 
     #[test]
     fn prod1_coding() {

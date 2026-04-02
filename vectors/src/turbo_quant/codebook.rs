@@ -57,11 +57,6 @@ pub fn scale<const N: usize>(codebook: &[f32; N], dim: usize) -> [f32; N] {
     scaled
 }
 
-/// Codebook for MSE vectors with 1 bit per dimension.
-pub fn mse1(dim: usize) -> [f32; 2] {
-    scale(&CENTROIDS_1, dim)
-}
-
 /// Select the closest code (index) from codebook for value.
 pub fn select_code<const N: usize>(codebook: &[f32; N], value: f32) -> u8 {
     if N == 2 {

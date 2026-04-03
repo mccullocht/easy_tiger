@@ -166,9 +166,7 @@ impl<const B: usize, const N: usize> QueryVectorDistance for MSEQueryDistance<B,
 
 #[cfg(test)]
 mod tests {
-    use approx::assert_abs_diff_eq;
-
-    use crate::F32VectorCoder;
+    use super::codebook;
 
     // This test vector contains randomly generated numbers in [-1,1] but is not l2 normalized.
     // It has 19 elements -- long enough to trigger SIMD optimizations but with some remainder to
@@ -178,5 +176,117 @@ mod tests {
         -0.273, 0.539, -0.731, 0.436, 0.913, 0.694, 0.202,
     ];
 
-    // TODO: generate some tests for MSECoder.
+    const MSE_SEED: u64 = 42;
+
+    macro_rules! mse_tests {
+        ($mod_name:ident, $B:literal, $N:literal, $centroids:expr) => {
+            mod $mod_name {
+                use approx::assert_abs_diff_eq;
+
+                use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
+
+                use super::{MSE_SEED, TEST_VECTOR, codebook};
+                use crate::turbo_quant::{MSECoder, MSEQueryDistance};
+
+                const DIM: usize = TEST_VECTOR.len();
+
+                fn coder() -> MSECoder<$B, $N> {
+                    MSECoder::<$B, $N>::new(DIM, MSE_SEED, $centroids)
+                }
+
+                fn query_distance(similarity: VectorSimilarity) -> MSEQueryDistance<$B, $N> {
+                    MSEQueryDistance::<$B, $N>::new(
+                        similarity,
+                        TEST_VECTOR.to_vec(),
+                        MSE_SEED,
+                        $centroids,
+                    )
+                }
+
+                #[test]
+                fn byte_len() {
+                    let c = coder();
+                    assert_eq!(c.byte_len(DIM), 4 + (DIM * $B).div_ceil(8));
+                }
+
+                #[test]
+                fn null_vector_roundtrip() {
+                    let v = vec![0.0f32; DIM];
+                    let c = coder();
+                    let mut decoded = vec![0.0f32; DIM];
+                    c.decode_to(&c.encode(&v), &mut decoded);
+                    assert_abs_diff_eq!(decoded.as_slice(), v.as_slice());
+                }
+
+                // The L2 norm of the input is stored verbatim in the first 4 bytes of the
+                // encoded buffer.
+                #[test]
+                fn stored_norm() {
+                    let c = coder();
+                    let encoded = c.encode(&TEST_VECTOR);
+                    let stored_norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+                    let orig_norm: f32 = TEST_VECTOR.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    assert_abs_diff_eq!(stored_norm, orig_norm, epsilon = 1e-5);
+                }
+
+                // Euclidean distance from a vector to itself should be near 0.
+                #[test]
+                fn euclidean_self_distance() {
+                    let encoded = coder().encode(&TEST_VECTOR);
+                    let dist =
+                        query_distance(VectorSimilarity::Euclidean).distance(&encoded) as f32;
+                    let norm_sq: f32 = TEST_VECTOR.iter().map(|x| x * x).sum();
+                    // Allow tolerance scaling with quantization error; even at 1-bit the
+                    // self-distance should be well under half the squared norm.
+                    assert!(
+                        dist < norm_sq * 0.5,
+                        "euclidean self-distance {dist} too large (norm_sq={norm_sq})"
+                    );
+                }
+
+                // Cosine distance from a normalized vector to itself should be near 0.
+                #[test]
+                fn cosine_self_distance() {
+                    let encoded = coder().encode(&TEST_VECTOR);
+                    let dist = query_distance(VectorSimilarity::Cosine).distance(&encoded);
+                    assert!(dist < 0.1, "cosine self-distance {dist} too large");
+                }
+
+                // Dot distance from a normalized vector to itself should be near 0.
+                #[test]
+                fn dot_self_distance() {
+                    let encoded = coder().encode(&TEST_VECTOR);
+                    let dist = query_distance(VectorSimilarity::Dot).distance(&encoded);
+                    assert!(dist < 0.1, "dot self-distance {dist} too large");
+                }
+
+                // A vector in the same direction as the query (scaled) should be closer than one
+                // pointing in the opposite direction, for all similarity functions.
+                #[test]
+                fn distance_ordering() {
+                    let near: Vec<f32> = TEST_VECTOR.iter().map(|&x| x * 1.1).collect();
+                    let far: Vec<f32> = TEST_VECTOR.iter().map(|&x| -x * 2.0).collect();
+                    let c = coder();
+                    let near_enc = c.encode(&near);
+                    let far_enc = c.encode(&far);
+
+                    for similarity in VectorSimilarity::all() {
+                        let qd = query_distance(similarity);
+                        let near_dist = qd.distance(&near_enc);
+                        let far_dist = qd.distance(&far_enc);
+                        assert!(
+                            near_dist < far_dist,
+                            "{similarity:?}: near_dist={near_dist} should be < far_dist={far_dist}"
+                        );
+                    }
+                }
+            }
+        };
+    }
+
+    mse_tests!(mse1, 1, 2, &codebook::CENTROIDS_1);
+    mse_tests!(mse2, 2, 4, &codebook::CENTROIDS_2);
+    mse_tests!(mse3, 3, 8, &codebook::CENTROIDS_3);
+    mse_tests!(mse4, 4, 16, &codebook::CENTROIDS_4);
+    mse_tests!(mse8, 8, 256, &codebook::CENTROIDS_8);
 }

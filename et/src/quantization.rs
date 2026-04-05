@@ -1,6 +1,7 @@
 mod distance_loss;
 mod loss;
 mod recall;
+mod rotate;
 
 use std::{fs::File, io, num::NonZero, path::PathBuf};
 
@@ -13,6 +14,7 @@ use memmap2::Mmap;
 use distance_loss::{distance_loss, DistanceLossArgs};
 use loss::{loss, LossArgs};
 use recall::{recall, RecallArgs};
+use rotate::{rotate, RotateArgs};
 
 #[derive(Args)]
 pub struct QuantizationArgs {
@@ -39,6 +41,8 @@ pub enum Command {
     DistanceLoss(DistanceLossArgs),
     /// Compute recall difference with quantization using exhaustive search.
     Recall(RecallArgs),
+    /// Apply an orthogonal rotation to each vector and write to an output file.
+    Rotate(RotateArgs),
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
@@ -60,6 +64,7 @@ fn cmd(cmd: Command, vectors: &(impl VectorStore<Elem = f32> + Send + Sync)) -> 
         Command::Loss(args) => loss(args, vectors),
         Command::DistanceLoss(args) => distance_loss(args, vectors),
         Command::Recall(args) => recall(args, vectors),
+        Command::Rotate(args) => rotate(args, vectors),
     }
 }
 

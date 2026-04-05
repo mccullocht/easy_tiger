@@ -1,14 +1,11 @@
 use std::{
     fs::File,
     io::{self, BufWriter, Write},
-    num::NonZero,
-    path::PathBuf,
     sync::mpsc,
     time::Duration,
 };
 
 use bytemuck::{Pod, Zeroable};
-use clap::Args;
 use easy_tiger::{
     Neighbor,
     input::{DerefVectorStore, VectorStore},
@@ -17,6 +14,8 @@ use memmap2::Mmap;
 use vectors::VectorSimilarity;
 
 use crate::{neighbor_util::TopNeighbors, ui::progress_bar};
+
+use super::ComputeNeighborsArgs;
 
 /// WGSL compute shader for pairwise distance computation.
 ///
@@ -104,40 +103,18 @@ struct GpuParams {
 const WG_Q: usize = 16;
 const WG_D: usize = 16;
 
-#[derive(Args)]
-pub struct ComputeNeighborsWgpuArgs {
-    /// Path to numpy formatted little-endian float vectors.
-    #[arg(long)]
-    query_vectors: PathBuf,
-    /// Maximum number of query vectors to process.
-    #[arg(long)]
-    query_limit: Option<usize>,
-    /// Path to numpy formatted little-endian float vectors.
-    #[arg(long)]
-    doc_vectors: PathBuf,
-    /// Maximum number of doc vectors to process.
-    #[arg(long)]
-    doc_limit: Option<usize>,
-
-    /// Number of dimensions for both query and doc vectors.
-    #[arg(short, long)]
-    dimensions: NonZero<usize>,
-    /// Similarity function to use.
-    #[arg(short, long)]
-    similarity: VectorSimilarity,
-
-    /// Path to neighbors file to write.
-    ///
-    /// The output file will contain one row for each vector in query_vectors. Within each row
-    /// there will be neighbors_len entries of Neighbor, an (i64, f64) tuple.
-    #[arg(short, long)]
-    neighbors: PathBuf,
-    /// Number of neighbors for each query in the neighbors file.
-    #[arg(long, default_value_t = NonZero::new(100).unwrap())]
-    neighbors_len: NonZero<usize>,
+/// Try to obtain a high-performance GPU adapter. Returns `None` if no suitable adapter is found.
+pub fn try_adapter() -> Option<wgpu::Adapter> {
+    let instance = wgpu::Instance::default();
+    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .ok()
 }
 
-pub fn compute_neighbors_wgpu(args: ComputeNeighborsWgpuArgs) -> io::Result<()> {
+pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()> {
     let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(&args.query_vectors)?)? },
         args.dimensions,
@@ -164,15 +141,6 @@ pub fn compute_neighbors_wgpu(args: ComputeNeighborsWgpuArgs) -> io::Result<()> 
         VectorSimilarity::Dot => 1,
         VectorSimilarity::Cosine => 2,
     };
-
-    // --- GPU setup ---
-    let instance = wgpu::Instance::default();
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     let info = adapter.get_info();
     tracing::info!("using GPU: {} ({:?})", info.name, info.backend);
@@ -385,7 +353,12 @@ pub fn compute_neighbors_wgpu(args: ComputeNeighborsWgpuArgs) -> io::Result<()> 
                 .map_async(wgpu::MapMode::Read, move |result| {
                     tx.send(result).unwrap();
                 });
-            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .unwrap();
             rx.recv()
                 .unwrap()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;

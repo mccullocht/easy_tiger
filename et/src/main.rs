@@ -46,7 +46,9 @@ fn main() -> io::Result<()> {
         .with_env_filter(
             EnvFilter::builder()
                 .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy(),
+                .from_env_lossy()
+                .add_directive("wgpu_core=warn".parse().unwrap())
+                .add_directive("wgpu_hal=warn".parse().unwrap()),
         )
         .init();
 

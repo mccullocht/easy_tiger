@@ -15,7 +15,11 @@ use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use vectors::F32VectorCoder;
-use wt_mdb::{Connection, Result, session::Formatted};
+use wt_mdb::{
+    Connection, Result,
+    session::{BeginTransactionOptions, CommitTransactionOptions, Formatted},
+    timestamp::{MontonicTimestampClock, TimestampClock},
+};
 
 use crate::ui::progress_bar;
 
@@ -87,9 +91,12 @@ pub fn insert_vectors(
     let batch_size = args.batch_size.get();
     let main_progress = progress_bar(args.count.get(), "inserting vectors");
 
+    let timestamp = MontonicTimestampClock::try_from(connection.as_ref())?;
     let mut rebalance_stats = RebalanceStats::default();
     let mut batches: usize = 0;
     let mut total_batch_unique_centroids: usize = 0;
+    // Advance timestamps every ~4k vectors to keep checkpoint sizes manageable.
+    let ts_interval = 4096 / batch_size * batch_size;
 
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
@@ -97,6 +104,7 @@ pub fn insert_vectors(
         total_batch_unique_centroids += insert_batch(
             &index,
             &connection,
+            &timestamp,
             &f32_vectors,
             batch_start..batch_end,
             posting_coder.as_ref(),
@@ -105,8 +113,19 @@ pub fn insert_vectors(
         )?;
         batches += 1;
 
-        rebalance_stats += rebalance(&index, &connection, &mut rng, &main_progress)?;
+        rebalance_stats += rebalance(&index, &connection, &timestamp, &mut rng, &main_progress)?;
+
+        // Periodically advance global timestamps to reduce checkpoint size and cache pressure.
+        if batch_end % ts_interval == 0 {
+            let ts = timestamp.current();
+            connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Stable, ts)?;
+            connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Oldest, ts)?;
+        }
     }
+
+    let ts = timestamp.current();
+    connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Stable, ts)?;
+    connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Oldest, ts)?;
 
     main_progress.set_message("inserting vectors");
     main_progress.finish();
@@ -160,6 +179,7 @@ pub fn insert_vectors(
 fn insert_batch(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
+    timestamp: &impl TimestampClock,
     f32_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     batch: Range<usize>,
     posting_coder: &dyn F32VectorCoder,
@@ -177,7 +197,9 @@ fn insert_batch(
                 let txn_idx = TransactionIndex::new(
                     index,
                     connection
-                        .begin_transaction(None)
+                        .begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(
+                            timestamp.current(),
+                        )))
                         .expect("begin transaction"),
                 );
                 let searcher = GraphSearcher::new(index.config().head_search_params);
@@ -208,7 +230,12 @@ fn insert_batch(
         .collect::<HashSet<_>>()
         .len();
 
-    let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+    let txn_idx = TransactionIndex::new(
+        index,
+        connection.begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(
+            timestamp.current(),
+        )))?,
+    );
     progress.set_message("writing postings");
     let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
     let mut posting_cursor = txn_idx
@@ -244,13 +271,16 @@ fn insert_batch(
     drop(assignment_updater);
     drop(posting_cursor);
     drop(rerank_cursor);
-    txn_idx.commit(None)?;
+    txn_idx.commit(Some(CommitTransactionOptions::with_commit_timestamp(
+        timestamp.next(),
+    )))?;
     Ok(unique_centroids)
 }
 
 fn rebalance(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
+    timestamp: &impl TimestampClock,
     rng: &mut impl Rng,
     progress: &ProgressBar,
 ) -> Result<RebalanceStats> {
@@ -258,7 +288,12 @@ fn rebalance(
     let mut rebalance_stats = RebalanceStats::default();
     loop {
         // Need a new transaction for rebalancing steps
-        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+        let txn_idx = TransactionIndex::new(
+            index,
+            connection.begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(
+                timestamp.current(),
+            )))?,
+        );
 
         let stats = CentroidStats::from_index_stats(&txn_idx)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
@@ -281,7 +316,9 @@ fn rebalance(
             _ => break,
         }
 
-        txn_idx.commit(None)?;
+        txn_idx.commit(Some(CommitTransactionOptions::with_commit_timestamp(
+            timestamp.next(),
+        )))?;
         iter += 1;
     }
 

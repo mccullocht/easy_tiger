@@ -289,6 +289,9 @@ impl ConfigurationString for RollbackTransactionOptions {
     }
 }
 
+const DEFAULT_CURSOR_OPTIONS: &CStr = c"raw";
+const DEFAULT_RO_CURSOR_OPTIONS: &CStr = c"raw,readonly";
+
 /// A WiredTiger session.
 ///
 /// `Session`s are used to create cursors to view and mutate data and manage transaction state.
@@ -301,6 +304,7 @@ pub(crate) struct Session {
     ptr: NonNull<WT_SESSION>,
     connection: Arc<Connection>,
     cached_cursors: RefCell<Vec<InnerCursor>>,
+    default_cursor_options: &'static CStr,
 }
 
 impl Session {
@@ -309,6 +313,15 @@ impl Session {
             ptr: session,
             connection: connection.clone(),
             cached_cursors: RefCell::new(vec![]),
+            default_cursor_options: DEFAULT_CURSOR_OPTIONS,
+        }
+    }
+
+    pub(crate) fn set_read_only(&mut self, read_only: bool) {
+        self.default_cursor_options = if read_only {
+            DEFAULT_RO_CURSOR_OPTIONS
+        } else {
+            DEFAULT_CURSOR_OPTIONS
         }
     }
 
@@ -381,11 +394,11 @@ impl Session {
         options: Option<&CStr>,
     ) -> Result<InnerCursor> {
         let options: Cow<'_, CStr> = if let Some(o) = options {
-            CString::new([o.to_bytes(), b",raw"].concat())
+            CString::new([self.default_cursor_options.to_bytes(), b",", o.to_bytes()].concat())
                 .expect("no nulls")
                 .into()
         } else {
-            c"raw".into()
+            self.default_cursor_options.into()
         };
         let mut cursorp: *mut WT_CURSOR = std::ptr::null_mut();
         unsafe {

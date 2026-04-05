@@ -6,6 +6,7 @@ mod binary;
 mod float16;
 mod float32;
 mod lvq;
+pub mod rotate;
 pub mod soar;
 mod turbo_quant;
 

@@ -1,4 +1,5 @@
 mod compute_neighbors;
+mod compute_neighbors_wgpu;
 mod neighbor_util;
 mod quantization;
 mod recall;
@@ -12,6 +13,7 @@ use std::io::{self};
 
 use clap::{command, Parser, Subcommand};
 use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
+use compute_neighbors_wgpu::{compute_neighbors_wgpu, ComputeNeighborsWgpuArgs};
 use quantization::{quantization, QuantizationArgs};
 use spann::{spann_command, SpannArgs};
 use tracing::level_filters::LevelFilter;
@@ -33,6 +35,8 @@ enum Commands {
     Vamana(VamanaArgs),
     /// Compute the top k neighbors for a set of queries against a set of document vectors.
     ComputeNeighbors(ComputeNeighborsArgs),
+    /// Compute the top k neighbors using GPU-accelerated distance computation via wgpu.
+    ComputeNeighborsWgpu(ComputeNeighborsWgpuArgs),
     /// Quantization related utilities.
     Quantization(QuantizationArgs),
 }
@@ -51,6 +55,7 @@ fn main() -> io::Result<()> {
         Commands::Spann(args) => spann_command(args),
         Commands::Vamana(args) => vamana_command(args),
         Commands::ComputeNeighbors(args) => compute_neighbors(args),
+        Commands::ComputeNeighborsWgpu(args) => compute_neighbors_wgpu(args),
         Commands::Quantization(args) => quantization(args),
     }
 }

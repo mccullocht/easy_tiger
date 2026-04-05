@@ -172,7 +172,7 @@ pub fn compute_neighbors_wgpu(args: ComputeNeighborsWgpuArgs) -> io::Result<()> 
         compatible_surface: None,
         force_fallback_adapter: false,
     }))
-    .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no suitable GPU adapter found"))?;
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     let info = adapter.get_info();
     tracing::info!("using GPU: {} ({:?})", info.name, info.backend);
@@ -190,8 +190,9 @@ pub fn compute_neighbors_wgpu(args: ComputeNeighborsWgpuArgs) -> io::Result<()> 
                 ..wgpu::Limits::default()
             },
             memory_hints: wgpu::MemoryHints::Performance,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            trace: wgpu::Trace::Off,
         },
-        None,
     ))
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
@@ -245,12 +246,12 @@ pub fn compute_neighbors_wgpu(args: ComputeNeighborsWgpuArgs) -> io::Result<()> 
         layout: Some(
             &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("distance_pl"),
-                bind_group_layouts: &[&bgl],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&bgl)],
+                immediate_size: 0,
             }),
         ),
         module: &shader,
-        entry_point: "main",
+        entry_point: Some("main"),
         compilation_options: Default::default(),
         cache: None,
     });
@@ -384,7 +385,7 @@ pub fn compute_neighbors_wgpu(args: ComputeNeighborsWgpuArgs) -> io::Result<()> 
                 .map_async(wgpu::MapMode::Read, move |result| {
                     tx.send(result).unwrap();
                 });
-            device.poll(wgpu::Maintain::Wait);
+            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
             rx.recv()
                 .unwrap()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;

@@ -7,13 +7,12 @@
 
 pub mod codebook;
 mod packing;
-mod rotate;
 
-use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
+use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity, rotate::Rotator};
 
 pub struct MSECoder<const B: usize, const N: usize> {
     dim: usize,
-    rotator: rotate::Rotator,
+    rotator: Rotator,
     codebook: [f32; N],
 }
 
@@ -21,7 +20,7 @@ impl<const B: usize, const N: usize> MSECoder<B, N> {
     pub fn new(dim: usize, seed: u64, codebook: &[f32; N]) -> Self {
         Self {
             dim,
-            rotator: rotate::Rotator::new(dim, seed),
+            rotator: Rotator::new(dim, seed),
             codebook: codebook::scale(codebook, dim),
         }
     }
@@ -126,7 +125,7 @@ impl<const B: usize, const N: usize> MSEQueryDistance<B, N> {
             *d = *d * inv_norm
         }
 
-        let rotator = rotate::Rotator::new(query.len(), seed);
+        let rotator = Rotator::new(query.len(), seed);
         let rquery = rotator.forward(&query);
         let euclidean_scale = 2.0 / inner_product_bias(codebook);
         let codebook = codebook::scale(codebook, rquery.len());

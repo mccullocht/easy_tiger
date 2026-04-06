@@ -221,7 +221,7 @@ impl Searcher {
                 .index
                 .config()
                 .posting_coder
-                .query_vector_distance_f32(query, reader.index().head_config().config().similarity),
+                .query_distance_asymmetric(reader.index().head_config().config().similarity, query, None),
         );
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
@@ -274,7 +274,7 @@ impl Searcher {
             .config()
             .rerank_format
             .expect("rerank format is set");
-        let query = format.query_vector_distance_f32(query, reader.head_reader.config().similarity);
+        let query = format.query_distance_asymmetric(reader.head_reader.config().similarity, query, None);
         let mut raw_cursor = reader
             .session()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;

@@ -126,13 +126,14 @@ pub fn recall(
         .map(|i| match centers.as_ref() {
             None => {
                 let qdist = if args.quantize_query {
-                    args.format.query_vector_distance_indexing(
-                        coder.encode(&query_vectors[i]),
+                    args.format.query_distance_symmetric(
                         args.similarity,
+                        coder.encode(&query_vectors[i]),
+                        None,
                     )
                 } else {
                     args.format
-                        .query_vector_distance_f32(query_vectors[i].to_vec(), args.similarity)
+                        .query_distance_asymmetric(args.similarity, query_vectors[i].to_vec(), None)
                 };
                 vec![qdist]
             }
@@ -145,13 +146,14 @@ pub fn recall(
                         .map(|(q, c)| q - c)
                         .collect::<Vec<_>>();
                     if args.quantize_query {
-                        args.format.query_vector_distance_indexing(
-                            coder.encode(&centered),
+                        args.format.query_distance_symmetric(
                             args.similarity,
+                            coder.encode(&centered),
+                            None,
                         )
                     } else {
                         args.format
-                            .query_vector_distance_f32(centered, args.similarity)
+                            .query_distance_asymmetric(args.similarity, centered, None)
                     }
                 })
                 .collect::<Vec<_>>(),

@@ -85,7 +85,7 @@ pub fn float16_benchmarks(c: &mut Criterion) {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
         });
 
-        let query_dist = F32VectorCoding::F16.query_vector_distance_f32(&a, sim);
+        let query_dist = F32VectorCoding::F16.query_distance_asymmetric(sim, &a, None);
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| std::hint::black_box(query_dist.distance(&y)))
         });
@@ -120,7 +120,7 @@ pub fn float16_benchmarks(c: &mut Criterion) {
             })
         });
 
-        let query_dist = F32VectorCoding::F16.query_vector_distance_f32(&a, sim);
+        let query_dist = F32VectorCoding::F16.query_distance_asymmetric(sim, &a, None);
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| {
                 std::hint::black_box({
@@ -165,7 +165,7 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
         });
 
-        let query_dist = encoding.query_vector_distance_f32(&a, sim);
+        let query_dist = encoding.query_distance_asymmetric(sim, &a, None);
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| std::hint::black_box(query_dist.distance(&y)))
         });

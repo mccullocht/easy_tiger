@@ -248,16 +248,6 @@ impl F32VectorCoding {
         }
     }
 
-    /// Create a new [QueryVectorDistance] given a query, similarity function, and vector coding.
-    #[deprecated = "use query_distance_asymmetric() instead"]
-    pub fn query_vector_distance_f32<'a>(
-        &self,
-        query: impl Into<Cow<'a, [f32]>>,
-        similarity: VectorSimilarity,
-    ) -> Box<dyn QueryVectorDistance + 'a> {
-        self.query_distance_asymmetric(query, None, similarity)
-    }
-
     /// Create a new [`QueryVectorDistance`] that computes distance between a fixed float query and
     /// an arbitrary vector using this vector coding.
     ///
@@ -265,9 +255,9 @@ impl F32VectorCoding {
     /// all input vectors _also_ use the same center value.
     pub fn query_distance_asymmetric<'a>(
         &self,
+        similarity: VectorSimilarity,
         query: impl Into<Cow<'a, [f32]>>,
         center: Option<&[f32]>,
-        similarity: VectorSimilarity,
     ) -> Box<dyn QueryVectorDistance + 'a> {
         match (*self, similarity) {
             (F32VectorCoding::F32, _) => {
@@ -328,16 +318,6 @@ impl F32VectorCoding {
         }
     }
 
-    /// Create a new [QueryVectorDistance] for indexing that _requires_ symmetrical distance computation.
-    #[deprecated = "use query_distance_symmetric() instead"]
-    pub fn query_vector_distance_indexing<'a>(
-        &self,
-        query: impl Into<Cow<'a, [u8]>>,
-        similarity: VectorSimilarity,
-    ) -> Box<dyn QueryVectorDistance + 'a> {
-        self.query_distance_symmetric(query, None, similarity)
-    }
-
     /// Create a new [`QueryVectorDistance`] that computes distance between a fixed query encoded
     /// in this format and other vectors that are also in this format.
     ///
@@ -345,9 +325,9 @@ impl F32VectorCoding {
     /// all input vectors _also_ use the same center value.
     pub fn query_distance_symmetric<'a>(
         &self,
+        similarity: VectorSimilarity,
         query: impl Into<Cow<'a, [u8]>>,
         center: Option<&[f32]>,
-        similarity: VectorSimilarity,
     ) -> Box<dyn QueryVectorDistance + 'a> {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
         macro_rules! quantized_qvd {
@@ -638,7 +618,7 @@ mod test {
         let f32_dist_fn = similarity.new_distance_function();
         let f32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
 
-        let query_dist_fn = format.query_distance_asymmetric(&a.rvec, None, similarity);
+        let query_dist_fn = format.query_distance_asymmetric(similarity, &a.rvec, None);
         let query_dist = query_dist_fn.distance(&b.qvec);
 
         assert_float_near!(f32_dist, query_dist, threshold, index);

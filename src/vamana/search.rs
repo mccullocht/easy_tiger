@@ -167,7 +167,7 @@ impl GraphSearcher {
         let nav_query = reader
             .config()
             .nav_format
-            .query_vector_distance_indexing(&nav_query_rep, reader.config().similarity);
+            .query_distance_symmetric(reader.config().similarity, &nav_query_rep, None);
 
         let rerank_query = if self.params.num_rerank > 0 {
             if let Some(vectors) = reader.rerank_vectors() {
@@ -179,7 +179,7 @@ impl GraphSearcher {
                 Some(
                     vectors
                         .format()
-                        .query_vector_distance_indexing(query, vectors.similarity()),
+                        .query_distance_symmetric(vectors.similarity(), query, None),
                 )
             } else {
                 None
@@ -205,12 +205,12 @@ impl GraphSearcher {
         let nav_query = reader
             .config()
             .nav_format
-            .query_vector_distance_f32(query, reader.config().similarity);
+            .query_distance_asymmetric(reader.config().similarity, query, None);
         let rerank_query = if self.params.num_rerank > 0 {
             reader
                 .config()
                 .rerank_format
-                .map(|f| f.query_vector_distance_f32(query, reader.config().similarity))
+                .map(|f| f.query_distance_asymmetric(reader.config().similarity, query, None))
         } else {
             None
         };

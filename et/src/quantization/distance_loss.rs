@@ -68,13 +68,13 @@ pub fn distance_loss(
             }
             let qdist = if args.quantize_query {
                 args.format
-                    .query_vector_distance_indexing(coder.encode(&query), args.similarity)
+                    .query_distance_symmetric(args.similarity, coder.encode(&query), None)
             } else {
                 args.format
-                    .query_vector_distance_f32(query.to_vec(), args.similarity)
+                    .query_distance_asymmetric(args.similarity, query.to_vec(), None)
             };
             let f32_dist =
-                F32VectorCoding::F32.query_vector_distance_f32(query.into_owned(), args.similarity);
+                F32VectorCoding::F32.query_distance_asymmetric(args.similarity, query.into_owned(), None);
             (f32_dist, qdist)
         })
         .collect::<Vec<_>>();

@@ -312,11 +312,11 @@ pub fn split_centroid(
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
     // TODO: skip decoding if head index and posting index format are the same.
     let c0_dist_fn = posting_format
-        .query_vector_distance_indexing(posting_coder.encode(&original_centroid), similarity);
+        .query_distance_symmetric(similarity, posting_coder.encode(&original_centroid), None);
     let c1_dist_fn = posting_format
-        .query_vector_distance_indexing(posting_coder.encode(&centroids[0]), similarity);
+        .query_distance_symmetric(similarity, posting_coder.encode(&centroids[0]), None);
     let c2_dist_fn = posting_format
-        .query_vector_distance_indexing(posting_coder.encode(&centroids[1]), similarity);
+        .query_distance_symmetric(similarity, posting_coder.encode(&centroids[1]), None);
     let mut searches = 0;
     let moved_vectors = vectors.len();
     let connection = Arc::clone(head_index.session().connection());
@@ -425,9 +425,10 @@ pub fn split_centroid(
                         .get(nearby_centroid_id as i64)
                         .unwrap_or(Err(Error::not_found_error()))?,
                 );
-                let c0_dist_fn = posting_format.query_vector_distance_indexing(
-                    posting_coder.encode(&nearby_centroid),
+                let c0_dist_fn = posting_format.query_distance_symmetric(
                     similarity,
+                    posting_coder.encode(&nearby_centroid),
+                    None,
                 );
                 let mut posting_cursor = head_index
                     .session()

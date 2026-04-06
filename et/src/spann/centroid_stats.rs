@@ -1,13 +1,13 @@
 use std::{io, sync::Arc};
 
-use easy_tiger::spann::{centroid_stats::CentroidStats, TableIndex};
+use easy_tiger::spann::{TableIndex, TransactionIndex, centroid_stats::CentroidStats};
 use histogram::Histogram;
 use wt_mdb::Connection;
 
 pub fn centroid_stats(connection: Arc<Connection>, index_name: &str) -> io::Result<()> {
-    let index = TableIndex::from_db(&connection, index_name)?;
-    let session = connection.open_session()?;
-    let stats = CentroidStats::from_index_stats(&session, &index)?;
+    let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
+    let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
+    let stats = CentroidStats::from_index_stats(&txn_idx)?;
 
     println!("Head contains {} centroids", stats.centroid_count());
     println!("{} tail posting entries", stats.vector_count());

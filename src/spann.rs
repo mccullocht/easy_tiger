@@ -19,15 +19,16 @@ use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding};
 use wt_mdb::{
-    session::{CreateOptionsBuilder, DropOptions, FormatString, Formatted},
-    Connection, Error, Result, Session,
+    connection::{CreateOptionsBuilder, DropOptions},
+    session::{CommitTransactionOptions, FormatString, Formatted, RollbackTransactionOptions},
+    Connection, Error, Result, Transaction,
 };
 
 use crate::{
     spann::centroid_stats::CentroidCounts,
     vamana::{
         prune_edges,
-        wt::{read_app_metadata, SessionGraphVectorIndex, TableGraphVectorIndex},
+        wt::{read_app_metadata, TableGraphVectorIndex, TransactionGraphVectorIndex},
         EdgePruningConfig, EdgeSetDistanceComputer, GraphConfig, GraphSearchParams,
         GraphVectorIndex, GraphVectorStore,
     },
@@ -173,10 +174,9 @@ impl TableIndex {
         )?);
 
         let table_names = TableNames::from_index_name(index_name);
-        let session = connection.open_session()?;
+        let txn = connection.begin_transaction(None)?;
         let config: IndexConfig = serde_json::from_str(
-            &read_app_metadata(&session, &table_names.postings)
-                .ok_or(Error::not_found_error())??,
+            &read_app_metadata(&txn, &table_names.postings).ok_or(Error::not_found_error())??,
         )?;
         Ok(Self {
             head,
@@ -212,9 +212,8 @@ impl TableIndex {
             &Self::head_name(index_name),
         )?);
         let table_names = TableNames::from_index_name(index_name);
-        let session = connection.open_session()?;
         for table_name in table_names.record_table_names() {
-            session.create_table(
+            connection.create_table(
                 table_name,
                 Some(
                     CreateOptionsBuilder::default()
@@ -224,7 +223,7 @@ impl TableIndex {
                 ),
             )?;
         }
-        session.create_table(
+        connection.create_table(
             &table_names.centroid_stats,
             Some(
                 CreateOptionsBuilder::default()
@@ -233,7 +232,7 @@ impl TableIndex {
                     .into(),
             ),
         )?;
-        session.create_table(
+        connection.create_table(
             &table_names.postings,
             Some(
                 CreateOptionsBuilder::default()
@@ -251,13 +250,13 @@ impl TableIndex {
     }
 
     pub fn drop_tables(
-        session: &Session,
+        connection: &Arc<Connection>,
         index_name: &str,
         options: &Option<DropOptions>,
     ) -> Result<()> {
-        TableGraphVectorIndex::drop_tables(session, &Self::head_name(index_name), options)?;
+        TableGraphVectorIndex::drop_tables(connection, &Self::head_name(index_name), options)?;
         for table_name in TableNames::from_index_name(index_name).all_names() {
-            session.drop_table(table_name, options.clone())?;
+            connection.drop_table(table_name, options.clone())?;
         }
         Ok(())
     }
@@ -570,29 +569,39 @@ fn select_centroids_soar(
     ))
 }
 
-pub struct SessionIndexReader {
+pub struct TransactionIndex {
     index: Arc<TableIndex>,
-    head_reader: SessionGraphVectorIndex,
+    head: TransactionGraphVectorIndex,
 }
 
-impl SessionIndexReader {
-    pub fn new(index: &Arc<TableIndex>, session: Session) -> Self {
-        let head_reader = SessionGraphVectorIndex::new(index.head_config().clone(), session);
+impl TransactionIndex {
+    pub fn new(index: &Arc<TableIndex>, transaction: Transaction) -> Self {
+        let head = TransactionGraphVectorIndex::new(Arc::clone(index.head_config()), transaction);
         Self {
             index: index.clone(),
-            head_reader,
+            head,
         }
     }
 
-    pub fn session(&self) -> &Session {
-        self.head_reader.session()
+    pub fn transaction(&self) -> &Transaction {
+        self.head.transaction()
     }
 
-    pub fn index(&self) -> &TableIndex {
-        self.index.as_ref()
+    pub fn head(&self) -> &TransactionGraphVectorIndex {
+        &self.head
     }
 
-    pub fn head_reader(&self) -> &SessionGraphVectorIndex {
-        &self.head_reader
+    pub fn index(&self) -> &Arc<TableIndex> {
+        &self.index
+    }
+
+    /// Commit the underlying [`Transaction`] with the provided options.
+    pub fn commit(self, options: Option<CommitTransactionOptions>) -> Result<()> {
+        self.head.commit(options)
+    }
+
+    /// Rollback the underlying [`Transaction`] with the provided options.
+    pub fn rollback(self, options: Option<RollbackTransactionOptions>) -> Result<()> {
+        self.head.rollback(options)
     }
 }

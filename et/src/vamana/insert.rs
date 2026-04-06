@@ -5,7 +5,7 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
         mutate::insert_vector,
-        wt::{SessionGraphVectorIndex, TableGraphVectorIndex},
+        wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
     },
 };
 use indicatif::ProgressIterator;
@@ -29,15 +29,19 @@ pub struct InsertArgs {
 }
 
 fn insert_all<'a>(
-    wt_index: &SessionGraphVectorIndex,
+    connection: &Arc<Connection>,
+    index: &Arc<TableGraphVectorIndex>,
     vectors: impl ExactSizeIterator<Item = &'a [f32]>,
 ) -> Result<Vec<Range<i64>>> {
     let mut keys: Vec<Range<i64>> = vec![];
     // I could probably write this as a fold but it seems annoying.
     let progress = progress_bar(vectors.len(), "");
     for vector in vectors.progress_with(progress) {
-        wt_index.session().begin_transaction(None)?;
-        let key = insert_vector(vector, wt_index)?;
+        let txn = TransactionGraphVectorIndex::new(
+            Arc::clone(index),
+            connection.begin_transaction(None)?,
+        );
+        let key = insert_vector(vector, &txn)?;
         if let Some(r) = keys.last_mut() {
             if r.end == key {
                 r.end = key + 1;
@@ -47,7 +51,7 @@ fn insert_all<'a>(
         } else {
             keys.push(key..(key + 1))
         }
-        wt_index.session().commit_transaction(None)?;
+        txn.commit(None)?;
     }
     Ok(keys)
 }
@@ -59,9 +63,9 @@ pub fn insert(connection: Arc<Connection>, index_name: &str, args: InsertArgs) -
         index.config().dimensions,
     )?;
 
-    let wt_index = SessionGraphVectorIndex::new(index, connection.open_session()?);
     match insert_all(
-        &wt_index,
+        &connection,
+        &index,
         vectors
             .iter()
             .skip(args.offset)

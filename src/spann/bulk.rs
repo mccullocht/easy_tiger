@@ -1,4 +1,4 @@
-use std::{cell::RefCell, ops::DerefMut, sync::Arc};
+use std::{cell::RefCell, sync::Arc};
 
 use crate::{
     input::VectorStore,
@@ -6,17 +6,14 @@ use crate::{
         centroid_stats::CentroidCounts, select_centroids, CentroidAssignment,
         CentroidAssignmentType, PostingKey, TableIndex,
     },
-    vamana::{search::GraphSearcher, wt::SessionGraphVectorIndex},
+    vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{
-    session::{CreateOptionsBuilder, Formatted},
-    Connection, Result, Session,
-};
+use wt_mdb::{connection::CreateOptionsBuilder, session::Formatted, Connection, Result};
 
 /// Assign all the vectors to one or more centroids in the head index. This performs the same search
-/// and pruning as [`super::SessionIndexWriter`] does.
+/// and pruning as [`super::TransactionIndex`] does.
 pub fn assign_to_centroids(
     index: &TableIndex,
     connection: &Arc<Connection>,
@@ -24,29 +21,24 @@ pub fn assign_to_centroids(
     limit: usize,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<Vec<CentroidAssignment>> {
-    let tl_head_reader = ThreadLocal::new();
     let tl_searcher = ThreadLocal::new();
     (0..limit)
         .into_par_iter()
         .map(|i| {
-            let mut head_reader = tl_head_reader
-                .get_or_try(|| {
-                    Ok::<_, wt_mdb::Error>(RefCell::new(SessionGraphVectorIndex::new(
-                        Arc::clone(&index.head),
-                        connection.open_session()?,
-                    )))
-                })?
-                .borrow_mut();
+            let head_reader = TransactionGraphVectorIndex::new(
+                Arc::clone(index.head_config()),
+                connection.begin_transaction(None)?,
+            );
             let mut searcher = tl_searcher
                 .get_or(|| RefCell::new(GraphSearcher::new(index.config().head_search_params)))
                 .borrow_mut();
-            let candidates = searcher.search(&vectors[i], head_reader.deref_mut())?;
+            let candidates = searcher.search(&vectors[i], &head_reader)?;
             let selected = select_centroids(
                 index.config().replica_selection,
                 index.config().replica_count,
                 candidates,
                 &vectors[i],
-                head_reader.deref_mut(),
+                &head_reader,
             );
             progress(1);
             selected
@@ -57,14 +49,14 @@ pub fn assign_to_centroids(
 /// Load all centroid assignments into a record id keyed table.
 pub fn load_centroids(
     index: &TableIndex,
-    session: &Session,
+    connection: &Arc<Connection>,
     centroid_assignments: &[CentroidAssignment],
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
-    let mut bulk_cursor = session
+    let mut bulk_cursor = connection
         .new_bulk_load_cursor::<i64, CentroidAssignment>(&index.table_names.centroids, None)?;
     for (record_id, centroids) in centroid_assignments.iter().enumerate() {
-        bulk_cursor.insert(record_id as i64, centroids.to_formatted_ref())?;
+        bulk_cursor.append(record_id as i64, centroids.to_formatted_ref())?;
         progress(1);
     }
     Ok(())
@@ -76,7 +68,7 @@ pub fn load_centroids(
 /// assigned vectors for efficient statistics queries.
 pub fn load_centroid_stats(
     index: &TableIndex,
-    session: &Session,
+    connection: &Arc<Connection>,
     centroid_assignments: &[CentroidAssignment],
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
@@ -101,11 +93,11 @@ pub fn load_centroid_stats(
     let mut stats = stats.into_iter().collect::<Vec<_>>();
     stats.sort_by_key(|(id, _)| *id);
     // Bulk load the stats
-    let mut bulk_cursor = session
+    let mut bulk_cursor = connection
         .new_bulk_load_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats, None)?;
 
     for (centroid_id, counts) in stats {
-        bulk_cursor.insert(centroid_id, counts)?;
+        bulk_cursor.append(centroid_id, counts)?;
         progress(1);
     }
 
@@ -120,7 +112,7 @@ pub fn load_centroid_stats(
 /// pages. Bulk uploading also avoids checkpointing.
 pub fn load_postings(
     index: &TableIndex,
-    session: &Session,
+    connection: &Arc<Connection>,
     centroid_assignments: &[CentroidAssignment],
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     progress: impl Fn(u64) + Send + Sync,
@@ -141,7 +133,7 @@ pub fn load_postings(
         .config()
         .posting_coder
         .coder(index.head_config().config().similarity, None);
-    let mut bulk_cursor = session.new_bulk_load_cursor::<PostingKey, Vec<u8>>(
+    let mut bulk_cursor = connection.new_bulk_load_cursor::<PostingKey, Vec<u8>>(
         &index.table_names.postings,
         Some(
             CreateOptionsBuilder::default()
@@ -160,7 +152,7 @@ pub fn load_postings(
                 coder.encode_to(&vectors[pk.record_id as usize], buf);
             });
         for (pk, buf) in batch.iter().zip(encoded_buffer.iter()) {
-            bulk_cursor.insert(*pk, buf)?;
+            bulk_cursor.append(*pk, buf)?;
         }
         progress(batch.len() as u64);
     }
@@ -170,13 +162,13 @@ pub fn load_postings(
 /// Bulk load raw vector data into the raw vectors table for re-ranking.
 pub fn load_raw_vectors(
     index: &TableIndex,
-    session: &Session,
+    connection: &Arc<Connection>,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     limit: usize,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     let mut bulk_cursor =
-        session.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
+        connection.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
     let coder = index
         .config()
         .rerank_format
@@ -185,7 +177,7 @@ pub fn load_raw_vectors(
     let mut encoded = vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())];
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {
         coder.encode_to(vector, &mut encoded);
-        bulk_cursor.insert(record_id as i64, &encoded)?;
+        bulk_cursor.append(record_id as i64, &encoded)?;
         progress(1);
     }
     Ok(())

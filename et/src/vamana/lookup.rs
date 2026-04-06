@@ -2,8 +2,8 @@ use std::{io, sync::Arc};
 
 use clap::Args;
 use easy_tiger::vamana::{
-    wt::{CursorGraph, CursorVectorStore, TableGraphVectorIndex},
     Graph, GraphVectorStore,
+    wt::{CursorGraph, CursorVectorStore, TableGraphVectorIndex},
 };
 use wt_mdb::Connection;
 
@@ -28,10 +28,10 @@ pub struct LookupArgs {
 
 pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -> io::Result<()> {
     let index = TableGraphVectorIndex::from_db(&connection, index_name)?;
-    let session = connection.open_session()?;
+    let txn = connection.begin_transaction(None)?;
 
     if args.edges {
-        let mut graph = CursorGraph::new(session.get_record_cursor(index.graph_table_name())?);
+        let mut graph = CursorGraph::new(txn.open_record_cursor(index.graph_table_name())?);
         match graph.edges(args.id) {
             None => {
                 println!("Vertex not found!");
@@ -47,7 +47,7 @@ pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -
 
     if args.vector {
         let mut vectors = CursorVectorStore::new(
-            session.get_record_cursor(index.nav_table().name())?,
+            txn.open_record_cursor(index.nav_table().name())?,
             index.config().similarity,
             index.nav_table().format(),
         );

@@ -12,7 +12,7 @@ use core::f64;
 use std::{
     cell::RefCell,
     num::NonZero,
-    ops::{Deref, Range},
+    ops::Range,
     sync::{
         atomic::{self, AtomicI64},
         Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
@@ -26,7 +26,7 @@ use rustix::io::Errno;
 use thread_local::ThreadLocal;
 use tracing::warn;
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{session::CreateOptionsBuilder, Connection, Error, Result, Session};
+use wt_mdb::{connection::CreateOptionsBuilder, Connection, Error, Result, Transaction};
 
 use crate::{
     input::{DerefVectorStore, VectorStore},
@@ -175,7 +175,6 @@ where
 
     /// Load nav and rerank vectors into tables.
     fn load_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
-        let session = self.connection.open_session()?;
         let dim = self.index.config().dimensions.get();
         let nav_coder = self.index.nav_table().new_coder();
         let mut nav_vector = vec![0u8; nav_coder.byte_len(dim)];
@@ -185,14 +184,16 @@ where
         } else {
             None
         };
-        let mut nav_cursor =
-            session.new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table().name(), None)?;
+        let mut nav_cursor = self
+            .connection
+            .new_bulk_load_cursor::<i64, Vec<u8>>(self.index.nav_table().name(), None)?;
 
         let mut rerank = if let Some(rerank_table) = self.index.rerank_table() {
             let rerank_coder = rerank_table.new_coder();
             let rerank_vector = vec![0u8; rerank_coder.byte_len(dim)];
-            let rerank_cursor =
-                session.new_bulk_load_cursor::<i64, Vec<u8>>(rerank_table.name(), None)?;
+            let rerank_cursor = self
+                .connection
+                .new_bulk_load_cursor::<i64, Vec<u8>>(rerank_table.name(), None)?;
             Some((rerank_coder, rerank_vector, rerank_cursor))
         } else {
             None
@@ -207,11 +208,11 @@ where
                 let start = i * nav_vector.len();
                 q[start..(start + nav_vector.len())].copy_from_slice(&nav_vector);
             }
-            nav_cursor.insert(i as i64, &nav_vector)?;
+            nav_cursor.append(i as i64, &nav_vector)?;
 
             if let Some((coder, vector, cursor)) = rerank.as_mut() {
                 coder.encode_to(v, vector);
-                cursor.insert(i as i64, vector)?;
+                cursor.append(i as i64, vector)?;
             }
             progress(1);
         }
@@ -242,8 +243,8 @@ where
         // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
         let distance_fn = self.index.high_fidelity_table().new_distance_function();
         let apply_mu = {
-            let session = self.connection.open_session()?;
-            let reader = BulkLoadGraphVectorIndexReader(self, &session);
+            let txn = self.connection.begin_transaction(None)?;
+            let reader = BulkLoadGraphVectorIndexReader(self, &txn);
             let mut vectors = reader.high_fidelity_vectors()?;
             Mutex::new((
                 0i64,
@@ -252,10 +253,7 @@ where
         };
         self.entry_vertex.store(0, atomic::Ordering::SeqCst);
 
-        // Use thread locals to avoid recreating Session and GraphSearcher per vector. Rayon
-        // doesn't provide a good way to initialize something falliable once per thread, and the
-        // alternative is chunking which limits work-stealing.
-        let tl_session = ThreadLocalSession::new(self.connection.clone());
+        // Use thread locals to avoid recreating GraphSearcher per vector.
         let tl_searcher = ThreadLocal::new();
 
         // Keep track of all in-flight concurrent insertions. These nodes will be processed at the
@@ -266,17 +264,13 @@ where
             .into_par_iter()
             .filter(|&i| i != 0)
             .try_for_each(|v| {
-                let session = tl_session.get()?;
+                let txn = self.connection.begin_transaction(None)?;
                 let mut searcher = tl_searcher
                     .get_or(|| {
                         RefCell::new(GraphSearcher::new(self.index.config().index_search_params))
                     })
                     .borrow_mut();
-                // Use a transaction for each search. Without this each lookup will be a separate transaction
-                // which obtains a reader lock inside the session. Overhead for that is ~10x.
-                // TODO: add session.do_in_transaction() or similar to avoid getting session into a bad state.
-                session.begin_transaction(None)?;
-                let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
+                let mut reader = BulkLoadGraphVectorIndexReader(self, &txn);
                 in_flight.insert(v);
                 let mut edges = self.search_for_insert(v, &mut searcher, &mut reader)?;
                 let centroid_distance = {
@@ -341,8 +335,6 @@ where
                     }
                 }
 
-                // Close out the transaction. There should be no conflicts as we did not write to the database.
-                session.rollback_transaction(None)?;
                 in_flight.remove(&v);
                 progress(1);
 
@@ -358,14 +350,10 @@ where
         // this is necessary to ensure the graph remains undirected.
         let apply_mu = Mutex::new(());
 
-        let tl_session = ThreadLocalSession::new(self.connection.clone());
-
         (0..self.limit).into_par_iter().try_for_each(|v| {
-            let session = tl_session.get()?;
-            session.begin_transaction(None)?;
-            let mut reader = BulkLoadGraphVectorIndexReader(self, &session);
+            let txn = self.connection.begin_transaction(None)?;
+            let mut reader = BulkLoadGraphVectorIndexReader(self, &txn);
             self.prune_and_apply(v, &mut reader, &apply_mu)?;
-            session.rollback_transaction(None)?;
             progress(1);
             Ok::<_, wt_mdb::Error>(())
         })
@@ -380,15 +368,14 @@ where
             edges: 0,
             unconnected: 0,
         };
-        let session = self.connection.open_session()?;
-        let mut cursor = session.new_bulk_load_cursor::<i64, Vec<u8>>(
+        let mut cursor = self.connection.new_bulk_load_cursor::<i64, Vec<u8>>(
             self.index.graph_table_name(),
             Some(
                 CreateOptionsBuilder::default()
                     .app_metadata(&serde_json::to_string(&self.index.config()).unwrap()),
             ),
         )?;
-        cursor.insert(
+        cursor.append(
             ENTRY_POINT_KEY,
             &self
                 .entry_vertex
@@ -411,7 +398,7 @@ where
                 stats.unconnected += 1;
             }
             let edges = encode_graph_vertex(edges);
-            cursor.insert(i as i64, &edges)?;
+            cursor.append(i as i64, &edges)?;
             progress(1);
         }
         Ok(stats)
@@ -580,44 +567,7 @@ where
     }
 }
 
-// TODO: move this, it could be useful elsewhere.
-struct ThreadLocalSession {
-    connection: Arc<Connection>,
-    tl_session: ThreadLocal<Session>,
-}
-
-impl ThreadLocalSession {
-    fn new(connection: Arc<Connection>) -> Self {
-        ThreadLocalSession {
-            connection,
-            tl_session: ThreadLocal::new(),
-        }
-    }
-
-    fn get(&self) -> Result<SessionGuard<'_>> {
-        self.tl_session
-            .get_or_try(|| self.connection.open_session())
-            .map(SessionGuard)
-    }
-}
-
-struct SessionGuard<'a>(&'a Session);
-
-impl Deref for SessionGuard<'_> {
-    type Target = Session;
-
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-impl Drop for SessionGuard<'_> {
-    fn drop(&mut self) {
-        let _ = self.0.reset();
-    }
-}
-
-struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Session);
+struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Transaction);
 
 impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
     for BulkLoadGraphVectorIndexReader<'_, '_, D>
@@ -648,7 +598,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
             ))
         } else {
             Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
-                self.1.get_record_cursor(self.0.index.nav_table().name())?,
+                self.1.open_record_cursor(self.0.index.nav_table().name())?,
                 self.config().similarity,
                 self.config().nav_format,
             )))
@@ -657,7 +607,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
 
     fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
         self.0.index.rerank_table().map(|t| {
-            self.1.get_record_cursor(t.name()).map(|c| {
+            self.1.open_record_cursor(t.name()).map(|c| {
                 BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
                     c,
                     self.0.index.config().similarity,

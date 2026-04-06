@@ -3,9 +3,9 @@ use std::{fs::File, io, num::NonZero, path::PathBuf};
 use crate::{neighbor_util::TopNeighbors, recall::RecallComputer, ui::progress_bar};
 use clap::Args;
 use easy_tiger::{
-    input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
-    kmeans::{kmeans, Params},
     Neighbor,
+    input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
+    kmeans::{Params, kmeans},
 };
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
@@ -27,10 +27,6 @@ pub struct RecallArgs {
     #[arg(long, default_value_t = false)]
     quantize_query: bool,
 
-    /// If set, only process this many input doc vectors.
-    #[arg(long)]
-    doc_limit: Option<usize>,
-
     /// Vector coding to test.
     #[arg(long)]
     format: F32VectorCoding,
@@ -40,6 +36,13 @@ pub struct RecallArgs {
 
     #[command(flatten)]
     recall: crate::recall::RecallArgs,
+
+    /// Multiplier for recall k.
+    ///
+    /// Collect k * k_mult neighbors for each query and compute recall using that set. This
+    /// simulates recall with full-fidelity reranking where we over retrieve to get the final set.
+    #[arg(long, default_value_t = 1.0)]
+    k_mult: f64,
 
     /// Number of centers to compute and use.
     ///
@@ -74,10 +77,6 @@ pub fn recall(
         .query_limit
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
-    let doc_limit = args
-        .doc_limit
-        .unwrap_or(doc_vectors.len())
-        .min(doc_vectors.len());
 
     let recall_computer = RecallComputer::from_args(args.recall, args.similarity)?.ok_or(
         io::Error::new(io::ErrorKind::InvalidInput, "must provide recall args"),
@@ -86,7 +85,7 @@ pub fn recall(
     let centers = match args.centers {
         0 => None,
         1 => {
-            let vectors = SubsetViewVectorStore::new(doc_vectors, (0..doc_limit).collect());
+            let vectors = SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect());
             let mean = super::compute_center(&vectors);
             let mut centers = VecVectorStore::with_capacity(doc_vectors.elem_stride(), 1);
             centers.push(&mean);
@@ -94,12 +93,12 @@ pub fn recall(
         }
         _ => {
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(args.seed);
-            let sample_size = args.center_sample_size.min(doc_limit);
-            let sample_vectors = if sample_size < doc_limit {
-                let indices = rand::seq::index::sample(&mut rng, doc_limit, sample_size);
+            let sample_size = args.center_sample_size.min(doc_vectors.len());
+            let sample_vectors = if sample_size < doc_vectors.len() {
+                let indices = rand::seq::index::sample(&mut rng, doc_vectors.len(), sample_size);
                 SubsetViewVectorStore::new(doc_vectors, indices.into_vec())
             } else {
-                SubsetViewVectorStore::new(doc_vectors, (0..doc_limit).collect())
+                SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect())
             };
             println!(
                 "Computing {} centers from a sample of {} vectors",
@@ -164,11 +163,12 @@ pub fn recall(
         .collect::<Vec<_>>();
 
     let k = recall_computer.k();
+    let result_len = (k as f64 * args.k_mult) as usize;
     let mut query_k = Vec::with_capacity(query_limit);
-    query_k.resize_with(query_limit, || TopNeighbors::new(k));
-    let (total_scored, total_competitive) = (0..doc_limit)
+    query_k.resize_with(query_limit, || TopNeighbors::new(result_len));
+    let (total_scored, total_competitive) = (0..doc_vectors.len())
         .into_par_iter()
-        .progress_with(progress_bar(doc_limit, "scoring"))
+        .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .map(|d| {
             let center = select_center_for_doc(&doc_vectors[d], centers.as_ref(), args.similarity);
             let doc = if let Some(centers) = centers.as_ref() {
@@ -196,8 +196,6 @@ pub fn recall(
         })
         .reduce(|| (0usize, 0usize), |a, b| (a.0 + b.0, a.1 + b.1));
 
-    // TODO: add analysis for re-scoring depth. For simple recall this amount to using a larger set
-    // on the "actual" side, but may be more complicated for NDCG.
     let sum_recall = query_k
         .into_iter()
         .enumerate()

@@ -4,12 +4,12 @@ use clap::Args;
 use easy_tiger::{
     spann::{IndexConfig, ReplicaSelectionAlgorithm, TableIndex},
     vamana::{
-        mutate::insert_vector, wt::SessionGraphVectorIndex, GraphConfig, GraphSearchParams,
-        PatienceParams,
+        GraphConfig, GraphSearchParams, PatienceParams, mutate::insert_vector,
+        wt::TransactionGraphVectorIndex,
     },
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{session::DropOptionsBuilder, Connection};
+use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
 use crate::vamana::EdgePruningArgs;
 
@@ -101,7 +101,7 @@ pub fn init_index(
 ) -> io::Result<()> {
     if args.drop_tables {
         TableIndex::drop_tables(
-            &connection.open_session()?,
+            &connection,
             index_name,
             &Some(DropOptionsBuilder::default().set_force().into()),
         )?;
@@ -155,12 +155,15 @@ pub fn init_index(
         spann_config,
     )?);
 
-    let head_index =
-        SessionGraphVectorIndex::new(Arc::clone(index.head_config()), connection.open_session()?);
+    let head_index = TransactionGraphVectorIndex::new(
+        Arc::clone(index.head_config()),
+        connection.begin_transaction(None)?,
+    );
     // Insert a dummy vector into the head index to provide somewhere for the first insert to go.
     // This vector is not a good vector (particularly for angular distance metrics) but it will
     // disappear as soon as we need to split the initial centroid.
     insert_vector(&vec![0.0f32; args.dimensions.get()], &head_index)?;
+    head_index.commit(None)?;
 
     Ok(())
 }

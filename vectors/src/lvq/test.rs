@@ -638,44 +638,61 @@ tlvq_coder_test!(
     ]
 );
 
-tlvq_coder_test!(
-    tlvq8x8_uncentered,
-    TurboResidualCoder::<8>,
-    Centering::Uncentered,
-    PrimaryVectorHeader {
-        l2_norm: 2.5226507,
-        residual_error_term: 0.007704542,
-        center_dot: 0.0,
-        lower: -0.92000645,
-        upper: 0.91146713,
-        component_sum: 2876,
-    },
-    ResidualVectorHeader {
-        magnitude: 0.0071822493,
-        component_sum: 2422,
-    },
-    [
-        -0.9210063,
-        -0.06099535,
-        0.65900403,
-        0.66998863,
-        0.572986,
-        0.43100283,
-        0.64599144,
-        0.0009973188,
-        -0.199993,
-        -0.42799422,
-        0.7300097,
-        -0.70398974,
-        -0.27299845,
-        0.53899,
-        -0.7310006,
-        0.43598813,
-        0.9130022,
-        0.69401395,
-        0.20198764
-    ]
-);
+// Use a larger epsilon for tlvq8x8 because the primary dequantize intermediate value can differ
+// by ~1 ULP between architectures (e.g. x86_64 AVX512 vs aarch64 Neon), which causes the
+// residual to round to a different index (~1 residual step ≈ 0.000028).
+#[test]
+fn tlvq8x8() {
+    let coder = TurboResidualCoder::<8>::new(VectorSimilarity::Euclidean, None);
+    let encoded = coder.encode(&TEST_VECTOR);
+    let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded).unwrap();
+    assert_abs_diff_eq!(
+        primary_header,
+        PrimaryVectorHeader {
+            l2_norm: 2.5226507,
+            lower: -0.92000645,
+            upper: 0.91146713,
+            residual_error_term: 0.007704542,
+            center_dot: 0.0,
+            component_sum: 2876,
+        }
+    );
+    assert_abs_diff_eq!(
+        ResidualVectorHeader::deserialize(&vector_bytes).unwrap().0,
+        ResidualVectorHeader {
+            magnitude: 0.0071822493,
+            component_sum: 2422,
+        }
+    );
+    let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
+    coder.decode_to(&encoded, &mut decoded);
+    assert_abs_diff_eq!(
+        decoded.as_ref(),
+        [
+            -0.9210063f32,
+            -0.06099535,
+            0.65900403,
+            0.66998863,
+            0.572986,
+            0.43100283,
+            0.64599144,
+            0.0009973188,
+            -0.199993,
+            -0.42799422,
+            0.7300097,
+            -0.70398974,
+            -0.27299845,
+            0.53899,
+            -0.7310006,
+            0.43598813,
+            0.9130022,
+            0.69401395,
+            0.20198764
+        ]
+        .as_ref(),
+        epsilon = 0.00005
+    );
+}
 
 tlvq_coder_test!(
     tlvq8x8_centered,

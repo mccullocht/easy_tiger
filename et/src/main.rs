@@ -32,6 +32,7 @@ enum Commands {
     /// Perform Vamana/DiskANN index operations.
     Vamana(VamanaArgs),
     /// Compute the top k neighbors for a set of queries against a set of document vectors.
+    /// Uses GPU acceleration via wgpu if a suitable adapter is available, otherwise CPU.
     ComputeNeighbors(ComputeNeighborsArgs),
     /// Quantization related utilities.
     Quantization(QuantizationArgs),
@@ -42,7 +43,9 @@ fn main() -> io::Result<()> {
         .with_env_filter(
             EnvFilter::builder()
                 .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy(),
+                .from_env_lossy()
+                .add_directive("wgpu_core=warn".parse().unwrap())
+                .add_directive("wgpu_hal=warn".parse().unwrap()),
         )
         .init();
 

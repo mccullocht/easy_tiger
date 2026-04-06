@@ -8,8 +8,8 @@ use std::{
 
 use clap::{Args, ValueEnum};
 use easy_tiger::{
-    input::{DerefVectorStore, VectorStore},
     Neighbor,
+    input::{DerefVectorStore, VectorStore},
 };
 use memmap2::Mmap;
 use vectors::VectorSimilarity;
@@ -109,7 +109,7 @@ impl RecallComputer {
             .iter()
             .take(self.k)
             .map(|n| Neighbor::from(*n));
-        let actual = query_results.iter().take(self.k).copied();
+        let actual = query_results.iter().copied();
         match self.metric {
             RecallMetric::Simple => self.simple_recall(expected, actual),
             RecallMetric::Ndcg => self.ndcg_recall(expected, actual),

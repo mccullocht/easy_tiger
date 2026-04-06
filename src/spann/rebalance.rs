@@ -311,16 +311,24 @@ pub fn split_centroid(
 
     let mut assignment_updater = CentroidAssignmentUpdater::new(index, head_index.session())?;
     // TODO: skip decoding if head index and posting index format are the same.
-    let c0_dist_fn = posting_format
-        .query_distance_symmetric(similarity, posting_coder.encode(&original_centroid), None);
-    let c1_dist_fn = posting_format
-        .query_distance_symmetric(similarity, posting_coder.encode(&centroids[0]), None);
-    let c2_dist_fn = posting_format
-        .query_distance_symmetric(similarity, posting_coder.encode(&centroids[1]), None);
+    let c0_dist_fn = posting_format.query_distance_symmetric(
+        similarity,
+        posting_coder.encode(&original_centroid),
+        None,
+    );
+    let c1_dist_fn = posting_format.query_distance_symmetric(
+        similarity,
+        posting_coder.encode(&centroids[0]),
+        None,
+    );
+    let c2_dist_fn = posting_format.query_distance_symmetric(
+        similarity,
+        posting_coder.encode(&centroids[1]),
+        None,
+    );
     let mut searches = 0;
     let moved_vectors = vectors.len();
     let connection = Arc::clone(head_index.session().connection());
-    // XXX this won't observe the deletion of the head vector.
     let split_reassignments = vectors
         .into_par_iter()
         .map_init(

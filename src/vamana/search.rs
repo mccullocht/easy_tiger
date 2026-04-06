@@ -164,10 +164,11 @@ impl GraphSearcher {
             .get(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
             .to_vec();
-        let nav_query = reader
-            .config()
-            .nav_format
-            .query_distance_symmetric(reader.config().similarity, &nav_query_rep, None);
+        let nav_query = reader.config().nav_format.query_distance_symmetric(
+            reader.config().similarity,
+            &nav_query_rep,
+            None,
+        );
 
         let rerank_query = if self.params.num_rerank > 0 {
             if let Some(vectors) = reader.rerank_vectors() {
@@ -202,10 +203,11 @@ impl GraphSearcher {
         filter_predicate: impl FnMut(i64) -> bool,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
-        let nav_query = reader
-            .config()
-            .nav_format
-            .query_distance_asymmetric(reader.config().similarity, query, None);
+        let nav_query = reader.config().nav_format.query_distance_asymmetric(
+            reader.config().similarity,
+            query,
+            None,
+        );
         let rerank_query = if self.params.num_rerank > 0 {
             reader
                 .config()

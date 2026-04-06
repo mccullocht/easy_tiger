@@ -132,8 +132,11 @@ pub fn recall(
                         None,
                     )
                 } else {
-                    args.format
-                        .query_distance_asymmetric(args.similarity, query_vectors[i].to_vec(), None)
+                    args.format.query_distance_asymmetric(
+                        args.similarity,
+                        query_vectors[i].to_vec(),
+                        None,
+                    )
                 };
                 vec![qdist]
             }

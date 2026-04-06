@@ -73,8 +73,11 @@ pub fn distance_loss(
                 args.format
                     .query_distance_asymmetric(args.similarity, query.to_vec(), None)
             };
-            let f32_dist =
-                F32VectorCoding::F32.query_distance_asymmetric(args.similarity, query.into_owned(), None);
+            let f32_dist = F32VectorCoding::F32.query_distance_asymmetric(
+                args.similarity,
+                query.into_owned(),
+                None,
+            );
             (f32_dist, qdist)
         })
         .collect::<Vec<_>>();

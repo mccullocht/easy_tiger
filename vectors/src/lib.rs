@@ -209,20 +209,14 @@ impl F32VectorCoding {
         }
     }
 
-    /// Returns a [VectorDistance] between vectors encoded using this coder.
-    #[deprecated = "use distance_symmetric() instead"]
-    pub fn new_vector_distance(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
-        self.distance_symmetric(None, similarity)
-    }
-
     /// Returns a [`VectorDistance`] between vectors encoded using this scheme.
     ///
     /// If `center` is present, it is assumed that all inputs vectors are centered with respect to
     /// this vector before encoding, and `center` may be used as part of distance corrections.
     pub fn distance_symmetric(
         &self,
-        center: Option<&[f32]>,
         similarity: VectorSimilarity,
+        center: Option<&[f32]>,
     ) -> Box<dyn VectorDistance> {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
 
@@ -624,7 +618,7 @@ mod test {
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
         assert_float_near!(rf32_dist, ru8_dist, 0.0001, index);
 
-        let dist_fn = format.distance_symmetric(None, similarity);
+        let dist_fn = format.distance_symmetric(similarity, None);
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);
         assert_float_near!(rf32_dist, qdist, threshold, index);
     }

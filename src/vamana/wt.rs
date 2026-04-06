@@ -185,7 +185,7 @@ impl GraphVectorTable {
     }
 
     pub fn new_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.format.new_vector_distance(self.similarity)
+        self.format.distance_symmetric(self.similarity, None)
     }
 }
 

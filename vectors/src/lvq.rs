@@ -305,15 +305,15 @@ struct PrimaryVectorHeader {
     /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
     /// This term can be used to compute a statistical bound on the estimated distance.
     residual_error_term: f32,
-    /// The dot product of the vector and the centroid.
-    /// This is used to compute angular distance when the vector is centered.
-    center_dot: f32,
     /// Lower interval bound used for quantization, no smaller than the minimum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     lower: f32,
     /// Upper interval bound used for quantization, no larger than the maximum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     upper: f32,
+    /// The dot product of the vector and the centroid.
+    /// This is used to compute angular distance when the vector is centered.
+    center_dot: f32,
     /// Sum of all the quantized components of the vector. This is used to correct the uint dot
     /// product to an f32 dot product.
     component_sum: u32,

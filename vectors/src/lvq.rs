@@ -43,7 +43,7 @@ const fn check_primary_bits(bits: usize) {
     assert!(is_supported_bits(bits, &SUPPORTED_PRIMARY_BITS));
 }
 
-const ESTIMATED_DISTANCE_Z_SCORE: f64 = 1.96;
+const ESTIMATED_DISTANCE_Z_SCORE: f32 = 1.96;
 
 #[derive(Debug, Copy, Clone)]
 enum InstructionSet {
@@ -272,8 +272,7 @@ struct ErrorBoundTerms {
 
 impl ErrorBoundTerms {
     fn from_header(header: &PrimaryVectorHeader, dim: usize, similarity: VectorSimilarity) -> Self {
-        // XXX get rid of cast.
-        let mult = (ESTIMATED_DISTANCE_Z_SCORE as f32
+        let mult = (ESTIMATED_DISTANCE_Z_SCORE
             * match similarity {
                 VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
                 VectorSimilarity::Euclidean => 2.0,
@@ -287,7 +286,6 @@ impl ErrorBoundTerms {
     }
 
     fn error_bound<const B: usize>(&self, vector: &TurboPrimaryVector<B>) -> f32 {
-        // XXX i can probably also fold mult into the self terms.
         (self.residual_error_term * vector.l2_norm + vector.residual_error_term * self.l2_norm)
             * self.mult
     }
@@ -321,7 +319,7 @@ struct PrimaryVectorHeader {
     component_sum: u32,
 }
 
-// XXX we should not encode center_dot when using euclidean distance.
+// TODO: we should not encode center_dot when using euclidean distance.
 impl PrimaryVectorHeader {
     /// Encoded buffer size.
     const LEN: usize = std::mem::size_of::<Self>();

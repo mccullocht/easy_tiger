@@ -3,7 +3,7 @@ use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
 use crate::lvq::{
     PrimaryVectorHeader, ResidualVectorHeader, TurboPrimaryCoder, TurboResidualCoder, VectorStats,
 };
-use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity};
+use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize};
 
 impl AbsDiffEq for PrimaryVectorHeader {
     type Epsilon = f32;
@@ -716,7 +716,103 @@ tlvq_coder_test!(
     ]
 );
 
-// XXX centered and uncentered distance tests.
+// Deterministic 135-element test vectors (using a simple LCG).
+// 135 is deliberately chosen: it is not a multiple of 8, 16, 32, 64, or 128, so it exercises
+// the scalar tail paths of every SIMD kernel.
+fn lvq_test_vecs_135() -> ([Vec<f32>; 3], Vec<f32>) {
+    let mut s = 0xDEAD_BEEFu32;
+    let mut next = || {
+        s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (s >> 16) as f32 / 32_768.0 - 1.0 // uniform in [-1, 1)
+    };
+    let vecs = std::array::from_fn(|_| (0..135).map(|_| next()).collect::<Vec<_>>());
+    // Center has smaller magnitude, as is typical for a dataset centroid.
+    let center: Vec<f32> = (0..135).map(|_| next() * 0.4).collect();
+    (vecs, center)
+}
+
+// Encode `a` and `b` with `format`, then verify that both `distance_symmetric` (doc-doc)
+// and `query_distance_symmetric` (encoded-query vs doc) agree with the f32 reference.
+//
+// The tolerance is derived from the per-vector residual norms e_a = ‖a − decode(encode(a))‖₂
+// and e_b = ‖b − decode(encode(b))‖₂. For squared-Euclidean the bound is tight:
+//   |d(a,b) − d(qa,qb)| ≤ (e_a + e_b) · (e_a + e_b + 2‖a−b‖₂)
+// For Dot (distance ∈ [0,1]) the same formula is conservative since √f32_dist ≤ 1.
+fn check_lvq_distance(
+    format: F32VectorCoding,
+    sim: VectorSimilarity,
+    a: &[f32],
+    b: &[f32],
+    center: Option<&[f32]>,
+) {
+    // Dot similarity assumes l2-normalized inputs.
+    let (a, b) = if sim == VectorSimilarity::Dot {
+        (l2_normalize(a).into_owned(), l2_normalize(b).into_owned())
+    } else {
+        (a.to_vec(), b.to_vec())
+    };
+
+    let f32_dist = sim.new_distance_function().distance_f32(&a, &b);
+
+    let coder = format.coder(sim, center.map(|c| c.to_vec()));
+    let enc_a = coder.encode(&a);
+    let enc_b = coder.encode(&b);
+
+    let residual_norm = |orig: &[f32], enc: &[u8]| -> f64 {
+        let decoded = coder.decode(enc);
+        orig.iter()
+            .zip(decoded.iter())
+            .map(|(o, d)| (*o - *d) as f64 * (*o - *d) as f64)
+            .sum::<f64>()
+            .sqrt()
+    };
+    let ea = residual_norm(&a, &enc_a);
+    let eb = residual_norm(&b, &enc_b);
+    let abs_epsilon = (ea + eb) * (ea + eb + 2.0 * f32_dist.abs().sqrt());
+
+    // doc-doc symmetric distance
+    let sym = format
+        .distance_symmetric(sim, center)
+        .distance(&enc_a, &enc_b);
+    assert_abs_diff_eq!(f32_dist, sym, epsilon = abs_epsilon);
+
+    // encoded-query vs doc distance
+    let qd = format
+        .query_distance_symmetric(sim, enc_a.as_slice(), center)
+        .distance(&enc_b);
+    assert_abs_diff_eq!(f32_dist, qd, epsilon = abs_epsilon);
+}
+
+macro_rules! lvq_distance_135_test {
+    ($name:ident, $format:expr) => {
+        #[test]
+        fn $name() {
+            let (vecs, center) = lvq_test_vecs_135();
+            let pairs = [
+                (&vecs[0], &vecs[1]),
+                (&vecs[1], &vecs[2]),
+                (&vecs[0], &vecs[2]),
+            ];
+            for (a, b) in pairs {
+                for sim in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
+                    // uncentered
+                    check_lvq_distance($format, sim, a, b, None);
+                    // centered
+                    check_lvq_distance($format, sim, a, b, Some(center.as_slice()));
+                }
+            }
+        }
+    };
+}
+
+lvq_distance_135_test!(distance_135_tlvq1, F32VectorCoding::TLVQ1);
+lvq_distance_135_test!(distance_135_tlvq2, F32VectorCoding::TLVQ2);
+lvq_distance_135_test!(distance_135_tlvq4, F32VectorCoding::TLVQ4);
+lvq_distance_135_test!(distance_135_tlvq8, F32VectorCoding::TLVQ8);
+lvq_distance_135_test!(distance_135_tlvq1x8, F32VectorCoding::TLVQ1x8);
+lvq_distance_135_test!(distance_135_tlvq2x8, F32VectorCoding::TLVQ2x8);
+lvq_distance_135_test!(distance_135_tlvq4x8, F32VectorCoding::TLVQ4x8);
+lvq_distance_135_test!(distance_135_tlvq8x8, F32VectorCoding::TLVQ8x8);
 
 #[test]
 fn null_vector_decode() {

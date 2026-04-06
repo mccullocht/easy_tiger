@@ -83,11 +83,11 @@ pub fn insert_vectors(
 
     let posting_format = index.config().posting_coder;
     let similarity = index.head_config().config().similarity;
-    let posting_coder = posting_format.new_coder(similarity);
+    let posting_coder = posting_format.coder(similarity, None);
     let rerank_coder = index
         .config()
         .rerank_format
-        .map(|f| f.new_coder(similarity));
+        .map(|f| f.coder(similarity, None));
 
     let batch_size = args.batch_size.get();
     let main_progress = progress_bar(args.count.get(), "inserting vectors");

@@ -29,7 +29,7 @@ pub fn float32_benchmarks(c: &mut Criterion) {
         bytes: (a.len() * std::mem::size_of::<f32>()) as u64,
     });
     for sim in VectorSimilarity::all() {
-        let coder = F32VectorCoding::F32.new_coder(sim);
+        let coder = F32VectorCoding::F32.coder(sim, None);
         let x = coder.encode(&a);
         let y = coder.encode(&b);
         let dist = F32VectorCoding::F32.new_vector_distance(sim);
@@ -45,7 +45,7 @@ pub fn float32_benchmarks(c: &mut Criterion) {
         bytes: (a.len() * std::mem::size_of::<f32>() * BULK_VECTORS) as u64,
     });
     for sim in VectorSimilarity::all() {
-        let coder = F32VectorCoding::F32.new_coder(sim);
+        let coder = F32VectorCoding::F32.coder(sim, None);
         let x = coder.encode(&a);
         let y = coder.encode(&b);
         let mut bulk_docs_storage = vec![];
@@ -77,7 +77,7 @@ pub fn float16_benchmarks(c: &mut Criterion) {
     });
 
     for sim in VectorSimilarity::all() {
-        let coder = F32VectorCoding::F16.new_coder(sim);
+        let coder = F32VectorCoding::F16.coder(sim, None);
         let x = coder.encode(&a);
         let y = coder.encode(&b);
         let dist = F32VectorCoding::F16.new_vector_distance(sim);
@@ -99,7 +99,7 @@ pub fn float16_benchmarks(c: &mut Criterion) {
     });
 
     for sim in VectorSimilarity::all() {
-        let coder = F32VectorCoding::F16.new_coder(sim);
+        let coder = F32VectorCoding::F16.coder(sim, None);
         let x = coder.encode(&a);
         let y = coder.encode(&b);
         let mut bulk_docs_storage = vec![];
@@ -151,7 +151,7 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
     let (a, b) = generate_test_vectors(DIMENSIONS);
 
     for encoding in encodings {
-        let coder = encoding.new_coder(sim);
+        let coder = encoding.coder(sim, None);
         let x = coder.encode(&a);
         let y = coder.encode(&b);
 

@@ -40,7 +40,7 @@ pub fn extract_index(
     let head_index = SessionGraphVectorIndex::new(index.head_config().clone(), session);
     let head_coder = head_index.high_fidelity_vectors()?.new_coder();
     let posting_coder = index.new_posting_coder();
-    let out_coder = F32VectorCoding::F32.new_coder(head_index.index().config().similarity);
+    let out_coder = F32VectorCoding::F32.coder(head_index.index().config().similarity, None);
 
     let dim = head_index.index().config().dimensions.get();
     centroid_ids

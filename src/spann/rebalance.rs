@@ -264,7 +264,7 @@ pub fn split_centroid(
     // Unpack all of the vectors as floats and split into two clusters.
     let posting_format = index.config().posting_coder;
     let similarity = index.head_config().config().similarity;
-    let posting_coder = posting_format.new_coder(similarity);
+    let posting_coder = posting_format.coder(similarity, None);
     let mut scratch_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
     let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), vectors.len());
     for (_, vector) in vectors.iter() {

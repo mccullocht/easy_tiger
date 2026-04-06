@@ -480,7 +480,7 @@ mod test {
             T: IntoIterator<Item = V>,
             V: Into<Vec<f32>>,
         {
-            let coder = F32VectorCoding::BinaryQuantized.new_coder(VectorSimilarity::Euclidean);
+            let coder = F32VectorCoding::BinaryQuantized.coder(VectorSimilarity::Euclidean, None);
             let mut rep = iter
                 .into_iter()
                 .map(|x| {

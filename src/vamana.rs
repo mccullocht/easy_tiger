@@ -210,7 +210,7 @@ pub trait GraphVectorStore {
 
     /// Create a new coder for vectors of this type.
     fn new_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.format().new_coder(self.similarity())
+        self.format().coder(self.similarity(), None)
     }
 
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.

@@ -183,12 +183,6 @@ pub enum F32VectorCoding {
 }
 
 impl F32VectorCoding {
-    /// Create a new coder for this format.
-    #[deprecated = "use `coder(similarity, None)` instead"]
-    pub fn new_coder(&self, similarity: VectorSimilarity) -> Box<dyn F32VectorCoder> {
-        self.coder(similarity, None)
-    }
-
     /// Create a new coder for this format and similarity function.
     ///
     /// If `center`` is present, the center vector will be subtracted from each vector before

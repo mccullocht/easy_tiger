@@ -103,7 +103,7 @@ fn read_head_vectors(
     let posting_coder = index
         .config()
         .posting_coder
-        .new_coder(index.head_config().config().similarity);
+        .coder(index.head_config().config().similarity, None);
 
     let mut cursor = session.get_or_create_typed_cursor::<i64, Vec<u8>>(&vector_table.name())?;
     let mut f32_buffer = vec![0.0f32; dim];

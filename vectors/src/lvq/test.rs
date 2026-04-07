@@ -92,7 +92,7 @@ macro_rules! tlvq_coder_test {
             };
             let encoded = coder.encode(&TEST_VECTOR);
             assert_abs_diff_eq!(
-                PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+                PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean).unwrap().0,
                 $primary_header
             );
             let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -111,7 +111,7 @@ macro_rules! tlvq_coder_test {
             };
             let encoded = coder.encode(&TEST_VECTOR);
             let (primary_header, vector_bytes) =
-                PrimaryVectorHeader::deserialize(&encoded).unwrap();
+                PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean).unwrap();
             assert_abs_diff_eq!(primary_header, $primary_header);
             assert_abs_diff_eq!(
                 ResidualVectorHeader::deserialize(&vector_bytes).unwrap().0,
@@ -129,8 +129,8 @@ tlvq_coder_test!(
     TurboPrimaryCoder::<1>,
     Centering::Uncentered,
     PrimaryVectorHeader {
-        l2_norm: 2.5234375,
-        residual_error_term: 1.1640625,
+        l2_norm: 2.5226507,
+        residual_error_term: 1.163901,
         center_dot: 0.0,
         lower: -0.49560547,
         upper: 0.7055664,
@@ -164,8 +164,8 @@ tlvq_coder_test!(
     TurboPrimaryCoder::<1>,
     Centering::Centered,
     PrimaryVectorHeader {
-        l2_norm: 1.5517578,
-        residual_error_term: 0.8178711,
+        l2_norm: 1.5514041,
+        residual_error_term: 0.8178981,
         center_dot: 0.0,
         lower: -0.60498047,
         upper: 0.23901367,
@@ -199,8 +199,8 @@ tlvq_coder_test!(
     TurboPrimaryCoder::<2>,
     Centering::Uncentered,
     PrimaryVectorHeader {
-        l2_norm: 2.5234375,
-        residual_error_term: 0.6713867,
+        l2_norm: 2.5226507,
+        residual_error_term: 0.6714753,
         center_dot: 0.0,
         lower: -0.67089844,
         upper: 0.8408203,
@@ -234,8 +234,8 @@ tlvq_coder_test!(
     TurboPrimaryCoder::<2>,
     Centering::Centered,
     PrimaryVectorHeader {
-        l2_norm: 1.5517578,
-        residual_error_term: 0.53271484,
+        l2_norm: 1.5514041,
+        residual_error_term: 0.5325365,
         center_dot: 0.0,
         lower: -0.5571289,
         upper: 0.5683594,
@@ -269,8 +269,8 @@ tlvq_coder_test!(
     TurboPrimaryCoder::<4>,
     Centering::Uncentered,
     PrimaryVectorHeader {
-        l2_norm: 2.5234375,
-        residual_error_term: 0.11846924,
+        l2_norm: 2.5226507,
+        residual_error_term: 0.11848368,
         center_dot: 0.0,
         lower: -0.9345703,
         upper: 0.91308594,
@@ -304,8 +304,8 @@ tlvq_coder_test!(
     TurboPrimaryCoder::<4>,
     Centering::Centered,
     PrimaryVectorHeader {
-        l2_norm: 1.5517578,
-        residual_error_term: 0.095947266,
+        l2_norm: 1.5514041,
+        residual_error_term: 0.09595752,
         center_dot: 0.0,
         lower: -0.69091797,
         upper: 0.56347656,
@@ -339,8 +339,8 @@ tlvq_coder_test!(
     TurboPrimaryCoder::<8>,
     Centering::Uncentered,
     PrimaryVectorHeader {
-        l2_norm: 2.5234375,
-        residual_error_term: 0.0077056885,
+        l2_norm: 2.5226507,
+        residual_error_term: 0.007704542,
         center_dot: 0.0,
         lower: -0.9199219,
         upper: 0.9116211,
@@ -374,8 +374,8 @@ tlvq_coder_test!(
     TurboPrimaryCoder::<8>,
     Centering::Centered,
     PrimaryVectorHeader {
-        l2_norm: 1.5517578,
-        residual_error_term: 0.0055274963,
+        l2_norm: 1.5514041,
+        residual_error_term: 0.00552745,
         center_dot: 0.0,
         lower: -0.6953125,
         upper: 0.57470703,
@@ -409,8 +409,8 @@ tlvq_coder_test!(
     TurboResidualCoder::<1>,
     Centering::Uncentered,
     PrimaryVectorHeader {
-        l2_norm: 2.5234375,
-        residual_error_term: 1.1640625,
+        l2_norm: 2.5226507,
+        residual_error_term: 1.163901,
         center_dot: 0.0,
         lower: -0.49560547,
         upper: 0.7055664,
@@ -448,8 +448,8 @@ tlvq_coder_test!(
     TurboResidualCoder::<1>,
     Centering::Centered,
     PrimaryVectorHeader {
-        l2_norm: 1.5517578,
-        residual_error_term: 0.8178711,
+        l2_norm: 1.5514041,
+        residual_error_term: 0.8178981,
         center_dot: 0.0,
         lower: -0.60498047,
         upper: 0.23901367,
@@ -487,8 +487,8 @@ tlvq_coder_test!(
     TurboResidualCoder::<2>,
     Centering::Uncentered,
     PrimaryVectorHeader {
-        l2_norm: 2.5234375,
-        residual_error_term: 0.6713867,
+        l2_norm: 2.5226507,
+        residual_error_term: 0.6714753,
         center_dot: 0.0,
         lower: -0.67089844,
         upper: 0.8408203,
@@ -526,8 +526,8 @@ tlvq_coder_test!(
     TurboResidualCoder::<2>,
     Centering::Centered,
     PrimaryVectorHeader {
-        l2_norm: 1.5517578,
-        residual_error_term: 0.53271484,
+        l2_norm: 1.5514041,
+        residual_error_term: 0.5325365,
         center_dot: 0.0,
         lower: -0.5571289,
         upper: 0.5683594,
@@ -565,8 +565,8 @@ tlvq_coder_test!(
     TurboResidualCoder::<4>,
     Centering::Uncentered,
     PrimaryVectorHeader {
-        l2_norm: 2.5234375,
-        residual_error_term: 0.11846924,
+        l2_norm: 2.5226507,
+        residual_error_term: 0.11848368,
         center_dot: 0.0,
         lower: -0.9345703,
         upper: 0.91308594,
@@ -604,8 +604,8 @@ tlvq_coder_test!(
     TurboResidualCoder::<4>,
     Centering::Centered,
     PrimaryVectorHeader {
-        l2_norm: 1.5517578,
-        residual_error_term: 0.095947266,
+        l2_norm: 1.5514041,
+        residual_error_term: 0.09595752,
         center_dot: 0.0,
         lower: -0.69091797,
         upper: 0.56347656,
@@ -645,14 +645,14 @@ tlvq_coder_test!(
 fn tlvq8x8() {
     let coder = TurboResidualCoder::<8>::new(VectorSimilarity::Euclidean, None);
     let encoded = coder.encode(&TEST_VECTOR);
-    let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded).unwrap();
+    let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean).unwrap();
     assert_abs_diff_eq!(
         primary_header,
         PrimaryVectorHeader {
-            l2_norm: 2.5234375,
+            l2_norm: 2.5226507,
             lower: -0.9199219,
             upper: 0.9116211,
-            residual_error_term: 0.0077056885,
+            residual_error_term: 0.007704542,
             center_dot: 0.0,
             component_sum: 2876,
         }
@@ -699,8 +699,8 @@ tlvq_coder_test!(
     TurboResidualCoder::<8>,
     Centering::Centered,
     PrimaryVectorHeader {
-        l2_norm: 1.5517578,
-        residual_error_term: 0.0055274963,
+        l2_norm: 1.5514041,
+        residual_error_term: 0.00552745,
         center_dot: 0.0,
         lower: -0.6953125,
         upper: 0.57470703,
@@ -844,7 +844,7 @@ fn null_vector_decode() {
         F32VectorCoding::TLVQ4x8,
         F32VectorCoding::TLVQ8x8,
     ] {
-        let coder = coding.coder(VectorSimilarity::Dot, None);
+        let coder = coding.coder(VectorSimilarity::Euclidean, None);
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
@@ -864,7 +864,7 @@ fn fill_vector_decode() {
         F32VectorCoding::TLVQ4x8,
         F32VectorCoding::TLVQ8x8,
     ] {
-        let coder = coding.coder(VectorSimilarity::Dot, None);
+        let coder = coding.coder(VectorSimilarity::Euclidean, None);
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());

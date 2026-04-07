@@ -186,7 +186,7 @@ pub fn merge_centroid(
     }
 
     // Query the head index for each vector and assign a new centroid.
-    let coder = index.new_posting_coder();
+    let coder = index.posting_coder(None);
     let removed_vectors = vectors.len();
     let txn_factory = ReadTransactionFactory::try_from_transaction(txn_idx.transaction())?;
     let reassignments = vectors

@@ -60,6 +60,9 @@ pub struct IndexConfig {
     pub replica_selection: ReplicaSelectionAlgorithm,
     /// If set, build a vector id keyed vector table in this format for re-ranking results.
     pub rerank_format: Option<F32VectorCoding>,
+    /// Whether the index uses centered vectors.
+    #[serde(default)]
+    pub centered: bool,
 }
 
 impl IndexConfig {
@@ -161,12 +164,6 @@ impl TableIndex {
         &self.config
     }
 
-    pub fn new_posting_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.config
-            .posting_coder
-            .coder(self.head_config().config().similarity, None)
-    }
-
     pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {
         let head = Arc::new(TableGraphVectorIndex::from_db(
             connection,
@@ -259,6 +256,12 @@ impl TableIndex {
             connection.drop_table(table_name, options.clone())?;
         }
         Ok(())
+    }
+
+    pub fn posting_coder(&self, center: Option<Vec<f32>>) -> Box<dyn F32VectorCoder> {
+        self.config
+            .posting_coder
+            .coder(self.head_config().config().similarity, center)
     }
 
     pub fn centroid_assignments_table_name(&self) -> &str {

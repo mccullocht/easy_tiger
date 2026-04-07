@@ -147,6 +147,7 @@ pub fn init_index(
         },
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,
+        centered: false,
     };
     let index = Arc::new(TableIndex::init_index(
         &connection,

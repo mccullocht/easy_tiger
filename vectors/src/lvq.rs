@@ -171,7 +171,11 @@ fn prepare_vector<'a>(
 
     let center_dot = if let Some(center) = center {
         let cd = if similarity.angular() {
-            scratch.iter().zip(center.iter()).map(|(&s, &c)| s * c).sum()
+            scratch
+                .iter()
+                .zip(center.iter())
+                .map(|(&s, &c)| s * c)
+                .sum()
         } else {
             0.0
         };
@@ -201,6 +205,7 @@ enum DistanceCorrectionTerms {
         center_dot: f32,
         center_center_dot: f32,
     },
+    // XXX this can be angular, never need l2 norm anymore.
     Cosine {
         l2_norm: f32,
         center_dot: f32,
@@ -337,16 +342,14 @@ struct PrimaryVectorHeader {
     component_sum: u32,
 }
 
-// TODO: store l2_norm and center_dot in the same physical space, making the header encoding
-// depend on the similarity function. This requires that we normalize the vector for angular
-// similarity and assume an l2 norm of 1 in those cases.
 impl PrimaryVectorHeader {
-    /// Encoded buffer size.
+    /// Encoded buffer size: 4 f16 values and 1 u32 value.
     ///
-    /// l2_norm, residual_error_term, lower, and upper serialize as f16; center_dot as f32;
-    /// component_sum as u32.
-    const LEN: usize =
-        std::mem::size_of::<f16>() * 4 + std::mem::size_of::<f32>() + std::mem::size_of::<u32>();
+    /// The first f16 stores `l2_norm` for euclidean similarity or `center_dot` for angular
+    /// similarity (where `l2_norm` is assumed to be 1.0 after encoding-time normalization and
+    /// `center_dot` is assumed to be 0.0 for euclidean). The remaining fields are stored as f16
+    /// for any floating point values.
+    const LEN: usize = std::mem::size_of::<f16>() * 4 + std::mem::size_of::<u32>();
 
     fn new(stats: VectorStats, center_dot: f32) -> Self {
         Self {
@@ -365,27 +368,37 @@ impl PrimaryVectorHeader {
     }
 
     #[inline]
-    fn serialize(&self, header_bytes: &mut [u8]) {
-        header_bytes[0..2].copy_from_slice(&f16::from_f32(self.l2_norm).to_le_bytes());
+    fn serialize(&self, header_bytes: &mut [u8], similarity: VectorSimilarity) {
+        let first = if similarity.angular() {
+            f16::from_f32(self.center_dot)
+        } else {
+            f16::from_f32(self.l2_norm)
+        };
+        header_bytes[0..2].copy_from_slice(&first.to_le_bytes());
         header_bytes[2..4].copy_from_slice(&f16::from_f32(self.residual_error_term).to_le_bytes());
         header_bytes[4..6].copy_from_slice(&f16::from_f32(self.lower).to_le_bytes());
         header_bytes[6..8].copy_from_slice(&f16::from_f32(self.upper).to_le_bytes());
-        header_bytes[8..12].copy_from_slice(&self.center_dot.to_le_bytes());
-        header_bytes[12..16].copy_from_slice(&self.component_sum.to_le_bytes());
+        header_bytes[8..12].copy_from_slice(&self.component_sum.to_le_bytes());
     }
 
     #[inline]
-    fn deserialize(raw: &[u8]) -> Option<(Self, &[u8])> {
+    fn deserialize(raw: &[u8], similarity: VectorSimilarity) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
+        let first = f16::from_le_bytes(header_bytes[0..2].try_into().unwrap()).to_f32();
+        let (l2_norm, center_dot) = if similarity.angular() {
+            (1.0, first)
+        } else {
+            (first, 0.0)
+        };
         Some((
             Self {
-                l2_norm: f16::from_le_bytes(header_bytes[0..2].try_into().unwrap()).to_f32(),
+                l2_norm,
                 residual_error_term: f16::from_le_bytes(header_bytes[2..4].try_into().unwrap())
                     .to_f32(),
                 lower: f16::from_le_bytes(header_bytes[4..6].try_into().unwrap()).to_f32(),
                 upper: f16::from_le_bytes(header_bytes[6..8].try_into().unwrap()).to_f32(),
-                center_dot: f32::from_le_bytes(header_bytes[8..12].try_into().unwrap()),
-                component_sum: u32::from_le_bytes(header_bytes[12..16].try_into().unwrap()),
+                center_dot,
+                component_sum: u32::from_le_bytes(header_bytes[8..12].try_into().unwrap()),
             },
             vector_bytes,
         ))
@@ -558,8 +571,8 @@ struct TurboPrimaryVector<'a, const B: usize> {
 }
 
 impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
-    fn new(data: &'a [u8]) -> Option<Self> {
-        let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
+    fn new(data: &'a [u8], similarity: VectorSimilarity) -> Option<Self> {
+        let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data, similarity)?;
         Some(Self {
             rep: EncodedVector {
                 terms: VectorDecodeTerms::from_primary::<B>(header),
@@ -698,9 +711,8 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             self.center.as_deref(),
             self.similarity,
         );
-        let header =
-            Self::encode_parts_to(self.inst, prepared, center_dot, vector_bytes);
-        header.serialize(header_bytes);
+        let header = Self::encode_parts_to(self.inst, prepared, center_dot, vector_bytes);
+        header.serialize(header_bytes, self.similarity);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -708,7 +720,8 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     }
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
-        let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
+        let vector =
+            TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
         match self.inst {
             InstructionSet::Scalar => scalar::primary_decode::<B>(vector, out),
             #[cfg(target_arch = "aarch64")]
@@ -757,7 +770,7 @@ impl<const B: usize> TurboPrimaryDistance<B> {
         query: &TurboPrimaryVector<B>,
         doc: &[u8],
     ) -> f64 {
-        let doc = TurboPrimaryVector::<B>::new(doc).unwrap();
+        let doc = TurboPrimaryVector::<B>::new(doc, self.similarity).unwrap();
         let uint_dot = match self.inst {
             InstructionSet::Scalar => scalar::dot_u8::<B>(query.rep.data, doc.rep.data),
             #[cfg(target_arch = "aarch64")]
@@ -776,7 +789,7 @@ impl<const B: usize> TurboPrimaryDistance<B> {
 
 impl<const B: usize> VectorDistance for TurboPrimaryDistance<B> {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = TurboPrimaryVector::<B>::new(query).unwrap();
+        let query = TurboPrimaryVector::<B>::new(query, self.similarity).unwrap();
         let correction_terms = DistanceCorrectionTerms::from_parts(
             query.l2_norm,
             query.center_dot,
@@ -787,7 +800,7 @@ impl<const B: usize> VectorDistance for TurboPrimaryDistance<B> {
     }
 
     fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
-        let query = TurboPrimaryVector::<B>::new(query).unwrap();
+        let query = TurboPrimaryVector::<B>::new(query, self.similarity).unwrap();
         let correction_terms = DistanceCorrectionTerms::from_parts(
             query.l2_norm,
             query.center_dot,
@@ -804,6 +817,7 @@ const PRIMARY_QUERY_BITS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct TurboPrimaryQueryDistance<const B: usize> {
+    similarity: VectorSimilarity,
     query: Vec<u8>,
     terms: VectorDecodeTerms,
     correction_terms: DistanceCorrectionTerms,
@@ -828,6 +842,7 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
         let correction_terms = DistanceCorrectionTerms::new(&header, center, similarity);
 
         Self {
+            similarity,
             query,
             terms,
             correction_terms,
@@ -837,7 +852,8 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
 
     #[inline(always)]
     fn distance_internal(&self, vector: &[u8]) -> f64 {
-        let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
+        let vector =
+            TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
         let uint8_dot = match self.inst {
             InstructionSet::Scalar => {
                 scalar::primary_query8_dot_unnormalized::<B>(&self.query, &vector)
@@ -877,6 +893,7 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
 /// This can provide significant savings, particularly when using memory bound indexes like a flat
 /// index or partitioned index.
 pub struct TurboPrimaryQueryDistance1 {
+    similarity: VectorSimilarity,
     primary_query: Vec<u8>,
     primary_terms: VectorDecodeTerms,
     residual_query: Vec<u8>,
@@ -898,6 +915,7 @@ impl TurboPrimaryQueryDistance1 {
             TurboResidualCoder::<1>::encode_parts(inst, similarity, query.as_ref(), center);
         let correction_terms = DistanceCorrectionTerms::new(&primary_header, center, similarity);
         Self {
+            similarity,
             primary_query,
             primary_terms: VectorDecodeTerms::from_primary::<1>(primary_header),
             residual_query,
@@ -915,7 +933,8 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
     }
 
     fn distance_with_bound(&self, vector: &[u8], max_distance: f64) -> Option<f64> {
-        let vector = TurboPrimaryVector::<1>::new(vector).expect("valid primary vector");
+        let vector =
+            TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
         let uint8_dot_primary = match self.inst {
             InstructionSet::Scalar => scalar::dot_u8::<1>(&self.primary_query, vector.rep.data),
             #[cfg(target_arch = "aarch64")]
@@ -985,11 +1004,11 @@ struct TurboResidualVector<'a, const B: usize> {
 impl<'a, const B: usize> TurboResidualVector<'a, B> {
     const B_CHECK: () = { check_primary_bits(B) };
 
-    fn new(data: &'a [u8]) -> Option<Self> {
+    fn new(data: &'a [u8], similarity: VectorSimilarity) -> Option<Self> {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
 
-        let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
+        let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(data, similarity)?;
         let (residual_header, vector_bytes) = ResidualVectorHeader::deserialize(vector_bytes)?;
         let (primary_vector, residual_vector) = vector_bytes.split_at(packing::two_vector_split(
             vector_bytes.len(),
@@ -1231,14 +1250,9 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
             self.center.as_deref(),
             self.similarity,
         );
-        let (primary_header, residual_header) = Self::encode_parts_to(
-            self.inst,
-            prepared,
-            center_dot,
-            primary,
-            residual,
-        );
-        primary_header.serialize(primary_header_bytes);
+        let (primary_header, residual_header) =
+            Self::encode_parts_to(self.inst, prepared, center_dot, primary, residual);
+        primary_header.serialize(primary_header_bytes, self.similarity);
         residual_header.serialize(residual_header_bytes);
     }
 
@@ -1250,7 +1264,7 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
     }
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
-        let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
+        let vector = TurboResidualVector::<B>::new(vector, self.similarity).expect("valid vector");
         match self.inst {
             InstructionSet::Scalar => scalar::residual_decode::<B>(&vector, out),
             #[cfg(target_arch = "aarch64")]
@@ -1298,8 +1312,8 @@ impl<const B: usize> TurboResidualDistance<B> {
 
 impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = TurboResidualVector::<B>::new(query).unwrap();
-        let doc = TurboResidualVector::<B>::new(doc).unwrap();
+        let query = TurboResidualVector::<B>::new(query, self.similarity).unwrap();
+        let doc = TurboResidualVector::<B>::new(doc, self.similarity).unwrap();
 
         let component_dot = match self.inst {
             InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B>(
@@ -1337,6 +1351,7 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
 }
 
 pub struct TurboResidualQueryDistance<const B: usize> {
+    similarity: VectorSimilarity,
     primary_vector: Vec<u8>,
     primary_terms: VectorDecodeTerms,
     residual_vector: Vec<u8>,
@@ -1359,6 +1374,7 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
         let residual_terms = VectorDecodeTerms::from_residual(residual_header);
         let correction_terms = DistanceCorrectionTerms::new(&primary_header, center, similarity);
         Self {
+            similarity,
             primary_vector,
             primary_terms,
             residual_vector,
@@ -1371,7 +1387,7 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
 
 impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = TurboResidualVector::<B>::new(vector).expect("valid vector");
+        let vector = TurboResidualVector::<B>::new(vector, self.similarity).expect("valid vector");
         let component_dot = match self.inst {
             InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B>(
                 (&self.primary_vector, &self.residual_vector),

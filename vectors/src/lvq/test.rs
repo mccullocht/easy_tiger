@@ -92,7 +92,7 @@ macro_rules! tlvq_coder_test {
             };
             let encoded = coder.encode(&TEST_VECTOR);
             assert_abs_diff_eq!(
-                PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
+                PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean).unwrap().0,
                 $primary_header
             );
             let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -111,7 +111,7 @@ macro_rules! tlvq_coder_test {
             };
             let encoded = coder.encode(&TEST_VECTOR);
             let (primary_header, vector_bytes) =
-                PrimaryVectorHeader::deserialize(&encoded).unwrap();
+                PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean).unwrap();
             assert_abs_diff_eq!(primary_header, $primary_header);
             assert_abs_diff_eq!(
                 ResidualVectorHeader::deserialize(&vector_bytes).unwrap().0,
@@ -645,7 +645,7 @@ tlvq_coder_test!(
 fn tlvq8x8() {
     let coder = TurboResidualCoder::<8>::new(VectorSimilarity::Euclidean, None);
     let encoded = coder.encode(&TEST_VECTOR);
-    let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded).unwrap();
+    let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean).unwrap();
     assert_abs_diff_eq!(
         primary_header,
         PrimaryVectorHeader {

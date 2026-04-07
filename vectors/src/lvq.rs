@@ -318,13 +318,19 @@ struct PrimaryVectorHeader {
 }
 
 impl PrimaryVectorHeader {
-    /// Encoded buffer size: 4 f16 values and 1 u32 value.
+    /// Length of the encoded header in bytes.
     ///
-    /// The first f16 stores `l2_norm` for euclidean similarity or `center_dot` for angular
-    /// similarity (where `l2_norm` is assumed to be 1.0 after encoding-time normalization and
-    /// `center_dot` is assumed to be 0.0 for euclidean). The remaining fields are stored as f16
-    /// for any floating point values.
-    const LEN: usize = std::mem::size_of::<f16>() * 4 + std::mem::size_of::<u32>();
+    /// Stores 5 values -- two 16-bit values and 3 32-bit values.
+    /// * l2_norm or center_dot (f32)
+    /// * residual_error_term (f32)
+    /// * lower (f16)
+    /// * upper (f16)
+    /// * component_sum (u32)
+    ///
+    /// The first two terms are stored as f32 as they have a greater effect on precision.
+    const LEN: usize = std::mem::size_of::<f32>() * 2
+        + std::mem::size_of::<f16>() * 2
+        + std::mem::size_of::<u32>();
 
     fn new(stats: VectorStats, center_dot: f32) -> Self {
         Self {
@@ -345,21 +351,21 @@ impl PrimaryVectorHeader {
     #[inline]
     fn serialize(&self, header_bytes: &mut [u8], similarity: VectorSimilarity) {
         let first = if similarity.angular() {
-            f16::from_f32(self.center_dot)
+            self.center_dot
         } else {
-            f16::from_f32(self.l2_norm)
+            self.l2_norm
         };
-        header_bytes[0..2].copy_from_slice(&first.to_le_bytes());
-        header_bytes[2..4].copy_from_slice(&f16::from_f32(self.residual_error_term).to_le_bytes());
-        header_bytes[4..6].copy_from_slice(&f16::from_f32(self.lower).to_le_bytes());
-        header_bytes[6..8].copy_from_slice(&f16::from_f32(self.upper).to_le_bytes());
-        header_bytes[8..12].copy_from_slice(&self.component_sum.to_le_bytes());
+        header_bytes[0..4].copy_from_slice(&first.to_le_bytes());
+        header_bytes[4..8].copy_from_slice(&self.residual_error_term.to_le_bytes());
+        header_bytes[8..10].copy_from_slice(&f16::from_f32(self.lower).to_le_bytes());
+        header_bytes[10..12].copy_from_slice(&f16::from_f32(self.upper).to_le_bytes());
+        header_bytes[12..16].copy_from_slice(&self.component_sum.to_le_bytes());
     }
 
     #[inline]
     fn deserialize(raw: &[u8], similarity: VectorSimilarity) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
-        let first = f16::from_le_bytes(header_bytes[0..2].try_into().unwrap()).to_f32();
+        let first = f32::from_le_bytes(header_bytes[0..4].try_into().unwrap());
         let (l2_norm, center_dot) = if similarity.angular() {
             (1.0, first)
         } else {
@@ -368,12 +374,11 @@ impl PrimaryVectorHeader {
         Some((
             Self {
                 l2_norm,
-                residual_error_term: f16::from_le_bytes(header_bytes[2..4].try_into().unwrap())
-                    .to_f32(),
-                lower: f16::from_le_bytes(header_bytes[4..6].try_into().unwrap()).to_f32(),
-                upper: f16::from_le_bytes(header_bytes[6..8].try_into().unwrap()).to_f32(),
+                residual_error_term: f32::from_le_bytes(header_bytes[4..8].try_into().unwrap()),
+                lower: f16::from_le_bytes(header_bytes[8..10].try_into().unwrap()).to_f32(),
+                upper: f16::from_le_bytes(header_bytes[10..12].try_into().unwrap()).to_f32(),
                 center_dot,
-                component_sum: u32::from_le_bytes(header_bytes[8..12].try_into().unwrap()),
+                component_sum: u32::from_le_bytes(header_bytes[12..16].try_into().unwrap()),
             },
             vector_bytes,
         ))

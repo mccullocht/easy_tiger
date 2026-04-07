@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
+use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::input::{DerefVectorStore, VectorStore};
@@ -53,26 +53,24 @@ pub fn distance_loss(
         None
     };
 
-    let coder = args.format.coder(args.similarity, None);
+    let coder = args.format.coder(args.similarity, center.clone());
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
-            let mut query = Cow::from(&query_vectors[i]);
-            if let Some(center) = center.as_ref() {
-                for (q, c) in query.to_mut().iter_mut().zip(center.iter()) {
-                    *q -= *c;
-                }
-            }
+            let query = &query_vectors[i];
             let qdist = if args.quantize_query {
                 args.format
                     .query_distance_symmetric(args.similarity, coder.encode(&query), None)
             } else {
-                args.format
-                    .query_distance_asymmetric(args.similarity, query.to_vec(), None)
+                args.format.query_distance_asymmetric(
+                    args.similarity,
+                    query.to_vec(),
+                    center.as_deref(),
+                )
             };
             let f32_dist = F32VectorCoding::F32.query_distance_asymmetric(
                 args.similarity,
-                query.into_owned(),
+                query.to_vec(),
                 None,
             );
             (f32_dist, qdist)
@@ -83,13 +81,7 @@ pub fn distance_loss(
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "scoring"))
         .flat_map(|d| {
-            let mut doc_f32 = Cow::from(&vectors[d]);
-            if let Some(center) = center.as_ref() {
-                for (d, c) in doc_f32.to_mut().iter_mut().zip(center.iter()) {
-                    *d -= *c;
-                }
-            }
-            let doc_f32 = Arc::new(doc_f32.into_owned());
+            let doc_f32 = Arc::new(vectors[d].to_vec());
             let doc = Arc::new(coder.encode(&doc_f32));
             let doc_decoded = coder.decode(&doc);
             let error_term = (doc_f32

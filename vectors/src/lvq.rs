@@ -201,13 +201,7 @@ enum DistanceCorrectionTerms {
     Euclidean {
         l2_norm_sq: f32,
     },
-    Dot {
-        center_dot: f32,
-        center_center_dot: f32,
-    },
-    // XXX this can be angular, never need l2 norm anymore.
-    Cosine {
-        l2_norm: f32,
+    Angular {
         center_dot: f32,
         center_center_dot: f32,
     },
@@ -223,14 +217,7 @@ impl DistanceCorrectionTerms {
             VectorSimilarity::Euclidean => Self::Euclidean {
                 l2_norm_sq: header.l2_norm.powi(2),
             },
-            VectorSimilarity::Dot => Self::Dot {
-                center_dot: header.center_dot,
-                center_center_dot: center
-                    .map(|c| c.iter().map(|&v| v * v).sum())
-                    .unwrap_or(0.0),
-            },
-            VectorSimilarity::Cosine => Self::Cosine {
-                l2_norm: header.l2_norm,
+            VectorSimilarity::Dot | VectorSimilarity::Cosine => Self::Angular {
                 center_dot: header.center_dot,
                 center_center_dot: center
                     .map(|c| c.iter().map(|&v| v * v).sum())
@@ -249,12 +236,7 @@ impl DistanceCorrectionTerms {
             VectorSimilarity::Euclidean => Self::Euclidean {
                 l2_norm_sq: l2_norm.powi(2),
             },
-            VectorSimilarity::Dot => Self::Dot {
-                center_dot,
-                center_center_dot,
-            },
-            VectorSimilarity::Cosine => Self::Cosine {
-                l2_norm,
+            VectorSimilarity::Dot | VectorSimilarity::Cosine => Self::Angular {
                 center_dot,
                 center_center_dot,
             },
@@ -271,17 +253,10 @@ impl DistanceCorrectionTerms {
             Self::Euclidean { l2_norm_sq } => {
                 l2_norm_sq + vector_l2_norm.powi(2) - (2.0 * dot_unnormalized)
             }
-            Self::Dot {
+            Self::Angular {
                 center_dot,
                 center_center_dot,
             } => (dot_unnormalized + center_dot + vector_center_dot - center_center_dot)
-                .mul_add(-0.5, 0.5),
-            Self::Cosine {
-                l2_norm,
-                center_dot,
-                center_center_dot,
-            } => ((dot_unnormalized + center_dot + vector_center_dot - center_center_dot)
-                / (l2_norm * vector_l2_norm))
                 .mul_add(-0.5, 0.5),
         }
     }

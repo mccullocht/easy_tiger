@@ -25,7 +25,7 @@ use std::{
 use half::f16;
 use thread_local::ThreadLocal;
 
-use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity};
+use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity, l2_norm};
 
 const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
 
@@ -144,29 +144,46 @@ fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, 
     }
 }
 
-fn maybe_center_vector_to<'a>(
+/// Prepare a vector for quantization: optionally l2-normalize (for angular similarity) and/or
+/// subtract the center. Returns the prepared vector slice and the center_dot correction term.
+///
+/// `scratch` must be `Some` (and sized to `vector.len()`) when `similarity.angular()` or `center`
+/// is `Some`; it is unused and may be `None` otherwise.
+fn prepare_vector<'a>(
     vector: &'a [f32],
-    center: Option<(&[f32], &'a mut [f32])>,
+    scratch: Option<&'a mut [f32]>,
+    center: Option<&[f32]>,
     similarity: VectorSimilarity,
 ) -> (&'a [f32], f32) {
-    if let Some((center, out)) = center {
-        center_vector(vector, center, out);
-        let center_dot = match similarity {
-            VectorSimilarity::Dot | VectorSimilarity::Cosine => {
-                vector.iter().zip(center.iter()).map(|(&v, &c)| v * c).sum()
-            }
-            _ => 0.0,
-        };
-        (out, center_dot)
-    } else {
-        (vector, 0.0)
-    }
-}
+    let Some(scratch) = scratch else {
+        return (vector, 0.0);
+    };
 
-fn center_vector(vector: &[f32], center: &[f32], out: &mut [f32]) {
-    for ((v, c), o) in vector.iter().zip(center.iter()).zip(out.iter_mut()) {
-        *o = *v - *c;
+    if similarity.angular() {
+        let norm = l2_norm(vector);
+        let scale = if norm > 0.0 { 1.0 / norm } else { 1.0 };
+        for (v, s) in vector.iter().zip(scratch.iter_mut()) {
+            *s = v * scale;
+        }
+    } else {
+        scratch.copy_from_slice(vector);
     }
+
+    let center_dot = if let Some(center) = center {
+        let cd = if similarity.angular() {
+            scratch.iter().zip(center.iter()).map(|(&s, &c)| s * c).sum()
+        } else {
+            0.0
+        };
+        for (s, c) in scratch.iter_mut().zip(center.iter()) {
+            *s -= c;
+        }
+        cd
+    } else {
+        0.0
+    };
+
+    (scratch, center_dot)
 }
 
 fn uncenter_vector(center: &[f32], vector: &mut [f32]) {
@@ -580,24 +597,10 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
 }
 
 #[derive(Debug)]
-struct CenteringState {
-    center: Vec<f32>,
-    scratch: ThreadLocal<RefCell<Vec<f32>>>,
-}
-
-impl CenteringState {
-    fn new(center: Vec<f32>) -> Self {
-        Self {
-            center,
-            scratch: ThreadLocal::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct TurboPrimaryCoder<const B: usize> {
     similarity: VectorSimilarity,
-    centering_state: Option<CenteringState>,
+    center: Option<Vec<f32>>,
+    scratch: ThreadLocal<RefCell<Vec<f32>>>,
     inst: InstructionSet,
 }
 
@@ -609,7 +612,8 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         let _ = Self::B_CHECK;
         Self {
             similarity,
-            centering_state: center.map(CenteringState::new),
+            center,
+            scratch: ThreadLocal::new(),
             inst: InstructionSet::default(),
         }
     }
@@ -620,7 +624,8 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         let _ = Self::B_CHECK;
         Self {
             similarity,
-            centering_state: center.map(CenteringState::new),
+            center,
+            scratch: ThreadLocal::new(),
             inst: InstructionSet::Scalar,
         }
     }
@@ -631,27 +636,29 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         vector: &[f32],
         center: Option<&[f32]>,
     ) -> (PrimaryVectorHeader, Vec<u8>) {
-        let mut scratch = center.map(|c| vec![0.0f32; c.len()]);
+        let needs_scratch = similarity.angular() || center.is_some();
+        let mut scratch_storage = if needs_scratch {
+            vec![0.0f32; vector.len()]
+        } else {
+            vec![]
+        };
+        let scratch = if needs_scratch {
+            Some(scratch_storage.as_mut_slice())
+        } else {
+            None
+        };
+        let (prepared, center_dot) = prepare_vector(vector, scratch, center, similarity);
         let mut out = vec![0u8; packing::byte_len(vector.len(), B)];
-        let header = Self::encode_parts_to(
-            inst,
-            similarity,
-            vector,
-            center.zip(scratch.as_deref_mut()),
-            &mut out,
-        );
+        let header = Self::encode_parts_to(inst, prepared, center_dot, &mut out);
         (header, out)
     }
 
     fn encode_parts_to(
         inst: InstructionSet,
-        similarity: VectorSimilarity,
         vector: &[f32],
-        center: Option<(&[f32], &mut [f32])>,
+        center_dot: f32,
         out: &mut [u8],
     ) -> PrimaryVectorHeader {
-        let (vector, center_dot) = maybe_center_vector_to(vector, center, similarity);
-
         let stats = VectorStats::from(vector);
         let mut header = PrimaryVectorHeader::new(stats, center_dot);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
@@ -677,23 +684,22 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
 
-        let mut center_scratch = self.centering_state.as_ref().map(|c| {
-            let mut scratch = c.scratch.get_or_default().borrow_mut();
-            scratch.resize(vector.len(), 0.0);
-            scratch
-        });
-        let center_state = self
-            .centering_state
-            .as_ref()
-            .map(|c| c.center.as_slice())
-            .zip(center_scratch.as_mut().map(|s| s.as_mut_slice()));
-        let header = Self::encode_parts_to(
-            self.inst,
-            self.similarity,
+        let needs_scratch = self.similarity.angular() || self.center.is_some();
+        let mut scratch_guard = if needs_scratch {
+            let mut g = self.scratch.get_or_default().borrow_mut();
+            g.resize(vector.len(), 0.0);
+            Some(g)
+        } else {
+            None
+        };
+        let (prepared, center_dot) = prepare_vector(
             vector,
-            center_state,
-            vector_bytes,
+            scratch_guard.as_mut().map(|g| g.as_mut_slice()),
+            self.center.as_deref(),
+            self.similarity,
         );
+        let header =
+            Self::encode_parts_to(self.inst, prepared, center_dot, vector_bytes);
         header.serialize(header_bytes);
     }
 
@@ -710,8 +716,8 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe { x86_64::primary_decode_avx512::<B>(vector, out) },
         };
-        if let Some(c) = self.centering_state.as_ref() {
-            uncenter_vector(&c.center, out);
+        if let Some(c) = &self.center {
+            uncenter_vector(c, out);
         }
     }
 
@@ -1077,7 +1083,8 @@ impl VectorEncodeTerms {
 #[derive(Debug)]
 pub struct TurboResidualCoder<const B: usize> {
     similarity: VectorSimilarity,
-    centering_state: Option<CenteringState>,
+    center: Option<Vec<f32>>,
+    scratch: ThreadLocal<RefCell<Vec<f32>>>,
     inst: InstructionSet,
 }
 
@@ -1087,7 +1094,8 @@ impl<const B: usize> TurboResidualCoder<B> {
     pub fn new(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
         Self {
             similarity,
-            centering_state: center.map(CenteringState::new),
+            center,
+            scratch: ThreadLocal::new(),
             inst: InstructionSet::default(),
         }
     }
@@ -1098,7 +1106,8 @@ impl<const B: usize> TurboResidualCoder<B> {
         let _ = Self::B_CHECK;
         Self {
             similarity,
-            centering_state: center.map(CenteringState::new),
+            center,
+            scratch: ThreadLocal::new(),
             inst: InstructionSet::Scalar,
         }
     }
@@ -1109,30 +1118,32 @@ impl<const B: usize> TurboResidualCoder<B> {
         vector: &[f32],
         center: Option<&[f32]>,
     ) -> (PrimaryVectorHeader, Vec<u8>, ResidualVectorHeader, Vec<u8>) {
-        let mut scratch = center.map(|c| vec![0.0f32; c.len()]);
+        let needs_scratch = similarity.angular() || center.is_some();
+        let mut scratch_storage = if needs_scratch {
+            vec![0.0f32; vector.len()]
+        } else {
+            vec![]
+        };
+        let scratch = if needs_scratch {
+            Some(scratch_storage.as_mut_slice())
+        } else {
+            None
+        };
+        let (prepared, center_dot) = prepare_vector(vector, scratch, center, similarity);
         let mut primary = vec![0u8; packing::byte_len(vector.len(), B)];
         let mut residual = vec![0u8; vector.len()];
-        let (primary_header, residual_header) = Self::encode_parts_to(
-            inst,
-            similarity,
-            vector,
-            center.zip(scratch.as_deref_mut()),
-            &mut primary,
-            &mut residual,
-        );
+        let (primary_header, residual_header) =
+            Self::encode_parts_to(inst, prepared, center_dot, &mut primary, &mut residual);
         (primary_header, primary, residual_header, residual)
     }
 
     fn encode_parts_to(
         inst: InstructionSet,
-        similarity: VectorSimilarity,
         vector: &[f32],
-        center: Option<(&[f32], &mut [f32])>,
+        center_dot: f32,
         primary: &mut [u8],
         residual: &mut [u8],
     ) -> (PrimaryVectorHeader, ResidualVectorHeader) {
-        let (vector, center_dot) = maybe_center_vector_to(vector, center, similarity);
-
         let stats = VectorStats::from(vector);
         let mut primary_header = PrimaryVectorHeader::new(stats, center_dot);
         // NB: this interval optimization reduces loss for the primary vector, but this loss
@@ -1206,21 +1217,24 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
         let split = packing::two_vector_split(vector_bytes.len(), B, RESIDUAL_BITS);
         let (primary, residual) = vector_bytes.split_at_mut(split);
 
-        let mut center_scratch = self.centering_state.as_ref().map(|c| {
-            let mut scratch = c.scratch.get_or_default().borrow_mut();
-            scratch.resize(vector.len(), 0.0);
-            scratch
-        });
-        let center_state = self
-            .centering_state
-            .as_ref()
-            .map(|c| c.center.as_slice())
-            .zip(center_scratch.as_mut().map(|s| s.as_mut_slice()));
+        let needs_scratch = self.similarity.angular() || self.center.is_some();
+        let mut scratch_guard = if needs_scratch {
+            let mut g = self.scratch.get_or_default().borrow_mut();
+            g.resize(vector.len(), 0.0);
+            Some(g)
+        } else {
+            None
+        };
+        let (prepared, center_dot) = prepare_vector(
+            vector,
+            scratch_guard.as_mut().map(|g| g.as_mut_slice()),
+            self.center.as_deref(),
+            self.similarity,
+        );
         let (primary_header, residual_header) = Self::encode_parts_to(
             self.inst,
-            self.similarity,
-            vector,
-            center_state,
+            prepared,
+            center_dot,
             primary,
             residual,
         );
@@ -1244,8 +1258,8 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe { x86_64::residual_decode_avx512::<B>(&vector, out) },
         }
-        if let Some(c) = self.centering_state.as_ref() {
-            uncenter_vector(&c.center, out);
+        if let Some(c) = &self.center {
+            uncenter_vector(c, out);
         }
     }
 

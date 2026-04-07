@@ -164,7 +164,7 @@ impl TableIndex {
     pub fn new_posting_coder(&self) -> Box<dyn F32VectorCoder> {
         self.config
             .posting_coder
-            .new_coder(self.head_config().config().similarity)
+            .coder(self.head_config().config().similarity, None)
     }
 
     pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {

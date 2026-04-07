@@ -182,11 +182,11 @@ impl GraphVectorTable {
     }
 
     pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.format.new_coder(self.similarity)
+        self.format.coder(self.similarity, None)
     }
 
     pub fn new_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.format.new_vector_distance(self.similarity)
+        self.format.distance_symmetric(self.similarity, None)
     }
 }
 

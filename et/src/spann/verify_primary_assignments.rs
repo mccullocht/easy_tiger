@@ -105,7 +105,7 @@ fn read_head_vectors(txn_idx: &TransactionIndex) -> Result<(Vec<u32>, VecVectorS
     let posting_coder = index
         .config()
         .posting_coder
-        .new_coder(index.head_config().config().similarity);
+        .coder(index.head_config().config().similarity, None);
 
     let mut cursor = txn_idx
         .transaction()
@@ -146,7 +146,7 @@ fn count_primary_assigned_vectors(
     let dist_fn = index
         .config()
         .posting_coder
-        .new_vector_distance(index.head_config().config().similarity);
+        .distance_symmetric(index.head_config().config().similarity, None);
 
     let mut correct = 0;
     let mut total = 0;

@@ -119,41 +119,37 @@ pub fn recall(
         }
     };
 
-    let coder = args.format.new_coder(args.similarity);
+    let coders: Vec<Box<dyn vectors::F32VectorCoder>> = match centers.as_ref() {
+        None => vec![args.format.coder(args.similarity, None)],
+        Some(cs) => cs
+            .iter()
+            .map(|c| args.format.coder(args.similarity, Some(c.to_vec())))
+            .collect(),
+    };
+
     let query_scorers = (0..query_limit)
         .into_par_iter()
-        .map(|i| match centers.as_ref() {
-            None => {
-                let qdist = if args.quantize_query {
-                    args.format.query_vector_distance_indexing(
-                        coder.encode(&query_vectors[i]),
-                        args.similarity,
-                    )
-                } else {
-                    args.format
-                        .query_vector_distance_f32(query_vectors[i].to_vec(), args.similarity)
-                };
-                vec![qdist]
-            }
-            Some(centers) => centers
+        .map(|i| {
+            coders
                 .iter()
-                .map(|c| {
-                    let centered = query_vectors[i]
-                        .iter()
-                        .zip(c.iter())
-                        .map(|(q, c)| q - c)
-                        .collect::<Vec<_>>();
+                .enumerate()
+                .map(|(ci, coder)| {
+                    let center = centers.as_ref().map(|cs| &cs[ci]);
                     if args.quantize_query {
-                        args.format.query_vector_distance_indexing(
-                            coder.encode(&centered),
+                        args.format.query_distance_symmetric(
                             args.similarity,
+                            coder.encode(&query_vectors[i]),
+                            center,
                         )
                     } else {
-                        args.format
-                            .query_vector_distance_f32(centered, args.similarity)
+                        args.format.query_distance_asymmetric(
+                            args.similarity,
+                            &query_vectors[i][..],
+                            center,
+                        )
                     }
                 })
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
 
@@ -166,17 +162,7 @@ pub fn recall(
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .map(|d| {
             let center = select_center_for_doc(&doc_vectors[d], centers.as_ref(), args.similarity);
-            let doc = if let Some(centers) = centers.as_ref() {
-                coder.encode(
-                    &doc_vectors[d]
-                        .iter()
-                        .zip(centers[center].iter())
-                        .map(|(d, c)| d - c)
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                coder.encode(&doc_vectors[d])
-            };
+            let doc = coders[center].encode(&doc_vectors[d]);
             let mut total_scored = 0;
             let mut total_competitive = 0;
             for (q, s) in query_scorers.iter().enumerate() {

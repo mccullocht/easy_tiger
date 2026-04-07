@@ -9,6 +9,7 @@ half = "2.7.1"
 rand = "0.9.1"
 rand_xoshiro = "0.7.0"
 serde = { version = "1.0.228", features = ["serde_derive"] }
+thread_local = "1.1.9"
 
 [build-dependencies]
 cc = "1.2.41"

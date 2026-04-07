@@ -281,7 +281,7 @@ pub fn split_centroid(
     // Unpack all of the vectors as floats and split into two clusters.
     let posting_format = txn_idx.index().config().posting_coder;
     let similarity = txn_idx.index().head_config().config().similarity;
-    let posting_coder = posting_format.new_coder(similarity);
+    let posting_coder = posting_format.coder(similarity, None);
     let mut scratch_vector = vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
     let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), vectors.len());
     for (_, vector) in vectors.iter() {
@@ -328,12 +328,21 @@ pub fn split_centroid(
 
     let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
     // TODO: skip decoding if head index and posting index format are the same.
-    let c0_dist_fn = posting_format
-        .query_vector_distance_indexing(posting_coder.encode(&original_centroid), similarity);
-    let c1_dist_fn = posting_format
-        .query_vector_distance_indexing(posting_coder.encode(&centroids[0]), similarity);
-    let c2_dist_fn = posting_format
-        .query_vector_distance_indexing(posting_coder.encode(&centroids[1]), similarity);
+    let c0_dist_fn = posting_format.query_distance_symmetric(
+        similarity,
+        posting_coder.encode(&original_centroid),
+        None,
+    );
+    let c1_dist_fn = posting_format.query_distance_symmetric(
+        similarity,
+        posting_coder.encode(&centroids[0]),
+        None,
+    );
+    let c2_dist_fn = posting_format.query_distance_symmetric(
+        similarity,
+        posting_coder.encode(&centroids[1]),
+        None,
+    );
     let mut searches = 0;
     let moved_vectors = vectors.len();
     let txn_factory = ReadTransactionFactory::try_from_transaction(txn_idx.transaction())?;
@@ -445,9 +454,10 @@ pub fn split_centroid(
                         .get(nearby_centroid_id as i64)
                         .unwrap_or(Err(Error::not_found_error()))?,
                 );
-                let c0_dist_fn = posting_format.query_vector_distance_indexing(
-                    posting_coder.encode(&nearby_centroid),
+                let c0_dist_fn = posting_format.query_distance_symmetric(
                     similarity,
+                    posting_coder.encode(&nearby_centroid),
+                    None,
                 );
                 let mut posting_cursor = head_index
                     .transaction()

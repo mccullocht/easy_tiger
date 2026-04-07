@@ -132,7 +132,7 @@ pub fn load_postings(
     let coder = index
         .config()
         .posting_coder
-        .new_coder(index.head_config().config().similarity);
+        .coder(index.head_config().config().similarity, None);
     let mut bulk_cursor = connection.new_bulk_load_cursor::<PostingKey, Vec<u8>>(
         &index.table_names.postings,
         Some(
@@ -173,7 +173,7 @@ pub fn load_raw_vectors(
         .config()
         .rerank_format
         .unwrap()
-        .new_coder(index.head_config().config().similarity);
+        .coder(index.head_config().config().similarity, None);
     let mut encoded = vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())];
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {
         coder.encode_to(vector, &mut encoded);

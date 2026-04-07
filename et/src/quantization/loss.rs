@@ -1,4 +1,4 @@
-use std::{borrow::Cow, io};
+use std::io;
 
 use clap::Args;
 use easy_tiger::input::VectorStore;
@@ -30,23 +30,12 @@ pub fn loss(
 
     // Assume Euclidean. It might be best to make this configurable as some encodings might perform
     // better when the inputs are l2 normalized.
-    let coder = args.format.new_coder(VectorSimilarity::Euclidean);
+    let coder = args.format.coder(VectorSimilarity::Euclidean, mean);
     let (abs_error, sq_error) = (0..vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "loss"))
         .map(|i| {
-            let v = mean
-                .as_ref()
-                .map(|m| {
-                    Cow::from(
-                        vectors[i]
-                            .iter()
-                            .zip(m.iter())
-                            .map(|(d, m)| *d - *m)
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .unwrap_or(Cow::from(&vectors[i]));
+            let v = &vectors[i];
             let encoded = coder.encode(&v);
             let q = coder.decode(&encoded);
             let (abs_error, sq_error) = v

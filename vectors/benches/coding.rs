@@ -17,7 +17,7 @@ fn benchmark_coding(
     similarity: Option<VectorSimilarity>,
 ) {
     let vector = generate_test_vector(1024);
-    let coder = format.new_coder(similarity.unwrap_or(VectorSimilarity::Dot));
+    let coder = format.coder(similarity.unwrap_or(VectorSimilarity::Dot), None);
     let mut out = vec![0u8; coder.byte_len(vector.len())];
     let id = if let Some(s) = similarity {
         format!("{format}/coding/{s}")

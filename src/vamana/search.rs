@@ -164,10 +164,11 @@ impl GraphSearcher {
             .get(vertex_id)
             .unwrap_or(Err(Error::not_found_error()))?
             .to_vec();
-        let nav_query = reader
-            .config()
-            .nav_format
-            .query_vector_distance_indexing(&nav_query_rep, reader.config().similarity);
+        let nav_query = reader.config().nav_format.query_distance_symmetric(
+            reader.config().similarity,
+            &nav_query_rep,
+            None,
+        );
 
         let rerank_query = if self.params.num_rerank > 0 {
             if let Some(vectors) = reader.rerank_vectors() {
@@ -179,7 +180,7 @@ impl GraphSearcher {
                 Some(
                     vectors
                         .format()
-                        .query_vector_distance_indexing(query, vectors.similarity()),
+                        .query_distance_symmetric(vectors.similarity(), query, None),
                 )
             } else {
                 None
@@ -202,15 +203,16 @@ impl GraphSearcher {
         filter_predicate: impl FnMut(i64) -> bool,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
-        let nav_query = reader
-            .config()
-            .nav_format
-            .query_vector_distance_f32(query, reader.config().similarity);
+        let nav_query = reader.config().nav_format.query_distance_asymmetric(
+            reader.config().similarity,
+            query,
+            None,
+        );
         let rerank_query = if self.params.num_rerank > 0 {
             reader
                 .config()
                 .rerank_format
-                .map(|f| f.query_vector_distance_f32(query, reader.config().similarity))
+                .map(|f| f.query_distance_asymmetric(reader.config().similarity, query, None))
         } else {
             None
         };
@@ -480,7 +482,7 @@ mod test {
             T: IntoIterator<Item = V>,
             V: Into<Vec<f32>>,
         {
-            let coder = F32VectorCoding::BinaryQuantized.new_coder(VectorSimilarity::Euclidean);
+            let coder = F32VectorCoding::BinaryQuantized.coder(VectorSimilarity::Euclidean, None);
             let mut rep = iter
                 .into_iter()
                 .map(|x| {

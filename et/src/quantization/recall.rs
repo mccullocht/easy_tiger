@@ -187,12 +187,14 @@ pub fn recall(
         recall_computer.label(),
         sum_recall / query_limit as f64
     );
-    println!(
-        "scored: {} competitive: {} ratio: {:.6}",
-        total_scored,
-        total_competitive,
-        total_competitive as f64 / total_scored as f64
-    );
+    if total_competitive != total_scored {
+        println!(
+            "scored: {} competitive: {} ratio: {:.6}",
+            total_scored,
+            total_competitive,
+            total_competitive as f64 / total_scored as f64
+        );
+    }
 
     Ok(())
 }

@@ -6,11 +6,11 @@ use crate::{
         centroid_stats::CentroidCounts, select_centroids, CentroidAssignment,
         CentroidAssignmentType, PostingKey, TableIndex,
     },
-    vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
+    vamana::{GraphVectorIndex, GraphVectorStore, search::GraphSearcher, wt::TransactionGraphVectorIndex},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{connection::CreateOptionsBuilder, session::Formatted, Connection, Result};
+use wt_mdb::{Error, connection::CreateOptionsBuilder, session::Formatted, Connection, Result};
 
 /// Assign all the vectors to one or more centroids in the head index. This performs the same search
 /// and pruning as [`super::TransactionIndex`] does.
@@ -129,10 +129,9 @@ pub fn load_postings(
         .collect();
     posting_keys.par_sort_unstable();
 
-    let coder = index
-        .config()
-        .posting_coder
-        .coder(index.head_config().config().similarity, None);
+    let similarity = index.head_config().config().similarity;
+    let posting_format = index.config().posting_coder;
+    let dims = index.head_config().config().dimensions.get();
     let mut bulk_cursor = connection.new_bulk_load_cursor::<PostingKey, Vec<u8>>(
         &index.table_names.postings,
         Some(
@@ -140,21 +139,59 @@ pub fn load_postings(
                 .app_metadata(&serde_json::to_string(&index.config).unwrap()),
         ),
     )?;
-    // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
-    // this will also allow us to parallelize IO.
-    let mut encoded_buffer =
-        vec![vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())]; 1024];
-    for batch in posting_keys.chunks(1024) {
-        encoded_buffer
-            .par_iter_mut()
-            .zip(batch)
-            .for_each(|(buf, pk)| {
-                coder.encode_to(&vectors[pk.record_id as usize], buf);
-            });
-        for (pk, buf) in batch.iter().zip(encoded_buffer.iter()) {
-            bulk_cursor.append(*pk, buf)?;
+    let buf_len = posting_format.coder(similarity, None).byte_len(dims);
+
+    // Open the head index once to look up centroid vectors when building centered coders.
+    let head_reader = if index.config().centered {
+        Some(TransactionGraphVectorIndex::new(
+            Arc::clone(index.head_config()),
+            connection.begin_transaction(None)?,
+        ))
+    } else {
+        None
+    };
+    let mut head_index = head_reader
+        .as_ref()
+        .map(|r| -> Result<_> {
+            let vecs = r.high_fidelity_vectors()?;
+            let coder = vecs.new_coder();
+            Ok((vecs, coder))
+        })
+        .transpose()?;
+
+    // Encode in batches grouped by centroid, up to 1024 vectors per batch. Grouping by centroid
+    // allows per-centroid coders when centering is enabled. Batching avoids single-threading
+    // encoding work; if vectors are backed by mmap this also parallelizes IO.
+    let mut encoded_buffer = vec![vec![0u8; buf_len]; 1024];
+    let mut i = 0;
+    while i < posting_keys.len() {
+        let centroid_id = posting_keys[i].centroid_id;
+        let group_len = posting_keys[i..].partition_point(|pk| pk.centroid_id == centroid_id);
+
+        let center = head_index
+            .as_mut()
+            .map(|(vecs, head_coder)| -> Result<_> {
+                Ok(head_coder.decode(
+                    vecs.get(centroid_id as i64)
+                        .unwrap_or(Err(Error::not_found_error()))?,
+                ))
+            })
+            .transpose()?;
+        let coder = posting_format.coder(similarity, center);
+
+        for chunk in posting_keys[i..i + group_len].chunks(1024) {
+            encoded_buffer[..chunk.len()]
+                .par_iter_mut()
+                .zip(chunk)
+                .for_each(|(buf, pk)| {
+                    coder.encode_to(&vectors[pk.record_id as usize], buf);
+                });
+            for (pk, buf) in chunk.iter().zip(encoded_buffer.iter()) {
+                bulk_cursor.append(*pk, buf)?;
+            }
+            progress(chunk.len() as u64);
         }
-        progress(batch.len() as u64);
+        i += group_len;
     }
     Ok(())
 }

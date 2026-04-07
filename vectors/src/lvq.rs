@@ -22,6 +22,7 @@ use std::{
     ops::{Add, AddAssign},
 };
 
+use half::f16;
 use thread_local::ThreadLocal;
 
 use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity};
@@ -319,10 +320,16 @@ struct PrimaryVectorHeader {
     component_sum: u32,
 }
 
-// TODO: we should not encode center_dot when using euclidean distance.
+// TODO: store l2_norm and center_dot in the same physical space, making the header encoding
+// depend on the similarity function. This requires that we normalize the vector for angular
+// similarity and assume an l2 norm of 1 in those cases.
 impl PrimaryVectorHeader {
     /// Encoded buffer size.
-    const LEN: usize = std::mem::size_of::<Self>();
+    ///
+    /// l2_norm, residual_error_term, lower, and upper serialize as f16; center_dot as f32;
+    /// component_sum as u32.
+    const LEN: usize =
+        std::mem::size_of::<f16>() * 4 + std::mem::size_of::<f32>() + std::mem::size_of::<u32>();
 
     fn new(stats: VectorStats, center_dot: f32) -> Self {
         Self {
@@ -342,27 +349,26 @@ impl PrimaryVectorHeader {
 
     #[inline]
     fn serialize(&self, header_bytes: &mut [u8]) {
-        let header = header_bytes.as_chunks_mut::<4>().0;
-        header[0] = self.l2_norm.to_le_bytes();
-        header[1] = self.residual_error_term.to_le_bytes();
-        header[2] = self.center_dot.to_le_bytes();
-        header[3] = self.lower.to_le_bytes();
-        header[4] = self.upper.to_le_bytes();
-        header[5] = self.component_sum.to_le_bytes();
+        header_bytes[0..2].copy_from_slice(&f16::from_f32(self.l2_norm).to_le_bytes());
+        header_bytes[2..4].copy_from_slice(&f16::from_f32(self.residual_error_term).to_le_bytes());
+        header_bytes[4..6].copy_from_slice(&f16::from_f32(self.lower).to_le_bytes());
+        header_bytes[6..8].copy_from_slice(&f16::from_f32(self.upper).to_le_bytes());
+        header_bytes[8..12].copy_from_slice(&self.center_dot.to_le_bytes());
+        header_bytes[12..16].copy_from_slice(&self.component_sum.to_le_bytes());
     }
 
     #[inline]
     fn deserialize(raw: &[u8]) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
-        let header_entries = header_bytes.as_chunks::<4>().0;
         Some((
             Self {
-                l2_norm: f32::from_le_bytes(header_entries[0]),
-                residual_error_term: f32::from_le_bytes(header_entries[1]),
-                center_dot: f32::from_le_bytes(header_entries[2]),
-                lower: f32::from_le_bytes(header_entries[3]),
-                upper: f32::from_le_bytes(header_entries[4]),
-                component_sum: u32::from_le_bytes(header_entries[5]),
+                l2_norm: f16::from_le_bytes(header_bytes[0..2].try_into().unwrap()).to_f32(),
+                residual_error_term: f16::from_le_bytes(header_bytes[2..4].try_into().unwrap())
+                    .to_f32(),
+                lower: f16::from_le_bytes(header_bytes[4..6].try_into().unwrap()).to_f32(),
+                upper: f16::from_le_bytes(header_bytes[6..8].try_into().unwrap()).to_f32(),
+                center_dot: f32::from_le_bytes(header_bytes[8..12].try_into().unwrap()),
+                component_sum: u32::from_le_bytes(header_bytes[12..16].try_into().unwrap()),
             },
             vector_bytes,
         ))

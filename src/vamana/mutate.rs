@@ -380,6 +380,7 @@ mod tests {
                         rerank_format: Some(F32VectorCoding::F32),
                         pruning: EdgePruningConfig::new(NonZero::new(4).unwrap()),
                         index_search_params: Self::search_params(),
+                        centroid: None,
                     },
                     "test",
                 )

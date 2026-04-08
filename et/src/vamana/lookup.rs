@@ -50,6 +50,7 @@ pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -
             txn.open_record_cursor(index.nav_table().name())?,
             index.config().similarity,
             index.nav_table().format(),
+            index.nav_table().centroid().map(std::sync::Arc::from),
         );
         match vectors.get(args.id) {
             None => {

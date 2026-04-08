@@ -81,7 +81,7 @@ impl EdgePruningConfig {
 }
 
 /// Configuration describing graph shape and construction. Used to read and mutate the graph.
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphConfig {
     /// Number of vector dimensions.
     pub dimensions: NonZero<usize>,
@@ -110,6 +110,11 @@ pub struct GraphConfig {
     ///
     /// This dictates the set of candidate edges provided to pruning.
     pub index_search_params: GraphSearchParams,
+    /// Optional center vector used for quantization.
+    ///
+    /// When present, this centroid is subtracted from vectors before encoding and is passed to all
+    /// distance computation functions to apply the appropriate correction terms.
+    pub centroid: Option<Vec<f32>>,
 }
 
 /// `GraphVectorIndex` is used to generate objects for graph navigation and mutation.
@@ -203,14 +208,18 @@ pub trait GraphVectorStore {
     /// Return the format that vectors in the store are encoded in.
     fn format(&self) -> F32VectorCoding;
 
+    /// Return the centering vector used for quantization, if any.
+    fn centroid(&self) -> Option<&[f32]>;
+
     /// Create a new distance function that operates over vectors on this table.
     fn new_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.format().distance_symmetric(self.similarity(), None)
+        self.format().distance_symmetric(self.similarity(), self.centroid())
     }
 
     /// Create a new coder for vectors of this type.
     fn new_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.format().coder(self.similarity(), None)
+        self.format()
+            .coder(self.similarity(), self.centroid().map(|c| c.to_vec()))
     }
 
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.

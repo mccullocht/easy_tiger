@@ -104,6 +104,7 @@ pub fn bulk_load(
                 patience_count: c,
             }),
         },
+        centroid: None,
     };
     if args.drop_tables {
         drop_index(connection.clone(), index_name)?;

@@ -93,6 +93,7 @@ pub fn init_index(
                     patience_count: c,
                 }),
             },
+            centroid: None,
         },
         index_name,
     )

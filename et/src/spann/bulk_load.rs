@@ -168,6 +168,7 @@ pub fn bulk_load(
                 patience_count: c,
             }),
         },
+        centroid: None,
     };
     let spann_config = IndexConfig {
         replica_count: args.replica_count.get(),

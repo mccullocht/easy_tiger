@@ -158,12 +158,7 @@ impl CentroidStats {
     /// Iterate over available centroid ids. The returned iterator is effectively unbounded (up to
     /// `u32::MAX`) so callers should `take()` this iterator to mint the number of ids they need.
     pub fn available_centroid_ids(&self) -> impl Iterator<Item = usize> + '_ {
-        self.0
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.is_none())
-            .map(|(i, _)| i)
-            .chain(self.0.len()..)
+        self.0.len()..
     }
 }
 

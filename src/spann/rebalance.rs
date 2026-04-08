@@ -188,49 +188,26 @@ pub fn merge_centroid(
     // Query the head index for each vector and assign a new centroid.
     let coder = index.new_posting_coder();
     let removed_vectors = vectors.len();
-    let txn_factory = ReadTransactionFactory::try_from_transaction(txn_idx.transaction())?;
-    let reassignments = vectors
-        .into_par_iter()
-        .map_init(
-            || {
-                (
-                    TransactionGraphVectorIndex::new(
-                        Arc::clone(index.head_config()),
-                        txn_factory.create().expect("open session"),
-                    ),
-                    GraphSearcher::new(index.config().head_search_params),
-                    vec![0.0f32; index.head_config().config().dimensions.get()],
-                )
-            },
-            |(head_index, searcher, float_vector), (record_id, vector)| {
-                coder.decode_to(&vector, float_vector);
-                // TODO: seed the search with the existing assignments for this record; reduce budget.
-                let candidates = searcher.search_with_filter(
-                    float_vector,
-                    |i| i != centroid_id as i64,
-                    head_index,
-                )?;
-                let new_assignments = select_centroids(
-                    index.config().replica_selection,
-                    index.config().replica_count,
-                    candidates,
-                    float_vector,
-                    head_index,
-                )?;
-                Ok((record_id, new_assignments, vector))
-            },
-        )
-        .collect::<Result<Vec<_>>>()?;
-
-    let unique_centroids = reassignments
-        .iter()
-        .map(|(_, a, _)| a.primary_id)
-        .collect::<HashSet<_>>()
-        .len();
-
+    let mut searcher = GraphSearcher::new(index.config().head_search_params);
+    let mut float_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
+    let mut unique_centroids = HashSet::new();
+    let mut reassignments = Vec::with_capacity(removed_vectors);
     let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
-    posting_cursor.reset()?;
-    for (record_id, new_assignments, vector) in reassignments {
+    for (record_id, vector) in vectors {
+        coder.decode_to(&vector, &mut float_vector);
+        // TODO: seed the search with the existing assignments for this record; reduce budget.
+        let candidates = searcher.search_with_filter(
+            &float_vector,
+            |i| i != centroid_id as i64,
+            txn_idx.head(),
+        )?;
+        let new_assignments = select_centroids(
+            index.config().replica_selection,
+            index.config().replica_count,
+            candidates,
+            &float_vector,
+            txn_idx.head(),
+        )?;
         let old_assignments =
             assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
         move_postings(
@@ -243,6 +220,10 @@ pub fn merge_centroid(
             &new_assignments,
             &mut posting_cursor,
         )?;
+        for (_, new_centroid) in new_assignments.iter() {
+            unique_centroids.insert(new_centroid);
+        }
+        reassignments.push((record_id, new_assignments, vector));
     }
 
     assignment_updater.flush()?;
@@ -253,7 +234,7 @@ pub fn merge_centroid(
 
     Ok(MergeStats {
         moved_vectors: removed_vectors,
-        unique_centroids,
+        unique_centroids: unique_centroids.len(),
     })
 }
 

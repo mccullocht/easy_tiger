@@ -189,8 +189,8 @@ pub fn merge_centroid(
     let mut searcher = GraphSearcher::new(index.config().head_search_params);
     let mut float_vector = vec![0.0f32; index.head_config().config().dimensions.get()];
     let mut unique_centroids = HashSet::new();
-    let mut reassignments = Vec::with_capacity(removed_vectors);
     let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
+    posting_cursor.reset()?;
     for (record_id, vector) in vectors {
         coder.decode_to(&vector, &mut float_vector);
         // TODO: seed the search with the existing assignments for this record; reduce budget.
@@ -221,7 +221,6 @@ pub fn merge_centroid(
         for (_, new_centroid) in new_assignments.iter() {
             unique_centroids.insert(new_centroid);
         }
-        reassignments.push((record_id, new_assignments, vector));
     }
 
     assignment_updater.flush()?;

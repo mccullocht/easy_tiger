@@ -305,13 +305,15 @@ where
                         if iv.len() == iv.capacity() || ev.len() == ev.capacity() {
                             true
                         } else {
-                            // Another concurrent search may have added this edge already, so skip
-                            // it if that is the case.
-                            if !iv.contains(&e) {
+                            // Another concurrent insertion may have added this edge already, so
+                            // skip it if that is the case. Compare by vertex id only: the same
+                            // vertex can appear with different distances (e.g. asymmetric vs
+                            // symmetric distance), and Neighbor equality includes distance.
+                            if !iv.iter().any(|n| n.vertex() == e.vertex()) {
                                 iv.push(e);
                             }
                             let backedge = Neighbor::new(v as i64, e.distance());
-                            if !ev.contains(&backedge) {
+                            if !ev.iter().any(|n| n.vertex() == v as i64) {
                                 ev.push(backedge);
                             }
                             false
@@ -471,6 +473,14 @@ where
         );
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
+            // Skip vertices already in edges: the graph search may have found this vertex
+            // while it was concurrently being inserted, producing a different distance than
+            // the symmetric distance computed here. Since Neighbor equality is (vertex, distance),
+            // binary_search below would not find the existing entry and would insert a duplicate.
+            if edges.iter().any(|n| n.vertex() == in_flight_vertex as i64) {
+                continue;
+            }
+
             let in_flight_vertex_vector = vector_store.get(in_flight_vertex as i64).unwrap()?;
             let n = Neighbor::new(
                 in_flight_vertex as i64,

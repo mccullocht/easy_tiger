@@ -463,7 +463,7 @@ pub fn split_centroid(
                 assignment_updater.update(key.record_id, new_assignments.to_formatted_ref())?;
             nearby_moved += move_postings(
                 key,
-                &vector,
+                vector,
                 &old_assignments,
                 &new_assignments,
                 &mut posting_cursor,

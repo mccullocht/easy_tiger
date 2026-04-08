@@ -305,13 +305,15 @@ where
                         if iv.len() == iv.capacity() || ev.len() == ev.capacity() {
                             true
                         } else {
-                            // Another concurrent search may have added this edge already, so skip
-                            // it if that is the case.
-                            if !iv.contains(&e) {
+                            // Another concurrent insertion may have added this edge already, so
+                            // skip it if that is the case. Compare by vertex id only: the same
+                            // vertex can appear with different distances (e.g. asymmetric vs
+                            // symmetric distance), and Neighbor equality includes distance.
+                            if !iv.iter().any(|n| n.vertex() == e.vertex()) {
                                 iv.push(e);
                             }
                             let backedge = Neighbor::new(v as i64, e.distance());
-                            if !ev.contains(&backedge) {
+                            if !ev.iter().any(|n| n.vertex() == v as i64) {
                                 ev.push(backedge);
                             }
                             false
@@ -467,10 +469,18 @@ where
         let vertex_dist_fn = vector_format.query_distance_symmetric(
             self.index.config().similarity,
             &vertex_vector,
-            None,
+            self.index.config().centroid.as_deref(),
         );
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
+            // Skip vertices already in edges: the graph search may have found this vertex
+            // while it was concurrently being inserted, producing a different distance than
+            // the symmetric distance computed here. Since Neighbor equality is (vertex, distance),
+            // binary_search below would not find the existing entry and would insert a duplicate.
+            if edges.iter().any(|n| n.vertex() == in_flight_vertex as i64) {
+                continue;
+            }
+
             let in_flight_vertex_vector = vector_store.get(in_flight_vertex as i64).unwrap()?;
             let n = Neighbor::new(
                 in_flight_vertex as i64,
@@ -590,28 +600,35 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
     }
 
     fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
+        let centroid: Option<Arc<[f32]>> =
+            self.config().centroid.as_deref().map(Arc::from);
         if let Some(s) = self.0.quantized_vectors.as_ref() {
             Ok(BulkLoadGraphVectorStore::Memory(
                 s,
                 self.config().similarity,
                 self.config().nav_format,
+                centroid,
             ))
         } else {
             Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
                 self.1.open_record_cursor(self.0.index.nav_table().name())?,
                 self.config().similarity,
                 self.config().nav_format,
+                centroid,
             )))
         }
     }
 
     fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
         self.0.index.rerank_table().map(|t| {
+            let centroid: Option<Arc<[f32]>> =
+                self.0.index.config().centroid.as_deref().map(Arc::from);
             self.1.open_record_cursor(t.name()).map(|c| {
                 BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
                     c,
                     self.0.index.config().similarity,
                     t.format(),
+                    centroid,
                 ))
             })
         })
@@ -699,6 +716,7 @@ enum BulkLoadGraphVectorStore<'a> {
         &'a DerefVectorStore<u8, memmap2::Mmap>,
         VectorSimilarity,
         F32VectorCoding,
+        Option<Arc<[f32]>>,
     ),
 }
 
@@ -706,21 +724,28 @@ impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
     fn format(&self) -> F32VectorCoding {
         match self {
             Self::Cursor(c) => c.format(),
-            Self::Memory(_, _, f) => *f,
+            Self::Memory(_, _, f, _) => *f,
         }
     }
 
     fn similarity(&self) -> VectorSimilarity {
         match self {
             Self::Cursor(c) => c.similarity(),
-            Self::Memory(_, s, _) => *s,
+            Self::Memory(_, s, _, _) => *s,
+        }
+    }
+
+    fn centroid(&self) -> Option<&[f32]> {
+        match self {
+            Self::Cursor(c) => c.centroid(),
+            Self::Memory(_, _, _, c) => c.as_deref(),
         }
     }
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
         match self {
             Self::Cursor(c) => c.get(vertex_id),
-            Self::Memory(m, _, _) => {
+            Self::Memory(m, _, _, _) => {
                 if vertex_id >= 0 && (vertex_id as usize) < m.len() {
                     Some(Ok(&m[vertex_id as usize]))
                 } else {

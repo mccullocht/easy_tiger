@@ -75,6 +75,11 @@ pub struct BulkLoadArgs {
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
     limit: Option<usize>,
+
+    /// If set, compute a mean vector from the input dataset and use it as a centering offset
+    /// during quantization and distance computation.
+    #[arg(long, default_value_t = false)]
+    center: bool,
 }
 
 pub fn bulk_load(
@@ -86,6 +91,23 @@ pub fn bulk_load(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
         args.dimensions,
     )?;
+
+    let num_vectors = f32_vectors.len();
+    let limit = args.limit.unwrap_or(num_vectors);
+
+    let centroid = if args.center {
+        let dims = args.dimensions.get();
+        let mut sum = vec![0.0f64; dims];
+        for v in f32_vectors.iter().take(limit) {
+            for (s, x) in sum.iter_mut().zip(v.iter()) {
+                *s += *x as f64;
+            }
+        }
+        let n = limit as f64;
+        Some(sum.iter().map(|s| (s / n) as f32).collect::<Vec<f32>>())
+    } else {
+        None
+    };
 
     let config = GraphConfig {
         dimensions: args.dimensions,
@@ -104,14 +126,13 @@ pub fn bulk_load(
                 patience_count: c,
             }),
         },
+        centroid,
     };
     if args.drop_tables {
         drop_index(connection.clone(), index_name)?;
     }
     let index = TableGraphVectorIndex::from_init(config, index_name)?;
 
-    let num_vectors = f32_vectors.len();
-    let limit = args.limit.unwrap_or(num_vectors);
     let mut builder = BulkLoadBuilder::new(
         connection.clone(),
         index,

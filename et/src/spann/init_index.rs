@@ -127,6 +127,7 @@ pub fn init_index(
                 patience_count: c,
             }),
         },
+        centroid: None,
     };
     let beam_width = args
         .head_edge_candidates

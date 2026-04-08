@@ -167,7 +167,7 @@ impl GraphSearcher {
         let nav_query = reader.config().nav_format.query_distance_symmetric(
             reader.config().similarity,
             &nav_query_rep,
-            None,
+            reader.config().centroid.as_deref(),
         );
 
         let rerank_query = if self.params.num_rerank > 0 {
@@ -180,7 +180,7 @@ impl GraphSearcher {
                 Some(
                     vectors
                         .format()
-                        .query_distance_symmetric(vectors.similarity(), query, None),
+                        .query_distance_symmetric(vectors.similarity(), query, vectors.centroid()),
                 )
             } else {
                 None
@@ -206,13 +206,16 @@ impl GraphSearcher {
         let nav_query = reader.config().nav_format.query_distance_asymmetric(
             reader.config().similarity,
             query,
-            None,
+            reader.config().centroid.as_deref(),
         );
         let rerank_query = if self.params.num_rerank > 0 {
-            reader
-                .config()
-                .rerank_format
-                .map(|f| f.query_distance_asymmetric(reader.config().similarity, query, None))
+            reader.config().rerank_format.map(|f| {
+                f.query_distance_asymmetric(
+                    reader.config().similarity,
+                    query,
+                    reader.config().centroid.as_deref(),
+                )
+            })
         } else {
             None
         };
@@ -482,7 +485,21 @@ mod test {
             T: IntoIterator<Item = V>,
             V: Into<Vec<f32>>,
         {
-            let coder = F32VectorCoding::BinaryQuantized.coder(VectorSimilarity::Euclidean, None);
+            Self::new_with_centroid(max_edges, distance_fn, iter, None)
+        }
+
+        pub fn new_with_centroid<T, V>(
+            max_edges: NonZero<usize>,
+            distance_fn: Box<dyn F32VectorDistance>,
+            iter: T,
+            centroid: Option<Vec<f32>>,
+        ) -> Self
+        where
+            T: IntoIterator<Item = V>,
+            V: Into<Vec<f32>>,
+        {
+            let coder = F32VectorCoding::BinaryQuantized
+                .coder(VectorSimilarity::Euclidean, centroid.clone());
             let mut rep = iter
                 .into_iter()
                 .map(|x| {
@@ -510,6 +527,7 @@ mod test {
                     num_rerank: usize::MAX,
                     patience: None,
                 },
+                centroid,
             };
             Self { data: rep, config }
         }
@@ -663,6 +681,10 @@ mod test {
             self.0.config.similarity
         }
 
+        fn centroid(&self) -> Option<&[f32]> {
+            self.0.config.centroid.as_deref()
+        }
+
         fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
             self.0.data.get(vertex_id as usize).map(|v| {
                 Ok(match self.1 {
@@ -694,6 +716,23 @@ mod test {
                     dim_values[(v >> 6) & 0x3],
                 ])
             }),
+        )
+    }
+
+    fn build_test_graph_with_centroid(max_edges: usize, centroid: Vec<f32>) -> TestGraphVectorIndex {
+        let dim_values = [-0.25, -0.125, 0.125, 0.25];
+        TestGraphVectorIndex::new_with_centroid(
+            NonZero::new(max_edges).unwrap(),
+            VectorSimilarity::Dot.new_distance_function(),
+            (0..256).map(|v| {
+                Vec::from([
+                    dim_values[v & 0x3],
+                    dim_values[(v >> 2) & 0x3],
+                    dim_values[(v >> 4) & 0x3],
+                    dim_values[(v >> 6) & 0x3],
+                ])
+            }),
+            Some(centroid),
         )
     }
 
@@ -797,5 +836,60 @@ mod test {
             "Expected at least 1 filtered candidate, got {}",
             stats.filtered
         );
+    }
+
+    /// Nav-only search with a centroid exercises query_distance_asymmetric with centroid.
+    /// Verifies that the graph can be traversed and returns a sorted candidate list.
+    #[test]
+    fn centroid_no_rerank() {
+        let centroid = vec![0.0625, 0.0625, 0.0625, 0.0625];
+        let index = build_test_graph_with_centroid(4, centroid);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(4).unwrap(),
+            num_rerank: 0,
+            patience: None,
+        });
+        let results = searcher
+            .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+            .unwrap();
+        // Results must be non-empty and sorted by increasing BQ distance.
+        assert!(!results.is_empty());
+        for w in results.windows(2) {
+            assert!(
+                w[0].distance() <= w[1].distance(),
+                "BQ distances not sorted: {w:?}"
+            );
+        }
+    }
+
+    /// Rerank search with a centroid exercises query_distance_symmetric (nav, encoded query) and
+    /// query_distance_asymmetric (rerank, f32 query) both with centroid.
+    ///
+    /// Vertices 1, 4, 16, 64 each differ from the query [-0.1, -0.1, -0.1, -0.1] in exactly one
+    /// dimension (at -0.25 vs -0.1) and are the nearest reachable vertices under raw F32 distance.
+    /// With F32 reranking they should appear first with squared-Euclidean distance ≈ 0.0681.
+    #[test]
+    fn centroid_with_rerank() {
+        let centroid = vec![0.0625, 0.0625, 0.0625, 0.0625];
+        let index = build_test_graph_with_centroid(4, centroid);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(4).unwrap(),
+            num_rerank: 4,
+            patience: None,
+        });
+        let results = searcher
+            .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+            .unwrap();
+        assert!(!results.is_empty());
+        // Results must be sorted by increasing F32 squared-Euclidean distance.
+        for w in results.windows(2) {
+            assert!(
+                w[0].distance() <= w[1].distance(),
+                "rerank distances not sorted: {w:?}"
+            );
+        }
+        // Top result distance should match the known nearest reachable vertex (squared dist ≈ 0.0681).
+        let top_dist = normalize_scores(results)[0].distance();
+        assert_eq!(top_dist, 0.06813, "unexpected top rerank distance");
     }
 }

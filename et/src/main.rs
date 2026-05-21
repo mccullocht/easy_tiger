@@ -1,4 +1,5 @@
 mod compute_neighbors;
+mod generate;
 mod neighbor_util;
 mod quantization;
 mod recall;
@@ -12,6 +13,7 @@ use std::io::{self};
 
 use clap::{command, Parser, Subcommand};
 use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
+use generate::{generate, GenerateArgs};
 use quantization::{quantization, QuantizationArgs};
 use spann::{spann_command, SpannArgs};
 use tracing::level_filters::LevelFilter;
@@ -36,6 +38,8 @@ enum Commands {
     ComputeNeighbors(ComputeNeighborsArgs),
     /// Quantization related utilities.
     Quantization(QuantizationArgs),
+    /// Generate random vectors and write them to a file.
+    Generate(GenerateArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -55,5 +59,6 @@ fn main() -> io::Result<()> {
         Commands::Vamana(args) => vamana_command(args),
         Commands::ComputeNeighbors(args) => compute_neighbors(args),
         Commands::Quantization(args) => quantization(args),
+        Commands::Generate(args) => generate(args),
     }
 }

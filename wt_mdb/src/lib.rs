@@ -129,7 +129,7 @@ impl From<Error> for std::io::Error {
 pub use connection::{BulkLoadCursor, Connection};
 pub use session::{
     IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, StatCursor, TypedCursor,
-    TypedCursorGuard,
+    TypedCursorGuard, ValueDelta,
 };
 pub use transaction::Transaction;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -255,7 +255,7 @@ mod test {
             SetGlobalTimestampType,
         },
         session::{Formatted, QueryTransactionTimestampType, SetTransactionTimestampType},
-        Error, RecordCursorGuard, Result, Statistics, Transaction, WiredTigerError,
+        Error, RecordCursorGuard, Result, Statistics, Transaction, ValueDelta, WiredTigerError,
     };
 
     fn conn_options() -> Option<crate::connection::Options> {
@@ -836,6 +836,101 @@ mod test {
         assert_eq!(
             std::io::Error::from(err).to_string(),
             std::io::Error::new(ErrorKind::NotFound, err).to_string()
+        );
+    }
+
+    #[test]
+    fn index_modify_replace() -> Result<()> {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", index_table_options()).unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_index_cursor("test").unwrap();
+        cursor.set(&b"key".as_slice(), &b"hello world".as_slice())?;
+        cursor.modify(
+            &b"key".as_slice(),
+            &[ValueDelta::Replace {
+                range: (6..11).into(),
+                data: b"rust",
+            }],
+        )?;
+        assert_eq!(
+            cursor.seek_exact(&b"key".as_slice()),
+            Some(Ok(b"hello rust".to_vec()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn record_modify_replace() -> Result<()> {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", None).unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
+        cursor.set(1, b"hello world")?;
+        cursor.modify(
+            1,
+            &[ValueDelta::Replace {
+                range: (6..11).into(),
+                data: b"rust",
+            }],
+        )?;
+        assert_eq!(cursor.seek_exact(1), Some(Ok(b"hello rust".to_vec())));
+        Ok(())
+    }
+
+    #[test]
+    fn index_modify_insert() -> Result<()> {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", index_table_options()).unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_index_cursor("test").unwrap();
+        cursor.set(&b"key".as_slice(), &b"hello".as_slice())?;
+        cursor.modify(
+            &b"key".as_slice(),
+            &[ValueDelta::Insert {
+                data: b" world",
+                offset: 5,
+            }],
+        )?;
+        assert_eq!(
+            cursor.seek_exact(&b"key".as_slice()),
+            Some(Ok(b"hello world".to_vec()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn index_modify_delete() -> Result<()> {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", index_table_options()).unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_index_cursor("test").unwrap();
+        cursor.set(&b"key".as_slice(), &b"hello world".as_slice())?;
+        cursor.modify(
+            &b"key".as_slice(),
+            &[ValueDelta::Delete((5..11).into())],
+        )?;
+        assert_eq!(
+            cursor.seek_exact(&b"key".as_slice()),
+            Some(Ok(b"hello".to_vec()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn modify_wrong_format() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", None).unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_metadata_cursor().unwrap();
+        assert_eq!(
+            cursor.modify(c"table:test", &[]),
+            Err(Error::Errno(Errno::NOTSUP))
         );
     }
 }

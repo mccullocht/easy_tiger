@@ -18,7 +18,7 @@ use crate::{
 };
 
 pub use format::{pack1, pack2, pack3, unpack1, unpack2, unpack3, FormatString, Formatted};
-pub use typed_cursor::{TypedCursor, TypedCursorGuard};
+pub use typed_cursor::{TypedCursor, TypedCursorGuard, ValueDelta};
 
 pub(crate) const METADATA_URI: &CStr = c"metadata:";
 

@@ -11,14 +11,14 @@ mod wt_stats;
 
 use std::io::{self};
 
-use clap::{command, Parser, Subcommand};
-use compute_neighbors::{compute_neighbors, ComputeNeighborsArgs};
-use generate::{generate, GenerateArgs};
-use quantization::{quantization, QuantizationArgs};
-use spann::{spann_command, SpannArgs};
+use clap::{Parser, Subcommand};
+use compute_neighbors::{ComputeNeighborsArgs, compute_neighbors};
+use generate::{GenerateArgs, generate};
+use quantization::{QuantizationArgs, quantization};
+use spann::{SpannArgs, spann_command};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
-use vamana::{vamana_command, VamanaArgs};
+use vamana::{VamanaArgs, vamana_command};
 
 #[derive(Parser)]
 #[command(version, about = "EasyTiger vector indexing tool", long_about = None)]

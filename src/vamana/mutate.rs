@@ -263,7 +263,7 @@ fn cross_link_peer_vertices(
     let mut pruned_edges = vec![];
     for (src_vertex_id, dst_vertex_id) in vertex_data
         .iter()
-        .zip(edge_scores.into_iter())
+        .zip(edge_scores)
         .flat_map(|(v, e)| std::iter::repeat(v.0).zip(e.into_iter().map(|n| n.vertex())))
     {
         // Insert edge symmetrically to maintain an undirected graph.

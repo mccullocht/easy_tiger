@@ -530,7 +530,7 @@ fn hkmeans_group(
             }
         };
 
-        for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
+        for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors) {
             if subset.len() <= *params.cluster_size.end() {
                 centroids.push(centroid);
                 progress(subset.len() as u64);

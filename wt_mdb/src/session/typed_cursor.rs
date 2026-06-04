@@ -2,9 +2,13 @@ use std::{
     marker::PhantomData,
     mem::ManuallyDrop,
     ops::{Bound, Deref, DerefMut, RangeBounds},
+    os::raw::c_void,
+    range::Range,
 };
 
 use rustix::io::Errno;
+use smallvec::SmallVec;
+use wt_sys::{WT_ITEM, WT_MODIFY};
 
 use crate::{
     map_not_found,
@@ -22,6 +26,52 @@ macro_rules! format_to_buf {
     ($var:expr, $formatter:ident, $buf:expr) => {{
         $formatter::pack($var, &mut $buf).map(|()| $buf.as_slice())
     }};
+}
+
+/// A delta to be applied to an existing value using [`TypedCursor::modify`].
+#[derive(Debug, Copy, Clone)]
+pub enum ValueDelta<'a> {
+    /// Insert `data` at `offset`. If `offset` is beyond the end of the value padding bytes will be
+    /// inserted before `data` appears.
+    Insert { data: &'a [u8], offset: usize },
+    /// Delete all bytes in range from the value.
+    Delete(Range<usize>),
+    /// Replace all bytes in `range` in the value with `data`.
+    Replace { range: Range<usize>, data: &'a [u8] },
+}
+
+impl<'a> From<ValueDelta<'a>> for WT_MODIFY {
+    fn from(value: ValueDelta) -> Self {
+        match value {
+            ValueDelta::Insert { data, offset } => WT_MODIFY {
+                data: wt_item_from_slice(data),
+                offset,
+                size: 0,
+            },
+            ValueDelta::Delete(range) => WT_MODIFY {
+                data: wt_item_from_slice(EMPTY_BYTE_SLICE),
+                offset: range.start,
+                size: range.end - range.start,
+            },
+            ValueDelta::Replace { range, data } => WT_MODIFY {
+                data: wt_item_from_slice(data),
+                offset: range.start,
+                size: range.end - range.start,
+            },
+        }
+    }
+}
+
+const EMPTY_BYTE_SLICE: &[u8] = &[];
+
+fn wt_item_from_slice(s: &[u8]) -> WT_ITEM {
+    WT_ITEM {
+        data: s.as_ptr() as *const c_void,
+        size: s.len(),
+        mem: std::ptr::null_mut(),
+        memsize: 0,
+        flags: 0,
+    }
 }
 
 pub struct TypedCursor<'a, K, V> {
@@ -81,6 +131,22 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         unsafe {
             wt_call!(void self.inner.0, set_key, &Item::from(key).0)?;
             wt_call!(self.inner.0, remove)
+        }
+    }
+
+    /// Apply `deltas` to an existing record at `key`.
+    ///
+    /// Returns `ENOTSUP` if the value format is not `u`.
+    pub fn modify(&mut self, key: K::Ref<'_>, deltas: &[ValueDelta<'_>]) -> Result<()> {
+        if V::FORMAT.format_str() != "u" {
+            return Err(Error::Errno(Errno::NOTSUP));
+        }
+        let key = format_to_buf!(key, K, self.key_buf)?;
+        let mut entries: SmallVec<[WT_MODIFY; 32]> =
+            deltas.iter().copied().map(WT_MODIFY::from).collect();
+        unsafe {
+            wt_call!(void self.inner.0, set_key, &Item::from(key).0)?;
+            wt_call!(self.inner.0, modify, entries.as_mut_ptr(), entries.len() as i32)
         }
     }
 

@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
-        GraphConfig, GraphSearchParams, PatienceParams,
+        EdgeType, GraphConfig, GraphSearchParams, PatienceParams,
         bulk::{BulkLoadBuilder, Options},
         wt::TableGraphVectorIndex,
     },
@@ -127,6 +127,7 @@ pub fn bulk_load(
             }),
         },
         centroid,
+        edge_type: EdgeType::Undirected,
     };
     if args.drop_tables {
         drop_index(connection.clone(), index_name)?;

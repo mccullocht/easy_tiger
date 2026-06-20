@@ -2,7 +2,7 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::vamana::{
-    wt::TableGraphVectorIndex, GraphConfig, GraphSearchParams, PatienceParams,
+    wt::TableGraphVectorIndex, EdgeType, GraphConfig, GraphSearchParams, PatienceParams,
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;
@@ -94,6 +94,7 @@ pub fn init_index(
                 }),
             },
             centroid: None,
+            edge_type: EdgeType::Undirected,
         },
         index_name,
     )

@@ -80,6 +80,16 @@ impl EdgePruningConfig {
     }
 }
 
+/// Whether the graph maintains directed or undirected edges.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum EdgeType {
+    /// Every edge A→B has a corresponding back edge B→A.
+    #[default]
+    Undirected,
+    /// Edges are one-way; no back edge is required.
+    Directed,
+}
+
 /// Configuration describing graph shape and construction. Used to read and mutate the graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphConfig {
@@ -115,6 +125,9 @@ pub struct GraphConfig {
     /// When present, this centroid is subtracted from vectors before encoding and is passed to all
     /// distance computation functions to apply the appropriate correction terms.
     pub centroid: Option<Vec<f32>>,
+    /// Whether this graph maintains directed or undirected edges.
+    #[serde(default)]
+    pub edge_type: EdgeType,
 }
 
 /// `GraphVectorIndex` is used to generate objects for graph navigation and mutation.

@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     spann::{IndexConfig, ReplicaSelectionAlgorithm, TableIndex},
     vamana::{
-        GraphConfig, GraphSearchParams, PatienceParams, mutate::insert_vector,
+        EdgeType, GraphConfig, GraphSearchParams, PatienceParams, mutate::insert_vector,
         wt::TransactionGraphVectorIndex,
     },
 };
@@ -128,6 +128,7 @@ pub fn init_index(
             }),
         },
         centroid: None,
+        edge_type: EdgeType::Undirected,
     };
     let beam_width = args
         .head_edge_candidates

@@ -12,7 +12,7 @@ use easy_tiger::{
         },
     },
     vamana::{
-        GraphConfig, GraphSearchParams, PatienceParams,
+        EdgeType, GraphConfig, GraphSearchParams, PatienceParams,
         bulk::{self, BulkLoadBuilder},
     },
 };
@@ -169,6 +169,7 @@ pub fn bulk_load(
             }),
         },
         centroid: None,
+        edge_type: EdgeType::Undirected,
     };
     let spann_config = IndexConfig {
         replica_count: args.replica_count.get(),

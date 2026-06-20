@@ -456,7 +456,7 @@ mod test {
     use wt_mdb::{Error, Result};
 
     use crate::vamana::{
-        EdgePruningConfig, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
+        EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
     };
     use crate::Neighbor;
 
@@ -528,6 +528,7 @@ mod test {
                     patience: None,
                 },
                 centroid,
+                edge_type: EdgeType::Undirected,
             };
             Self { data: rep, config }
         }

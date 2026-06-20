@@ -315,7 +315,7 @@ mod tests {
         mutate::{delete_vector, insert_vector, upsert_vector},
         search::GraphSearcher,
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
-        EdgePruningConfig, Graph, GraphConfig, GraphSearchParams, GraphVectorIndex,
+        EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphSearchParams, GraphVectorIndex,
     };
 
     struct Fixture {
@@ -381,6 +381,7 @@ mod tests {
                         pruning: EdgePruningConfig::new(NonZero::new(4).unwrap()),
                         index_search_params: Self::search_params(),
                         centroid: None,
+                        edge_type: EdgeType::Undirected,
                     },
                     "test",
                 )

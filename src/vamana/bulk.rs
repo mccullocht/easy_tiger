@@ -33,7 +33,7 @@ use crate::{
     vamana::search::GraphSearcher,
     vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     vamana::{
-        prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
+        prune_edges, select_pruned_edges, EdgeSetDistanceComputer, EdgeType, Graph, GraphConfig,
         GraphVectorIndex, GraphVectorStore,
     },
     Neighbor,
@@ -238,9 +238,9 @@ where
     }
 
     fn insert_all<P: Fn(u64) + Send + Sync>(&self, progress: P) -> Result<()> {
-        // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
-        // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
-        // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
+        // apply_mu stores the vertex closest to the centroid and its distance for use as an entry
+        // point. When building an undirected graph this Mutex is also used to ensure that only one
+        // thread is mutating the graph at a time.
         let distance_fn = self.index.high_fidelity_table().new_distance_function();
         let apply_mu = {
             let txn = self.connection.begin_transaction(None)?;
@@ -293,49 +293,14 @@ where
                     distance_fn.distance(&self.centroid, vectors.get(v as i64).unwrap()?)
                 };
 
-                // Add each edge to this vertex and a reciprocal edge to make the graph
-                // undirected. If an edge does not fit on either vertex, save it for later.
-                // We will prune any vertices in this state, but put together the pruned edge
-                // list outside of `apply_mu` to maximize concurrency.
-                loop {
-                    let mut entry_point = apply_mu.lock().unwrap();
-
-                    edges.retain(|&e| {
-                        let (mut iv, mut ev) = self.lock_edge(v, e.vertex() as usize);
-                        if iv.len() == iv.capacity() || ev.len() == ev.capacity() {
-                            true
-                        } else {
-                            // Another concurrent insertion may have added this edge already, so
-                            // skip it if that is the case. Compare by vertex id only: the same
-                            // vertex can appear with different distances (e.g. asymmetric vs
-                            // symmetric distance), and Neighbor equality includes distance.
-                            if !iv.iter().any(|n| n.vertex() == e.vertex()) {
-                                iv.push(e);
-                            }
-                            let backedge = Neighbor::new(v as i64, e.distance());
-                            if !ev.iter().any(|n| n.vertex() == v as i64) {
-                                ev.push(backedge);
-                            }
-                            false
-                        }
-                    });
-
-                    if edges.is_empty() {
-                        if centroid_distance < entry_point.1 {
-                            entry_point.0 = v as i64;
-                            entry_point.1 = centroid_distance;
-                            self.entry_vertex.store(v as i64, atomic::Ordering::SeqCst);
-                        }
-                        break;
+                match self.index.config().edge_type {
+                    EdgeType::Undirected => {
+                        self.insert_undirected(v, centroid_distance, &apply_mu, edges, &reader)?
                     }
-
-                    drop(entry_point);
-                    // Any edge still in the list is overful, so prune it.
-                    self.prune_and_apply(v, &mut reader, &apply_mu)?;
-                    for e in edges.iter() {
-                        self.prune_and_apply(e.vertex() as usize, &mut reader, &apply_mu)?;
+                    EdgeType::Directed => {
+                        self.insert_directed(v, edges, &reader, centroid_distance, &apply_mu)?
                     }
-                }
+                };
 
                 in_flight.remove(&v);
                 progress(1);
@@ -348,14 +313,25 @@ where
     ///
     /// This may prune edges and/or ensure graph connectivity.
     fn cleanup<P: Fn(u64) + Send + Sync>(&self, progress: P) -> Result<()> {
-        // synchronize application of changes to the graph.
-        // this is necessary to ensure the graph remains undirected.
-        let apply_mu = Mutex::new(());
-
         (0..self.limit).into_par_iter().try_for_each(|v| {
             let txn = self.connection.begin_transaction(None)?;
             let mut reader = BulkLoadGraphVectorIndexReader(self, &txn);
-            self.prune_and_apply(v, &mut reader, &apply_mu)?;
+            match self.index.config().edge_type {
+                EdgeType::Undirected => {
+                    // Synchronize application of changes to keep graph undirected.
+                    let apply_mu = Mutex::new(());
+                    self.prune_and_apply_undirected(v, &mut reader, &apply_mu)?
+                }
+                EdgeType::Directed => {
+                    let mut vertex = self.graph[v].write().unwrap();
+                    if vertex.len() > self.index.config().pruning.max_edges.get() {
+                        vertex.sort_unstable();
+                        let computer = EdgeSetDistanceComputer::new(&reader, &vertex)?;
+                        let keep = prune_edges(&mut vertex, &self.index.config().pruning, computer);
+                        vertex.truncate(keep);
+                    }
+                }
+            }
             progress(1);
             Ok::<_, wt_mdb::Error>(())
         })
@@ -502,10 +478,65 @@ where
         Ok(())
     }
 
-    fn prune_and_apply<T>(
+    fn insert_undirected(
         &self,
         vertex: usize,
-        reader: &mut BulkLoadGraphVectorIndexReader<'_, '_, D>,
+        centroid_distance: f64,
+        apply_mu: &Mutex<(i64, f64)>,
+        mut edges: Vec<Neighbor>,
+        reader: &impl GraphVectorIndex,
+    ) -> Result<()> {
+        // Add each edge to this vertex and a reciprocal edge to make the graph
+        // undirected. If an edge does not fit on either vertex, save it for later.
+        // We will prune any vertices in this state, but put together the pruned edge
+        // list outside of `apply_mu` to maximize concurrency.
+        loop {
+            let mut entry_point = apply_mu.lock().unwrap();
+
+            edges.retain(|&e| {
+                let (mut iv, mut ev) = self.lock_edge(vertex, e.vertex() as usize);
+                if iv.len() == iv.capacity() || ev.len() == ev.capacity() {
+                    true
+                } else {
+                    // Another concurrent insertion may have added this edge already, so
+                    // skip it if that is the case. Compare by vertex id only: the same
+                    // vertex can appear with different distances (e.g. asymmetric vs
+                    // symmetric distance), and Neighbor equality includes distance.
+                    if !iv.iter().any(|n| n.vertex() == e.vertex()) {
+                        iv.push(e);
+                    }
+                    let backedge = Neighbor::new(vertex as i64, e.distance());
+                    if !ev.iter().any(|n| n.vertex() == vertex as i64) {
+                        ev.push(backedge);
+                    }
+                    false
+                }
+            });
+
+            if edges.is_empty() {
+                if centroid_distance < entry_point.1 {
+                    entry_point.0 = vertex as i64;
+                    entry_point.1 = centroid_distance;
+                    self.entry_vertex
+                        .store(vertex as i64, atomic::Ordering::SeqCst);
+                }
+                break;
+            }
+
+            drop(entry_point);
+            // Any edge still in the list is overful, so prune it.
+            self.prune_and_apply_undirected(vertex, reader, &apply_mu)?;
+            for e in edges.iter() {
+                self.prune_and_apply_undirected(e.vertex() as usize, reader, &apply_mu)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prune_and_apply_undirected<T>(
+        &self,
+        vertex: usize,
+        reader: &impl GraphVectorIndex,
         apply_mu: &Mutex<T>,
     ) -> Result<()> {
         // Get the set of edges to prune while only holding a read lock on the vertex.
@@ -575,6 +606,67 @@ where
             (self.graph[vertex0].write().unwrap(), g1)
         }
     }
+
+    fn insert_directed(
+        &self,
+        vertex: usize,
+        mut edges: Vec<Neighbor>,
+        reader: &impl GraphVectorIndex,
+        centroid_distance: f64,
+        entry_point: &Mutex<(i64, f64)>,
+    ) -> Result<()> {
+        let computer = EdgeSetDistanceComputer::new(reader, &edges)?;
+        let keep = prune_edges(&mut edges, &self.index.config().pruning, computer);
+        edges.truncate(keep);
+        // Note that we have to add the edges -- concurrent threads may have already inserted back
+        // edges to vertex.
+        self.add_edges_directed(vertex, &edges, reader)?;
+
+        // Insert back links to vertex.
+        for e in edges {
+            self.add_edges_directed(
+                e.vertex() as usize,
+                &[Neighbor::new(vertex as i64, e.distance())],
+                reader,
+            )?;
+        }
+
+        // Update entry point if we are closer.
+        {
+            let mut ep = entry_point.lock().unwrap();
+            if centroid_distance < ep.1 {
+                ep.0 = vertex as i64;
+                ep.1 = centroid_distance;
+                self.entry_vertex
+                    .store(vertex as i64, atomic::Ordering::SeqCst);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn add_edges_directed(
+        &self,
+        vertex: usize,
+        edges: &[Neighbor],
+        reader: &impl GraphVectorIndex,
+    ) -> Result<()> {
+        let mut vertex = self.graph[vertex].write().unwrap();
+        for e in edges {
+            // Skip any attempts to duplicate insert.
+            if vertex.iter().any(|f| f.vertex() == e.vertex()) {
+                continue;
+            }
+            vertex.push(*e);
+            if vertex.len() == vertex.capacity() {
+                vertex.sort_unstable();
+                let computer = EdgeSetDistanceComputer::new(reader, &vertex)?;
+                let keep = prune_edges(&mut vertex, &self.index.config().pruning, computer);
+                vertex.truncate(keep);
+            }
+        }
+        Ok(())
+    }
 }
 
 struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Transaction);
@@ -600,8 +692,7 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
     }
 
     fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
-        let centroid: Option<Arc<[f32]>> =
-            self.config().centroid.as_deref().map(Arc::from);
+        let centroid: Option<Arc<[f32]>> = self.config().centroid.as_deref().map(Arc::from);
         if let Some(s) = self.0.quantized_vectors.as_ref() {
             Ok(BulkLoadGraphVectorStore::Memory(
                 s,

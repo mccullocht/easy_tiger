@@ -177,11 +177,11 @@ impl GraphSearcher {
                     .get(vertex_id)
                     .unwrap_or(Err(Error::not_found_error()))?
                     .to_vec();
-                Some(
-                    vectors
-                        .format()
-                        .query_distance_symmetric(vectors.similarity(), query, vectors.centroid()),
-                )
+                Some(vectors.format().query_distance_symmetric(
+                    vectors.similarity(),
+                    query,
+                    vectors.centroid(),
+                ))
             } else {
                 None
             }
@@ -720,7 +720,10 @@ mod test {
         )
     }
 
-    fn build_test_graph_with_centroid(max_edges: usize, centroid: Vec<f32>) -> TestGraphVectorIndex {
+    fn build_test_graph_with_centroid(
+        max_edges: usize,
+        centroid: Vec<f32>,
+    ) -> TestGraphVectorIndex {
         let dim_values = [-0.25, -0.125, 0.125, 0.25];
         TestGraphVectorIndex::new_with_centroid(
             NonZero::new(max_edges).unwrap(),

@@ -315,12 +315,12 @@ where
     fn cleanup<P: Fn(u64) + Send + Sync>(&self, progress: P) -> Result<()> {
         (0..self.limit).into_par_iter().try_for_each(|v| {
             let txn = self.connection.begin_transaction(None)?;
-            let mut reader = BulkLoadGraphVectorIndexReader(self, &txn);
+            let reader = BulkLoadGraphVectorIndexReader(self, &txn);
             match self.index.config().edge_type {
                 EdgeType::Undirected => {
                     // Synchronize application of changes to keep graph undirected.
                     let apply_mu = Mutex::new(());
-                    self.prune_and_apply_undirected(v, &mut reader, &apply_mu)?
+                    self.prune_and_apply_undirected(v, &reader, &apply_mu)?
                 }
                 EdgeType::Directed => {
                     let mut vertex = self.graph[v].write().unwrap();
@@ -525,9 +525,9 @@ where
 
             drop(entry_point);
             // Any edge still in the list is overful, so prune it.
-            self.prune_and_apply_undirected(vertex, reader, &apply_mu)?;
+            self.prune_and_apply_undirected(vertex, reader, apply_mu)?;
             for e in edges.iter() {
-                self.prune_and_apply_undirected(e.vertex() as usize, reader, &apply_mu)?;
+                self.prune_and_apply_undirected(e.vertex() as usize, reader, apply_mu)?;
             }
         }
         Ok(())

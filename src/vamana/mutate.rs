@@ -1,9 +1,10 @@
 //! Tools for mutating a vamana graph vector index.
 use crate::vamana::{
-    prune_edges, search::GraphSearcher, EdgeSetDistanceComputer, Graph, GraphVectorIndex,
-    GraphVectorStore,
+    prune_edges, search::GraphSearcher, EdgePruningConfig, EdgeSetDistanceComputer, EdgeType,
+    Graph, GraphVectorIndex, GraphVectorStore,
 };
 use crate::Neighbor;
+use std::collections::{hash_map::Entry, HashMap};
 use vectors::VectorDistance;
 use wt_mdb::{Error, Result};
 
@@ -17,6 +18,13 @@ pub fn insert_vector(vector: &[f32], index: &impl GraphVectorIndex) -> Result<i6
 ///
 /// May return a non found error if `vertex_id` is not present in the index.
 pub fn delete_vector(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
+    match index.config().edge_type {
+        EdgeType::Undirected => delete_vector_undirected(vertex_id, index),
+        EdgeType::Directed => delete_vector_directed(vertex_id, index),
+    }
+}
+
+fn delete_vector_undirected(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
     let mut graph = index.graph()?;
     let mut vectors = index.high_fidelity_vectors()?;
     let distance_fn = vectors.new_distance_function();
@@ -80,6 +88,136 @@ pub fn delete_vector(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()
     Ok(())
 }
 
+/// Delete a vector in a directed graph.
+///
+/// This utilizes Inplace Delete (Algorithm 6) from https://www.vldb.org/pvldb/vol18/p5166-upreti.pdf
+fn delete_vector_directed(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
+    let mut graph = index.graph()?;
+    let mut vectors = index.high_fidelity_vectors()?;
+    let distance_fn = vectors.new_distance_function();
+
+    let edges = graph.remove_vertex(vertex_id)?;
+    let vector = vectors
+        .get(vertex_id)
+        .expect("row exists")
+        .map(|v| v.to_vec())?;
+    index.nav_vectors()?.remove(vertex_id)?;
+    if let Some(vectors) = index.rerank_vectors() {
+        vectors?.remove(vertex_id)?;
+    }
+
+    // A candidate vertex to reprocess. Reprocess if there is an edge to vertex_id, saving all of
+    // the other edges, otherwise skip.
+    enum Vertex {
+        Skip,
+        Reprocess(Vec<i64>),
+    }
+
+    impl Vertex {
+        fn new(delete_vertex_id: i64, mut edges: Vec<i64>) -> Self {
+            if let Some(pos) = edges.iter().position(|e| *e == delete_vertex_id) {
+                edges.remove(pos);
+                Self::Reprocess(edges)
+            } else {
+                Self::Skip
+            }
+        }
+    }
+
+    // Cast a net looking for vertexes that reference vertex_id, searching within 2 hops.
+    let mut seen_vertexes: HashMap<i64, Vertex> = HashMap::new();
+    for v in edges.iter() {
+        let Some(vedges) = graph.edges(*v).transpose()?.map(|e| e.collect::<Vec<_>>()) else {
+            continue;
+        };
+        seen_vertexes
+            .entry(*v)
+            .or_insert_with(|| Vertex::new(vertex_id, vedges.clone()));
+        for vv in vedges.iter() {
+            if let Entry::Vacant(entry) = seen_vertexes.entry(*vv) {
+                let Some(vvedges) = graph.edges(*vv).transpose()?.map(|e| e.collect::<Vec<_>>())
+                else {
+                    continue;
+                };
+                entry.insert(Vertex::new(vertex_id, vvedges));
+            }
+        }
+    }
+
+    // Each vertex that I removed an edge from may get replacement edges
+    // Fetch these vectors since they will be used repeatedly.
+    let mut replacement_candidates = Vec::with_capacity(edges.len());
+    for e in edges {
+        if let Some(v) = vectors.get(e).transpose()? {
+            replacement_candidates.push((e, v.to_vec()));
+        }
+    }
+
+    // For each vertex that we removed vertex_id from, score all of the replacement candidates
+    // and select some of them into the edge set, pruning if needed.
+    let mut replacements = Vec::with_capacity(replacement_candidates.len());
+    for (id, vertex) in seen_vertexes.iter_mut() {
+        let Vertex::Reprocess(edges) = vertex else {
+            continue;
+        };
+        edges.sort_unstable();
+        replacements.clear();
+
+        let cvector = vectors.get(*id).expect("row exists")?.to_vec();
+        for (rid, rv) in replacement_candidates.iter() {
+            // Skip anything that exists already in the edge set.
+            if !edges.contains(rid) {
+                replacements.push(Neighbor::new(*rid, distance_fn.distance(&cvector, rv)));
+            }
+        }
+
+        if replacements.is_empty() {
+            continue;
+        }
+
+        if replacements.len() > 4 {
+            replacements.select_nth_unstable(3);
+        }
+        for c in replacements.iter().take(4).map(|n| n.vertex()) {
+            if let Err(i) = edges.binary_search(&c) {
+                edges.insert(i, c);
+            }
+        }
+
+        // If there are now too many edges, rehydrate the edge list and prune.
+        if edges.len() > index.config().pruning.max_edges.get() {
+            let (neighbors, keep) =
+                rehydrate_and_prune_directed(&cvector, &mut vectors, edges, &index.config().pruning)?;
+            edges.clear();
+            edges.extend(neighbors.iter().take(keep).map(Neighbor::vertex));
+        }
+
+        graph.set_edges(*id, edges.to_vec())?;
+    }
+
+    // Oh no, we've deleted the entry point! Find the closest point amongst the edges of this node
+    // to use as a new entry point.
+    // TODO: consider all of seen_vertexes instead since they pointed to the removed vertex.
+    if graph
+        .entry_point()
+        .expect("there was at least one vertex")?
+        == vertex_id
+    {
+        let mut neighbors = replacement_candidates
+            .iter()
+            .map(|(id, vec)| Neighbor::new(*id, distance_fn.distance(&vector, vec)))
+            .collect::<Vec<_>>();
+        neighbors.sort_unstable();
+        if let Some(ep_neighbor) = neighbors.first() {
+            graph.set_entry_point(ep_neighbor.vertex())?
+        } else {
+            graph.remove_entry_point()?
+        }
+    }
+
+    Ok(())
+}
+
 /// Upsert vector with the externally assigned `vertex_id`.
 pub fn upsert_vector(vertex_id: i64, vector: &[f32], index: &impl GraphVectorIndex) -> Result<()> {
     let mut graph = index.graph()?;
@@ -130,26 +268,45 @@ fn insert_internal(vertex_id: i64, vector: &[f32], index: &impl GraphVectorIndex
     }
 
     let mut vectors = index.high_fidelity_vectors()?;
-    let distance_fn = vectors.new_distance_function();
     let mut pruned_edges = vec![];
     for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
         let edges = insert_edge_directed(
             index,
             &mut graph,
             &mut vectors,
-            distance_fn.as_ref(),
             src_vertex_id,
             vertex_id,
             &mut pruned_edges,
         )?;
         graph.set_edges(src_vertex_id, edges)?;
 
-        for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
-            remove_edge_directed(&mut graph, src_vertex_id, dst_vertex_id)?;
+        if index.config().edge_type == EdgeType::Undirected {
+            for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
+                remove_edge_directed(&mut graph, src_vertex_id, dst_vertex_id)?;
+            }
         }
     }
 
     Ok(())
+}
+
+/// Rehydrates `edges` as neighbors with distances from `vertex_vector`, skipping any dangling
+/// edges, and prunes if needed. Returns `(neighbors, keep)` where `neighbors[..keep]` are the
+/// selected edges in ascending distance order and `neighbors[keep..]` are the pruned ones.
+fn rehydrate_and_prune_directed(
+    vertex_vector: &[u8],
+    vectors: &mut impl GraphVectorStore,
+    edges: &[i64],
+    config: &EdgePruningConfig,
+) -> Result<(Vec<Neighbor>, usize)> {
+    let (mut neighbors, computer) =
+        EdgeSetDistanceComputer::from_directed_edges(vertex_vector, vectors, edges)?;
+    let keep = if neighbors.len() > config.max_edges.get() {
+        prune_edges(&mut neighbors, config, computer)
+    } else {
+        neighbors.len()
+    };
+    Ok((neighbors, keep))
 }
 
 /// Attempt to insert a directed edge from `src_vertex_id` to `dst_vertex_id` and return the set of
@@ -159,12 +316,10 @@ fn insert_internal(vertex_id: i64, vector: &[f32], index: &impl GraphVectorIndex
 /// exceed max_edges then the edges are pruned according to policy. This process may result in the
 /// inserted edges being dropped. Pruning will also fill `pruned_edges` with any back edges that
 /// need to be removed to maintain an undirected graph.
-#[allow(clippy::too_many_arguments)]
 fn insert_edge_directed(
     index: &impl GraphVectorIndex,
     graph: &mut impl Graph,
     vectors: &mut impl GraphVectorStore,
-    distance_fn: &dyn VectorDistance,
     src_vertex_id: i64,
     dst_vertex_id: i64,
     pruned_edges: &mut Vec<(i64, i64)>,
@@ -185,25 +340,10 @@ fn insert_edge_directed(
         .get(src_vertex_id)
         .expect("row exists")
         .map(|v| v.to_vec())?;
-    let mut neighbors = edges
-        .iter()
-        .map(|e| {
-            vectors
-                .get(*e)
-                .unwrap_or(Err(Error::not_found_error()))
-                .map(|dst| Neighbor::new(*e, distance_fn.distance(&src_vector, dst)))
-        })
-        .collect::<Result<Vec<Neighbor>>>()?;
-    neighbors.sort();
-    let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &neighbors)?;
-    let selected_len = prune_edges(
-        &mut neighbors,
-        &index.config().pruning,
-        edge_set_distance_computer,
-    );
-    // Ensure the graph is undirected by removing links from pruned edges back to this node.
+    let (neighbors, selected_len) =
+        rehydrate_and_prune_directed(&src_vector, vectors, &edges, &index.config().pruning)?;
     for v in neighbors.iter().skip(selected_len).map(Neighbor::vertex) {
-        pruned_edges.push((v, src_vertex_id))
+        pruned_edges.push((v, src_vertex_id));
     }
     edges.clear();
     edges.extend(neighbors.iter().take(selected_len).map(Neighbor::vertex));
@@ -271,7 +411,6 @@ fn cross_link_peer_vertices(
             index,
             graph,
             vectors,
-            distance_fn,
             src_vertex_id,
             dst_vertex_id,
             &mut pruned_edges,
@@ -280,7 +419,6 @@ fn cross_link_peer_vertices(
             index,
             graph,
             vectors,
-            distance_fn,
             dst_vertex_id,
             src_vertex_id,
             &mut pruned_edges,
@@ -567,6 +705,251 @@ mod tests {
 
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![1, 2, 3, 5, 4, 0]));
 
+        Ok(())
+    }
+
+    struct DirectedFixture {
+        index: Arc<TableGraphVectorIndex>,
+        conn: Arc<Connection>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl DirectedFixture {
+        fn search_params() -> GraphSearchParams {
+            GraphSearchParams {
+                beam_width: NonZero::new(16).unwrap(),
+                num_rerank: 16,
+                patience: None,
+            }
+        }
+
+        fn new_txn_index(&self) -> TransactionGraphVectorIndex {
+            TransactionGraphVectorIndex::new(
+                self.index.clone(),
+                self.conn.begin_transaction(None).unwrap(),
+            )
+        }
+
+        fn insert_many(&self, vectors: &[[f32; 2]]) -> Result<Vec<i64>> {
+            let index = self.new_txn_index();
+            vectors
+                .iter()
+                .map(|v| insert_vector(v.as_ref(), &index))
+                .collect::<Result<Vec<_>>>()
+                .and_then(|ids| index.commit(None).map(|_| ids))
+        }
+
+        fn search(&self, query: &[f32]) -> Result<Vec<i64>> {
+            let mut searcher = GraphSearcher::new(Self::search_params());
+            let reader = self.new_txn_index();
+            searcher
+                .search(query, &reader)
+                .map(|neighbors| neighbors.into_iter().map(|n| n.vertex()).collect())
+        }
+    }
+
+    impl Default for DirectedFixture {
+        fn default() -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let conn = Connection::open(
+                dir.path().to_str().unwrap(),
+                Some(
+                    wt_mdb::connection::OptionsBuilder::default()
+                        .create()
+                        .into(),
+                ),
+            )
+            .unwrap();
+            let index = Arc::new(
+                TableGraphVectorIndex::init_index(
+                    &conn,
+                    GraphConfig {
+                        dimensions: NonZero::new(2).unwrap(),
+                        similarity: VectorSimilarity::Euclidean,
+                        nav_format: F32VectorCoding::BinaryQuantized,
+                        rerank_format: Some(F32VectorCoding::F32),
+                        pruning: EdgePruningConfig::new(NonZero::new(4).unwrap()),
+                        index_search_params: Self::search_params(),
+                        centroid: None,
+                        edge_type: EdgeType::Directed,
+                    },
+                    "test",
+                )
+                .unwrap(),
+            );
+            Self {
+                _dir: dir,
+                conn,
+                index,
+            }
+        }
+    }
+
+    #[test]
+    fn directed_empty_graph() -> Result<()> {
+        let fixture = DirectedFixture::default();
+
+        let reader = fixture.new_txn_index();
+        assert_eq!(reader.graph()?.entry_point(), None);
+        let mut searcher = GraphSearcher::new(DirectedFixture::search_params());
+        assert_eq!(searcher.search(&[0.5, -0.5], &reader), Ok(vec![]));
+        Ok(())
+    }
+
+    #[test]
+    fn directed_insert_one() -> Result<()> {
+        let fixture = DirectedFixture::default();
+
+        let index = fixture.new_txn_index();
+        let id = insert_vector(&[0.0, 0.0], &index)?;
+        index.commit(None)?;
+
+        assert_eq!(id, 0);
+        assert_eq!(fixture.new_txn_index().graph()?.entry_point(), Some(Ok(id)));
+        assert_eq!(fixture.search(&[1.0, 1.0]), Ok(vec![id]));
+        Ok(())
+    }
+
+    #[test]
+    fn directed_insert_two() -> Result<()> {
+        let fixture = DirectedFixture::default();
+
+        fixture.insert_many(&[[0.0, 0.0], [0.5, 0.5]])?;
+        assert_eq!(fixture.search(&[1.0, 1.0]), Ok(vec![1, 0]));
+        Ok(())
+    }
+
+    // Verify that inserting a vertex also adds best-effort back edges to its chosen neighbors.
+    #[test]
+    fn directed_back_edges_added_on_insert() -> Result<()> {
+        let fixture = DirectedFixture::default();
+
+        let ids = fixture.insert_many(&[[0.0, 0.0], [1.0, 1.0]])?;
+
+        let reader = fixture.new_txn_index();
+        let mut graph = reader.graph()?;
+        let edges_0: Vec<i64> = graph.edges(ids[0]).unwrap()?.collect();
+        let edges_1: Vec<i64> = graph.edges(ids[1]).unwrap()?.collect();
+        // vertex 1 was inserted second and selects vertex 0 as a forward edge.
+        assert!(
+            edges_1.contains(&ids[0]),
+            "vertex 1 should have a forward edge to vertex 0"
+        );
+        // vertex 0 should have received a back edge to vertex 1.
+        assert!(
+            edges_0.contains(&ids[1]),
+            "vertex 0 should have received a back edge to vertex 1"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn directed_insert_to_prune() -> Result<()> {
+        let fixture = DirectedFixture::default();
+
+        fixture.insert_many(&[
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.1],
+            [0.1, -0.1],
+            [-0.2, -0.2],
+            [-0.1, -0.1],
+        ])?;
+
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
+        Ok(())
+    }
+
+    #[test]
+    fn directed_delete_one() -> Result<()> {
+        let fixture = DirectedFixture::default();
+
+        let vertex_ids = fixture.insert_many(&[[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])?;
+        let txn_index = fixture.new_txn_index();
+        delete_vector(vertex_ids[1], &txn_index)?;
+        txn_index.commit(None)?;
+
+        assert_eq!(
+            fixture.search(&[0.0, 0.0])?,
+            vertex_ids
+                .iter()
+                .copied()
+                .filter(|i| *i != vertex_ids[1])
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    // Delete a hub vertex and verify the graph remains fully searchable.
+    #[test]
+    fn directed_delete_relink() -> Result<()> {
+        let fixture = DirectedFixture::default();
+
+        fixture.insert_many(&[
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.1],
+            [0.1, -0.1],
+            [-0.2, -0.2],
+            [-0.1, -0.1],
+        ])?;
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2, 3, 5, 4]));
+
+        let txn_index = fixture.new_txn_index();
+        delete_vector(1, &txn_index)?;
+        txn_index.commit(None)?;
+
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 2, 3, 5, 4]));
+        Ok(())
+    }
+
+    #[test]
+    fn directed_delete_entry_point() -> Result<()> {
+        let fixture = DirectedFixture::default();
+
+        let txn_index = fixture.new_txn_index();
+        let entry_id = insert_vector(&[0.0, 0.0], &txn_index)?;
+        let next_entry_id = insert_vector(&[0.5, 0.5], &txn_index)?;
+        insert_vector(&[1.0, 1.0], &txn_index)?;
+
+        delete_vector(entry_id, &txn_index)?;
+        assert_eq!(txn_index.graph()?.entry_point(), Some(Ok(next_entry_id)));
+        txn_index.commit(None)?;
+
+        assert_eq!(fixture.search(&[0.0, 0.0])?, vec![1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn directed_delete_only_point() -> Result<()> {
+        let fixture = DirectedFixture::default();
+
+        let txn_index = fixture.new_txn_index();
+        let id = insert_vector(&[0.0, 0.0], &txn_index)?;
+        txn_index.commit(None)?;
+        assert_eq!(fixture.search(&[0.0, 0.0])?, vec![id]);
+
+        let txn_index = fixture.new_txn_index();
+        delete_vector(id, &txn_index)?;
+        txn_index.commit(None)?;
+        assert_eq!(fixture.search(&[0.0, 0.0])?, Vec::<i64>::new());
+        Ok(())
+    }
+
+    #[test]
+    fn directed_upsert() -> Result<()> {
+        let fixture = DirectedFixture::default();
+
+        let vertex_ids = fixture.insert_many(&[[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])?;
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![0, 1, 2]));
+
+        let txn_index = fixture.new_txn_index();
+        upsert_vector(vertex_ids[0], &[2.0, 2.0], &txn_index)?;
+        txn_index.commit(None)?;
+
+        // vertex 0 moved far away; vertex 1 is now nearest to [0.0, 0.0]
+        let results = fixture.search(&[0.0, 0.0])?;
+        assert_eq!(results[0], vertex_ids[1]);
         Ok(())
     }
 }

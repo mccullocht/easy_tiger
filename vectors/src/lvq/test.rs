@@ -826,6 +826,7 @@ lvq_distance_135_test!(distance_135_tlvq1, F32VectorCoding::TLVQ1);
 lvq_distance_135_test!(distance_135_tlvq2, F32VectorCoding::TLVQ2);
 lvq_distance_135_test!(distance_135_tlvq4, F32VectorCoding::TLVQ4);
 lvq_distance_135_test!(distance_135_tlvq8, F32VectorCoding::TLVQ8);
+lvq_distance_135_test!(distance_135_tlvq1x4, F32VectorCoding::TLVQ1x4);
 lvq_distance_135_test!(distance_135_tlvq1x8, F32VectorCoding::TLVQ1x8);
 lvq_distance_135_test!(distance_135_tlvq2x8, F32VectorCoding::TLVQ2x8);
 lvq_distance_135_test!(distance_135_tlvq4x8, F32VectorCoding::TLVQ4x8);
@@ -839,6 +840,7 @@ fn null_vector_decode() {
         F32VectorCoding::TLVQ2,
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
+        F32VectorCoding::TLVQ1x4,
         F32VectorCoding::TLVQ1x8,
         F32VectorCoding::TLVQ2x8,
         F32VectorCoding::TLVQ4x8,
@@ -859,6 +861,7 @@ fn fill_vector_decode() {
         F32VectorCoding::TLVQ2,
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
+        F32VectorCoding::TLVQ1x4,
         F32VectorCoding::TLVQ1x8,
         F32VectorCoding::TLVQ2x8,
         F32VectorCoding::TLVQ4x8,

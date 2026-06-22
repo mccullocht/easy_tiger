@@ -443,10 +443,11 @@ impl VectorDecodeTerms {
         }
     }
 
-    fn from_residual(header: ResidualVectorHeader) -> Self {
+    fn from_residual<const R: usize>(header: ResidualVectorHeader) -> Self {
+        let residual_max = ((1u32 << R) - 1) as f32;
         Self {
             lower: -header.magnitude / 2.0,
-            delta: header.magnitude / RESIDUAL_MAX,
+            delta: header.magnitude / residual_max,
             component_sum: header.component_sum,
         }
     }
@@ -899,7 +900,7 @@ impl TurboPrimaryQueryDistance1 {
             primary_query,
             primary_terms: VectorDecodeTerms::from_primary::<1>(primary_header),
             residual_query,
-            residual_terms: VectorDecodeTerms::from_residual(residual_header),
+            residual_terms: VectorDecodeTerms::from_residual::<RESIDUAL_BITS>(residual_header),
             correction_terms,
             error_terms: ErrorBoundTerms::from_header(&primary_header, query.len(), similarity),
             inst,
@@ -972,16 +973,15 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
 }
 
 const RESIDUAL_BITS: usize = 8;
-const RESIDUAL_MAX: f32 = ((1 << RESIDUAL_BITS) - 1) as f32;
 
-struct TurboResidualVector<'a, const B: usize> {
+struct TurboResidualVector<'a, const B: usize, const R: usize = 8> {
     primary: EncodedVector<'a>,
     residual: EncodedVector<'a>,
     l2_norm: f32,
     center_dot: f32,
 }
 
-impl<'a, const B: usize> TurboResidualVector<'a, B> {
+impl<'a, const B: usize, const R: usize> TurboResidualVector<'a, B, R> {
     const B_CHECK: () = { check_primary_bits(B) };
 
     fn new(data: &'a [u8], similarity: VectorSimilarity) -> Option<Self> {
@@ -993,7 +993,7 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
         let (primary_vector, residual_vector) = vector_bytes.split_at(packing::two_vector_split(
             vector_bytes.len(),
             B,
-            RESIDUAL_BITS,
+            R,
         ));
         Some(Self {
             primary: EncodedVector {
@@ -1001,7 +1001,7 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
                 data: primary_vector,
             },
             residual: EncodedVector {
-                terms: VectorDecodeTerms::from_residual(residual_header),
+                terms: VectorDecodeTerms::from_residual::<R>(residual_header),
                 data: residual_vector,
             },
             l2_norm: primary_header.l2_norm,
@@ -1010,13 +1010,14 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
     }
 
     fn dim(&self) -> usize {
-        self.residual.data.len()
+        (self.residual.data.len() * 8) / R
     }
 
     fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
         let tail_dim = dim & !(packing::block_dim(B) - 1);
         let (primary_headv, primary_tailv) = self.primary.split_at(packing::byte_len(tail_dim, B));
-        let (residual_headv, residual_tailv) = self.residual.split_at(tail_dim);
+        let (residual_headv, residual_tailv) =
+            self.residual.split_at(packing::byte_len(tail_dim, R));
         (
             tail_dim,
             Self {
@@ -1040,9 +1041,10 @@ impl<'a, const B: usize> TurboResidualVector<'a, B> {
     fn split_vector_tail<'b>(
         vector: ResidualVectorBytes<'b>,
     ) -> (usize, ResidualVectorBytes<'b>, ResidualVectorBytes<'b>) {
-        let tail_split = vector.1.len() & !(packing::block_dim(B) - 1);
+        let total_dim = (vector.1.len() * 8) / R;
+        let tail_split = total_dim & !(packing::block_dim(B) - 1);
         let primary = vector.0.split_at(packing::byte_len(tail_split, B));
-        let residual = vector.1.split_at(tail_split);
+        let residual = vector.1.split_at(packing::byte_len(tail_split, R));
         (tail_split, (primary.0, residual.0), (primary.1, residual.1))
     }
 }
@@ -1069,28 +1071,32 @@ impl VectorEncodeTerms {
         }
     }
 
-    fn from_residual(magnitude: f32) -> Self {
+    fn from_residual<const R: usize>(magnitude: f32) -> Self {
+        let residual_max = ((1u32 << R) - 1) as f32;
         Self {
             lower: -magnitude / 2.0,
             upper: magnitude / 2.0,
-            delta_inv: RESIDUAL_MAX / magnitude,
+            delta_inv: residual_max / magnitude,
             delta: 0.0,
         }
     }
 }
 
 #[derive(Debug)]
-pub struct TurboResidualCoder<const B: usize> {
+pub struct TurboResidualCoder<const B: usize, const R: usize = 8> {
     similarity: VectorSimilarity,
     center: Option<Vec<f32>>,
     scratch: ThreadLocal<RefCell<Vec<f32>>>,
     inst: InstructionSet,
 }
 
-impl<const B: usize> TurboResidualCoder<B> {
+impl<const B: usize, const R: usize> TurboResidualCoder<B, R> {
     const B_CHECK: () = { check_primary_bits(B) };
+    const R_CHECK: () = { check_primary_bits(R) };
 
     pub fn new(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::R_CHECK;
         Self {
             similarity,
             center,
@@ -1103,6 +1109,8 @@ impl<const B: usize> TurboResidualCoder<B> {
     pub fn scalar(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::R_CHECK;
         Self {
             similarity,
             center,
@@ -1130,7 +1138,7 @@ impl<const B: usize> TurboResidualCoder<B> {
         };
         let (prepared, center_dot) = prepare_vector(vector, scratch, center, similarity);
         let mut primary = vec![0u8; packing::byte_len(vector.len(), B)];
-        let mut residual = vec![0u8; vector.len()];
+        let mut residual = vec![0u8; packing::byte_len(vector.len(), R)];
         let (primary_header, residual_header) =
             Self::encode_parts_to(inst, prepared, center_dot, &mut primary, &mut residual);
         (primary_header, primary, residual_header, residual)
@@ -1168,14 +1176,14 @@ impl<const B: usize> TurboResidualCoder<B> {
         };
 
         let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
-        let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
+        let residual_terms = VectorEncodeTerms::from_residual::<R>(residual_magnitude);
         let residual_error_sq;
         (
             primary_header.component_sum,
             residual_header.component_sum,
             residual_error_sq,
         ) = match inst {
-            InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
+            InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B, R>(
                 vector,
                 primary_terms,
                 residual_terms,
@@ -1183,7 +1191,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                 residual,
             ),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::residual_quantize_and_pack::<B>(
+            InstructionSet::Neon => aarch64::residual_quantize_and_pack::<B, R>(
                 vector,
                 primary_terms,
                 residual_terms,
@@ -1192,7 +1200,7 @@ impl<const B: usize> TurboResidualCoder<B> {
             ),
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                x86_64::residual_quantize_and_pack_avx512::<B>(
+                x86_64::residual_quantize_and_pack_avx512::<B, R>(
                     vector,
                     primary_terms,
                     residual_terms,
@@ -1207,13 +1215,13 @@ impl<const B: usize> TurboResidualCoder<B> {
     }
 }
 
-impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
+impl<const B: usize, const R: usize> F32VectorCoder for TurboResidualCoder<B, R> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let (primary_header_bytes, vector_bytes) =
             PrimaryVectorHeader::split_output_buf(out).unwrap();
         let (residual_header_bytes, vector_bytes) =
             ResidualVectorHeader::split_output_buf(vector_bytes).unwrap();
-        let split = packing::two_vector_split(vector_bytes.len(), B, RESIDUAL_BITS);
+        let split = packing::two_vector_split(vector_bytes.len(), B, R);
         let (primary, residual) = vector_bytes.split_at_mut(split);
 
         let needs_scratch = self.similarity.angular() || self.center.is_some();
@@ -1240,17 +1248,20 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
         PrimaryVectorHeader::LEN
             + ResidualVectorHeader::LEN
             + packing::byte_len(dimensions, B)
-            + dimensions
+            + packing::byte_len(dimensions, R)
     }
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
-        let vector = TurboResidualVector::<B>::new(vector, self.similarity).expect("valid vector");
+        let vector =
+            TurboResidualVector::<B, R>::new(vector, self.similarity).expect("valid vector");
         match self.inst {
-            InstructionSet::Scalar => scalar::residual_decode::<B>(&vector, out),
+            InstructionSet::Scalar => scalar::residual_decode::<B, R>(&vector, out),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::residual_decode::<B>(&vector, out),
+            InstructionSet::Neon => aarch64::residual_decode::<B, R>(&vector, out),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe { x86_64::residual_decode_avx512::<B>(&vector, out) },
+            InstructionSet::Avx512 => unsafe {
+                x86_64::residual_decode_avx512::<B, R>(&vector, out)
+            },
         }
         if let Some(c) = &self.center {
             uncenter_vector(c, out);
@@ -1260,20 +1271,20 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
     fn dimensions(&self, byte_len: usize) -> usize {
         let len_no_corrective_terms =
             byte_len - PrimaryVectorHeader::LEN - ResidualVectorHeader::LEN;
-        let split = packing::two_vector_split(len_no_corrective_terms, B, RESIDUAL_BITS);
-        // Residual vector always uses a byte per dimension.
-        len_no_corrective_terms - split
+        let split = packing::two_vector_split(len_no_corrective_terms, B, R);
+        let residual_bytes = len_no_corrective_terms - split;
+        (residual_bytes * 8) / R
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TurboResidualDistance<const B: usize> {
+pub struct TurboResidualDistance<const B: usize, const R: usize = 8> {
     similarity: VectorSimilarity,
     center_center_dot: f32,
     inst: InstructionSet,
 }
 
-impl<const B: usize> TurboResidualDistance<B> {
+impl<const B: usize, const R: usize> TurboResidualDistance<B, R> {
     pub fn new(similarity: VectorSimilarity, center: Option<&[f32]>) -> Self {
         let center_center_dot = if let Some(c) = center
             && similarity.angular()
@@ -1290,24 +1301,24 @@ impl<const B: usize> TurboResidualDistance<B> {
     }
 }
 
-impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
+impl<const B: usize, const R: usize> VectorDistance for TurboResidualDistance<B, R> {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = TurboResidualVector::<B>::new(query, self.similarity).unwrap();
-        let doc = TurboResidualVector::<B>::new(doc, self.similarity).unwrap();
+        let query = TurboResidualVector::<B, R>::new(query, self.similarity).unwrap();
+        let doc = TurboResidualVector::<B, R>::new(doc, self.similarity).unwrap();
 
         let component_dot = match self.inst {
-            InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B>(
+            InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B, R>(
                 (query.primary.data, query.residual.data),
                 (doc.primary.data, doc.residual.data),
             ),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::residual_dot_unnormalized::<B>(
+            InstructionSet::Neon => aarch64::residual_dot_unnormalized::<B, R>(
                 (query.primary.data, query.residual.data),
                 (doc.primary.data, doc.residual.data),
             ),
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                x86_64::residual_dot_unnormalized_avx512::<B>(
+                x86_64::residual_dot_unnormalized_avx512::<B, R>(
                     (query.primary.data, query.residual.data),
                     (doc.primary.data, doc.residual.data),
                 )
@@ -1330,7 +1341,7 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
     }
 }
 
-pub struct TurboResidualQueryDistance<const B: usize> {
+pub struct TurboResidualQueryDistance<const B: usize, const R: usize = 8> {
     similarity: VectorSimilarity,
     primary_vector: Vec<u8>,
     primary_terms: VectorDecodeTerms,
@@ -1341,7 +1352,7 @@ pub struct TurboResidualQueryDistance<const B: usize> {
     inst: InstructionSet,
 }
 
-impl<const B: usize> TurboResidualQueryDistance<B> {
+impl<const B: usize, const R: usize> TurboResidualQueryDistance<B, R> {
     pub fn new(
         similarity: VectorSimilarity,
         query: Cow<'_, [f32]>,
@@ -1349,9 +1360,9 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
     ) -> Self {
         let inst = InstructionSet::default();
         let (primary_header, primary_vector, residual_header, residual_vector) =
-            TurboResidualCoder::<B>::encode_parts(inst, similarity, query.as_ref(), center);
+            TurboResidualCoder::<B, R>::encode_parts(inst, similarity, query.as_ref(), center);
         let primary_terms = VectorDecodeTerms::from_primary::<B>(primary_header);
-        let residual_terms = VectorDecodeTerms::from_residual(residual_header);
+        let residual_terms = VectorDecodeTerms::from_residual::<R>(residual_header);
         let correction_terms = DistanceCorrectionTerms::new(&primary_header, center, similarity);
         Self {
             similarity,
@@ -1365,22 +1376,23 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
     }
 }
 
-impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
+impl<const B: usize, const R: usize> QueryVectorDistance for TurboResidualQueryDistance<B, R> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = TurboResidualVector::<B>::new(vector, self.similarity).expect("valid vector");
+        let vector =
+            TurboResidualVector::<B, R>::new(vector, self.similarity).expect("valid vector");
         let component_dot = match self.inst {
-            InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B>(
+            InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B, R>(
                 (&self.primary_vector, &self.residual_vector),
                 (vector.primary.data, vector.residual.data),
             ),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::residual_dot_unnormalized::<B>(
+            InstructionSet::Neon => aarch64::residual_dot_unnormalized::<B, R>(
                 (&self.primary_vector, &self.residual_vector),
                 (vector.primary.data, vector.residual.data),
             ),
             #[cfg(target_arch = "x86_64")]
             InstructionSet::Avx512 => unsafe {
-                x86_64::residual_dot_unnormalized_avx512::<B>(
+                x86_64::residual_dot_unnormalized_avx512::<B, R>(
                     (&self.primary_vector, &self.residual_vector),
                     (vector.primary.data, vector.residual.data),
                 )

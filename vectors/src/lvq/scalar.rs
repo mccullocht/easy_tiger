@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use super::{
-    LAMBDA, MINIMUM_MSE_GRID, RESIDUAL_BITS, ResidualDotComponents, TurboPrimaryVector,
+    LAMBDA, MINIMUM_MSE_GRID, ResidualDotComponents, TurboPrimaryVector,
     TurboResidualVector, VectorEncodeTerms, VectorStats,
     packing::{TurboPacker, TurboUnpacker},
 };
@@ -130,7 +130,7 @@ pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &m
     }
 }
 
-pub fn residual_quantize_and_pack<const B: usize>(
+pub fn residual_quantize_and_pack<const B: usize, const R: usize>(
     vector: &[f32],
     primary_terms: VectorEncodeTerms,
     residual_terms: VectorEncodeTerms,
@@ -138,7 +138,7 @@ pub fn residual_quantize_and_pack<const B: usize>(
     residual: &mut [u8],
 ) -> (u32, u32, f32) {
     let mut primary_packer = TurboPacker::<B>::new(primary);
-    let mut residual_packer = TurboPacker::<RESIDUAL_BITS>::new(residual);
+    let mut residual_packer = TurboPacker::<R>::new(residual);
     let (primary_sum, residual_sum, residual_error_sq) = vector
         .iter()
         .map(|&v| {
@@ -161,9 +161,12 @@ pub fn residual_quantize_and_pack<const B: usize>(
     (primary_sum, residual_sum, residual_error_sq)
 }
 
-pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {
+pub fn residual_decode<const B: usize, const R: usize>(
+    vector: &TurboResidualVector<'_, B, R>,
+    out: &mut [f32],
+) {
     for ((p, r), o) in TurboUnpacker::<B>::new(vector.primary.data)
-        .zip(vector.residual.data.iter().copied())
+        .zip(TurboUnpacker::<R>::new(vector.residual.data))
         .zip(out.iter_mut())
     {
         *o = (p as f32).mul_add(vector.primary.terms.delta, vector.primary.terms.lower)
@@ -207,13 +210,13 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
 }
 
 #[inline]
-pub fn residual_dot_unnormalized<const B: usize>(
+pub fn residual_dot_unnormalized<const B: usize, const R: usize>(
     query: (&[u8], &[u8]),
     doc: (&[u8], &[u8]),
 ) -> ResidualDotComponents {
     TurboUnpacker::<B>::new(query.0)
-        .zip(query.1.iter().copied())
-        .zip(TurboUnpacker::<B>::new(doc.0).zip(doc.1.iter().copied()))
+        .zip(TurboUnpacker::<R>::new(query.1))
+        .zip(TurboUnpacker::<B>::new(doc.0).zip(TurboUnpacker::<R>::new(doc.1)))
         .map(|((qp, qr), (dp, dr))| ResidualDotComponents {
             ap_dot_bp: qp as u32 * dp as u32,
             ap_dot_br: qp as u32 * dr as u32,

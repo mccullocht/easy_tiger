@@ -370,13 +370,22 @@ pub unsafe fn primary_decode_avx512<const B: usize>(
 }
 
 #[target_feature(enable = "avx512f")]
-pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
+pub unsafe fn residual_quantize_and_pack_avx512<const B: usize, const R: usize>(
     vector: &[f32],
     primary_terms: VectorEncodeTerms,
     residual_terms: VectorEncodeTerms,
     primary_out: &mut [u8],
     residual_out: &mut [u8],
 ) -> (u32, u32, f32) {
+    if R != 8 {
+        return super::scalar::residual_quantize_and_pack::<B, R>(
+            vector,
+            primary_terms,
+            residual_terms,
+            primary_out,
+            residual_out,
+        );
+    }
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
@@ -436,7 +445,7 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
         };
 
     if !vector_tail.is_empty() {
-        let (p, r, e) = super::scalar::residual_quantize_and_pack::<B>(
+        let (p, r, e) = super::scalar::residual_quantize_and_pack::<B, R>(
             vector_tail,
             primary_terms,
             residual_terms,
@@ -456,10 +465,14 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
 }
 
 #[target_feature(enable = "avx512f")]
-pub fn residual_decode_avx512<const B: usize>(
-    vector: &TurboResidualVector<'_, B>,
+pub fn residual_decode_avx512<const B: usize, const R: usize>(
+    vector: &TurboResidualVector<'_, B, R>,
     out: &mut [f32],
 ) {
+    if R != 8 {
+        super::scalar::residual_decode::<B, R>(vector, out);
+        return;
+    }
     let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
     let (out_head, out_tail) = out.split_at_mut(tail_split);
 
@@ -505,7 +518,7 @@ pub fn residual_decode_avx512<const B: usize>(
     }
 
     if !in_tail.primary.data.is_empty() {
-        super::scalar::residual_decode::<B>(&in_tail, out_tail);
+        super::scalar::residual_decode::<B, R>(&in_tail, out_tail);
     }
 }
 
@@ -717,12 +730,16 @@ impl ResidualDotComponents512 {
 }
 
 #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vnni")]
-pub unsafe fn residual_dot_unnormalized_avx512<const B: usize>(
+pub unsafe fn residual_dot_unnormalized_avx512<const B: usize, const R: usize>(
     query: (&[u8], &[u8]),
     doc: (&[u8], &[u8]),
 ) -> ResidualDotComponents {
-    let (tail_split, query_head, query_tail) = TurboResidualVector::<B>::split_vector_tail(query);
-    let (_, doc_head, doc_tail) = TurboResidualVector::<B>::split_vector_tail(doc);
+    if R != 8 {
+        return super::scalar::residual_dot_unnormalized::<B, R>(query, doc);
+    }
+    let (tail_split, query_head, query_tail) =
+        TurboResidualVector::<B, R>::split_vector_tail(query);
+    let (_, doc_head, doc_tail) = TurboResidualVector::<B, R>::split_vector_tail(doc);
 
     let mut dot = if !query_head.0.is_empty() {
         let mut dot = ResidualDotComponents512::new();
@@ -832,7 +849,7 @@ pub unsafe fn residual_dot_unnormalized_avx512<const B: usize>(
     };
 
     if !query_tail.0.is_empty() {
-        dot += super::scalar::residual_dot_unnormalized::<B>(query_tail, doc_tail);
+        dot += super::scalar::residual_dot_unnormalized::<B, R>(query_tail, doc_tail);
     }
     dot
 }

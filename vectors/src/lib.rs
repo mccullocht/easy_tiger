@@ -181,6 +181,10 @@ pub enum F32VectorCoding {
     ///
     /// This encoding is optimized for cases where dimensionality is a multiple of 16.
     TLVQ8x8,
+    /// Turbo LVQ; 1 bit primary vector and 4 bit residual vector.
+    ///
+    /// This encoding is optimized for cases where dimensionality is a multiple of 128.
+    TLVQ1x4,
 }
 
 impl F32VectorCoding {
@@ -207,6 +211,9 @@ impl F32VectorCoding {
             (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualCoder::<2>::new(similarity, center)),
             (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualCoder::<4>::new(similarity, center)),
             (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualCoder::<8>::new(similarity, center)),
+            (Self::TLVQ1x4, _) => {
+                Box::new(lvq::TurboResidualCoder::<1, 4>::new(similarity, center))
+            }
         }
     }
 
@@ -245,6 +252,9 @@ impl F32VectorCoding {
             }
             (Self::TLVQ8x8, _) => {
                 Box::new(lvq::TurboResidualDistance::<8>::new(similarity, center))
+            }
+            (Self::TLVQ1x4, _) => {
+                Box::new(lvq::TurboResidualDistance::<1, 4>::new(similarity, center))
             }
         }
     }
@@ -316,6 +326,13 @@ impl F32VectorCoding {
                 query.into(),
                 center,
             )),
+            (F32VectorCoding::TLVQ1x4, _) => {
+                Box::new(lvq::TurboResidualQueryDistance::<1, 4>::new(
+                    similarity,
+                    query.into(),
+                    center,
+                ))
+            }
         }
     }
 
@@ -404,6 +421,12 @@ impl F32VectorCoding {
                     query
                 )
             }
+            (_, F32VectorCoding::TLVQ1x4) => {
+                quantized_qvd!(
+                    lvq::TurboResidualDistance::<1, 4>::new(similarity, center),
+                    query
+                )
+            }
         }
     }
 }
@@ -425,6 +448,7 @@ impl FromStr for F32VectorCoding {
             "tlvq2x8" => Ok(Self::TLVQ2x8),
             "tlvq4x8" => Ok(Self::TLVQ4x8),
             "tlvq8x8" => Ok(Self::TLVQ8x8),
+            "tlvq1x4" => Ok(Self::TLVQ1x4),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -444,6 +468,7 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TLVQ2x8 => write!(f, "tlvq2x8"),
             Self::TLVQ4x8 => write!(f, "tlvq4x8"),
             Self::TLVQ8x8 => write!(f, "tlvq8x8"),
+            Self::TLVQ1x4 => write!(f, "tlvq1x4"),
         }
     }
 }
@@ -625,7 +650,7 @@ mod test {
         assert_float_near!(f32_dist, query_dist, threshold, index);
     }
 
-    use F32VectorCoding::{F16, TLVQ1, TLVQ1x8, TLVQ2, TLVQ2x8, TLVQ4, TLVQ4x8, TLVQ8, TLVQ8x8};
+    use F32VectorCoding::{F16, TLVQ1, TLVQ1x4, TLVQ1x8, TLVQ2, TLVQ2x8, TLVQ4, TLVQ4x8, TLVQ8, TLVQ8x8};
     use VectorSimilarity::{Cosine, Dot, Euclidean};
     use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
 
@@ -665,6 +690,8 @@ mod test {
     distance_test!(tlvq8_dot_dist, Dot, TLVQ8, 0.01);
     distance_test!(tlvq8_l2_dist, Euclidean, TLVQ8, 0.01);
 
+    distance_test!(tlvq1x4_dot_dist, Dot, TLVQ1x4, 0.1);
+    distance_test!(tlvq1x4_l2_dist, Euclidean, TLVQ1x4, 0.1);
     distance_test!(tlvq1x8_dot_dist, Dot, TLVQ1x8, 0.01);
     distance_test!(tlvq1x8_l2_dist, Euclidean, TLVQ1x8, 0.01);
     distance_test!(tlvq2x8_dot_dist, Dot, TLVQ2x8, 0.01);
@@ -706,6 +733,7 @@ mod test {
     lvq_coding_simd_test!(tlvq2_coding_simd, TurboPrimaryCoder::<2>);
     lvq_coding_simd_test!(tlvq4_coding_simd, TurboPrimaryCoder::<4>);
     lvq_coding_simd_test!(tlvq8_coding_simd, TurboPrimaryCoder::<8>);
+    lvq_coding_simd_test!(tlvq1x4_coding_simd, TurboResidualCoder::<1, 4>);
     lvq_coding_simd_test!(tlvq1x8_coding_simd, TurboResidualCoder::<1>);
     lvq_coding_simd_test!(tlvq2x8_coding_simd, TurboResidualCoder::<2>);
     lvq_coding_simd_test!(tlvq4x8_coding_simd, TurboResidualCoder::<4>);

@@ -340,13 +340,22 @@ pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &m
     }
 }
 
-pub fn residual_quantize_and_pack<const B: usize>(
+pub fn residual_quantize_and_pack<const B: usize, const R: usize>(
     vector: &[f32],
     primary_terms: VectorEncodeTerms,
     residual_terms: VectorEncodeTerms,
     primary_out: &mut [u8],
     residual_out: &mut [u8],
 ) -> (u32, u32, f32) {
+    if R != 8 {
+        return scalar::residual_quantize_and_pack::<B, R>(
+            vector,
+            primary_terms,
+            residual_terms,
+            primary_out,
+            residual_out,
+        );
+    }
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
@@ -444,7 +453,7 @@ pub fn residual_quantize_and_pack<const B: usize>(
     }
 
     if !vector_tail.is_empty() {
-        let (ps, rs, re) = scalar::residual_quantize_and_pack::<B>(
+        let (ps, rs, re) = scalar::residual_quantize_and_pack::<B, R>(
             vector_tail,
             primary_terms,
             residual_terms,
@@ -462,7 +471,14 @@ pub fn residual_quantize_and_pack<const B: usize>(
     )
 }
 
-pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {
+pub fn residual_decode<const B: usize, const R: usize>(
+    vector: &TurboResidualVector<'_, B, R>,
+    out: &mut [f32],
+) {
+    if R != 8 {
+        scalar::residual_decode::<B, R>(vector, out);
+        return;
+    }
     let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
     let (out_head, out_tail) = out.split_at_mut(tail_split);
 
@@ -497,7 +513,7 @@ pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out:
     }
 
     if !in_tail.primary.data.is_empty() {
-        scalar::residual_decode::<B>(&in_tail, out_tail);
+        scalar::residual_decode::<B, R>(&in_tail, out_tail);
     }
 }
 
@@ -604,6 +620,16 @@ unsafe extern "C" {
     unsafe fn et_lvq_dot_u8_u2(q: *const u8, d: *const u8, len: usize) -> u32;
     // Asymmetric dot product 8 bit-4 bit. len must be a multiple of 32.
     unsafe fn et_lvq_dot_u8_u4(q: *const u8, d: *const u8, len: usize) -> u32;
+
+    // This function requires that len is a multiple of 64.
+    // len = number of 4-bit residual bytes = dims / 2.
+    unsafe fn et_residual_dot_u1_u4(
+        ap: *const u8,
+        ar: *const u8,
+        bp: *const u8,
+        br: *const u8,
+        len: usize,
+    ) -> ResidualDotComponents;
 
     // This function requires that len is a multiple of 128.
     unsafe fn et_residual_dot_u1_u8(
@@ -817,59 +843,74 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
 }
 
 #[inline]
-pub fn residual_dot_unnormalized<const B: usize>(
+pub fn residual_dot_unnormalized<const B: usize, const R: usize>(
     query: (&[u8], &[u8]),
     doc: (&[u8], &[u8]),
 ) -> ResidualDotComponents {
-    let (_, query_head, query_tail) = TurboResidualVector::<B>::split_vector_tail(query);
-    let (_, doc_head, doc_tail) = TurboResidualVector::<B>::split_vector_tail(doc);
+    if R != 8 && !(B == 1 && R == 4) {
+        return scalar::residual_dot_unnormalized::<B, R>(query, doc);
+    }
+    let (_, query_head, query_tail) = TurboResidualVector::<B, R>::split_vector_tail(query);
+    let (_, doc_head, doc_tail) = TurboResidualVector::<B, R>::split_vector_tail(doc);
 
     let mut dot = if !query_head.0.is_empty() {
-        match B {
-            1 => unsafe {
-                et_residual_dot_u1_u8(
+        if B == 1 && R == 4 {
+            unsafe {
+                et_residual_dot_u1_u4(
                     query_head.0.as_ptr(),
                     query_head.1.as_ptr(),
                     doc_head.0.as_ptr(),
                     doc_head.1.as_ptr(),
                     query_head.1.len(),
                 )
-            },
-            2 => unsafe {
-                et_residual_dot_u2_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
-            4 => unsafe {
-                et_residual_dot_u4_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
-            8 => unsafe {
-                et_residual_dot_u8_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
-            _ => scalar::residual_dot_unnormalized::<B>(query_head, doc_head),
+            }
+        } else {
+            match B {
+                1 => unsafe {
+                    et_residual_dot_u1_u8(
+                        query_head.0.as_ptr(),
+                        query_head.1.as_ptr(),
+                        doc_head.0.as_ptr(),
+                        doc_head.1.as_ptr(),
+                        query_head.1.len(),
+                    )
+                },
+                2 => unsafe {
+                    et_residual_dot_u2_u8(
+                        query_head.0.as_ptr(),
+                        query_head.1.as_ptr(),
+                        doc_head.0.as_ptr(),
+                        doc_head.1.as_ptr(),
+                        query_head.1.len(),
+                    )
+                },
+                4 => unsafe {
+                    et_residual_dot_u4_u8(
+                        query_head.0.as_ptr(),
+                        query_head.1.as_ptr(),
+                        doc_head.0.as_ptr(),
+                        doc_head.1.as_ptr(),
+                        query_head.1.len(),
+                    )
+                },
+                8 => unsafe {
+                    et_residual_dot_u8_u8(
+                        query_head.0.as_ptr(),
+                        query_head.1.as_ptr(),
+                        doc_head.0.as_ptr(),
+                        doc_head.1.as_ptr(),
+                        query_head.1.len(),
+                    )
+                },
+                _ => scalar::residual_dot_unnormalized::<B, R>(query_head, doc_head),
+            }
         }
     } else {
         ResidualDotComponents::default()
     };
 
     if !query_tail.0.is_empty() {
-        dot += scalar::residual_dot_unnormalized::<B>(query_tail, doc_tail);
+        dot += scalar::residual_dot_unnormalized::<B, R>(query_tail, doc_tail);
     }
 
     dot

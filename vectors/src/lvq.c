@@ -218,6 +218,116 @@ struct ResidualDotComponents {
   uint32_t ar_dot_br;
 };
 
+// This function requires that len is a multiple of 64.
+// len = number of 4-bit residual bytes = dims / 2.
+__attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
+et_residual_dot_u1_u4(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
+                      const uint8_t *br, size_t len) {
+  uint32_t ap_dot_bp = 0;
+  uint32x4_t ap_dot_br_v = vdupq_n_u32(0);
+  uint32x4_t ar_dot_bp_v = vdupq_n_u32(0);
+  uint32x4_t ar_dot_br_v = vdupq_n_u32(0);
+  uint8x16_t nibble_mask = vdupq_n_u8(0xf);
+  uint8x16_t bit_mask = vdupq_n_u8(1);
+
+  // Each iteration handles 128 dims: 16 primary bytes + 64 residual bytes.
+  // Primary byte[k] bit[j] = dim j*16+k.
+  // Residual block j byte[k] low nibble = dim j*32+k, high nibble = dim j*32+16+k.
+  // So primary bit 2*j aligns with residual block j low nibbles, bit 2*j+1 with high nibbles.
+  for (size_t i = 0; i < len; i += 64) {
+    uint8x16_t apv = vld1q_u8(ap + i / 64 * 16);
+    uint8x16_t bpv = vld1q_u8(bp + i / 64 * 16);
+    ap_dot_bp += vaddlvq_u8(vcntq_u8(vandq_u8(apv, bpv)));
+
+    // j=0: primary bits 0/1, residual block at offset i+0
+    {
+      uint8x16_t arv = vld1q_u8(ar + i);
+      uint8x16_t brv = vld1q_u8(br + i);
+      uint8x16_t ar_low = vandq_u8(arv, nibble_mask);
+      uint8x16_t ar_high = vshrq_n_u8(arv, 4);
+      uint8x16_t br_low = vandq_u8(brv, nibble_mask);
+      uint8x16_t br_high = vshrq_n_u8(brv, 4);
+      uint8x16_t ap_low = vandq_u8(apv, bit_mask);
+      uint8x16_t ap_high = vandq_u8(vshrq_n_u8(apv, 1), bit_mask);
+      uint8x16_t bp_low = vandq_u8(bpv, bit_mask);
+      uint8x16_t bp_high = vandq_u8(vshrq_n_u8(bpv, 1), bit_mask);
+      ap_dot_br_v = vdotq_u32(ap_dot_br_v, ap_low, br_low);
+      ap_dot_br_v = vdotq_u32(ap_dot_br_v, ap_high, br_high);
+      ar_dot_bp_v = vdotq_u32(ar_dot_bp_v, ar_low, bp_low);
+      ar_dot_bp_v = vdotq_u32(ar_dot_bp_v, ar_high, bp_high);
+      ar_dot_br_v = vdotq_u32(ar_dot_br_v, ar_low, br_low);
+      ar_dot_br_v = vdotq_u32(ar_dot_br_v, ar_high, br_high);
+    }
+
+    // j=1: primary bits 2/3, residual block at offset i+16
+    {
+      uint8x16_t arv = vld1q_u8(ar + i + 16);
+      uint8x16_t brv = vld1q_u8(br + i + 16);
+      uint8x16_t ar_low = vandq_u8(arv, nibble_mask);
+      uint8x16_t ar_high = vshrq_n_u8(arv, 4);
+      uint8x16_t br_low = vandq_u8(brv, nibble_mask);
+      uint8x16_t br_high = vshrq_n_u8(brv, 4);
+      uint8x16_t ap_low = vandq_u8(vshrq_n_u8(apv, 2), bit_mask);
+      uint8x16_t ap_high = vandq_u8(vshrq_n_u8(apv, 3), bit_mask);
+      uint8x16_t bp_low = vandq_u8(vshrq_n_u8(bpv, 2), bit_mask);
+      uint8x16_t bp_high = vandq_u8(vshrq_n_u8(bpv, 3), bit_mask);
+      ap_dot_br_v = vdotq_u32(ap_dot_br_v, ap_low, br_low);
+      ap_dot_br_v = vdotq_u32(ap_dot_br_v, ap_high, br_high);
+      ar_dot_bp_v = vdotq_u32(ar_dot_bp_v, ar_low, bp_low);
+      ar_dot_bp_v = vdotq_u32(ar_dot_bp_v, ar_high, bp_high);
+      ar_dot_br_v = vdotq_u32(ar_dot_br_v, ar_low, br_low);
+      ar_dot_br_v = vdotq_u32(ar_dot_br_v, ar_high, br_high);
+    }
+
+    // j=2: primary bits 4/5, residual block at offset i+32
+    {
+      uint8x16_t arv = vld1q_u8(ar + i + 32);
+      uint8x16_t brv = vld1q_u8(br + i + 32);
+      uint8x16_t ar_low = vandq_u8(arv, nibble_mask);
+      uint8x16_t ar_high = vshrq_n_u8(arv, 4);
+      uint8x16_t br_low = vandq_u8(brv, nibble_mask);
+      uint8x16_t br_high = vshrq_n_u8(brv, 4);
+      uint8x16_t ap_low = vandq_u8(vshrq_n_u8(apv, 4), bit_mask);
+      uint8x16_t ap_high = vandq_u8(vshrq_n_u8(apv, 5), bit_mask);
+      uint8x16_t bp_low = vandq_u8(vshrq_n_u8(bpv, 4), bit_mask);
+      uint8x16_t bp_high = vandq_u8(vshrq_n_u8(bpv, 5), bit_mask);
+      ap_dot_br_v = vdotq_u32(ap_dot_br_v, ap_low, br_low);
+      ap_dot_br_v = vdotq_u32(ap_dot_br_v, ap_high, br_high);
+      ar_dot_bp_v = vdotq_u32(ar_dot_bp_v, ar_low, bp_low);
+      ar_dot_bp_v = vdotq_u32(ar_dot_bp_v, ar_high, bp_high);
+      ar_dot_br_v = vdotq_u32(ar_dot_br_v, ar_low, br_low);
+      ar_dot_br_v = vdotq_u32(ar_dot_br_v, ar_high, br_high);
+    }
+
+    // j=3: primary bits 6/7, residual block at offset i+48
+    {
+      uint8x16_t arv = vld1q_u8(ar + i + 48);
+      uint8x16_t brv = vld1q_u8(br + i + 48);
+      uint8x16_t ar_low = vandq_u8(arv, nibble_mask);
+      uint8x16_t ar_high = vshrq_n_u8(arv, 4);
+      uint8x16_t br_low = vandq_u8(brv, nibble_mask);
+      uint8x16_t br_high = vshrq_n_u8(brv, 4);
+      uint8x16_t ap_low = vandq_u8(vshrq_n_u8(apv, 6), bit_mask);
+      uint8x16_t ap_high = vshrq_n_u8(apv, 7);
+      uint8x16_t bp_low = vandq_u8(vshrq_n_u8(bpv, 6), bit_mask);
+      uint8x16_t bp_high = vshrq_n_u8(bpv, 7);
+      ap_dot_br_v = vdotq_u32(ap_dot_br_v, ap_low, br_low);
+      ap_dot_br_v = vdotq_u32(ap_dot_br_v, ap_high, br_high);
+      ar_dot_bp_v = vdotq_u32(ar_dot_bp_v, ar_low, bp_low);
+      ar_dot_bp_v = vdotq_u32(ar_dot_bp_v, ar_high, bp_high);
+      ar_dot_br_v = vdotq_u32(ar_dot_br_v, ar_low, br_low);
+      ar_dot_br_v = vdotq_u32(ar_dot_br_v, ar_high, br_high);
+    }
+  }
+
+  return (struct ResidualDotComponents){
+      .ap_dot_bp = ap_dot_bp,
+      .ap_dot_br = vaddvq_u32(ap_dot_br_v),
+      .ar_dot_bp = vaddvq_u32(ar_dot_bp_v),
+      .ar_dot_br = vaddvq_u32(ar_dot_br_v),
+  };
+}
+
 __attribute__((target("+dotprod"))) EXPORT struct ResidualDotComponents
 et_residual_dot_u1_u8(const uint8_t *ap, const uint8_t *ar, const uint8_t *bp,
                       const uint8_t *br, size_t len) {

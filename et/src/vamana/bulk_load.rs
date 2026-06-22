@@ -4,7 +4,7 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
-        EdgeType, GraphConfig, GraphSearchParams, PatienceParams,
+        GraphConfig, GraphSearchParams, PatienceParams,
         bulk::{BulkLoadBuilder, Options},
         wt::TableGraphVectorIndex,
     },
@@ -14,7 +14,7 @@ use wt_mdb::Connection;
 
 use crate::{
     ui::progress_bar,
-    vamana::{EdgePruningArgs, drop_index::drop_index},
+    vamana::{EdgePruningArgs, EdgeTypeArg, drop_index::drop_index},
     wt_stats::WiredTigerConnectionStats,
 };
 
@@ -67,6 +67,10 @@ pub struct BulkLoadArgs {
 
     #[command(flatten)]
     pruning: EdgePruningArgs,
+
+    /// Whether the graph maintains directed or undirected edges.
+    #[arg(long, value_enum, default_value_t = EdgeTypeArg::Undirected)]
+    edge_type: EdgeTypeArg,
 
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value = "false")]
@@ -127,7 +131,7 @@ pub fn bulk_load(
             }),
         },
         centroid,
-        edge_type: EdgeType::Undirected,
+        edge_type: args.edge_type.into(),
     };
     if args.drop_tables {
         drop_index(connection.clone(), index_name)?;

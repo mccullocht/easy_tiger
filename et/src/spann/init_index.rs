@@ -4,14 +4,14 @@ use clap::Args;
 use easy_tiger::{
     spann::{IndexConfig, ReplicaSelectionAlgorithm, TableIndex},
     vamana::{
-        EdgeType, GraphConfig, GraphSearchParams, PatienceParams, mutate::insert_vector,
+        GraphConfig, GraphSearchParams, PatienceParams, mutate::insert_vector,
         wt::TransactionGraphVectorIndex,
     },
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
-use crate::vamana::EdgePruningArgs;
+use crate::vamana::{EdgePruningArgs, EdgeTypeArg};
 
 #[derive(Args)]
 pub struct InitIndexArgs {
@@ -43,6 +43,10 @@ pub struct InitIndexArgs {
 
     #[command(flatten)]
     pruning: EdgePruningArgs,
+
+    /// Whether the head graph maintains directed or undirected edges.
+    #[arg(long, value_enum, default_value_t = EdgeTypeArg::Undirected)]
+    head_edge_type: EdgeTypeArg,
 
     /// Minimum number of vectors that should map to each head centroid.
     #[arg(long, default_value_t = 192)]
@@ -128,7 +132,7 @@ pub fn init_index(
             }),
         },
         centroid: None,
-        edge_type: EdgeType::Undirected,
+        edge_type: args.head_edge_type.into(),
     };
     let beam_width = args
         .head_edge_candidates

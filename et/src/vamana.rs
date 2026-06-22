@@ -11,7 +11,7 @@ use clap::{Args, Subcommand};
 
 use bulk_load::{BulkLoadArgs, bulk_load};
 use drop_index::drop_index;
-use easy_tiger::vamana::EdgePruningConfig;
+use easy_tiger::vamana::{EdgePruningConfig, EdgeType};
 use init_index::{InitIndexArgs, init_index};
 use insert::{InsertArgs, insert};
 use lookup::{LookupArgs, lookup};
@@ -44,6 +44,22 @@ pub struct EdgePruningArgs {
     /// exceeded. Lower values will trigger fewer iterations. Must be >= 1.0.
     #[arg(long, default_value_t = 1.2)]
     alpha_scale: f64,
+}
+
+#[derive(Copy, Clone, Debug, Default, clap::ValueEnum)]
+pub enum EdgeTypeArg {
+    #[default]
+    Undirected,
+    Directed,
+}
+
+impl From<EdgeTypeArg> for EdgeType {
+    fn from(v: EdgeTypeArg) -> Self {
+        match v {
+            EdgeTypeArg::Undirected => EdgeType::Undirected,
+            EdgeTypeArg::Directed => EdgeType::Directed,
+        }
+    }
 }
 
 impl From<EdgePruningArgs> for EdgePruningConfig {

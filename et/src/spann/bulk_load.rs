@@ -12,7 +12,7 @@ use easy_tiger::{
         },
     },
     vamana::{
-        EdgeType, GraphConfig, GraphSearchParams, PatienceParams,
+        GraphConfig, GraphSearchParams, PatienceParams,
         bulk::{self, BulkLoadBuilder},
     },
 };
@@ -20,7 +20,7 @@ use rand_xoshiro::{Xoshiro128PlusPlus, rand_core::SeedableRng};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
-use crate::{ui::progress_bar, vamana::EdgePruningArgs};
+use crate::{ui::progress_bar, vamana::{EdgePruningArgs, EdgeTypeArg}};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -55,6 +55,10 @@ pub struct BulkLoadArgs {
 
     #[command(flatten)]
     pruning: EdgePruningArgs,
+
+    /// Whether the head graph maintains directed or undirected edges.
+    #[arg(long, value_enum, default_value_t = EdgeTypeArg::Undirected)]
+    head_edge_type: EdgeTypeArg,
 
     /// Number of vectors to buffer at once when clustering.
     ///
@@ -169,7 +173,7 @@ pub fn bulk_load(
             }),
         },
         centroid: None,
-        edge_type: EdgeType::Undirected,
+        edge_type: args.head_edge_type.into(),
     };
     let spann_config = IndexConfig {
         replica_count: args.replica_count.get(),

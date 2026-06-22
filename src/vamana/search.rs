@@ -21,6 +21,8 @@ pub struct GraphSearchStats {
     pub visited: usize,
     /// Total number of candidates visited that did not match the filter predicate.
     pub filtered: usize,
+    /// Number of candidates skipped due to a stale edge in a directed graph.
+    pub skipped: usize,
 }
 
 impl Add for GraphSearchStats {
@@ -32,6 +34,7 @@ impl Add for GraphSearchStats {
             candidates_added: self.candidates_added + rhs.candidates_added,
             visited: self.visited + rhs.visited,
             filtered: self.filtered + rhs.filtered,
+            skipped: self.skipped + rhs.skipped,
         }
     }
 }
@@ -82,6 +85,7 @@ pub struct GraphSearcher {
     candidates_added: usize,
     visited: usize,
     filtered: usize,
+    skipped: usize,
 }
 
 impl GraphSearcher {
@@ -100,6 +104,7 @@ impl GraphSearcher {
             candidates_added: 0,
             visited: 0,
             filtered: 0,
+            skipped: 0,
         }
     }
 
@@ -115,6 +120,7 @@ impl GraphSearcher {
             candidates_added: self.candidates_added,
             visited: self.visited,
             filtered: self.filtered,
+            skipped: self.skipped,
         }
     }
 
@@ -279,7 +285,10 @@ impl GraphSearcher {
                 if !self.seen.insert(edge) {
                     continue;
                 }
-                let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
+                let Some(vec) = nav.get(edge).transpose()? else {
+                    self.skipped += 1;
+                    continue;
+                };
                 if self
                     .candidates
                     .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)))

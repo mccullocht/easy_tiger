@@ -1,4 +1,5 @@
 mod bulk_load;
+mod check_reachability;
 mod drop_index;
 mod init_index;
 mod insert;
@@ -10,6 +11,7 @@ use std::{io, num::NonZero, sync::Arc};
 use clap::{Args, Subcommand};
 
 use bulk_load::{BulkLoadArgs, bulk_load};
+use check_reachability::{CheckReachabilityArgs, check_reachability};
 use drop_index::drop_index;
 use easy_tiger::vamana::{EdgePruningConfig, EdgeType};
 use init_index::{InitIndexArgs, init_index};
@@ -87,6 +89,8 @@ pub enum Command {
     Lookup(LookupArgs),
     /// Insert a vectors from a file into the index.
     Insert(InsertArgs),
+    /// Check whether every vertex in the graph is reachable from the entry point.
+    CheckReachability(CheckReachabilityArgs),
 }
 
 pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
@@ -100,6 +104,7 @@ pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
         Command::DropIndex => drop_index(connection, index_name),
         Command::Lookup(args) => lookup(connection, index_name, args),
         Command::Insert(args) => insert(connection, index_name, args),
+        Command::CheckReachability(args) => check_reachability(connection, index_name, args),
     }?;
     cmd_connection.checkpoint()?;
     Ok(())

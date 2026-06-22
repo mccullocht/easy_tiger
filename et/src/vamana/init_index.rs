@@ -7,7 +7,7 @@ use easy_tiger::vamana::{
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;
 
-use crate::vamana::EdgePruningArgs;
+use crate::vamana::{EdgePruningArgs, EdgeTypeArg};
 
 use super::drop_index::drop_index;
 
@@ -53,6 +53,10 @@ pub struct InitIndexArgs {
     #[command(flatten)]
     pruning: EdgePruningArgs,
 
+    /// Whether the graph maintains directed or undirected edges.
+    #[arg(long, value_enum, default_value_t = EdgeTypeArg::Undirected)]
+    edge_type: EdgeTypeArg,
+
     /// If true, drop the named index if it exists and re-initialize.
     ///
     /// If false and the index already exists this command will fail.
@@ -94,6 +98,7 @@ pub fn init_index(
                 }),
             },
             centroid: None,
+            edge_type: args.edge_type.into(),
         },
         index_name,
     )

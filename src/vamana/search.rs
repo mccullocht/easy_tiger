@@ -21,6 +21,8 @@ pub struct GraphSearchStats {
     pub visited: usize,
     /// Total number of candidates visited that did not match the filter predicate.
     pub filtered: usize,
+    /// Number of candidates skipped due to a stale edge in a directed graph.
+    pub skipped: usize,
 }
 
 impl Add for GraphSearchStats {
@@ -32,6 +34,7 @@ impl Add for GraphSearchStats {
             candidates_added: self.candidates_added + rhs.candidates_added,
             visited: self.visited + rhs.visited,
             filtered: self.filtered + rhs.filtered,
+            skipped: self.skipped + rhs.skipped,
         }
     }
 }
@@ -82,6 +85,7 @@ pub struct GraphSearcher {
     candidates_added: usize,
     visited: usize,
     filtered: usize,
+    skipped: usize,
 }
 
 impl GraphSearcher {
@@ -100,6 +104,7 @@ impl GraphSearcher {
             candidates_added: 0,
             visited: 0,
             filtered: 0,
+            skipped: 0,
         }
     }
 
@@ -115,6 +120,7 @@ impl GraphSearcher {
             candidates_added: self.candidates_added,
             visited: self.visited,
             filtered: self.filtered,
+            skipped: self.skipped,
         }
     }
 
@@ -177,11 +183,11 @@ impl GraphSearcher {
                     .get(vertex_id)
                     .unwrap_or(Err(Error::not_found_error()))?
                     .to_vec();
-                Some(
-                    vectors
-                        .format()
-                        .query_distance_symmetric(vectors.similarity(), query, vectors.centroid()),
-                )
+                Some(vectors.format().query_distance_symmetric(
+                    vectors.similarity(),
+                    query,
+                    vectors.centroid(),
+                ))
             } else {
                 None
             }
@@ -279,7 +285,10 @@ impl GraphSearcher {
                 if !self.seen.insert(edge) {
                     continue;
                 }
-                let vec = nav.get(edge).unwrap_or(Err(Error::not_found_error()))?;
+                let Some(vec) = nav.get(edge).transpose()? else {
+                    self.skipped += 1;
+                    continue;
+                };
                 if self
                     .candidates
                     .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)))
@@ -456,7 +465,7 @@ mod test {
     use wt_mdb::{Error, Result};
 
     use crate::vamana::{
-        EdgePruningConfig, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
+        EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
     };
     use crate::Neighbor;
 
@@ -528,6 +537,7 @@ mod test {
                     patience: None,
                 },
                 centroid,
+                edge_type: EdgeType::Undirected,
             };
             Self { data: rep, config }
         }
@@ -719,7 +729,10 @@ mod test {
         )
     }
 
-    fn build_test_graph_with_centroid(max_edges: usize, centroid: Vec<f32>) -> TestGraphVectorIndex {
+    fn build_test_graph_with_centroid(
+        max_edges: usize,
+        centroid: Vec<f32>,
+    ) -> TestGraphVectorIndex {
         let dim_values = [-0.25, -0.125, 0.125, 0.25];
         TestGraphVectorIndex::new_with_centroid(
             NonZero::new(max_edges).unwrap(),

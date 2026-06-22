@@ -80,6 +80,16 @@ impl EdgePruningConfig {
     }
 }
 
+/// Whether the graph maintains directed or undirected edges.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum EdgeType {
+    /// Every edge A→B has a corresponding back edge B→A.
+    #[default]
+    Undirected,
+    /// Edges are one-way; no back edge is required.
+    Directed,
+}
+
 /// Configuration describing graph shape and construction. Used to read and mutate the graph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphConfig {
@@ -115,6 +125,9 @@ pub struct GraphConfig {
     /// When present, this centroid is subtracted from vectors before encoding and is passed to all
     /// distance computation functions to apply the appropriate correction terms.
     pub centroid: Option<Vec<f32>>,
+    /// Whether this graph maintains directed or undirected edges.
+    #[serde(default)]
+    pub edge_type: EdgeType,
 }
 
 /// `GraphVectorIndex` is used to generate objects for graph navigation and mutation.
@@ -213,7 +226,8 @@ pub trait GraphVectorStore {
 
     /// Create a new distance function that operates over vectors on this table.
     fn new_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.format().distance_symmetric(self.similarity(), self.centroid())
+        self.format()
+            .distance_symmetric(self.similarity(), self.centroid())
     }
 
     /// Create a new coder for vectors of this type.
@@ -283,6 +297,42 @@ impl EdgeSetDistanceComputer {
             distance_fn,
             vectors,
         })
+    }
+
+    /// Produce an edge set computer from a list of unhydrated edges in a directed graph.
+    /// This will fetch the vector for each of the edge and compare it to the vertex vector.
+    /// Any missing vectors are dropped -- this may happen as deletes are not guaranteed to be
+    /// removed from the graph.
+    ///
+    /// Returns a list of neighbors with their distance relative to `vertex_vector` as well as a
+    /// computer.
+    pub(crate) fn from_directed_edges(
+        vertex_vector: &[u8],
+        store: &mut impl GraphVectorStore,
+        edges: &[i64],
+    ) -> Result<(Vec<Neighbor>, Self)> {
+        let distance_fn = store.new_distance_function();
+        let mut neighbors = Vec::with_capacity(edges.len());
+        let mut vectors = Vec::with_capacity(edges.len());
+        for e in edges {
+            let Some(vector) = store.get(*e).transpose()? else {
+                continue;
+            };
+            neighbors.push(Neighbor::new(
+                *e,
+                distance_fn.distance(vertex_vector, vector),
+            ));
+            vectors.push(vector.to_vec());
+        }
+        neighbors.sort_unstable();
+
+        Ok((
+            neighbors,
+            Self {
+                distance_fn,
+                vectors,
+            },
+        ))
     }
 
     pub fn distance(&self, i: usize, j: usize) -> f64 {

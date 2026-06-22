@@ -194,8 +194,10 @@ impl GraphVectorTable {
     }
 
     pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.format
-            .coder(self.similarity, self.centroid.as_deref().map(|c| c.to_vec()))
+        self.format.coder(
+            self.similarity,
+            self.centroid.as_deref().map(|c| c.to_vec()),
+        )
     }
 
     pub fn new_distance_function(&self) -> Box<dyn VectorDistance> {
@@ -399,9 +401,14 @@ impl GraphVectorIndex for TransactionGraphVectorIndex {
 
     fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
         self.index.rerank_table().map(|t| {
-            self.transaction
-                .open_record_cursor(t.name())
-                .map(|c| CursorVectorStore::new(c, self.index.config().similarity, t.format(), t.centroid().map(Arc::from)))
+            self.transaction.open_record_cursor(t.name()).map(|c| {
+                CursorVectorStore::new(
+                    c,
+                    self.index.config().similarity,
+                    t.format(),
+                    t.centroid().map(Arc::from),
+                )
+            })
         })
     }
 }

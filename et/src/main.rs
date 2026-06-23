@@ -1,4 +1,5 @@
 mod compute_neighbors;
+mod flat;
 mod generate;
 mod neighbor_util;
 mod quantization;
@@ -13,6 +14,7 @@ use std::io::{self};
 
 use clap::{Parser, Subcommand};
 use compute_neighbors::{ComputeNeighborsArgs, compute_neighbors};
+use flat::{FlatArgs, flat_command};
 use generate::{GenerateArgs, generate};
 use quantization::{QuantizationArgs, quantization};
 use spann::{SpannArgs, spann_command};
@@ -29,6 +31,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Perform flat (exhaustive) index operations.
+    Flat(FlatArgs),
     /// Perform SPANN index operations.
     Spann(SpannArgs),
     /// Perform Vamana/DiskANN index operations.
@@ -55,6 +59,7 @@ fn main() -> io::Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
+        Commands::Flat(args) => flat_command(args),
         Commands::Spann(args) => spann_command(args),
         Commands::Vamana(args) => vamana_command(args),
         Commands::ComputeNeighbors(args) => compute_neighbors(args),

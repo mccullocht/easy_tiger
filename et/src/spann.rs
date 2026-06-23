@@ -1,6 +1,7 @@
 mod bulk_load;
 mod centroid_stats;
 mod drop_index;
+mod export_head;
 mod init_index;
 mod insert_vectors;
 mod rebalance;
@@ -15,6 +16,7 @@ use crate::wt_args::WiredTigerArgs;
 use bulk_load::{BulkLoadArgs, bulk_load};
 use centroid_stats::centroid_stats;
 use drop_index::drop_index;
+use export_head::{ExportHeadArgs, export_head};
 use init_index::{InitIndexArgs, init_index};
 use insert_vectors::{InsertVectorsArgs, insert_vectors};
 use rebalance::{RebalanceArgs, rebalance};
@@ -42,6 +44,8 @@ pub enum Command {
     Search(SearchArgs),
     /// Print centroid assignment statistics.
     CentroidStats,
+    /// Export centroid vectors from the head index as little-endian f32 values.
+    ExportHead(ExportHeadArgs),
     /// Rebalance the SPANN index.
     Rebalance(RebalanceArgs),
     /// Remove an existing index.
@@ -60,6 +64,7 @@ pub fn spann_command(args: SpannArgs) -> io::Result<()> {
         Command::InsertVectors(args) => insert_vectors(connection, index_name, args),
         Command::Search(args) => search(connection, index_name, args),
         Command::CentroidStats => centroid_stats(connection, index_name),
+        Command::ExportHead(args) => export_head(connection, index_name, args),
         Command::Rebalance(args) => rebalance(connection, index_name, args),
         Command::DropIndex => drop_index(connection, index_name),
         Command::VerifyPrimaryAssignments => verify_primary_assignments(connection, index_name),

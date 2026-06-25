@@ -1,4 +1,5 @@
 mod cpu;
+#[cfg(feature = "wgpu")]
 mod gpu;
 
 use std::{io, num::NonZero, path::PathBuf};
@@ -44,11 +45,11 @@ pub struct ComputeNeighborsArgs {
 }
 
 pub fn compute_neighbors(args: ComputeNeighborsArgs) -> io::Result<()> {
+    #[cfg(feature = "wgpu")]
     if let Some(adapter) = gpu::try_adapter()
         && !args.force_cpu
     {
-        gpu::run(adapter, &args)
-    } else {
-        cpu::run(&args)
+        return gpu::run(adapter, &args);
     }
+    cpu::run(&args)
 }

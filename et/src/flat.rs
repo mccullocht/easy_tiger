@@ -25,15 +25,14 @@ pub(super) struct FlatIndexConfig {
 }
 
 fn flat_table_name(index_name: &str) -> String {
-    format!("{index_name}_flat")
+    index_name.to_string()
 }
 
 fn open_config(connection: &Arc<Connection>, table_name: &str) -> io::Result<FlatIndexConfig> {
     let txn = connection.begin_transaction(None)?;
     let metadata = read_app_metadata(&txn, table_name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "flat index table not found"))??;
-    serde_json::from_str(&metadata)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    serde_json::from_str(&metadata).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 #[derive(Args)]

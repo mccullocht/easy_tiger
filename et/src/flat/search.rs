@@ -1,7 +1,7 @@
+use core::f64;
 use std::{
-    collections::BinaryHeap,
     fs::File,
-    io,
+    i64, io,
     num::NonZero,
     ops::Add,
     path::PathBuf,
@@ -10,7 +10,10 @@ use std::{
 };
 
 use clap::Args;
-use easy_tiger::{Neighbor, input::{DerefVectorStore, VectorStore}};
+use easy_tiger::{
+    Neighbor,
+    input::{DerefVectorStore, VectorStore},
+};
 use memmap2::Mmap;
 use vectors::QueryVectorDistance;
 use wt_mdb::Connection;
@@ -52,7 +55,10 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         config.dimensions,
     )?;
-    let limit = args.limit.unwrap_or(query_vectors.len()).min(query_vectors.len());
+    let limit = args
+        .limit
+        .unwrap_or(query_vectors.len())
+        .min(query_vectors.len());
 
     let recall_computer = RecallComputer::from_args(args.recall, config.similarity)?;
     if let Some(computer) = recall_computer.as_ref() {
@@ -136,9 +142,10 @@ fn search_phase<Q: Send + Sync>(
         .into_par_iter()
         .map(|qi| {
             let query: &[f32] = &query_vectors[qi];
-            let distance_fn = config
-                .format
-                .query_distance_asymmetric(config.similarity, query, None);
+            let distance_fn =
+                config
+                    .format
+                    .query_distance_asymmetric(config.similarity, query, None);
             let txn = connection.begin_transaction(None)?;
             let cursor = txn.open_record_cursor(table_name)?;
 
@@ -161,19 +168,27 @@ fn exhaustive_search(
     mut cursor: wt_mdb::RecordCursorGuard<'_>,
     distance_fn: &dyn QueryVectorDistance,
 ) -> io::Result<Vec<Neighbor>> {
-    // Max-heap bounded to k: when full, pop the worst if a new candidate is better.
-    let mut heap: BinaryHeap<Neighbor> = BinaryHeap::with_capacity(k.get() + 1);
-    for entry in cursor.by_ref() {
+    // Accumulate the top k values. When the buffer is full we select the top N and store a min
+    // competitive result to act as a ratchet. This is _much_ cheaper than a heap, especially since
+    // we aren't going to do anything meaningful with the heap.
+    let mut results = Vec::with_capacity(k.get() * 2);
+    let mut min_competitive = Neighbor::new(i64::MAX, f64::MAX);
+    while let Some(entry) = unsafe { cursor.next_unsafe() } {
         let (record_id, bytes) = entry.map_err(io::Error::from)?;
         let dist = distance_fn.distance(&bytes);
         let candidate = Neighbor::new(record_id, dist);
-        heap.push(candidate);
-        if heap.len() > k.get() {
-            heap.pop();
+        if candidate > min_competitive {
+            continue;
+        }
+        results.push(candidate);
+        if results.len() == results.capacity() {
+            results.select_nth_unstable(k.get());
+            min_competitive = results[k.get()];
+            results.truncate(k.get());
         }
     }
-    let mut results: Vec<Neighbor> = heap.into_sorted_vec();
     results.sort_unstable();
+    results.truncate(k.get());
     Ok(results)
 }
 

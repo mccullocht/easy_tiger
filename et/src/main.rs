@@ -38,7 +38,7 @@ enum Commands {
     /// Perform Vamana/DiskANN index operations.
     Vamana(VamanaArgs),
     /// Compute the top k neighbors for a set of queries against a set of document vectors.
-    /// Uses GPU acceleration via wgpu if a suitable adapter is available, otherwise CPU.
+    /// Uses GPU acceleration via wgpu if the `wgpu` feature is enabled and a suitable adapter is available, otherwise CPU.
     ComputeNeighbors(ComputeNeighborsArgs),
     /// Quantization related utilities.
     Quantization(QuantizationArgs),
@@ -47,15 +47,14 @@ enum Commands {
 }
 
 fn main() -> io::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy()
-                .add_directive("wgpu_core=warn".parse().unwrap())
-                .add_directive("wgpu_hal=warn".parse().unwrap()),
-        )
-        .init();
+    let filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+    #[cfg(feature = "wgpu")]
+    let filter = filter
+        .add_directive("wgpu_core=warn".parse().unwrap())
+        .add_directive("wgpu_hal=warn".parse().unwrap());
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let cli = Cli::parse();
     match cli.command {

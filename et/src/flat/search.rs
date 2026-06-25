@@ -1,7 +1,6 @@
-use core::f64;
 use std::{
     fs::File,
-    i64, io,
+    io,
     num::NonZero,
     ops::Add,
     path::PathBuf,
@@ -11,11 +10,10 @@ use std::{
 
 use clap::Args;
 use easy_tiger::{
-    Neighbor,
+    flat::{self, search::exhaustive_search, FlatIndexConfig},
     input::{DerefVectorStore, VectorStore},
 };
 use memmap2::Mmap;
-use vectors::QueryVectorDistance;
 use wt_mdb::Connection;
 
 use crate::{
@@ -23,8 +21,6 @@ use crate::{
     ui::progress_bar,
     wt_stats::WiredTigerConnectionStats,
 };
-
-use super::{FlatIndexConfig, flat_table_name, open_config};
 
 #[derive(Args)]
 pub struct SearchArgs {
@@ -48,8 +44,8 @@ pub struct SearchArgs {
 }
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
-    let table_name = flat_table_name(index_name);
-    let config = open_config(&connection, &table_name)?;
+    let config = flat::open_config(&connection, index_name)?;
+    let table_name = flat::table_name(index_name);
 
     let query_vectors = DerefVectorStore::new(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
@@ -161,35 +157,6 @@ fn search_phase<Q: Send + Sync>(
         .try_reduce(AggregateSearchStats::default, |a, b| Ok(a + b))?;
     progress.finish_using_style();
     Ok(stats)
-}
-
-fn exhaustive_search(
-    k: NonZero<usize>,
-    mut cursor: wt_mdb::RecordCursorGuard<'_>,
-    distance_fn: &dyn QueryVectorDistance,
-) -> io::Result<Vec<Neighbor>> {
-    // Accumulate the top k values. When the buffer is full we select the top N and store a min
-    // competitive result to act as a ratchet. This is _much_ cheaper than a heap, especially since
-    // we aren't going to do anything meaningful with the heap.
-    let mut results = Vec::with_capacity(k.get() * 2);
-    let mut min_competitive = Neighbor::new(i64::MAX, f64::MAX);
-    while let Some(entry) = unsafe { cursor.next_unsafe() } {
-        let (record_id, bytes) = entry.map_err(io::Error::from)?;
-        let dist = distance_fn.distance(&bytes);
-        let candidate = Neighbor::new(record_id, dist);
-        if candidate > min_competitive {
-            continue;
-        }
-        results.push(candidate);
-        if results.len() == results.capacity() {
-            results.select_nth_unstable(k.get());
-            min_competitive = results[k.get()];
-            results.truncate(k.get());
-        }
-    }
-    results.sort_unstable();
-    results.truncate(k.get());
-    Ok(results)
 }
 
 #[derive(Default)]

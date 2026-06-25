@@ -1,12 +1,13 @@
 use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
-use easy_tiger::input::{DerefVectorStore, VectorStore};
+use easy_tiger::{
+    flat,
+    input::{DerefVectorStore, VectorStore},
+};
 use wt_mdb::Connection;
 
 use crate::ui::progress_bar;
-
-use super::{flat_table_name, open_config};
 
 #[derive(Args)]
 pub struct InsertVectorsArgs {
@@ -29,8 +30,8 @@ pub fn insert_vectors(
     index_name: &str,
     args: InsertVectorsArgs,
 ) -> io::Result<()> {
-    let table_name = flat_table_name(index_name);
-    let config = open_config(&connection, &table_name)?;
+    let config = flat::open_config(&connection, index_name)?;
+    let table_name = flat::table_name(index_name);
 
     let f32_vectors = DerefVectorStore::new(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },

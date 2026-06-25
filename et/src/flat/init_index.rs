@@ -1,10 +1,9 @@
 use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
+use easy_tiger::flat::{self, FlatIndexConfig};
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{Connection, connection::{CreateOptionsBuilder, DropOptionsBuilder}};
-
-use super::{FlatIndexConfig, flat_table_name};
+use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
 #[derive(Args)]
 pub struct InitIndexArgs {
@@ -27,14 +26,12 @@ pub fn init_index(
     index_name: &str,
     args: InitIndexArgs,
 ) -> io::Result<()> {
-    let table_name = flat_table_name(index_name);
     if args.drop_tables {
-        connection
-            .drop_table(
-                &table_name,
-                Some(DropOptionsBuilder::default().set_force().into()),
-            )
-            .map_err(io::Error::from)?;
+        flat::drop_index(
+            &connection,
+            index_name,
+            Some(DropOptionsBuilder::default().set_force().into()),
+        )?;
     }
 
     let config = FlatIndexConfig {
@@ -42,15 +39,5 @@ pub fn init_index(
         similarity: args.similarity,
         format: args.format,
     };
-    let metadata = serde_json::to_string(&config).expect("serializable config");
-    connection
-        .create_table(
-            &table_name,
-            Some(
-                CreateOptionsBuilder::default()
-                    .app_metadata(&metadata)
-                    .into(),
-            ),
-        )
-        .map_err(io::Error::from)
+    flat::init_index(&connection, index_name, &config)
 }

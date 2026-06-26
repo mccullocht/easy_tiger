@@ -4,9 +4,9 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        CentroidAssignment, PostingKey, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
-        rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
+        rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
+        CentroidAssignment, PostingKey, TableIndex, TransactionIndex,
     },
     vamana::search::GraphSearcher,
 };
@@ -16,9 +16,9 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use vectors::F32VectorCoder;
 use wt_mdb::{
-    Connection, Result,
     session::{BeginTransactionOptions, CommitTransactionOptions, Formatted},
     timestamp::{MontonicTimestampClock, TimestampClock},
+    Connection, Result,
 };
 
 use crate::ui::progress_bar;
@@ -297,13 +297,18 @@ fn rebalance(
 
         let stats = CentroidStats::from_index_stats(&txn_idx)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
+        eprintln!("=== iter {iter}");
+        eprintln!("stats {stats:?}");
+        eprintln!("summary {summary:?}");
 
         match (summary.below_exemplar(), summary.above_exemplar()) {
             (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
+                eprintln!("merge {to_merge} of length {len}");
                 progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
                 rebalance_stats += merge_centroid(&txn_idx, to_merge, len)?;
             }
             (_, Some((to_split, len))) => {
+                eprintln!("split {to_split} of length {len}");
                 progress.set_message(format!("split {to_split} of {len} ({iter})"));
                 // TODO: split_centroid should allow splitting into multiple centroids.
                 // This requires allocating an arbitrary number of ids and accommodating these
@@ -320,6 +325,9 @@ fn rebalance(
             timestamp.next(),
         )))?;
         iter += 1;
+        if iter >= 16 {
+            panic!("endless rebalance loop");
+        }
     }
 
     Ok(rebalance_stats)

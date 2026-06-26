@@ -7,7 +7,7 @@ use rand::seq::index;
 use rand::{distr::weighted::WeightedIndex, prelude::*};
 use rayon::prelude::*;
 use tracing::warn;
-use vectors::{EuclideanDistance, F32VectorDistance};
+use vectors::{EuclideanDistance, F32VectorCoder, F32VectorDistance, VectorDistance};
 
 use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
 
@@ -236,6 +236,11 @@ mod bp {
             }
         }
 
+        eprintln!(
+            "split at {} of {} converged={converged}",
+            current_candidate.split,
+            dataset.len()
+        );
         if converged {
             Ok(current_candidate.centroids)
         } else {
@@ -345,6 +350,246 @@ mod bp {
                 .for_each(|(i, d)| {
                     let ldist = dist_fn.distance_f32(&self.centroids[0], &state.dataset[i]);
                     let rdist = dist_fn.distance_f32(&self.centroids[1], &state.dataset[i]);
+                    *d = (i, ldist, rdist, ldist - rdist)
+                });
+            state
+                .distances
+                .sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
+            self.split = state.distances.iter().position(|d| d.3 >= 0.0).unwrap_or(0);
+            self.distance_sum = state.distances[..self.split]
+                .iter()
+                .map(|d| d.1)
+                .sum::<f64>()
+                + state.distances[self.split..]
+                    .iter()
+                    .map(|d| d.2)
+                    .sum::<f64>();
+        }
+    }
+}
+
+/// Partition a dataset of quantized (byte-encoded) vectors into two balanced clusters.
+///
+/// Like [`balanced_binary_partition`] but accepts encoded vectors instead of raw f32 slices.
+/// `distance_fn` computes distances between encoded vectors for initialization; `coder` decodes
+/// vectors to f32 for centroid accumulation. The returned centroids are still f32. Returns an
+/// error wrapping the centroids if the partition fails to converge within `max_iters`.
+pub fn balanced_binary_partition_quantized(
+    dataset: &(impl VectorStore<Elem = u8> + Send + Sync),
+    coder: &dyn F32VectorCoder,
+    distance_fn: &dyn VectorDistance,
+    max_iters: usize,
+    min_cluster_size: usize,
+    rng: &mut impl Rng,
+) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
+    bpq::bp(
+        dataset,
+        coder,
+        distance_fn,
+        min_cluster_size..=(dataset.len() - min_cluster_size),
+        max_iters,
+        rng,
+    )
+}
+
+mod bpq {
+    use std::ops::RangeInclusive;
+
+    use rand::{distr::weighted::WeightedIndex, prelude::*};
+    use rayon::prelude::*;
+    use vectors::{EuclideanDistance, F32VectorCoder, F32VectorDistance, VectorDistance};
+
+    use crate::input::{VecVectorStore, VectorStore};
+
+    pub fn bp(
+        dataset: &(impl VectorStore<Elem = u8> + Send + Sync),
+        coder: &dyn F32VectorCoder,
+        distance_fn: &dyn VectorDistance,
+        acceptable_split: RangeInclusive<usize>,
+        max_iters: usize,
+        rng: &mut impl Rng,
+    ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
+        assert!(!acceptable_split.is_empty());
+        let dimensions = coder.dimensions(dataset.elem_stride());
+        let half = dataset.len() / 2;
+        let mut state = IterState::new(dataset, coder, dimensions);
+        let mut num_acceptable = 0;
+        let mut current_candidate = (0..max_iters)
+            .map_while(|_| {
+                if num_acceptable >= 3 {
+                    return None;
+                }
+                let first = rng.random_range(0..state.dataset.len());
+                let first_vec = &state.dataset[first];
+                let dataset = state.dataset;
+                let distances = (0..dataset.len())
+                    .into_par_iter()
+                    .map(|i| distance_fn.distance(&dataset[i], first_vec).max(0.0))
+                    .collect::<Vec<_>>();
+                let second = WeightedIndex::new(distances.iter().copied())
+                    .unwrap()
+                    .sample(rng);
+                let c = Candidate::from_sampled_vectors(first, second, &mut state);
+                if acceptable_split.contains(&c.split) {
+                    num_acceptable += 1;
+                }
+                Some(c)
+            })
+            .min_by(|a, b| {
+                acceptable_split
+                    .contains(&a.split)
+                    .cmp(&acceptable_split.contains(&b.split))
+                    .reverse()
+                    .then_with(|| a.distance_sum.total_cmp(&b.distance_sum))
+            })
+            .unwrap();
+        let mut next_candidate = current_candidate.clone();
+        let mut converged = false;
+        let mut adjustment_mult = 1;
+
+        for _ in 0..max_iters {
+            let split_adjustment =
+                (half.abs_diff(current_candidate.split) / 10 * adjustment_mult).max(1);
+            let target_split = if current_candidate.split < half {
+                (current_candidate.split + split_adjustment).max(dataset.len() - 1)
+            } else {
+                current_candidate.split - split_adjustment.min(current_candidate.split - 1)
+            };
+            next_candidate.update_centroids(target_split, &mut state);
+
+            let current_balance = half.abs_diff(current_candidate.split);
+            let next_balance = half.abs_diff(next_candidate.split);
+            if next_balance < current_balance {
+                std::mem::swap(&mut current_candidate, &mut next_candidate);
+                adjustment_mult = 1;
+            } else if acceptable_split.contains(&current_candidate.split) {
+                converged = true;
+                break;
+            } else {
+                adjustment_mult *= 2;
+            }
+        }
+
+        eprintln!(
+            "split at {} of {} converged={converged}",
+            current_candidate.split,
+            dataset.len()
+        );
+        if converged {
+            Ok(current_candidate.centroids)
+        } else {
+            Err(current_candidate.centroids)
+        }
+    }
+
+    struct IterState<'v, 'c, V> {
+        dataset: &'v V,
+        coder: &'c dyn F32VectorCoder,
+        dimensions: usize,
+        distances: Vec<(usize, f64, f64, f64)>,
+        assignments: Vec<usize>,
+        scratch: Vec<f32>,
+    }
+
+    impl<'v, 'c, V: VectorStore<Elem = u8> + Send + Sync> IterState<'v, 'c, V> {
+        fn new(dataset: &'v V, coder: &'c dyn F32VectorCoder, dimensions: usize) -> Self {
+            Self {
+                dataset,
+                coder,
+                dimensions,
+                distances: vec![(0usize, 0.0, 0.0, 0.0); dataset.len()],
+                assignments: vec![0usize; dataset.len()],
+                scratch: vec![0.0f32; dimensions],
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct Candidate {
+        centroids: VecVectorStore<f32>,
+        split: usize,
+        distance_sum: f64,
+    }
+
+    impl Candidate {
+        fn new(
+            centroids: VecVectorStore<f32>,
+            state: &mut IterState<'_, '_, impl VectorStore<Elem = u8> + Send + Sync>,
+        ) -> Self {
+            let mut candidate = Self {
+                centroids,
+                split: 0,
+                distance_sum: 0.0,
+            };
+            candidate.update_split(state);
+            candidate
+        }
+
+        fn from_sampled_vectors(
+            first: usize,
+            second: usize,
+            state: &mut IterState<'_, '_, impl VectorStore<Elem = u8> + Send + Sync>,
+        ) -> Self {
+            let coder = state.coder;
+            let mut centroids = VecVectorStore::with_capacity(state.dimensions, 2);
+            centroids.push(&coder.decode(&state.dataset[first]));
+            centroids.push(&coder.decode(&state.dataset[second]));
+            let mut candidate = Self::new(centroids, state);
+            candidate.update_centroids(candidate.split, state);
+            candidate
+        }
+
+        fn update_centroids(
+            &mut self,
+            target_split: usize,
+            state: &mut IterState<'_, '_, impl VectorStore<Elem = u8> + Send + Sync>,
+        ) {
+            for (i, &(idx, _, _, _)) in state.distances.iter().enumerate() {
+                state.assignments[idx] = if i < target_split { 0 } else { 1 };
+            }
+            let coder = state.coder;
+            let mut centroids = VecVectorStore::with_capacity(state.dimensions, 2);
+            centroids.push(&vec![0.0f32; state.dimensions]);
+            centroids.push(&vec![0.0f32; state.dimensions]);
+            let mut counts = [0usize; 2];
+            for (encoded, i) in state.dataset.iter().zip(state.assignments.iter().copied()) {
+                coder.decode_to(encoded, &mut state.scratch);
+                let centroid = &mut centroids[i];
+                counts[i] += 1;
+                for (d, o) in state.scratch.iter().zip(centroid.iter_mut()) {
+                    *o += *d;
+                }
+            }
+            for i in 0..2 {
+                if counts[i] == 0 {
+                    continue;
+                }
+                let count = counts[i] as f32;
+                for d in centroids[i].iter_mut() {
+                    *d /= count;
+                }
+            }
+            self.centroids = centroids;
+            self.update_split(state);
+        }
+
+        fn update_split(
+            &mut self,
+            state: &mut IterState<'_, '_, impl VectorStore<Elem = u8> + Send + Sync>,
+        ) {
+            let dist_fn = EuclideanDistance::get();
+            let coder = state.coder;
+            let dataset = state.dataset;
+            let c0: &[f32] = &self.centroids[0];
+            let c1: &[f32] = &self.centroids[1];
+            state
+                .distances
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, d)| {
+                    let decoded = coder.decode(&dataset[i]);
+                    let ldist = dist_fn.distance_f32(c0, &decoded);
+                    let rdist = dist_fn.distance_f32(c1, &decoded);
                     *d = (i, ldist, rdist, ldist - rdist)
                 });
             state

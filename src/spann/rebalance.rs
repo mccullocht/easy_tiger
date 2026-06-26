@@ -256,20 +256,23 @@ pub fn split_centroid(
         vectors.len()
     );
 
-    // Unpack all of the vectors as floats and split into two clusters.
+    // Build a quantized vector store for clustering.
     let posting_format = txn_idx.index().config().posting_coder;
     let similarity = txn_idx.index().head_config().config().similarity;
     let posting_coder = posting_format.coder(similarity, None);
-    let mut scratch_vector = vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
-    let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), vectors.len());
+    let posting_distance = posting_format.distance_symmetric(similarity, None);
+    let byte_stride =
+        posting_coder.byte_len(txn_idx.index().head_config().config().dimensions.get());
+    let mut clustering_vectors = VecVectorStore::<u8>::with_capacity(byte_stride, vectors.len());
     for (_, vector) in vectors.iter() {
-        posting_coder.decode_to(vector, &mut scratch_vector);
-        clustering_vectors.push(&scratch_vector);
+        clustering_vectors.push(vector);
     }
     posting_cursor.reset()?;
 
-    let centroids = match kmeans::balanced_binary_partition(
+    let centroids = match kmeans::balanced_binary_partition_quantized(
         &clustering_vectors,
+        posting_coder.as_ref(),
+        posting_distance.as_ref(),
         100,
         txn_idx.index().config().min_centroid_len,
         rng,
@@ -327,11 +330,13 @@ pub fn split_centroid(
     searcher = GraphSearcher::new(txn_idx.index().config().head_search_params);
     let mut float_vector = vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
     let mut unique_centroids = HashSet::new();
+    let mut assigned = (0, 0, 0);
     for (record_id, vector) in vectors {
         let c0_dist = c0_dist_fn.distance(&vector);
         let c1_dist = c1_dist_fn.distance(&vector);
         let c2_dist = c2_dist_fn.distance(&vector);
         let new_assignments = if c0_dist <= c1_dist && c0_dist <= c2_dist {
+            assigned.2 += 1;
             searches += 1;
             posting_coder.decode_to(&vector, &mut float_vector);
             let mut candidates = searcher.search_with_filter(
@@ -344,13 +349,15 @@ pub fn split_centroid(
                 txn_idx.index().config().replica_selection,
                 txn_idx.index().config().replica_count,
                 candidates,
-                &scratch_vector,
+                &float_vector,
                 txn_idx.head(),
             )?
         } else {
             let updated_centroid_id = if c1_dist < c2_dist {
+                assigned.0 += 1;
                 target_centroid_ids.0
             } else {
+                assigned.1 += 1;
                 target_centroid_ids.1
             };
             if txn_idx.index().config().replica_count <= 1 {
@@ -386,6 +393,10 @@ pub fn split_centroid(
             unique_centroids.insert(new_centroid);
         }
     }
+    eprintln!(
+        "  assigned {}={} {}={} other {}",
+        target_centroid_ids.0, assigned.0, target_centroid_ids.1, assigned.1, assigned.2
+    );
 
     let mut nearby_seen = 0;
     let mut nearby_moved = 0;
@@ -414,6 +425,7 @@ pub fn split_centroid(
         );
 
         nearby_posting_cursor.set_bounds(PostingKey::centroid_range(nearby_centroid_id))?;
+        let mut moved = (0, 0);
         while let Some(r) = unsafe { nearby_posting_cursor.next_unsafe() } {
             let (key, vector) = r?;
             let c0_dist = c0_dist_fn.distance(vector);
@@ -433,8 +445,10 @@ pub fn split_centroid(
             nearby_seen += 1;
 
             let assigned_centroid_id = if c1_dist < c0_dist {
+                moved.0 += 1;
                 target_centroid_ids.0 as u32
             } else if c2_dist < c0_dist {
+                moved.1 += 1;
                 target_centroid_ids.1 as u32
             } else {
                 continue;
@@ -442,9 +456,9 @@ pub fn split_centroid(
 
             let new_assignments = if txn_idx.index().config().replica_count > 1 {
                 searches += 1;
-                posting_coder.decode_to(vector, &mut scratch_vector);
+                posting_coder.decode_to(vector, &mut float_vector);
                 let candidates = searcher.search_with_filter(
-                    &scratch_vector,
+                    &float_vector,
                     |i| i != centroid_id as i64,
                     txn_idx.head(),
                 )?;
@@ -452,7 +466,7 @@ pub fn split_centroid(
                     txn_idx.index().config().replica_selection,
                     txn_idx.index().config().replica_count,
                     candidates,
-                    &scratch_vector,
+                    &float_vector,
                     txn_idx.head(),
                 )?
             } else {
@@ -468,6 +482,13 @@ pub fn split_centroid(
                 &new_assignments,
                 &mut posting_cursor,
             )?;
+        }
+
+        if moved.0 > 0 || moved.1 > 0 {
+            eprintln!(
+                "  nearby moved from {nearby_centroid_id} {}=>{} {}=> {}",
+                moved.0, target_centroid_ids.0, moved.1, target_centroid_ids.1
+            );
         }
     }
 

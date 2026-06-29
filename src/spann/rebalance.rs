@@ -284,11 +284,10 @@ pub fn split_centroid(
     // Extract the original centroid vector from the head index and delete original centroid.
     let mut head_vectors = txn_idx.head().high_fidelity_vectors()?;
     let head_coder = head_vectors.new_coder();
-    let original_centroid = head_coder.decode(
-        head_vectors
-            .get(centroid_id as i64)
-            .unwrap_or(Err(Error::not_found_error()))?,
-    );
+    let original_centroidq = head_vectors
+        .get(centroid_id as i64)
+        .unwrap_or(Err(Error::not_found_error()))?;
+    let original_centroid = head_coder.decode(original_centroidq);
     delete_vector(centroid_id as i64, txn_idx.head())?;
 
     // For each vector if it is closer to the original centroid than either of the new centroids
@@ -306,11 +305,7 @@ pub fn split_centroid(
 
     let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
     // TODO: skip decoding if head index and posting index format are the same.
-    let c0_dist_fn = posting_format.query_distance_symmetric(
-        similarity,
-        posting_coder.encode(&original_centroid),
-        None,
-    );
+    let c0_dist_fn = posting_format.query_distance_symmetric(similarity, original_centroidq, None);
     let c1_dist_fn = posting_format.query_distance_symmetric(
         similarity,
         posting_coder.encode(&centroids[0]),
@@ -402,16 +397,10 @@ pub fn split_centroid(
     for n in nearby_clusters {
         let nearby_centroid_id = n.vertex() as u32;
         let mut head_vectors = txn_idx.head().high_fidelity_vectors()?;
-        let nearby_centroid = head_coder.decode(
-            head_vectors
-                .get(nearby_centroid_id as i64)
-                .unwrap_or(Err(Error::not_found_error()))?,
-        );
-        let c0_dist_fn = posting_format.query_distance_symmetric(
-            similarity,
-            posting_coder.encode(&nearby_centroid),
-            None,
-        );
+        let nearby_centroid = head_vectors
+            .get(nearby_centroid_id as i64)
+            .unwrap_or(Err(Error::not_found_error()))?;
+        let c0_dist_fn = posting_format.query_distance_symmetric(similarity, nearby_centroid, None);
 
         nearby_posting_cursor.set_bounds(PostingKey::centroid_range(nearby_centroid_id))?;
         while let Some(r) = unsafe { nearby_posting_cursor.next_unsafe() } {

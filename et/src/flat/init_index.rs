@@ -3,7 +3,7 @@ use std::{io, num::NonZero, sync::Arc};
 use clap::Args;
 use easy_tiger::flat::{self, FlatIndexConfig};
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{Connection, connection::DropOptionsBuilder};
+use wt_mdb::{connection::DropOptionsBuilder, Connection};
 
 #[derive(Args)]
 pub struct InitIndexArgs {
@@ -16,6 +16,9 @@ pub struct InitIndexArgs {
     /// Encoding format for stored vectors.
     #[arg(short, long)]
     format: F32VectorCoding,
+    /// Maximum number of postings per block.
+    #[arg(long)]
+    block_size: NonZero<usize>,
     /// If true, drop any existing table with the same name before creating.
     #[arg(long, default_value_t = false)]
     drop_tables: bool,
@@ -38,6 +41,7 @@ pub fn init_index(
         dimensions: args.dimensions,
         similarity: args.similarity,
         format: args.format,
+        block_size: args.block_size,
     };
     flat::init_index(&connection, index_name, &config)
 }

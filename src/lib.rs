@@ -7,6 +7,7 @@
 pub mod flat;
 pub mod input;
 pub mod kmeans;
+pub mod posting_block;
 pub mod spann;
 pub mod vamana;
 

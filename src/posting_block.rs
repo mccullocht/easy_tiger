@@ -8,6 +8,9 @@
 
 use vectors::F32VectorCoder;
 
+/// A view over a block of vector posting data: (id, vector) tuples.
+///
+/// Vectors are expected to be fixed size but the format of the data is otherwise undefined.
 #[derive(Debug, Clone)]
 pub struct PostingBlock<'a> {
     ids: &'a [[u8; 8]],
@@ -41,6 +44,112 @@ impl<'a> PostingBlock<'a> {
             .copied()
             .map(i64::from_le_bytes)
             .zip(self.vectors.chunks(self.vector_len))
+    }
+
+    /// Lookup a vector by `id`, returning `None` if `id` is not present in the block.
+    pub fn lookup(&self, id: i64) -> Option<&[u8]> {
+        self.ids
+            .binary_search(&id.to_le_bytes())
+            .map(|i| {
+                let start = self.vector_len * i;
+                let end = start + self.vector_len;
+                &self.vectors[start..end]
+            })
+            .ok()
+    }
+
+    /// Return the number of entries in the block.
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
+
+/// Builder for a block of vector posting data.
+///
+/// Vectors are expected to be fixed size but the format of the data is otherwise undefined.
+#[derive(Debug, Clone, Default)]
+pub struct PostingBlockBuilder {
+    entries: Vec<(i64, Vec<u8>)>,
+    initial_entries: usize,
+    dirty: Vec<i64>,
+}
+
+// XXX this all needs docs.
+impl PostingBlockBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn from_entries(entries: Vec<(i64, Vec<u8>)>) -> Self {
+        Self {
+            initial_entries: entries.len(),
+            entries,
+            dirty: vec![],
+        }
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (i64, &[u8])> {
+        self.entries.iter().map(|(i, v)| (*i, v.as_slice()))
+    }
+
+    pub fn lookup(&self, id: i64) -> Option<&[u8]> {
+        self.entries
+            .binary_search_by_key(&id, |(i, _)| *i)
+            .map(|i| self.entries[i].1.as_slice())
+            .ok()
+    }
+
+    pub fn upsert(&mut self, id: i64, vector: impl Into<Vec<u8>>) {
+        match self.entries.binary_search_by_key(&id, |(i, _)| *i) {
+            Ok(i) => self.entries[i].1 = vector.into(),
+            Err(i) => self.entries.insert(i, (id, vector.into())),
+        }
+        self.mark_dirty(id);
+    }
+
+    pub fn delete(&mut self, id: i64) {
+        if let Ok(i) = self.entries.binary_search_by_key(&id, |(i, _)| *i) {
+            self.entries.remove(i);
+            self.mark_dirty(id);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    // XXX tri-state encode:
+    // * If it's empty, should result in the key being removed.
+    // * If there are too many mutations (~10% of max(entries, dirty)) then flush completely and set
+    // * Otherwise produce a diff.
+    //
+    // I think the state I have is sufficient to decide between 2 and 3.
+
+    fn mark_dirty(&mut self, id: i64) {
+        if let Err(i) = self.dirty.binary_search(&id) {
+            self.dirty.insert(i, id);
+        }
+    }
+}
+
+impl<B: Into<Vec<u8>>> FromIterator<(i64, B)> for PostingBlockBuilder {
+    fn from_iter<T: IntoIterator<Item = (i64, B)>>(iter: T) -> Self {
+        let entries = iter.into_iter().map(|(id, v)| (id, v.into())).collect();
+        Self::from_entries(entries)
+    }
+}
+
+impl From<PostingBlock<'_>> for PostingBlockBuilder {
+    fn from(value: PostingBlock<'_>) -> Self {
+        Self::from_iter(value.iter())
     }
 }
 

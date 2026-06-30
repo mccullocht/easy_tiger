@@ -132,6 +132,10 @@ fn search_phase<Q: Send + Sync>(
 ) -> io::Result<AggregateSearchStats> {
     use rayon::prelude::*;
 
+    let vector_len = config
+        .format
+        .coder(config.similarity, None)
+        .byte_len(config.dimensions.get());
     let query_indices = (0..limit).cycle().take(iters * limit).collect::<Vec<_>>();
     let progress = progress_bar(query_indices.len(), name);
     let stats = query_indices
@@ -146,7 +150,7 @@ fn search_phase<Q: Send + Sync>(
             let cursor = txn.open_record_cursor(table_name)?;
 
             let start = Instant::now();
-            let results = exhaustive_search(k, cursor, distance_fn.as_ref())?;
+            let results = exhaustive_search(cursor, vector_len, distance_fn.as_ref(), k)?;
             let duration = Instant::now() - start;
             progress.inc(1);
             Ok::<_, io::Error>(AggregateSearchStats::new(

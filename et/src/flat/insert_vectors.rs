@@ -4,6 +4,7 @@ use clap::Args;
 use easy_tiger::{
     flat,
     input::{DerefVectorStore, VectorStore},
+    posting_block,
 };
 use wt_mdb::Connection;
 
@@ -20,9 +21,6 @@ pub struct InsertVectorsArgs {
     /// Number of vectors to insert. If unset, inserts all vectors from --start to end of file.
     #[arg(short, long)]
     count: Option<NonZero<usize>>,
-    /// Number of vectors to insert in each transaction batch.
-    #[arg(long, default_value_t = NonZero::new(256).unwrap())]
-    batch_size: NonZero<usize>,
 }
 
 pub fn insert_vectors(
@@ -67,20 +65,19 @@ pub fn insert_vectors(
     }
 
     let coder = config.format.coder(config.similarity, None);
-    let batch_size = args.batch_size.get();
+    let batch_size = config.block_size.get();
     let progress = progress_bar(count, "inserting vectors");
 
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
+        let block = posting_block::encode_f32(
+            (batch_start..batch_end).map(|i| (i as i64, &f32_vectors[i])),
+            coder.as_ref(),
+            config.dimensions.get(),
+        );
         let txn = connection.begin_transaction(None)?;
-        {
-            let mut cursor = txn.open_record_cursor(&table_name)?;
-            for i in batch_start..batch_end {
-                let vector: &[f32] = &f32_vectors[i];
-                let encoded = coder.encode(vector);
-                cursor.set(i as i64, encoded.as_slice())?;
-            }
-        }
+        txn.open_record_cursor(&table_name)?
+            .set(batch_end as i64, &block)?;
         txn.commit(None)?;
         progress.inc((batch_end - batch_start) as u64);
     }

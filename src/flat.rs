@@ -7,8 +7,8 @@ use std::{io, num::NonZero, sync::Arc};
 use serde::{Deserialize, Serialize};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{
-    Connection,
     connection::{CreateOptionsBuilder, DropOptions},
+    Connection,
 };
 
 use crate::vamana::wt::read_app_metadata;
@@ -19,6 +19,7 @@ pub struct FlatIndexConfig {
     pub dimensions: NonZero<usize>,
     pub similarity: VectorSimilarity,
     pub format: F32VectorCoding,
+    pub block_size: NonZero<usize>,
 }
 
 /// Returns the WiredTiger table name for a flat index.
@@ -40,12 +41,22 @@ pub fn init_index(
     index_name: &str,
     config: &FlatIndexConfig,
 ) -> io::Result<()> {
+    let leaf_page_size = crate::posting_block::leaf_page_max(
+        config.block_size.get(),
+        config
+            .format
+            .coder(config.similarity, None)
+            .byte_len(config.dimensions.get()),
+        4096,
+    ) as u32;
     connection
         .create_table(
             &table_name(index_name),
             Some(
                 CreateOptionsBuilder::default()
                     .app_metadata(&serde_json::to_string(config)?)
+                    .leaf_page_max(leaf_page_size)
+                    .leaf_value_max(leaf_page_size)
                     .into(),
             ),
         )

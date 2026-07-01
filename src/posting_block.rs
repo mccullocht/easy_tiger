@@ -139,6 +139,8 @@ impl PostingBlockBuilder {
         if let Ok(i) = self.0.binary_search_by_key(&id, |e| e.id) {
             let e = &mut self.0[i];
             e.vector.clear();
+            // XXX I should remove the value entirely if base_index is unset.
+            // it will make it easier to fix up later.
             e.dirty = e.base_index != usize::MAX;
         }
     }
@@ -219,6 +221,10 @@ impl PostingBlockDelta {
         // i need to distinguish between insert and update
         // * inserts only need to know the next output index.
         // * updates and deletes need to track where base_index is in the output
+        // XXX is it easier if I iterate over every entry?
+        // delete => delete at current index, do not increment index.
+        // insert => insert at current index, increment index.
+        // update => replace at current index, increment index.
         PostingBlockDelta(
             builder
                 .0

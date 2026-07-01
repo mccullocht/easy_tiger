@@ -11,10 +11,11 @@ use std::{
 use min_max_heap::MinMaxHeap;
 use tracing::warn;
 use vectors::QueryVectorDistance;
-use wt_mdb::Result;
+use wt_mdb::{Result, TypedCursorGuard};
 
 use crate::{
-    spann::{centroid_stats::CentroidStats, postings::BlockPostingsMut, TransactionIndex},
+    posting_block::PostingBlock,
+    spann::{centroid_stats::CentroidStats, TransactionIndex},
     vamana::{
         search::{GraphSearchStats, GraphSearcher},
         GraphSearchParams, GraphVectorIndex,
@@ -198,7 +199,7 @@ impl Searcher {
         &mut self,
         query: &[f32],
         reader: &TransactionIndex,
-        postings: &mut BlockPostingsMut<'_>,
+        posting_cursor: &mut TypedCursorGuard<'_, u32, Vec<u8>>,
     ) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 
@@ -224,22 +225,28 @@ impl Searcher {
                     None,
                 ),
         );
+        let vector_len = reader.index().posting_vector_len();
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
-            // TODO: if I can't read a posting list then skip and warn rather than exiting early.
-            let entries = match postings.read_centroid(centroid_id) {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("failed to read posting in centroid {centroid_id}: {e}");
+            // SAFETY: we are not performing any WT operations in between seeks.
+            let data = match unsafe { posting_cursor.seek_exact_unsafe(centroid_id) } {
+                Some(Ok(data)) => data,
+                Some(Err(e)) => {
+                    warn!("failed to read posting for centroid {centroid_id}: {e}");
                     continue;
                 }
+                None => continue,
             };
-            for (record_id, vector) in entries {
+            let Some(block) = PostingBlock::new(&data, vector_len) else {
+                warn!("malformed posting block for centroid {centroid_id}");
+                continue;
+            };
+            for (record_id, vector) in block.iter() {
                 self.stats.posting_vectors_read += 1;
                 if !self.seen.insert(record_id) {
                     continue; // already seen
                 }
-                result_queue.push(record_id, &vector);
+                result_queue.push(record_id, vector);
             }
         }
 

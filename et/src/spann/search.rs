@@ -14,8 +14,8 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        PostingKey, TableIndex, TransactionIndex,
-        postings::RowPostingsMut,
+        TableIndex, TransactionIndex,
+        postings::BlockPostingsMut,
         search::{
             CentroidSelector, CentroidSelectorAlgorithm, SearchParams, SearchStats, Searcher,
         },
@@ -261,8 +261,8 @@ impl SearcherState {
         let reader = TransactionIndex::new(&self.index, self.connection.begin_transaction(None)?);
         let cursor = reader
             .transaction()
-            .open_cursor::<PostingKey, Vec<u8>>(self.index.postings_table_name())?;
-        let mut postings = RowPostingsMut::new(cursor);
+            .open_cursor::<u32, Vec<u8>>(self.index.postings_table_name())?;
+        let mut postings = BlockPostingsMut::new(cursor, self.index.posting_vector_len());
         let start = Instant::now();
         let results = self.searcher.search(query, &reader, &mut postings)?;
         let duration = Instant::now() - start;

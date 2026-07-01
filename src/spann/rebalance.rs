@@ -14,7 +14,7 @@ use crate::{
     kmeans,
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
-        postings::{PostingsMut, RowPostingsMut},
+        postings::BlockPostingsMut,
         select_centroids, CentroidAssignment, PostingKey, TransactionIndex,
     },
     vamana::{
@@ -163,8 +163,8 @@ pub fn merge_centroid(
     let index = Arc::clone(txn_idx.index());
     let posting_cursor = txn_idx
         .transaction()
-        .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
-    let mut postings = RowPostingsMut::new(posting_cursor);
+        .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+    let mut postings = BlockPostingsMut::new(posting_cursor, index.posting_vector_len());
     let vectors = postings.read_centroid(centroid_id as u32)?;
     postings.remove_centroid(centroid_id as u32)?;
     assert_eq!(
@@ -247,8 +247,8 @@ pub fn split_centroid(
 ) -> Result<SplitStats> {
     let posting_cursor = txn_idx
         .transaction()
-        .open_cursor::<PostingKey, Vec<u8>>(txn_idx.index().postings_table_name())?;
-    let mut postings = RowPostingsMut::new(posting_cursor);
+        .open_cursor::<u32, Vec<u8>>(txn_idx.index().postings_table_name())?;
+    let mut postings = BlockPostingsMut::new(posting_cursor, txn_idx.index().posting_vector_len());
     let vectors = postings.read_centroid(centroid_id as u32)?;
     postings.remove_centroid(centroid_id as u32)?;
     assert_eq!(
@@ -487,7 +487,7 @@ fn move_postings(
     vector: &[u8],
     old_assignment: &CentroidAssignment,
     new_assignment: &CentroidAssignment,
-    postings: &mut impl PostingsMut,
+    postings: &mut BlockPostingsMut<'_>,
 ) -> Result<usize> {
     let old_assignment = old_assignment
         .iter()

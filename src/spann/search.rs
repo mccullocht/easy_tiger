@@ -14,7 +14,7 @@ use vectors::QueryVectorDistance;
 use wt_mdb::Result;
 
 use crate::{
-    spann::{centroid_stats::CentroidStats, postings::PostingsMut, TransactionIndex},
+    spann::{centroid_stats::CentroidStats, postings::BlockPostingsMut, TransactionIndex},
     vamana::{
         search::{GraphSearchStats, GraphSearcher},
         GraphSearchParams, GraphVectorIndex,
@@ -198,7 +198,7 @@ impl Searcher {
         &mut self,
         query: &[f32],
         reader: &TransactionIndex,
-        postings: &mut impl PostingsMut,
+        postings: &mut BlockPostingsMut<'_>,
     ) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 

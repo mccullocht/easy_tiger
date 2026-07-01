@@ -5,12 +5,12 @@ use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     kmeans::{HierarchicalKMeansParams, Params, hierarchical_kmeans},
     spann::{
-        IndexConfig, PostingKey, ReplicaSelectionAlgorithm, TableIndex,
+        IndexConfig, ReplicaSelectionAlgorithm, TableIndex,
         bulk::{
             assign_to_centroids, load_centroid_stats, load_centroids, load_postings,
             load_raw_vectors,
         },
-        postings::RowPostingsMut,
+        postings::BlockPostingsMut,
     },
     vamana::{
         GraphConfig, GraphSearchParams, PatienceParams,
@@ -277,8 +277,8 @@ pub fn bulk_load(
         let txn = connection.begin_transaction(None)?;
         {
             let cursor =
-                txn.open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
-            let mut postings = RowPostingsMut::new(cursor);
+                txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+            let mut postings = BlockPostingsMut::new(cursor, index.posting_vector_len());
             load_postings(
                 index.as_ref(),
                 &mut postings,

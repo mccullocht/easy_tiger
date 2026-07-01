@@ -168,6 +168,11 @@ impl TableIndex {
             .coder(self.head_config().config().similarity, None)
     }
 
+    pub fn posting_vector_len(&self) -> usize {
+        self.new_posting_coder()
+            .byte_len(self.head_config().config().dimensions.get())
+    }
+
     pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {
         let head = Arc::new(TableGraphVectorIndex::from_db(
             connection,
@@ -237,7 +242,7 @@ impl TableIndex {
             &table_names.postings,
             Some(
                 CreateOptionsBuilder::default()
-                    .key_format::<PostingKey>()
+                    .key_format::<u32>()
                     .value_format::<Vec<u8>>()
                     .app_metadata(&serde_json::to_string(&spann_config)?)
                     .into(),

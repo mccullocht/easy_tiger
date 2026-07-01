@@ -5,6 +5,7 @@
 
 pub mod bulk;
 pub mod centroid_stats;
+pub mod postings;
 pub mod rebalance;
 pub mod search;
 

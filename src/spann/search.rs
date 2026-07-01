@@ -14,7 +14,7 @@ use vectors::QueryVectorDistance;
 use wt_mdb::Result;
 
 use crate::{
-    spann::{centroid_stats::CentroidStats, PostingKey, TransactionIndex},
+    spann::{centroid_stats::CentroidStats, postings::PostingsMut, TransactionIndex},
     vamana::{
         search::{GraphSearchStats, GraphSearcher},
         GraphSearchParams, GraphVectorIndex,
@@ -194,7 +194,12 @@ impl Searcher {
         self.stats
     }
 
-    pub fn search(&mut self, query: &[f32], reader: &TransactionIndex) -> Result<Vec<Neighbor>> {
+    pub fn search(
+        &mut self,
+        query: &[f32],
+        reader: &TransactionIndex,
+        postings: &mut impl PostingsMut,
+    ) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 
         let mut centroids = self.head_searcher.search(query, reader.head())?;
@@ -222,25 +227,19 @@ impl Searcher {
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
             // TODO: if I can't read a posting list then skip and warn rather than exiting early.
-            let mut cursor = reader
-                .transaction()
-                .open_cursor::<PostingKey, Vec<u8>>(&reader.index().table_names.postings)?;
-            cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
-            while let Some(r) = unsafe { cursor.next_unsafe() } {
+            let entries = match postings.read_centroid(centroid_id) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("failed to read posting in centroid {centroid_id}: {e}");
+                    continue;
+                }
+            };
+            for (record_id, vector) in entries {
                 self.stats.posting_vectors_read += 1;
-                let (record_id, vector) = match r {
-                    Ok((k, v)) => (k.record_id, v),
-                    Err(e) => {
-                        warn!("failed to read posting in centroid {centroid_id}: {e}");
-                        continue;
-                    }
-                };
-
                 if !self.seen.insert(record_id) {
                     continue; // already seen
                 }
-
-                result_queue.push(record_id, vector);
+                result_queue.push(record_id, &vector);
             }
         }
 

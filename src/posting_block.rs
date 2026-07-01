@@ -6,16 +6,132 @@
 //! block is inferred from the byte size of the block. Identifiers are stored before the rest of
 //! the vector to allow mutation without having to visit every byte in the block.
 
+use std::collections::BTreeMap;
+
 use vectors::F32VectorCoder;
+
+/// Internal model for handling pre-encoded blocks.
+///
+/// This is created with a fixed raw block length and vector length, validates settings, and
+/// provides routines to examine the raw block data without maintaing a slice reference.
+#[derive(Debug, Copy, Clone)]
+struct PostingBlockMeta {
+    raw_len: usize,
+    len: usize,
+    id_split: usize,
+    vector_len: usize,
+}
+
+impl PostingBlockMeta {
+    /// Create a new meta with a raw block length and a fixed vector length.
+    ///
+    /// Returns `None` if `raw_len` doesn't divide evenly into entries.
+    fn new(raw_len: usize, vector_len: usize) -> Option<Self> {
+        let entry_len = vector_len + std::mem::size_of::<i64>();
+        if raw_len.is_multiple_of(entry_len) {
+            let len = raw_len / entry_len;
+            let id_split = len * std::mem::size_of::<i64>();
+            Some(Self {
+                raw_len,
+                len,
+                id_split,
+                vector_len,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Presents ids as a slice of 8 byte entries.
+    ///
+    /// Each entry is a little-endian encoded `i64`. Entries are not guaranteed to be aligned.
+    ///
+    /// *Panics* if `raw_block` is not the same size as `raw_len` passed at construction.
+    #[inline]
+    fn raw_ids<'b>(&self, raw_block: &'b [u8]) -> &'b [[u8; 8]] {
+        assert_eq!(self.raw_len, raw_block.len());
+        &raw_block.as_chunks::<{ std::mem::size_of::<i64>() }>().0[..self.len]
+    }
+
+    /// Iterator over ids in `raw_block`
+    ///
+    /// *Panics* if `raw_block` is not the same size as `raw_len` passed at construction.
+    #[inline]
+    fn id_iter<'b>(&self, raw_block: &'b [u8]) -> impl ExactSizeIterator<Item = i64> + 'b {
+        self.raw_ids(raw_block)
+            .iter()
+            .copied()
+            .map(i64::from_le_bytes)
+    }
+
+    /// Iterator over vectors in `raw_block`
+    ///
+    /// *Panics* if `raw_block` is not the same size as `raw_len` passed at construction.
+    #[inline]
+    fn vector_iter<'b>(&self, raw_block: &'b [u8]) -> impl ExactSizeIterator<Item = &'b [u8]> {
+        assert_eq!(self.raw_len, raw_block.len());
+        raw_block[self.id_split..].chunks(self.vector_len)
+    }
+
+    /// Iterator over (id, vector) in `raw_block`.
+    ///
+    /// *Panics* if `raw_block` is not the same size as `raw_len` passed at construction.
+    #[inline]
+    fn block_iter<'b>(
+        &self,
+        raw_block: &'b [u8],
+    ) -> impl ExactSizeIterator<Item = (i64, &'b [u8])> {
+        self.id_iter(raw_block).zip(self.vector_iter(raw_block))
+    }
+
+    /// Lookup `id` in `raw_block`, returning the vector if present.
+    #[inline]
+    fn lookup<'b>(&self, raw_block: &'b [u8], id: i64) -> Option<&'b [u8]> {
+        let i = self
+            .raw_ids(raw_block)
+            .binary_search_by_key(&id, |r| i64::from_le_bytes(*r))
+            .ok()?;
+        Some(self.vector_index(raw_block, i))
+    }
+
+    /// Read the vector in `raw_block` at `index`.
+    ///
+    /// *Panics* if `raw_block` is not the same size as `raw_len` passed at construction or if
+    /// `i >= len`.
+    fn vector_index<'b>(&self, raw_block: &'b [u8], i: usize) -> &'b [u8] {
+        assert_eq!(self.raw_len, raw_block.len());
+        let offset = self.id_split + i * self.vector_len;
+        &raw_block[offset..(offset + self.vector_len)]
+    }
+
+    fn encode_block(
+        vector_len: usize,
+        it: impl ExactSizeIterator<Item = (i64, impl AsRef<[u8]>)>,
+    ) -> Vec<u8> {
+        let id_split = it.len() * std::mem::size_of::<i64>();
+        let mut out = vec![0u8; id_split + vector_len * it.len()];
+        let (id_out, vector_out) = out.split_at_mut(id_split);
+        let oit = id_out
+            .as_chunks_mut::<{ std::mem::size_of::<i64>() }>()
+            .0
+            .iter_mut()
+            .zip(vector_out.chunks_mut(vector_len));
+        for (i, o) in it.zip(oit) {
+            *o.0 = i.0.to_le_bytes();
+            assert_eq!(i.1.as_ref().len(), vector_len);
+            o.1.copy_from_slice(i.1.as_ref());
+        }
+        out
+    }
+}
 
 /// A view over a block of vector posting data: (id, vector) tuples.
 ///
 /// Vectors are expected to be fixed size but the format of the data is otherwise undefined.
 #[derive(Debug, Clone)]
 pub struct PostingBlock<'a> {
-    ids: &'a [[u8; 8]],
-    vectors: &'a [u8],
-    vector_len: usize,
+    data: &'a [u8],
+    meta: PostingBlockMeta,
 }
 
 impl<'a> PostingBlock<'a> {
@@ -23,227 +139,126 @@ impl<'a> PostingBlock<'a> {
     ///
     /// Returns `None` if the input data length does not align with an integer entry count.
     pub fn new(data: &'a [u8], vector_len: usize) -> Option<Self> {
-        let entry_len = vector_len + std::mem::size_of::<i64>();
-        if !data.len().is_multiple_of(entry_len) {
-            return None;
-        }
-        let len = data.len() / entry_len;
-        let split = len * std::mem::size_of::<i64>();
-        let (ids, vectors) = data.split_at(split);
-        Some(Self {
-            ids: ids.as_chunks::<{ std::mem::size_of::<i64>() }>().0,
-            vectors,
-            vector_len,
-        })
+        let meta = PostingBlockMeta::new(data.len(), vector_len)?;
+        Some(Self { data, meta })
     }
 
     /// Return an iterator over the vectors in the posting block and their ids.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (i64, &'a [u8])> {
-        self.ids
-            .iter()
-            .copied()
-            .map(i64::from_le_bytes)
-            .zip(self.vectors.chunks(self.vector_len))
+        self.meta.block_iter(self.data)
     }
 
     /// Lookup a vector by `id`, returning `None` if `id` is not present in the block.
     pub fn lookup(&self, id: i64) -> Option<&[u8]> {
-        self.ids
-            .binary_search(&id.to_le_bytes())
-            .map(|i| {
-                let start = self.vector_len * i;
-                let end = start + self.vector_len;
-                &self.vectors[start..end]
-            })
-            .ok()
+        self.meta.lookup(self.data, id)
     }
 
     /// Return the number of entries in the block.
     pub fn len(&self) -> usize {
-        self.ids.len()
+        self.meta.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ids.is_empty()
+        self.meta.len == 0
     }
 }
 
-// XXX this proposal cannot distinguish between an update and a clean entry.
-#[derive(Debug, Clone)]
-struct BuilderEntry {
-    id: i64,
-    // usize::MAX for an insert of a new entry.
-    base_index: usize,
-    // Empty to indicate a delete.
-    vector: Vec<u8>,
-    // True if this entry has been modified.
-    dirty: bool,
+enum EntrySource {
+    /// Index into the base block's entry array.
+    Base(usize),
+    /// Owned encoded vector bytes for a new or replaced entry.
+    New(Vec<u8>),
 }
 
-impl BuilderEntry {
-    fn vector_tuple(&self) -> Option<(i64, &[u8])> {
-        if !self.vector.is_empty() {
-            Some((self.id, self.vector.as_slice()))
-        } else {
-            None
+/// A mutable posting block that can be seeded from an existing block and mutated via inserts and
+/// removals. The original data is preserved so callers can produce a diff (e.g. via
+/// `wiredtiger_calc_modify`) against the serialized result.
+pub struct PostingBlockMut {
+    /// Base block we are working off of. May be empty.
+    base_data: Vec<u8>,
+    /// Metadata for base block.
+    base_meta: PostingBlockMeta,
+    /// Current entries sorted by id. Start pre-populated from base block.
+    entries: BTreeMap<i64, EntrySource>,
+}
+
+impl PostingBlockMut {
+    /// Create a new mutable block where each vector is expected be `vector_len` bytes.
+    pub fn new(vector_len: usize) -> Self {
+        Self {
+            base_data: vec![],
+            base_meta: PostingBlockMeta::new(0, vector_len).expect("0 divides evenly"),
+            entries: BTreeMap::new(),
         }
     }
-}
 
-/// Builder for a block of vector posting data.
-///
-/// Vectors are expected to be fixed size but the format of the data is otherwise undefined.
-#[derive(Debug, Clone, Default)]
-pub struct PostingBlockBuilder(Vec<BuilderEntry>);
-
-// XXX this all needs docs.
-impl PostingBlockBuilder {
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a mutable block pre-populated with data from `block`.
+    pub fn from_block(block: &PostingBlock<'_>) -> Self {
+        let entries = block
+            .meta
+            .id_iter(block.data)
+            .enumerate()
+            .map(|(i, id)| (id, EntrySource::Base(i)))
+            .collect();
+        Self {
+            base_data: block.data.to_vec(),
+            base_meta: block.meta,
+            entries,
+        }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (i64, &[u8])> {
-        self.0.iter().filter_map(BuilderEntry::vector_tuple)
+    /// Return an iterator over the current postings in the block.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (i64, &[u8])> {
+        self.entries.iter().map(|(&id, e)| (id, self.get_vector(e)))
     }
 
+    /// Lookup the vector for the given `id`, returning `None` if not found.
     pub fn lookup(&self, id: i64) -> Option<&[u8]> {
-        self.0
-            .binary_search_by_key(&id, |e| e.id)
-            .map(|i| self.0[i].vector.as_slice())
-            .ok()
-            .filter(|v| !v.is_empty())
+        let e = self.entries.get(&id)?;
+        Some(self.get_vector(e))
     }
 
-    pub fn upsert(&mut self, id: i64, vector: impl Into<Vec<u8>>) {
-        match self.0.binary_search_by_key(&id, |e| e.id) {
-            Ok(i) => {
-                let e = &mut self.0[i];
-                e.vector = vector.into();
-                e.dirty = true;
-            }
-            Err(i) => {
-                self.0.insert(
-                    i,
-                    BuilderEntry {
-                        id,
-                        base_index: usize::MAX,
-                        vector: vector.into(),
-                        dirty: true,
-                    },
-                );
-            }
-        }
+    /// Insert or replace the entry for `id`.
+    ///
+    /// *Panics* if `vector.into().len()` is not the vector length passed at construction.
+    pub fn insert(&mut self, id: i64, vector: impl Into<Vec<u8>>) {
+        let vector = vector.into();
+        assert_eq!(vector.len(), self.base_meta.vector_len);
+        self.entries.insert(id, EntrySource::New(vector));
     }
 
-    pub fn delete(&mut self, id: i64) {
-        if let Ok(i) = self.0.binary_search_by_key(&id, |e| e.id) {
-            let e = &mut self.0[i];
-            e.vector.clear();
-            // XXX I should remove the value entirely if base_index is unset.
-            // it will make it easier to fix up later.
-            e.dirty = e.base_index != usize::MAX;
-        }
+    /// Remove the entry for `id`, returning `true` if it was present.
+    pub fn remove(&mut self, id: i64) -> bool {
+        self.entries.remove(&id).is_some()
     }
 
+    /// The original block data passed to [`PostingBlockMut::from_block`], or an empty slice for
+    /// blocks created with [`PostingBlockMut::new`].
+    ///
+    /// This information can be used to create deltas for binary blocks.
+    pub fn base_block(&self) -> &[u8] {
+        &self.base_data
+    }
+
+    /// Serialize the current state of the block into the same layout as [`PostingBlock`].
+    pub fn serialize(&self) -> Vec<u8> {
+        PostingBlockMeta::encode_block(self.base_meta.vector_len, self.iter())
+    }
+
+    /// Return the number of entries in the block.
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.entries.is_empty()
     }
 
-    pub fn build(self) -> EncodedPostingBlock {
-        if self.is_empty() {
-            return EncodedPostingBlock::Remove;
+    fn get_vector<'a>(&'a self, entry: &'a EntrySource) -> &'a [u8] {
+        match entry {
+            EntrySource::Base(i) => self.base_meta.vector_index(&self.base_data, *i),
+            EntrySource::New(v) => v.as_slice(),
         }
-
-        let vector_len = self.0[0].vector.len();
-        let mut out = vec![0u8; self.len() * (std::mem::size_of::<i64>() + vector_len)];
-        let (ids_out, vectors_out) = out.split_at_mut(self.len() * std::mem::size_of::<i64>());
-        let out_it = ids_out
-            .as_chunks_mut::<{ std::mem::size_of::<i64>() }>()
-            .0
-            .iter_mut()
-            .zip(vectors_out.chunks_mut(vector_len));
-        for (i, o) in self.iter().zip(out_it) {
-            *o.0 = i.0.to_le_bytes();
-            o.1.copy_from_slice(&i.1);
-        }
-        EncodedPostingBlock::Replace(out)
-    }
-}
-
-impl<B: Into<Vec<u8>>> FromIterator<(i64, B)> for PostingBlockBuilder {
-    fn from_iter<T: IntoIterator<Item = (i64, B)>>(iter: T) -> Self {
-        Self(
-            iter.into_iter()
-                .enumerate()
-                .map(|(i, (id, v))| BuilderEntry {
-                    id: id,
-                    base_index: i,
-                    vector: v.into(),
-                    dirty: false,
-                })
-                .collect(),
-        )
-    }
-}
-
-impl From<PostingBlock<'_>> for PostingBlockBuilder {
-    fn from(value: PostingBlock<'_>) -> Self {
-        Self::from_iter(value.iter())
-    }
-}
-
-/// An encoded posting block produced by [`PostingBlockBuilder`].
-///
-/// This may represent a remove, set/overwrite, or a delta/modify call.
-#[derive(Debug, Clone)]
-pub enum EncodedPostingBlock {
-    /// This block no longer contains any postings so remove it.
-    Remove,
-    /// Replace the contents of this block with a different value.
-    Replace(Vec<u8>),
-}
-
-enum PostingDelta {
-    Upsert(usize, [u8; 8], Vec<u8>),
-    Delete(usize),
-}
-
-pub struct PostingBlockDelta(Vec<PostingDelta>);
-
-impl PostingBlockDelta {
-    fn from_builder(builder: PostingBlockBuilder) -> Self {
-        // XXX the indexes are wrong here.
-        // i need to track the base index and the output index.
-        // i need to distinguish between insert and update
-        // * inserts only need to know the next output index.
-        // * updates and deletes need to track where base_index is in the output
-        // XXX is it easier if I iterate over every entry?
-        // delete => delete at current index, do not increment index.
-        // insert => insert at current index, increment index.
-        // update => replace at current index, increment index.
-        PostingBlockDelta(
-            builder
-                .0
-                .into_iter()
-                .filter(|e| e.dirty)
-                .map(|e| {
-                    if e.vector.is_empty() {
-                        assert_ne!(e.base_index, usize::MAX);
-                        PostingDelta::Delete(e.base_index)
-                    } else {
-                        PostingDelta::Upsert(e.base_index, e.id.to_le_bytes(), e.vector)
-                    }
-                })
-                .collect(),
-        )
-    }
-
-    pub fn value_deltas(&self) -> Vec<wt_mdb::session::ValueDelta<'_>> {
-        todo!()
     }
 }
 
@@ -254,20 +269,11 @@ pub fn encode_f32(
     coder: &dyn F32VectorCoder,
     dim: usize,
 ) -> Vec<u8> {
-    let ids_len = std::mem::size_of::<i64>() * vectors.len();
-    let vec_len = coder.byte_len(dim);
-    let mut out = vec![0u8; ids_len + vectors.len() * vec_len];
-    let (out_ids, out_vecs) = out.split_at_mut(ids_len);
-    let out_it = out_ids
-        .as_chunks_mut::<{ std::mem::size_of::<i64>() }>()
-        .0
-        .iter_mut()
-        .zip(out_vecs.chunks_mut(vec_len));
-    for (i, o) in vectors.zip(out_it) {
-        *o.0 = i.0.to_le_bytes();
-        coder.encode_to(i.1.as_ref(), o.1);
-    }
-    out
+    let vector_len = coder.byte_len(dim);
+    PostingBlockMeta::encode_block(
+        vector_len,
+        vectors.map(|(id, v)| (id, coder.encode(v.as_ref()))),
+    )
 }
 
 /// Return the expected `leaf_page_max` and `leaf_value_max` sizes that should be used in

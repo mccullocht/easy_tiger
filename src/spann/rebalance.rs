@@ -165,7 +165,8 @@ pub fn merge_centroid(
         .transaction()
         .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
     let mut postings = RowPostingsMut::new(posting_cursor);
-    let vectors = postings.drain(centroid_id as u32)?;
+    let vectors = postings.read_centroid(centroid_id as u32)?;
+    postings.remove_centroid(centroid_id as u32)?;
     assert_eq!(
         vectors.len(),
         len,
@@ -248,7 +249,8 @@ pub fn split_centroid(
         .transaction()
         .open_cursor::<PostingKey, Vec<u8>>(txn_idx.index().postings_table_name())?;
     let mut postings = RowPostingsMut::new(posting_cursor);
-    let vectors = postings.drain(centroid_id as u32)?;
+    let vectors = postings.read_centroid(centroid_id as u32)?;
+    postings.remove_centroid(centroid_id as u32)?;
     assert_eq!(
         vectors.len(),
         len,

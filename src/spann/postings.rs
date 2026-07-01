@@ -1,6 +1,9 @@
 //! Trait and implementations for mutating SPANN postings.
 
-use std::collections::HashMap;
+use std::collections::{
+    hash_map::Entry::{Occupied, Vacant},
+    HashMap,
+};
 
 use wt_mdb::{Error, Result, TypedCursorGuard};
 
@@ -21,8 +24,10 @@ pub trait PostingsMut {
     /// Not-found is silently ignored.
     fn remove(&mut self, centroid_id: u32, record_id: i64) -> Result<()>;
 
-    /// Remove all postings for `centroid_id` and return them as `(record_id, vector)` pairs.
-    fn drain(&mut self, centroid_id: u32) -> Result<Vec<(i64, Vec<u8>)>>;
+    /// Remove all postings for `centroid_id`.
+    ///
+    /// Not-found is silently ignored.
+    fn remove_centroid(&mut self, centroid_id: u32) -> Result<()>;
 
     /// Read all postings for `centroid_id` without removing them.
     ///
@@ -73,17 +78,15 @@ impl PostingsMut for RowPostingsMut<'_> {
             })
     }
 
-    fn drain(&mut self, centroid_id: u32) -> Result<Vec<(i64, Vec<u8>)>> {
-        let mut vectors = vec![];
+    fn remove_centroid(&mut self, centroid_id: u32) -> Result<()> {
         self.cursor
             .set_bounds(PostingKey::centroid_range(centroid_id))?;
         while let Some(r) = self.cursor.next() {
-            let (key, vector) = r?;
-            vectors.push((key.record_id, vector));
+            let (key, _) = r?;
             self.cursor.remove(key)?;
         }
         self.cursor.reset()?;
-        Ok(vectors)
+        Ok(())
     }
 
     fn read_centroid(&mut self, centroid_id: u32) -> Result<Vec<(i64, Vec<u8>)>> {
@@ -124,19 +127,21 @@ impl<'a> BlockPostingsMut<'a> {
     }
 
     fn load_or_create(&mut self, centroid_id: u32) -> Result<&mut PostingBlockMut> {
-        if !self.dirty.contains_key(&centroid_id) {
-            let block = match self.cursor.seek_exact(centroid_id) {
-                Some(r) => {
-                    let data = r?;
-                    let pb = PostingBlock::new(&data, self.vector_len)
-                        .ok_or_else(|| Error::WiredTiger(wt_mdb::WiredTigerError::Generic))?;
-                    PostingBlockMut::from_block(&pb)
-                }
-                None => PostingBlockMut::new(self.vector_len),
-            };
-            self.dirty.insert(centroid_id, block);
+        match self.dirty.entry(centroid_id) {
+            Occupied(e) => Ok(e.into_mut()),
+            Vacant(e) => {
+                let block = match self.cursor.seek_exact(centroid_id) {
+                    Some(r) => {
+                        let data = r?;
+                        let pb = PostingBlock::new(&data, self.vector_len)
+                            .ok_or_else(|| Error::WiredTiger(wt_mdb::WiredTigerError::Generic))?;
+                        PostingBlockMut::from_block(&pb)
+                    }
+                    None => PostingBlockMut::new(self.vector_len),
+                };
+                Ok(e.insert(block))
+            }
         }
-        Ok(self.dirty.get_mut(&centroid_id).unwrap())
     }
 }
 
@@ -152,12 +157,11 @@ impl PostingsMut for BlockPostingsMut<'_> {
         Ok(())
     }
 
-    fn drain(&mut self, centroid_id: u32) -> Result<Vec<(i64, Vec<u8>)>> {
-        let vector_len = self.vector_len;
-        let block = self.load_or_create(centroid_id)?;
-        let entries = block.iter().map(|(id, v)| (id, v.to_vec())).collect();
-        *block = PostingBlockMut::new(vector_len);
-        Ok(entries)
+    fn remove_centroid(&mut self, centroid_id: u32) -> Result<()> {
+        // Overwrite with an empty block; flush will delete the row from storage.
+        self.dirty
+            .insert(centroid_id, PostingBlockMut::new(self.vector_len));
+        Ok(())
     }
 
     fn read_centroid(&mut self, centroid_id: u32) -> Result<Vec<(i64, Vec<u8>)>> {

@@ -510,6 +510,96 @@ mod tests {
         mb.insert(1, vec![1, 2, 3]); // one byte short
     }
 
+    // --- encode_f32 ---
+
+    fn decode_f32_vec(bytes: &[u8]) -> Vec<f32> {
+        bytes
+            .chunks(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn encode_f32_empty_produces_empty_bytes() {
+        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Euclidean, None);
+        let input: Vec<(i64, Vec<f32>)> = vec![];
+        let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn encode_f32_single_entry_roundtrip() {
+        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Euclidean, None);
+        let input = vec![(1i64, vec![1.0f32, 2.0, 3.0, 4.0])];
+        let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
+        let block = PostingBlock::new(&result, coder.byte_len(4)).unwrap();
+        assert_eq!(block.len(), 1);
+        let (id, vec_bytes) = block.iter().next().unwrap();
+        assert_eq!(id, 1);
+        assert_eq!(decode_f32_vec(vec_bytes), [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn encode_f32_multiple_entries_roundtrip() {
+        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Euclidean, None);
+        let input = vec![
+            (1i64, vec![1.0f32, 0.0, 0.0, 0.0]),
+            (5i64, vec![0.0, 2.0, 0.0, 0.0]),
+            (10i64, vec![0.0, 0.0, 3.0, 0.0]),
+        ];
+        let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
+        let block = PostingBlock::new(&result, coder.byte_len(4)).unwrap();
+        assert_eq!(block.len(), 3);
+        let entries: Vec<_> = block.iter().collect();
+        assert_eq!(entries[0].0, 1);
+        assert_eq!(decode_f32_vec(entries[0].1), [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(entries[1].0, 5);
+        assert_eq!(decode_f32_vec(entries[1].1), [0.0, 2.0, 0.0, 0.0]);
+        assert_eq!(entries[2].0, 10);
+        assert_eq!(decode_f32_vec(entries[2].1), [0.0, 0.0, 3.0, 0.0]);
+    }
+
+    #[test]
+    fn encode_f32_output_length_matches_entry_count() {
+        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Euclidean, None);
+        let n = 5usize;
+        let input: Vec<(i64, Vec<f32>)> = (0..n as i64).map(|i| (i, vec![i as f32; 4])).collect();
+        let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
+        assert_eq!(result.len(), n * (coder.byte_len(4) + std::mem::size_of::<i64>()));
+    }
+
+    #[test]
+    fn encode_f32_cosine_normalizes_stored_vector() {
+        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Cosine, None);
+        // l2 norm = 5.0 → after normalization: [0.6, 0.8, 0.0, 0.0]
+        let input = vec![(1i64, vec![3.0f32, 4.0, 0.0, 0.0])];
+        let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
+        let block = PostingBlock::new(&result, coder.byte_len(4)).unwrap();
+        let (_, vec_bytes) = block.iter().next().unwrap();
+        let decoded = decode_f32_vec(vec_bytes);
+        let norm_sq: f32 = decoded.iter().map(|x| x * x).sum();
+        assert!((norm_sq - 1.0).abs() < 1e-6, "expected unit norm, got norm_sq={norm_sq}");
+        assert!((decoded[0] - 0.6).abs() < 1e-6, "decoded[0]={}", decoded[0]);
+        assert!((decoded[1] - 0.8).abs() < 1e-6, "decoded[1]={}", decoded[1]);
+    }
+
+    #[test]
+    fn encode_f32_lookup_on_result() {
+        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Euclidean, None);
+        let input = vec![
+            (1i64, vec![1.0f32, 0.0, 0.0, 0.0]),
+            (3i64, vec![0.0, 1.0, 0.0, 0.0]),
+            (7i64, vec![0.0, 0.0, 1.0, 0.0]),
+        ];
+        let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
+        let block = PostingBlock::new(&result, coder.byte_len(4)).unwrap();
+        assert!(block.lookup(1).is_some());
+        assert!(block.lookup(3).is_some());
+        assert!(block.lookup(7).is_some());
+        assert!(block.lookup(2).is_none());
+        assert_eq!(decode_f32_vec(block.lookup(3).unwrap()), [0.0, 1.0, 0.0, 0.0]);
+    }
+
     // --- leaf_page_max ---
 
     #[test]

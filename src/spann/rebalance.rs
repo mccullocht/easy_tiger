@@ -15,7 +15,7 @@ use crate::{
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
         postings::BlockPostingsMut,
-        select_centroids, CentroidAssignment, PostingKey, TransactionIndex,
+        select_centroids, CentroidAssignment, TransactionIndex,
     },
     vamana::{
         mutate::{delete_vector, upsert_vector},

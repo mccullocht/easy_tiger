@@ -4,8 +4,9 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        CentroidAssignment, PostingKey, TableIndex, TransactionIndex,
+        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
+        postings::BlockPostingsMut,
         rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
     },
     vamana::search::GraphSearcher,
@@ -238,9 +239,10 @@ fn insert_batch(
     );
     progress.set_message("writing postings");
     let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
-    let mut posting_cursor = txn_idx
+    let posting_cursor = txn_idx
         .transaction()
-        .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
+        .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+    let mut postings = BlockPostingsMut::new(posting_cursor, index.posting_vector_len());
     let mut rerank_cursor = if rerank_coder.is_some() {
         Some(
             txn_idx
@@ -255,11 +257,7 @@ fn insert_batch(
         assignment_updater.insert(i as i64, assignment.to_formatted_ref())?;
 
         for (_, centroid_id) in assignment.iter() {
-            let key = PostingKey {
-                centroid_id,
-                record_id: i as i64,
-            };
-            posting_cursor.set(key, &posting_vector)?;
+            postings.insert(centroid_id, i as i64, &posting_vector)?;
         }
 
         if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(rerank_vector) {
@@ -267,9 +265,10 @@ fn insert_batch(
         }
     }
 
+    postings.flush()?;
     assignment_updater.flush()?;
     drop(assignment_updater);
-    drop(posting_cursor);
+    drop(postings);
     drop(rerank_cursor);
     txn_idx.commit(Some(CommitTransactionOptions::with_commit_timestamp(
         timestamp.next(),

@@ -68,15 +68,33 @@ impl<'a> PostingBlock<'a> {
     }
 }
 
+// XXX this proposal cannot distinguish between an update and a clean entry.
+#[derive(Debug, Clone)]
+struct BuilderEntry {
+    id: i64,
+    // usize::MAX for an insert of a new entry.
+    base_index: usize,
+    // Empty to indicate a delete.
+    vector: Vec<u8>,
+    // True if this entry has been modified.
+    dirty: bool,
+}
+
+impl BuilderEntry {
+    fn vector_tuple(&self) -> Option<(i64, &[u8])> {
+        if !self.vector.is_empty() {
+            Some((self.id, self.vector.as_slice()))
+        } else {
+            None
+        }
+    }
+}
+
 /// Builder for a block of vector posting data.
 ///
 /// Vectors are expected to be fixed size but the format of the data is otherwise undefined.
 #[derive(Debug, Clone, Default)]
-pub struct PostingBlockBuilder {
-    entries: Vec<(i64, Vec<u8>)>,
-    initial_entries: usize,
-    dirty: Vec<i64>,
-}
+pub struct PostingBlockBuilder(Vec<BuilderEntry>);
 
 // XXX this all needs docs.
 impl PostingBlockBuilder {
@@ -84,72 +102,142 @@ impl PostingBlockBuilder {
         Self::default()
     }
 
-    fn from_entries(entries: Vec<(i64, Vec<u8>)>) -> Self {
-        Self {
-            initial_entries: entries.len(),
-            entries,
-            dirty: vec![],
-        }
-    }
-
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (i64, &[u8])> {
-        self.entries.iter().map(|(i, v)| (*i, v.as_slice()))
+    pub fn iter(&self) -> impl Iterator<Item = (i64, &[u8])> {
+        self.0.iter().filter_map(BuilderEntry::vector_tuple)
     }
 
     pub fn lookup(&self, id: i64) -> Option<&[u8]> {
-        self.entries
-            .binary_search_by_key(&id, |(i, _)| *i)
-            .map(|i| self.entries[i].1.as_slice())
+        self.0
+            .binary_search_by_key(&id, |e| e.id)
+            .map(|i| self.0[i].vector.as_slice())
             .ok()
+            .filter(|v| !v.is_empty())
     }
 
     pub fn upsert(&mut self, id: i64, vector: impl Into<Vec<u8>>) {
-        match self.entries.binary_search_by_key(&id, |(i, _)| *i) {
-            Ok(i) => self.entries[i].1 = vector.into(),
-            Err(i) => self.entries.insert(i, (id, vector.into())),
+        match self.0.binary_search_by_key(&id, |e| e.id) {
+            Ok(i) => {
+                let e = &mut self.0[i];
+                e.vector = vector.into();
+                e.dirty = true;
+            }
+            Err(i) => {
+                self.0.insert(
+                    i,
+                    BuilderEntry {
+                        id,
+                        base_index: usize::MAX,
+                        vector: vector.into(),
+                        dirty: true,
+                    },
+                );
+            }
         }
-        self.mark_dirty(id);
     }
 
     pub fn delete(&mut self, id: i64) {
-        if let Ok(i) = self.entries.binary_search_by_key(&id, |(i, _)| *i) {
-            self.entries.remove(i);
-            self.mark_dirty(id);
+        if let Ok(i) = self.0.binary_search_by_key(&id, |e| e.id) {
+            let e = &mut self.0[i];
+            e.vector.clear();
+            e.dirty = e.base_index != usize::MAX;
         }
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.0.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.0.is_empty()
     }
 
-    // XXX tri-state encode:
-    // * If it's empty, should result in the key being removed.
-    // * If there are too many mutations (~10% of max(entries, dirty)) then flush completely and set
-    // * Otherwise produce a diff.
-    //
-    // I think the state I have is sufficient to decide between 2 and 3.
-
-    fn mark_dirty(&mut self, id: i64) {
-        if let Err(i) = self.dirty.binary_search(&id) {
-            self.dirty.insert(i, id);
+    pub fn build(self) -> EncodedPostingBlock {
+        if self.is_empty() {
+            return EncodedPostingBlock::Remove;
         }
+
+        let vector_len = self.0[0].vector.len();
+        let mut out = vec![0u8; self.len() * (std::mem::size_of::<i64>() + vector_len)];
+        let (ids_out, vectors_out) = out.split_at_mut(self.len() * std::mem::size_of::<i64>());
+        let out_it = ids_out
+            .as_chunks_mut::<{ std::mem::size_of::<i64>() }>()
+            .0
+            .iter_mut()
+            .zip(vectors_out.chunks_mut(vector_len));
+        for (i, o) in self.iter().zip(out_it) {
+            *o.0 = i.0.to_le_bytes();
+            o.1.copy_from_slice(&i.1);
+        }
+        EncodedPostingBlock::Replace(out)
     }
 }
 
 impl<B: Into<Vec<u8>>> FromIterator<(i64, B)> for PostingBlockBuilder {
     fn from_iter<T: IntoIterator<Item = (i64, B)>>(iter: T) -> Self {
-        let entries = iter.into_iter().map(|(id, v)| (id, v.into())).collect();
-        Self::from_entries(entries)
+        Self(
+            iter.into_iter()
+                .enumerate()
+                .map(|(i, (id, v))| BuilderEntry {
+                    id: id,
+                    base_index: i,
+                    vector: v.into(),
+                    dirty: false,
+                })
+                .collect(),
+        )
     }
 }
 
 impl From<PostingBlock<'_>> for PostingBlockBuilder {
     fn from(value: PostingBlock<'_>) -> Self {
         Self::from_iter(value.iter())
+    }
+}
+
+/// An encoded posting block produced by [`PostingBlockBuilder`].
+///
+/// This may represent a remove, set/overwrite, or a delta/modify call.
+#[derive(Debug, Clone)]
+pub enum EncodedPostingBlock {
+    /// This block no longer contains any postings so remove it.
+    Remove,
+    /// Replace the contents of this block with a different value.
+    Replace(Vec<u8>),
+}
+
+enum PostingDelta {
+    Upsert(usize, [u8; 8], Vec<u8>),
+    Delete(usize),
+}
+
+pub struct PostingBlockDelta(Vec<PostingDelta>);
+
+impl PostingBlockDelta {
+    fn from_builder(builder: PostingBlockBuilder) -> Self {
+        // XXX the indexes are wrong here.
+        // i need to track the base index and the output index.
+        // i need to distinguish between insert and update
+        // * inserts only need to know the next output index.
+        // * updates and deletes need to track where base_index is in the output
+        PostingBlockDelta(
+            builder
+                .0
+                .into_iter()
+                .filter(|e| e.dirty)
+                .map(|e| {
+                    if e.vector.is_empty() {
+                        assert_ne!(e.base_index, usize::MAX);
+                        PostingDelta::Delete(e.base_index)
+                    } else {
+                        PostingDelta::Upsert(e.base_index, e.id.to_le_bytes(), e.vector)
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    pub fn value_deltas(&self) -> Vec<wt_mdb::session::ValueDelta<'_>> {
+        todo!()
     }
 }
 

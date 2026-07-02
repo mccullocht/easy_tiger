@@ -131,6 +131,7 @@ pub use session::{
     IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, StatCursor, TypedCursor,
     TypedCursorGuard, ValueDelta,
 };
+pub use wt_sys::WT_MODIFY;
 pub use transaction::Transaction;
 pub type Result<T> = std::result::Result<T, Error>;
 

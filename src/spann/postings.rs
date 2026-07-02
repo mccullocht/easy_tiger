@@ -84,7 +84,7 @@ impl<'a> BlockPostingsMut<'a> {
             let base = block.base_block();
             if !base.is_empty() {
                 let max_diff = base.len() * 15 / 100;
-                if let Some(mut deltas) = self.cursor.calculate_modifications(
+                if let Some(deltas) = self.cursor.calculate_modifications(
                     base,
                     &new_serialized,
                     max_diff,
@@ -92,7 +92,7 @@ impl<'a> BlockPostingsMut<'a> {
                 ) {
                     // SAFETY: modify_buf[..n] holds WT_MODIFY entries whose data pointers
                     // point into new_serialized, which remains alive for this call.
-                    unsafe { self.cursor.modify_unsafe(centroid_id, &mut deltas)? };
+                    unsafe { self.cursor.modify_unsafe(centroid_id, deltas)? };
                     continue;
                 }
             }
@@ -109,7 +109,7 @@ impl<'a> BlockPostingsMut<'a> {
                     Some(r) => {
                         let data = r?;
                         let pb = PostingBlock::new(&data, self.vector_len)
-                            .ok_or_else(|| Error::WiredTiger(wt_mdb::WiredTigerError::Generic))?;
+                            .ok_or(Error::WiredTiger(wt_mdb::WiredTigerError::Generic))?;
                         PostingBlockMut::from_block(&pb)
                     }
                     None => PostingBlockMut::new(self.vector_len),

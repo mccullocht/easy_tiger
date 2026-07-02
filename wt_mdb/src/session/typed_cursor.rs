@@ -188,6 +188,10 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     ///
     /// This method _requires_ that there be an existing value for `key` and that the value type is
     /// `u` or `Vec<u8>`. See WiredTiger documentation for more detail.
+    ///
+    /// # Safety
+    ///
+    /// The inputs to this method are unsafe as [`WT_MODIFY`] contains raw pointers.
     pub unsafe fn modify_unsafe(
         &mut self,
         key: K::Ref<'_>,

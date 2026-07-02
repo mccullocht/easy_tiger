@@ -237,7 +237,7 @@ impl Searcher {
                 }
                 None => continue,
             };
-            let Some(block) = PostingBlock::new(&data, vector_len) else {
+            let Some(block) = PostingBlock::new(data, vector_len) else {
                 warn!("malformed posting block for centroid {centroid_id}");
                 continue;
             };

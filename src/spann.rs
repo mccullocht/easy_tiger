@@ -212,6 +212,8 @@ impl TableIndex {
         head_config: GraphConfig,
         spann_config: IndexConfig,
     ) -> io::Result<Self> {
+        let head_similarity = head_config.similarity;
+        let head_dimensions = head_config.dimensions;
         let head = Arc::new(TableGraphVectorIndex::init_index(
             connection,
             head_config,
@@ -238,6 +240,15 @@ impl TableIndex {
                     .into(),
             ),
         )?;
+        let posting_vector_len = spann_config
+            .posting_coder
+            .coder(head_similarity, None)
+            .byte_len(head_dimensions.get());
+        let leaf_page_size = crate::posting_block::leaf_page_max(
+            spann_config.max_centroid_len,
+            posting_vector_len,
+            4096,
+        ) as u32;
         connection.create_table(
             &table_names.postings,
             Some(
@@ -245,6 +256,8 @@ impl TableIndex {
                     .key_format::<u32>()
                     .value_format::<Vec<u8>>()
                     .app_metadata(&serde_json::to_string(&spann_config)?)
+                    .leaf_page_max(leaf_page_size)
+                    .leaf_value_max(leaf_page_size)
                     .into(),
             ),
         )?;

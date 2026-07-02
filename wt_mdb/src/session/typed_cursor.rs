@@ -159,11 +159,11 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         new_value: &[u8],
         max_diff: usize,
         modifications: &'m mut [WT_MODIFY],
-    ) -> Option<&'m [WT_MODIFY]> {
+    ) -> Option<&'m mut [WT_MODIFY]> {
         unsafe {
             let old_value = WT_ITEM::from_slice(old_value);
             let new_value = WT_ITEM::from_slice(new_value);
-            let mut nentries = 0i32;
+            let mut nentries = modifications.len() as i32;
             let ret = wt_sys::wiredtiger_calc_modify(
                 self.session.ptr.as_ptr(),
                 &old_value,
@@ -173,7 +173,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
                 &mut nentries,
             );
             if ret == 0 {
-                Some(&modifications[..nentries as usize])
+                Some(&mut modifications[..nentries as usize])
             } else {
                 None
             }

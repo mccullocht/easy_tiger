@@ -5,7 +5,7 @@ use std::collections::{
     HashMap,
 };
 
-use wt_mdb::{Error, Result, TypedCursorGuard};
+use wt_mdb::{Error, Result, TypedCursorGuard, WT_MODIFY};
 
 use crate::posting_block::{PostingBlock, PostingBlockMut};
 
@@ -67,7 +67,9 @@ impl<'a> BlockPostingsMut<'a> {
 
     /// Write all buffered changes to storage.
     pub fn flush(&mut self) -> Result<()> {
-        for (centroid_id, block) in self.dirty.drain() {
+        let dirty = std::mem::take(&mut self.dirty);
+        let mut modify_buf = [WT_MODIFY::default(); 128];
+        for (centroid_id, block) in dirty {
             if block.is_empty() {
                 self.cursor.remove(centroid_id).or_else(|e| {
                     if e == Error::not_found_error() {
@@ -76,9 +78,25 @@ impl<'a> BlockPostingsMut<'a> {
                         Err(e)
                     }
                 })?;
-            } else {
-                self.cursor.set(centroid_id, block.serialize().as_slice())?;
+                continue;
             }
+            let new_serialized = block.serialize();
+            let base = block.base_block();
+            if !base.is_empty() {
+                let max_diff = base.len() * 15 / 100;
+                if let Some(mut deltas) = self.cursor.calculate_modifications(
+                    base,
+                    &new_serialized,
+                    max_diff,
+                    &mut modify_buf,
+                ) {
+                    // SAFETY: modify_buf[..n] holds WT_MODIFY entries whose data pointers
+                    // point into new_serialized, which remains alive for this call.
+                    unsafe { self.cursor.modify_unsafe(centroid_id, &mut deltas)? };
+                    continue;
+                }
+            }
+            self.cursor.set(centroid_id, new_serialized.as_slice())?;
         }
         Ok(())
     }

@@ -138,15 +138,77 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     ///
     /// Returns `ENOTSUP` if the value format is not `u`.
     pub fn modify(&mut self, key: K::Ref<'_>, deltas: &[ValueDelta<'_>]) -> Result<()> {
+        let mut entries: SmallVec<[WT_MODIFY; 32]> =
+            deltas.iter().copied().map(WT_MODIFY::from).collect();
+        unsafe { self.modify_unsafe(key, &mut entries) }
+    }
+
+    /// Compute modifications between `old_value` and `new_value` that can be passed to
+    /// `modify_unsafe()`.
+    ///
+    /// `modify()` and friends are useful if values may be large to avoid write amplification by
+    /// only logging deltas rather than the entire replacement value.
+    ///
+    /// This will compute up to `max_diff` bytes of diffs with up to `entries.len()` different
+    /// modifications. If set the return value contains the list of modification to apply via
+    /// `modify_unsafe()`. The returned WT_MODIFY values contain pointers into `new_value`; callers
+    /// are responsible for ensuring these pointer stay alive as long as is necessary.
+    pub fn calculate_modifications<'m>(
+        &self,
+        old_value: &[u8],
+        new_value: &[u8],
+        max_diff: usize,
+        modifications: &'m mut [WT_MODIFY],
+    ) -> Option<&'m mut [WT_MODIFY]> {
+        unsafe {
+            let old_value = WT_ITEM::from_slice(old_value);
+            let new_value = WT_ITEM::from_slice(new_value);
+            let mut nentries = modifications.len() as i32;
+            let ret = wt_sys::wiredtiger_calc_modify(
+                self.session.ptr.as_ptr(),
+                &old_value,
+                &new_value,
+                max_diff,
+                modifications.as_mut_ptr(),
+                &mut nentries,
+            );
+            if ret == 0 {
+                Some(&mut modifications[..nentries as usize])
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Modify the value at `key` using a series insertions/deletions/replacements specified in
+    /// `modifications`.
+    ///
+    /// `modify()` and friends are useful if values may be large to avoid write amplification by
+    /// only logging deltas rather than the entire replacement value.
+    ///
+    /// This method _requires_ that there be an existing value for `key` and that the value type is
+    /// `u` or `Vec<u8>`. See WiredTiger documentation for more detail.
+    ///
+    /// # Safety
+    ///
+    /// The inputs to this method are unsafe as [`WT_MODIFY`] contains raw pointers.
+    pub unsafe fn modify_unsafe(
+        &mut self,
+        key: K::Ref<'_>,
+        modifications: &mut [WT_MODIFY],
+    ) -> Result<()> {
         if V::FORMAT.format_str() != "u" {
             return Err(Error::Errno(Errno::NOTSUP));
         }
         let key = format_to_buf!(key, K, self.key_buf)?;
-        let mut entries: SmallVec<[WT_MODIFY; 32]> =
-            deltas.iter().copied().map(WT_MODIFY::from).collect();
         unsafe {
             wt_call!(void self.inner.0, set_key, &Item::from(key).0)?;
-            wt_call!(self.inner.0, modify, entries.as_mut_ptr(), entries.len() as i32)
+            wt_call!(
+                self.inner.0,
+                modify,
+                modifications.as_mut_ptr(),
+                modifications.len() as i32
+            )
         }
     }
 

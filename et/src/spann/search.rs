@@ -258,8 +258,11 @@ impl SearcherState {
         recall_computer: Option<&RecallComputer>,
     ) -> io::Result<AggregateSearchStats> {
         let reader = TransactionIndex::new(&self.index, self.connection.begin_transaction(None)?);
+        let mut posting_cursor = reader
+            .transaction()
+            .open_cursor::<u32, Vec<u8>>(self.index.postings_table_name())?;
         let start = Instant::now();
-        let results = self.searcher.search(query, &reader)?;
+        let results = self.searcher.search(query, &reader, &mut posting_cursor)?;
         let duration = Instant::now() - start;
         Ok(AggregateSearchStats::new(
             duration,

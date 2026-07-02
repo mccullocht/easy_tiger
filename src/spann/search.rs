@@ -11,10 +11,11 @@ use std::{
 use min_max_heap::MinMaxHeap;
 use tracing::warn;
 use vectors::QueryVectorDistance;
-use wt_mdb::Result;
+use wt_mdb::{Result, TypedCursorGuard};
 
 use crate::{
-    spann::{centroid_stats::CentroidStats, PostingKey, TransactionIndex},
+    posting_block::PostingBlock,
+    spann::{centroid_stats::CentroidStats, TransactionIndex},
     vamana::{
         search::{GraphSearchStats, GraphSearcher},
         GraphSearchParams, GraphVectorIndex,
@@ -194,7 +195,12 @@ impl Searcher {
         self.stats
     }
 
-    pub fn search(&mut self, query: &[f32], reader: &TransactionIndex) -> Result<Vec<Neighbor>> {
+    pub fn search(
+        &mut self,
+        query: &[f32],
+        reader: &TransactionIndex,
+        posting_cursor: &mut TypedCursorGuard<'_, u32, Vec<u8>>,
+    ) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 
         let mut centroids = self.head_searcher.search(query, reader.head())?;
@@ -219,27 +225,27 @@ impl Searcher {
                     None,
                 ),
         );
+        let vector_len = reader.index().posting_vector_len();
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
-            // TODO: if I can't read a posting list then skip and warn rather than exiting early.
-            let mut cursor = reader
-                .transaction()
-                .open_cursor::<PostingKey, Vec<u8>>(&reader.index().table_names.postings)?;
-            cursor.set_bounds(PostingKey::centroid_range(centroid_id))?;
-            while let Some(r) = unsafe { cursor.next_unsafe() } {
+            // SAFETY: we are not performing any WT operations in between seeks.
+            let data = match unsafe { posting_cursor.seek_exact_unsafe(centroid_id) } {
+                Some(Ok(data)) => data,
+                Some(Err(e)) => {
+                    warn!("failed to read posting for centroid {centroid_id}: {e}");
+                    continue;
+                }
+                None => continue,
+            };
+            let Some(block) = PostingBlock::new(data, vector_len) else {
+                warn!("malformed posting block for centroid {centroid_id}");
+                continue;
+            };
+            for (record_id, vector) in block.iter() {
                 self.stats.posting_vectors_read += 1;
-                let (record_id, vector) = match r {
-                    Ok((k, v)) => (k.record_id, v),
-                    Err(e) => {
-                        warn!("failed to read posting in centroid {centroid_id}: {e}");
-                        continue;
-                    }
-                };
-
                 if !self.seen.insert(record_id) {
                     continue; // already seen
                 }
-
                 result_queue.push(record_id, vector);
             }
         }

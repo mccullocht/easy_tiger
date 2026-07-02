@@ -3,14 +3,14 @@ use std::{cell::RefCell, sync::Arc};
 use crate::{
     input::VectorStore,
     spann::{
-        centroid_stats::CentroidCounts, select_centroids, CentroidAssignment,
-        CentroidAssignmentType, PostingKey, TableIndex,
+        centroid_stats::CentroidCounts, postings::BlockPostingsMut, select_centroids, CentroidAssignment,
+        CentroidAssignmentType, TableIndex,
     },
     vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{connection::CreateOptionsBuilder, session::Formatted, Connection, Result};
+use wt_mdb::{session::Formatted, Connection, Result};
 
 /// Assign all the vectors to one or more centroids in the head index. This performs the same search
 /// and pruning as [`super::TransactionIndex`] does.
@@ -104,28 +104,23 @@ pub fn load_centroid_stats(
     Ok(())
 }
 
-/// Bulk load entries for each of the posting keys into the database.
+/// Load entries for each of the posting keys into `postings`.
 ///
-/// This runs in a single thread, reading the vector for each posting, quantizing it, and uploading
-/// it into a table. Bulk upload ensures that all posting entries belonging to each centroid appear
-/// contiguously on disk, whereas iterative insertion may "split up" a centroid as it splits leaf
-/// pages. Bulk uploading also avoids checkpointing.
+/// Vectors are encoded in parallel batches and inserted in (centroid_id, record_id) order, which
+/// allows implementations backed by sorted storage to place each centroid's entries contiguously.
+/// Callers must call [`PostingsMut::flush`] (or ensure `postings` does so on drop) to commit
+/// changes, though `load_postings` calls it internally before returning.
 pub fn load_postings(
     index: &TableIndex,
-    connection: &Arc<Connection>,
+    postings: &mut BlockPostingsMut<'_>,
     centroid_assignments: &[CentroidAssignment],
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
-    let mut posting_keys: Vec<PostingKey> = centroid_assignments
+    let mut posting_keys: Vec<(u32, i64)> = centroid_assignments
         .into_par_iter()
         .enumerate()
-        .flat_map_iter(|(i, a)| {
-            a.iter().map(move |(_, c)| PostingKey {
-                centroid_id: c,
-                record_id: i as i64,
-            })
-        })
+        .flat_map_iter(|(i, a)| a.iter().map(move |(_, c)| (c, i as i64)))
         .collect();
     posting_keys.par_sort_unstable();
 
@@ -133,13 +128,6 @@ pub fn load_postings(
         .config()
         .posting_coder
         .coder(index.head_config().config().similarity, None);
-    let mut bulk_cursor = connection.new_bulk_load_cursor::<PostingKey, Vec<u8>>(
-        &index.table_names.postings,
-        Some(
-            CreateOptionsBuilder::default()
-                .app_metadata(&serde_json::to_string(&index.config).unwrap()),
-        ),
-    )?;
     // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
     // this will also allow us to parallelize IO.
     let mut encoded_buffer =
@@ -148,15 +136,15 @@ pub fn load_postings(
         encoded_buffer
             .par_iter_mut()
             .zip(batch)
-            .for_each(|(buf, pk)| {
-                coder.encode_to(&vectors[pk.record_id as usize], buf);
+            .for_each(|(buf, &(_, record_id))| {
+                coder.encode_to(&vectors[record_id as usize], buf);
             });
-        for (pk, buf) in batch.iter().zip(encoded_buffer.iter()) {
-            bulk_cursor.append(*pk, buf)?;
+        for (&(centroid_id, record_id), buf) in batch.iter().zip(encoded_buffer.iter()) {
+            postings.insert(centroid_id, record_id, buf)?;
         }
         progress(batch.len() as u64);
     }
-    Ok(())
+    postings.flush()
 }
 
 /// Bulk load raw vector data into the raw vectors table for re-ranking.

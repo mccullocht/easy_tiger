@@ -7,12 +7,7 @@ use std::{
 
 use rand::Rng;
 use tracing::warn;
-use wt_mdb::{
-    session::Formatted,
-    Connection,
-    Error::{self, WiredTiger},
-    Result,
-};
+use wt_mdb::{session::Formatted, Connection, Error, Result, WiredTigerError};
 
 use crate::{
     input::VecVectorStore,
@@ -549,14 +544,10 @@ pub fn split_centroid_top_half(
 ) -> Result<CentroidSplit> {
     // XXX should TableIndex contain a centroid_id allocator? If it doesn't we will frequently hit
     // conflicts when two splits happen concurrently.
-    loop {
-        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
-        match split::top_half(&txn_idx, centroid_id, rng) {
-            Err(e) if e == WiredTiger(wt_mdb::WiredTigerError::Rollback) => continue,
-            Ok(split) => return Ok(split),
-            Err(e) => return Err(e),
-        }
-    }
+    retry_on_rollback(connection, index, |txn_idx| {
+        let centroid_split = split::top_half(&txn_idx, centroid_id, rng)?;
+        txn_idx.commit(None).map(|_| centroid_split)
+    })
 }
 
 /// Run the bottom half of the centroid split operation.
@@ -572,9 +563,21 @@ pub fn split_centroid_bottom_half(
     index: &Arc<TableIndex>,
     split_target: CentroidSplitTarget,
 ) -> Result<SplitStats> {
+    // XXX in all cases if split_target.centroid_id is not found then just exit.
+
     // XXX search-to-reassign in a loop, one txn per.
-    // XXX search for nearby centroids
-    // XXX reassign one centroid at a time.
+    // - read next to_reassign vector
+    // - do a search
+    // - remove-and-insert
+    // - update assignments
+    // (structure to avoid touching O(N) postings)
+    // (total of 4 posting mutations and 2 assignment updates)
+    // XXX search for nearby centroids (read-only)
+    // XXX reassign one nearby centroid at a time.
+    // - if the source centroid is missing, skip it.
+    // - if the target centroid is missing then return NOT_FOUND.
+    // - scan source and compute set to reassign.
+    // (total of 2 posting mutations, N assignment updates)
     todo!()
 }
 
@@ -758,6 +761,22 @@ mod split {
                     .posting_format
                     .query_distance_symmetric(similarity, query.to_vec(), None))
             }
+        }
+    }
+}
+
+fn retry_on_rollback<R>(
+    connection: &Arc<Connection>,
+    index: &Arc<TableIndex>,
+    mut op: impl FnMut(TransactionIndex) -> Result<R>,
+) -> Result<R> {
+    loop {
+        match op(TransactionIndex::new(
+            index,
+            connection.begin_transaction(None)?,
+        )) {
+            Err(e) if e == Error::WiredTiger(WiredTigerError::Rollback) => continue,
+            result @ _ => break result,
         }
     }
 }

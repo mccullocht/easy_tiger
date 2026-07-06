@@ -65,6 +65,16 @@ impl<'a> BlockPostingsMut<'a> {
             .collect())
     }
 
+    /// Return the next allocatable centroid id.
+    pub fn next_centroid_id(&mut self) -> Result<u32> {
+        Ok(self
+            .cursor
+            .largest_key()
+            .transpose()?
+            .map(|x| x + 1)
+            .unwrap_or(0))
+    }
+
     /// Write all buffered changes to storage.
     pub fn flush(&mut self) -> Result<()> {
         let dirty = std::mem::take(&mut self.dirty);

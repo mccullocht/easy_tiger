@@ -1,9 +1,9 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 use tracing::error;
 
 use wt_mdb::{
-    session::{FormatString, Formatted},
     Error, Result, Transaction, TypedCursorGuard,
+    session::{FormatString, Formatted},
 };
 
 use crate::spann::{
@@ -267,7 +267,7 @@ impl<'a> CentroidAssignmentUpdater<'a> {
 impl Drop for CentroidAssignmentUpdater<'_> {
     fn drop(&mut self) {
         if let Err(e) = self.flush() {
-            error!("Error flushing centroid assignment stats: {e}")
+            //error!("Error flushing centroid assignment stats: {e}")
         }
     }
 }

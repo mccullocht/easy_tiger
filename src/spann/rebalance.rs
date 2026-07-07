@@ -7,20 +7,21 @@ use std::{
 
 use rand::Rng;
 use tracing::warn;
-use wt_mdb::{session::Formatted, Connection, Error, Result, WiredTigerError};
+use wt_mdb::{Connection, Error, Result, WiredTigerError, session::Formatted};
 
 use crate::{
     input::VecVectorStore,
     kmeans,
     spann::{
+        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
         postings::BlockPostingsMut,
-        select_centroids, CentroidAssignment, TableIndex, TransactionIndex,
+        select_centroids,
     },
     vamana::{
+        GraphVectorIndex, GraphVectorStore,
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
-        GraphVectorIndex, GraphVectorStore,
     },
 };
 
@@ -277,7 +278,10 @@ pub fn split_centroid(
     ) {
         Ok(r) => r,
         Err(r) => {
-            warn!("split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!", vectors.len());
+            warn!(
+                "split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!",
+                vectors.len()
+            );
             r
         }
     };
@@ -648,21 +652,21 @@ mod split {
     use rand::Rng;
     use tracing::warn;
     use vectors::{F32VectorCoder, F32VectorCoding, QueryVectorDistance};
-    use wt_mdb::{session::Formatted, Error, Result};
+    use wt_mdb::{Error, Result, session::Formatted};
 
     use crate::input::VecVectorStore;
     use crate::spann::{
+        CentroidAssignment, CentroidCounts, TransactionIndex,
         centroid_stats::CentroidAssignmentUpdater, postings::BlockPostingsMut, select_centroids,
-        CentroidAssignment, TransactionIndex,
     };
     use crate::vamana::wt::CursorVectorStore;
     use crate::vamana::{
+        GraphVectorIndex, GraphVectorStore,
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
-        GraphVectorIndex, GraphVectorStore,
     };
 
-    use super::{move_postings, CentroidSplit, SplitStats};
+    use super::{CentroidSplit, SplitStats, move_postings};
 
     pub fn top_half(
         txn_idx: &TransactionIndex,
@@ -783,7 +787,10 @@ mod split {
         ) {
             Ok(r) => r,
             Err(r) => {
-                warn!("split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!", len);
+                warn!(
+                    "split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!",
+                    len
+                );
                 r
             }
         }

@@ -3,35 +3,67 @@ name = "easy_tiger"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-bytemuck = "1.23.0"
+[workspace]
+members = ["et", "vectors", "wt_mdb", "wt_sys"]
+
+[workspace.dependencies]
+approx = "0.5.1"
+bindgen = "0.72.1"
+bytemuck = "1.24.0"
+cc = "1.2.41"
+clap = { version = "4.5.20", features = ["derive"] }
+cmake = "0.1.51"
+criterion = "0.8.1"
 crossbeam-skiplist = "0.1.3"
-half = "2.6.0"
+crossbeam-utils = "0.8.21"
+half = "2.7.1"
+histogram = "0.11.3"
+indicatif = "0.17.8"
 leb128 = "0.2.5"
 memmap2 = { version = "0.9.5", features = ["stable_deref_trait"] }
 min-max-heap = "1.3.0"
+pollster = "0.4"
 rand = "0.9.1"
+rand_xoshiro = "0.7.0"
 rayon = "1.10.0"
 rustix = "1.0.7"
-serde = { version = "1.0.215", features = ["serde_derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.132"
-simsimd = { version = "6.5.0" }
+simsimd = "6.5.0"
+smallvec = "1"
 stable_deref_trait = "1.2.0"
-thread_local = "1.1.8"
+tempfile = "3.20.0"
+thread_local = "1.1.9"
 tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+wgpu = "29.0.1"
+
+[dependencies]
+bytemuck = { workspace = true }
+crossbeam-skiplist = { workspace = true }
+half = { workspace = true }
+leb128 = { workspace = true }
+memmap2 = { workspace = true }
+min-max-heap = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+simsimd = { workspace = true }
+stable_deref_trait = { workspace = true }
+thread_local = { workspace = true }
+tracing = { workspace = true }
 vectors = { path = "./vectors" }
 wt_mdb = { path = "./wt_mdb" }
 
 [dev-dependencies]
-approx = "0.5.1"
-rand_xoshiro = "0.7.0"
-tempfile = "3.20.0"
+approx = { workspace = true }
+rand_xoshiro = { workspace = true }
+tempfile = { workspace = true }
 
 [build-dependencies]
-cc = "1.2.31"
-
-[workspace]
-members = ["et", "vectors", "wt_mdb", "wt_sys"]
+cc = { workspace = true }
 
 [profile.profiling]
 inherits = "release"

@@ -6,22 +6,20 @@ mod init_index;
 mod insert_vectors;
 mod rebalance;
 mod search;
-mod verify_primary_assignments;
 
 use std::{io, sync::Arc};
 
 use clap::{Args, Subcommand};
 
 use crate::wt_args::WiredTigerArgs;
-use bulk_load::{BulkLoadArgs, bulk_load};
+use bulk_load::{bulk_load, BulkLoadArgs};
 use centroid_stats::centroid_stats;
 use drop_index::drop_index;
-use export_head::{ExportHeadArgs, export_head};
-use init_index::{InitIndexArgs, init_index};
-use insert_vectors::{InsertVectorsArgs, insert_vectors};
-use rebalance::{RebalanceArgs, rebalance};
-use search::{SearchArgs, search};
-use verify_primary_assignments::verify_primary_assignments;
+use export_head::{export_head, ExportHeadArgs};
+use init_index::{init_index, InitIndexArgs};
+use insert_vectors::{insert_vectors, InsertVectorsArgs};
+use rebalance::{rebalance, RebalanceArgs};
+use search::{search, SearchArgs};
 
 #[derive(Args)]
 pub struct SpannArgs {
@@ -50,8 +48,6 @@ pub enum Command {
     Rebalance(RebalanceArgs),
     /// Remove an existing index.
     DropIndex,
-    /// Verify that the primary assignment of each vector is to its closest centroid.
-    VerifyPrimaryAssignments,
 }
 
 pub fn spann_command(args: SpannArgs) -> io::Result<()> {
@@ -67,7 +63,6 @@ pub fn spann_command(args: SpannArgs) -> io::Result<()> {
         Command::ExportHead(args) => export_head(connection, index_name, args),
         Command::Rebalance(args) => rebalance(connection, index_name, args),
         Command::DropIndex => drop_index(connection, index_name),
-        Command::VerifyPrimaryAssignments => verify_primary_assignments(connection, index_name),
     }?;
     cmd_connection.checkpoint()?;
     Ok(())

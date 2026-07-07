@@ -7,8 +7,7 @@ use wt_mdb::{
 };
 
 use crate::spann::{
-    CentroidAssignment, CentroidAssignmentRef, CentroidAssignmentType, PostingKey, TableIndex,
-    TransactionIndex,
+    CentroidAssignment, CentroidAssignmentRef, CentroidAssignmentType, TableIndex, TransactionIndex,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -186,14 +185,14 @@ impl<'a> CentroidAssignmentUpdater<'a> {
         })
     }
 
-    /// Returns true if `key` is for the primary assigned for `record_id`.
-    pub fn is_primary(&mut self, key: PostingKey) -> Result<bool> {
+    /// Returns true if `centroid_id` is for the primary assigned for `record_id`.
+    pub fn is_primary(&mut self, centroid_id: u32, record_id: i64) -> Result<bool> {
         if self.replica_count <= 1 {
             Ok(true)
         } else {
             self.assignments_cursor
-                .seek_exact(key.record_id)
-                .map(|r| r.map(|a| a.primary_id == key.centroid_id))
+                .seek_exact(record_id)
+                .map(|r| r.map(|a| a.primary_id == centroid_id))
                 .unwrap_or(Ok(false))
         }
     }

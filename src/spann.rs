@@ -9,12 +9,7 @@ pub mod postings;
 pub mod rebalance;
 pub mod search;
 
-use std::{
-    io,
-    num::NonZero,
-    ops::{Range, RangeInclusive},
-    sync::Arc,
-};
+use std::{io, num::NonZero, ops::RangeInclusive, sync::Arc};
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -298,70 +293,6 @@ impl TableIndex {
 
     fn head_name(index_name: &str) -> String {
         format!("{index_name}.head")
-    }
-}
-
-/// A key in the posting table.
-///
-/// Serialized posting keys should result in entries ordered by centroid_id and then record_id,
-/// allowing each centroid to be read as a contiguous range.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PostingKey {
-    /// Centroid identifier.
-    pub centroid_id: u32,
-    /// Original record identifier assigned or provided on insertion.
-    pub record_id: i64,
-}
-
-impl PostingKey {
-    pub fn centroid_range(centroid_id: u32) -> Range<Self> {
-        Self {
-            centroid_id,
-            record_id: 0,
-        }..Self {
-            centroid_id: centroid_id + 1,
-            record_id: 0,
-        }
-    }
-
-    pub fn with_centroid_id(self, centroid_id: u32) -> Self {
-        Self {
-            centroid_id,
-            ..self
-        }
-    }
-}
-
-impl Formatted for PostingKey {
-    const FORMAT: FormatString = FormatString::new(c"u");
-
-    type Ref<'a> = Self;
-
-    #[inline(always)]
-    fn to_formatted_ref(&self) -> Self::Ref<'_> {
-        *self
-    }
-
-    #[inline(always)]
-    fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
-        packed.resize(12, 0);
-        packed[..4].copy_from_slice(&value.centroid_id.to_be_bytes());
-        packed[4..].copy_from_slice(&value.record_id.to_be_bytes());
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
-        if packed.len() == 12 {
-            let centroid_id = u32::from_be_bytes(packed[..4].try_into().unwrap());
-            let record_id = i64::from_be_bytes(packed[4..].try_into().unwrap());
-            Ok(Self {
-                centroid_id,
-                record_id,
-            })
-        } else {
-            Err(Error::WiredTiger(wt_mdb::WiredTigerError::Generic))
-        }
     }
 }
 

@@ -93,7 +93,7 @@ impl Error {
     }
 
     /// Return a WiredTiger `NotFound` error.
-    pub fn not_found_error() -> Self {
+    pub const fn not_found_error() -> Self {
         Error::WiredTiger(WiredTigerError::NotFound)
     }
 }
@@ -131,8 +131,8 @@ pub use session::{
     IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, StatCursor, TypedCursor,
     TypedCursorGuard, ValueDelta,
 };
-pub use wt_sys::WT_MODIFY;
 pub use transaction::Transaction;
+pub use wt_sys::WT_MODIFY;
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {
@@ -911,10 +911,7 @@ mod test {
         let txn = conn.begin_transaction(None).unwrap();
         let mut cursor = txn.open_index_cursor("test").unwrap();
         cursor.set(&b"key".as_slice(), &b"hello world".as_slice())?;
-        cursor.modify(
-            &b"key".as_slice(),
-            &[ValueDelta::Delete((5..11).into())],
-        )?;
+        cursor.modify(&b"key".as_slice(), &[ValueDelta::Delete((5..11).into())])?;
         assert_eq!(
             cursor.seek_exact(&b"key".as_slice()),
             Some(Ok(b"hello".to_vec()))

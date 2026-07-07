@@ -13,22 +13,21 @@ use std::{io, num::NonZero, ops::RangeInclusive, sync::Arc};
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
-use vectors::{soar::SoarQueryVectorDistance, F32VectorCoder, F32VectorCoding};
+use vectors::{F32VectorCoder, F32VectorCoding, soar::SoarQueryVectorDistance};
 use wt_mdb::{
+    Connection, Error, Result, Transaction,
     connection::{CreateOptionsBuilder, DropOptions},
     session::{CommitTransactionOptions, FormatString, Formatted, RollbackTransactionOptions},
-    Connection, Error, Result, Transaction,
 };
 
 use crate::{
+    Neighbor,
     spann::centroid_stats::CentroidCounts,
     vamana::{
-        prune_edges,
-        wt::{read_app_metadata, TableGraphVectorIndex, TransactionGraphVectorIndex},
         EdgePruningConfig, EdgeSetDistanceComputer, GraphConfig, GraphSearchParams,
-        GraphVectorIndex, GraphVectorStore,
+        GraphVectorIndex, GraphVectorStore, prune_edges,
+        wt::{TableGraphVectorIndex, TransactionGraphVectorIndex, read_app_metadata},
     },
-    Neighbor,
 };
 
 /// Configuration for the SPANN index.
@@ -326,7 +325,11 @@ impl CentroidAssignment {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + '_ {
-        self.to_formatted_ref().iter()
+        std::iter::once((CentroidAssignmentType::Primary, self.primary_id)).chain(
+            self.secondary_ids
+                .iter()
+                .map(|id| (CentroidAssignmentType::Secondary, u32::from_le_bytes(*id))),
+        )
     }
 
     fn replace(&mut self, old: u32, new: u32) {

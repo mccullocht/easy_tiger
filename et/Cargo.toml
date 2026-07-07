@@ -4,24 +4,24 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytemuck = { version = "1.23.1", features = ["derive"] }
-clap = { version = "4.5.20", features = ["derive"] }
-pollster = { version = "0.4", optional = true }
-wgpu = { version = "29.0.1", optional = true }
-crossbeam-utils = "0.8.21"
+bytemuck = { workspace = true, features = ["derive"] }
+clap = { workspace = true }
+pollster = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+crossbeam-utils = { workspace = true }
 easy_tiger = { path = "../" }
-histogram = "0.11.3"
-indicatif = { version = "0.17.8", features = ["rayon"] }
-memmap2 = { version = "0.9.5", features = ["stable_deref_trait"] }
-rand = "0.9.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-rand_xoshiro = "0.7.0"
-rayon = "1.10.0"
-stable_deref_trait = "1.2.0"
-thread_local = "1.1.8"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+histogram = { workspace = true }
+indicatif = { workspace = true, features = ["rayon"] }
+memmap2 = { workspace = true }
+rand = { workspace = true }
+rand_xoshiro = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+stable_deref_trait = { workspace = true }
+thread_local = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 vectors = { path = "../vectors" }
 wt_mdb = { path = "../wt_mdb" }
 wt_sys = { path = "../wt_sys" }

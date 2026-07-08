@@ -138,8 +138,6 @@ pub struct SearchStats {
     /// Number of posting lists read.
     pub postings_read: usize,
     /// Number of posting vectors read.
-    ///
-    /// This may be greater than the number scored if vectors are replicated across centroids.
     pub posting_vectors_read: usize,
     /// Number of posting entries "fast" scored.
     ///

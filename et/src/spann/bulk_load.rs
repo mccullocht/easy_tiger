@@ -5,7 +5,7 @@ use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     kmeans::{HierarchicalKMeansParams, Params, hierarchical_kmeans},
     spann::{
-        IndexConfig, ReplicaSelectionAlgorithm, TableIndex,
+        IndexConfig, TableIndex,
         bulk::{
             assign_to_centroids, load_centroid_stats, load_centroids, load_postings,
             load_raw_vectors,
@@ -84,7 +84,6 @@ pub struct BulkLoadArgs {
     head_max_centroid_len: usize,
 
     /// Number of edge candidates when searching head table for centroid ids during insertion.
-    /// This should be at least as many as --replica-count
     #[arg(long)]
     head_edge_candidates: NonZero<usize>,
     /// Number of vectors to re-rank when searching head table for centroid ids during insertion.
@@ -103,14 +102,6 @@ pub struct BulkLoadArgs {
     /// If unset, patience early termination will not be used.
     #[arg(long)]
     head_patience_saturation_count: Option<usize>,
-
-    /// Maximum number of replica centroids to assign each vector to.
-    #[arg(long, default_value_t = NonZero::new(1).unwrap())]
-    replica_count: NonZero<usize>,
-
-    /// Replica selection algorithm to use.
-    #[arg(long, default_value_t = ReplicaSelectionAlgorithm::SOAR)]
-    replica_selection: ReplicaSelectionAlgorithm,
 
     /// Quantizer to use for vectors written to centroid posting lists.
     #[arg(long)]
@@ -177,8 +168,6 @@ pub fn bulk_load(
         edge_type: args.head_edge_type.into(),
     };
     let spann_config = IndexConfig {
-        replica_count: args.replica_count.get(),
-        replica_selection: args.replica_selection,
         min_centroid_len: args.head_min_centroid_len,
         max_centroid_len: args.head_max_centroid_len,
         head_search_params: GraphSearchParams {
@@ -272,7 +261,7 @@ pub fn bulk_load(
     }
 
     {
-        let posting_count = centroid_assignments.iter().map(|c| c.len()).sum::<usize>();
+        let posting_count = centroid_assignments.len();
         let progress = progress_bar(posting_count, "tail load postings");
         let txn = connection.begin_transaction(None)?;
         {

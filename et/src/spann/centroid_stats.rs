@@ -12,17 +12,7 @@ pub fn centroid_stats(connection: Arc<Connection>, index_name: &str) -> io::Resu
     println!("Head contains {} centroids", stats.centroid_count());
     println!("{} tail posting entries", stats.vector_count());
     let max_value_power = max_value_power(&stats) + 1;
-    println!("Primary assignments per centroid:");
-    print_histogram(
-        max_value_power,
-        stats.primary_assignment_counts_iter().map(|(_, c)| c),
-    )?;
-    println!("Secondary assignments per centroid:");
-    print_histogram(
-        max_value_power,
-        stats.secondary_assignment_counts_iter().map(|(_, c)| c),
-    )?;
-    println!("Total assignments per centroid:");
+    println!("Assignments per centroid:");
     print_histogram(
         max_value_power,
         stats.assignment_counts_iter().map(|(_, c)| c),

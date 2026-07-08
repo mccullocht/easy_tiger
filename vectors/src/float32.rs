@@ -337,7 +337,7 @@ impl F32VectorCoder for VectorCoder {
 
 static L2_DIST: OnceLock<EuclideanDistance> = OnceLock::new();
 
-/// Computes a score based on l2 distance.
+/// Compute squared l2 (Euclidean) distance.
 #[derive(Debug, Copy, Clone, Default)]
 pub struct EuclideanDistance(InstructionSet);
 

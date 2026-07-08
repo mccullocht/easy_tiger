@@ -9,11 +9,11 @@ pub mod postings;
 pub mod rebalance;
 pub mod search;
 
-use std::{io, num::NonZero, ops::RangeInclusive, sync::Arc};
+use std::{ops::RangeInclusive, sync::Arc};
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
-use vectors::{F32VectorCoder, F32VectorCoding, soar::SoarQueryVectorDistance};
+use vectors::{F32VectorCoder, F32VectorCoding};
 use wt_mdb::{
     Connection, Error, Result, Transaction,
     connection::{CreateOptionsBuilder, DropOptions},
@@ -21,11 +21,9 @@ use wt_mdb::{
 };
 
 use crate::{
-    Neighbor,
     spann::centroid_stats::CentroidCounts,
     vamana::{
-        EdgePruningConfig, EdgeSetDistanceComputer, GraphConfig, GraphSearchParams,
-        GraphVectorIndex, GraphVectorStore, prune_edges,
+        GraphConfig, GraphSearchParams,
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex, read_app_metadata},
     },
 };
@@ -47,12 +45,6 @@ pub struct IndexConfig {
     /// Centroids with more vectors than this will be split into 2 centroids and their vectors will
     /// be reassigned to other centroids. Vectors in nearby centroids may also be reassigned.
     pub max_centroid_len: usize,
-    /// Number of posting replicas to write each vector to. Must be non-negative.
-    pub replica_count: usize,
-    /// Algorithm to select posting replicas from candidate centroids.
-    ///
-    /// If `replica_count` is one, only the closest centroid is selected.
-    pub replica_selection: ReplicaSelectionAlgorithm,
     /// If set, build a vector id keyed vector table in this format for re-ranking results.
     pub rerank_format: Option<F32VectorCoding>,
 }
@@ -64,49 +56,16 @@ impl IndexConfig {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub enum ReplicaSelectionAlgorithm {
-    /// Select replicas using relative neighbor graph edge pruning.
-    RNG,
-    /// Select replicas using SOAR distance scoring.
-    #[default]
-    SOAR,
-}
-
-impl std::str::FromStr for ReplicaSelectionAlgorithm {
-    type Err = io::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "rng" => Ok(Self::RNG),
-            "soar" => Ok(Self::SOAR),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("unknown replica selection algorithm {s}"),
-            )),
-        }
-    }
-}
-
-impl std::fmt::Display for ReplicaSelectionAlgorithm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::RNG => write!(f, "rng"),
-            Self::SOAR => write!(f, "soar"),
-        }
-    }
-}
-
 #[derive(Clone)]
 struct TableNames {
     // Table that maps (centroid_id,record_id) -> quantized vector.
     // Ranges of this table are searched based on the outcome of searching the head.
     postings: String,
-    // Table that maps record_id -> centroid_id*.
+    // Table that maps record_id -> centroid_id.
     // This table is necessary when deleting a vector to locate rows posting rows to delete.
     // It may also be useful for determining matching centroids in a filtered search.
     centroids: String,
-    // Table that maps centroid_id -> (primary_count, secondary_count).
+    // Table that maps centroid_id -> primary_count.
     // These pre-aggregated statistics are used to balance the index and influence search.
     centroid_stats: String,
     // Table that maps record_id -> raw vector.
@@ -167,7 +126,7 @@ impl TableIndex {
             .byte_len(self.head_config().config().dimensions.get())
     }
 
-    pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> io::Result<Self> {
+    pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> std::io::Result<Self> {
         let head = Arc::new(TableGraphVectorIndex::from_db(
             connection,
             &Self::head_name(index_name),
@@ -205,7 +164,7 @@ impl TableIndex {
         index_name: &str,
         head_config: GraphConfig,
         spann_config: IndexConfig,
-    ) -> io::Result<Self> {
+    ) -> std::io::Result<Self> {
         let head_similarity = head_config.similarity;
         let head_dimensions = head_config.dimensions;
         let head = Arc::new(TableGraphVectorIndex::init_index(
@@ -295,231 +254,50 @@ impl TableIndex {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum CentroidAssignmentType {
-    Primary,
-    Secondary,
-}
-
 /// A value in the centroid assignment table.
 ///
-/// This maps a record to its primary centroid and any secondary centroids.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// This maps a record to its assigned centroid.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct CentroidAssignment {
-    primary_id: u32,
-    secondary_ids: Vec<[u8; 4]>,
+    pub primary_id: u32,
 }
 
 impl CentroidAssignment {
-    pub fn new(primary_id: u32, secondary_ids: &[u32]) -> Self {
-        Self {
-            primary_id,
-            secondary_ids: secondary_ids.iter().map(|id| id.to_le_bytes()).collect(),
-        }
+    pub fn new(primary_id: u32) -> Self {
+        Self { primary_id }
     }
 
-    // is_empty() makes no sense -- there is always a primary.
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        self.to_formatted_ref().len()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + '_ {
-        std::iter::once((CentroidAssignmentType::Primary, self.primary_id)).chain(
-            self.secondary_ids
-                .iter()
-                .map(|id| (CentroidAssignmentType::Secondary, u32::from_le_bytes(*id))),
-        )
-    }
-
-    fn replace(&mut self, old: u32, new: u32) {
-        if self.primary_id == old {
-            self.primary_id = new;
-            return;
-        }
-        for id in self.secondary_ids.iter_mut() {
-            if u32::from_le_bytes(*id) == old {
-                *id = new.to_le_bytes();
-            }
-        }
+    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        std::iter::once(self.primary_id)
     }
 }
 
 impl Formatted for CentroidAssignment {
     const FORMAT: FormatString = FormatString::new(c"u");
 
-    type Ref<'a> = CentroidAssignmentRef<'a>;
+    type Ref<'a> = Self;
 
     #[inline(always)]
     fn to_formatted_ref(&self) -> Self::Ref<'_> {
-        CentroidAssignmentRef {
-            primary_id: self.primary_id,
-            secondary_ids: &self.secondary_ids,
-        }
+        *self
     }
 
     #[inline(always)]
     fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
-        packed.resize(value.len() * std::mem::size_of::<u32>(), 0);
-        packed[..4].copy_from_slice(&value.primary_id.to_le_bytes());
-        for (i, o) in value.secondary_ids.iter().zip(
-            packed[4..]
-                .as_chunks_mut::<{ std::mem::size_of::<u32>() }>()
-                .0
-                .iter_mut(),
-        ) {
-            *o = *i;
-        }
+        packed.resize(4, 0);
+        packed.copy_from_slice(&value.primary_id.to_le_bytes());
         Ok(())
     }
 
     #[inline(always)]
     fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
-        if !packed.len().is_multiple_of(std::mem::size_of::<u32>()) || packed.is_empty() {
+        if packed.len() != 4 {
             return Err(Error::Errno(Errno::INVAL));
         }
-
-        let ids = packed.as_chunks::<{ std::mem::size_of::<u32>() }>().0;
-        let primary_id = u32::from_le_bytes(ids[0]);
-        let secondary_ids: &[[u8; 4]] = &ids[1..];
-        Ok(CentroidAssignmentRef {
-            primary_id,
-            secondary_ids,
+        Ok(Self {
+            primary_id: u32::from_le_bytes(packed.try_into().unwrap()),
         })
     }
-}
-
-impl From<CentroidAssignmentRef<'_>> for CentroidAssignment {
-    fn from(value: CentroidAssignmentRef<'_>) -> Self {
-        Self {
-            primary_id: value.primary_id,
-            secondary_ids: value.secondary_ids.to_vec(),
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct CentroidAssignmentRef<'a> {
-    primary_id: u32,
-    secondary_ids: &'a [[u8; 4]],
-}
-
-impl<'a> CentroidAssignmentRef<'a> {
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        1 + self.secondary_ids.len()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (CentroidAssignmentType, u32)> + 'a {
-        std::iter::once((CentroidAssignmentType::Primary, self.primary_id)).chain(
-            self.secondary_ids
-                .iter()
-                .map(|id| (CentroidAssignmentType::Secondary, u32::from_le_bytes(*id))),
-        )
-    }
-}
-
-fn select_centroids(
-    algorithm: ReplicaSelectionAlgorithm,
-    replica_count: usize,
-    candidates: Vec<Neighbor>,
-    vector: &[f32],
-    head_reader: &impl GraphVectorIndex,
-) -> Result<CentroidAssignment> {
-    assert!(
-        !candidates.is_empty(),
-        "at least one candidate is required for replica selection"
-    );
-
-    if replica_count == 1 {
-        // If we aren't selecting multiple replicas then just return the first candidate.
-        return Ok(CentroidAssignment::new(candidates[0].vertex() as u32, &[]));
-    }
-
-    match algorithm {
-        ReplicaSelectionAlgorithm::RNG => {
-            select_centroids_rng(replica_count, candidates, head_reader)
-        }
-        ReplicaSelectionAlgorithm::SOAR => {
-            select_centroids_soar(replica_count, candidates, vector, head_reader)
-        }
-    }
-}
-
-fn select_centroids_rng(
-    replica_count: usize,
-    mut candidates: Vec<Neighbor>,
-    head_reader: &impl GraphVectorIndex,
-) -> Result<CentroidAssignment> {
-    assert!(!candidates.is_empty());
-
-    let pruning_computer = EdgeSetDistanceComputer::from_store_and_edges(
-        &mut head_reader.high_fidelity_vectors()?,
-        &candidates,
-    )?;
-    let count = prune_edges(
-        &mut candidates,
-        &EdgePruningConfig {
-            max_edges: NonZero::new(replica_count).unwrap(),
-            max_alpha: 1.0,
-            alpha_scale: 1.0,
-        },
-        pruning_computer,
-    );
-    candidates.truncate(count);
-    Ok(CentroidAssignment::new(
-        candidates[0].vertex() as u32,
-        &candidates[1..]
-            .iter()
-            .map(|n| n.vertex() as u32)
-            .collect::<Vec<_>>(),
-    ))
-}
-
-fn select_centroids_soar(
-    replica_count: usize,
-    candidates: Vec<Neighbor>,
-    vector: &[f32],
-    head_reader: &impl GraphVectorIndex,
-) -> Result<CentroidAssignment> {
-    assert!(!candidates.is_empty());
-    let mut vectors = head_reader.high_fidelity_vectors()?;
-    let coder = vectors.new_coder();
-
-    let primary = coder.decode(
-        vectors
-            .get(candidates[0].vertex())
-            .unwrap_or(Err(Error::not_found_error()))?,
-    );
-    let soar_dist = if let Some(dist) = SoarQueryVectorDistance::new(vector, &primary) {
-        dist
-    } else {
-        return Ok(CentroidAssignment::new(candidates[0].vertex() as u32, &[]));
-    };
-    let mut secondary_centroid_ids = Vec::with_capacity(candidates.len() - 1);
-    let mut candidate_vector = vec![0.0f32; primary.len()];
-    for candidate in candidates.iter().skip(1) {
-        coder.decode_to(
-            vectors
-                .get(candidate.vertex())
-                .unwrap_or(Err(Error::not_found_error()))?,
-            &mut candidate_vector,
-        );
-        secondary_centroid_ids.push(Neighbor::new(
-            candidate.vertex(),
-            soar_dist.distance(&candidate_vector),
-        ));
-    }
-
-    secondary_centroid_ids.sort_unstable();
-    Ok(CentroidAssignment::new(
-        candidates[0].vertex() as u32,
-        &secondary_centroid_ids
-            .iter()
-            .take(replica_count - 1)
-            .map(|n| n.vertex() as u32)
-            .collect::<Vec<_>>(),
-    ))
 }
 
 pub struct TransactionIndex {

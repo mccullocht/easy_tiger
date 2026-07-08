@@ -3,17 +3,17 @@ use std::{cell::RefCell, sync::Arc};
 use crate::{
     input::VectorStore,
     spann::{
-        centroid_stats::CentroidCounts, postings::BlockPostingsMut, select_centroids, CentroidAssignment,
-        CentroidAssignmentType, TableIndex,
+        centroid_stats::CentroidCounts, postings::BlockPostingsMut, CentroidAssignment,
+        TableIndex,
     },
     vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{session::Formatted, Connection, Result};
+use wt_mdb::{Connection, Result};
 
-/// Assign all the vectors to one or more centroids in the head index. This performs the same search
-/// and pruning as [`super::TransactionIndex`] does.
+/// Assign all the vectors to one centroid in the head index. This performs the same search
+/// as [`super::TransactionIndex`] does.
 pub fn assign_to_centroids(
     index: &TableIndex,
     connection: &Arc<Connection>,
@@ -33,13 +33,7 @@ pub fn assign_to_centroids(
                 .get_or(|| RefCell::new(GraphSearcher::new(index.config().head_search_params)))
                 .borrow_mut();
             let candidates = searcher.search(&vectors[i], &head_reader)?;
-            let selected = select_centroids(
-                index.config().replica_selection,
-                index.config().replica_count,
-                candidates,
-                &vectors[i],
-                &head_reader,
-            );
+            let selected = Ok(CentroidAssignment::new(candidates[0].vertex() as u32));
             progress(1);
             selected
         })
@@ -55,8 +49,8 @@ pub fn load_centroids(
 ) -> Result<()> {
     let mut bulk_cursor = connection
         .new_bulk_load_cursor::<i64, CentroidAssignment>(&index.table_names.centroids, None)?;
-    for (record_id, centroids) in centroid_assignments.iter().enumerate() {
-        bulk_cursor.append(record_id as i64, centroids.to_formatted_ref())?;
+    for (record_id, assignment) in centroid_assignments.iter().enumerate() {
+        bulk_cursor.append(record_id as i64, *assignment)?;
         progress(1);
     }
     Ok(())
@@ -64,8 +58,8 @@ pub fn load_centroids(
 
 /// Bulk load centroid statistics into a stats table.
 ///
-/// This creates a table mapping each centroid ID to the count of primary and secondary
-/// assigned vectors for efficient statistics queries.
+/// This creates a table mapping each centroid ID to the count of assigned vectors for efficient
+/// statistics queries.
 pub fn load_centroid_stats(
     index: &TableIndex,
     connection: &Arc<Connection>,
@@ -74,25 +68,13 @@ pub fn load_centroid_stats(
 ) -> Result<()> {
     use std::collections::HashMap;
 
-    // Count primary and secondary assignments for each centroid
     let mut stats: HashMap<u32, CentroidCounts> = HashMap::new();
-
-    for centroids in centroid_assignments {
-        for (assignment_type, centroid_id) in centroids.iter() {
-            match assignment_type {
-                CentroidAssignmentType::Primary => {
-                    stats.entry(centroid_id).or_default().primary += 1;
-                }
-                CentroidAssignmentType::Secondary => {
-                    stats.entry(centroid_id).or_default().secondary += 1;
-                }
-            }
-        }
+    for assignment in centroid_assignments {
+        stats.entry(assignment.primary_id).or_default().primary += 1;
     }
 
     let mut stats = stats.into_iter().collect::<Vec<_>>();
     stats.sort_by_key(|(id, _)| *id);
-    // Bulk load the stats
     let mut bulk_cursor = connection
         .new_bulk_load_cursor::<u32, CentroidCounts>(&index.table_names.centroid_stats, None)?;
 
@@ -118,9 +100,9 @@ pub fn load_postings(
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     let mut posting_keys: Vec<(u32, i64)> = centroid_assignments
-        .into_par_iter()
+        .iter()
         .enumerate()
-        .flat_map_iter(|(i, a)| a.iter().map(move |(_, c)| (c, i as i64)))
+        .map(|(i, a)| (a.primary_id, i as i64))
         .collect();
     posting_keys.par_sort_unstable();
 

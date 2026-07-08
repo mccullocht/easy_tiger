@@ -2,7 +2,7 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    spann::{IndexConfig, ReplicaSelectionAlgorithm, TableIndex},
+    spann::{IndexConfig, TableIndex},
     vamana::{
         GraphConfig, GraphSearchParams, PatienceParams, mutate::insert_vector,
         wt::TransactionGraphVectorIndex,
@@ -57,7 +57,6 @@ pub struct InitIndexArgs {
     head_max_centroid_len: usize,
 
     /// Number of edge candidates when searching head table for centroid ids during insertion.
-    /// This should be at least as many as --replica-count
     #[arg(long)]
     head_edge_candidates: Option<usize>,
     /// Number of vectors to re-rank when searching head table for centroid ids during insertion.
@@ -76,14 +75,6 @@ pub struct InitIndexArgs {
     /// If unset, patience early termination will not be used.
     #[arg(long)]
     head_patience_saturation_count: Option<usize>,
-
-    /// Maximum number of replica centroids to assign each vector to.
-    #[arg(long, default_value_t = NonZero::new(1).unwrap())]
-    replica_count: NonZero<usize>,
-
-    /// Replica selection algorithm to use.
-    #[arg(long, default_value_t = ReplicaSelectionAlgorithm::SOAR)]
-    replica_selection: ReplicaSelectionAlgorithm,
 
     /// Quantizer to use for vectors written to centroid posting lists.
     #[arg(long)]
@@ -139,8 +130,6 @@ pub fn init_index(
         .map(|v| NonZero::new(v).unwrap())
         .unwrap_or(args.edge_candidates);
     let spann_config = IndexConfig {
-        replica_count: args.replica_count.get(),
-        replica_selection: args.replica_selection,
         min_centroid_len: args.head_min_centroid_len,
         max_centroid_len: args.head_max_centroid_len,
         head_search_params: GraphSearchParams {

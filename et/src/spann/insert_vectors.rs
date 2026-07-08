@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use vectors::F32VectorCoder;
 use wt_mdb::{
     Connection, Result,
-    session::{BeginTransactionOptions, CommitTransactionOptions, Formatted},
+    session::{BeginTransactionOptions, CommitTransactionOptions},
     timestamp::{MontonicTimestampClock, TimestampClock},
 };
 
@@ -213,11 +213,10 @@ fn insert_batch(
                 let candidates = searcher.search(vector, txn_idx.head())?;
                 assert!(!candidates.is_empty());
 
-                // TODO: implement replica selection
                 let centroid_id = candidates[0].vertex() as u32;
                 Ok((
                     i,
-                    CentroidAssignment::new(centroid_id, &[]),
+                    CentroidAssignment::new(centroid_id),
                     posting_coder.encode(vector),
                     rerank_coder.map(|c| c.encode(vector)),
                 ))
@@ -227,7 +226,7 @@ fn insert_batch(
 
     let unique_centroids = vector_state
         .iter()
-        .filter_map(|(_, a, _, _)| a.iter().next().map(|(_, id)| id))
+        .map(|(_, a, _, _)| a.primary_id)
         .collect::<HashSet<_>>()
         .len();
 
@@ -254,11 +253,8 @@ fn insert_batch(
     };
 
     for (i, assignment, posting_vector, rerank_vector) in vector_state.into_iter() {
-        assignment_updater.insert(i as i64, assignment.to_formatted_ref())?;
-
-        for (_, centroid_id) in assignment.iter() {
-            postings.insert(centroid_id, i as i64, &posting_vector)?;
-        }
+        assignment_updater.insert(i as i64, assignment)?;
+        postings.insert(assignment.primary_id, i as i64, &posting_vector)?;
 
         if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(rerank_vector) {
             cursor.set(i as i64, &vector)?;

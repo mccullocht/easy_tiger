@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::HashSet,
     num::NonZero,
     ops::RangeInclusive,
     sync::Arc,
@@ -7,7 +7,7 @@ use std::{
 
 use rand::Rng;
 use tracing::warn;
-use wt_mdb::{session::Formatted, Error, Result};
+use wt_mdb::{Error, Result};
 
 use crate::{
     input::VecVectorStore,
@@ -15,7 +15,7 @@ use crate::{
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
         postings::BlockPostingsMut,
-        select_centroids, CentroidAssignment, TransactionIndex,
+        CentroidAssignment, TransactionIndex,
     },
     vamana::{
         mutate::{delete_vector, upsert_vector},
@@ -201,25 +201,17 @@ pub fn merge_centroid(
             |i| i != centroid_id as i64,
             txn_idx.head(),
         )?;
-        let new_assignments = select_centroids(
-            index.config().replica_selection,
-            index.config().replica_count,
-            candidates,
-            &float_vector,
-            txn_idx.head(),
-        )?;
+        let new_assignments = CentroidAssignment::new(candidates[0].vertex() as u32);
         let old_assignments =
-            assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
+            assignment_updater.update(record_id, new_assignments)?;
         move_postings(
             record_id,
             &vector,
-            &old_assignments,
-            &new_assignments,
+            old_assignments,
+            new_assignments,
             &mut postings,
         )?;
-        for (_, new_centroid) in new_assignments.iter() {
-            unique_centroids.insert(new_centroid);
-        }
+        unique_centroids.insert(new_assignments.primary_id);
     }
 
     postings.flush()?;
@@ -334,65 +326,38 @@ pub fn split_centroid(
         let new_assignments = if c0_dist <= c1_dist && c0_dist <= c2_dist {
             searches += 1;
             posting_coder.decode_to(&vector, &mut float_vector);
-            let mut candidates = searcher.search_with_filter(
+            let candidates = searcher.search_with_filter(
                 &float_vector,
                 |i| i != centroid_id as i64,
                 txn_idx.head(),
             )?;
-            candidates.truncate(txn_idx.index().config().replica_count * 4);
-            select_centroids(
-                txn_idx.index().config().replica_selection,
-                txn_idx.index().config().replica_count,
-                candidates,
-                &scratch_vector,
-                txn_idx.head(),
-            )?
+            CentroidAssignment::new(candidates[0].vertex() as u32)
         } else {
             let updated_centroid_id = if c1_dist < c2_dist {
                 target_centroid_ids.0
             } else {
                 target_centroid_ids.1
             };
-            if txn_idx.index().config().replica_count <= 1 {
-                CentroidAssignment::new(updated_centroid_id as u32, &[])
-            } else {
-                let mut cursor = txn_idx
-                    .transaction()
-                    .open_cursor::<i64, CentroidAssignment>(
-                        txn_idx.index().centroid_assignments_table_name(),
-                    )?;
-                let mut current_assignments = cursor
-                    .seek_exact(record_id)
-                    .unwrap_or(Err(Error::not_found_error()))?;
-                current_assignments.replace(centroid_id as u32, updated_centroid_id as u32);
-                current_assignments
-            }
+            CentroidAssignment::new(updated_centroid_id as u32)
         };
 
         let old_assignments =
-            assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
+            assignment_updater.update(record_id, new_assignments)?;
         move_postings(
             record_id,
             &vector,
-            &old_assignments,
-            &new_assignments,
+            old_assignments,
+            new_assignments,
             &mut postings,
         )?;
 
-        for (_, new_centroid) in new_assignments.iter() {
-            unique_centroids.insert(new_centroid);
-        }
+        unique_centroids.insert(new_assignments.primary_id);
     }
 
     let mut nearby_seen = 0;
     let mut nearby_moved = 0;
     // For a list of nearby centroids, examine all vectors and reassign them if they are closer
     // to one of the new centroids than they are to the current centroid.
-    let mut assignment_cursor = txn_idx
-        .transaction()
-        .open_cursor::<i64, CentroidAssignment>(
-            txn_idx.index().centroid_assignments_table_name(),
-        )?;
     for n in nearby_clusters {
         let nearby_centroid_id = n.vertex() as u32;
         let mut head_vectors = txn_idx.head().high_fidelity_vectors()?;
@@ -414,17 +379,6 @@ pub fn split_centroid(
             let c0_dist = c0_dist_fn.distance(&vector);
             let c1_dist = c1_dist_fn.distance(&vector);
             let c2_dist = c2_dist_fn.distance(&vector);
-
-            // Do not move postings that are not assigned to the original centroid; we're not
-            // willing to do this work for secondaries.
-            if txn_idx.index().config().replica_count > 1
-                && assignment_cursor
-                    .seek_exact(record_id)
-                    .map(|r| r.map(|a| a.primary_id != nearby_centroid_id))
-                    .unwrap_or(Ok(true))?
-            {
-                continue;
-            }
             nearby_seen += 1;
 
             let assigned_centroid_id = if c1_dist < c0_dist {
@@ -435,32 +389,14 @@ pub fn split_centroid(
                 continue;
             };
 
-            let new_assignments = if txn_idx.index().config().replica_count > 1 {
-                searches += 1;
-                posting_coder.decode_to(&vector, &mut scratch_vector);
-                let candidates = searcher.search_with_filter(
-                    &scratch_vector,
-                    |i| i != centroid_id as i64,
-                    txn_idx.head(),
-                )?;
-                select_centroids(
-                    txn_idx.index().config().replica_selection,
-                    txn_idx.index().config().replica_count,
-                    candidates,
-                    &scratch_vector,
-                    txn_idx.head(),
-                )?
-            } else {
-                CentroidAssignment::new(assigned_centroid_id, &[])
-            };
-
+            let new_assignments = CentroidAssignment::new(assigned_centroid_id);
             let old_assignments =
-                assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
+                assignment_updater.update(record_id, new_assignments)?;
             nearby_moved += move_postings(
                 record_id,
                 &vector,
-                &old_assignments,
-                &new_assignments,
+                old_assignments,
+                new_assignments,
                 &mut postings,
             )?;
         }
@@ -485,27 +421,17 @@ pub fn split_centroid(
 fn move_postings(
     record_id: i64,
     vector: &[u8],
-    old_assignment: &CentroidAssignment,
-    new_assignment: &CentroidAssignment,
+    old_assignment: CentroidAssignment,
+    new_assignment: CentroidAssignment,
     postings: &mut BlockPostingsMut<'_>,
 ) -> Result<usize> {
-    let old_assignment = old_assignment
-        .iter()
-        .map(|(_, id)| id)
-        .collect::<BTreeSet<_>>();
-    let new_assignment = new_assignment
-        .iter()
-        .map(|(_, id)| id)
-        .collect::<BTreeSet<_>>();
-    for &centroid_id in old_assignment.difference(&new_assignment) {
-        postings.remove(centroid_id, record_id)?;
+    if old_assignment.primary_id != new_assignment.primary_id {
+        postings.remove(old_assignment.primary_id, record_id)?;
+        postings.insert(new_assignment.primary_id, record_id, vector)?;
+        Ok(1)
+    } else {
+        Ok(0)
     }
-    let mut added = 0;
-    for &centroid_id in new_assignment.difference(&old_assignment) {
-        postings.insert(centroid_id, record_id, vector)?;
-        added += 1;
-    }
-    Ok(added)
 }
 
 /// A summary of centroid assignment balance.

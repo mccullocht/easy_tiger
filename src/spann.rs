@@ -503,7 +503,7 @@ fn select_centroids_soar(
 
     let mut candidate_vector = vec![0.0f32; primary.len()];
     let mut secondaries = candidates[1..]
-        .into_iter()
+        .iter()
         .map(|n| {
             let v = vectors
                 .get(n.vertex())

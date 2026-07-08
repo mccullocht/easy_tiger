@@ -143,12 +143,36 @@ pub fn rebalance(
             rebalance_stats.split_stats.unique_centroids as f64 / rebalance_stats.split as f64
         );
         println!(
+            "  Blocks flushed:{:9}",
+            rebalance_stats.split_stats.split_blocks_flushed
+        );
+        println!(
+            "  Modified:     {:10}",
+            rebalance_stats.split_stats.split_blocks_modified
+        );
+        println!(
+            "  To-reassign blocks flushed:{:3}",
+            rebalance_stats.split_stats.to_reassign_blocks_flushed
+        );
+        println!(
+            "  To-reassign modified:{:9}",
+            rebalance_stats.split_stats.to_reassign_blocks_modified
+        );
+        println!(
             "  Nearby seen:  {:10}",
             rebalance_stats.split_stats.nearby_seen
         );
         println!(
             "  Nearby moved: {:10}",
             rebalance_stats.split_stats.nearby_moved
+        );
+        println!(
+            "  Nearby blocks flushed:{:3}",
+            rebalance_stats.split_stats.nearby_blocks_flushed
+        );
+        println!(
+            "  Nearby modified:{:8}",
+            rebalance_stats.split_stats.nearby_blocks_modified
         );
     }
 

@@ -3,14 +3,14 @@ use std::{cell::RefCell, sync::Arc};
 use crate::{
     input::VectorStore,
     spann::{
-        centroid_stats::CentroidCounts, postings::BlockPostingsMut, select_centroids, CentroidAssignment,
-        CentroidAssignmentType, TableIndex,
+        CentroidAssignment, CentroidAssignmentType, TableIndex, centroid_stats::CentroidCounts,
+        postings::BlockPostingsMut, select_centroids,
     },
     vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{session::Formatted, Connection, Result};
+use wt_mdb::{Connection, Result, session::Formatted};
 
 /// Assign all the vectors to one or more centroids in the head index. This performs the same search
 /// and pruning as [`super::TransactionIndex`] does.
@@ -144,7 +144,7 @@ pub fn load_postings(
         }
         progress(batch.len() as u64);
     }
-    postings.flush()
+    postings.flush().map(|_| ())
 }
 
 /// Bulk load raw vector data into the raw vectors table for re-ranking.

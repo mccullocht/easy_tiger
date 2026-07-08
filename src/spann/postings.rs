@@ -1,8 +1,8 @@
 //! Block-based posting storage for SPANN.
 
 use std::collections::{
-    hash_map::Entry::{Occupied, Vacant},
     HashMap,
+    hash_map::Entry::{Occupied, Vacant},
 };
 
 use wt_mdb::{Error, Result, TypedCursorGuard, WT_MODIFY};
@@ -102,9 +102,13 @@ impl<'a> BlockPostingsMut<'a> {
     }
 
     /// Write all buffered changes to storage.
-    pub fn flush(&mut self) -> Result<()> {
+    ///
+    /// Returns the total number of blocks flushed and the number of blocks modified.
+    pub fn flush(&mut self) -> Result<(usize, usize)> {
         let dirty = std::mem::take(&mut self.dirty);
         let mut modify_buf = [WT_MODIFY::default(); 128];
+        let flush_blocks = dirty.len();
+        let mut modified_blocks = 0usize;
         for (centroid_id, block) in dirty {
             if block.is_empty() {
                 self.cursor.remove(centroid_id).or_else(|e| {
@@ -129,12 +133,13 @@ impl<'a> BlockPostingsMut<'a> {
                     // SAFETY: modify_buf[..n] holds WT_MODIFY entries whose data pointers
                     // point into new_serialized, which remains alive for this call.
                     unsafe { self.cursor.modify_unsafe(centroid_id, deltas)? };
+                    modified_blocks += 1;
                     continue;
                 }
             }
             self.cursor.set(centroid_id, new_serialized.as_slice())?;
         }
-        Ok(())
+        Ok((flush_blocks, modified_blocks))
     }
 
     fn load_or_create(&mut self, centroid_id: u32) -> Result<&mut PostingBlockMut> {

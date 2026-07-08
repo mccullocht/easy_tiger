@@ -27,7 +27,7 @@ use rayon::prelude::*;
 use vectors::F32VectorCoder;
 use wt_mdb::{Connection, Error, Result, WiredTigerError, session::Formatted};
 
-use crate::ui::progress_bar;
+use crate::{ui::progress_bar, wt_stats::WiredTigerConnectionStats};
 
 #[derive(Args)]
 pub struct InsertVectorsArgs {
@@ -86,6 +86,9 @@ pub fn insert_vectors(
 
     let main_progress = progress_bar(args.count.get(), "inserting vectors");
 
+    let wt_before = WiredTigerConnectionStats::try_from(&connection)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
     // Each rayon worker gets its own rng seeded from a shared counter so splits use distinct
     // random state without requiring a Sync rng.
     let seed = AtomicU64::new(args.seed);
@@ -115,9 +118,21 @@ pub fn insert_vectors(
         )
         .try_reduce(RebalanceStats::default, |a, b| Ok(a + b))?;
 
+    let wt_after = WiredTigerConnectionStats::try_from(&connection)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let wt = wt_after - wt_before;
+
     main_progress.set_message("inserting vectors");
     main_progress.finish();
 
+    println!(
+        "Blocks flushed: {:10}",
+        rebalance_stats.blocks_flushed
+    );
+    println!(
+        "  Modified:     {:10}",
+        rebalance_stats.blocks_modified
+    );
     println!("Split:          {:10}", rebalance_stats.split);
     if rebalance_stats.split > 0 {
         println!(
@@ -132,6 +147,22 @@ pub fn insert_vectors(
             "  Avg unique:   {:10.1}",
             rebalance_stats.split_stats.unique_centroids as f64 / rebalance_stats.split as f64
         );
+        println!(
+            "  Blocks flushed:{:9}",
+            rebalance_stats.split_stats.split_blocks_flushed
+        );
+        println!(
+            "  Modified:     {:10}",
+            rebalance_stats.split_stats.split_blocks_modified
+        );
+        println!(
+            "  To-reassign blocks flushed:{:3}",
+            rebalance_stats.split_stats.to_reassign_blocks_flushed
+        );
+        println!(
+            "  To-reassign modified:{:9}",
+            rebalance_stats.split_stats.to_reassign_blocks_modified
+        );
         println!("Nearby:");
         println!(
             "  Seen:         {:10}",
@@ -141,7 +172,59 @@ pub fn insert_vectors(
             "  Moved:        {:10}",
             rebalance_stats.split_stats.nearby_moved
         );
+        println!(
+            "  Blocks flushed:{:9}",
+            rebalance_stats.split_stats.nearby_blocks_flushed
+        );
+        println!(
+            "  Modified:     {:10}",
+            rebalance_stats.split_stats.nearby_blocks_modified
+        );
     }
+
+    println!("WiredTiger log (WAL):");
+    println!("  Writes:       {:10}", wt.log_writes);
+    println!(
+        "  Payload:      {:10} MB",
+        wt.log_bytes_payload / (1 << 20)
+    );
+    println!(
+        "  Written:      {:10} MB",
+        wt.log_bytes_written / (1 << 20)
+    );
+    println!("WiredTiger blocks (data files):");
+    println!("  Writes:       {:10}", wt.block_writes);
+    println!(
+        "  Written:      {:10} MB",
+        wt.block_bytes_written / (1 << 20)
+    );
+    println!(
+        "  Checkpoint:   {:10} MB",
+        wt.block_bytes_written_checkpoint / (1 << 20)
+    );
+    println!("WiredTiger cursor full-value writes:");
+    println!(
+        "  Insert bytes: {:10} MB",
+        wt.cursor_insert_bytes / (1 << 20)
+    );
+    println!(
+        "  Update bytes: {:10} MB",
+        wt.cursor_update_bytes / (1 << 20)
+    );
+    println!(
+        "  Remove bytes: {:10} MB",
+        wt.cursor_remove_bytes / (1 << 20)
+    );
+    println!("WiredTiger cursor modify:");
+    println!("  Calls:        {:10}", wt.cursor_modify_calls);
+    println!(
+        "  Value bytes:  {:10} MB",
+        wt.cursor_modify_bytes / (1 << 20)
+    );
+    println!(
+        "  Delta bytes:  {:10} MB",
+        wt.cursor_modify_bytes_touch / (1 << 20)
+    );
 
     Ok(())
 }
@@ -176,9 +259,13 @@ fn insert_one(
             max_centroid_len,
         )? {
             // The vector was inserted; we're done.
-            None => return Ok(stats),
+            (None, flushed, modified) => {
+                stats.blocks_flushed += flushed;
+                stats.blocks_modified += modified;
+                return Ok(stats);
+            }
             // The chosen centroid is full; split it then retry the insert.
-            Some(centroid_id) => {
+            (Some(centroid_id), _, _) => {
                 // NOT_FOUND from either split half means another worker has already
                 // split/merged this centroid. That's fine: swallow it and retry the insert,
                 // which will re-search for the now-current centroid.
@@ -203,9 +290,10 @@ fn insert_one(
 
 /// Attempt to insert vector `i` in a single transaction, retrying on OCC rollback.
 ///
-/// Returns `Ok(None)` if the vector was inserted and the transaction committed. Returns
-/// `Ok(Some(centroid_id))` if inserting would overflow `centroid_id`; in that case the
-/// transaction is rolled back and the caller should split the centroid before retrying.
+/// Returns `Ok((None, flushed, modified))` if the vector was inserted and the transaction
+/// committed, where `flushed` and `modified` are the counts from [`BlockPostingsMut::flush`].
+/// Returns `Ok((Some(centroid_id), 0, 0))` if inserting would overflow `centroid_id`; in that
+/// case the transaction is rolled back and the caller should split the centroid before retrying.
 #[allow(clippy::too_many_arguments)]
 fn try_insert(
     connection: &Arc<Connection>,
@@ -216,12 +304,12 @@ fn try_insert(
     rerank_vector: Option<&[u8]>,
     searcher: &mut GraphSearcher,
     max_centroid_len: usize,
-) -> Result<Option<u32>> {
+) -> Result<(Option<u32>, usize, usize)> {
     loop {
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
         // Perform all the reads and writes for this attempt; the transaction is committed
         // (or rolled back by drop) based on the result below.
-        let result: Result<Option<u32>> = (|| {
+        let result: Result<(Option<u32>, usize, usize)> = (|| {
             let candidates = searcher.search(&f32_vectors[i], txn_idx.head())?;
             assert!(!candidates.is_empty());
 
@@ -230,7 +318,7 @@ fn try_insert(
 
             let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
             if postings.centroid_len(centroid_id)? >= max_centroid_len {
-                return Ok(Some(centroid_id));
+                return Ok((Some(centroid_id), 0, 0));
             }
 
             postings.insert(centroid_id, i as i64, posting_vector)?;
@@ -248,22 +336,22 @@ fn try_insert(
                     .set(i as i64, vector)?;
             }
 
-            postings.flush()?;
+            let (flushed, modified) = postings.flush()?;
             assignment_updater.flush()?;
             drop(assignment_updater);
             drop(postings);
-            Ok(None)
+            Ok((None, flushed, modified))
         })();
 
         match result {
             // Retry the whole attempt on a fresh transaction.
             Err(Error::WiredTiger(WiredTigerError::Rollback)) => continue,
             // Centroid is full: drop (rollback) the transaction and signal a split.
-            Ok(Some(centroid_id)) => return Ok(Some(centroid_id)),
+            Ok((Some(centroid_id), _, _)) => return Ok((Some(centroid_id), 0, 0)),
             // Inserted: commit.
-            Ok(None) => {
+            Ok((None, flushed, modified)) => {
                 txn_idx.commit(None)?;
-                return Ok(None);
+                return Ok((None, flushed, modified));
             }
             Err(e) => return Err(e),
         }

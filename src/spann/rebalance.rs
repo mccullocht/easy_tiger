@@ -66,6 +66,18 @@ pub struct SplitStats {
     pub nearby_seen: usize,
     /// The number of nearby vectors that were reassigned to a new centroid.
     pub nearby_moved: usize,
+    /// Number of posting blocks flushed during the top half of the split.
+    pub split_blocks_flushed: usize,
+    /// Number of those top-half blocks written using WiredTiger modify().
+    pub split_blocks_modified: usize,
+    /// Number of posting blocks flushed while reassigning vectors that landed in the wrong half.
+    pub to_reassign_blocks_flushed: usize,
+    /// Number of those to-reassign blocks written using WiredTiger modify().
+    pub to_reassign_blocks_modified: usize,
+    /// Number of posting blocks flushed during nearby-centroid reassignment.
+    pub nearby_blocks_flushed: usize,
+    /// Number of those nearby blocks written using WiredTiger modify().
+    pub nearby_blocks_modified: usize,
 }
 
 impl Add for SplitStats {
@@ -78,6 +90,14 @@ impl Add for SplitStats {
             unique_centroids: self.unique_centroids + rhs.unique_centroids,
             nearby_seen: self.nearby_seen + rhs.nearby_seen,
             nearby_moved: self.nearby_moved + rhs.nearby_moved,
+            split_blocks_flushed: self.split_blocks_flushed + rhs.split_blocks_flushed,
+            split_blocks_modified: self.split_blocks_modified + rhs.split_blocks_modified,
+            to_reassign_blocks_flushed: self.to_reassign_blocks_flushed
+                + rhs.to_reassign_blocks_flushed,
+            to_reassign_blocks_modified: self.to_reassign_blocks_modified
+                + rhs.to_reassign_blocks_modified,
+            nearby_blocks_flushed: self.nearby_blocks_flushed + rhs.nearby_blocks_flushed,
+            nearby_blocks_modified: self.nearby_blocks_modified + rhs.nearby_blocks_modified,
         }
     }
 }
@@ -95,6 +115,10 @@ pub struct RebalanceStats {
     pub merge_stats: MergeStats,
     pub split: usize,
     pub split_stats: SplitStats,
+    /// Total number of posting blocks written to storage (set + modify).
+    pub blocks_flushed: usize,
+    /// Number of those blocks written using WiredTiger modify().
+    pub blocks_modified: usize,
 }
 
 impl Add for RebalanceStats {
@@ -106,6 +130,8 @@ impl Add for RebalanceStats {
             merge_stats: self.merge_stats + rhs.merge_stats,
             split: self.split + rhs.split,
             split_stats: self.split_stats + rhs.split_stats,
+            blocks_flushed: self.blocks_flushed + rhs.blocks_flushed,
+            blocks_modified: self.blocks_modified + rhs.blocks_modified,
         }
     }
 }
@@ -125,6 +151,8 @@ impl Add<MergeStats> for RebalanceStats {
             merge_stats: self.merge_stats + rhs,
             split: self.split,
             split_stats: self.split_stats,
+            blocks_flushed: self.blocks_flushed,
+            blocks_modified: self.blocks_modified,
         }
     }
 }
@@ -144,6 +172,8 @@ impl Add<SplitStats> for RebalanceStats {
             merge_stats: self.merge_stats,
             split: self.split + 1,
             split_stats: self.split_stats + rhs,
+            blocks_flushed: self.blocks_flushed,
+            blocks_modified: self.blocks_modified,
         }
     }
 }
@@ -388,6 +418,7 @@ pub fn split_centroid(
         }
     }
 
+    let (split_blocks_flushed, split_blocks_modified) = postings.flush()?;
     let mut nearby_seen = 0;
     let mut nearby_moved = 0;
     // For a list of nearby centroids, examine all vectors and reassign them if they are closer
@@ -470,7 +501,7 @@ pub fn split_centroid(
         }
     }
 
-    postings.flush()?;
+    let (nearby_blocks_flushed, nearby_blocks_modified) = postings.flush()?;
     assignment_updater.flush()?;
     txn_idx
         .transaction()
@@ -483,6 +514,12 @@ pub fn split_centroid(
         unique_centroids: unique_centroids.len(),
         nearby_seen,
         nearby_moved,
+        split_blocks_flushed,
+        split_blocks_modified,
+        to_reassign_blocks_flushed: 0,
+        to_reassign_blocks_modified: 0,
+        nearby_blocks_flushed,
+        nearby_blocks_modified,
     })
 }
 
@@ -575,45 +612,51 @@ pub fn split_centroid_bottom_half(
     let mut searcher = GraphSearcher::new(index.config().head_search_params);
     let posting_coder = index.new_posting_coder();
     for record_id in split_target.to_reassign {
-        split_stats.searches += retry_on_rollback(connection, index, |txn_idx| {
-            let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
+        let (searches, flushed, modified) =
+            retry_on_rollback(connection, index, |txn_idx| {
+                let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
 
-            // If the target posting can't be found, then skip it.
-            // There's a broader case where the centroid has been split again and in this case we
-            // could skip the rest of the function.
-            let posting = match postings.get(split_target.centroid_id, record_id) {
-                Err(e) if e == Error::not_found_error() => return Ok(0usize),
-                result => result,
-            }?;
-            let query = posting_coder.decode(&posting);
-            let mut candidates = searcher.search(&query, txn_idx.head())?;
-            candidates.truncate(txn_idx.index().config().replica_count * 4);
-            let new_assignments = select_centroids(
-                txn_idx.index().config().replica_selection,
-                txn_idx.index().config().replica_count,
-                candidates,
-                &query,
-                txn_idx.head(),
-            )?;
+                // If the target posting can't be found, then skip it.
+                // There's a broader case where the centroid has been split again and in this case we
+                // could skip the rest of the function.
+                let posting = match postings.get(split_target.centroid_id, record_id) {
+                    Err(e) if e == Error::not_found_error() => {
+                        return Ok((0usize, 0usize, 0usize));
+                    }
+                    result => result,
+                }?;
+                let query = posting_coder.decode(&posting);
+                let mut candidates = searcher.search(&query, txn_idx.head())?;
+                candidates.truncate(txn_idx.index().config().replica_count * 4);
+                let new_assignments = select_centroids(
+                    txn_idx.index().config().replica_selection,
+                    txn_idx.index().config().replica_count,
+                    candidates,
+                    &query,
+                    txn_idx.head(),
+                )?;
 
-            let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
-            let old_assignments =
-                assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
-            move_postings(
-                record_id,
-                &posting,
-                &old_assignments,
-                &new_assignments,
-                &mut postings,
-            )?;
+                let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
+                let old_assignments =
+                    assignment_updater.update(record_id, new_assignments.to_formatted_ref())?;
+                move_postings(
+                    record_id,
+                    &posting,
+                    &old_assignments,
+                    &new_assignments,
+                    &mut postings,
+                )?;
 
-            postings.flush()?;
-            drop(postings);
-            assignment_updater.flush()?;
-            drop(assignment_updater);
+                let (flushed, modified) = postings.flush()?;
+                drop(postings);
+                assignment_updater.flush()?;
+                drop(assignment_updater);
 
-            txn_idx.commit(None).map(|()| 1usize)
-        })?;
+                txn_idx.commit(None).map(|()| (1usize, flushed, modified))
+            })?;
+        split_stats.searches += searches;
+        split_stats.to_reassign_blocks_flushed += flushed;
+        split_stats.to_reassign_blocks_modified += modified;
     }
 
     let nearby_clusters: Vec<u32> = {
@@ -749,7 +792,9 @@ mod split {
             )?;
         }
 
-        postings.flush()?;
+        let (split_blocks_flushed, split_blocks_modified) = postings.flush()?;
+        centroid_split.stats.split_blocks_flushed += split_blocks_flushed;
+        centroid_split.stats.split_blocks_modified += split_blocks_modified;
         assignment_updater.flush()?;
         txn_idx
             .transaction()
@@ -860,7 +905,9 @@ mod split {
             )?;
         }
 
-        postings.flush()?;
+        let (nearby_blocks_flushed, nearby_blocks_modified) = postings.flush()?;
+        stats.nearby_blocks_flushed += nearby_blocks_flushed;
+        stats.nearby_blocks_modified += nearby_blocks_modified;
         assignment_updater.flush()?;
 
         Ok(stats)

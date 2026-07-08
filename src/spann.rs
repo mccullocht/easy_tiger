@@ -13,7 +13,10 @@ use std::{io, num::NonZero, ops::RangeInclusive, sync::Arc};
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
-use vectors::{F32VectorCoder, F32VectorCoding, soar::SoarQueryVectorDistance};
+use vectors::{
+    EuclideanDistance, F32VectorCoder, F32VectorCoding, F32VectorDistance,
+    soar::SoarQueryVectorDistance,
+};
 use wt_mdb::{
     Connection, Error, Result, Transaction,
     connection::{CreateOptionsBuilder, DropOptions},
@@ -476,6 +479,10 @@ fn select_centroids_rng(
     ))
 }
 
+/// Ratio of distance from a vector to secondary and primary centroid.
+/// If the distance ratio is <= TAU then keep the secondary, else discard.
+const TAU: f64 = 1.05;
+
 fn select_centroids_soar(
     replica_count: usize,
     candidates: Vec<Neighbor>,
@@ -491,33 +498,33 @@ fn select_centroids_soar(
             .get(candidates[0].vertex())
             .unwrap_or(Err(Error::not_found_error()))?,
     );
-    let soar_dist = if let Some(dist) = SoarQueryVectorDistance::new(vector, &primary) {
-        dist
-    } else {
-        return Ok(CentroidAssignment::new(candidates[0].vertex() as u32, &[]));
-    };
-    let mut secondary_centroid_ids = Vec::with_capacity(candidates.len() - 1);
-    let mut candidate_vector = vec![0.0f32; primary.len()];
-    for candidate in candidates.iter().skip(1) {
-        coder.decode_to(
-            vectors
-                .get(candidate.vertex())
-                .unwrap_or(Err(Error::not_found_error()))?,
-            &mut candidate_vector,
-        );
-        secondary_centroid_ids.push(Neighbor::new(
-            candidate.vertex(),
-            soar_dist.distance(&candidate_vector),
-        ));
-    }
+    let soar_dist = SoarQueryVectorDistance::new(vector, &primary);
+    let dist_fn = EuclideanDistance::get();
 
-    secondary_centroid_ids.sort_unstable();
+    let mut candidate_vector = vec![0.0f32; primary.len()];
+    let mut secondaries = candidates[1..]
+        .iter()
+        .map(|n| {
+            let v = vectors
+                .get(n.vertex())
+                .unwrap_or(Err(Error::not_found_error()))?;
+            coder.decode_to(v, &mut candidate_vector);
+            Ok((
+                Neighbor::new(n.vertex(), soar_dist.loss(&candidate_vector)),
+                dist_fn.distance_f32(vector, &candidate_vector),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    secondaries.sort_unstable_by_key(|x| x.0);
+    secondaries.truncate(replica_count - 1);
+
+    let primary_dist = dist_fn.distance_f32(vector, &primary);
     Ok(CentroidAssignment::new(
         candidates[0].vertex() as u32,
-        &secondary_centroid_ids
-            .iter()
-            .take(replica_count - 1)
-            .map(|n| n.vertex() as u32)
+        &secondaries
+            .into_iter()
+            .filter(|(_, d)| *d / primary_dist < TAU)
+            .map(|x| x.0.vertex() as u32)
             .collect::<Vec<_>>(),
     ))
 }

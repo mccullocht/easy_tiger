@@ -758,6 +758,15 @@ mod split {
         Ok(stats)
     }
 
+    // XXX a single struct to wrap our various manipulators
+    // * posting rewrites
+    // * assignment updates
+    // * centroid stats, accessible through updater?
+    // * centroid distance
+    // * maybe remove move_postings entirely?
+    // These atomized handles would accept a txn_idx and derived data structure, or maybe just the
+    // wrapper we provided?
+
     struct PostingDistanceFactory<'a> {
         store: CursorVectorStore<'a>,
         posting_format: F32VectorCoding,

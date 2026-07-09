@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use vectors::F32VectorCoder;
 use wt_mdb::{Connection, Result};
 
-use crate::ui::progress_bar;
+use crate::{ui::progress_bar, wt_stats::WiredTigerWriteStats};
 
 #[derive(Args)]
 pub struct InsertVectorsArgs {
@@ -88,6 +88,8 @@ pub fn insert_vectors(
     let batch_size = args.batch_size.get();
     let main_progress = progress_bar(args.count.get(), "inserting vectors");
 
+    let wt_stats_before = WiredTigerWriteStats::try_from(&connection)?;
+
     let mut rebalance_stats = RebalanceStats::default();
     let mut batches: usize = 0;
     let mut total_batch_unique_centroids: usize = 0;
@@ -110,7 +112,6 @@ pub fn insert_vectors(
     }
 
     main_progress.finish();
-
     println!("Batches:        {:10}", batches);
     if batches > 0 {
         println!(
@@ -153,6 +154,30 @@ pub fn insert_vectors(
             rebalance_stats.split_stats.nearby_moved
         );
     }
+
+    let wt_stats = WiredTigerWriteStats::try_from(&connection)? - wt_stats_before;
+    println!("WT log:         {:10} MB", wt_stats.log_bytes / (1 << 20));
+    println!("WT data:        {:10} MB", wt_stats.data_bytes / (1 << 20));
+    println!(
+        "WT insert:      {:10} MB",
+        wt_stats.insert_bytes / (1 << 20)
+    );
+    println!(
+        "WT update:      {:10} MB",
+        wt_stats.update_bytes / (1 << 20)
+    );
+    println!(
+        "WT remove:      {:10} MB",
+        wt_stats.remove_bytes / (1 << 20)
+    );
+    println!(
+        "WT modify in:   {:10} MB",
+        wt_stats.modify_bytes / (1 << 20)
+    );
+    println!(
+        "WT modify out:  {:10} MB",
+        wt_stats.modify_bytes_touch / (1 << 20)
+    );
 
     Ok(())
 }

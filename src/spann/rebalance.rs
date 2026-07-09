@@ -659,7 +659,14 @@ mod split {
         txn_idx
             .transaction()
             .open_cursor::<u32, CentroidCounts>(txn_idx.index().centroid_stats_table_name())?
-            .remove(centroid_id)?;
+            .remove(centroid_id)
+            .or_else(|e| {
+                if e == Error::not_found_error() {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
 
         Ok(centroid_split)
     }

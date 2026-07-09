@@ -1,33 +1,28 @@
-use std::{
-    collections::HashSet,
-    num::NonZero,
-    ops::RangeInclusive,
-    sync::Arc,
-};
+use std::{collections::HashSet, num::NonZero, ops::RangeInclusive, sync::Arc};
 
 use rand::Rng;
 use tracing::warn;
-use wt_mdb::{Error, Result};
+use wt_mdb::{Connection, Error, Result, WiredTigerError};
 
 use crate::{
     input::VecVectorStore,
     kmeans,
     spann::{
+        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
         postings::BlockPostingsMut,
-        CentroidAssignment, TransactionIndex,
     },
     vamana::{
+        GraphVectorIndex, GraphVectorStore,
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
-        GraphVectorIndex, GraphVectorStore,
     },
 };
 
 use std::ops::{Add, AddAssign};
 
 /// Statistics collected during a centroid merge operation.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MergeStats {
     /// Number of vectors that were in the merged centroid.
     pub moved_vectors: usize,
@@ -53,7 +48,7 @@ impl AddAssign for MergeStats {
 }
 
 /// Statistics collected during a centroid split operation.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SplitStats {
     /// Number of vectors in the centroid being split.
     pub moved_vectors: usize,
@@ -88,7 +83,7 @@ impl AddAssign for SplitStats {
 }
 
 /// Statistics collected during a rebalance operation.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RebalanceStats {
     pub merged: usize,
     pub merge_stats: MergeStats,
@@ -202,8 +197,7 @@ pub fn merge_centroid(
             txn_idx.head(),
         )?;
         let new_assignments = CentroidAssignment::new(candidates[0].vertex() as u32);
-        let old_assignments =
-            assignment_updater.update(record_id, new_assignments)?;
+        let old_assignments = assignment_updater.update(record_id, new_assignments)?;
         move_postings(
             record_id,
             &vector,
@@ -269,7 +263,10 @@ pub fn split_centroid(
     ) {
         Ok(r) => r,
         Err(r) => {
-            warn!("split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!", vectors.len());
+            warn!(
+                "split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!",
+                vectors.len()
+            );
             r
         }
     };
@@ -341,8 +338,7 @@ pub fn split_centroid(
             CentroidAssignment::new(updated_centroid_id as u32)
         };
 
-        let old_assignments =
-            assignment_updater.update(record_id, new_assignments)?;
+        let old_assignments = assignment_updater.update(record_id, new_assignments)?;
         move_postings(
             record_id,
             &vector,
@@ -390,8 +386,7 @@ pub fn split_centroid(
             };
 
             let new_assignments = CentroidAssignment::new(assigned_centroid_id);
-            let old_assignments =
-                assignment_updater.update(record_id, new_assignments)?;
+            let old_assignments = assignment_updater.update(record_id, new_assignments)?;
             nearby_moved += move_postings(
                 record_id,
                 &vector,
@@ -416,6 +411,410 @@ pub fn split_centroid(
         nearby_seen,
         nearby_moved,
     })
+}
+
+/// Target centroid produced by split of a centroid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CentroidSplitTarget {
+    /// The centroid_id the split was written to.
+    pub centroid_id: u32,
+    /// Vectors within the block that should be reassigned by search. This means that the vector
+    /// is closer to the previous centroid than it is to this target centroid.
+    pub to_reassign: Vec<i64>,
+}
+
+impl CentroidSplitTarget {
+    fn new(centroid_id: u32) -> Self {
+        Self {
+            centroid_id,
+            to_reassign: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CentroidSplit {
+    /// Stats generated for the split.
+    pub stats: SplitStats,
+    /// The two output split targets. This contains additional information for bottom half use.
+    pub targets: [CentroidSplitTarget; 2],
+}
+
+impl CentroidSplit {
+    fn new(len: usize, targets: [u32; 2]) -> Self {
+        Self {
+            stats: SplitStats {
+                moved_vectors: len,
+                ..Default::default()
+            },
+            targets: [
+                CentroidSplitTarget::new(targets[0]),
+                CentroidSplitTarget::new(targets[1]),
+            ],
+        }
+    }
+}
+
+/// Run the top half of the centroid split operation.
+///
+/// The top half clusters the contents of the centroid and produces two new centroids. Every
+/// vector assigned to the centroid is reassigned to one of the new centroids and the head index
+/// is updated.
+///
+/// This method will only mutate the head index and the centroid to split as well as assignments
+/// for all vectors in the centroid. This mutation is not sufficient to ensure that vectors are
+/// assigned to their closest centroid; callers should invoke the bottom half to finish rebalancing.
+///
+/// Returns NOT_FOUND if `centroid_id` cannot be found in `index` -- this may mean that another
+/// thread has split this centroid already.
+pub fn split_centroid_top_half(
+    connection: &Arc<Connection>,
+    index: &Arc<TableIndex>,
+    centroid_id: u32,
+    rng: &mut impl Rng,
+) -> Result<CentroidSplit> {
+    // XXX should TableIndex contain a centroid_id allocator? If it doesn't we will frequently hit
+    // conflicts when two splits happen concurrently.
+    // XXX an alt is to lock when performing the top half. might be necessary any way since it's
+    // hard to atomize head updates.
+    retry_on_rollback(connection, index, |txn_idx| {
+        let centroid_split = split::top_half(&txn_idx, centroid_id, rng)?;
+        txn_idx.commit(None).map(|_| centroid_split)
+    })
+}
+
+/// Run the bottom half of the centroid split operation.
+///
+/// This should be invoked once for each centroid produced by the split. It will reassign any
+/// vectors in the centroid that may have a closer centroid in the broader pool and also check if
+/// any vectors from nearby centroids ought to be reassigned. This may be broken into many smaller
+/// transactions to minimize the likelihood of conflicts.
+///
+/// Returns NOT_FOUND if `split_target.centroid_id` cannot be found in `index` -- this may mean that
+/// another thread has elected to merge or split this centroid.
+pub fn split_centroid_bottom_half(
+    connection: &Arc<Connection>,
+    index: &Arc<TableIndex>,
+    split_target: CentroidSplitTarget,
+) -> Result<SplitStats> {
+    let mut split_stats = SplitStats::default();
+
+    let mut searcher = GraphSearcher::new(index.config().head_search_params);
+    let posting_coder = index.new_posting_coder();
+    for record_id in split_target.to_reassign {
+        split_stats.searches += retry_on_rollback(connection, index, |txn_idx| {
+            let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
+
+            // If the target posting can't be found, then skip it.
+            // There's a broader case where the centroid has been split again and in this case we
+            // could skip the rest of the function.
+            let posting = match postings.get(split_target.centroid_id, record_id) {
+                Err(e) if e == Error::not_found_error() => return Ok(0usize),
+                result => result,
+            }?;
+            let query = posting_coder.decode(&posting);
+            let candidates = searcher.search(&query, txn_idx.head())?;
+            let new_assignments = CentroidAssignment::new(candidates[0].vertex() as u32);
+
+            let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
+            let old_assignments = assignment_updater.update(record_id, new_assignments)?;
+            move_postings(
+                record_id,
+                &posting,
+                old_assignments,
+                new_assignments,
+                &mut postings,
+            )?;
+
+            postings.flush()?;
+            drop(postings);
+            assignment_updater.flush()?;
+            drop(assignment_updater);
+
+            txn_idx.commit(None).map(|()| 1usize)
+        })?;
+    }
+
+    let nearby_clusters: Vec<u32> = {
+        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+        let mut store = txn_idx.head().high_fidelity_vectors()?;
+        let query = store.new_coder().decode(
+            store
+                .get(split_target.centroid_id as i64)
+                .unwrap_or(Err(Error::not_found_error()))?,
+        );
+        let mut searcher = GraphSearcher::new(txn_idx.index().config().head_search_params);
+        let mut candidates = searcher.search_with_filter(
+            &query,
+            |i| i != split_target.centroid_id as i64,
+            txn_idx.head(),
+        )?;
+        candidates.truncate(64);
+        candidates.into_iter().map(|n| n.vertex() as u32).collect()
+    };
+
+    for nearby_centroid_id in nearby_clusters {
+        split_stats += retry_on_rollback(connection, index, |txn_idx| {
+            split::bottom_half_nearby_reassign(
+                &txn_idx,
+                split_target.centroid_id,
+                nearby_centroid_id,
+            )
+            .and_then(|s| txn_idx.commit(None).map(|()| s))
+        })?
+    }
+
+    Ok(split_stats)
+}
+
+mod split {
+    use rand::Rng;
+    use tracing::warn;
+    use vectors::{F32VectorCoder, F32VectorCoding, QueryVectorDistance};
+    use wt_mdb::{Error, Result};
+
+    use crate::input::VecVectorStore;
+    use crate::spann::{
+        CentroidAssignment, TransactionIndex,
+        centroid_stats::{CentroidAssignmentUpdater, CentroidCounts},
+        postings::BlockPostingsMut,
+    };
+    use crate::vamana::wt::CursorVectorStore;
+    use crate::vamana::{
+        GraphVectorIndex, GraphVectorStore,
+        mutate::{delete_vector, upsert_vector},
+    };
+
+    use super::{CentroidSplit, SplitStats, move_postings};
+
+    pub fn top_half(
+        txn_idx: &TransactionIndex,
+        centroid_id: u32,
+        rng: &mut impl Rng,
+    ) -> Result<CentroidSplit> {
+        let mut postings = BlockPostingsMut::new(
+            txn_idx
+                .transaction()
+                .open_cursor::<u32, Vec<u8>>(txn_idx.index().postings_table_name())?,
+            txn_idx.index().posting_vector_len(),
+        );
+        let vectors = postings.read_centroid(centroid_id)?;
+        if vectors.is_empty() {
+            return Err(Error::WiredTiger(wt_mdb::WiredTigerError::NotFound));
+        }
+
+        let mut distance_factory = PostingDistanceFactory::new(txn_idx)?;
+        let c0_dist_fn = distance_factory.query_distance(centroid_id)?;
+
+        // Remove postings and vector quickly to trigger OCC rollbacks.
+        let target_centroid_ids = postings.next_centroid_id().map(|x| [x, x + 1])?;
+        postings.remove_centroid(centroid_id)?;
+        delete_vector(centroid_id as i64, txn_idx.head())?;
+
+        // Partition the postings for `centroid_id` into two new postings and insert into index.
+        let centroids = partition_postings(
+            txn_idx,
+            centroid_id,
+            vectors.iter().map(|x| x.1.as_slice()),
+            rng,
+        );
+        upsert_vector(target_centroid_ids[0] as i64, &centroids[0], txn_idx.head())?;
+        upsert_vector(target_centroid_ids[1] as i64, &centroids[1], txn_idx.head())?;
+
+        let c1_dist_fn = distance_factory.query_distance(target_centroid_ids[0])?;
+        let c2_dist_fn = distance_factory.query_distance(target_centroid_ids[1])?;
+
+        let mut centroid_split = CentroidSplit::new(vectors.len(), target_centroid_ids);
+        let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
+        for (record_id, vector) in vectors {
+            let c0_dist = c0_dist_fn.distance(&vector);
+            let c1_dist = c1_dist_fn.distance(&vector);
+            let c2_dist = c2_dist_fn.distance(&vector);
+            let split_centroid_id = if c1_dist < c2_dist {
+                if c0_dist < c1_dist {
+                    centroid_split.targets[0].to_reassign.push(record_id)
+                }
+                centroid_split.targets[0].centroid_id
+            } else {
+                if c0_dist < c2_dist {
+                    centroid_split.targets[1].to_reassign.push(record_id)
+                }
+                centroid_split.targets[1].centroid_id
+            };
+
+            let new_assignments = CentroidAssignment::new(split_centroid_id);
+
+            let old_assignments = assignment_updater.update(record_id, new_assignments)?;
+            move_postings(
+                record_id,
+                &vector,
+                old_assignments,
+                new_assignments,
+                &mut postings,
+            )?;
+        }
+
+        postings.flush()?;
+        assignment_updater.flush()?;
+        txn_idx
+            .transaction()
+            .open_cursor::<u32, CentroidCounts>(txn_idx.index().centroid_stats_table_name())?
+            .remove(centroid_id)
+            .or_else(|e| {
+                if e == Error::not_found_error() {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
+
+        Ok(centroid_split)
+    }
+
+    fn partition_postings<'a>(
+        txn_idx: &TransactionIndex,
+        centroid_id: u32,
+        vectors: impl ExactSizeIterator<Item = &'a [u8]>,
+        rng: &mut impl Rng,
+    ) -> VecVectorStore<f32> {
+        let len = vectors.len();
+        let posting_coder = txn_idx
+            .index()
+            .config()
+            .posting_coder
+            .coder(txn_idx.index().head_config().config().similarity, None);
+        let mut scratch_vector =
+            vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
+        let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), len);
+        for v in vectors {
+            posting_coder.decode_to(v, &mut scratch_vector);
+            clustering_vectors.push(&scratch_vector);
+        }
+
+        match crate::kmeans::balanced_binary_partition(
+            &clustering_vectors,
+            100,
+            txn_idx.index().config().min_centroid_len,
+            rng,
+        ) {
+            Ok(r) => r,
+            Err(r) => {
+                warn!(
+                    "split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!",
+                    len
+                );
+                r
+            }
+        }
+    }
+
+    pub fn bottom_half_nearby_reassign(
+        txn_idx: &TransactionIndex,
+        target_centroid_id: u32,
+        nearby_centroid_id: u32,
+    ) -> Result<SplitStats> {
+        let mut stats = SplitStats::default();
+        let mut postings = BlockPostingsMut::from_txn(txn_idx)?;
+        if postings.centroid_len(nearby_centroid_id)? == 0
+            || postings.centroid_len(target_centroid_id)? == 0
+        {
+            return Ok(stats);
+        }
+
+        let mut distance_factory = PostingDistanceFactory::new(txn_idx)?;
+
+        let c0_dist_fn = match distance_factory.query_distance(nearby_centroid_id) {
+            Err(e) if e == Error::not_found_error() => return Ok(stats),
+            result => result,
+        }?;
+        let c1_dist_fn = match distance_factory.query_distance(target_centroid_id) {
+            Err(e) if e == Error::not_found_error() => return Ok(stats),
+            result => result,
+        }?;
+
+        let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
+        for (record_id, vector) in postings.read_centroid(nearby_centroid_id)? {
+            stats.nearby_seen += 1;
+
+            if c0_dist_fn.distance(&vector) <= c1_dist_fn.distance(&vector) {
+                continue; // closer to nearby than target.
+            }
+
+            let new_assignments = CentroidAssignment::new(target_centroid_id);
+
+            let old_assignments = assignment_updater.update(record_id, new_assignments)?;
+            stats.nearby_moved += move_postings(
+                record_id,
+                &vector,
+                old_assignments,
+                new_assignments,
+                &mut postings,
+            )?;
+        }
+
+        postings.flush()?;
+        assignment_updater.flush()?;
+
+        Ok(stats)
+    }
+
+    struct PostingDistanceFactory<'a> {
+        store: CursorVectorStore<'a>,
+        posting_format: F32VectorCoding,
+        head_coder: Option<Box<dyn F32VectorCoder>>,
+    }
+
+    impl<'a> PostingDistanceFactory<'a> {
+        fn new(index: &'a TransactionIndex) -> Result<Self> {
+            let store = index.head().high_fidelity_vectors()?;
+            let posting_format = index.index().config().posting_coder;
+            let head_format = store.format();
+            let head_coder = if posting_format == head_format {
+                None
+            } else {
+                Some(head_format.coder(store.similarity(), None))
+            };
+            Ok(Self {
+                store,
+                posting_format,
+                head_coder,
+            })
+        }
+
+        fn query_distance(&mut self, centroid_id: u32) -> Result<Box<dyn QueryVectorDistance>> {
+            let similarity = self.store.similarity();
+            let query = self
+                .store
+                .get(centroid_id as i64)
+                .unwrap_or(Err(Error::not_found_error()))?;
+            if let Some(head_coder) = self.head_coder.as_ref() {
+                let query = head_coder.decode(query);
+                Ok(self
+                    .posting_format
+                    .query_distance_asymmetric(similarity, query, None))
+            } else {
+                Ok(self
+                    .posting_format
+                    .query_distance_symmetric(similarity, query.to_vec(), None))
+            }
+        }
+    }
+}
+
+fn retry_on_rollback<R>(
+    connection: &Arc<Connection>,
+    index: &Arc<TableIndex>,
+    mut op: impl FnMut(TransactionIndex) -> Result<R>,
+) -> Result<R> {
+    loop {
+        match op(TransactionIndex::new(
+            index,
+            connection.begin_transaction(None)?,
+        )) {
+            Err(Error::WiredTiger(WiredTigerError::Rollback)) => continue,
+            result => break result,
+        }
+    }
 }
 
 fn move_postings(

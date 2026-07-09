@@ -414,7 +414,7 @@ pub fn split_centroid(
 }
 
 /// Target centroid produced by split of a centroid.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct CentroidSplitTarget {
     /// The centroid_id the split was written to.
     pub centroid_id: u32,

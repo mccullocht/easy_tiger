@@ -7,7 +7,7 @@ use easy_tiger::{
         CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
         postings::BlockPostingsMut,
-        rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
+        rebalance::{BalanceSummary, RebalanceStats, merge_centroid},
     },
     vamana::search::GraphSearcher,
 };
@@ -30,13 +30,19 @@ pub struct InsertVectorsArgs {
     #[arg(long, default_value_t = 0)]
     start: usize,
 
-    /// Number of vectors to insert.
+    /// Number of vectors to insert. If unset, insert all of the input vectors.
     #[arg(short, long)]
-    count: NonZero<usize>,
+    count: Option<NonZero<usize>>,
 
     /// Number of vectors to insert in each transaction batch.
     #[arg(long, default_value_t = NonZero::new(256).unwrap())]
     batch_size: NonZero<usize>,
+
+    /// If true, skip the "bottom half" of centroid split -- move some vectors out and perform
+    /// reassignment on nearby centroids. This produces a higher quality index but is more
+    /// expensive.
+    #[arg(long, default_value_t = false)]
+    split_no_bottom_half: bool,
 
     /// Random seed used for clustering computations.
     /// Use a fixed value for repeatability.
@@ -62,7 +68,7 @@ pub fn insert_vectors(
     // For now, let's stick with simple iteration.
     f32_vectors.data().advise(memmap2::Advice::Sequential)?;
 
-    let end = args.start + args.count.get();
+    let end = args.start + args.count.map(|c| c.get()).unwrap_or(f32_vectors.len());
     if end > f32_vectors.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -86,7 +92,7 @@ pub fn insert_vectors(
         .map(|f| f.coder(similarity, None));
 
     let batch_size = args.batch_size.get();
-    let main_progress = progress_bar(args.count.get(), "inserting vectors");
+    let main_progress = progress_bar(end - args.start, "inserting vectors");
 
     let wt_stats_before = WiredTigerWriteStats::try_from(&connection)?;
 
@@ -108,9 +114,16 @@ pub fn insert_vectors(
         )?;
         batches += 1;
 
-        rebalance_stats += rebalance(&index, &connection, &mut rng, &main_progress)?;
+        rebalance_stats += rebalance(
+            &index,
+            &connection,
+            !args.split_no_bottom_half,
+            &mut rng,
+            &main_progress,
+        )?;
     }
 
+    main_progress.set_message("inserting vectors");
     main_progress.finish();
     println!("Batches:        {:10}", batches);
     if batches > 0 {
@@ -269,6 +282,7 @@ fn insert_batch(
 fn rebalance(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
+    split_bottom_half: bool,
     rng: &mut impl Rng,
     progress: &ProgressBar,
 ) -> Result<RebalanceStats> {
@@ -285,21 +299,35 @@ fn rebalance(
             (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
                 progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
                 rebalance_stats += merge_centroid(&txn_idx, to_merge, len)?;
+                txn_idx.commit(None)?;
             }
             (_, Some((to_split, len))) => {
                 progress.set_message(format!("split {to_split} of {len} ({iter})"));
-                // TODO: split_centroid should allow splitting into multiple centroids.
-                // This requires allocating an arbitrary number of ids and accommodating these
-                // additional ids in the split of the centroid and updating of nearby centroids.
-                let mut it = stats.available_centroid_ids();
-                let target_centroid_ids = (it.next().unwrap(), it.next().unwrap());
-                rebalance_stats +=
-                    split_centroid(&txn_idx, to_split, target_centroid_ids, len, rng)?;
+                drop(txn_idx);
+
+                let mut centroid_split = easy_tiger::spann::rebalance::split_centroid_top_half(
+                    connection,
+                    index,
+                    to_split as u32,
+                    rng,
+                )?;
+                rebalance_stats += centroid_split.stats;
+                if split_bottom_half {
+                    rebalance_stats += easy_tiger::spann::rebalance::split_centroid_bottom_half(
+                        connection,
+                        index,
+                        std::mem::take(&mut centroid_split.targets[0]),
+                    )?;
+                    rebalance_stats += easy_tiger::spann::rebalance::split_centroid_bottom_half(
+                        connection,
+                        index,
+                        std::mem::take(&mut centroid_split.targets[1]),
+                    )?;
+                }
             }
             _ => break,
         }
 
-        txn_idx.commit(None)?;
         iter += 1;
     }
 

@@ -474,7 +474,22 @@ pub fn split_centroid_top_half(
     rng: &mut impl Rng,
 ) -> Result<CentroidSplit> {
     retry_on_rollback(connection, index, |txn_idx| {
-        let centroid_split = split::top_half(&txn_idx, centroid_id, rng)?;
+        let centroid_split = {
+            let mut updater = split::PostingUpdater::new(&txn_idx)?;
+            let centroid_split = split::top_half(&mut updater, centroid_id, rng)?;
+            updater.flush().map(|()| centroid_split)?
+        };
+        txn_idx
+            .transaction()
+            .open_cursor::<u32, CentroidCounts>(txn_idx.index().centroid_stats_table_name())?
+            .remove(centroid_id)
+            .or_else(|e| {
+                if e == Error::not_found_error() {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
         txn_idx.commit(None).map(|_| centroid_split)
     })
 }
@@ -543,9 +558,8 @@ mod split {
 
     use crate::input::VecVectorStore;
     use crate::spann::{
-        centroid_stats::{CentroidAssignmentUpdater, CentroidCounts},
-        postings::BlockPostingsMut,
-        CentroidAssignment, TransactionIndex,
+        centroid_stats::CentroidAssignmentUpdater, postings::BlockPostingsMut, CentroidAssignment,
+        TransactionIndex,
     };
     use crate::vamana::wt::CursorVectorStore;
     use crate::vamana::{
@@ -554,47 +568,47 @@ mod split {
         GraphVectorIndex, GraphVectorStore,
     };
 
-    use super::{move_postings, CentroidSplit, SplitStats};
+    use super::{CentroidSplit, SplitStats};
 
     pub fn top_half(
-        txn_idx: &TransactionIndex,
+        updater: &mut PostingUpdater<'_>,
         centroid_id: u32,
         rng: &mut impl Rng,
     ) -> Result<CentroidSplit> {
-        let mut postings = BlockPostingsMut::new(
-            txn_idx
-                .transaction()
-                .open_cursor::<u32, Vec<u8>>(txn_idx.index().postings_table_name())?,
-            txn_idx.index().posting_vector_len(),
-        );
-        let vectors = postings.read_centroid(centroid_id)?;
+        let vectors = updater.read_centroid(centroid_id)?;
         if vectors.is_empty() {
-            return Err(Error::WiredTiger(wt_mdb::WiredTigerError::NotFound));
+            return Err(Error::not_found_error());
         }
 
-        let mut distance_factory = PostingDistanceFactory::new(txn_idx)?;
-        let c0_dist_fn = distance_factory.query_distance(centroid_id)?;
+        let c0_dist_fn = updater.distance_to_centroid(centroid_id)?;
 
         // Remove postings and vector quickly to trigger OCC rollbacks.
-        let target_centroid_ids = postings.next_centroid_id().map(|x| [x, x + 1])?;
-        postings.remove_centroid(centroid_id)?;
-        delete_vector(centroid_id as i64, txn_idx.head())?;
+        let target_centroid_ids = updater.postings.next_centroid_id().map(|x| [x, x + 1])?;
+        updater.postings.remove_centroid(centroid_id)?;
+        delete_vector(centroid_id as i64, updater.txn_idx.head())?;
 
         // Partition the postings for `centroid_id` into two new postings and insert into index.
         let centroids = partition_postings(
-            txn_idx,
+            updater.txn_idx,
             centroid_id,
             vectors.iter().map(|x| x.1.as_slice()),
             rng,
         );
-        upsert_vector(target_centroid_ids[0] as i64, &centroids[0], txn_idx.head())?;
-        upsert_vector(target_centroid_ids[1] as i64, &centroids[1], txn_idx.head())?;
+        upsert_vector(
+            target_centroid_ids[0] as i64,
+            &centroids[0],
+            updater.txn_idx.head(),
+        )?;
+        upsert_vector(
+            target_centroid_ids[1] as i64,
+            &centroids[1],
+            updater.txn_idx.head(),
+        )?;
 
-        let c1_dist_fn = distance_factory.query_distance(target_centroid_ids[0])?;
-        let c2_dist_fn = distance_factory.query_distance(target_centroid_ids[1])?;
+        let c1_dist_fn = updater.distance_to_centroid(target_centroid_ids[0])?;
+        let c2_dist_fn = updater.distance_to_centroid(target_centroid_ids[1])?;
 
         let mut centroid_split = CentroidSplit::new(vectors.len(), target_centroid_ids);
-        let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
         for (record_id, vector) in vectors {
             let c0_dist = c0_dist_fn.distance(&vector);
             let c1_dist = c1_dist_fn.distance(&vector);
@@ -611,31 +625,8 @@ mod split {
                 centroid_split.targets[1].centroid_id
             };
 
-            let new_assignments = CentroidAssignment::new(split_centroid_id);
-
-            let old_assignments = assignment_updater.update(record_id, new_assignments)?;
-            move_postings(
-                record_id,
-                &vector,
-                old_assignments,
-                new_assignments,
-                &mut postings,
-            )?;
+            updater.move_posting(record_id, &vector, centroid_id, split_centroid_id)?
         }
-
-        postings.flush()?;
-        assignment_updater.flush()?;
-        txn_idx
-            .transaction()
-            .open_cursor::<u32, CentroidCounts>(txn_idx.index().centroid_stats_table_name())?
-            .remove(centroid_id)
-            .or_else(|e| {
-                if e == Error::not_found_error() {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })?;
 
         Ok(centroid_split)
     }
@@ -824,48 +815,6 @@ mod split {
             self.postings
                 .flush()
                 .and_then(|()| self.assignments.flush())
-        }
-    }
-
-    struct PostingDistanceFactory<'a> {
-        store: CursorVectorStore<'a>,
-        posting_format: F32VectorCoding,
-        head_coder: Option<Box<dyn F32VectorCoder>>,
-    }
-
-    impl<'a> PostingDistanceFactory<'a> {
-        fn new(index: &'a TransactionIndex) -> Result<Self> {
-            let store = index.head().high_fidelity_vectors()?;
-            let posting_format = index.index().config().posting_coder;
-            let head_format = store.format();
-            let head_coder = if posting_format == head_format {
-                None
-            } else {
-                Some(head_format.coder(store.similarity(), None))
-            };
-            Ok(Self {
-                store,
-                posting_format,
-                head_coder,
-            })
-        }
-
-        fn query_distance(&mut self, centroid_id: u32) -> Result<Box<dyn QueryVectorDistance>> {
-            let similarity = self.store.similarity();
-            let query = self
-                .store
-                .get(centroid_id as i64)
-                .unwrap_or(Err(Error::not_found_error()))?;
-            if let Some(head_coder) = self.head_coder.as_ref() {
-                let query = head_coder.decode(query);
-                Ok(self
-                    .posting_format
-                    .query_distance_asymmetric(similarity, query, None))
-            } else {
-                Ok(self
-                    .posting_format
-                    .query_distance_symmetric(similarity, query.to_vec(), None))
-            }
         }
     }
 }

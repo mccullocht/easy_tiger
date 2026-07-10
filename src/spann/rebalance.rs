@@ -354,6 +354,8 @@ pub fn split_centroid_bottom_half(
 ) -> Result<SplitStats> {
     let mut split_stats = SplitStats::default();
 
+    // XXX track how many of these outputs appear in nearby_clusters. if it's high enough
+    // then symmetrical nearby checks might be enough.
     let mut searcher = GraphSearcher::new(index.config().head_search_params);
     let posting_coder = index.new_posting_coder();
     for record_id in split_target.to_reassign {

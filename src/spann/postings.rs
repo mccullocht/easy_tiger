@@ -16,7 +16,7 @@ use crate::posting_block::{PostingBlock, PostingBlockMut};
 /// vectors assigned to that centroid. Modified blocks are held in memory and written to storage
 /// only when [`flush`] is called.
 pub struct BlockPostingsMut<'a> {
-    // XXX consider RefCell/inner mutability for the cursor since the cursor makes this struct
+    // TODO: consider RefCell/inner mutability for the cursor since the cursor makes this struct
     // Send + !Sync anyway.
     cursor: TypedCursorGuard<'a, u32, Vec<u8>>,
     vector_len: usize,

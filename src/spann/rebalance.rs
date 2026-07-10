@@ -8,14 +8,14 @@ use crate::{
     input::VecVectorStore,
     kmeans,
     spann::{
-        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
         postings::BlockPostingsMut,
+        CentroidAssignment, TableIndex, TransactionIndex,
     },
     vamana::{
-        GraphVectorIndex, GraphVectorStore,
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
+        GraphVectorIndex, GraphVectorStore,
     },
 };
 
@@ -473,10 +473,6 @@ pub fn split_centroid_top_half(
     centroid_id: u32,
     rng: &mut impl Rng,
 ) -> Result<CentroidSplit> {
-    // XXX should TableIndex contain a centroid_id allocator? If it doesn't we will frequently hit
-    // conflicts when two splits happen concurrently.
-    // XXX an alt is to lock when performing the top half. might be necessary any way since it's
-    // hard to atomize head updates.
     retry_on_rollback(connection, index, |txn_idx| {
         let centroid_split = split::top_half(&txn_idx, centroid_id, rng)?;
         txn_idx.commit(None).map(|_| centroid_split)
@@ -537,30 +533,21 @@ pub fn split_centroid_bottom_half(
 
     let nearby_clusters: Vec<u32> = {
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
-        let mut store = txn_idx.head().high_fidelity_vectors()?;
-        let query = store.new_coder().decode(
-            store
-                .get(split_target.centroid_id as i64)
-                .unwrap_or(Err(Error::not_found_error()))?,
-        );
-        let mut searcher = GraphSearcher::new(txn_idx.index().config().head_search_params);
-        let mut candidates = searcher.search_with_filter(
-            &query,
-            |i| i != split_target.centroid_id as i64,
-            txn_idx.head(),
-        )?;
-        candidates.truncate(64);
-        candidates.into_iter().map(|n| n.vertex() as u32).collect()
+        split::bottom_half_find_nearby_centroids(&txn_idx, split_target.centroid_id)?
     };
 
     for nearby_centroid_id in nearby_clusters {
         split_stats += retry_on_rollback(connection, index, |txn_idx| {
-            split::bottom_half_nearby_reassign(
-                &txn_idx,
-                split_target.centroid_id,
-                nearby_centroid_id,
-            )
-            .and_then(|s| txn_idx.commit(None).map(|()| s))
+            let stats = {
+                let mut updater = split::PostingUpdater::new(&txn_idx)?;
+                let stats = split::bottom_half_nearby_reassign_centroid(
+                    &mut updater,
+                    nearby_centroid_id,
+                    split_target.centroid_id,
+                )?;
+                updater.flush().map(|()| stats)?
+            };
+            txn_idx.commit(None).map(|()| stats)
         })?
     }
 
@@ -575,17 +562,18 @@ mod split {
 
     use crate::input::VecVectorStore;
     use crate::spann::{
-        CentroidAssignment, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts},
         postings::BlockPostingsMut,
+        CentroidAssignment, TransactionIndex,
     };
     use crate::vamana::wt::CursorVectorStore;
     use crate::vamana::{
-        GraphVectorIndex, GraphVectorStore,
         mutate::{delete_vector, upsert_vector},
+        search::GraphSearcher,
+        GraphVectorIndex, GraphVectorStore,
     };
 
-    use super::{CentroidSplit, SplitStats, move_postings};
+    use super::{move_postings, CentroidSplit, SplitStats};
 
     pub fn top_half(
         txn_idx: &TransactionIndex,
@@ -708,64 +696,127 @@ mod split {
         }
     }
 
-    pub fn bottom_half_nearby_reassign(
+    pub fn bottom_half_find_nearby_centroids(
         txn_idx: &TransactionIndex,
-        target_centroid_id: u32,
+        centroid_id: u32,
+    ) -> Result<Vec<u32>> {
+        let mut store = txn_idx.head().high_fidelity_vectors()?;
+        let query = store.new_coder().decode(
+            store
+                .get(centroid_id as i64)
+                .unwrap_or(Err(Error::not_found_error()))?,
+        );
+        let mut searcher = GraphSearcher::new(txn_idx.index().config().head_search_params);
+        let mut candidates =
+            searcher.search_with_filter(&query, |i| i != centroid_id as i64, txn_idx.head())?;
+        candidates.truncate(64);
+        Ok(candidates.into_iter().map(|n| n.vertex() as u32).collect())
+    }
+
+    /// Moves vectors from `nearby_centroid_id` to `target_centroid_id` if they are closer to the
+    /// target.
+    pub fn bottom_half_nearby_reassign_centroid(
+        updater: &mut PostingUpdater<'_>,
         nearby_centroid_id: u32,
+        target_centroid_id: u32,
     ) -> Result<SplitStats> {
         let mut stats = SplitStats::default();
-        let mut postings = BlockPostingsMut::from_txn(txn_idx)?;
-        if postings.centroid_len(nearby_centroid_id)? == 0
-            || postings.centroid_len(target_centroid_id)? == 0
+        if updater.centroid_empty(nearby_centroid_id)?
+            || updater.centroid_empty(target_centroid_id)?
         {
             return Ok(stats);
         }
 
-        let mut distance_factory = PostingDistanceFactory::new(txn_idx)?;
-
-        let c0_dist_fn = match distance_factory.query_distance(nearby_centroid_id) {
-            Err(e) if e == Error::not_found_error() => return Ok(stats),
-            result => result,
-        }?;
-        let c1_dist_fn = match distance_factory.query_distance(target_centroid_id) {
-            Err(e) if e == Error::not_found_error() => return Ok(stats),
-            result => result,
-        }?;
-
-        let mut assignment_updater = CentroidAssignmentUpdater::new(txn_idx)?;
-        for (record_id, vector) in postings.read_centroid(nearby_centroid_id)? {
+        let nearby_dist_fn = updater.distance_to_centroid(nearby_centroid_id)?;
+        let target_dist_fn = updater.distance_to_centroid(target_centroid_id)?;
+        for (record_id, vector) in updater.read_centroid(nearby_centroid_id)? {
             stats.nearby_seen += 1;
 
-            if c0_dist_fn.distance(&vector) <= c1_dist_fn.distance(&vector) {
-                continue; // closer to nearby than target.
+            if target_dist_fn.distance(&vector) < nearby_dist_fn.distance(&vector) {
+                updater.move_posting(record_id, &vector, nearby_centroid_id, target_centroid_id)?;
             }
-
-            let new_assignments = CentroidAssignment::new(target_centroid_id);
-
-            let old_assignments = assignment_updater.update(record_id, new_assignments)?;
-            stats.nearby_moved += move_postings(
-                record_id,
-                &vector,
-                old_assignments,
-                new_assignments,
-                &mut postings,
-            )?;
         }
-
-        postings.flush()?;
-        assignment_updater.flush()?;
 
         Ok(stats)
     }
 
-    // XXX a single struct to wrap our various manipulators
-    // * posting rewrites
-    // * assignment updates
-    // * centroid stats, accessible through updater?
-    // * centroid distance
-    // * maybe remove move_postings entirely?
-    // These atomized handles would accept a txn_idx and derived data structure, or maybe just the
-    // wrapper we provided?
+    pub struct PostingUpdater<'a> {
+        postings: BlockPostingsMut<'a>,
+        assignments: CentroidAssignmentUpdater<'a>,
+        centroid_store: CursorVectorStore<'a>,
+        posting_format: F32VectorCoding,
+        head_coder: Option<Box<dyn F32VectorCoder>>,
+    }
+
+    impl<'a> PostingUpdater<'a> {
+        pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
+            let centroid_store = txn_idx.head().high_fidelity_vectors()?;
+            let posting_format = txn_idx.index().config().posting_coder;
+            let head_format = centroid_store.format();
+            let head_coder = if posting_format == head_format {
+                None
+            } else {
+                Some(head_format.coder(centroid_store.similarity(), None))
+            };
+            Ok(Self {
+                postings: BlockPostingsMut::from_txn(txn_idx)?,
+                assignments: CentroidAssignmentUpdater::new(txn_idx)?,
+                centroid_store,
+                posting_format,
+                head_coder,
+            })
+        }
+
+        fn distance_to_centroid(
+            &mut self,
+            centroid_id: u32,
+        ) -> Result<Box<dyn QueryVectorDistance>> {
+            let similarity = self.centroid_store.similarity();
+            let query = self
+                .centroid_store
+                .get(centroid_id as i64)
+                .unwrap_or(Err(Error::not_found_error()))?;
+            if let Some(head_coder) = self.head_coder.as_ref() {
+                let query = head_coder.decode(query);
+                Ok(self
+                    .posting_format
+                    .query_distance_asymmetric(similarity, query, None))
+            } else {
+                Ok(self
+                    .posting_format
+                    .query_distance_symmetric(similarity, query.to_vec(), None))
+            }
+        }
+
+        pub fn centroid_empty(&mut self, centroid_id: u32) -> Result<bool> {
+            self.assignments.centroid_len(centroid_id).map(|c| c == 0)
+        }
+
+        pub fn read_centroid(&mut self, centroid_id: u32) -> Result<Vec<(i64, Vec<u8>)>> {
+            self.postings.read_centroid(centroid_id)
+        }
+
+        pub fn move_posting(
+            &mut self,
+            record_id: i64,
+            vector: &[u8],
+            from: u32,
+            to: u32,
+        ) -> Result<()> {
+            let old = self
+                .assignments
+                .update(record_id, CentroidAssignment::new(to))?;
+            assert_eq!(old.primary_id, from);
+            self.postings.remove(from, record_id)?;
+            self.postings.insert(to, record_id, vector)
+        }
+
+        pub fn flush(mut self) -> Result<()> {
+            self.postings
+                .flush()
+                .and_then(|()| self.assignments.flush())
+        }
+    }
 
     struct PostingDistanceFactory<'a> {
         store: CursorVectorStore<'a>,

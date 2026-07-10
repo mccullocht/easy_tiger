@@ -1,9 +1,9 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 use tracing::error;
 
 use wt_mdb::{
-    session::{FormatString, Formatted},
     Error, Result, Transaction, TypedCursorGuard,
+    session::{FormatString, Formatted},
 };
 
 use crate::spann::{CentroidAssignment, TableIndex, TransactionIndex};
@@ -58,10 +58,13 @@ impl CentroidStats {
         let centroid_len = head_cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
 
         let mut counts: Vec<Option<CentroidCounts>> = vec![None; centroid_len];
-        let centroid_cursor = txn.open_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
+        let centroid_cursor =
+            txn.open_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
         for r in centroid_cursor {
             let (_, a) = r?;
-            counts[a.primary_id as usize].get_or_insert_default().primary += 1;
+            counts[a.primary_id as usize]
+                .get_or_insert_default()
+                .primary += 1;
         }
 
         // Some centroids may have no assignments; ensure they are represented in case the caller is
@@ -208,20 +211,15 @@ impl<'a> CentroidAssignmentUpdater<'a> {
             .map(|()| existing_assignment)
     }
 
+    /// Return the number of vectors for `centroid_id`, or 0 if the centroid isn't found.
+    pub fn centroid_len(&mut self, centroid_id: u32) -> Result<u32> {
+        self.stats.count(centroid_id)
+    }
+
     /// Flush buffered stats updates back to the database.
-    ///
-    /// Dropping the updater will also flush any buffered updates, but prefer this method to allow
-    /// observation of any errors.
+    /// This must be called in order to push updates into the database.
     pub fn flush(&mut self) -> Result<()> {
         self.stats.flush()
-    }
-}
-
-impl Drop for CentroidAssignmentUpdater<'_> {
-    fn drop(&mut self) {
-        if let Err(e) = self.flush() {
-            error!("Error flushing centroid assignment stats: {e}")
-        }
     }
 }
 
@@ -236,6 +234,10 @@ impl<'a> CentroidStatsCache<'a> {
             cursor,
             cache: HashMap::new(),
         }
+    }
+
+    fn count(&mut self, id: u32) -> Result<u32> {
+        self.get_counts(id).map(|c| c.primary)
     }
 
     fn increment_count(&mut self, id: u32) -> Result<()> {

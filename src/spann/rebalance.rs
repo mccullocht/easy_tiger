@@ -499,35 +499,16 @@ pub fn split_centroid_bottom_half(
     let posting_coder = index.new_posting_coder();
     for record_id in split_target.to_reassign {
         split_stats.searches += retry_on_rollback(connection, index, |txn_idx| {
-            let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
-
-            // If the target posting can't be found, then skip it.
-            // There's a broader case where the centroid has been split again and in this case we
-            // could skip the rest of the function.
-            let posting = match postings.get(split_target.centroid_id, record_id) {
-                Err(e) if e == Error::not_found_error() => return Ok(0usize),
-                result => result,
-            }?;
-            let query = posting_coder.decode(&posting);
-            let candidates = searcher.search(&query, txn_idx.head())?;
-            let new_assignments = CentroidAssignment::new(candidates[0].vertex() as u32);
-
-            let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
-            let old_assignments = assignment_updater.update(record_id, new_assignments)?;
-            move_postings(
+            let mut updater = split::PostingUpdater::new(&txn_idx)?;
+            let r = split::bottom_half_reassign_one_with_search(
+                split_target.centroid_id,
                 record_id,
-                &posting,
-                old_assignments,
-                new_assignments,
-                &mut postings,
+                posting_coder.as_ref(),
+                &mut searcher,
+                &mut updater,
             )?;
-
-            postings.flush()?;
-            drop(postings);
-            assignment_updater.flush()?;
-            drop(assignment_updater);
-
-            txn_idx.commit(None).map(|()| 1usize)
+            updater.flush()?;
+            txn_idx.commit(None).map(|()| r)
         })?;
     }
 
@@ -696,6 +677,32 @@ mod split {
         }
     }
 
+    pub fn bottom_half_reassign_one_with_search(
+        centroid_id: u32,
+        record_id: i64,
+        posting_coder: &dyn F32VectorCoder,
+        searcher: &mut GraphSearcher,
+        updater: &mut PostingUpdater<'_>,
+    ) -> Result<usize> {
+        // If the target posting can't be found, then skip it.
+        // There's a broader case where the centroid has been split again and in this case we
+        // could skip the rest of the function.
+        let posting = match updater.postings.get(centroid_id, record_id) {
+            Err(e) if e == Error::not_found_error() => return Ok(0usize),
+            result => result,
+        }?;
+        let query = posting_coder.decode(&posting);
+        let candidates = searcher.search(&query, updater.txn_idx.head())?;
+        updater
+            .move_posting(
+                record_id,
+                &posting,
+                centroid_id,
+                candidates[0].vertex() as u32,
+            )
+            .map(|()| 1usize)
+    }
+
     pub fn bottom_half_find_nearby_centroids(
         txn_idx: &TransactionIndex,
         centroid_id: u32,
@@ -741,6 +748,7 @@ mod split {
     }
 
     pub struct PostingUpdater<'a> {
+        txn_idx: &'a TransactionIndex,
         postings: BlockPostingsMut<'a>,
         assignments: CentroidAssignmentUpdater<'a>,
         centroid_store: CursorVectorStore<'a>,
@@ -759,6 +767,7 @@ mod split {
                 Some(head_format.coder(centroid_store.similarity(), None))
             };
             Ok(Self {
+                txn_idx,
                 postings: BlockPostingsMut::from_txn(txn_idx)?,
                 assignments: CentroidAssignmentUpdater::new(txn_idx)?,
                 centroid_store,

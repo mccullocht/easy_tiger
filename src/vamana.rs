@@ -271,7 +271,7 @@ impl EdgeSetDistanceComputer {
             Self::from_store_and_edges(
                 &mut reader
                     .rerank_vectors()
-                    .unwrap_or(Err(Error::Errno(Errno::NOTSUP)))?,
+                    .unwrap_or_else(|| Err(Error::errno(Errno::NOTSUP)))?,
                 edges,
             )
         } else {
@@ -288,7 +288,7 @@ impl EdgeSetDistanceComputer {
             .map(|n| {
                 store
                     .get(n.vertex())
-                    .unwrap_or(Err(Error::not_found_error()))
+                    .unwrap_or_else(|| Err(Error::not_found_error()))
                     .map(|v| v.to_vec())
             })
             .collect::<Result<Vec<_>>>()?;

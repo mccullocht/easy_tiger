@@ -145,7 +145,7 @@ impl<'a> BlockPostingsMut<'a> {
                     Some(r) => {
                         let data = r?;
                         let pb = PostingBlock::new(&data, self.vector_len)
-                            .ok_or(Error::WiredTiger(wt_mdb::WiredTigerError::Generic))?;
+                            .ok_or(Error::wired_tiger(wt_mdb::WiredTigerError::Generic))?;
                         PostingBlockMut::from_block(&pb)
                     }
                     None => PostingBlockMut::new(self.vector_len),

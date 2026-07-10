@@ -32,7 +32,7 @@ fn read_app_metadata_internal(txn: &Transaction, table_name: &str) -> Result<Str
     {
         Ok(app_metadata.to_owned())
     } else {
-        Err(Error::Errno(Errno::INVAL))
+        Err(Error::errno(Errno::INVAL))
     }
 }
 
@@ -107,7 +107,7 @@ impl Graph for CursorGraph<'_> {
 
     fn remove_vertex(&mut self, vertex_id: i64) -> Result<Vec<i64>> {
         self.edges(vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))
+            .unwrap_or_else(|| Err(Error::not_found_error()))
             .map(|e| e.collect::<Vec<_>>())
             .and_then(|e| self.0.remove(vertex_id).map(|_| e))
     }
@@ -167,7 +167,7 @@ impl GraphVectorStore for CursorVectorStore<'_> {
         let vector = self
             .inner
             .seek_exact(vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))?;
+            .unwrap_or_else(|| Err(Error::not_found_error()))?;
         self.inner.remove(vertex_id).map(|()| vector)
     }
 }
@@ -244,7 +244,7 @@ impl TableGraphVectorIndex {
         rerank_table_name: String,
     ) -> io::Result<Self> {
         if config.index_search_params.num_rerank > 0 && config.rerank_format.is_none() {
-            return Err(Error::Errno(Errno::NOTSUP).into());
+            return Err(Error::errno(Errno::NOTSUP).into());
         }
         let centroid: Option<Arc<[f32]>> = config.centroid.as_deref().map(Arc::from);
         Ok(Self {

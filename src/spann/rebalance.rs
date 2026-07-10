@@ -1,7 +1,7 @@
 use std::{collections::HashSet, ops::RangeInclusive, sync::Arc};
 
 use rand::Rng;
-use wt_mdb::{Connection, Error, Result, WiredTigerError};
+use wt_mdb::{Connection, Error, Kind, Result, WiredTigerError};
 
 use crate::{
     spann::{
@@ -552,7 +552,7 @@ mod split {
         let query = store.new_coder().decode(
             store
                 .get(centroid_id as i64)
-                .unwrap_or(Err(Error::not_found_error()))?,
+                .unwrap_or_else(|| Err(Error::not_found_error()))?,
         );
         let mut searcher = GraphSearcher::new(txn_idx.index().config().head_search_params);
         let mut candidates =
@@ -625,7 +625,7 @@ mod split {
             let query = self
                 .centroid_store
                 .get(centroid_id as i64)
-                .unwrap_or(Err(Error::not_found_error()))?;
+                .unwrap_or_else(|| Err(Error::not_found_error()))?;
             if let Some(head_coder) = self.head_coder.as_ref() {
                 let query = head_coder.decode(query);
                 Ok(self
@@ -679,7 +679,7 @@ fn retry_on_rollback<R>(
             index,
             connection.begin_transaction(None)?,
         )) {
-            Err(Error::WiredTiger(WiredTigerError::Rollback)) => continue,
+            Err(e) if e.kind() == Kind::WiredTiger(WiredTigerError::Rollback) => continue,
             result => break result,
         }
     }

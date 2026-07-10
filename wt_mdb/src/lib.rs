@@ -15,11 +15,13 @@ pub mod transaction;
 use rustix::io::Errno;
 use wt_sys::wiredtiger_strerror;
 
+use std::backtrace::Backtrace;
 use std::ffi::{c_char, CStr};
 use std::io;
 use std::io::ErrorKind;
 use std::num::NonZero;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// WiredTiger specific error codes.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -79,38 +81,84 @@ impl From<WiredTigerError> for ErrorKind {
     }
 }
 
-/// An Error, either WiredTiger-specific or POSIX.
+/// The kind of a WiredTiger [`Error`], either WiredTiger-specific or POSIX.
 // TODO: use rustix::io::Errno instead of Posix
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum Error {
+pub enum Kind {
     WiredTiger(WiredTigerError),
     Errno(Errno),
 }
 
+/// An Error, either WiredTiger-specific or POSIX, with a backtrace captured at the point
+/// the error was created.
+#[derive(Clone, Debug)]
+pub struct Error {
+    kind: Kind,
+    backtrace: Arc<Backtrace>,
+}
+
 impl Error {
+    fn new(kind: Kind) -> Self {
+        Error {
+            kind,
+            backtrace: Arc::new(Backtrace::capture()),
+        }
+    }
+
+    /// Construct a WiredTiger-specific error.
+    pub fn wired_tiger(kind: WiredTigerError) -> Self {
+        Self::new(Kind::WiredTiger(kind))
+    }
+
+    /// Construct a POSIX errno error.
+    pub fn errno(errno: Errno) -> Self {
+        Self::new(Kind::Errno(errno))
+    }
+
     fn generic_error() -> Self {
-        Error::WiredTiger(WiredTigerError::Generic)
+        Self::wired_tiger(WiredTigerError::Generic)
     }
 
     /// Return a WiredTiger `NotFound` error.
-    pub const fn not_found_error() -> Self {
-        Error::WiredTiger(WiredTigerError::NotFound)
+    pub fn not_found_error() -> Self {
+        Self::wired_tiger(WiredTigerError::NotFound)
+    }
+
+    /// Return the kind of this error.
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// Return the backtrace captured when this error was created.
+    ///
+    /// Only populated if backtrace capture is enabled, e.g. by setting `RUST_BACKTRACE=1`.
+    pub fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
     }
 }
 
+impl PartialEq for Error {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+impl Eq for Error {}
+
 impl From<NonZero<i32>> for Error {
     fn from(value: NonZero<i32>) -> Self {
-        WiredTigerError::try_from_code(value.get())
-            .map(Error::WiredTiger)
-            .unwrap_or_else(|| Error::Errno(Errno::from_raw_os_error(value.get())))
+        let kind = WiredTigerError::try_from_code(value.get())
+            .map(Kind::WiredTiger)
+            .unwrap_or_else(|| Kind::Errno(Errno::from_raw_os_error(value.get())));
+        Self::new(kind)
     }
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::WiredTiger(w) => write!(f, "WT {w}"),
-            Self::Errno(p) => write!(f, "errno {p}"),
+        match self.kind {
+            Kind::WiredTiger(w) => write!(f, "WT {w}"),
+            Kind::Errno(p) => write!(f, "errno {p}"),
         }
     }
 }
@@ -119,9 +167,9 @@ impl std::error::Error for Error {}
 
 impl From<Error> for std::io::Error {
     fn from(value: Error) -> Self {
-        match &value {
-            Error::WiredTiger(wt) => io::Error::new((*wt).into(), value),
-            Error::Errno(errno) => io::Error::from(*errno),
+        match value.kind {
+            Kind::WiredTiger(wt) => io::Error::new(wt.into(), value),
+            Kind::Errno(errno) => io::Error::from(errno),
         }
     }
 }
@@ -342,7 +390,7 @@ mod test {
         assert_eq!(cursor.next(), None);
         assert_eq!(
             cursor.remove(13),
-            Err(Error::WiredTiger(WiredTigerError::NotFound))
+            Err(Error::wired_tiger(WiredTigerError::NotFound))
         );
     }
 
@@ -360,7 +408,7 @@ mod test {
         assert_eq!(cursor.next(), None);
         assert_eq!(
             cursor.remove(&b"c".as_slice()),
-            Err(Error::WiredTiger(WiredTigerError::NotFound))
+            Err(Error::wired_tiger(WiredTigerError::NotFound))
         );
     }
 
@@ -495,7 +543,7 @@ mod test {
         txn.commit(None).unwrap();
         assert_eq!(
             conn.bulk_load::<i64, Vec<u8>, _>("test", None, [(7, b"foo".to_vec())].into_iter()),
-            Err(Error::Errno(Errno::BUSY))
+            Err(Error::errno(Errno::BUSY))
         );
     }
 
@@ -510,7 +558,7 @@ mod test {
                 None,
                 [(11, b"bar".to_vec()), (7, b"foo".to_vec())].into_iter()
             ),
-            Err(Error::Errno(Errno::INVAL))
+            Err(Error::errno(Errno::INVAL))
         );
     }
 
@@ -709,7 +757,7 @@ mod test {
         let data = cursor_bounds_test_data();
         let fixture = RecordTableFixture::with_data("test", &data);
         let mut cursor = fixture.open_cursor().unwrap();
-        assert_eq!(cursor.set_bounds(1..-1), Err(Error::Errno(Errno::INVAL)));
+        assert_eq!(cursor.set_bounds(1..-1), Err(Error::errno(Errno::INVAL)));
     }
 
     #[test]
@@ -833,9 +881,9 @@ mod test {
 
     #[test]
     fn io_error() {
-        let err = Error::WiredTiger(WiredTigerError::NotFound);
+        let err = Error::wired_tiger(WiredTigerError::NotFound);
         assert_eq!(
-            std::io::Error::from(err).to_string(),
+            std::io::Error::from(err.clone()).to_string(),
             std::io::Error::new(ErrorKind::NotFound, err).to_string()
         );
     }
@@ -928,7 +976,7 @@ mod test {
         let mut cursor = txn.open_metadata_cursor().unwrap();
         assert_eq!(
             cursor.modify(c"table:test", &[]),
-            Err(Error::Errno(Errno::NOTSUP))
+            Err(Error::errno(Errno::NOTSUP))
         );
     }
 }

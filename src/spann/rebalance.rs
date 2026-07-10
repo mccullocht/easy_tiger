@@ -5,9 +5,9 @@ use wt_mdb::{Connection, Error, Kind, Result, WiredTigerError};
 
 use crate::{
     spann::{
+        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
         postings::BlockPostingsMut,
-        CentroidAssignment, TableIndex, TransactionIndex,
     },
     vamana::{mutate::delete_vector, search::GraphSearcher},
 };
@@ -222,12 +222,12 @@ pub fn split_centroid(
     let mut updater = split::PostingUpdater::new(txn_idx)?;
     let centroid_split = split::top_half(&mut updater, centroid_id as u32, rng)?;
 
-    let mut searches = 0;
+    let mut stats = centroid_split.stats;
     let posting_coder = txn_idx.index().new_posting_coder();
     let mut searcher = GraphSearcher::new(txn_idx.index().config().head_search_params);
     for target in &centroid_split.targets {
         for &record_id in &target.to_reassign {
-            searches += split::bottom_half_reassign_one_with_search(
+            stats += split::bottom_half_reassign_one_with_search(
                 target.centroid_id,
                 record_id,
                 posting_coder.as_ref(),
@@ -237,11 +237,10 @@ pub fn split_centroid(
         }
     }
 
-    let mut nearby_stats = SplitStats::default();
     for target in &centroid_split.targets {
         let nearby = split::bottom_half_find_nearby_centroids(txn_idx, target.centroid_id)?;
         for nearby_centroid_id in nearby {
-            nearby_stats += split::bottom_half_nearby_reassign_centroid(
+            stats += split::bottom_half_nearby_reassign_centroid(
                 &mut updater,
                 nearby_centroid_id,
                 target.centroid_id,
@@ -255,12 +254,7 @@ pub fn split_centroid(
         .open_cursor::<u32, CentroidCounts>(txn_idx.index().centroid_stats_table_name())?
         .remove(centroid_id as u32)?;
 
-    Ok(SplitStats {
-        moved_vectors: centroid_split.stats.moved_vectors,
-        searches,
-        nearby_seen: nearby_stats.nearby_seen,
-        nearby_moved: nearby_stats.nearby_moved,
-    })
+    Ok(stats)
 }
 
 /// Target centroid produced by split of a centroid.
@@ -363,7 +357,7 @@ pub fn split_centroid_bottom_half(
     let mut searcher = GraphSearcher::new(index.config().head_search_params);
     let posting_coder = index.new_posting_coder();
     for record_id in split_target.to_reassign {
-        split_stats.searches += retry_on_rollback(connection, index, |txn_idx| {
+        split_stats += retry_on_rollback(connection, index, |txn_idx| {
             let mut updater = split::PostingUpdater::new(&txn_idx)?;
             let r = split::bottom_half_reassign_one_with_search(
                 split_target.centroid_id,
@@ -408,14 +402,14 @@ mod split {
 
     use crate::input::VecVectorStore;
     use crate::spann::{
-        centroid_stats::CentroidAssignmentUpdater, postings::BlockPostingsMut, CentroidAssignment,
-        TransactionIndex,
+        CentroidAssignment, TransactionIndex, centroid_stats::CentroidAssignmentUpdater,
+        postings::BlockPostingsMut,
     };
     use crate::vamana::wt::CursorVectorStore;
     use crate::vamana::{
+        GraphVectorIndex, GraphVectorStore,
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
-        GraphVectorIndex, GraphVectorStore,
     };
 
     use super::{CentroidSplit, SplitStats};
@@ -524,24 +518,26 @@ mod split {
         posting_coder: &dyn F32VectorCoder,
         searcher: &mut GraphSearcher,
         updater: &mut PostingUpdater<'_>,
-    ) -> Result<usize> {
+    ) -> Result<SplitStats> {
         // If the target posting can't be found, then skip it.
         // There's a broader case where the centroid has been split again and in this case we
         // could skip the rest of the function.
         let posting = match updater.postings.get(centroid_id, record_id) {
-            Err(e) if e == Error::not_found_error() => return Ok(0usize),
+            Err(e) if e == Error::not_found_error() => return Ok(SplitStats::default()),
             result => result,
         }?;
+
+        let mut stats = SplitStats::default();
+        stats.searches += 1;
         let query = posting_coder.decode(&posting);
         let candidates = searcher.search(&query, updater.txn_idx.head())?;
-        updater
-            .move_posting(
-                record_id,
-                &posting,
-                centroid_id,
-                candidates[0].vertex() as u32,
-            )
-            .map(|()| 1usize)
+
+        let to_centroid = candidates[0].vertex() as u32;
+        if to_centroid != centroid_id {
+            stats.moved_vectors += 1;
+            updater.move_posting(record_id, &posting, centroid_id, to_centroid)?;
+        }
+        Ok(stats)
     }
 
     pub fn bottom_half_find_nearby_centroids(
@@ -581,6 +577,7 @@ mod split {
             stats.nearby_seen += 1;
 
             if target_dist_fn.distance(&vector) < nearby_dist_fn.distance(&vector) {
+                stats.nearby_moved += 1;
                 updater.move_posting(record_id, &vector, nearby_centroid_id, target_centroid_id)?;
             }
         }

@@ -138,6 +138,7 @@ pub fn insert_vectors(
         )?;
     }
 
+    main_progress.set_message("inserting vectors");
     main_progress.finish();
 
     if let Some(deferred) = split_deferred {
@@ -310,6 +311,8 @@ fn rebalance(
     rng: &mut impl Rng,
     progress: &ProgressBar,
 ) -> Result<RebalanceStats> {
+    // XXX at 16k vectors/batch we split ~90 vectors per batch.
+    // This is _embarassingly_ parallel.
     let mut iter = 1;
     let mut rebalance_stats = RebalanceStats::default();
     loop {

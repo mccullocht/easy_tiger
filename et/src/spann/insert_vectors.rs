@@ -323,6 +323,9 @@ fn rebalance(
             (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
                 progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
                 rebalance_stats += merge_centroid(&txn_idx, to_merge, len)?;
+                if let Some(deferred) = split_deferred.as_mut() {
+                    deferred.remove(&(to_merge as u32));
+                }
             }
             (_, Some((to_split, len))) => {
                 progress.set_message(format!("split {to_split} of {len} ({iter})"));

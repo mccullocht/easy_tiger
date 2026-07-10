@@ -9,10 +9,7 @@ use crate::{
         postings::BlockPostingsMut,
         CentroidAssignment, TableIndex, TransactionIndex,
     },
-    vamana::{
-        mutate::delete_vector,
-        search::GraphSearcher,
-    },
+    vamana::{mutate::delete_vector, search::GraphSearcher},
 };
 
 use std::ops::{Add, AddAssign};
@@ -263,7 +260,6 @@ pub fn split_centroid(
         searches,
         nearby_seen: nearby_stats.nearby_seen,
         nearby_moved: nearby_stats.nearby_moved,
-        ..Default::default()
     })
 }
 

@@ -160,7 +160,7 @@ impl Formatted for CString {
     #[inline(always)]
     fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
         CStr::from_bytes_with_nul(packed)
-            .map_err(|_| Error::WiredTiger(crate::WiredTigerError::Generic))
+            .map_err(|_| Error::wired_tiger(crate::WiredTigerError::Generic))
     }
 }
 

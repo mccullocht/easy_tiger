@@ -168,7 +168,7 @@ impl GraphSearcher {
         let nav_query_rep = reader
             .nav_vectors()?
             .get(vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))?
+            .unwrap_or_else(|| Err(Error::not_found_error()))?
             .to_vec();
         let nav_query = reader.config().nav_format.query_distance_symmetric(
             reader.config().similarity,
@@ -181,7 +181,7 @@ impl GraphSearcher {
                 let mut vectors = vectors?;
                 let query = vectors
                     .get(vertex_id)
-                    .unwrap_or(Err(Error::not_found_error()))?
+                    .unwrap_or_else(|| Err(Error::not_found_error()))?
                     .to_vec();
                 Some(vectors.format().query_distance_symmetric(
                     vectors.similarity(),
@@ -256,7 +256,7 @@ impl GraphSearcher {
             let entry_point = epr?;
             let entry_vector = nav
                 .get(entry_point)
-                .unwrap_or(Err(Error::not_found_error()))?;
+                .unwrap_or_else(|| Err(Error::not_found_error()))?;
             if self
                 .candidates
                 .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)))
@@ -279,7 +279,7 @@ impl GraphSearcher {
             let mut added = 0;
             for edge in graph
                 .edges(vertex_id)
-                .unwrap_or(Err(Error::not_found_error()))?
+                .unwrap_or_else(|| Err(Error::not_found_error()))?
                 .collect::<Vec<_>>()
             {
                 if !self.seen.insert(edge) {
@@ -652,23 +652,23 @@ mod test {
         }
 
         fn set_entry_point(&mut self, _: i64) -> Result<()> {
-            Err(Error::Errno(Errno::NOTSUP))
+            Err(Error::errno(Errno::NOTSUP))
         }
 
         fn remove_entry_point(&mut self) -> Result<()> {
-            Err(Error::Errno(Errno::NOTSUP))
+            Err(Error::errno(Errno::NOTSUP))
         }
 
         fn set_edges(&mut self, _: i64, _: impl Into<Vec<i64>>) -> Result<()> {
-            Err(Error::Errno(Errno::NOTSUP))
+            Err(Error::errno(Errno::NOTSUP))
         }
 
         fn remove_vertex(&mut self, _: i64) -> Result<Vec<i64>> {
-            Err(Error::Errno(Errno::NOTSUP))
+            Err(Error::errno(Errno::NOTSUP))
         }
 
         fn next_available_vertex_id(&mut self) -> Result<i64> {
-            Err(Error::Errno(Errno::NOTSUP))
+            Err(Error::errno(Errno::NOTSUP))
         }
     }
 
@@ -705,11 +705,11 @@ mod test {
         }
 
         fn set(&mut self, _: i64, _: impl AsRef<[u8]>) -> Result<()> {
-            Err(Error::Errno(Errno::NOTSUP))
+            Err(Error::errno(Errno::NOTSUP))
         }
 
         fn remove(&mut self, _: i64) -> Result<Vec<u8>> {
-            Err(Error::Errno(Errno::NOTSUP))
+            Err(Error::errno(Errno::NOTSUP))
         }
     }
 

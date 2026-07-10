@@ -172,7 +172,7 @@ impl<'a> CentroidAssignmentUpdater<'a> {
     pub fn insert(&mut self, record_id: i64, assignment: CentroidAssignment) -> Result<()> {
         if let Some(_existing_assignment) = self.assignments_cursor.seek_exact(record_id) {
             error!("attempted to insert duplicate record id {}", record_id);
-            return Err(Error::WiredTiger(wt_mdb::WiredTigerError::DuplicateKey));
+            return Err(Error::wired_tiger(wt_mdb::WiredTigerError::DuplicateKey));
         }
         self.assignments_cursor.set(record_id, assignment)?;
         self.stats.increment_count(assignment.primary_id)?;
@@ -186,7 +186,7 @@ impl<'a> CentroidAssignmentUpdater<'a> {
         let existing_assignment = self
             .assignments_cursor
             .seek_exact(record_id)
-            .unwrap_or(Err(Error::not_found_error()))?;
+            .unwrap_or_else(|| Err(Error::not_found_error()))?;
         self.stats.decrement_count(existing_assignment.primary_id)?;
         self.assignments_cursor.remove(record_id)?;
         Ok(existing_assignment)
@@ -203,7 +203,7 @@ impl<'a> CentroidAssignmentUpdater<'a> {
         let existing_assignment = self
             .assignments_cursor
             .seek_exact(record_id)
-            .unwrap_or(Err(Error::not_found_error()))?;
+            .unwrap_or_else(|| Err(Error::not_found_error()))?;
         self.stats.decrement_count(existing_assignment.primary_id)?;
         self.stats.increment_count(assignment.primary_id)?;
         self.assignments_cursor

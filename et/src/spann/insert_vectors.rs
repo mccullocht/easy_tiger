@@ -1,4 +1,12 @@
-use std::{collections::HashSet, fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs::File,
+    io,
+    num::NonZero,
+    ops::Range,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use clap::Args;
 use easy_tiger::{
@@ -7,7 +15,10 @@ use easy_tiger::{
         CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
         postings::BlockPostingsMut,
-        rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
+        rebalance::{
+            BalanceSummary, CentroidSplitTarget, RebalanceStats, merge_centroid, split_centroid,
+            split_centroid_bottom_half, split_centroid_top_half,
+        },
     },
     vamana::search::GraphSearcher,
 };
@@ -37,6 +48,10 @@ pub struct InsertVectorsArgs {
     /// Number of vectors to insert in each transaction batch.
     #[arg(long, default_value_t = NonZero::new(256).unwrap())]
     batch_size: NonZero<usize>,
+
+    /// Defer granular post-split rebalancing operations until after rebalancing completes.
+    #[arg(long, default_value_t = false)]
+    split_centroid_defer_rebalancing: bool,
 
     /// Random seed used for clustering computations.
     /// Use a fixed value for repeatability.
@@ -93,6 +108,12 @@ pub fn insert_vectors(
     let mut rebalance_stats = RebalanceStats::default();
     let mut batches: usize = 0;
     let mut total_batch_unique_centroids: usize = 0;
+    let mut split_deferred: Option<BTreeMap<u32, CentroidSplitTarget>> =
+        if args.split_centroid_defer_rebalancing {
+            Some(BTreeMap::new())
+        } else {
+            None
+        };
 
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
@@ -108,10 +129,30 @@ pub fn insert_vectors(
         )?;
         batches += 1;
 
-        rebalance_stats += rebalance(&index, &connection, &mut rng, &main_progress)?;
+        rebalance_stats += rebalance(
+            &index,
+            &connection,
+            &mut split_deferred,
+            &mut rng,
+            &main_progress,
+        )?;
     }
 
     main_progress.finish();
+
+    if let Some(deferred) = split_deferred {
+        let refine_progress = progress_bar(deferred.len(), "refine");
+        let stats = deferred
+            .into_par_iter()
+            .progress_with(refine_progress.clone())
+            .map(|(_, target)| split_centroid_bottom_half(&connection, &index, target))
+            .collect::<Result<Vec<_>>>()?;
+        refine_progress.finish();
+        for s in stats {
+            rebalance_stats += s;
+        }
+    }
+
     println!("Batches:        {:10}", batches);
     if batches > 0 {
         println!(
@@ -265,6 +306,7 @@ fn insert_batch(
 fn rebalance(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
+    split_deferred: &mut Option<BTreeMap<u32, CentroidSplitTarget>>,
     rng: &mut impl Rng,
     progress: &ProgressBar,
 ) -> Result<RebalanceStats> {
@@ -284,7 +326,15 @@ fn rebalance(
             }
             (_, Some((to_split, len))) => {
                 progress.set_message(format!("split {to_split} of {len} ({iter})"));
-                rebalance_stats += split_centroid(&txn_idx, to_split, rng)?;
+                if let Some(deferred) = split_deferred.as_mut() {
+                    deferred.remove(&(to_split as u32));
+                    let split = split_centroid_top_half(connection, index, to_split as u32, rng)?;
+                    rebalance_stats += split.stats;
+                    deferred.insert(split.targets[0].centroid_id, split.targets[0].clone());
+                    deferred.insert(split.targets[1].centroid_id, split.targets[1].clone());
+                } else {
+                    rebalance_stats += split_centroid(&txn_idx, to_split, rng)?;
+                }
             }
             _ => break,
         }

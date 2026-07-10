@@ -83,11 +83,8 @@ pub fn rebalance(
             (Some((to_merge, len)), None) => {
                 rebalance_stats += merge_centroid(&txn_idx, to_merge, len)?;
             }
-            (_, Some((to_split, len))) => {
-                let mut it = stats.available_centroid_ids();
-                let target_centroid_ids = (it.next().unwrap(), it.next().unwrap());
-                rebalance_stats +=
-                    split_centroid(&txn_idx, to_split, target_centroid_ids, len, &mut rng)?;
+            (_, Some((to_split, _len))) => {
+                rebalance_stats += split_centroid(&txn_idx, to_split, &mut rng)?;
             }
         }
 
@@ -137,10 +134,6 @@ pub fn rebalance(
         println!(
             "  Searches:     {:10}",
             rebalance_stats.split_stats.searches
-        );
-        println!(
-            "  Avg unique:   {:10.1}",
-            rebalance_stats.split_stats.unique_centroids as f64 / rebalance_stats.split as f64
         );
         println!(
             "  Nearby seen:  {:10}",

@@ -140,10 +140,6 @@ pub fn insert_vectors(
             "  Searches:     {:10}",
             rebalance_stats.split_stats.searches
         );
-        println!(
-            "  Avg unique:   {:10.1}",
-            rebalance_stats.split_stats.unique_centroids as f64 / rebalance_stats.split as f64
-        );
         println!("Nearby:");
         println!(
             "  Seen:         {:10}",
@@ -288,13 +284,7 @@ fn rebalance(
             }
             (_, Some((to_split, len))) => {
                 progress.set_message(format!("split {to_split} of {len} ({iter})"));
-                // TODO: split_centroid should allow splitting into multiple centroids.
-                // This requires allocating an arbitrary number of ids and accommodating these
-                // additional ids in the split of the centroid and updating of nearby centroids.
-                let mut it = stats.available_centroid_ids();
-                let target_centroid_ids = (it.next().unwrap(), it.next().unwrap());
-                rebalance_stats +=
-                    split_centroid(&txn_idx, to_split, target_centroid_ids, len, rng)?;
+                rebalance_stats += split_centroid(&txn_idx, to_split, rng)?;
             }
             _ => break,
         }

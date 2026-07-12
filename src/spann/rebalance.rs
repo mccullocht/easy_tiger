@@ -5,9 +5,9 @@ use wt_mdb::{Connection, Error, Kind, Result, WiredTigerError};
 
 use crate::{
     spann::{
-        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
         postings::BlockPostingsMut,
+        CentroidAssignment, TableIndex, TransactionIndex,
     },
     vamana::{mutate::delete_vector, search::GraphSearcher},
 };
@@ -354,10 +354,11 @@ pub fn split_centroid_bottom_half(
 ) -> Result<SplitStats> {
     let mut split_stats = SplitStats::default();
 
-    // XXX track how many of these outputs appear in nearby_clusters. if it's high enough
-    // then symmetrical nearby checks might be enough.
     let mut searcher = GraphSearcher::new(index.config().head_search_params);
     let posting_coder = index.new_posting_coder();
+    // XXX this work can be separated out. it's very similar to the regular insert vectors flow
+    // except you are starting from an existing vector. If I wanted to I could read the rerank
+    // vector instead of the posting? might improve quality.
     for record_id in split_target.to_reassign {
         split_stats += retry_on_rollback(connection, index, |txn_idx| {
             let mut updater = split::PostingUpdater::new(&txn_idx)?;
@@ -404,14 +405,14 @@ mod split {
 
     use crate::input::VecVectorStore;
     use crate::spann::{
-        CentroidAssignment, TransactionIndex, centroid_stats::CentroidAssignmentUpdater,
-        postings::BlockPostingsMut,
+        centroid_stats::CentroidAssignmentUpdater, postings::BlockPostingsMut, CentroidAssignment,
+        TransactionIndex,
     };
     use crate::vamana::wt::CursorVectorStore;
     use crate::vamana::{
-        GraphVectorIndex, GraphVectorStore,
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
+        GraphVectorIndex, GraphVectorStore,
     };
 
     use super::{CentroidSplit, SplitStats};

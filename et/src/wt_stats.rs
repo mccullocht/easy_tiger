@@ -5,8 +5,8 @@ use wt_sys::{
     WT_STAT_CONN_BLOCK_BYTE_READ, WT_STAT_CONN_BLOCK_BYTE_WRITE, WT_STAT_CONN_BLOCK_READ,
     WT_STAT_CONN_CURSOR_INSERT_BYTES, WT_STAT_CONN_CURSOR_MODIFY_BYTES,
     WT_STAT_CONN_CURSOR_MODIFY_BYTES_TOUCH, WT_STAT_CONN_CURSOR_REMOVE_BYTES,
-    WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_CURSOR_UPDATE_BYTES,
-    WT_STAT_CONN_LOG_BYTES_WRITTEN,
+    WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_CURSOR_UPDATE_BYTES, WT_STAT_CONN_LOG_BYTES_WRITTEN,
+    WT_STAT_CONN_TXN_UPDATE_CONFLICT,
 };
 
 pub struct WiredTigerConnectionStats {
@@ -67,6 +67,8 @@ pub struct WiredTigerWriteStats {
     pub modify_bytes: i64,
     /// Cursor modify delta bytes actually written.
     pub modify_bytes_touch: i64,
+    /// Transaction update conflicts (OCC rollbacks on commit).
+    pub txn_update_conflicts: i64,
 }
 
 impl TryFrom<&Transaction> for WiredTigerWriteStats {
@@ -102,6 +104,10 @@ impl TryFrom<&Transaction> for WiredTigerWriteStats {
             .seek_exact(WT_STAT_CONN_CURSOR_MODIFY_BYTES_TOUCH as i32)
             .expect("WT_STAT_CONN_CURSOR_MODIFY_BYTES_TOUCH")?
             .value;
+        let txn_update_conflicts = stat_cursor
+            .seek_exact(WT_STAT_CONN_TXN_UPDATE_CONFLICT as i32)
+            .expect("WT_STAT_CONN_TXN_UPDATE_CONFLICT")?
+            .value;
         Ok(Self {
             log_bytes,
             data_bytes,
@@ -110,6 +116,7 @@ impl TryFrom<&Transaction> for WiredTigerWriteStats {
             remove_bytes,
             modify_bytes,
             modify_bytes_touch,
+            txn_update_conflicts,
         })
     }
 }
@@ -135,6 +142,7 @@ impl Sub for WiredTigerWriteStats {
             remove_bytes: self.remove_bytes - rhs.remove_bytes,
             modify_bytes: self.modify_bytes - rhs.modify_bytes,
             modify_bytes_touch: self.modify_bytes_touch - rhs.modify_bytes_touch,
+            txn_update_conflicts: self.txn_update_conflicts - rhs.txn_update_conflicts,
         }
     }
 }

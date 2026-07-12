@@ -216,6 +216,10 @@ pub fn insert_vectors(
         "WT modify out:  {:10} MB",
         wt_stats.modify_bytes_touch / (1 << 20)
     );
+    println!(
+        "WT OCC retries: {:10}",
+        wt_stats.txn_update_conflicts
+    );
 
     Ok(())
 }

@@ -2,9 +2,9 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::spann::{
-    TableIndex, TransactionIndex,
     centroid_stats::CentroidStats,
-    rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
+    rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
+    TableIndex, TransactionIndex,
 };
 use rand::SeedableRng;
 use wt_mdb::Connection;
@@ -130,10 +130,6 @@ pub fn rebalance(
         println!(
             "  Moved:        {:10}",
             rebalance_stats.split_stats.moved_vectors
-        );
-        println!(
-            "  Searches:     {:10}",
-            rebalance_stats.split_stats.searches
         );
         println!(
             "  Nearby seen:  {:10}",

@@ -4,10 +4,10 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
         postings::BlockPostingsMut,
-        rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
+        rebalance::{merge_centroid, split_centroid, BalanceSummary, RebalanceStats},
+        CentroidAssignment, TableIndex, TransactionIndex,
     },
     vamana::search::GraphSearcher,
 };
@@ -135,10 +135,6 @@ pub fn insert_vectors(
         println!(
             "  Moved:        {:10}",
             rebalance_stats.split_stats.moved_vectors
-        );
-        println!(
-            "  Searches:     {:10}",
-            rebalance_stats.split_stats.searches
         );
         println!("Nearby:");
         println!(

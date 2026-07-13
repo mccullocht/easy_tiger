@@ -4,12 +4,12 @@ use clap::Args;
 use easy_tiger::{
     spann::{IndexConfig, TableIndex},
     vamana::{
-        GraphConfig, GraphSearchParams, PatienceParams, mutate::insert_vector,
-        wt::TransactionGraphVectorIndex,
+        mutate::insert_vector, wt::TransactionGraphVectorIndex, GraphConfig, GraphSearchParams,
+        PatienceParams,
     },
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{Connection, connection::DropOptionsBuilder};
+use wt_mdb::{connection::DropOptionsBuilder, Connection};
 
 use crate::vamana::{EdgePruningArgs, EdgeTypeArg};
 
@@ -49,7 +49,7 @@ pub struct InitIndexArgs {
     head_edge_type: EdgeTypeArg,
 
     /// Minimum number of vectors that should map to each head centroid.
-    #[arg(long, default_value_t = 192)]
+    #[arg(long, default_value_t = 100)]
     head_min_centroid_len: usize,
     /// Maximum number of vectors that should map to each head centroid.
     /// This should be at least 2x --head-min-centroid-len.

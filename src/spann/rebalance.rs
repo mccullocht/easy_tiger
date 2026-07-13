@@ -45,8 +45,6 @@ impl AddAssign for MergeStats {
 pub struct SplitStats {
     /// Number of vectors in the centroid being split.
     pub moved_vectors: usize,
-    /// Number of vectors where we had to search the head index again to find a new assigned centroid.
-    pub searches: usize,
     /// The number of nearby vectors we examine for reassignment.
     pub nearby_seen: usize,
     /// The number of nearby vectors that were reassigned to a new centroid.
@@ -59,7 +57,6 @@ impl Add for SplitStats {
     fn add(self, rhs: Self) -> Self::Output {
         Self {
             moved_vectors: self.moved_vectors + rhs.moved_vectors,
-            searches: self.searches + rhs.searches,
             nearby_seen: self.nearby_seen + rhs.nearby_seen,
             nearby_moved: self.nearby_moved + rhs.nearby_moved,
         }
@@ -222,21 +219,6 @@ pub fn split_centroid(
     let mut updater = split::PostingUpdater::new(txn_idx)?;
     let centroid_split = split::top_half(&mut updater, centroid_id as u32, rng)?;
 
-    let mut searches = 0;
-    let posting_coder = txn_idx.index().new_posting_coder();
-    let mut searcher = GraphSearcher::new(txn_idx.index().config().head_search_params);
-    for target in &centroid_split.targets {
-        for &record_id in &target.to_reassign {
-            searches += split::bottom_half_reassign_one_with_search(
-                target.centroid_id,
-                record_id,
-                posting_coder.as_ref(),
-                &mut searcher,
-                &mut updater,
-            )?;
-        }
-    }
-
     let mut nearby_stats = SplitStats::default();
     for target in &centroid_split.targets {
         let nearby = split::bottom_half_find_nearby_centroids(txn_idx, target.centroid_id)?;
@@ -250,14 +232,8 @@ pub fn split_centroid(
     }
 
     updater.flush()?;
-    txn_idx
-        .transaction()
-        .open_cursor::<u32, CentroidCounts>(txn_idx.index().centroid_stats_table_name())?
-        .remove(centroid_id as u32)?;
-
     Ok(SplitStats {
         moved_vectors: centroid_split.stats.moved_vectors,
-        searches,
         nearby_seen: nearby_stats.nearby_seen,
         nearby_moved: nearby_stats.nearby_moved,
     })
@@ -268,17 +244,11 @@ pub fn split_centroid(
 pub struct CentroidSplitTarget {
     /// The centroid_id the split was written to.
     pub centroid_id: u32,
-    /// Vectors within the block that should be reassigned by search. This means that the vector
-    /// is closer to the previous centroid than it is to this target centroid.
-    pub to_reassign: Vec<i64>,
 }
 
 impl CentroidSplitTarget {
     fn new(centroid_id: u32) -> Self {
-        Self {
-            centroid_id,
-            to_reassign: vec![],
-        }
+        Self { centroid_id }
     }
 }
 
@@ -329,21 +299,11 @@ pub fn split_centroid_top_half(
             let centroid_split = split::top_half(&mut updater, centroid_id, rng)?;
             updater.flush().map(|()| centroid_split)?
         };
-        txn_idx
-            .transaction()
-            .open_cursor::<u32, CentroidCounts>(txn_idx.index().centroid_stats_table_name())?
-            .remove(centroid_id)
-            .or_else(|e| {
-                if e == Error::not_found_error() {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })?;
         txn_idx.commit(None).map(|_| centroid_split)
     })
 }
 
+// XXX update comment
 /// Run the bottom half of the centroid split operation.
 ///
 /// This should be invoked once for each centroid produced by the split. It will reassign any
@@ -359,23 +319,6 @@ pub fn split_centroid_bottom_half(
     split_target: CentroidSplitTarget,
 ) -> Result<SplitStats> {
     let mut split_stats = SplitStats::default();
-
-    let mut searcher = GraphSearcher::new(index.config().head_search_params);
-    let posting_coder = index.new_posting_coder();
-    for record_id in split_target.to_reassign {
-        split_stats.searches += retry_on_rollback(connection, index, |txn_idx| {
-            let mut updater = split::PostingUpdater::new(&txn_idx)?;
-            let r = split::bottom_half_reassign_one_with_search(
-                split_target.centroid_id,
-                record_id,
-                posting_coder.as_ref(),
-                &mut searcher,
-                &mut updater,
-            )?;
-            updater.flush()?;
-            txn_idx.commit(None).map(|()| r)
-        })?;
-    }
 
     let nearby_clusters: Vec<u32> = {
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
@@ -413,9 +356,7 @@ mod split {
     };
     use crate::vamana::wt::CursorVectorStore;
     use crate::vamana::{
-        mutate::{delete_vector, upsert_vector},
-        search::GraphSearcher,
-        GraphVectorIndex, GraphVectorStore,
+        mutate::upsert_vector, search::GraphSearcher, GraphVectorIndex, GraphVectorStore,
     };
 
     use super::{CentroidSplit, SplitStats};
@@ -434,8 +375,6 @@ mod split {
 
         // Remove postings and vector quickly to trigger OCC rollbacks.
         let target_centroid_ids = updater.postings.next_centroid_id().map(|x| [x, x + 1])?;
-        updater.postings.remove_centroid(centroid_id)?;
-        delete_vector(centroid_id as i64, updater.txn_idx.head())?;
 
         // Partition the postings for `centroid_id` into two new postings and insert into index.
         let centroids = partition_postings(
@@ -458,24 +397,20 @@ mod split {
         let c1_dist_fn = updater.distance_to_centroid(target_centroid_ids[0])?;
         let c2_dist_fn = updater.distance_to_centroid(target_centroid_ids[1])?;
 
-        let mut centroid_split = CentroidSplit::new(vectors.len(), target_centroid_ids);
+        let centroid_split = CentroidSplit::new(vectors.len(), target_centroid_ids);
         for (record_id, vector) in vectors {
             let c0_dist = c0_dist_fn.distance(&vector);
             let c1_dist = c1_dist_fn.distance(&vector);
             let c2_dist = c2_dist_fn.distance(&vector);
-            let split_centroid_id = if c1_dist < c2_dist {
-                if c0_dist < c1_dist {
-                    centroid_split.targets[0].to_reassign.push(record_id)
-                }
-                centroid_split.targets[0].centroid_id
-            } else {
-                if c0_dist < c2_dist {
-                    centroid_split.targets[1].to_reassign.push(record_id)
-                }
-                centroid_split.targets[1].centroid_id
-            };
+            if c1_dist < c0_dist || c2_dist < c0_dist {
+                let split_centroid_id = if c1_dist < c2_dist {
+                    centroid_split.targets[0].centroid_id
+                } else {
+                    centroid_split.targets[1].centroid_id
+                };
 
-            updater.move_posting(record_id, &vector, centroid_id, split_centroid_id)?
+                updater.move_posting(record_id, &vector, centroid_id, split_centroid_id)?
+            }
         }
 
         Ok(centroid_split)
@@ -516,32 +451,6 @@ mod split {
                 r
             }
         }
-    }
-
-    pub fn bottom_half_reassign_one_with_search(
-        centroid_id: u32,
-        record_id: i64,
-        posting_coder: &dyn F32VectorCoder,
-        searcher: &mut GraphSearcher,
-        updater: &mut PostingUpdater<'_>,
-    ) -> Result<usize> {
-        // If the target posting can't be found, then skip it.
-        // There's a broader case where the centroid has been split again and in this case we
-        // could skip the rest of the function.
-        let posting = match updater.postings.get(centroid_id, record_id) {
-            Err(e) if e == Error::not_found_error() => return Ok(0usize),
-            result => result,
-        }?;
-        let query = posting_coder.decode(&posting);
-        let candidates = searcher.search(&query, updater.txn_idx.head())?;
-        updater
-            .move_posting(
-                record_id,
-                &posting,
-                centroid_id,
-                candidates[0].vertex() as u32,
-            )
-            .map(|()| 1usize)
     }
 
     pub fn bottom_half_find_nearby_centroids(

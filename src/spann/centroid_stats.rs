@@ -192,6 +192,12 @@ impl<'a> CentroidAssignmentUpdater<'a> {
         Ok(existing_assignment)
     }
 
+    // XXX docos
+    pub fn overwrite(&mut self, record_id: i64, assignment: CentroidAssignment) -> Result<()> {
+        self.assignments_cursor.set(record_id, assignment)?;
+        self.stats.increment_count(assignment.primary_id)
+    }
+
     /// Update centroid assignments for an existing record, returning the previous assignments.
     ///
     /// Returns a NotFound error if the record does not exist.

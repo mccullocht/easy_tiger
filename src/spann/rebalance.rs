@@ -5,11 +5,14 @@ use wt_mdb::{Connection, Error, Kind, Result, WiredTigerError};
 
 use crate::{
     spann::{
+        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
         postings::BlockPostingsMut,
-        CentroidAssignment, TableIndex, TransactionIndex,
     },
-    vamana::{mutate::delete_vector, search::GraphSearcher, search::Options as GraphSearchOptions},
+    vamana::{
+        mutate::delete_vector, search::GraphSearchStats, search::GraphSearcher,
+        search::Options as GraphSearchOptions,
+    },
 };
 
 use std::ops::{Add, AddAssign};
@@ -79,6 +82,8 @@ pub struct RebalanceStats {
     pub merge_stats: MergeStats,
     pub split: usize,
     pub split_stats: SplitStats,
+    /// Accumulated graph search stats for all searches performed during rebalancing.
+    pub search_stats: GraphSearchStats,
 }
 
 impl Add for RebalanceStats {
@@ -90,6 +95,7 @@ impl Add for RebalanceStats {
             merge_stats: self.merge_stats + rhs.merge_stats,
             split: self.split + rhs.split,
             split_stats: self.split_stats + rhs.split_stats,
+            search_stats: self.search_stats + rhs.search_stats,
         }
     }
 }
@@ -109,6 +115,7 @@ impl Add<MergeStats> for RebalanceStats {
             merge_stats: self.merge_stats + rhs,
             split: self.split,
             split_stats: self.split_stats,
+            search_stats: self.search_stats,
         }
     }
 }
@@ -128,6 +135,7 @@ impl Add<SplitStats> for RebalanceStats {
             merge_stats: self.merge_stats,
             split: self.split + 1,
             split_stats: self.split_stats + rhs,
+            search_stats: self.search_stats,
         }
     }
 }
@@ -408,15 +416,15 @@ mod split {
 
     use crate::input::VecVectorStore;
     use crate::spann::{
-        centroid_stats::CentroidAssignmentUpdater, postings::BlockPostingsMut, CentroidAssignment,
-        TransactionIndex,
+        CentroidAssignment, TransactionIndex, centroid_stats::CentroidAssignmentUpdater,
+        postings::BlockPostingsMut,
     };
     use crate::vamana::wt::CursorVectorStore;
     use crate::vamana::{
+        GraphVectorIndex, GraphVectorStore,
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
         search::Options as GraphSearchOptions,
-        GraphVectorIndex, GraphVectorStore,
     };
 
     use super::{CentroidSplit, SplitStats};
@@ -482,7 +490,7 @@ mod split {
         Ok(centroid_split)
     }
 
-    fn partition_postings<'a>(
+    pub fn partition_postings<'a>(
         txn_idx: &TransactionIndex,
         centroid_id: u32,
         vectors: impl ExactSizeIterator<Item = &'a [u8]>,
@@ -621,7 +629,7 @@ mod split {
             })
         }
 
-        fn distance_to_centroid(
+        pub fn distance_to_centroid(
             &mut self,
             centroid_id: u32,
         ) -> Result<Box<dyn QueryVectorDistance>> {
@@ -663,6 +671,27 @@ mod split {
             assert_eq!(old.primary_id, from);
             self.postings.remove(from, record_id)?;
             self.postings.insert(to, record_id, vector)
+        }
+
+        pub fn move_posting_from(
+            &mut self,
+            record_id: i64,
+            source: u32,
+            target: u32,
+        ) -> Result<()> {
+            let old = self
+                .assignments
+                .update(record_id, CentroidAssignment::new(target))?;
+            assert_eq!(old.primary_id, source);
+            let v = self.postings.remove(source, record_id)?.unwrap().to_vec();
+            self.postings.insert(target, record_id, &v)
+        }
+
+        pub fn copy_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
+            self.assignments
+                .overwrite(record_id, CentroidAssignment::new(target))?;
+            let v = self.postings.get(source, record_id)?;
+            self.postings.insert(target, record_id, &v)
         }
 
         pub fn flush(mut self) -> Result<()> {
@@ -783,4 +812,508 @@ impl BalanceSummary {
     pub fn above_exemplar(&self) -> Option<(usize, usize)> {
         self.above_exemplar
     }
+}
+
+mod parallel {
+    use rand::Rng;
+    use rayon::prelude::*;
+    use std::{
+        collections::{HashMap, HashSet},
+        num::NonZero,
+        ops::RangeInclusive,
+        sync::Arc,
+    };
+    use wt_mdb::{Connection, Error, Result};
+
+    use crate::{
+        posting_block::PostingBlock,
+        spann::{
+            TableIndex, TransactionIndex,
+            centroid_stats::{CentroidCounts, CentroidStats},
+            rebalance::{MergeStats, RebalanceStats, SplitStats, split::PostingUpdater},
+        },
+        vamana::{
+            GraphVectorIndex, GraphVectorStore,
+            mutate::{delete_vector, upsert_vector},
+            search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
+        },
+    };
+
+    #[derive(Debug, Clone)]
+    pub enum RebalanceOp {
+        /// Merge out the centroid, globally reassigning all vectors contain in its posting.
+        Merge(u32),
+        /// Split the centroid into two new component centroids.
+        /// Posting vectors will be assigned to new targets or globally reassigned.
+        Split(u32, u32, u32),
+    }
+
+    impl RebalanceOp {
+        fn source(&self) -> u32 {
+            *match self {
+                Self::Merge(c) => c,
+                Self::Split(c, _, _) => c,
+            }
+        }
+    }
+
+    /// Get a list of all rebalancing operations that need to be performed.
+    pub fn get_rebalance_ops(
+        stats: &CentroidStats,
+        bounds: RangeInclusive<usize>,
+    ) -> Vec<RebalanceOp> {
+        let mut it = stats.available_centroid_ids();
+        stats
+            .assignment_counts_iter()
+            .filter_map(|(centroid, count)| {
+                if (count as usize) < *bounds.start() {
+                    Some(RebalanceOp::Merge(centroid as u32))
+                } else if count as usize > *bounds.end() {
+                    Some(RebalanceOp::Split(
+                        centroid as u32,
+                        it.next().unwrap() as u32,
+                        it.next().unwrap() as u32,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// For all split operations, generates new target centroids and inserts them in head index.
+    pub fn split_update_head<R: Rng>(
+        connection: &Arc<Connection>,
+        index: &Arc<TableIndex>,
+        ops: &[RebalanceOp],
+        rng_supplier: &(impl Fn() -> R + Send + Sync),
+    ) -> Result<()> {
+        // NB: deliberately done sequentially to avoid conflicts.
+        // TODO: parallelize invocation of partition_postings.
+        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+        for op in ops {
+            if let RebalanceOp::Split(s, t0, t1) = op {
+                let mut posting_cursor = txn_idx
+                    .transaction()
+                    .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+                let Some(raw_posting) =
+                    unsafe { posting_cursor.seek_exact_unsafe(*s) }.transpose()?
+                else {
+                    return Ok(());
+                };
+                let block = PostingBlock::new(raw_posting, txn_idx.index().posting_vector_len())
+                    .expect("valid posting block");
+                let mut rng = rng_supplier();
+                let centroids = super::split::partition_postings(
+                    &txn_idx,
+                    *s,
+                    block.iter().map(|(_, v)| v),
+                    &mut rng,
+                );
+
+                upsert_vector(*t0 as i64, &centroids[0], txn_idx.head())?;
+                upsert_vector(*t1 as i64, &centroids[1], txn_idx.head())?;
+            }
+        }
+        txn_idx.commit(None)
+    }
+
+    /// Generate a list of all reassignments out of ops assuming an updated head index.
+    /// Assignments are grouped by _target_ centroid, listing the source centroid and vector.
+    pub fn posting_reassignments(
+        connection: &Arc<Connection>,
+        index: &Arc<TableIndex>,
+        ops: &[RebalanceOp],
+    ) -> Result<(HashMap<u32, Vec<(u32, i64)>>, RebalanceStats)> {
+        #[derive(Debug, Clone)]
+        enum Target {
+            Centroid(u32),
+            Query(Vec<u8>),
+        }
+
+        // For each op compute the set of vectors that need to be moved to a target.
+        let centroid_reassignments = ops
+            .par_iter()
+            .map_init(
+                || {
+                    TransactionIndex::new(
+                        index,
+                        connection
+                            .begin_transaction(None)
+                            .expect("open session and txn"),
+                    )
+                },
+                |txn, op| {
+                    let mut posting_cursor = txn
+                        .transaction()
+                        .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+                    let Some(raw_posting) =
+                        unsafe { posting_cursor.seek_exact_unsafe(op.source()) }.transpose()?
+                    else {
+                        return Ok::<(u32, Vec<(i64, Target)>), Error>((op.source(), vec![]));
+                    };
+                    let block = PostingBlock::new(raw_posting, txn.index().posting_vector_len())
+                        .expect("valid posting block");
+                    match op {
+                        RebalanceOp::Split(s, t0, t1) => {
+                            // XXX using PostingUpdater is kind of gross but it's easy.
+                            let mut updater = super::split::PostingUpdater::new(txn)?;
+                            let s_distfn = updater.distance_to_centroid(*s)?;
+                            let t0_distfn = updater.distance_to_centroid(*t0)?;
+                            let t1_distfn = updater.distance_to_centroid(*t1)?;
+                            Ok((
+                                *s,
+                                block
+                                    .iter()
+                                    .map(|(id, v)| {
+                                        let s_dist = s_distfn.distance(v);
+                                        let t0_dist = t0_distfn.distance(v);
+                                        let t1_dist = t1_distfn.distance(v);
+                                        let target = if s_dist < t0_dist && s_dist < t1_dist {
+                                            Target::Query(v.to_vec())
+                                        } else if t0_dist < t1_dist {
+                                            Target::Centroid(*t0)
+                                        } else {
+                                            Target::Centroid(*t1)
+                                        };
+                                        (id, target)
+                                    })
+                                    .collect::<Vec<_>>(),
+                            ))
+                        }
+                        RebalanceOp::Merge(s) => Ok((
+                            *s,
+                            block
+                                .iter()
+                                .map(|(i, v)| (i, Target::Query(v.to_vec())))
+                                .collect::<Vec<_>>(),
+                        )),
+                    }
+                },
+            )
+            .collect::<Result<Vec<_>>>()?;
+        let mut stats = ops
+            .iter()
+            .zip(centroid_reassignments.iter())
+            .map(|(op, assignments)| match op {
+                RebalanceOp::Merge(_) => {
+                    RebalanceStats::default()
+                        + MergeStats {
+                            moved_vectors: assignments.1.len(),
+                            unique_centroids: 0,
+                        }
+                }
+                RebalanceOp::Split(_, _, _) => {
+                    RebalanceStats::default()
+                        + SplitStats {
+                            moved_vectors: assignments.1.len(),
+                            searches: assignments
+                                .1
+                                .iter()
+                                .filter(|x| matches!(x.1, Target::Query(_)))
+                                .count(),
+                            nearby_seen: 0,
+                            nearby_moved: 0,
+                        }
+                }
+            })
+            .fold(RebalanceStats::default(), |acc, s| acc + s);
+        // Assign targets to any vector that does not yet have one and group by target centroid.
+        let coder = index.new_posting_coder();
+        let filter = ops.iter().map(|o| o.source()).collect::<HashSet<_>>();
+        let (by_target, search_stats) = centroid_reassignments
+            .into_par_iter()
+            .flat_map(|(source, postings)| {
+                postings
+                    .into_par_iter()
+                    .map(move |(vector_id, target)| (source, vector_id, target))
+            })
+            .map_init(
+                || {
+                    let txn = TransactionIndex::new(
+                        index,
+                        connection
+                            .begin_transaction(None)
+                            .expect("open session and txn"),
+                    );
+                    // Use a lower budget for during reassignment. We're going to seed the search
+                    // with the source node which makes convergence faster and more accurate.
+                    let mut params = txn.index().config().head_search_params;
+                    params.beam_width = NonZero::new(16.min(params.beam_width.get())).unwrap();
+                    let searcher = GraphSearcher::new(params);
+                    (txn, searcher)
+                },
+                |(txn, searcher), (source, vector_id, target)| match target {
+                    Target::Centroid(c) => Ok::<(u32, i64, u32, GraphSearchStats), Error>((
+                        source,
+                        vector_id,
+                        c,
+                        GraphSearchStats::default(),
+                    )),
+                    Target::Query(q) => {
+                        let candidates = searcher.search_with_options(
+                            &coder.decode(&q),
+                            GraphSearchOptions::with_filter(|i| !filter.contains(&(i as u32)))
+                                .with_seeds([source as i64]),
+                            txn.head(),
+                        )?;
+                        Ok((
+                            source,
+                            vector_id,
+                            candidates[0].vertex() as u32,
+                            searcher.stats(),
+                        ))
+                    }
+                },
+            )
+            .try_fold(
+                || {
+                    (
+                        HashMap::<u32, Vec<(u32, i64)>>::new(),
+                        GraphSearchStats::default(),
+                    )
+                },
+                |(mut m, mut s), r| {
+                    let (source, vector_id, target, search_stats) = r?;
+                    m.entry(target).or_default().push((source, vector_id));
+                    s += search_stats;
+                    Ok::<(HashMap<u32, Vec<(u32, i64)>>, GraphSearchStats), Error>((m, s))
+                },
+            )
+            .try_reduce(
+                || (HashMap::new(), GraphSearchStats::default()),
+                |(mut acc, mut acc_stats), (partial, partial_stats)| {
+                    for (centroid, list) in partial {
+                        acc.entry(centroid).or_default().extend_from_slice(&list);
+                    }
+                    acc_stats += partial_stats;
+                    Ok((acc, acc_stats))
+                },
+            )?;
+        stats.search_stats = search_stats;
+        Ok((by_target, stats))
+    }
+
+    /// Apply all posting reassignments then remove the source centroid ids.
+    pub fn apply_posting_reassignments(
+        connection: &Arc<Connection>,
+        index: &Arc<TableIndex>,
+        reassignments: &HashMap<u32, Vec<(u32, i64)>>,
+        ops: &[RebalanceOp],
+    ) -> Result<()> {
+        reassignments
+            .par_iter()
+            .try_for_each(|(target, reassignments)| {
+                let txn = TransactionIndex::new(index, connection.begin_transaction(None)?);
+                let mut updater = PostingUpdater::new(&txn)?;
+                for (source, vector_id) in reassignments {
+                    updater.copy_posting(*vector_id, *source, *target)?
+                }
+                updater.flush()?;
+                txn.commit(None)?;
+                Ok::<_, Error>(())
+            })?;
+
+        // NB: deliberately sequential to avoid high conflict rate.
+        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+        for op in ops {
+            let mut stats_cursor = txn_idx
+                .transaction()
+                .open_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?;
+            stats_cursor.remove(op.source()).or_else(|e| {
+                if e == Error::not_found_error() {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
+            let mut posting_cursor = txn_idx
+                .transaction()
+                .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+            posting_cursor.remove(op.source()).or_else(|e| {
+                if e == Error::not_found_error() {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
+            delete_vector(op.source() as i64, txn_idx.head())?;
+        }
+        txn_idx.commit(None)
+    }
+
+    /// For all split ops produce a map from each nearby centroid that should be considered for
+    /// reassignment to a list of potential targets that should be considered.
+    pub fn select_nearby_centroids(
+        connection: &Arc<Connection>,
+        index: &Arc<TableIndex>,
+        ops: &[RebalanceOp],
+    ) -> Result<(HashMap<u32, Vec<u32>>, GraphSearchStats)> {
+        let filter_centroids = ops.iter().map(RebalanceOp::source).collect::<HashSet<_>>();
+        let target_to_nearby = ops
+            .par_iter()
+            .filter(|op| matches!(op, RebalanceOp::Split(_, _, _)))
+            .flat_map(|op| {
+                let RebalanceOp::Split(_, t0, t1) = op else {
+                    unreachable!("filtered to splits")
+                };
+                [*t0, *t1]
+            })
+            .map_init(
+                || {
+                    let txn = TransactionIndex::new(
+                        index,
+                        connection
+                            .begin_transaction(None)
+                            .expect("open session and txn"),
+                    );
+                    // Search for 128 vectors regardless of settings, we will truncate to 64 for
+                    // nearby check.
+                    let mut params = txn.index().config().head_search_params;
+                    params.beam_width = NonZero::new(128).unwrap();
+                    let searcher = GraphSearcher::new(params);
+                    (txn, searcher)
+                },
+                |(txn_idx, searcher), centroid| {
+                    let mut store = txn_idx.head().high_fidelity_vectors()?;
+                    let coder = store.new_coder();
+                    let candidates = searcher.search_with_options(
+                        &coder.decode(
+                            store
+                                .get(centroid as i64)
+                                .unwrap_or_else(|| Err(Error::not_found_error()))?,
+                        ),
+                        GraphSearchOptions::with_filter(|i| {
+                            i != centroid as i64 && !filter_centroids.contains(&(i as u32))
+                        })
+                        .with_seeds([centroid as i64]),
+                        txn_idx.head(),
+                    )?;
+                    Ok::<_, Error>((
+                        centroid,
+                        candidates
+                            .iter()
+                            .take(64)
+                            .map(|n| n.vertex() as u32)
+                            .collect::<Vec<_>>(),
+                        searcher.stats(),
+                    ))
+                },
+            )
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut nearby_to_targets: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut search_stats = GraphSearchStats::default();
+        for (target, nearby, stats) in target_to_nearby {
+            search_stats += stats;
+            for n in nearby {
+                nearby_to_targets.entry(n).or_default().push(target);
+            }
+        }
+        Ok((nearby_to_targets, search_stats))
+    }
+
+    /// For each nearby centroid examine all postings and compare them against each of the target
+    /// centroid vectors. Yield any vector that is closer to one of the targets.
+    pub fn compute_nearby_reassignments(
+        connection: &Arc<Connection>,
+        index: &Arc<TableIndex>,
+        nearby_to_targets: &HashMap<u32, Vec<u32>>,
+    ) -> Result<(Vec<(u32, i64, u32)>, SplitStats)> {
+        let per_nearby = nearby_to_targets
+            .par_iter()
+            .map_init(
+                || {
+                    TransactionIndex::new(
+                        index,
+                        connection
+                            .begin_transaction(None)
+                            .expect("open session and txn"),
+                    )
+                },
+                |txn, (nearby, targets)| {
+                    // XXX using PostingUpdater is kind of gross but it's easy.
+                    let mut updater = super::split::PostingUpdater::new(txn)?;
+                    let postings = updater.read_centroid(*nearby)?;
+                    let nearby_distfn = updater.distance_to_centroid(*nearby)?;
+                    let targets_distfn = targets
+                        .iter()
+                        .map(|c| updater.distance_to_centroid(*c))
+                        .collect::<Result<Vec<_>>>()?;
+                    let moves = postings
+                        .iter()
+                        .filter_map(|(id, v)| {
+                            let closest_target = targets
+                                .iter()
+                                .zip(targets_distfn.iter())
+                                .map(|(c, d)| (*c, d.distance(&v)))
+                                .min_by(|a, b| a.1.total_cmp(&b.1))
+                                .unwrap();
+                            if closest_target.1 < nearby_distfn.distance(&v) {
+                                Some((*nearby, *id, closest_target.0))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    // XXX reflect the number of comparisons done in the same way as baseline.
+                    let stats = SplitStats {
+                        nearby_seen: (postings.len() * targets.len()),
+                        nearby_moved: moves.len(),
+                        ..Default::default()
+                    };
+                    Ok::<_, Error>((moves, stats))
+                },
+            )
+            .collect::<Result<Vec<_>>>()?;
+
+        let stats = per_nearby
+            .iter()
+            .map(|x| x.1)
+            .fold(SplitStats::default(), |acc, s| acc + s);
+        let moves = per_nearby.into_iter().map(|x| x.0).flatten().collect();
+        Ok((moves, stats))
+    }
+
+    /// Apply all computed nearby reassignments to the index.
+    pub fn apply_nearby_reassignments(
+        connection: &Arc<Connection>,
+        index: &Arc<TableIndex>,
+        moves: &[(u32, i64, u32)],
+    ) -> Result<()> {
+        if moves.is_empty() {
+            return Ok(());
+        }
+
+        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+        let mut updater = PostingUpdater::new(&txn_idx)?;
+        for &(source, record_id, target) in moves {
+            updater.move_posting_from(record_id, source, target)?;
+        }
+        updater.flush()?;
+        txn_idx.commit(None)
+    }
+}
+
+/// Rebalance all centroids that do not match size policy in parallel.
+pub fn parallel_rebalance<R: Rng>(
+    connection: &Arc<Connection>,
+    index: &Arc<TableIndex>,
+    rng_supplier: &(impl Fn() -> R + Send + Sync),
+) -> Result<RebalanceStats> {
+    let centroid_stats = {
+        let txn = TransactionIndex::new(index, connection.begin_transaction(None)?);
+        CentroidStats::from_index_stats(&txn)?
+    };
+    let ops = parallel::get_rebalance_ops(&centroid_stats, index.config().centroid_len_range());
+    parallel::split_update_head(connection, index, &ops, rng_supplier)?;
+    let (reassignments, mut stats) = parallel::posting_reassignments(connection, index, &ops)?;
+    parallel::apply_posting_reassignments(connection, index, &reassignments, &ops)?;
+    // XXX I should be able to disable nearby reassignment.
+    let (nearby_to_targets, _) = parallel::select_nearby_centroids(connection, index, &ops)?;
+    let (nearby_reassignments, nearby_stats) =
+        parallel::compute_nearby_reassignments(connection, index, &nearby_to_targets)?;
+    stats += nearby_stats;
+    parallel::apply_nearby_reassignments(connection, index, &nearby_reassignments)?;
+    Ok(stats)
 }

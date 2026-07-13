@@ -6,7 +6,7 @@
 //! block is inferred from the byte size of the block. Identifiers are stored before the rest of
 //! the vector to allow mutation without having to visit every byte in the block.
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use vectors::F32VectorCoder;
 
@@ -180,6 +180,8 @@ pub struct PostingBlockMut {
     base_meta: PostingBlockMeta,
     /// Current entries sorted by id. Start pre-populated from base block.
     entries: BTreeMap<i64, EntrySource>,
+    /// If true, block contents has been modified.
+    dirty: bool,
 }
 
 impl PostingBlockMut {
@@ -189,6 +191,7 @@ impl PostingBlockMut {
             base_data: vec![],
             base_meta: PostingBlockMeta::new(0, vector_len).expect("0 divides evenly"),
             entries: BTreeMap::new(),
+            dirty: false,
         }
     }
 
@@ -204,6 +207,7 @@ impl PostingBlockMut {
             base_data: block.data.to_vec(),
             base_meta: block.meta,
             entries,
+            dirty: false,
         }
     }
 
@@ -224,12 +228,18 @@ impl PostingBlockMut {
     pub fn insert(&mut self, id: i64, vector: impl Into<Vec<u8>>) {
         let vector = vector.into();
         assert_eq!(vector.len(), self.base_meta.vector_len);
+        self.dirty = true;
         self.entries.insert(id, EntrySource::New(vector));
     }
 
     /// Remove the entry for `id`, returning `true` if it was present.
-    pub fn remove(&mut self, id: i64) -> bool {
-        self.entries.remove(&id).is_some()
+    pub fn remove(&mut self, id: i64) -> Option<Cow<'_, [u8]>> {
+        let result = self.entries.remove(&id).map(|e| match e {
+            EntrySource::Base(i) => self.base_meta.vector_index(&self.base_data, i).into(),
+            EntrySource::New(v) => v.into(),
+        });
+        self.dirty |= result.is_some();
+        result
     }
 
     /// The original block data passed to [`PostingBlockMut::from_block`], or an empty slice for
@@ -252,6 +262,16 @@ impl PostingBlockMut {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Return true if the block has been modified.
+    pub fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Mark this block as dirty.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     fn get_vector<'a>(&'a self, entry: &'a EntrySource) -> &'a [u8] {
@@ -414,7 +434,7 @@ mod tests {
     fn posting_block_mut_remove_existing() {
         let mut mb = PostingBlockMut::new(4);
         mb.insert(1, vec![1, 2, 3, 4]);
-        assert!(mb.remove(1));
+        assert!(mb.remove(1).is_some());
         assert_eq!(mb.len(), 0);
         assert_eq!(mb.lookup(1), None);
     }
@@ -423,7 +443,7 @@ mod tests {
     fn posting_block_mut_remove_missing_returns_false() {
         let mut mb = PostingBlockMut::new(4);
         mb.insert(1, vec![1, 2, 3, 4]);
-        assert!(!mb.remove(2));
+        assert!(mb.remove(2).is_none());
         assert_eq!(mb.len(), 1);
     }
 
@@ -455,7 +475,7 @@ mod tests {
         let data = make_block_data(&[(1, &[10, 11, 12, 13]), (5, &[20, 21, 22, 23])]);
         let block = PostingBlock::new(&data, 4).unwrap();
         let mut mb = PostingBlockMut::from_block(&block);
-        assert!(mb.remove(1));
+        assert!(mb.remove(1).is_some());
         assert_eq!(mb.len(), 1);
         assert_eq!(mb.lookup(1), None);
         assert_eq!(mb.lookup(5), Some(&[20u8, 21, 22, 23][..]));
@@ -565,7 +585,10 @@ mod tests {
         let n = 5usize;
         let input: Vec<(i64, Vec<f32>)> = (0..n as i64).map(|i| (i, vec![i as f32; 4])).collect();
         let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
-        assert_eq!(result.len(), n * (coder.byte_len(4) + std::mem::size_of::<i64>()));
+        assert_eq!(
+            result.len(),
+            n * (coder.byte_len(4) + std::mem::size_of::<i64>())
+        );
     }
 
     #[test]
@@ -578,7 +601,10 @@ mod tests {
         let (_, vec_bytes) = block.iter().next().unwrap();
         let decoded = decode_f32_vec(vec_bytes);
         let norm_sq: f32 = decoded.iter().map(|x| x * x).sum();
-        assert!((norm_sq - 1.0).abs() < 1e-6, "expected unit norm, got norm_sq={norm_sq}");
+        assert!(
+            (norm_sq - 1.0).abs() < 1e-6,
+            "expected unit norm, got norm_sq={norm_sq}"
+        );
         assert!((decoded[0] - 0.6).abs() < 1e-6, "decoded[0]={}", decoded[0]);
         assert!((decoded[1] - 0.8).abs() < 1e-6, "decoded[1]={}", decoded[1]);
     }
@@ -597,7 +623,10 @@ mod tests {
         assert!(block.lookup(3).is_some());
         assert!(block.lookup(7).is_some());
         assert!(block.lookup(2).is_none());
-        assert_eq!(decode_f32_vec(block.lookup(3).unwrap()), [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(
+            decode_f32_vec(block.lookup(3).unwrap()),
+            [0.0, 1.0, 0.0, 0.0]
+        );
     }
 
     // --- leaf_page_max ---

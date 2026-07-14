@@ -1,9 +1,8 @@
 //! Index search implementation, including graph search and re-ranking.
 
-use std::{
-    collections::HashSet,
-    ops::{Add, AddAssign},
-};
+use std::ops::{Add, AddAssign};
+
+use ahash::AHashSet;
 
 use super::{Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore};
 use crate::{vamana::PatienceParams, Neighbor};
@@ -81,7 +80,7 @@ pub struct GraphSearcher {
     patience: Option<Patience>,
 
     candidates: CandidateList,
-    seen: HashSet<i64>, // TODO: use a more efficient hash function (ahash?)
+    seen: AHashSet<i64>,
     candidates_added: usize,
     visited: usize,
     filtered: usize,
@@ -100,7 +99,7 @@ impl GraphSearcher {
             params,
             patience,
             candidates: CandidateList::new(params.beam_width.get()),
-            seen: HashSet::new(),
+            seen: AHashSet::new(),
             candidates_added: 0,
             visited: 0,
             filtered: 0,

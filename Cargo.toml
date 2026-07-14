@@ -39,6 +39,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 wgpu = "29.0.1"
 
 [dependencies]
+ahash = "0.8.12"
 bytemuck = { workspace = true }
 crossbeam-skiplist = { workspace = true }
 half = { workspace = true }

@@ -5,7 +5,7 @@ use std::ops::{Add, AddAssign};
 use ahash::AHashSet;
 
 use super::{Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore};
-use crate::{vamana::PatienceParams, Neighbor};
+use crate::{Neighbor, vamana::PatienceParams};
 
 use vectors::QueryVectorDistance;
 use wt_mdb::{Error, Result};
@@ -278,8 +278,7 @@ impl GraphSearcher {
             let mut added = 0;
             for edge in graph
                 .edges(vertex_id)
-                .unwrap_or(Err(Error::not_found_error()))?
-                .collect::<Vec<_>>()
+                .unwrap_or_else(|| Err(Error::not_found_error()))?
             {
                 if !self.seen.insert(edge) {
                     continue;
@@ -463,10 +462,10 @@ mod test {
     use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
     use wt_mdb::{Error, Result};
 
+    use crate::Neighbor;
     use crate::vamana::{
         EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
     };
-    use crate::Neighbor;
 
     use super::{GraphSearchParams, GraphSearcher};
 

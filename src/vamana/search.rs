@@ -133,7 +133,7 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, |_| true, reader)
+        self.search_internal(query, |_| true, std::iter::empty(), reader)
     }
 
     /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
@@ -148,7 +148,24 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, filter_predicate, reader)
+        self.search_internal(query, filter_predicate, std::iter::empty(), reader)
+    }
+
+    /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
+    /// vertex ids are valid results, seeding the candidate queue with `seeds` in addition to the graph entry point.
+    ///
+    /// Any seed vertex that cannot be found in the graph is silently skipped.
+    ///
+    /// Returns an approximate list of neighbors matching `filter_predicate` with the highest scores.
+    pub fn search_with_filter_and_seeds(
+        &mut self,
+        query: &[f32],
+        filter_predicate: impl FnMut(i64) -> bool,
+        seeds: impl IntoIterator<Item = i64>,
+        reader: &impl GraphVectorIndex,
+    ) -> Result<Vec<Neighbor>> {
+        self.seen.clear();
+        self.search_internal(query, filter_predicate, seeds, reader)
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -197,6 +214,7 @@ impl GraphSearcher {
         self.search_graph_and_rerank(
             nav_query.as_ref(),
             |_| true,
+            std::iter::empty(),
             rerank_query.as_ref().map(|q| q.as_ref()),
             reader,
         )
@@ -206,6 +224,7 @@ impl GraphSearcher {
         &mut self,
         query: &[f32],
         filter_predicate: impl FnMut(i64) -> bool,
+        seeds: impl IntoIterator<Item = i64>,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         let nav_query = reader.config().nav_format.query_distance_asymmetric(
@@ -228,6 +247,7 @@ impl GraphSearcher {
         self.search_graph_and_rerank(
             nav_query.as_ref(),
             filter_predicate,
+            seeds,
             rerank_query.as_ref().map(|q| q.as_ref()),
             reader,
         )
@@ -237,6 +257,7 @@ impl GraphSearcher {
         &mut self,
         nav_query: &dyn QueryVectorDistance,
         mut filter_predicate: impl FnMut(i64) -> bool,
+        seeds: impl IntoIterator<Item = i64>,
         rerank_query: Option<&dyn QueryVectorDistance>,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
@@ -263,6 +284,23 @@ impl GraphSearcher {
                 self.candidates_added += 1;
             }
             self.seen.insert(entry_point);
+        }
+
+        for seed in seeds {
+            if !self.seen.insert(seed) {
+                continue;
+            }
+            let seed_vector = match nav.get(seed) {
+                Some(Ok(v)) => v,
+                // Silently skip any seed that cannot be found in the graph.
+                _ => continue,
+            };
+            if self
+                .candidates
+                .add_unvisited(Neighbor::new(seed, nav_query.distance(seed_vector)))
+            {
+                self.candidates_added += 1;
+            }
         }
 
         while let Some(best_candidate) = self.candidates.next_unvisited() {

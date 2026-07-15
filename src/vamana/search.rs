@@ -81,9 +81,8 @@ pub struct Options<F: FnMut(i64) -> bool> {
     result_scratch: Option<Vec<Neighbor>>,
 }
 
-impl Options<fn(i64) -> bool> {
-    /// Create default options.
-    pub fn new() -> Self {
+impl Default for Options<fn(i64) -> bool> {
+    fn default() -> Self {
         Self {
             filter: (|_| true) as fn(i64) -> bool,
             seeds: smallvec::SmallVec::new(),
@@ -177,7 +176,7 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, Options::new(), reader)
+        self.search_internal(query, Options::default(), reader)
     }
 
     /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
@@ -277,7 +276,7 @@ impl GraphSearcher {
 
         self.search_graph_and_rerank(
             nav_query.as_ref(),
-            Options::new(),
+            Options::default(),
             rerank_query.as_ref().map(|q| q.as_ref()),
             reader,
         )
@@ -404,28 +403,33 @@ impl GraphSearcher {
             }
         }
 
-        // XXX re-use the scratch vector instead of allocating a new one every time.
+        // Reuse result_scratch if present to avoid reallocation of the result vec.
+        let mut results = options
+            .result_scratch
+            .take()
+            .map(|mut v| {
+                v.clear();
+                v
+            })
+            .unwrap_or_default();
         if let Some(rerank_query) = rerank_query {
             let mut rerank_vectors = reader.rerank_vectors().expect("rerank enabled")?;
-            let rescored = self
-                .candidates
-                .iter()
-                .take(self.params.num_rerank)
-                .map(|c| {
-                    let vertex = c.neighbor.vertex();
+            results.reserve(self.params.num_rerank);
+            for c in self.candidates.iter().take(self.params.num_rerank) {
+                let vertex = c.neighbor.vertex();
+                results.push(
                     rerank_vectors
                         .get(vertex)
                         .expect("row exists")
-                        .map(|rv| Neighbor::new(vertex, rerank_query.distance(rv)))
-                })
-                .collect::<Result<Vec<_>>>();
-            rescored.map(|mut r| {
-                r.sort();
-                r
-            })
+                        .map(|rv| Neighbor::new(vertex, rerank_query.distance(rv)))?,
+                );
+            }
+            results.sort_unstable();
         } else {
-            Ok(self.candidates.iter().map(|c| c.neighbor).collect())
+            results.reserve(self.candidates.len());
+            results.extend(self.candidates.iter().map(|c| c.neighbor));
         }
+        Ok(results)
     }
 }
 
@@ -510,6 +514,10 @@ impl CandidateList {
     fn clear(&mut self) {
         self.candidates.clear();
         self.next_unvisited = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.candidates.len()
     }
 }
 

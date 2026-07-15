@@ -192,7 +192,7 @@ impl<'a> CentroidAssignmentUpdater<'a> {
         Ok(existing_assignment)
     }
 
-    // XXX docos
+    /// Overwrite the assignment for `record_id`, without consider previous assignment.
     pub fn overwrite(&mut self, record_id: i64, assignment: CentroidAssignment) -> Result<()> {
         self.assignments_cursor.set(record_id, assignment)?;
         self.stats.increment_count(assignment.primary_id)

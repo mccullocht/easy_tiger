@@ -1,15 +1,11 @@
 use std::{ops::RangeInclusive, sync::Arc};
 
 use rand::Rng;
-use wt_mdb::{Connection, Error, Kind, Result, WiredTigerError};
+use wt_mdb::{Connection, Result};
 
 use crate::{
-    spann::{
-        CentroidAssignment, TableIndex, TransactionIndex,
-        centroid_stats::{CentroidCounts, CentroidStats},
-        postings::BlockPostingsMut,
-    },
-    vamana::{search::GraphSearchStats, search::GraphSearcher},
+    spann::{TableIndex, TransactionIndex, centroid_stats::CentroidStats},
+    vamana::search::GraphSearchStats,
 };
 
 use std::ops::{Add, AddAssign};
@@ -143,99 +139,6 @@ impl AddAssign<SplitStats> for RebalanceStats {
     }
 }
 
-mod split {
-    use vectors::{F32VectorCoder, F32VectorCoding, QueryVectorDistance};
-    use wt_mdb::{Error, Result};
-
-    use crate::spann::{
-        CentroidAssignment, TransactionIndex, centroid_stats::CentroidAssignmentUpdater,
-        postings::BlockPostingsMut,
-    };
-    use crate::vamana::wt::CursorVectorStore;
-    use crate::vamana::{GraphVectorIndex, GraphVectorStore};
-
-    pub struct PostingUpdater<'a> {
-        postings: BlockPostingsMut<'a>,
-        assignments: CentroidAssignmentUpdater<'a>,
-        centroid_store: CursorVectorStore<'a>,
-        posting_format: F32VectorCoding,
-        head_coder: Option<Box<dyn F32VectorCoder>>,
-    }
-
-    impl<'a> PostingUpdater<'a> {
-        pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
-            let centroid_store = txn_idx.head().high_fidelity_vectors()?;
-            let posting_format = txn_idx.index().config().posting_coder;
-            let head_format = centroid_store.format();
-            let head_coder = if posting_format == head_format {
-                None
-            } else {
-                Some(head_format.coder(centroid_store.similarity(), None))
-            };
-            Ok(Self {
-                postings: BlockPostingsMut::from_txn(txn_idx)?,
-                assignments: CentroidAssignmentUpdater::new(txn_idx)?,
-                centroid_store,
-                posting_format,
-                head_coder,
-            })
-        }
-
-        pub fn distance_to_centroid(
-            &mut self,
-            centroid_id: u32,
-        ) -> Result<Box<dyn QueryVectorDistance>> {
-            let similarity = self.centroid_store.similarity();
-            let query = self
-                .centroid_store
-                .get(centroid_id as i64)
-                .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            if let Some(head_coder) = self.head_coder.as_ref() {
-                let query = head_coder.decode(query);
-                Ok(self
-                    .posting_format
-                    .query_distance_asymmetric(similarity, query, None))
-            } else {
-                Ok(self
-                    .posting_format
-                    .query_distance_symmetric(similarity, query.to_vec(), None))
-            }
-        }
-
-        pub fn read_centroid(&mut self, centroid_id: u32) -> Result<Vec<(i64, Vec<u8>)>> {
-            self.postings.read_centroid(centroid_id)
-        }
-
-        // XXX rename
-        pub fn move_posting_from(
-            &mut self,
-            record_id: i64,
-            source: u32,
-            target: u32,
-        ) -> Result<()> {
-            let old = self
-                .assignments
-                .update(record_id, CentroidAssignment::new(target))?;
-            assert_eq!(old.primary_id, source);
-            let v = self.postings.remove(source, record_id)?.unwrap().to_vec();
-            self.postings.insert(target, record_id, &v)
-        }
-
-        pub fn copy_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
-            self.assignments
-                .overwrite(record_id, CentroidAssignment::new(target))?;
-            let v = self.postings.get(source, record_id)?;
-            self.postings.insert(target, record_id, &v)
-        }
-
-        pub fn flush(mut self) -> Result<()> {
-            self.postings
-                .flush()
-                .and_then(|()| self.assignments.flush())
-        }
-    }
-}
-
 /// A summary of centroid assignment balance.
 ///
 /// This consumes centroid stats and a range of valid assignment counts and provides a summary of
@@ -326,20 +229,23 @@ mod parallel {
         sync::Arc,
     };
     use tracing::warn;
+    use vectors::{F32VectorCoder, F32VectorCoding, QueryVectorDistance};
     use wt_mdb::{Connection, Error, Result};
 
     use crate::{
         input::VecVectorStore,
         posting_block::PostingBlock,
         spann::{
-            TableIndex, TransactionIndex,
-            centroid_stats::{CentroidCounts, CentroidStats},
-            rebalance::{MergeStats, RebalanceStats, SplitStats, split::PostingUpdater},
+            CentroidAssignment, TableIndex, TransactionIndex,
+            centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
+            postings::BlockPostingsMut,
+            rebalance::{MergeStats, RebalanceStats, SplitStats},
         },
         vamana::{
             GraphVectorIndex, GraphVectorStore,
             mutate::{delete_vector, upsert_vector},
             search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
+            wt::CursorVectorStore,
         },
     };
 
@@ -358,6 +264,91 @@ mod parallel {
                 Self::Merge(c) => c,
                 Self::Split(c, _, _) => c,
             }
+        }
+    }
+
+    pub struct CentroidDistanceFactory<'a> {
+        centroid_store: CursorVectorStore<'a>,
+        posting_format: F32VectorCoding,
+        head_coder: Option<Box<dyn F32VectorCoder>>,
+    }
+
+    impl<'a> CentroidDistanceFactory<'a> {
+        pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
+            let centroid_store = txn_idx.head().high_fidelity_vectors()?;
+            let posting_format = txn_idx.index().config().posting_coder;
+            let head_format = centroid_store.format();
+            let head_coder = if posting_format == head_format {
+                None
+            } else {
+                Some(head_format.coder(centroid_store.similarity(), None))
+            };
+            Ok(Self {
+                centroid_store,
+                posting_format,
+                head_coder,
+            })
+        }
+
+        pub fn distance_to_centroid(
+            &mut self,
+            centroid_id: u32,
+        ) -> Result<Box<dyn QueryVectorDistance>> {
+            let similarity = self.centroid_store.similarity();
+            let query = self
+                .centroid_store
+                .get(centroid_id as i64)
+                .unwrap_or_else(|| Err(Error::not_found_error()))?;
+            if let Some(head_coder) = self.head_coder.as_ref() {
+                let query = head_coder.decode(query);
+                Ok(self
+                    .posting_format
+                    .query_distance_asymmetric(similarity, query, None))
+            } else {
+                Ok(self
+                    .posting_format
+                    .query_distance_symmetric(similarity, query.to_vec(), None))
+            }
+        }
+    }
+
+    struct PostingUpdater<'a> {
+        postings: BlockPostingsMut<'a>,
+        assignments: CentroidAssignmentUpdater<'a>,
+    }
+
+    impl<'a> PostingUpdater<'a> {
+        pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
+            Ok(Self {
+                postings: BlockPostingsMut::from_txn(txn_idx)?,
+                assignments: CentroidAssignmentUpdater::new(txn_idx)?,
+            })
+        }
+
+        pub fn read_centroid(&mut self, centroid_id: u32) -> Result<Vec<(i64, Vec<u8>)>> {
+            self.postings.read_centroid(centroid_id)
+        }
+
+        pub fn move_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
+            let old = self
+                .assignments
+                .update(record_id, CentroidAssignment::new(target))?;
+            assert_eq!(old.primary_id, source);
+            let v = self.postings.remove(source, record_id)?.unwrap().to_vec();
+            self.postings.insert(target, record_id, &v)
+        }
+
+        pub fn copy_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
+            self.assignments
+                .overwrite(record_id, CentroidAssignment::new(target))?;
+            let v = self.postings.get(source, record_id)?;
+            self.postings.insert(target, record_id, &v)
+        }
+
+        pub fn flush(mut self) -> Result<()> {
+            self.postings
+                .flush()
+                .and_then(|()| self.assignments.flush())
         }
     }
 
@@ -493,11 +484,10 @@ mod parallel {
                         .expect("valid posting block");
                     match op {
                         RebalanceOp::Split(s, t0, t1) => {
-                            // XXX using PostingUpdater is kind of gross but it's easy.
-                            let mut updater = super::split::PostingUpdater::new(txn)?;
-                            let s_distfn = updater.distance_to_centroid(*s)?;
-                            let t0_distfn = updater.distance_to_centroid(*t0)?;
-                            let t1_distfn = updater.distance_to_centroid(*t1)?;
+                            let mut f = CentroidDistanceFactory::new(txn)?;
+                            let s_distfn = f.distance_to_centroid(*s)?;
+                            let t0_distfn = f.distance_to_centroid(*t0)?;
+                            let t1_distfn = f.distance_to_centroid(*t1)?;
                             Ok((
                                 *s,
                                 block
@@ -555,6 +545,8 @@ mod parallel {
                 }
             })
             .fold(RebalanceStats::default(), |acc, s| acc + s);
+        // XXX try to fold this all together? I'm not sure if it matter that we flatten things out.
+
         // Assign targets to any vector that does not yet have one and group by target centroid.
         let coder = index.new_posting_coder();
         let filter = ops.iter().map(|o| o.source()).collect::<HashSet<_>>();
@@ -768,13 +760,13 @@ mod parallel {
                     )
                 },
                 |txn, (nearby, targets)| {
-                    // XXX using PostingUpdater is kind of gross but it's easy.
-                    let mut updater = super::split::PostingUpdater::new(txn)?;
+                    let mut updater = PostingUpdater::new(txn)?;
+                    let mut f = CentroidDistanceFactory::new(txn)?;
                     let postings = updater.read_centroid(*nearby)?;
-                    let nearby_distfn = updater.distance_to_centroid(*nearby)?;
+                    let nearby_distfn = f.distance_to_centroid(*nearby)?;
                     let targets_distfn = targets
                         .iter()
-                        .map(|c| updater.distance_to_centroid(*c))
+                        .map(|c| f.distance_to_centroid(*c))
                         .collect::<Result<Vec<_>>>()?;
                     let moves = postings
                         .iter()
@@ -792,7 +784,6 @@ mod parallel {
                             }
                         })
                         .collect::<Vec<_>>();
-                    // XXX reflect the number of comparisons done in the same way as baseline.
                     let stats = SplitStats {
                         nearby_seen: (postings.len() * targets.len()),
                         nearby_moved: moves.len(),
@@ -824,7 +815,7 @@ mod parallel {
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
         let mut updater = PostingUpdater::new(&txn_idx)?;
         for &(source, record_id, target) in moves {
-            updater.move_posting_from(record_id, source, target)?;
+            updater.move_posting(record_id, source, target)?;
         }
         updater.flush()?;
         txn_idx.commit(None)
@@ -845,7 +836,6 @@ pub fn parallel_rebalance<R: Rng>(
     parallel::split_update_head(connection, index, &ops, rng_supplier)?;
     let (reassignments, mut stats) = parallel::posting_reassignments(connection, index, &ops)?;
     parallel::apply_posting_reassignments(connection, index, &reassignments, &ops)?;
-    // XXX I should be able to disable nearby reassignment.
     let (nearby_to_targets, _) = parallel::select_nearby_centroids(connection, index, &ops)?;
     let (nearby_reassignments, nearby_stats) =
         parallel::compute_nearby_reassignments(connection, index, &nearby_to_targets)?;

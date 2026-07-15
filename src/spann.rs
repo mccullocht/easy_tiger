@@ -292,7 +292,7 @@ impl Formatted for CentroidAssignment {
     #[inline(always)]
     fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
         if packed.len() != 4 {
-            return Err(Error::Errno(Errno::INVAL));
+            return Err(Error::errno(Errno::INVAL));
         }
         Ok(Self {
             primary_id: u32::from_le_bytes(packed.try_into().unwrap()),

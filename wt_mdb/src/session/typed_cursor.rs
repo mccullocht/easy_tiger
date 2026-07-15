@@ -106,7 +106,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
                 _vm: PhantomData,
             })
         } else {
-            Err(Error::Errno(Errno::INVAL))
+            Err(Error::errno(Errno::INVAL))
         }
     }
 
@@ -198,7 +198,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         modifications: &mut [WT_MODIFY],
     ) -> Result<()> {
         if V::FORMAT.format_str() != "u" {
-            return Err(Error::Errno(Errno::NOTSUP));
+            return Err(Error::errno(Errno::NOTSUP));
         }
         let key = format_to_buf!(key, K, self.key_buf)?;
         unsafe {

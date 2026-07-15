@@ -758,23 +758,23 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     }
 
     fn set_entry_point(&mut self, _: i64) -> Result<()> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 
     fn remove_entry_point(&mut self) -> Result<()> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 
     fn set_edges(&mut self, _: i64, _: impl Into<Vec<i64>>) -> Result<()> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 
     fn remove_vertex(&mut self, _: i64) -> Result<Vec<i64>> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 
     fn next_available_vertex_id(&mut self) -> Result<i64> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 }
 
@@ -847,10 +847,10 @@ impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
     }
 
     fn set(&mut self, _: i64, _: impl AsRef<[u8]>) -> Result<()> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 
     fn remove(&mut self, _: i64) -> Result<Vec<u8>> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 }

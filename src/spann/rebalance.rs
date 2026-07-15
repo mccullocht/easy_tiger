@@ -9,7 +9,7 @@ use crate::{
         postings::BlockPostingsMut,
         CentroidAssignment, TableIndex, TransactionIndex,
     },
-    vamana::{mutate::delete_vector, search::GraphSearcher},
+    vamana::{mutate::delete_vector, search::GraphSearcher, search::Options as GraphSearchOptions},
 };
 
 use std::ops::{Add, AddAssign};
@@ -181,9 +181,9 @@ pub fn merge_centroid(
     for (record_id, vector) in vectors {
         coder.decode_to(&vector, &mut float_vector);
         // TODO: seed the search with the existing assignments for this record; reduce budget.
-        let candidates = searcher.search_with_filter(
+        let candidates = searcher.search_with_options(
             &float_vector,
-            |i| i != centroid_id as i64,
+            GraphSearchOptions::with_filter(|i| i != centroid_id as i64),
             txn_idx.head(),
         )?;
         let new_assignments = CentroidAssignment::new(candidates[0].vertex() as u32);
@@ -415,6 +415,7 @@ mod split {
     use crate::vamana::{
         mutate::{delete_vector, upsert_vector},
         search::GraphSearcher,
+        search::Options as GraphSearchOptions,
         GraphVectorIndex, GraphVectorStore,
     };
 
@@ -555,8 +556,11 @@ mod split {
                 .unwrap_or_else(|| Err(Error::not_found_error()))?,
         );
         let mut searcher = GraphSearcher::new(txn_idx.index().config().head_search_params);
-        let mut candidates =
-            searcher.search_with_filter(&query, |i| i != centroid_id as i64, txn_idx.head())?;
+        let mut candidates = searcher.search_with_options(
+            &query,
+            GraphSearchOptions::with_filter(|i| i != centroid_id as i64),
+            txn_idx.head(),
+        )?;
         candidates.truncate(64);
         Ok(candidates.into_iter().map(|n| n.vertex() as u32).collect())
     }

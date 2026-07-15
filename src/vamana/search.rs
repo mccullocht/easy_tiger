@@ -179,44 +179,6 @@ impl GraphSearcher {
         self.search_internal(query, Options::default(), reader)
     }
 
-    /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
-    /// vertex ids are valid results. The returned results will only include vertices that match `filter_predicate`
-    /// and will assume that for any vertex id that all calls will return the same value.
-    ///
-    /// Returns an approximate list of neighbors matching `filter_predicate` with the highest scores.
-    // XXX die
-    pub fn search_with_filter(
-        &mut self,
-        query: &[f32],
-        filter_predicate: impl FnMut(i64) -> bool,
-        reader: &impl GraphVectorIndex,
-    ) -> Result<Vec<Neighbor>> {
-        self.seen.clear();
-        self.search_internal(query, Options::with_filter(filter_predicate), reader)
-    }
-
-    /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
-    /// vertex ids are valid results, seeding the candidate queue with `seeds` in addition to the graph entry point.
-    ///
-    /// Any seed vertex that cannot be found in the graph is silently skipped.
-    ///
-    /// Returns an approximate list of neighbors matching `filter_predicate` with the highest scores.
-    // XXX DIE
-    pub fn search_with_filter_and_seeds(
-        &mut self,
-        query: &[f32],
-        filter_predicate: impl FnMut(i64) -> bool,
-        seeds: impl IntoIterator<Item = i64>,
-        reader: &impl GraphVectorIndex,
-    ) -> Result<Vec<Neighbor>> {
-        self.seen.clear();
-        self.search_internal(
-            query,
-            Options::with_filter(filter_predicate).with_seeds(seeds),
-            reader,
-        )
-    }
-
     /// Search for `query` in graph `reader` with `options`.
     ///
     /// Returns a an approximate list of the closest neighbors matching any specified filter
@@ -574,7 +536,7 @@ mod test {
     };
     use crate::Neighbor;
 
-    use super::{GraphSearchParams, GraphSearcher};
+    use super::{GraphSearchParams, GraphSearcher, Options};
 
     #[derive(Debug)]
     struct TestVector {
@@ -939,7 +901,11 @@ mod test {
 
         // Search with a filter that rejects vertex 1
         let _ = searcher
-            .search_with_filter(&[-0.1, -0.1, -0.1, -0.1], |v| v != 1, &mut index.reader())
+            .search_with_options(
+                &[-0.1, -0.1, -0.1, -0.1],
+                Options::with_filter(|v| v != 1),
+                &mut index.reader(),
+            )
             .unwrap();
 
         let stats = searcher.stats();

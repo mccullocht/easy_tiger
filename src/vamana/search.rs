@@ -5,7 +5,7 @@ use std::ops::{Add, AddAssign};
 use ahash::AHashSet;
 
 use super::{Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore};
-use crate::{Neighbor, vamana::PatienceParams};
+use crate::{vamana::PatienceParams, Neighbor};
 
 use vectors::QueryVectorDistance;
 use wt_mdb::{Error, Result};
@@ -74,6 +74,50 @@ impl Patience {
     }
 }
 
+/// Options for a graph search.
+pub struct Options<F: FnMut(i64) -> bool> {
+    filter: F,
+    seeds: smallvec::SmallVec<[i64; 4]>,
+    result_scratch: Option<Vec<Neighbor>>,
+}
+
+impl Options<fn(i64) -> bool> {
+    /// Create default options.
+    pub fn new() -> Self {
+        Self {
+            filter: (|_| true) as fn(i64) -> bool,
+            seeds: smallvec::SmallVec::new(),
+            result_scratch: None,
+        }
+    }
+}
+
+impl<F: FnMut(i64) -> bool> Options<F> {
+    /// Create options with a pre-filter function that is applied to each result before it is
+    /// returned.
+    pub fn with_filter(filter: F) -> Self {
+        Self {
+            filter,
+            seeds: smallvec::SmallVec::new(),
+            result_scratch: None,
+        }
+    }
+
+    /// Set seed vector ids for this request. Seeds are added as initial candidates along with the
+    /// entry point to the graph. Any seed id that cannot be found is ignored.
+    pub fn with_seeds(mut self, seeds: impl IntoIterator<Item = i64>) -> Self {
+        self.seeds = seeds.into_iter().collect();
+        self
+    }
+
+    /// A pre-allocated buffer of neighbors. This may be used to buffer results returned by a
+    /// search_with_options() call.
+    pub fn with_result_scratch(mut self, scratch: Vec<Neighbor>) -> Self {
+        self.result_scratch = Some(scratch);
+        self
+    }
+}
+
 /// Helper to search a Vamana graph.
 pub struct GraphSearcher {
     params: GraphSearchParams,
@@ -133,7 +177,7 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, |_| true, std::iter::empty(), reader)
+        self.search_internal(query, Options::new(), reader)
     }
 
     /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
@@ -141,6 +185,7 @@ impl GraphSearcher {
     /// and will assume that for any vertex id that all calls will return the same value.
     ///
     /// Returns an approximate list of neighbors matching `filter_predicate` with the highest scores.
+    // XXX die
     pub fn search_with_filter(
         &mut self,
         query: &[f32],
@@ -148,7 +193,7 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, filter_predicate, std::iter::empty(), reader)
+        self.search_internal(query, Options::with_filter(filter_predicate), reader)
     }
 
     /// Search for `query` in the given graph `reader`, with oracle function `filter_predicate` dictating which
@@ -157,6 +202,7 @@ impl GraphSearcher {
     /// Any seed vertex that cannot be found in the graph is silently skipped.
     ///
     /// Returns an approximate list of neighbors matching `filter_predicate` with the highest scores.
+    // XXX DIE
     pub fn search_with_filter_and_seeds(
         &mut self,
         query: &[f32],
@@ -165,7 +211,25 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, filter_predicate, seeds, reader)
+        self.search_internal(
+            query,
+            Options::with_filter(filter_predicate).with_seeds(seeds),
+            reader,
+        )
+    }
+
+    /// Search for `query` in graph `reader` with `options`.
+    ///
+    /// Returns a an approximate list of the closest neighbors matching any specified filter
+    /// predicate.
+    pub fn search_with_options<F: FnMut(i64) -> bool>(
+        &mut self,
+        query: &[f32],
+        options: Options<F>,
+        reader: &impl GraphVectorIndex,
+    ) -> Result<Vec<Neighbor>> {
+        self.seen.clear();
+        self.search_internal(query, options, reader)
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -213,18 +277,16 @@ impl GraphSearcher {
 
         self.search_graph_and_rerank(
             nav_query.as_ref(),
-            |_| true,
-            std::iter::empty(),
+            Options::new(),
             rerank_query.as_ref().map(|q| q.as_ref()),
             reader,
         )
     }
 
-    fn search_internal(
+    fn search_internal<F: FnMut(i64) -> bool>(
         &mut self,
         query: &[f32],
-        filter_predicate: impl FnMut(i64) -> bool,
-        seeds: impl IntoIterator<Item = i64>,
+        options: Options<F>,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         let nav_query = reader.config().nav_format.query_distance_asymmetric(
@@ -246,18 +308,16 @@ impl GraphSearcher {
 
         self.search_graph_and_rerank(
             nav_query.as_ref(),
-            filter_predicate,
-            seeds,
+            options,
             rerank_query.as_ref().map(|q| q.as_ref()),
             reader,
         )
     }
 
-    fn search_graph_and_rerank(
+    fn search_graph_and_rerank<F: FnMut(i64) -> bool>(
         &mut self,
         nav_query: &dyn QueryVectorDistance,
-        mut filter_predicate: impl FnMut(i64) -> bool,
-        seeds: impl IntoIterator<Item = i64>,
+        mut options: Options<F>,
         rerank_query: Option<&dyn QueryVectorDistance>,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
@@ -286,7 +346,7 @@ impl GraphSearcher {
             self.seen.insert(entry_point);
         }
 
-        for seed in seeds {
+        for seed in options.seeds {
             if !self.seen.insert(seed) {
                 continue;
             }
@@ -306,7 +366,7 @@ impl GraphSearcher {
         while let Some(best_candidate) = self.candidates.next_unvisited() {
             self.visited += 1;
             let vertex_id = best_candidate.neighbor().vertex();
-            if filter_predicate(vertex_id) {
+            if (options.filter)(vertex_id) {
                 best_candidate.visit();
             } else {
                 best_candidate.remove();
@@ -344,6 +404,7 @@ impl GraphSearcher {
             }
         }
 
+        // XXX re-use the scratch vector instead of allocating a new one every time.
         if let Some(rerank_query) = rerank_query {
             let mut rerank_vectors = reader.rerank_vectors().expect("rerank enabled")?;
             let rescored = self
@@ -500,10 +561,10 @@ mod test {
     use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
     use wt_mdb::{Error, Result};
 
-    use crate::Neighbor;
     use crate::vamana::{
         EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
     };
+    use crate::Neighbor;
 
     use super::{GraphSearchParams, GraphSearcher};
 

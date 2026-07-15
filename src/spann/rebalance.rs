@@ -1041,9 +1041,10 @@ mod parallel {
                     let mut params = txn.index().config().head_search_params;
                     params.beam_width = NonZero::new(16.min(params.beam_width.get())).unwrap();
                     let searcher = GraphSearcher::new(params);
-                    (txn, searcher)
+                    let result_scratch = Vec::with_capacity(params.beam_width.get());
+                    (txn, searcher, result_scratch)
                 },
-                |(txn, searcher), (source, vector_id, target)| match target {
+                |(txn, searcher, result_scratch), (source, vector_id, target)| match target {
                     Target::Centroid(c) => Ok::<(u32, i64, u32, GraphSearchStats), Error>((
                         source,
                         vector_id,
@@ -1051,18 +1052,16 @@ mod parallel {
                         GraphSearchStats::default(),
                     )),
                     Target::Query(q) => {
-                        let candidates = searcher.search_with_options(
+                        let mut candidates = searcher.search_with_options(
                             &coder.decode(&q),
                             GraphSearchOptions::with_filter(|i| !filter.contains(&(i as u32)))
-                                .with_seeds([source as i64]),
+                                .with_seeds([source as i64])
+                                .with_result_scratch(std::mem::take(result_scratch)),
                             txn.head(),
                         )?;
-                        Ok((
-                            source,
-                            vector_id,
-                            candidates[0].vertex() as u32,
-                            searcher.stats(),
-                        ))
+                        let centroid = candidates[0].vertex() as u32;
+                        std::mem::swap(result_scratch, &mut candidates); // return scratch.
+                        Ok((source, vector_id, centroid, searcher.stats()))
                     }
                 },
             )

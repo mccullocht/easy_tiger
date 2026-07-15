@@ -2,6 +2,7 @@ use std::{collections::HashSet, fs::File, io, num::NonZero, ops::Range, path::Pa
 
 use clap::Args;
 use easy_tiger::{
+    Neighbor,
     input::{DerefVectorStore, VectorStore},
     spann::{
         CentroidAssignment, TableIndex, TransactionIndex,
@@ -9,7 +10,7 @@ use easy_tiger::{
         postings::BlockPostingsMut,
         rebalance::{BalanceSummary, RebalanceStats},
     },
-    vamana::search::{GraphSearchStats, GraphSearcher},
+    vamana::search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
 };
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::SeedableRng;
@@ -288,17 +289,25 @@ fn insert_batch(
                         .begin_transaction(None)
                         .expect("begin transaction"),
                 );
-                let searcher = GraphSearcher::new(index.config().head_search_params);
-                (txn_idx, searcher)
+                let params = index.config().head_search_params;
+                let result_scratch: Vec<Neighbor> = Vec::with_capacity(params.beam_width.get());
+                let searcher = GraphSearcher::new(params);
+                (txn_idx, searcher, result_scratch)
             },
-            |(txn_idx, searcher), i| {
+            |(txn_idx, searcher, result_scratch), i| {
                 let vector = &f32_vectors[i];
 
                 // Search for centroid
-                let candidates = searcher.search(vector, txn_idx.head())?;
+                let mut candidates = searcher.search_with_options(
+                    vector,
+                    GraphSearchOptions::default()
+                        .with_result_scratch(std::mem::take(result_scratch)),
+                    txn_idx.head(),
+                )?;
                 assert!(!candidates.is_empty());
-
                 let centroid_id = candidates[0].vertex() as u32;
+                std::mem::swap(result_scratch, &mut candidates); // return scratch
+
                 Ok((
                     i,
                     CentroidAssignment::new(centroid_id),

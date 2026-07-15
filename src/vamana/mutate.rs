@@ -49,7 +49,7 @@ fn delete_vector_undirected(vertex_id: i64, index: &impl GraphVectorIndex) -> Re
         .map(|e| {
             graph
                 .edges(e)
-                .unwrap_or(Err(Error::not_found_error()))
+                .unwrap_or_else(|| Err(Error::not_found_error()))
                 .map(|edges| {
                     let vector = vectors.get(e).expect("row exists").map(|rv| rv.to_vec());
                     vector.map(|rv| (e, rv, edges.filter(|d| *d != vertex_id).collect::<Vec<_>>()))
@@ -326,7 +326,7 @@ fn insert_edge_directed(
 ) -> Result<Vec<i64>> {
     let mut edges = graph
         .edges(src_vertex_id)
-        .unwrap_or(Err(Error::not_found_error()))?
+        .unwrap_or_else(|| Err(Error::not_found_error()))?
         .collect::<Vec<_>>();
     if edges.contains(&dst_vertex_id) {
         return Ok(edges); // edge already exists.
@@ -358,7 +358,7 @@ fn remove_edge_directed(
 ) -> Result<()> {
     let edges = graph
         .edges(src_vertex_id)
-        .unwrap_or(Err(Error::not_found_error()))?
+        .unwrap_or_else(|| Err(Error::not_found_error()))?
         .filter(|v| *v != dst_vertex_id)
         .collect::<Vec<_>>();
     graph.set_edges(src_vertex_id, edges)

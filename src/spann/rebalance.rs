@@ -459,6 +459,10 @@ mod parallel {
             Query(Vec<u8>),
         }
 
+        // TODO: this is two separate statements to maximize parallelism between the searches, but
+        // the searches only take a few ms at most to finish so it would probably be better to
+        // collapse the work down to per-centroid.
+
         // For each op compute the set of vectors that need to be moved to a target.
         let centroid_reassignments = ops
             .par_iter()
@@ -540,7 +544,6 @@ mod parallel {
             .iter()
             .map(|(_, _, stats)| *stats)
             .fold(RebalanceStats::default(), |acc, s| acc + s);
-        // XXX try to fold this all together? I'm not sure if it matter that we flatten things out.
 
         // Assign targets to any vector that does not yet have one and group by target centroid.
         let coder = index.new_posting_coder();
@@ -572,9 +575,11 @@ mod parallel {
                             Target::Query(q) => {
                                 let mut candidates = searcher.search_with_options(
                                     &coder.decode(&q),
-                                    GraphSearchOptions::with_filter(|i| !filter.contains(&(i as u32)))
-                                        .with_seeds([source as i64])
-                                        .with_result_scratch(std::mem::take(result_scratch)),
+                                    GraphSearchOptions::with_filter(|i| {
+                                        !filter.contains(&(i as u32))
+                                    })
+                                    .with_seeds([source as i64])
+                                    .with_result_scratch(std::mem::take(result_scratch)),
                                     txn.head(),
                                 )?;
                                 let centroid = candidates[0].vertex() as u32;

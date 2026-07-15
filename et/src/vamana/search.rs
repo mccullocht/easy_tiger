@@ -12,9 +12,9 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
-        GraphSearchParams, PatienceParams,
-        search::{GraphSearchStats, GraphSearcher},
+        search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
+        GraphSearchParams, PatienceParams,
     },
 };
 use memmap2::Mmap;
@@ -242,7 +242,7 @@ impl SearcherState {
         let start = Instant::now();
         let results = self
             .searcher
-            .search_with_filter(query, |i| i < record_limit, &reader)?;
+            .search_with_options(query, GraphSearchOptions::with_filter(|i| i < record_limit), &reader)?;
         let duration = Instant::now() - start;
         Ok(AggregateSearchStats::new(
             duration,

@@ -478,7 +478,11 @@ mod parallel {
                     let Some(raw_posting) =
                         unsafe { posting_cursor.seek_exact_unsafe(op.source()) }.transpose()?
                     else {
-                        return Ok::<(u32, Vec<(i64, Target)>), Error>((op.source(), vec![]));
+                        return Ok::<(u32, Vec<(i64, Target)>, RebalanceStats), Error>((
+                            op.source(),
+                            vec![],
+                            RebalanceStats::default(),
+                        ));
                     };
                     let block = PostingBlock::new(raw_posting, txn.index().posting_vector_len())
                         .expect("valid posting block");
@@ -488,62 +492,53 @@ mod parallel {
                             let s_distfn = f.distance_to_centroid(*s)?;
                             let t0_distfn = f.distance_to_centroid(*t0)?;
                             let t1_distfn = f.distance_to_centroid(*t1)?;
-                            Ok((
-                                *s,
-                                block
-                                    .iter()
-                                    .map(|(id, v)| {
-                                        let s_dist = s_distfn.distance(v);
-                                        let t0_dist = t0_distfn.distance(v);
-                                        let t1_dist = t1_distfn.distance(v);
-                                        let target = if s_dist < t0_dist && s_dist < t1_dist {
-                                            Target::Query(v.to_vec())
-                                        } else if t0_dist < t1_dist {
-                                            Target::Centroid(*t0)
-                                        } else {
-                                            Target::Centroid(*t1)
-                                        };
-                                        (id, target)
-                                    })
-                                    .collect::<Vec<_>>(),
-                            ))
+                            let postings = block
+                                .iter()
+                                .map(|(id, v)| {
+                                    let s_dist = s_distfn.distance(v);
+                                    let t0_dist = t0_distfn.distance(v);
+                                    let t1_dist = t1_distfn.distance(v);
+                                    let target = if s_dist < t0_dist && s_dist < t1_dist {
+                                        Target::Query(v.to_vec())
+                                    } else if t0_dist < t1_dist {
+                                        Target::Centroid(*t0)
+                                    } else {
+                                        Target::Centroid(*t1)
+                                    };
+                                    (id, target)
+                                })
+                                .collect::<Vec<_>>();
+                            let stats = RebalanceStats::default()
+                                + SplitStats {
+                                    moved_vectors: postings.len(),
+                                    searches: postings
+                                        .iter()
+                                        .filter(|x| matches!(x.1, Target::Query(_)))
+                                        .count(),
+                                    nearby_seen: 0,
+                                    nearby_moved: 0,
+                                };
+                            Ok((*s, postings, stats))
                         }
-                        RebalanceOp::Merge(s) => Ok((
-                            *s,
-                            block
+                        RebalanceOp::Merge(s) => {
+                            let postings = block
                                 .iter()
                                 .map(|(i, v)| (i, Target::Query(v.to_vec())))
-                                .collect::<Vec<_>>(),
-                        )),
+                                .collect::<Vec<_>>();
+                            let stats = RebalanceStats::default()
+                                + MergeStats {
+                                    moved_vectors: postings.len(),
+                                    unique_centroids: 0,
+                                };
+                            Ok((*s, postings, stats))
+                        }
                     }
                 },
             )
             .collect::<Result<Vec<_>>>()?;
-        let mut stats = ops
+        let mut stats = centroid_reassignments
             .iter()
-            .zip(centroid_reassignments.iter())
-            .map(|(op, assignments)| match op {
-                RebalanceOp::Merge(_) => {
-                    RebalanceStats::default()
-                        + MergeStats {
-                            moved_vectors: assignments.1.len(),
-                            unique_centroids: 0,
-                        }
-                }
-                RebalanceOp::Split(_, _, _) => {
-                    RebalanceStats::default()
-                        + SplitStats {
-                            moved_vectors: assignments.1.len(),
-                            searches: assignments
-                                .1
-                                .iter()
-                                .filter(|x| matches!(x.1, Target::Query(_)))
-                                .count(),
-                            nearby_seen: 0,
-                            nearby_moved: 0,
-                        }
-                }
-            })
+            .map(|(_, _, stats)| *stats)
             .fold(RebalanceStats::default(), |acc, s| acc + s);
         // XXX try to fold this all together? I'm not sure if it matter that we flatten things out.
 
@@ -552,11 +547,6 @@ mod parallel {
         let filter = ops.iter().map(|o| o.source()).collect::<HashSet<_>>();
         let (by_target, search_stats) = centroid_reassignments
             .into_par_iter()
-            .flat_map(|(source, postings)| {
-                postings
-                    .into_par_iter()
-                    .map(move |(vector_id, target)| (source, vector_id, target))
-            })
             .map_init(
                 || {
                     let txn = TransactionIndex::new(
@@ -573,38 +563,28 @@ mod parallel {
                     let result_scratch = Vec::with_capacity(params.beam_width.get());
                     (txn, searcher, result_scratch)
                 },
-                |(txn, searcher, result_scratch), (source, vector_id, target)| match target {
-                    Target::Centroid(c) => Ok::<(u32, i64, u32, GraphSearchStats), Error>((
-                        source,
-                        vector_id,
-                        c,
-                        GraphSearchStats::default(),
-                    )),
-                    Target::Query(q) => {
-                        let mut candidates = searcher.search_with_options(
-                            &coder.decode(&q),
-                            GraphSearchOptions::with_filter(|i| !filter.contains(&(i as u32)))
-                                .with_seeds([source as i64])
-                                .with_result_scratch(std::mem::take(result_scratch)),
-                            txn.head(),
-                        )?;
-                        let centroid = candidates[0].vertex() as u32;
-                        std::mem::swap(result_scratch, &mut candidates); // return scratch.
-                        Ok((source, vector_id, centroid, searcher.stats()))
+                |(txn, searcher, result_scratch), (source, postings, _)| {
+                    let mut m = HashMap::<u32, Vec<(u32, i64)>>::new();
+                    let mut s = GraphSearchStats::default();
+                    for (vector_id, target) in postings {
+                        let centroid = match target {
+                            Target::Centroid(c) => c,
+                            Target::Query(q) => {
+                                let mut candidates = searcher.search_with_options(
+                                    &coder.decode(&q),
+                                    GraphSearchOptions::with_filter(|i| !filter.contains(&(i as u32)))
+                                        .with_seeds([source as i64])
+                                        .with_result_scratch(std::mem::take(result_scratch)),
+                                    txn.head(),
+                                )?;
+                                let centroid = candidates[0].vertex() as u32;
+                                std::mem::swap(result_scratch, &mut candidates); // return scratch.
+                                s += searcher.stats();
+                                centroid
+                            }
+                        };
+                        m.entry(centroid).or_default().push((source, vector_id));
                     }
-                },
-            )
-            .try_fold(
-                || {
-                    (
-                        HashMap::<u32, Vec<(u32, i64)>>::new(),
-                        GraphSearchStats::default(),
-                    )
-                },
-                |(mut m, mut s), r| {
-                    let (source, vector_id, target, search_stats) = r?;
-                    m.entry(target).or_default().push((source, vector_id));
-                    s += search_stats;
                     Ok::<(HashMap<u32, Vec<(u32, i64)>>, GraphSearchStats), Error>((m, s))
                 },
             )

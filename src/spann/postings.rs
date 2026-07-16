@@ -1,8 +1,11 @@
 //! Block-based posting storage for SPANN.
 
-use std::collections::{
-    hash_map::Entry::{Occupied, Vacant},
-    HashMap,
+use std::{
+    borrow::Cow,
+    collections::{
+        hash_map::Entry::{Occupied, Vacant},
+        HashMap,
+    },
 };
 
 use wt_mdb::{Error, Result, TypedCursorGuard, WT_MODIFY};
@@ -20,7 +23,7 @@ pub struct BlockPostingsMut<'a> {
     // Send + !Sync anyway.
     cursor: TypedCursorGuard<'a, u32, Vec<u8>>,
     vector_len: usize,
-    dirty: HashMap<u32, PostingBlockMut>,
+    cached: HashMap<u32, PostingBlockMut>,
 }
 
 impl<'a> BlockPostingsMut<'a> {
@@ -28,7 +31,7 @@ impl<'a> BlockPostingsMut<'a> {
         Self {
             cursor,
             vector_len,
-            dirty: HashMap::new(),
+            cached: HashMap::new(),
         }
     }
 
@@ -58,9 +61,8 @@ impl<'a> BlockPostingsMut<'a> {
     /// Remove the posting for `(centroid_id, record_id)`.
     ///
     /// Not-found is silently ignored.
-    pub fn remove(&mut self, centroid_id: u32, record_id: i64) -> Result<()> {
-        self.load_or_create(centroid_id)?.remove(record_id);
-        Ok(())
+    pub fn remove(&mut self, centroid_id: u32, record_id: i64) -> Result<Option<Cow<'_, [u8]>>> {
+        Ok(self.load_or_create(centroid_id)?.remove(record_id))
     }
 
     /// Return the number of vectors in centroid_id postings.
@@ -86,8 +88,9 @@ impl<'a> BlockPostingsMut<'a> {
     /// Not-found is silently ignored.
     pub fn remove_centroid(&mut self, centroid_id: u32) -> Result<()> {
         // Overwrite with an empty block; flush will delete the row from storage.
-        self.dirty
-            .insert(centroid_id, PostingBlockMut::new(self.vector_len));
+        let mut block = PostingBlockMut::new(self.vector_len);
+        block.mark_dirty();
+        self.cached.insert(centroid_id, block);
         Ok(())
     }
 
@@ -103,9 +106,12 @@ impl<'a> BlockPostingsMut<'a> {
 
     /// Write all buffered changes to storage.
     pub fn flush(&mut self) -> Result<()> {
-        let dirty = std::mem::take(&mut self.dirty);
+        let cached = std::mem::take(&mut self.cached);
         let mut modify_buf = [WT_MODIFY::default(); 128];
-        for (centroid_id, block) in dirty {
+        for (centroid_id, block) in cached {
+            if !block.dirty() {
+                continue;
+            }
             if block.is_empty() {
                 self.cursor.remove(centroid_id).or_else(|e| {
                     if e == Error::not_found_error() {
@@ -138,7 +144,7 @@ impl<'a> BlockPostingsMut<'a> {
     }
 
     fn load_or_create(&mut self, centroid_id: u32) -> Result<&mut PostingBlockMut> {
-        match self.dirty.entry(centroid_id) {
+        match self.cached.entry(centroid_id) {
             Occupied(e) => Ok(e.into_mut()),
             Vacant(e) => {
                 let block = match self.cursor.seek_exact(centroid_id) {

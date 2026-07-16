@@ -6,7 +6,7 @@ use wt_sys::{
     WT_STAT_CONN_CURSOR_INSERT_BYTES, WT_STAT_CONN_CURSOR_MODIFY_BYTES,
     WT_STAT_CONN_CURSOR_MODIFY_BYTES_TOUCH, WT_STAT_CONN_CURSOR_REMOVE_BYTES,
     WT_STAT_CONN_CURSOR_SEARCH, WT_STAT_CONN_CURSOR_UPDATE_BYTES,
-    WT_STAT_CONN_LOG_BYTES_WRITTEN,
+    WT_STAT_CONN_LOG_BYTES_WRITTEN, WT_STAT_CONN_TXN_ROLLBACK, WT_STAT_CONN_TXN_UPDATE_CONFLICT,
 };
 
 pub struct WiredTigerConnectionStats {
@@ -67,6 +67,10 @@ pub struct WiredTigerWriteStats {
     pub modify_bytes: i64,
     /// Cursor modify delta bytes actually written.
     pub modify_bytes_touch: i64,
+    /// OCC write-write conflicts detected.
+    pub txn_update_conflicts: i64,
+    /// Total transaction rollbacks (includes OCC and other causes).
+    pub txn_rollbacks: i64,
 }
 
 impl TryFrom<&Transaction> for WiredTigerWriteStats {
@@ -102,6 +106,14 @@ impl TryFrom<&Transaction> for WiredTigerWriteStats {
             .seek_exact(WT_STAT_CONN_CURSOR_MODIFY_BYTES_TOUCH as i32)
             .expect("WT_STAT_CONN_CURSOR_MODIFY_BYTES_TOUCH")?
             .value;
+        let txn_update_conflicts = stat_cursor
+            .seek_exact(WT_STAT_CONN_TXN_UPDATE_CONFLICT as i32)
+            .expect("WT_STAT_CONN_TXN_UPDATE_CONFLICT")?
+            .value;
+        let txn_rollbacks = stat_cursor
+            .seek_exact(WT_STAT_CONN_TXN_ROLLBACK as i32)
+            .expect("WT_STAT_CONN_TXN_ROLLBACK")?
+            .value;
         Ok(Self {
             log_bytes,
             data_bytes,
@@ -110,6 +122,8 @@ impl TryFrom<&Transaction> for WiredTigerWriteStats {
             remove_bytes,
             modify_bytes,
             modify_bytes_touch,
+            txn_update_conflicts,
+            txn_rollbacks,
         })
     }
 }
@@ -135,6 +149,8 @@ impl Sub for WiredTigerWriteStats {
             remove_bytes: self.remove_bytes - rhs.remove_bytes,
             modify_bytes: self.modify_bytes - rhs.modify_bytes,
             modify_bytes_touch: self.modify_bytes_touch - rhs.modify_bytes_touch,
+            txn_update_conflicts: self.txn_update_conflicts - rhs.txn_update_conflicts,
+            txn_rollbacks: self.txn_rollbacks - rhs.txn_rollbacks,
         }
     }
 }

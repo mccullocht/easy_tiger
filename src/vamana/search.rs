@@ -5,12 +5,12 @@ use std::ops::{Add, AddAssign};
 use ahash::AHashSet;
 
 use super::{Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore};
-use crate::{vamana::PatienceParams, Neighbor};
+use crate::{Neighbor, vamana::PatienceParams};
 
 use vectors::QueryVectorDistance;
 use wt_mdb::{Error, Result};
 
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct GraphSearchStats {
     /// Total number of candidates vertices seen and nav scored.
     pub candidates: usize,
@@ -531,10 +531,10 @@ mod test {
     use vectors::{F32VectorCoding, F32VectorDistance, VectorSimilarity};
     use wt_mdb::{Error, Result};
 
+    use crate::Neighbor;
     use crate::vamana::{
         EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
     };
-    use crate::Neighbor;
 
     use super::{GraphSearchParams, GraphSearcher, Options};
 

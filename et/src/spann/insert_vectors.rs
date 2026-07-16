@@ -2,18 +2,18 @@ use std::{collections::HashSet, fs::File, io, num::NonZero, ops::Range, path::Pa
 
 use clap::Args;
 use easy_tiger::{
+    Neighbor,
     input::{DerefVectorStore, VectorStore},
     spann::{
         CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
         postings::BlockPostingsMut,
-        rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
+        rebalance::{BalanceSummary, RebalanceStats},
     },
-    vamana::search::GraphSearcher,
+    vamana::search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
 };
 use indicatif::{ParallelProgressIterator, ProgressBar};
-use rand::{Rng, SeedableRng};
-use rand_xoshiro::Xoshiro256PlusPlus;
+use rand::SeedableRng;
 use rayon::prelude::*;
 use vectors::F32VectorCoder;
 use wt_mdb::{Connection, Result};
@@ -75,8 +75,6 @@ pub fn insert_vectors(
         ));
     }
 
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(args.seed);
-
     let posting_format = index.config().posting_coder;
     let similarity = index.head_config().config().similarity;
     let posting_coder = posting_format.coder(similarity, None);
@@ -90,14 +88,19 @@ pub fn insert_vectors(
 
     let wt_stats_before = WiredTigerWriteStats::try_from(&connection)?;
 
-    let mut rebalance_stats = RebalanceStats::default();
     let mut batches: usize = 0;
     let mut total_batch_unique_centroids: usize = 0;
+    let mut rebalance_stats = RebalanceStats::default();
+    let mut rebalance_iters = 0;
+    let mut search_stats = GraphSearchStats::default();
+    let mut insert_time = std::time::Duration::ZERO;
+    let mut rebalance_time = std::time::Duration::ZERO;
 
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
 
-        total_batch_unique_centroids += insert_batch(
+        let insert_start = std::time::Instant::now();
+        let (unique_centroids, batch_search_stats) = insert_batch(
             &index,
             &connection,
             &f32_vectors,
@@ -106,19 +109,75 @@ pub fn insert_vectors(
             rerank_coder.as_ref().map(|c| c.as_ref()),
             &main_progress,
         )?;
+        insert_time += insert_start.elapsed();
+        total_batch_unique_centroids += unique_centroids;
+        search_stats += batch_search_stats;
         batches += 1;
 
-        rebalance_stats += rebalance(&index, &connection, &mut rng, &main_progress)?;
+        main_progress.set_message("rebalancing index");
+        let rebalance_start = std::time::Instant::now();
+        let (s, iters) = rebalance(&index, &connection, args.seed)?;
+        rebalance_time += rebalance_start.elapsed();
+        rebalance_stats += s;
+        rebalance_iters += iters;
+        main_progress.set_message("inserting vectors");
     }
 
     main_progress.finish();
+    let queries = args.count.get() as f64;
+    let total_time = insert_time + rebalance_time;
+    println!("Wall time:");
+    println!(
+        "  Insert:       {:10.2} s ({:5.1}%)",
+        insert_time.as_secs_f64(),
+        if total_time.is_zero() {
+            0.0
+        } else {
+            insert_time.as_secs_f64() / total_time.as_secs_f64() * 100.0
+        }
+    );
+    println!(
+        "  Rebalance:    {:10.2} s ({:5.1}%)",
+        rebalance_time.as_secs_f64(),
+        if total_time.is_zero() {
+            0.0
+        } else {
+            rebalance_time.as_secs_f64() / total_time.as_secs_f64() * 100.0
+        }
+    );
     println!("Batches:        {:10}", batches);
     if batches > 0 {
         println!(
             "  Avg Unique:   {:10.1}",
             total_batch_unique_centroids as f64 / batches as f64
         );
+        println!(
+            "  Avg Balance:  {:10.1}",
+            rebalance_iters as f64 / batches as f64
+        );
     }
+    println!("Insert Search:");
+    println!("  Total:        {:10}", queries);
+    println!(
+        "  Candidates:   {:10.1}",
+        search_stats.candidates as f64 / queries
+    );
+    println!(
+        "  Cand added:   {:10.1}",
+        search_stats.candidates_added as f64 / queries
+    );
+    println!(
+        "  Visited:      {:10.1}",
+        search_stats.visited as f64 / queries
+    );
+    println!(
+        "  Filtered:     {:10.1}",
+        search_stats.filtered as f64 / queries
+    );
+    println!(
+        "  Skipped:      {:10.1}",
+        search_stats.skipped as f64 / queries
+    );
     println!("Merged:         {:10}", rebalance_stats.merged);
     if rebalance_stats.merged > 0 {
         println!(
@@ -150,30 +209,59 @@ pub fn insert_vectors(
             rebalance_stats.split_stats.nearby_moved
         );
     }
+    let rebalance_searches =
+        (rebalance_stats.merge_stats.moved_vectors + rebalance_stats.split_stats.searches) as f64;
+    if rebalance_searches > 0.0 {
+        let s = rebalance_stats.search_stats;
+        println!("Rebalance Search:");
+        println!("  Total:        {:10}", rebalance_searches);
+        println!(
+            "  Candidates:   {:10.1}",
+            s.candidates as f64 / rebalance_searches
+        );
+        println!(
+            "  Cand added:   {:10.1}",
+            s.candidates_added as f64 / rebalance_searches
+        );
+        println!(
+            "  Visited:      {:10.1}",
+            s.visited as f64 / rebalance_searches
+        );
+        println!(
+            "  Filtered:     {:10.1}",
+            s.filtered as f64 / rebalance_searches
+        );
+        println!(
+            "  Skipped:      {:10.1}",
+            s.skipped as f64 / rebalance_searches
+        );
+    }
 
     let wt_stats = WiredTigerWriteStats::try_from(&connection)? - wt_stats_before;
-    println!("WT log:         {:10} MB", wt_stats.log_bytes / (1 << 20));
-    println!("WT data:        {:10} MB", wt_stats.data_bytes / (1 << 20));
+    println!("WiredTiger Stats");
+    println!("  Log:          {:10} MB", wt_stats.log_bytes / (1 << 20));
+    println!("  Data:         {:10} MB", wt_stats.data_bytes / (1 << 20));
     println!(
-        "WT insert:      {:10} MB",
+        "  Insert:       {:10} MB",
         wt_stats.insert_bytes / (1 << 20)
     );
     println!(
-        "WT update:      {:10} MB",
+        "  Update:       {:10} MB",
         wt_stats.update_bytes / (1 << 20)
     );
     println!(
-        "WT remove:      {:10} MB",
+        "  Remove:       {:10} MB",
         wt_stats.remove_bytes / (1 << 20)
     );
     println!(
-        "WT modify in:   {:10} MB",
+        "  Modify in:    {:10} MB",
         wt_stats.modify_bytes / (1 << 20)
     );
     println!(
-        "WT modify out:  {:10} MB",
+        "  Modify out:   {:10} MB",
         wt_stats.modify_bytes_touch / (1 << 20)
     );
+    println!("  CC conflict:  {:10}", wt_stats.txn_update_conflicts);
 
     Ok(())
 }
@@ -186,7 +274,7 @@ fn insert_batch(
     posting_coder: &dyn F32VectorCoder,
     rerank_coder: Option<&dyn F32VectorCoder>,
     progress: &ProgressBar,
-) -> Result<usize> {
+) -> Result<(usize, GraphSearchStats)> {
     progress.set_message("inserting vectors");
 
     let vector_state = batch
@@ -201,30 +289,44 @@ fn insert_batch(
                         .begin_transaction(None)
                         .expect("begin transaction"),
                 );
-                let searcher = GraphSearcher::new(index.config().head_search_params);
-                (txn_idx, searcher)
+                let params = index.config().head_search_params;
+                let result_scratch: Vec<Neighbor> = Vec::with_capacity(params.beam_width.get());
+                let searcher = GraphSearcher::new(params);
+                (txn_idx, searcher, result_scratch)
             },
-            |(txn_idx, searcher), i| {
+            |(txn_idx, searcher, result_scratch), i| {
                 let vector = &f32_vectors[i];
 
                 // Search for centroid
-                let candidates = searcher.search(vector, txn_idx.head())?;
+                let mut candidates = searcher.search_with_options(
+                    vector,
+                    GraphSearchOptions::default()
+                        .with_result_scratch(std::mem::take(result_scratch)),
+                    txn_idx.head(),
+                )?;
                 assert!(!candidates.is_empty());
-
                 let centroid_id = candidates[0].vertex() as u32;
+                std::mem::swap(result_scratch, &mut candidates); // return scratch
+
                 Ok((
                     i,
                     CentroidAssignment::new(centroid_id),
                     posting_coder.encode(vector),
                     rerank_coder.map(|c| c.encode(vector)),
+                    searcher.stats(),
                 ))
             },
         )
         .collect::<Result<Vec<_>>>()?;
 
+    let search_stats = vector_state
+        .iter()
+        .map(|(_, _, _, _, stats)| *stats)
+        .fold(GraphSearchStats::default(), |acc, stats| acc + stats);
+
     let unique_centroids = vector_state
         .iter()
-        .map(|(_, a, _, _)| a.primary_id)
+        .map(|(_, a, _, _, _)| a.primary_id)
         .collect::<HashSet<_>>()
         .len();
 
@@ -244,7 +346,7 @@ fn insert_batch(
         None
     };
 
-    for (i, assignment, posting_vector, rerank_vector) in vector_state.into_iter() {
+    for (i, assignment, posting_vector, rerank_vector, _) in vector_state.into_iter() {
         assignment_updater.insert(i as i64, assignment)?;
         postings.insert(assignment.primary_id, i as i64, &posting_vector)?;
 
@@ -259,17 +361,16 @@ fn insert_batch(
     drop(postings);
     drop(rerank_cursor);
     txn_idx.commit(None)?;
-    Ok(unique_centroids)
+    Ok((unique_centroids, search_stats))
 }
 
 fn rebalance(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
-    rng: &mut impl Rng,
-    progress: &ProgressBar,
-) -> Result<RebalanceStats> {
-    let mut iter = 1;
+    rng_seed: u64,
+) -> Result<(RebalanceStats, usize)> {
     let mut rebalance_stats = RebalanceStats::default();
+    let mut iters = 0;
     loop {
         // Need a new transaction for rebalancing steps
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
@@ -277,21 +378,20 @@ fn rebalance(
         let stats = CentroidStats::from_index_stats(&txn_idx)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
 
-        match (summary.below_exemplar(), summary.above_exemplar()) {
-            (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
-                progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
-                rebalance_stats += merge_centroid(&txn_idx, to_merge, len)?;
-            }
-            (_, Some((to_split, len))) => {
-                progress.set_message(format!("split {to_split} of {len} ({iter})"));
-                rebalance_stats += split_centroid(&txn_idx, to_split, rng)?;
-            }
-            _ => break,
+        if summary
+            .below_exemplar()
+            .or(summary.above_exemplar())
+            .is_some()
+        {
+            rebalance_stats +=
+                easy_tiger::spann::rebalance::parallel_rebalance(connection, index, &|| {
+                    rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(rng_seed)
+                })?;
+            iters += 1;
+        } else {
+            break;
         }
-
-        txn_idx.commit(None)?;
-        iter += 1;
     }
 
-    Ok(rebalance_stats)
+    Ok((rebalance_stats, iters))
 }

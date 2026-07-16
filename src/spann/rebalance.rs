@@ -4,7 +4,7 @@ use rand::Rng;
 use wt_mdb::{Connection, Result};
 
 use crate::{
-    spann::{TableIndex, TransactionIndex, centroid_stats::CentroidStats},
+    spann::{centroid_stats::CentroidStats, TableIndex, TransactionIndex},
     vamana::search::GraphSearchStats,
 };
 
@@ -236,16 +236,16 @@ mod parallel {
         input::VecVectorStore,
         posting_block::PostingBlock,
         spann::{
-            CentroidAssignment, TableIndex, TransactionIndex,
             centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
             postings::BlockPostingsMut,
             rebalance::{MergeStats, RebalanceStats, SplitStats},
+            CentroidAssignment, TableIndex, TransactionIndex,
         },
         vamana::{
-            GraphVectorIndex, GraphVectorStore,
             mutate::{delete_vector, upsert_vector},
             search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
             wt::CursorVectorStore,
+            GraphVectorIndex, GraphVectorStore,
         },
     };
 
@@ -446,13 +446,15 @@ mod parallel {
         }
     }
 
+    pub type TargetCentroidSourceMap = HashMap<u32, Vec<(u32, i64)>>;
+
     /// Generate a list of all reassignments out of ops assuming an updated head index.
     /// Assignments are grouped by _target_ centroid, listing the source centroid and vector.
     pub fn posting_reassignments(
         connection: &Arc<Connection>,
         index: &Arc<TableIndex>,
         ops: &[RebalanceOp],
-    ) -> Result<(HashMap<u32, Vec<(u32, i64)>>, RebalanceStats)> {
+    ) -> Result<(TargetCentroidSourceMap, RebalanceStats)> {
         #[derive(Debug, Clone)]
         enum Target {
             Centroid(u32),
@@ -726,13 +728,20 @@ mod parallel {
         Ok((nearby_to_targets, search_stats))
     }
 
+    #[derive(Debug, Copy, Clone)]
+    pub struct PostingMove {
+        record_id: i64,
+        source: u32,
+        target: u32,
+    }
+
     /// For each nearby centroid examine all postings and compare them against each of the target
     /// centroid vectors. Yield any vector that is closer to one of the targets.
     pub fn compute_nearby_reassignments(
         connection: &Arc<Connection>,
         index: &Arc<TableIndex>,
         nearby_to_targets: &HashMap<u32, Vec<u32>>,
-    ) -> Result<(Vec<(u32, i64, u32)>, SplitStats)> {
+    ) -> Result<(Vec<PostingMove>, SplitStats)> {
         let per_nearby = nearby_to_targets
             .par_iter()
             .map_init(
@@ -759,11 +768,15 @@ mod parallel {
                             let closest_target = targets
                                 .iter()
                                 .zip(targets_distfn.iter())
-                                .map(|(c, d)| (*c, d.distance(&v)))
+                                .map(|(c, d)| (*c, d.distance(v)))
                                 .min_by(|a, b| a.1.total_cmp(&b.1))
                                 .unwrap();
-                            if closest_target.1 < nearby_distfn.distance(&v) {
-                                Some((*nearby, *id, closest_target.0))
+                            if closest_target.1 < nearby_distfn.distance(v) {
+                                Some(PostingMove {
+                                    record_id: *id,
+                                    source: *nearby,
+                                    target: closest_target.0,
+                                })
                             } else {
                                 None
                             }
@@ -783,7 +796,7 @@ mod parallel {
             .iter()
             .map(|x| x.1)
             .fold(SplitStats::default(), |acc, s| acc + s);
-        let moves = per_nearby.into_iter().map(|x| x.0).flatten().collect();
+        let moves = per_nearby.into_iter().flat_map(|x| x.0).collect();
         Ok((moves, stats))
     }
 
@@ -791,7 +804,7 @@ mod parallel {
     pub fn apply_nearby_reassignments(
         connection: &Arc<Connection>,
         index: &Arc<TableIndex>,
-        moves: &[(u32, i64, u32)],
+        moves: &[PostingMove],
     ) -> Result<()> {
         if moves.is_empty() {
             return Ok(());
@@ -799,8 +812,8 @@ mod parallel {
 
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
         let mut updater = PostingUpdater::new(&txn_idx)?;
-        for &(source, record_id, target) in moves {
-            updater.move_posting(record_id, source, target)?;
+        for &m in moves {
+            updater.move_posting(m.record_id, m.source, m.target)?;
         }
         updater.flush()?;
         txn_idx.commit(None)

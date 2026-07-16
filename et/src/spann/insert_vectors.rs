@@ -95,12 +95,14 @@ pub fn insert_vectors(
     let mut search_stats = GraphSearchStats::default();
     let mut insert_time = std::time::Duration::ZERO;
     let mut rebalance_time = std::time::Duration::ZERO;
+    let mut prepare_time = std::time::Duration::ZERO;
+    let mut apply_time = std::time::Duration::ZERO;
 
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
 
         let insert_start = std::time::Instant::now();
-        let (unique_centroids, batch_search_stats) = insert_batch(
+        let batch_result = insert_batch(
             &index,
             &connection,
             &f32_vectors,
@@ -110,8 +112,10 @@ pub fn insert_vectors(
             &main_progress,
         )?;
         insert_time += insert_start.elapsed();
-        total_batch_unique_centroids += unique_centroids;
-        search_stats += batch_search_stats;
+        total_batch_unique_centroids += batch_result.unique_centroids;
+        search_stats += batch_result.search_stats;
+        prepare_time += batch_result.prepare_time;
+        apply_time += batch_result.apply_time;
         batches += 1;
 
         main_progress.set_message("rebalancing index");
@@ -137,6 +141,24 @@ pub fn insert_vectors(
         }
     );
     println!(
+        "    Prepare:    {:10.2} s ({:5.1}%)",
+        prepare_time.as_secs_f64(),
+        if total_time.is_zero() {
+            0.0
+        } else {
+            prepare_time.as_secs_f64() / total_time.as_secs_f64() * 100.0
+        }
+    );
+    println!(
+        "    Apply:      {:10.2} s ({:5.1}%)",
+        apply_time.as_secs_f64(),
+        if total_time.is_zero() {
+            0.0
+        } else {
+            apply_time.as_secs_f64() / total_time.as_secs_f64() * 100.0
+        }
+    );
+    println!(
         "  Rebalance:    {:10.2} s ({:5.1}%)",
         rebalance_time.as_secs_f64(),
         if total_time.is_zero() {
@@ -145,6 +167,24 @@ pub fn insert_vectors(
             rebalance_time.as_secs_f64() / total_time.as_secs_f64() * 100.0
         }
     );
+    let pd = rebalance_stats.phase_durations;
+    let phase = |label: &str, d: std::time::Duration| {
+        println!(
+            "    {:<24}{:10.2} s ({:5.1}%)",
+            label,
+            d.as_secs_f64(),
+            if total_time.is_zero() {
+                0.0
+            } else {
+                d.as_secs_f64() / total_time.as_secs_f64() * 100.0
+            }
+        );
+    };
+    phase("Split update head:", pd.split_update_head);
+    phase("Posting reassign:", pd.posting_reassignments);
+    phase("Select nearby:", pd.select_nearby_centroids);
+    phase("Compute nearby:", pd.compute_nearby_reassignments);
+    phase("Apply nearby:", pd.apply_nearby_reassignments);
     println!("Batches:        {:10}", batches);
     if batches > 0 {
         println!(
@@ -300,6 +340,16 @@ impl PreparedInsertBatch {
     }
 }
 
+/// Result of inserting a single batch of vectors.
+struct InsertBatchResult {
+    unique_centroids: usize,
+    search_stats: GraphSearchStats,
+    /// Time spent producing the prepared batch (search + encoding).
+    prepare_time: std::time::Duration,
+    /// Time spent applying the prepared batch to the index.
+    apply_time: std::time::Duration,
+}
+
 fn insert_batch(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
@@ -308,9 +358,10 @@ fn insert_batch(
     posting_coder: &dyn F32VectorCoder,
     rerank_coder: Option<&dyn F32VectorCoder>,
     progress: &ProgressBar,
-) -> Result<(usize, GraphSearchStats)> {
+) -> Result<InsertBatchResult> {
     progress.set_message("inserting vectors");
 
+    let prepare_start = std::time::Instant::now();
     let mut prepared_batch = batch
         .clone()
         .into_par_iter()
@@ -366,9 +417,12 @@ fn insert_batch(
             },
         )?;
 
+    let prepare_time = prepare_start.elapsed();
+
     let unique_centroids = prepared_batch.postings.len();
     let search_stats = prepared_batch.stats;
 
+    let apply_start = std::time::Instant::now();
     std::mem::take(&mut prepared_batch.postings)
         .into_par_iter()
         .try_for_each(|(centroid, postings)| {
@@ -407,8 +461,14 @@ fn insert_batch(
 
             txn_idx.commit(None)
         })?;
+    let apply_time = apply_start.elapsed();
 
-    Ok((unique_centroids, search_stats))
+    Ok(InsertBatchResult {
+        unique_centroids,
+        search_stats,
+        prepare_time,
+        apply_time,
+    })
 }
 
 fn rebalance(

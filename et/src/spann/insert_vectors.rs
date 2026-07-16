@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
@@ -16,7 +16,7 @@ use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::SeedableRng;
 use rayon::prelude::*;
 use vectors::F32VectorCoder;
-use wt_mdb::{Connection, Result};
+use wt_mdb::{Connection, Error, Result};
 
 use crate::{ui::progress_bar, wt_stats::WiredTigerWriteStats};
 
@@ -266,6 +266,40 @@ pub fn insert_vectors(
     Ok(())
 }
 
+/// A single insert
+#[derive(Debug, Clone)]
+struct InsertRecord {
+    record_id: i64,
+    assignment: CentroidAssignment,
+    posting_vector: Vec<u8>,
+    rerank_vector: Option<Vec<u8>>,
+    stats: GraphSearchStats,
+}
+
+/// Batch of vectors for insertion complete with encoded vectors and assignments.
+#[derive(Debug, Default, Clone)]
+struct PreparedInsertBatch {
+    postings: HashMap<CentroidAssignment, Vec<InsertRecord>>,
+    stats: GraphSearchStats,
+}
+
+impl PreparedInsertBatch {
+    fn add(&mut self, record: InsertRecord) {
+        self.stats += record.stats;
+        self.postings
+            .entry(record.assignment)
+            .or_default()
+            .push(record);
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.stats += other.stats;
+        for (c, p) in other.postings {
+            self.postings.entry(c).or_default().extend(p.into_iter())
+        }
+    }
+}
+
 fn insert_batch(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
@@ -277,7 +311,7 @@ fn insert_batch(
 ) -> Result<(usize, GraphSearchStats)> {
     progress.set_message("inserting vectors");
 
-    let vector_state = batch
+    let mut prepared_batch = batch
         .clone()
         .into_par_iter()
         .progress_with(progress.clone())
@@ -308,59 +342,72 @@ fn insert_batch(
                 let centroid_id = candidates[0].vertex() as u32;
                 std::mem::swap(result_scratch, &mut candidates); // return scratch
 
-                Ok((
-                    i,
-                    CentroidAssignment::new(centroid_id),
-                    posting_coder.encode(vector),
-                    rerank_coder.map(|c| c.encode(vector)),
-                    searcher.stats(),
-                ))
+                Ok::<_, Error>(InsertRecord {
+                    record_id: i as i64,
+                    assignment: CentroidAssignment::new(centroid_id),
+                    posting_vector: posting_coder.encode(vector),
+                    rerank_vector: rerank_coder.map(|c| c.encode(vector)),
+                    stats: searcher.stats(),
+                })
             },
         )
-        .collect::<Result<Vec<_>>>()?;
-
-    let search_stats = vector_state
-        .iter()
-        .map(|(_, _, _, _, stats)| *stats)
-        .fold(GraphSearchStats::default(), |acc, stats| acc + stats);
-
-    let unique_centroids = vector_state
-        .iter()
-        .map(|(_, a, _, _, _)| a.primary_id)
-        .collect::<HashSet<_>>()
-        .len();
-
-    let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
-    let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
-    let posting_cursor = txn_idx
-        .transaction()
-        .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
-    let mut postings = BlockPostingsMut::new(posting_cursor, index.posting_vector_len());
-    let mut rerank_cursor = if rerank_coder.is_some() {
-        Some(
-            txn_idx
-                .transaction()
-                .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?,
+        .try_fold(
+            || PreparedInsertBatch::default(),
+            |mut b, r| {
+                b.add(r?);
+                Ok::<_, Error>(b)
+            },
         )
-    } else {
-        None
-    };
+        .try_reduce(
+            || PreparedInsertBatch::default(),
+            |mut a, b| {
+                a.merge(b);
+                Ok(a)
+            },
+        )?;
 
-    for (i, assignment, posting_vector, rerank_vector, _) in vector_state.into_iter() {
-        assignment_updater.insert(i as i64, assignment)?;
-        postings.insert(assignment.primary_id, i as i64, &posting_vector)?;
+    let unique_centroids = prepared_batch.postings.len();
+    let search_stats = prepared_batch.stats;
 
-        if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(rerank_vector) {
-            cursor.set(i as i64, &vector)?;
-        }
-    }
+    std::mem::take(&mut prepared_batch.postings)
+        .into_par_iter()
+        .try_for_each(|(centroid, postings)| {
+            let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+            let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
+            let mut postings_mut = BlockPostingsMut::new(
+                txn_idx
+                    .transaction()
+                    .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?,
+                index.posting_vector_len(),
+            );
+            let mut rerank_cursor = if rerank_coder.is_some() {
+                Some(
+                    txn_idx
+                        .transaction()
+                        .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?,
+                )
+            } else {
+                None
+            };
 
-    postings.flush()?;
-    assignment_updater.flush()?;
-    drop(assignment_updater);
-    drop(postings);
-    drop(rerank_cursor);
-    txn_idx.commit(None)?;
+            for r in postings {
+                assignment_updater.insert(r.record_id, centroid)?;
+                postings_mut.insert(centroid.primary_id, r.record_id, &r.posting_vector)?;
+
+                if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(r.rerank_vector) {
+                    cursor.set(r.record_id, &vector)?;
+                }
+            }
+
+            postings_mut.flush()?;
+            assignment_updater.flush()?;
+            drop(assignment_updater);
+            drop(postings_mut);
+            drop(rerank_cursor);
+
+            txn_idx.commit(None)
+        })?;
+
     Ok((unique_centroids, search_stats))
 }
 

@@ -2,13 +2,14 @@ use std::{io, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    posting_block::leaf_page_max,
+    posting_block::{encode_f32, leaf_page_max, PostingBlock},
     spann::{centroid_stats::CentroidCounts, CentroidAssignment, TableIndex},
 };
+use vectors::F32VectorCoding;
 use wt_mdb::{
     connection::CreateOptionsBuilder,
     session::Formatted,
-    Connection,
+    Connection, Error,
 };
 
 use crate::ui::progress_spinner;
@@ -20,12 +21,26 @@ pub struct CopyArgs {
     /// The destination tables must not already exist.
     #[arg(short = 'd', long)]
     dest_index_name: String,
+    /// If set, re-encode each posting vector into this format instead of copying blocks verbatim.
+    ///
+    /// This changes the posting vector length (and therefore the leaf page sizing) of the
+    /// destination index, and records the new format in the destination index config.
+    #[arg(long, value_enum)]
+    postings_format: Option<F32VectorCoding>,
 }
 
 pub fn copy(connection: Arc<Connection>, index_name: &str, args: CopyArgs) -> io::Result<()> {
     let source = TableIndex::from_db(&connection, index_name)?;
     let head_config = source.head_config().config().clone();
-    let spann_config = *source.config();
+    let source_spann_config = *source.config();
+    // The destination config differs from the source only if we are re-encoding postings.
+    let spann_config = match args.postings_format {
+        Some(posting_coder) => easy_tiger::spann::IndexConfig {
+            posting_coder,
+            ..source_spann_config
+        },
+        None => source_spann_config,
+    };
     // Compute destination table names without touching the db.
     let dest =
         TableIndex::from_init(&args.dest_index_name, head_config.clone(), spann_config);
@@ -80,25 +95,81 @@ pub fn copy(connection: Arc<Connection>, index_name: &str, args: CopyArgs) -> io
     )?;
 
     // The postings table carries the IndexConfig as app_metadata and uses larger leaf pages sized
-    // to hold a full centroid worth of posting vectors.
+    // to hold a full centroid worth of posting vectors. Both the app_metadata and the page sizing
+    // reflect the (possibly re-encoded) destination posting format.
+    let dimensions = head_config.dimensions.get();
+    let similarity = head_config.similarity;
     let posting_vector_len = spann_config
         .posting_coder
-        .coder(head_config.similarity, None)
-        .byte_len(head_config.dimensions.get());
+        .coder(similarity, None)
+        .byte_len(dimensions);
     let leaf_page_size =
         leaf_page_max(spann_config.max_centroid_len, posting_vector_len, 4096) as u32;
-    copy_table::<u32, Vec<u8>>(
-        &connection,
-        source.postings_table_name(),
-        dest.postings_table_name(),
-        Some(
-            CreateOptionsBuilder::default()
-                .app_metadata(&serde_json::to_string(&spann_config)?)
-                .leaf_page_max(leaf_page_size)
-                .leaf_value_max(leaf_page_size),
-        ),
-    )?;
+    let postings_options = CreateOptionsBuilder::default()
+        .app_metadata(&serde_json::to_string(&spann_config)?)
+        .leaf_page_max(leaf_page_size)
+        .leaf_value_max(leaf_page_size);
+    if args.postings_format.is_some() {
+        let src_coder = source_spann_config
+            .posting_coder
+            .coder(similarity, None);
+        let dst_coder = spann_config.posting_coder.coder(similarity, None);
+        copy_postings_reencoded(
+            &connection,
+            source.postings_table_name(),
+            dest.postings_table_name(),
+            postings_options,
+            src_coder.as_ref(),
+            dst_coder.as_ref(),
+            src_coder.byte_len(dimensions),
+            dimensions,
+        )?;
+    } else {
+        copy_table::<u32, Vec<u8>>(
+            &connection,
+            source.postings_table_name(),
+            dest.postings_table_name(),
+            Some(postings_options),
+        )?;
+    }
 
+    Ok(())
+}
+
+/// Copy the postings table, re-encoding every vector in each block from `src_coder`'s format into
+/// `dst_coder`'s format.
+///
+/// Each source block is decoded to f32 vectors and re-encoded, so the destination blocks use the
+/// new (possibly different length) posting vector encoding.
+#[allow(clippy::too_many_arguments)]
+fn copy_postings_reencoded(
+    connection: &Arc<Connection>,
+    source_table: &str,
+    dest_table: &str,
+    dest_options: CreateOptionsBuilder,
+    src_coder: &dyn vectors::F32VectorCoder,
+    dst_coder: &dyn vectors::F32VectorCoder,
+    src_vector_len: usize,
+    dimensions: usize,
+) -> io::Result<()> {
+    let progress = progress_spinner(format!("re-encode {source_table} -> {dest_table}"));
+    let txn = connection.begin_transaction(None)?;
+    let cursor = txn.open_cursor::<u32, Vec<u8>>(source_table)?;
+    let mut bulk =
+        connection.new_bulk_load_cursor::<u32, Vec<u8>>(dest_table, Some(dest_options))?;
+    for item in cursor {
+        let (centroid_id, data) = item?;
+        let block = PostingBlock::new(&data, src_vector_len)
+            .ok_or_else(|| Error::wired_tiger(wt_mdb::WiredTigerError::Generic))?;
+        let reencoded = encode_f32(
+            block.iter().map(|(id, encoded)| (id, src_coder.decode(encoded))),
+            dst_coder,
+            dimensions,
+        );
+        bulk.append(centroid_id, reencoded.as_slice())?;
+        progress.inc(1);
+    }
+    progress.finish();
     Ok(())
 }
 

@@ -115,6 +115,10 @@ impl TableIndex {
         &self.config
     }
 
+    pub fn dimensions(&self) -> usize {
+        self.head_config().config().dimensions.get()
+    }
+
     pub fn new_posting_coder(&self) -> Box<dyn F32VectorCoder> {
         self.config
             .posting_coder
@@ -124,6 +128,10 @@ impl TableIndex {
     pub fn posting_vector_len(&self) -> usize {
         self.new_posting_coder()
             .byte_len(self.head_config().config().dimensions.get())
+    }
+
+    pub fn rerank_coder(&self) -> Option<Box<dyn F32VectorCoder>> {
+        self.config.rerank_format.map(|f| f.coder(self.head_config().config().similarity, None))
     }
 
     pub fn from_db(connection: &Arc<Connection>, index_name: &str) -> std::io::Result<Self> {

@@ -233,7 +233,7 @@ mod parallel {
     use wt_mdb::{Connection, Error, Result};
 
     use crate::{
-        input::VecVectorStore,
+        input::{VecVectorStore, VectorStore},
         posting_block::PostingBlock,
         spann::{
             centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
@@ -383,67 +383,76 @@ mod parallel {
         ops: &[RebalanceOp],
         rng_supplier: &(impl Fn() -> R + Send + Sync),
     ) -> Result<()> {
-        // NB: deliberately done sequentially to avoid conflicts.
-        // TODO: parallelize invocation of partition_postings.
-        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
-        for op in ops {
+        let target_centroids = ops.par_iter().filter(|op| matches!(op, RebalanceOp::Split(_, _, _))).map(|op| {
             if let RebalanceOp::Split(s, t0, t1) = op {
-                let mut posting_cursor = txn_idx
-                    .transaction()
-                    .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
-                let Some(raw_posting) =
-                    unsafe { posting_cursor.seek_exact_unsafe(*s) }.transpose()?
-                else {
-                    return Ok(());
-                };
-                let block = PostingBlock::new(raw_posting, txn_idx.index().posting_vector_len())
-                    .expect("valid posting block");
+                let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+                let vectors = extract_vectors(&txn_idx, *s)?;
                 let mut rng = rng_supplier();
-                let centroids =
-                    partition_postings(&txn_idx, *s, block.iter().map(|(_, v)| v), &mut rng);
-
-                upsert_vector(*t0 as i64, &centroids[0], txn_idx.head())?;
-                upsert_vector(*t1 as i64, &centroids[1], txn_idx.head())?;
+                let centroids = match crate::kmeans::balanced_binary_partition(
+                    &vectors,
+                    100,
+                    txn_idx.index().config().min_centroid_len,
+                    &mut rng,
+                ) {
+                    Ok(r) => r,
+                    Err(r) => {
+                        warn!(
+                            "split_centroid: binary partition of centroid {s} (count {}) failed to converge!",
+                            vectors.len()
+                        );
+                        r
+                    }
+                };
+                Ok::<_, Error>((*t0, *t1, centroids))
+            } else {
+                unreachable!("filtered to splits");
             }
+        }).collect::<Result<Vec<_>>>()?;
+
+        // NB: deliberately done sequentially to avoid conflicts.
+        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+        for (t0, t1, centroids) in target_centroids {
+            upsert_vector(t0 as i64, &centroids[0], txn_idx.head())?;
+            upsert_vector(t1 as i64, &centroids[1], txn_idx.head())?;
         }
         txn_idx.commit(None)
     }
 
-    fn partition_postings<'a>(
+    fn extract_vectors(
         txn_idx: &TransactionIndex,
         centroid_id: u32,
-        vectors: impl ExactSizeIterator<Item = &'a [u8]>,
-        rng: &mut impl Rng,
-    ) -> VecVectorStore<f32> {
-        let len = vectors.len();
-        let posting_coder = txn_idx
-            .index()
-            .config()
-            .posting_coder
-            .coder(txn_idx.index().head_config().config().similarity, None);
-        let mut scratch_vector =
-            vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
-        let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), len);
-        for v in vectors {
-            posting_coder.decode_to(v, &mut scratch_vector);
-            clustering_vectors.push(&scratch_vector);
-        }
+    ) -> Result<VecVectorStore<f32>> {
+        let mut posting_cursor = txn_idx
+            .transaction()
+            .open_cursor::<u32, Vec<u8>>(txn_idx.index().postings_table_name())?;
+        let Some(raw_posting) =
+            unsafe { posting_cursor.seek_exact_unsafe(centroid_id) }.transpose()?
+        else {
+            return Ok(VecVectorStore::new(txn_idx.index().dimensions()));
+        };
+        let block = PostingBlock::new(raw_posting, txn_idx.index().posting_vector_len())
+            .expect("valid posting block");
 
-        match crate::kmeans::balanced_binary_partition(
-            &clustering_vectors,
-            100,
-            txn_idx.index().config().min_centroid_len,
-            rng,
-        ) {
-            Ok(r) => r,
-            Err(r) => {
-                warn!(
-                    "split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!",
-                    len
-                );
-                r
+        let mut scratch = vec![0.0f32; txn_idx.index().dimensions()];
+        let mut vectors = VecVectorStore::with_capacity(scratch.len(), block.len());
+        if let Some(coder) = txn_idx.index().rerank_coder() {
+            let mut rerank_cursor = txn_idx
+                .transaction()
+                .open_cursor::<i64, Vec<u8>>(txn_idx.index().raw_vectors_table_name())?;
+            for (r, _) in block.iter() {
+                let v = unsafe { rerank_cursor.seek_exact_unsafe(r) }
+                    .unwrap_or_else(|| Err(Error::not_found_error()))?;
+                coder.decode_to(v, &mut scratch);
+                vectors.push(&scratch);
+            }
+        } else {
+            let coder = txn_idx.index().new_posting_coder();
+            for (_, v) in block.iter() {
+                coder.decode_to(&v, &mut scratch);
+                vectors.push(&scratch);
             }
         }
+        Ok(vectors)
     }
 
     pub type TargetCentroidSourceMap = HashMap<u32, Vec<(u32, i64)>>;

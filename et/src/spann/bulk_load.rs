@@ -7,8 +7,8 @@ use easy_tiger::{
     spann::{
         IndexConfig, TableIndex,
         bulk::{
-            assign_to_centroids, load_centroid_stats, load_centroids, load_postings,
-            load_raw_vectors,
+            assign_to_centroids, fetch_centroid_vecs, load_centroid_stats, load_centroids,
+            load_postings, load_raw_vectors,
         },
         postings::BlockPostingsMut,
     },
@@ -111,6 +111,10 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     rerank_format: Option<F32VectorCoding>,
 
+    /// If true, encode each posting list centered on its centroid's highest-fidelity vector.
+    #[arg(long, default_value_t = false)]
+    center_postings: bool,
+
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
     limit: Option<usize>,
@@ -183,6 +187,7 @@ pub fn bulk_load(
         },
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,
+        center_postings: args.center_postings,
     };
     let index = Arc::new(TableIndex::init_index(
         &connection,
@@ -263,6 +268,11 @@ pub fn bulk_load(
     {
         let posting_count = centroid_assignments.len();
         let progress = progress_bar(posting_count, "tail load postings");
+        let centroid_vecs = if index.config().center_postings {
+            Some(fetch_centroid_vecs(index.as_ref(), &connection, &centroid_assignments)?)
+        } else {
+            None
+        };
         let txn = connection.begin_transaction(None)?;
         {
             let cursor =
@@ -273,6 +283,7 @@ pub fn bulk_load(
                 &mut postings,
                 &centroid_assignments,
                 &f32_vectors,
+                centroid_vecs.as_ref(),
                 |i| progress.inc(i),
             )?;
         }

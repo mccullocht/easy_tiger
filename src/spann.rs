@@ -47,6 +47,13 @@ pub struct IndexConfig {
     pub max_centroid_len: usize,
     /// If set, build a vector id keyed vector table in this format for re-ranking results.
     pub rerank_format: Option<F32VectorCoding>,
+    /// If true, encode each posting list centered on its centroid's highest-fidelity vector.
+    ///
+    /// Centering reduces the dynamic range of residual vectors before quantization, which can
+    /// substantially reduce quantization loss for LVQ-family formats. The centering vector is
+    /// the highest-fidelity representation of each centroid stored in the head index.
+    #[serde(default)]
+    pub center_postings: bool,
 }
 
 impl IndexConfig {
@@ -123,6 +130,12 @@ impl TableIndex {
         self.config
             .posting_coder
             .coder(self.head_config().config().similarity, None)
+    }
+
+    pub fn new_posting_coder_centered(&self, center: Vec<f32>) -> Box<dyn F32VectorCoder> {
+        self.config
+            .posting_coder
+            .coder(self.head_config().config().similarity, Some(center))
     }
 
     pub fn posting_vector_len(&self) -> usize {

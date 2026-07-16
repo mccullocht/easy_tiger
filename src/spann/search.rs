@@ -18,7 +18,7 @@ use crate::{
     spann::{centroid_stats::CentroidStats, TransactionIndex},
     vamana::{
         search::{GraphSearchStats, GraphSearcher},
-        GraphSearchParams, GraphVectorIndex,
+        GraphSearchParams, GraphVectorIndex, GraphVectorStore,
     },
     Neighbor,
 };
@@ -211,40 +211,82 @@ impl Searcher {
         self.stats.postings_read = centroids.len();
 
         self.seen.clear();
-        let mut result_queue = ResultQueue::new(
-            self.params.limit.get(),
-            reader
-                .index
+        let mut result_queue = ResultQueue::new(self.params.limit.get());
+        let vector_len = reader.index().posting_vector_len();
+        let similarity = reader.index().head_config().config().similarity;
+
+        if reader.index().config().center_postings {
+            let mut hf_store = reader.head().high_fidelity_vectors()?;
+            let hf_coder = hf_store.new_coder();
+            for c in centroids {
+                let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
+                let centroid_raw = match hf_store.get(centroid_id as i64) {
+                    Some(Ok(raw)) => raw.to_vec(),
+                    Some(Err(e)) => {
+                        warn!("failed to read centroid vector for {centroid_id}: {e}");
+                        continue;
+                    }
+                    None => {
+                        warn!("centroid vector missing for {centroid_id}");
+                        continue;
+                    }
+                };
+                let centroid_vec = hf_coder.decode(&centroid_raw);
+                let dist_fn = reader
+                    .index()
+                    .config()
+                    .posting_coder
+                    .query_distance_asymmetric(similarity, query, Some(&centroid_vec));
+
+                // SAFETY: we are not performing any WT operations in between seeks.
+                let data = match unsafe { posting_cursor.seek_exact_unsafe(centroid_id) } {
+                    Some(Ok(data)) => data,
+                    Some(Err(e)) => {
+                        warn!("failed to read posting for centroid {centroid_id}: {e}");
+                        continue;
+                    }
+                    None => continue,
+                };
+                let Some(block) = PostingBlock::new(data, vector_len) else {
+                    warn!("malformed posting block for centroid {centroid_id}");
+                    continue;
+                };
+                for (record_id, vector) in block.iter() {
+                    self.stats.posting_vectors_read += 1;
+                    if !self.seen.insert(record_id) {
+                        continue;
+                    }
+                    result_queue.push(record_id, vector, dist_fn.as_ref());
+                }
+            }
+        } else {
+            let dist_fn = reader
+                .index()
                 .config()
                 .posting_coder
-                .query_distance_asymmetric(
-                    reader.index().head_config().config().similarity,
-                    query,
-                    None,
-                ),
-        );
-        let vector_len = reader.index().posting_vector_len();
-        for c in centroids {
-            let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
-            // SAFETY: we are not performing any WT operations in between seeks.
-            let data = match unsafe { posting_cursor.seek_exact_unsafe(centroid_id) } {
-                Some(Ok(data)) => data,
-                Some(Err(e)) => {
-                    warn!("failed to read posting for centroid {centroid_id}: {e}");
+                .query_distance_asymmetric(similarity, query, None);
+            for c in centroids {
+                let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
+                // SAFETY: we are not performing any WT operations in between seeks.
+                let data = match unsafe { posting_cursor.seek_exact_unsafe(centroid_id) } {
+                    Some(Ok(data)) => data,
+                    Some(Err(e)) => {
+                        warn!("failed to read posting for centroid {centroid_id}: {e}");
+                        continue;
+                    }
+                    None => continue,
+                };
+                let Some(block) = PostingBlock::new(data, vector_len) else {
+                    warn!("malformed posting block for centroid {centroid_id}");
                     continue;
+                };
+                for (record_id, vector) in block.iter() {
+                    self.stats.posting_vectors_read += 1;
+                    if !self.seen.insert(record_id) {
+                        continue; // already seen
+                    }
+                    result_queue.push(record_id, vector, dist_fn.as_ref());
                 }
-                None => continue,
-            };
-            let Some(block) = PostingBlock::new(data, vector_len) else {
-                warn!("malformed posting block for centroid {centroid_id}");
-                continue;
-            };
-            for (record_id, vector) in block.iter() {
-                self.stats.posting_vectors_read += 1;
-                if !self.seen.insert(record_id) {
-                    continue; // already seen
-                }
-                result_queue.push(record_id, vector);
             }
         }
 
@@ -260,7 +302,7 @@ impl Searcher {
     fn maybe_rerank_results(
         &mut self,
         query: &[f32],
-        result_queue: ResultQueue<'_>,
+        result_queue: ResultQueue,
         reader: &TransactionIndex,
     ) -> Result<Vec<Neighbor>> {
         if self.params.num_rerank == 0 || reader.index().config().rerank_format.is_none() {
@@ -297,8 +339,7 @@ impl Searcher {
     }
 }
 
-struct ResultQueue<'a> {
-    dist_fn: Box<dyn QueryVectorDistance + 'a>,
+struct ResultQueue {
     results: MinMaxHeap<Neighbor>,
     max_len: usize,
 
@@ -306,10 +347,9 @@ struct ResultQueue<'a> {
     fast_scored: usize,
 }
 
-impl<'a> ResultQueue<'a> {
-    fn new(max_len: usize, dist_fn: Box<dyn QueryVectorDistance + 'a>) -> Self {
+impl ResultQueue {
+    fn new(max_len: usize) -> Self {
         Self {
-            dist_fn,
             results: MinMaxHeap::with_capacity(max_len),
             max_len,
             slow_scored: 0,
@@ -318,16 +358,16 @@ impl<'a> ResultQueue<'a> {
     }
 
     /// Returns `true` if `v` is kept in the queue rather than discarded.
-    fn push(&mut self, vertex: i64, vector: &[u8]) -> bool {
+    fn push(&mut self, vertex: i64, vector: &[u8], dist_fn: &dyn QueryVectorDistance) -> bool {
         if self.results.len() < self.max_len {
             self.results
-                .push(Neighbor::new(vertex, self.dist_fn.distance(vector)));
+                .push(Neighbor::new(vertex, dist_fn.distance(vector)));
             self.slow_scored += 1;
             return true;
         }
 
         let max_distance = self.results.peek_max().unwrap().distance();
-        if let Some(dist) = self.dist_fn.distance_with_bound(vector, max_distance) {
+        if let Some(dist) = dist_fn.distance_with_bound(vector, max_distance) {
             self.results.push_pop_max(Neighbor::new(vertex, dist));
             self.slow_scored += 1;
             true

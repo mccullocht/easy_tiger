@@ -1,4 +1,4 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use crate::{
     input::VectorStore,
@@ -6,7 +6,7 @@ use crate::{
         centroid_stats::CentroidCounts, postings::BlockPostingsMut, CentroidAssignment,
         TableIndex,
     },
-    vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
+    vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex, GraphVectorIndex, GraphVectorStore},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
@@ -86,17 +86,47 @@ pub fn load_centroid_stats(
     Ok(())
 }
 
+/// Fetch the highest-fidelity decoded f32 vectors for a set of centroid IDs from the head index.
+///
+/// Used when `center_postings` is enabled to supply per-centroid coders during bulk loading.
+pub fn fetch_centroid_vecs(
+    index: &TableIndex,
+    connection: &Arc<Connection>,
+    centroid_assignments: &[CentroidAssignment],
+) -> Result<HashMap<u32, Vec<f32>>> {
+    let mut centroid_ids: Vec<u32> = centroid_assignments.iter().map(|a| a.primary_id).collect();
+    centroid_ids.sort_unstable();
+    centroid_ids.dedup();
+
+    let txn = connection.begin_transaction(None)?;
+    let head_reader = TransactionGraphVectorIndex::new(Arc::clone(index.head_config()), txn);
+    let mut store = head_reader.high_fidelity_vectors()?;
+    let coder = store.new_coder();
+    let mut out = HashMap::with_capacity(centroid_ids.len());
+    for id in centroid_ids {
+        let raw = store
+            .get(id as i64)
+            .unwrap_or_else(|| Err(wt_mdb::Error::not_found_error()))?;
+        out.insert(id, coder.decode(raw));
+    }
+    Ok(out)
+}
+
 /// Load entries for each of the posting keys into `postings`.
 ///
 /// Vectors are encoded in parallel batches and inserted in (centroid_id, record_id) order, which
 /// allows implementations backed by sorted storage to place each centroid's entries contiguously.
 /// Callers must call [`PostingsMut::flush`] (or ensure `postings` does so on drop) to commit
 /// changes, though `load_postings` calls it internally before returning.
+///
+/// When `centroid_vecs` is `Some`, each posting vector is encoded centered on its centroid's
+/// decoded f32 vector. Pass `None` for standard uncentered encoding.
 pub fn load_postings(
     index: &TableIndex,
     postings: &mut BlockPostingsMut<'_>,
     centroid_assignments: &[CentroidAssignment],
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    centroid_vecs: Option<&HashMap<u32, Vec<f32>>>,
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     let mut posting_keys: Vec<(u32, i64)> = centroid_assignments
@@ -106,26 +136,45 @@ pub fn load_postings(
         .collect();
     posting_keys.par_sort_unstable();
 
-    let coder = index
-        .config()
-        .posting_coder
-        .coder(index.head_config().config().similarity, None);
-    // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
-    // this will also allow us to parallelize IO.
-    let mut encoded_buffer =
-        vec![vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())]; 1024];
-    for batch in posting_keys.chunks(1024) {
-        encoded_buffer
-            .par_iter_mut()
-            .zip(batch)
-            .for_each(|(buf, &(_, record_id))| {
-                coder.encode_to(&vectors[record_id as usize], buf);
-            });
-        for (&(centroid_id, record_id), buf) in batch.iter().zip(encoded_buffer.iter()) {
-            postings.insert(centroid_id, record_id, buf)?;
+    let similarity = index.head_config().config().similarity;
+    let encoded_len = index.posting_vector_len();
+
+    // posting_keys is sorted by centroid_id; process one centroid group at a time so the
+    // per-centroid coder is created only once per centroid rather than once per vector.
+    let mut encoded_buffer = vec![vec![0u8; encoded_len]; 1024];
+    let mut pos = 0;
+    while pos < posting_keys.len() {
+        let centroid_id = posting_keys[pos].0;
+        let group_end = posting_keys[pos..]
+            .iter()
+            .position(|&(c, _)| c != centroid_id)
+            .map(|n| pos + n)
+            .unwrap_or(posting_keys.len());
+        let group = &posting_keys[pos..group_end];
+
+        let coder: Box<dyn vectors::F32VectorCoder> =
+            match centroid_vecs.and_then(|m| m.get(&centroid_id)) {
+                Some(center) => index.new_posting_coder_centered(center.clone()),
+                None => index.config().posting_coder.coder(similarity, None),
+            };
+
+        for batch in group.chunks(1024) {
+            encoded_buffer.resize(batch.len(), vec![0u8; encoded_len]);
+            encoded_buffer
+                .par_iter_mut()
+                .zip(batch)
+                .for_each(|(buf, &(_, record_id))| {
+                    coder.encode_to(&vectors[record_id as usize], buf);
+                });
+            for (&(centroid, record_id), buf) in batch.iter().zip(encoded_buffer.iter()) {
+                postings.insert(centroid, record_id, buf)?;
+            }
+            progress(batch.len() as u64);
         }
-        progress(batch.len() as u64);
+
+        pos = group_end;
     }
+
     postings.flush()
 }
 

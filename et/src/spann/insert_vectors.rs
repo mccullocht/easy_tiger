@@ -10,13 +10,16 @@ use easy_tiger::{
         postings::BlockPostingsMut,
         rebalance::{BalanceSummary, RebalanceStats},
     },
-    vamana::search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
+    vamana::{
+        GraphVectorIndex, GraphVectorStore,
+        search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
+    },
 };
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::SeedableRng;
 use rayon::prelude::*;
 use vectors::F32VectorCoder;
-use wt_mdb::{Connection, Result};
+use wt_mdb::{Connection, Error, Result};
 
 use crate::{ui::progress_bar, wt_stats::WiredTigerWriteStats};
 
@@ -311,7 +314,12 @@ fn insert_batch(
                 Ok((
                     i,
                     CentroidAssignment::new(centroid_id),
-                    posting_coder.encode(vector),
+                    // When centering, encoding happens in the write phase with the centroid vector.
+                    if index.config().center_postings {
+                        vec![]
+                    } else {
+                        posting_coder.encode(vector)
+                    },
                     rerank_coder.map(|c| c.encode(vector)),
                     searcher.stats(),
                 ))
@@ -346,14 +354,45 @@ fn insert_batch(
         None
     };
 
-    for (i, assignment, posting_vector, rerank_vector, _) in vector_state.into_iter() {
+    // When centering, open head HF vectors and cache per-centroid coders across the batch.
+    let mut hf_store = if index.config().center_postings {
+        Some(txn_idx.head().high_fidelity_vectors()?)
+    } else {
+        None
+    };
+    let hf_base_coder = hf_store.as_ref().map(|s| s.new_coder());
+    let mut centroid_coder_cache: std::collections::HashMap<u32, Box<dyn F32VectorCoder>> =
+        std::collections::HashMap::new();
+
+    for (i, assignment, pre_encoded, rerank_vector, _) in vector_state.into_iter() {
         assignment_updater.insert(i as i64, assignment)?;
-        postings.insert(assignment.primary_id, i as i64, &posting_vector)?;
+
+        let posting_bytes = if let Some(hf) = hf_store.as_mut() {
+            let centroid_id = assignment.primary_id;
+            if !centroid_coder_cache.contains_key(&centroid_id) {
+                let raw = hf
+                    .get(centroid_id as i64)
+                    .unwrap_or_else(|| Err(Error::not_found_error()))?
+                    .to_vec();
+                let center = hf_base_coder.as_ref().unwrap().decode(&raw);
+                centroid_coder_cache.insert(centroid_id, index.new_posting_coder_centered(center));
+            }
+            centroid_coder_cache
+                .get(&centroid_id)
+                .unwrap()
+                .encode(&f32_vectors[i])
+        } else {
+            pre_encoded
+        };
+        postings.insert(assignment.primary_id, i as i64, &posting_bytes)?;
 
         if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(rerank_vector) {
             cursor.set(i as i64, &vector)?;
         }
     }
+    drop(centroid_coder_cache);
+    drop(hf_store);
+    drop(hf_base_coder);
 
     postings.flush()?;
     assignment_updater.flush()?;

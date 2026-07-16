@@ -84,6 +84,10 @@ pub struct InitIndexArgs {
     #[arg(long)]
     rerank_format: Option<F32VectorCoding>,
 
+    /// If true, encode each posting list centered on its centroid's highest-fidelity vector.
+    #[arg(long, default_value_t = false)]
+    center_postings: bool,
+
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value_t = false)]
     drop_tables: bool,
@@ -142,6 +146,7 @@ pub fn init_index(
         },
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,
+        center_postings: args.center_postings,
     };
     let index = Arc::new(TableIndex::init_index(
         &connection,

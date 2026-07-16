@@ -1,5 +1,6 @@
 mod bulk_load;
 mod centroid_stats;
+mod copy;
 mod drop_index;
 mod export_head;
 mod init_index;
@@ -14,6 +15,7 @@ use clap::{Args, Subcommand};
 use crate::wt_args::WiredTigerArgs;
 use bulk_load::{bulk_load, BulkLoadArgs};
 use centroid_stats::centroid_stats;
+use copy::{copy, CopyArgs};
 use drop_index::drop_index;
 use export_head::{export_head, ExportHeadArgs};
 use init_index::{init_index, InitIndexArgs};
@@ -48,6 +50,8 @@ pub enum Command {
     Rebalance(RebalanceArgs),
     /// Remove an existing index.
     DropIndex,
+    /// Copy the contents of this index into a new SPANN index.
+    Copy(CopyArgs),
 }
 
 pub fn spann_command(args: SpannArgs) -> io::Result<()> {
@@ -63,6 +67,7 @@ pub fn spann_command(args: SpannArgs) -> io::Result<()> {
         Command::ExportHead(args) => export_head(connection, index_name, args),
         Command::Rebalance(args) => rebalance(connection, index_name, args),
         Command::DropIndex => drop_index(connection, index_name),
+        Command::Copy(args) => copy(connection, index_name, args),
     }?;
     cmd_connection.checkpoint()?;
     Ok(())

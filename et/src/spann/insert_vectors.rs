@@ -2,15 +2,15 @@ use std::{collections::HashMap, fs::File, io, num::NonZero, ops::Range, path::Pa
 
 use clap::Args;
 use easy_tiger::{
-    Neighbor,
     input::{DerefVectorStore, VectorStore},
     spann::{
-        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
         postings::BlockPostingsMut,
         rebalance::{BalanceSummary, RebalanceStats},
+        CentroidAssignment, TableIndex, TransactionIndex,
     },
     vamana::search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
+    Neighbor,
 };
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::SeedableRng;
@@ -132,7 +132,7 @@ pub fn insert_vectors(
     let total_time = insert_time + rebalance_time;
     println!("Wall time:");
     println!(
-        "  Insert:       {:10.2} s ({:5.1}%)",
+        "  Insert:           {:10.2} s ({:5.1}%)",
         insert_time.as_secs_f64(),
         if total_time.is_zero() {
             0.0
@@ -141,7 +141,7 @@ pub fn insert_vectors(
         }
     );
     println!(
-        "    Prepare:    {:10.2} s ({:5.1}%)",
+        "    Prepare:        {:10.2} s ({:5.1}%)",
         prepare_time.as_secs_f64(),
         if total_time.is_zero() {
             0.0
@@ -150,7 +150,7 @@ pub fn insert_vectors(
         }
     );
     println!(
-        "    Apply:      {:10.2} s ({:5.1}%)",
+        "    Apply:          {:10.2} s ({:5.1}%)",
         apply_time.as_secs_f64(),
         if total_time.is_zero() {
             0.0
@@ -159,7 +159,7 @@ pub fn insert_vectors(
         }
     );
     println!(
-        "  Rebalance:    {:10.2} s ({:5.1}%)",
+        "  Rebalance:        {:10.2} s ({:5.1}%)",
         rebalance_time.as_secs_f64(),
         if total_time.is_zero() {
             0.0
@@ -170,7 +170,7 @@ pub fn insert_vectors(
     let pd = rebalance_stats.phase_durations;
     let phase = |label: &str, d: std::time::Duration| {
         println!(
-            "    {:<24}{:10.2} s ({:5.1}%)",
+            "    {:<16}{:10.2} s ({:5.1}%)",
             label,
             d.as_secs_f64(),
             if total_time.is_zero() {
@@ -180,11 +180,12 @@ pub fn insert_vectors(
             }
         );
     };
-    phase("Split update head:", pd.split_update_head);
-    phase("Posting reassign:", pd.posting_reassignments);
-    phase("Select nearby:", pd.select_nearby_centroids);
-    phase("Compute nearby:", pd.compute_nearby_reassignments);
-    phase("Apply nearby:", pd.apply_nearby_reassignments);
+    phase("Partition:", pd.split_update_head);
+    phase("Reassign:", pd.posting_reassignments);
+    phase("Apply Reassign:", pd.apply_posting_reassignments);
+    phase("Nearby Find:", pd.select_nearby_centroids);
+    phase("Nearby Select:", pd.compute_nearby_reassignments);
+    phase("Nearby Apply:", pd.apply_nearby_reassignments);
     println!("Batches:        {:10}", batches);
     if batches > 0 {
         println!(

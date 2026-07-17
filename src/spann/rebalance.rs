@@ -73,6 +73,7 @@ impl AddAssign for SplitStats {
 pub struct RebalancePhaseDurations {
     pub split_update_head: std::time::Duration,
     pub posting_reassignments: std::time::Duration,
+    pub apply_posting_reassignments: std::time::Duration,
     pub select_nearby_centroids: std::time::Duration,
     pub compute_nearby_reassignments: std::time::Duration,
     pub apply_nearby_reassignments: std::time::Duration,
@@ -85,6 +86,8 @@ impl Add for RebalancePhaseDurations {
         Self {
             split_update_head: self.split_update_head + rhs.split_update_head,
             posting_reassignments: self.posting_reassignments + rhs.posting_reassignments,
+            apply_posting_reassignments: self.apply_posting_reassignments
+                + rhs.apply_posting_reassignments,
             select_nearby_centroids: self.select_nearby_centroids + rhs.select_nearby_centroids,
             compute_nearby_reassignments: self.compute_nearby_reassignments
                 + rhs.compute_nearby_reassignments,
@@ -877,7 +880,9 @@ pub fn parallel_rebalance<R: Rng>(
     let (reassignments, mut stats) = parallel::posting_reassignments(connection, index, &ops)?;
     let posting_reassignments = start.elapsed();
 
+    let start = std::time::Instant::now();
     parallel::apply_posting_reassignments(connection, index, &reassignments, &ops)?;
+    let apply_posting_reassignments = start.elapsed();
 
     let start = std::time::Instant::now();
     let (nearby_to_targets, _) = parallel::select_nearby_centroids(connection, index, &ops)?;
@@ -896,6 +901,7 @@ pub fn parallel_rebalance<R: Rng>(
     stats.phase_durations += RebalancePhaseDurations {
         split_update_head,
         posting_reassignments,
+        apply_posting_reassignments,
         select_nearby_centroids,
         compute_nearby_reassignments,
         apply_nearby_reassignments,

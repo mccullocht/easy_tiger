@@ -72,8 +72,10 @@ impl AddAssign for SplitStats {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RebalancePhaseDurations {
     pub split_update_head: std::time::Duration,
+    pub insert_split_centroids: std::time::Duration,
     pub posting_reassignments: std::time::Duration,
     pub apply_posting_reassignments: std::time::Duration,
+    pub remove_source_centroids: std::time::Duration,
     pub select_nearby_centroids: std::time::Duration,
     pub compute_nearby_reassignments: std::time::Duration,
     pub apply_nearby_reassignments: std::time::Duration,
@@ -85,9 +87,11 @@ impl Add for RebalancePhaseDurations {
     fn add(self, rhs: Self) -> Self::Output {
         Self {
             split_update_head: self.split_update_head + rhs.split_update_head,
+            insert_split_centroids: self.insert_split_centroids + rhs.insert_split_centroids,
             posting_reassignments: self.posting_reassignments + rhs.posting_reassignments,
             apply_posting_reassignments: self.apply_posting_reassignments
                 + rhs.apply_posting_reassignments,
+            remove_source_centroids: self.remove_source_centroids + rhs.remove_source_centroids,
             select_nearby_centroids: self.select_nearby_centroids + rhs.select_nearby_centroids,
             compute_nearby_reassignments: self.compute_nearby_reassignments
                 + rhs.compute_nearby_reassignments,
@@ -416,35 +420,63 @@ mod parallel {
             .collect()
     }
 
-    /// For all split operations, generates new target centroids and inserts them in head index.
-    pub fn split_update_head<R: Rng>(
+    /// For all split operations, generate new centroid vectors in parallel.
+    pub fn generate_split_centroids<R: Rng>(
         connection: &Arc<Connection>,
         index: &Arc<TableIndex>,
         ops: &[RebalanceOp],
         rng_supplier: &(impl Fn() -> R + Send + Sync),
-    ) -> Result<()> {
-        // NB: deliberately done sequentially to avoid conflicts.
-        // TODO: parallelize invocation of partition_postings.
-        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
-        for op in ops {
-            if let RebalanceOp::Split(s, t0, t1) = op {
-                let mut posting_cursor = txn_idx
-                    .transaction()
-                    .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
-                let Some(raw_posting) =
-                    unsafe { posting_cursor.seek_exact_unsafe(*s) }.transpose()?
-                else {
-                    return Ok(());
-                };
-                let block = PostingBlock::new(raw_posting, txn_idx.index().posting_vector_len())
-                    .expect("valid posting block");
-                let mut rng = rng_supplier();
-                let centroids =
-                    partition_postings(&txn_idx, *s, block.iter().map(|(_, v)| v), &mut rng);
+    ) -> Result<Vec<(u32, u32, VecVectorStore<f32>)>> {
+        ops.par_iter()
+            .filter_map(|op| match op {
+                RebalanceOp::Split(s, t0, t1) => Some((*s, *t0, *t1)),
+                RebalanceOp::Merge(_) => None,
+            })
+            .map_init(
+                || {
+                    TransactionIndex::new(
+                        index,
+                        connection
+                            .begin_transaction(None)
+                            .expect("open session and txn"),
+                    )
+                },
+                |txn_idx, (s, t0, t1)| {
+                    let mut posting_cursor = txn_idx
+                        .transaction()
+                        .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+                    let Some(raw_posting) =
+                        unsafe { posting_cursor.seek_exact_unsafe(s) }.transpose()?
+                    else {
+                        return Ok(None);
+                    };
+                    let block =
+                        PostingBlock::new(raw_posting, txn_idx.index().posting_vector_len())
+                            .expect("valid posting block");
+                    let mut rng = rng_supplier();
+                    let centroids =
+                        partition_postings(txn_idx, s, block.iter().map(|(_, v)| v), &mut rng);
+                    Ok(Some((t0, t1, centroids)))
+                },
+            )
+            .filter_map(|r: Result<Option<_>>| r.transpose())
+            .collect()
+    }
 
-                upsert_vector(*t0 as i64, &centroids[0], txn_idx.head())?;
-                upsert_vector(*t1 as i64, &centroids[1], txn_idx.head())?;
-            }
+    /// Insert pre-computed split centroids into the head index.
+    // NB: deliberately sequential to avoid conflicts.
+    pub fn insert_split_centroids(
+        connection: &Arc<Connection>,
+        index: &Arc<TableIndex>,
+        split_centroids: &[(u32, u32, VecVectorStore<f32>)],
+    ) -> Result<()> {
+        if split_centroids.is_empty() {
+            return Ok(());
+        }
+        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+        for (t0, t1, centroids) in split_centroids {
+            upsert_vector(*t0 as i64, &centroids[0], txn_idx.head())?;
+            upsert_vector(*t1 as i64, &centroids[1], txn_idx.head())?;
         }
         txn_idx.commit(None)
     }
@@ -649,12 +681,11 @@ mod parallel {
         Ok((by_target, stats))
     }
 
-    /// Apply all posting reassignments then remove the source centroid ids.
+    /// Apply all posting reassignments by copying vectors to their target centroids.
     pub fn apply_posting_reassignments(
         connection: &Arc<Connection>,
         index: &Arc<TableIndex>,
         reassignments: &HashMap<u32, Vec<(u32, i64)>>,
-        ops: &[RebalanceOp],
     ) -> Result<()> {
         reassignments
             .par_iter()
@@ -667,9 +698,17 @@ mod parallel {
                 updater.flush()?;
                 txn.commit(None)?;
                 Ok::<_, Error>(())
-            })?;
+            })
+    }
 
-        // NB: deliberately sequential to avoid high conflict rate.
+    /// Remove source centroid ids from stats, postings, and the head graph.
+    ///
+    // NB: deliberately sequential to avoid high conflict rate.
+    pub fn remove_source_centroids(
+        connection: &Arc<Connection>,
+        index: &Arc<TableIndex>,
+        ops: &[RebalanceOp],
+    ) -> Result<()> {
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
         for op in ops {
             let mut stats_cursor = txn_idx
@@ -873,16 +912,25 @@ pub fn parallel_rebalance<R: Rng>(
     let ops = parallel::get_rebalance_ops(&centroid_stats, index.config().centroid_len_range());
 
     let start = std::time::Instant::now();
-    parallel::split_update_head(connection, index, &ops, rng_supplier)?;
+    let split_centroids =
+        parallel::generate_split_centroids(connection, index, &ops, rng_supplier)?;
     let split_update_head = start.elapsed();
+
+    let start = std::time::Instant::now();
+    parallel::insert_split_centroids(connection, index, &split_centroids)?;
+    let insert_split_centroids = start.elapsed();
 
     let start = std::time::Instant::now();
     let (reassignments, mut stats) = parallel::posting_reassignments(connection, index, &ops)?;
     let posting_reassignments = start.elapsed();
 
     let start = std::time::Instant::now();
-    parallel::apply_posting_reassignments(connection, index, &reassignments, &ops)?;
+    parallel::apply_posting_reassignments(connection, index, &reassignments)?;
     let apply_posting_reassignments = start.elapsed();
+
+    let start = std::time::Instant::now();
+    parallel::remove_source_centroids(connection, index, &ops)?;
+    let remove_source_centroids = start.elapsed();
 
     let start = std::time::Instant::now();
     let (nearby_to_targets, _) = parallel::select_nearby_centroids(connection, index, &ops)?;
@@ -900,8 +948,10 @@ pub fn parallel_rebalance<R: Rng>(
 
     stats.phase_durations += RebalancePhaseDurations {
         split_update_head,
+        insert_split_centroids,
         posting_reassignments,
         apply_posting_reassignments,
+        remove_source_centroids,
         select_nearby_centroids,
         compute_nearby_reassignments,
         apply_nearby_reassignments,

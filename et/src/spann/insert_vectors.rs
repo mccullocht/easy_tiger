@@ -181,8 +181,10 @@ pub fn insert_vectors(
         );
     };
     phase("Partition:", pd.split_update_head);
+    phase("Insert:", pd.insert_split_centroids);
     phase("Reassign:", pd.posting_reassignments);
     phase("Apply Reassign:", pd.apply_posting_reassignments);
+    phase("Remove:", pd.remove_source_centroids);
     phase("Nearby Find:", pd.select_nearby_centroids);
     phase("Nearby Select:", pd.compute_nearby_reassignments);
     phase("Nearby Apply:", pd.apply_nearby_reassignments);

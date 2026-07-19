@@ -2,10 +2,7 @@ use std::{cell::RefCell, sync::Arc};
 
 use crate::{
     input::VectorStore,
-    spann::{
-        centroid_stats::CentroidCounts, postings::CentroidPostingsMut, CentroidAssignment,
-        TableIndex,
-    },
+    spann::{centroid_stats::CentroidCounts, postings::CentroidPostingsMut, TableIndex},
     vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
 };
 use rayon::prelude::*;
@@ -20,7 +17,8 @@ pub fn assign_to_centroids(
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     limit: usize,
     progress: impl Fn(u64) + Send + Sync,
-) -> Result<Vec<CentroidAssignment>> {
+) -> Result<Vec<u32>> {
+    // TODO: use map_init() to avoid thread locals.
     let tl_searcher = ThreadLocal::new();
     (0..limit)
         .into_par_iter()
@@ -33,27 +31,11 @@ pub fn assign_to_centroids(
                 .get_or(|| RefCell::new(GraphSearcher::new(index.config().head_search_params)))
                 .borrow_mut();
             let candidates = searcher.search(&vectors[i], &head_reader)?;
-            let selected = Ok(CentroidAssignment::new(candidates[0].vertex() as u32));
+            let selected = Ok(candidates[0].vertex() as u32);
             progress(1);
             selected
         })
         .collect::<Result<Vec<_>>>()
-}
-
-/// Load all centroid assignments into a record id keyed table.
-pub fn load_centroids(
-    index: &TableIndex,
-    connection: &Arc<Connection>,
-    centroid_assignments: &[CentroidAssignment],
-    progress: impl Fn(u64) + Send + Sync,
-) -> Result<()> {
-    let mut bulk_cursor = connection
-        .new_bulk_load_cursor::<i64, CentroidAssignment>(&index.table_names.centroids, None)?;
-    for (record_id, assignment) in centroid_assignments.iter().enumerate() {
-        bulk_cursor.append(record_id as i64, *assignment)?;
-        progress(1);
-    }
-    Ok(())
 }
 
 /// Bulk load centroid statistics into a stats table.
@@ -63,14 +45,14 @@ pub fn load_centroids(
 pub fn load_centroid_stats(
     index: &TableIndex,
     connection: &Arc<Connection>,
-    centroid_assignments: &[CentroidAssignment],
+    centroid_assignments: &[u32],
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     use std::collections::HashMap;
 
     let mut stats: HashMap<u32, CentroidCounts> = HashMap::new();
-    for assignment in centroid_assignments {
-        stats.entry(assignment.primary_id).or_default().primary += 1;
+    for &assignment in centroid_assignments {
+        stats.entry(assignment).or_default().primary += 1;
     }
 
     let mut stats = stats.into_iter().collect::<Vec<_>>();
@@ -95,14 +77,14 @@ pub fn load_centroid_stats(
 pub fn load_postings(
     index: &TableIndex,
     postings: &mut CentroidPostingsMut<'_>,
-    centroid_assignments: &[CentroidAssignment],
+    centroid_assignments: &[u32],
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     let mut posting_keys: Vec<(u32, i64)> = centroid_assignments
         .iter()
         .enumerate()
-        .map(|(i, a)| (a.primary_id, i as i64))
+        .map(|(i, &a)| (a, i as i64))
         .collect();
     posting_keys.par_sort_unstable();
 

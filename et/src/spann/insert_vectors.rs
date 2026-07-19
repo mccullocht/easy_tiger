@@ -4,10 +4,10 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
-        centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
+        centroid_stats::CentroidStats,
         postings::CentroidPostingsMut,
         rebalance::{BalanceSummary, RebalanceStats},
-        CentroidAssignment, TableIndex, TransactionIndex,
+        TableIndex, TransactionIndex,
     },
     vamana::search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
     Neighbor,
@@ -313,7 +313,7 @@ pub fn insert_vectors(
 #[derive(Debug, Clone)]
 struct InsertRecord {
     record_id: i64,
-    assignment: CentroidAssignment,
+    assignment: u32,
     posting_vector: Vec<u8>,
     rerank_vector: Option<Vec<u8>>,
     stats: GraphSearchStats,
@@ -322,7 +322,7 @@ struct InsertRecord {
 /// Batch of vectors for insertion complete with encoded vectors and assignments.
 #[derive(Debug, Default, Clone)]
 struct PreparedInsertBatch {
-    postings: HashMap<CentroidAssignment, Vec<InsertRecord>>,
+    postings: HashMap<u32, Vec<InsertRecord>>,
     stats: GraphSearchStats,
 }
 
@@ -398,7 +398,7 @@ fn insert_batch(
 
                 Ok::<_, Error>(InsertRecord {
                     record_id: i as i64,
-                    assignment: CentroidAssignment::new(centroid_id),
+                    assignment: centroid_id,
                     posting_vector: posting_coder.encode(vector),
                     rerank_vector: rerank_coder.map(|c| c.encode(vector)),
                     stats: searcher.stats(),
@@ -430,7 +430,6 @@ fn insert_batch(
         .into_par_iter()
         .try_for_each(|(centroid, postings)| {
             let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
-            let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
             let mut postings_mut = CentroidPostingsMut::from_txn(&txn_idx)?;
             let mut rerank_cursor = if rerank_coder.is_some() {
                 Some(
@@ -443,8 +442,7 @@ fn insert_batch(
             };
 
             for r in postings {
-                assignment_updater.insert(r.record_id, centroid)?;
-                postings_mut.insert(centroid.primary_id, r.record_id, &r.posting_vector)?;
+                postings_mut.insert(centroid, r.record_id, &r.posting_vector)?;
 
                 if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(r.rerank_vector) {
                     cursor.set(r.record_id, &vector)?;
@@ -452,8 +450,6 @@ fn insert_batch(
             }
 
             postings_mut.flush()?;
-            assignment_updater.flush()?;
-            drop(assignment_updater);
             drop(postings_mut);
             drop(rerank_cursor);
 

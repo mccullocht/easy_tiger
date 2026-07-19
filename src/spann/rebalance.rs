@@ -280,10 +280,10 @@ mod parallel {
         input::VecVectorStore,
         posting_block::PostingBlock,
         spann::{
-            centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
-             postings::CentroidPostingsMut,
+            centroid_stats::{CentroidCounts, CentroidStats},
+            postings::CentroidPostingsMut,
             rebalance::{MergeStats, RebalanceStats, SplitStats},
-            CentroidAssignment, TableIndex, TransactionIndex,
+            TableIndex, TransactionIndex,
         },
         vamana::{
             mutate::{delete_vector, upsert_vector},
@@ -356,16 +356,15 @@ mod parallel {
         }
     }
 
+    // XXX fix this it's just a thin wrapper around CentroidPostingsMut.
     struct PostingUpdater<'a> {
         postings: CentroidPostingsMut<'a>,
-        assignments: CentroidAssignmentUpdater<'a>,
     }
 
     impl<'a> PostingUpdater<'a> {
         pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
             Ok(Self {
                 postings: CentroidPostingsMut::from_txn(txn_idx)?,
-                assignments: CentroidAssignmentUpdater::new(txn_idx)?,
             })
         }
 
@@ -374,25 +373,17 @@ mod parallel {
         }
 
         pub fn move_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
-            let old = self
-                .assignments
-                .update(record_id, CentroidAssignment::new(target))?;
-            assert_eq!(old.primary_id, source);
             let v = self.postings.remove(source, record_id)?.unwrap().to_vec();
             self.postings.insert(target, record_id, &v)
         }
 
         pub fn copy_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
-            self.assignments
-                .overwrite(record_id, CentroidAssignment::new(target))?;
             let v = self.postings.get(source, record_id)?;
             self.postings.insert(target, record_id, &v)
         }
 
         pub fn flush(mut self) -> Result<()> {
-            self.postings
-                .flush()
-                .and_then(|()| self.assignments.flush())
+            self.postings.flush()
         }
     }
 

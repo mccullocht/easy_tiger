@@ -11,20 +11,19 @@ pub mod search;
 
 use std::{ops::RangeInclusive, sync::Arc};
 
-use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use vectors::{F32VectorCoder, F32VectorCoding};
 use wt_mdb::{
-    Connection, Error, Result, Transaction,
     connection::{CreateOptionsBuilder, DropOptions},
-    session::{CommitTransactionOptions, FormatString, Formatted, RollbackTransactionOptions},
+    session::{CommitTransactionOptions, RollbackTransactionOptions},
+    Connection, Error, Result, Transaction,
 };
 
 use crate::{
     spann::centroid_stats::CentroidCounts,
     vamana::{
+        wt::{read_app_metadata, TableGraphVectorIndex, TransactionGraphVectorIndex},
         GraphConfig, GraphSearchParams,
-        wt::{TableGraphVectorIndex, TransactionGraphVectorIndex, read_app_metadata},
     },
 };
 
@@ -46,6 +45,7 @@ pub struct IndexConfig {
     /// be reassigned to other centroids. Vectors in nearby centroids may also be reassigned.
     pub max_centroid_len: usize,
     /// If set, build a vector id keyed vector table in this format for re-ranking results.
+    // XXX this can no longer be optional.
     pub rerank_format: Option<F32VectorCoding>,
 }
 
@@ -61,10 +61,6 @@ struct TableNames {
     // Table that maps (centroid_id,record_id) -> quantized vector.
     // Ranges of this table are searched based on the outcome of searching the head.
     postings: String,
-    // Table that maps record_id -> centroid_id.
-    // This table is necessary when deleting a vector to locate rows posting rows to delete.
-    // It may also be useful for determining matching centroids in a filtered search.
-    centroids: String,
     // Table that maps centroid_id -> primary_count.
     // These pre-aggregated statistics are used to balance the index and influence search.
     centroid_stats: String,
@@ -77,20 +73,18 @@ impl TableNames {
     fn from_index_name(index_name: &str) -> Self {
         Self {
             postings: format!("{index_name}.postings"),
-            centroids: format!("{index_name}.centroids"),
             centroid_stats: format!("{index_name}.centroid_stats"),
             raw_vectors: format!("{index_name}.raw_vectors"),
         }
     }
 
     fn record_table_names(&self) -> impl Iterator<Item = &str> {
-        [self.centroids.as_str(), self.raw_vectors.as_str()].into_iter()
+        [self.raw_vectors.as_str()].into_iter()
     }
 
     fn all_names(&self) -> impl Iterator<Item = &str> {
         [
             self.postings.as_str(),
-            self.centroids.as_str(),
             self.centroid_stats.as_str(),
             self.raw_vectors.as_str(),
         ]
@@ -233,10 +227,6 @@ impl TableIndex {
         Ok(())
     }
 
-    pub fn centroid_assignments_table_name(&self) -> &str {
-        &self.table_names.centroids
-    }
-
     pub fn postings_table_name(&self) -> &str {
         &self.table_names.postings
     }
@@ -245,58 +235,13 @@ impl TableIndex {
         &self.table_names.centroid_stats
     }
 
+    // XXX this has to be renamed.
     pub fn raw_vectors_table_name(&self) -> &str {
         &self.table_names.raw_vectors
     }
 
     fn head_name(index_name: &str) -> String {
         format!("{index_name}.head")
-    }
-}
-
-/// A value in the centroid assignment table.
-///
-/// This maps a record to its assigned centroid.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct CentroidAssignment {
-    pub primary_id: u32,
-}
-
-impl CentroidAssignment {
-    pub fn new(primary_id: u32) -> Self {
-        Self { primary_id }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = u32> + '_ {
-        std::iter::once(self.primary_id)
-    }
-}
-
-impl Formatted for CentroidAssignment {
-    const FORMAT: FormatString = FormatString::new(c"u");
-
-    type Ref<'a> = Self;
-
-    #[inline(always)]
-    fn to_formatted_ref(&self) -> Self::Ref<'_> {
-        *self
-    }
-
-    #[inline(always)]
-    fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
-        packed.resize(4, 0);
-        packed.copy_from_slice(&value.primary_id.to_le_bytes());
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
-        if packed.len() != 4 {
-            return Err(Error::errno(Errno::INVAL));
-        }
-        Ok(Self {
-            primary_id: u32::from_le_bytes(packed.try_into().unwrap()),
-        })
     }
 }
 

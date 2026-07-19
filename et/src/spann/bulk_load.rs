@@ -5,10 +5,7 @@ use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
     kmeans::{hierarchical_kmeans, HierarchicalKMeansParams, Params},
     spann::{
-        bulk::{
-            assign_to_centroids, load_centroid_stats, load_centroids, load_postings,
-            load_raw_vectors,
-        },
+        bulk::{assign_to_centroids, load_centroid_stats, load_postings, load_raw_vectors},
         centroid_stats::CentroidCounts,
         postings::CentroidPostingsMut,
         IndexConfig, TableIndex,
@@ -250,12 +247,6 @@ pub fn bulk_load(
             progress.inc(i)
         })?
     };
-    {
-        let progress = progress_bar(limit, "tail load centroids");
-        load_centroids(index.as_ref(), &connection, &centroid_assignments, |i| {
-            progress.inc(i)
-        })?;
-    }
 
     {
         let progress = progress_bar(centroids_len, "tail load centroid stats");

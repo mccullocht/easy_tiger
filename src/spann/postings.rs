@@ -148,6 +148,7 @@ impl<'a> CentroidPostingsMut<'a> {
     }
 
     /// Write all buffered changes to storage.
+    // XXX this should accept 'mut self'
     pub fn flush(&mut self) -> Result<()> {
         let mut modify_buf = [WT_MODIFY::default(); 128];
         for (centroid_id, bs) in std::mem::take(&mut self.blocks) {

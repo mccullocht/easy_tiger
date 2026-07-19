@@ -3,7 +3,7 @@ use std::{cell::RefCell, sync::Arc};
 use crate::{
     input::VectorStore,
     spann::{
-        centroid_stats::CentroidCounts, postings::BlockPostingsMut, CentroidAssignment,
+        centroid_stats::CentroidCounts, postings::CentroidPostingsMut, CentroidAssignment,
         TableIndex,
     },
     vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
@@ -94,7 +94,7 @@ pub fn load_centroid_stats(
 /// changes, though `load_postings` calls it internally before returning.
 pub fn load_postings(
     index: &TableIndex,
-    postings: &mut BlockPostingsMut<'_>,
+    postings: &mut CentroidPostingsMut<'_>,
     centroid_assignments: &[CentroidAssignment],
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     progress: impl Fn(u64) + Send + Sync,

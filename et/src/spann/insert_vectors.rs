@@ -5,7 +5,7 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     spann::{
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
-        postings::BlockPostingsMut,
+        postings::CentroidPostingsMut,
         rebalance::{BalanceSummary, RebalanceStats},
         CentroidAssignment, TableIndex, TransactionIndex,
     },
@@ -431,7 +431,7 @@ fn insert_batch(
         .try_for_each(|(centroid, postings)| {
             let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
             let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
-            let mut postings_mut = BlockPostingsMut::new(
+            let mut postings_mut = CentroidPostingsMut::new(
                 txn_idx
                     .transaction()
                     .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?,

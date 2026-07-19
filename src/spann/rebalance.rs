@@ -281,7 +281,7 @@ mod parallel {
         posting_block::PostingBlock,
         spann::{
             centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
-            postings::BlockPostingsMut,
+             postings::CentroidPostingsMut,
             rebalance::{MergeStats, RebalanceStats, SplitStats},
             CentroidAssignment, TableIndex, TransactionIndex,
         },
@@ -357,14 +357,14 @@ mod parallel {
     }
 
     struct PostingUpdater<'a> {
-        postings: BlockPostingsMut<'a>,
+        postings: CentroidPostingsMut<'a>,
         assignments: CentroidAssignmentUpdater<'a>,
     }
 
     impl<'a> PostingUpdater<'a> {
         pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
             Ok(Self {
-                postings: BlockPostingsMut::from_txn(txn_idx)?,
+                postings: CentroidPostingsMut::from_txn(txn_idx)?,
                 assignments: CentroidAssignmentUpdater::new(txn_idx)?,
             })
         }

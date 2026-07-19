@@ -46,13 +46,13 @@ impl BlockState {
 /// Each centroid maps to a single row whose value is a serialized [`PostingBlock`] containing all
 /// vectors assigned to that centroid. Modified blocks are held in memory and written to storage
 /// only when [`flush`] is called.
-pub struct BlockPostingsMut<'a> {
+pub struct CentroidPostingsMut<'a> {
     cursor: TypedCursorGuard<'a, u32, Vec<u8>>,
     vector_len: usize,
     blocks: HashMap<u32, BlockState>,
 }
 
-impl<'a> BlockPostingsMut<'a> {
+impl<'a> CentroidPostingsMut<'a> {
     pub fn new(cursor: TypedCursorGuard<'a, u32, Vec<u8>>, vector_len: usize) -> Self {
         Self {
             cursor,

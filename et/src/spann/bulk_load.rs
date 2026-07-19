@@ -10,7 +10,7 @@ use easy_tiger::{
             assign_to_centroids, load_centroid_stats, load_centroids, load_postings,
             load_raw_vectors,
         },
-        postings::BlockPostingsMut,
+        postings::CentroidPostingsMut,
     },
     vamana::{
         GraphConfig, GraphSearchParams, PatienceParams,
@@ -267,7 +267,7 @@ pub fn bulk_load(
         {
             let cursor =
                 txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
-            let mut postings = BlockPostingsMut::new(cursor, index.posting_vector_len());
+            let mut postings = CentroidPostingsMut::new(cursor, index.posting_vector_len());
             load_postings(
                 index.as_ref(),
                 &mut postings,

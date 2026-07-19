@@ -431,12 +431,7 @@ fn insert_batch(
         .try_for_each(|(centroid, postings)| {
             let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
             let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
-            let mut postings_mut = CentroidPostingsMut::new(
-                txn_idx
-                    .transaction()
-                    .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?,
-                index.posting_vector_len(),
-            );
+            let mut postings_mut = CentroidPostingsMut::from_txn(&txn_idx)?;
             let mut rerank_cursor = if rerank_coder.is_some() {
                 Some(
                     txn_idx

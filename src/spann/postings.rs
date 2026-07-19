@@ -11,7 +11,7 @@ use std::{
 use wt_mdb::{Error, Result, TypedCursorGuard, WT_MODIFY};
 
 use super::TransactionIndex;
-use crate::posting_block::{PostingBlock, PostingBlockMut};
+use crate::{posting_block::{PostingBlock, PostingBlockMut}, spann::CentroidCounts};
 
 /// Maximum byte difference in a block to modify instead of full replacement.
 const MAX_DIFF_PCT: usize = 15;
@@ -48,24 +48,33 @@ impl BlockState {
 /// only when [`flush`] is called.
 pub struct CentroidPostingsMut<'a> {
     posting_cursor: TypedCursorGuard<'a, u32, Vec<u8>>,
+    stats_cursor: TypedCursorGuard<'a, u32, CentroidCounts>,
     vector_len: usize,
     blocks: HashMap<u32, BlockState>,
 }
 
 impl<'a> CentroidPostingsMut<'a> {
-    pub fn new(posting_cursor: TypedCursorGuard<'a, u32, Vec<u8>>, vector_len: usize) -> Self {
+    pub fn new(
+        posting_cursor: TypedCursorGuard<'a, u32, Vec<u8>>,
+        stats_cursor: TypedCursorGuard<'a, u32, CentroidCounts>,
+        vector_len: usize,
+    ) -> Self {
         Self {
             posting_cursor,
+            stats_cursor,
             vector_len,
             blocks: HashMap::new(),
         }
     }
 
     pub fn from_txn(txn_idx: &'a TransactionIndex) -> Result<Self> {
-        txn_idx
+        let posting_cursor = txn_idx
             .transaction()
-            .open_cursor::<u32, Vec<u8>>(txn_idx.index().postings_table_name())
-            .map(|c| Self::new(c, txn_idx.index().posting_vector_len()))
+            .open_cursor::<u32, Vec<u8>>(txn_idx.index().postings_table_name())?;
+        let stats_cursor = txn_idx
+            .transaction()
+            .open_cursor::<u32, CentroidCounts>(&txn_idx.index().table_names.centroid_stats)?;
+        Ok(Self::new(posting_cursor, stats_cursor, txn_idx.index().posting_vector_len()))
     }
 
     /// Return the given vector or a NotFound error.
@@ -152,6 +161,14 @@ impl<'a> CentroidPostingsMut<'a> {
                             Err(e)
                         }
                     })?;
+                    // Update stats: remove the centroid from stats table
+                    self.stats_cursor.remove(centroid_id).or_else(|e| {
+                        if e == Error::not_found_error() {
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
+                    })?;
                 }
                 BlockState::Found(block) => {
                     let new_serialized = block.serialize();
@@ -171,6 +188,11 @@ impl<'a> CentroidPostingsMut<'a> {
                         }
                     }
                     self.posting_cursor.set(centroid_id, new_serialized.as_slice())?;
+                    // Update stats: write the new count of vectors for this centroid
+                    let count = CentroidCounts {
+                        primary: block.len() as u32,
+                    };
+                    self.stats_cursor.set(centroid_id, count)?;
                 }
             }
         }

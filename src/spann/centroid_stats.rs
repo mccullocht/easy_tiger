@@ -151,17 +151,6 @@ impl CentroidStats {
         })
     }
 
-    /// Iterate over counts for all centroids with at least one assignment.
-    fn counts_iter(&self) -> impl Iterator<Item = (usize, CentroidCounts)> + '_ {
-        self.counts.iter().filter_map(|(&id, counts)| {
-            if counts.total() > 0 {
-                Some((id as usize, *counts))
-            } else {
-                None
-            }
-        })
-    }
-
     /// Iterate over available centroid ids. The returned iterator is effectively unbounded (up to
     /// `u32::MAX`) so callers should `take()` this iterator to mint the number of ids they need.
     pub fn available_centroid_ids(&self) -> impl Iterator<Item = usize> + '_ {

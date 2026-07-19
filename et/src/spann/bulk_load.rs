@@ -3,25 +3,29 @@ use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc, time::Duration};
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
-    kmeans::{HierarchicalKMeansParams, Params, hierarchical_kmeans},
+    kmeans::{hierarchical_kmeans, HierarchicalKMeansParams, Params},
     spann::{
-        IndexConfig, TableIndex,
         bulk::{
             assign_to_centroids, load_centroid_stats, load_centroids, load_postings,
             load_raw_vectors,
         },
+        centroid_stats::CentroidCounts,
         postings::CentroidPostingsMut,
+        IndexConfig, TableIndex,
     },
     vamana::{
-        GraphConfig, GraphSearchParams, PatienceParams,
         bulk::{self, BulkLoadBuilder},
+        GraphConfig, GraphSearchParams, PatienceParams,
     },
 };
-use rand_xoshiro::{Xoshiro128PlusPlus, rand_core::SeedableRng};
+use rand_xoshiro::{rand_core::SeedableRng, Xoshiro128PlusPlus};
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{Connection, connection::DropOptionsBuilder};
+use wt_mdb::{connection::DropOptionsBuilder, Connection};
 
-use crate::{ui::progress_bar, vamana::{EdgePruningArgs, EdgeTypeArg}};
+use crate::{
+    ui::progress_bar,
+    vamana::{EdgePruningArgs, EdgeTypeArg},
+};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -265,9 +269,11 @@ pub fn bulk_load(
         let progress = progress_bar(posting_count, "tail load postings");
         let txn = connection.begin_transaction(None)?;
         {
-            let cursor =
-                txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
-            let mut postings = CentroidPostingsMut::new(cursor, index.posting_vector_len());
+            let posting_cursor = txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+            let stats_cursor =
+                txn.open_cursor::<u32, CentroidCounts>(&index.centroid_stats_table_name())?;
+            let mut postings =
+                CentroidPostingsMut::new(posting_cursor, stats_cursor, index.posting_vector_len());
             load_postings(
                 index.as_ref(),
                 &mut postings,

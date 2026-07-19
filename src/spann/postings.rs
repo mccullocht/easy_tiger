@@ -13,17 +13,43 @@ use wt_mdb::{Error, Result, TypedCursorGuard, WT_MODIFY};
 use super::TransactionIndex;
 use crate::posting_block::{PostingBlock, PostingBlockMut};
 
+/// Maximum byte difference in a block to modify instead of full replacement.
+const MAX_DIFF_PCT: usize = 15;
+
+enum BlockState {
+    /// Block not found in the underlying repos.
+    NotFound,
+    /// Block removed by the caller.
+    Removed,
+    /// Block found. Caller may have mutated block content.
+    Found(PostingBlockMut),
+}
+
+impl BlockState {
+    fn to_block_mut(&mut self, vector_len: usize) -> &mut PostingBlockMut {
+        match self {
+            BlockState::NotFound | BlockState::Removed => {
+                *self = BlockState::Found(PostingBlockMut::new(vector_len))
+            }
+            _ => {}
+        };
+        if let BlockState::Found(b) = self {
+            b
+        } else {
+            unreachable!("coerced to found")
+        }
+    }
+}
+
 /// Posting mutations backed by a centroid-keyed [`PostingBlock`] table.
 ///
 /// Each centroid maps to a single row whose value is a serialized [`PostingBlock`] containing all
 /// vectors assigned to that centroid. Modified blocks are held in memory and written to storage
 /// only when [`flush`] is called.
 pub struct BlockPostingsMut<'a> {
-    // TODO: consider RefCell/inner mutability for the cursor since the cursor makes this struct
-    // Send + !Sync anyway.
     cursor: TypedCursorGuard<'a, u32, Vec<u8>>,
     vector_len: usize,
-    cached: HashMap<u32, PostingBlockMut>,
+    blocks: HashMap<u32, BlockState>,
 }
 
 impl<'a> BlockPostingsMut<'a> {
@@ -31,7 +57,7 @@ impl<'a> BlockPostingsMut<'a> {
         Self {
             cursor,
             vector_len,
-            cached: HashMap::new(),
+            blocks: HashMap::new(),
         }
     }
 
@@ -44,53 +70,61 @@ impl<'a> BlockPostingsMut<'a> {
 
     /// Return the given vector or a NotFound error.
     pub fn get(&mut self, centroid_id: u32, record_id: i64) -> Result<Vec<u8>> {
-        let block = self.load_or_create(centroid_id)?;
-        block
-            .lookup(record_id)
-            .map(|v| v.to_vec())
-            .ok_or(Error::not_found_error())
+        if let BlockState::Found(b) = self.get_or_fetch(centroid_id)? {
+            b.lookup(record_id)
+                .map(|v| v.to_vec())
+                .ok_or_else(Error::not_found_error)
+        } else {
+            Err(Error::not_found_error())
+        }
     }
 
     /// Insert or update the posting for `(centroid_id, record_id)`.
     pub fn insert(&mut self, centroid_id: u32, record_id: i64, vector: &[u8]) -> Result<()> {
-        self.load_or_create(centroid_id)?
-            .insert(record_id, vector.to_vec());
-        Ok(())
+        self.get_or_fetch_block_mut(centroid_id)
+            .map(|b| b.insert(record_id, vector.to_vec()))
     }
 
     /// Remove the posting for `(centroid_id, record_id)`.
     ///
-    /// Not-found is silently ignored.
+    /// Returns the posting vector or `None` if the centroid/record is not found.
     pub fn remove(&mut self, centroid_id: u32, record_id: i64) -> Result<Option<Cow<'_, [u8]>>> {
-        Ok(self.load_or_create(centroid_id)?.remove(record_id))
+        match self.get_or_fetch(centroid_id)? {
+            BlockState::NotFound | BlockState::Removed => Ok(None),
+            BlockState::Found(b) => Ok(b.remove(record_id)),
+        }
     }
 
     /// Return the number of vectors in centroid_id postings.
     ///
     /// This will return 0 if the centroid was not found.
     pub fn centroid_len(&mut self, centroid_id: u32) -> Result<usize> {
-        self.load_or_create(centroid_id).map(|b| b.len())
+        match self.get_or_fetch(centroid_id)? {
+            BlockState::Found(b) => Ok(b.len()),
+            _ => Ok(0),
+        }
     }
 
-    /// Read all postings for `centroid_id` without removing them.
+    /// Read all postings for `centroid_id`, returning NotFound error if the posting block doesn't
+    /// exist.
     ///
-    /// Reflects any pending mutations not yet flushed.
+    /// Reflects any pending mutations not yet flushed, so may return NotFound after
+    /// remove_centroid().
     pub fn read_centroid(&mut self, centroid_id: u32) -> Result<Vec<(i64, Vec<u8>)>> {
-        Ok(self
-            .load_or_create(centroid_id)?
-            .iter()
-            .map(|(id, v)| (id, v.to_vec()))
-            .collect())
+        match self.get_or_fetch(centroid_id)? {
+            BlockState::Found(b) => Ok(b.iter().map(|(id, v)| (id, v.to_vec())).collect()),
+            _ => Err(Error::not_found_error()),
+        }
     }
 
     /// Remove all postings for `centroid_id`.
     ///
-    /// Not-found is silently ignored.
+    /// If centroid_id is not found this operation is silently ignored.
     pub fn remove_centroid(&mut self, centroid_id: u32) -> Result<()> {
-        // Overwrite with an empty block; flush will delete the row from storage.
-        let mut block = PostingBlockMut::new(self.vector_len);
-        block.mark_dirty();
-        self.cached.insert(centroid_id, block);
+        match self.get_or_fetch(centroid_id)? {
+            BlockState::NotFound => {}
+            bs => *bs = BlockState::Removed,
+        };
         Ok(())
     }
 
@@ -106,58 +140,65 @@ impl<'a> BlockPostingsMut<'a> {
 
     /// Write all buffered changes to storage.
     pub fn flush(&mut self) -> Result<()> {
-        let cached = std::mem::take(&mut self.cached);
         let mut modify_buf = [WT_MODIFY::default(); 128];
-        for (centroid_id, block) in cached {
-            if !block.dirty() {
-                continue;
-            }
-            if block.is_empty() {
-                self.cursor.remove(centroid_id).or_else(|e| {
-                    if e == Error::not_found_error() {
-                        Ok(())
-                    } else {
-                        Err(e)
+        for (centroid_id, bs) in std::mem::take(&mut self.blocks) {
+            match bs {
+                BlockState::NotFound => continue,
+                BlockState::Removed => {
+                    self.cursor.remove(centroid_id).or_else(|e| {
+                        if e == Error::not_found_error() {
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
+                    })?;
+                }
+                BlockState::Found(block) => {
+                    let new_serialized = block.serialize();
+                    let base = block.base_block();
+                    if !base.is_empty() {
+                        let max_diff = base.len() * MAX_DIFF_PCT / 100;
+                        if let Some(deltas) = self.cursor.calculate_modifications(
+                            base,
+                            &new_serialized,
+                            max_diff,
+                            &mut modify_buf,
+                        ) {
+                            // SAFETY: modify_buf[..n] holds WT_MODIFY entries whose data pointers
+                            // point into new_serialized, which remains alive for this call.
+                            unsafe { self.cursor.modify_unsafe(centroid_id, deltas)? };
+                            continue;
+                        }
                     }
-                })?;
-                continue;
-            }
-            let new_serialized = block.serialize();
-            let base = block.base_block();
-            if !base.is_empty() {
-                let max_diff = base.len() * 15 / 100;
-                if let Some(deltas) = self.cursor.calculate_modifications(
-                    base,
-                    &new_serialized,
-                    max_diff,
-                    &mut modify_buf,
-                ) {
-                    // SAFETY: modify_buf[..n] holds WT_MODIFY entries whose data pointers
-                    // point into new_serialized, which remains alive for this call.
-                    unsafe { self.cursor.modify_unsafe(centroid_id, deltas)? };
-                    continue;
+                    self.cursor.set(centroid_id, new_serialized.as_slice())?;
                 }
             }
-            self.cursor.set(centroid_id, new_serialized.as_slice())?;
         }
         Ok(())
     }
 
-    fn load_or_create(&mut self, centroid_id: u32) -> Result<&mut PostingBlockMut> {
-        match self.cached.entry(centroid_id) {
+    fn get_or_fetch(&mut self, centroid_id: u32) -> Result<&mut BlockState> {
+        match self.blocks.entry(centroid_id) {
             Occupied(e) => Ok(e.into_mut()),
             Vacant(e) => {
-                let block = match self.cursor.seek_exact(centroid_id) {
+                // SAFETY: will perform no other cursor operations until this value is copied.
+                let block = match unsafe { self.cursor.seek_exact_unsafe(centroid_id) } {
+                    None => BlockState::NotFound,
                     Some(r) => {
-                        let data = r?;
-                        let pb = PostingBlock::new(&data, self.vector_len)
+                        let raw_data = r?;
+                        let pb = PostingBlock::new(raw_data, self.vector_len)
                             .ok_or(Error::wired_tiger(wt_mdb::WiredTigerError::Generic))?;
-                        PostingBlockMut::from_block(&pb)
+                        BlockState::Found(PostingBlockMut::from_block(&pb))
                     }
-                    None => PostingBlockMut::new(self.vector_len),
                 };
                 Ok(e.insert(block))
             }
         }
+    }
+
+    fn get_or_fetch_block_mut(&mut self, centroid_id: u32) -> Result<&mut PostingBlockMut> {
+        let vector_len = self.vector_len;
+        self.get_or_fetch(centroid_id)
+            .map(|bs| bs.to_block_mut(vector_len))
     }
 }

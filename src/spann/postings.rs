@@ -47,15 +47,15 @@ impl BlockState {
 /// vectors assigned to that centroid. Modified blocks are held in memory and written to storage
 /// only when [`flush`] is called.
 pub struct CentroidPostingsMut<'a> {
-    cursor: TypedCursorGuard<'a, u32, Vec<u8>>,
+    posting_cursor: TypedCursorGuard<'a, u32, Vec<u8>>,
     vector_len: usize,
     blocks: HashMap<u32, BlockState>,
 }
 
 impl<'a> CentroidPostingsMut<'a> {
-    pub fn new(cursor: TypedCursorGuard<'a, u32, Vec<u8>>, vector_len: usize) -> Self {
+    pub fn new(posting_cursor: TypedCursorGuard<'a, u32, Vec<u8>>, vector_len: usize) -> Self {
         Self {
-            cursor,
+            posting_cursor,
             vector_len,
             blocks: HashMap::new(),
         }
@@ -131,7 +131,7 @@ impl<'a> CentroidPostingsMut<'a> {
     /// Return the next allocatable centroid id.
     pub fn next_centroid_id(&mut self) -> Result<u32> {
         Ok(self
-            .cursor
+            .posting_cursor
             .largest_key()
             .transpose()?
             .map(|x| x + 1)
@@ -145,7 +145,7 @@ impl<'a> CentroidPostingsMut<'a> {
             match bs {
                 BlockState::NotFound => continue,
                 BlockState::Removed => {
-                    self.cursor.remove(centroid_id).or_else(|e| {
+                    self.posting_cursor.remove(centroid_id).or_else(|e| {
                         if e == Error::not_found_error() {
                             Ok(())
                         } else {
@@ -158,7 +158,7 @@ impl<'a> CentroidPostingsMut<'a> {
                     let base = block.base_block();
                     if !base.is_empty() {
                         let max_diff = base.len() * MAX_DIFF_PCT / 100;
-                        if let Some(deltas) = self.cursor.calculate_modifications(
+                        if let Some(deltas) = self.posting_cursor.calculate_modifications(
                             base,
                             &new_serialized,
                             max_diff,
@@ -166,11 +166,11 @@ impl<'a> CentroidPostingsMut<'a> {
                         ) {
                             // SAFETY: modify_buf[..n] holds WT_MODIFY entries whose data pointers
                             // point into new_serialized, which remains alive for this call.
-                            unsafe { self.cursor.modify_unsafe(centroid_id, deltas)? };
+                            unsafe { self.posting_cursor.modify_unsafe(centroid_id, deltas)? };
                             continue;
                         }
                     }
-                    self.cursor.set(centroid_id, new_serialized.as_slice())?;
+                    self.posting_cursor.set(centroid_id, new_serialized.as_slice())?;
                 }
             }
         }
@@ -182,7 +182,7 @@ impl<'a> CentroidPostingsMut<'a> {
             Occupied(e) => Ok(e.into_mut()),
             Vacant(e) => {
                 // SAFETY: will perform no other cursor operations until this value is copied.
-                let block = match unsafe { self.cursor.seek_exact_unsafe(centroid_id) } {
+                let block = match unsafe { self.posting_cursor.seek_exact_unsafe(centroid_id) } {
                     None => BlockState::NotFound,
                     Some(r) => {
                         let raw_data = r?;

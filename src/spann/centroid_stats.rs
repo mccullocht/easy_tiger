@@ -44,7 +44,10 @@ impl Formatted for CentroidCounts {
 
 /// Tracks occupancy statistics for centroids.
 #[derive(Debug, Clone)]
-pub struct CentroidStats(Vec<Option<CentroidCounts>>);
+pub struct CentroidStats {
+    counts: HashMap<u32, CentroidCounts>,
+    max_centroid_id: u32,
+}
 
 impl CentroidStats {
     /// Compute centroid statistics from per-vector assignments.
@@ -54,28 +57,34 @@ impl CentroidStats {
     ///
     /// Callers should open a transaction for this sequence of reads.
     pub fn from_centroid_assignments(txn: &Transaction, index: &TableIndex) -> Result<Self> {
-        let mut head_cursor = txn.open_record_cursor(index.head.graph_table_name())?;
-        let centroid_len = head_cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
+        let head_cursor = txn.open_record_cursor(index.head.graph_table_name())?;
+        let mut counts: HashMap<u32, CentroidCounts> = HashMap::new();
+        let mut max_centroid_id = 0u32;
 
-        let mut counts: Vec<Option<CentroidCounts>> = vec![None; centroid_len];
         let centroid_cursor =
             txn.open_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
         for r in centroid_cursor {
             let (_, a) = r?;
-            counts[a.primary_id as usize]
-                .get_or_insert_default()
-                .primary += 1;
+            let entry = counts
+                .entry(a.primary_id)
+                .or_insert_with(CentroidCounts::default);
+            entry.primary += 1;
+            max_centroid_id = max_centroid_id.max(a.primary_id);
         }
 
         // Some centroids may have no assignments; ensure they are represented in case the caller is
         // interested in re-clustering.
-        for (i, c) in counts.iter_mut().enumerate() {
-            if c.is_none() && head_cursor.seek_exact(i as i64).is_some() {
-                *c = Some(CentroidCounts::default());
+        for r in head_cursor {
+            let (id, _) = r?;
+            if !counts.contains_key(&(id as u32)) {
+                counts.insert(id as u32, CentroidCounts::default());
             }
         }
 
-        Ok(Self(counts))
+        Ok(Self {
+            counts,
+            max_centroid_id,
+        })
     }
 
     /// Read centroid assignments from the pre-computed stats table.
@@ -85,57 +94,78 @@ impl CentroidStats {
     ///
     /// Callers should open a transaction for this sequence of reads.
     pub fn from_index_stats(txn_idx: &TransactionIndex) -> Result<Self> {
-        let mut cursor = txn_idx
+        let cursor = txn_idx
             .transaction()
             .open_cursor::<u32, CentroidCounts>(&txn_idx.index().table_names.centroid_stats)?;
-        let centroid_len = cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
-        let mut counts = vec![None; centroid_len];
+        let mut counts: HashMap<u32, CentroidCounts> = HashMap::new();
+        let mut max_centroid_id = 0u32;
+
         for r in cursor {
             let (id, cc) = r?;
-            counts[id as usize] = Some(cc);
+            counts.insert(id, cc);
+            max_centroid_id = max_centroid_id.max(id);
         }
-        Ok(Self(counts))
+        Ok(Self {
+            counts,
+            max_centroid_id,
+        })
     }
 
     /// Return the number of centroids in the index.
     pub fn centroid_count(&self) -> usize {
-        self.counts_iter().count()
+        self.counts.values().filter(|c| c.total() > 0).count()
     }
 
     /// Return the number of vector -> centroid assignments.
     pub fn vector_count(&self) -> usize {
-        self.assignment_counts_iter()
-            .map(|(_, c)| c as usize)
+        self.counts
+            .values()
+            .map(|c| c.total() as usize)
             .sum::<usize>()
     }
 
     /// Iterate over a list of centroid identifiers and the number of assigned vectors for each.
     pub fn assignment_counts_iter(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
-        self.counts_iter().map(|(i, c)| (i, c.total()))
+        self.counts.iter().filter_map(|(&id, counts)| {
+            if counts.total() > 0 {
+                Some((id as usize, counts.total()))
+            } else {
+                None
+            }
+        })
     }
 
     /// Get the assignment counts for a specific centroid or `None` if the centroid does not exist.
     pub fn assignment_counts(&self, centroid_id: usize) -> Option<CentroidCounts> {
-        *self.0.get(centroid_id).unwrap_or(&None)
+        self.counts.get(&(centroid_id as u32)).copied()
     }
 
     /// Iterate over a list of centroid identifiers and the number of assigned vectors for each.
     pub fn primary_assignment_counts_iter(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
-        self.counts_iter().map(|(i, c)| (i, c.primary))
+        self.counts.iter().filter_map(|(&id, counts)| {
+            if counts.primary > 0 {
+                Some((id as usize, counts.primary))
+            } else {
+                None
+            }
+        })
     }
 
     /// Iterate over counts for all centroids with at least one assignment.
     fn counts_iter(&self) -> impl Iterator<Item = (usize, CentroidCounts)> + '_ {
-        self.0
-            .iter()
-            .enumerate()
-            .filter_map(|(i, c)| c.as_ref().map(|counts| (i, *counts)))
+        self.counts.iter().filter_map(|(&id, counts)| {
+            if counts.total() > 0 {
+                Some((id as usize, *counts))
+            } else {
+                None
+            }
+        })
     }
 
     /// Iterate over available centroid ids. The returned iterator is effectively unbounded (up to
     /// `u32::MAX`) so callers should `take()` this iterator to mint the number of ids they need.
     pub fn available_centroid_ids(&self) -> impl Iterator<Item = usize> + '_ {
-        self.0.len()..
+        (self.max_centroid_id + 1..).map(|x| x as usize)
     }
 }
 

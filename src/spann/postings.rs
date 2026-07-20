@@ -178,6 +178,9 @@ impl<'a> CentroidPostingsMut<'a> {
                     })?;
                 }
                 BlockState::Found(block) => {
+                    if !block.dirty() {
+                        continue;
+                    }
                     let new_serialized = block.serialize();
                     let base = block.base_block();
                     if !base.is_empty() {

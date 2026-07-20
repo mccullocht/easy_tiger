@@ -450,7 +450,6 @@ fn insert_batch(
             }
 
             postings_mut.flush()?;
-            drop(postings_mut);
             drop(rerank_cursor);
 
             txn_idx.commit(None)

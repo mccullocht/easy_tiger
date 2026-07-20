@@ -11,7 +11,10 @@ use std::{
 use wt_mdb::{Error, Result, TypedCursorGuard, WT_MODIFY};
 
 use super::TransactionIndex;
-use crate::{posting_block::{PostingBlock, PostingBlockMut}, spann::CentroidCounts};
+use crate::{
+    posting_block::{PostingBlock, PostingBlockMut},
+    spann::CentroidCounts,
+};
 
 /// Maximum byte difference in a block to modify instead of full replacement.
 const MAX_DIFF_PCT: usize = 15;
@@ -74,7 +77,11 @@ impl<'a> CentroidPostingsMut<'a> {
         let stats_cursor = txn_idx
             .transaction()
             .open_cursor::<u32, CentroidCounts>(&txn_idx.index().table_names.centroid_stats)?;
-        Ok(Self::new(posting_cursor, stats_cursor, txn_idx.index().posting_vector_len()))
+        Ok(Self::new(
+            posting_cursor,
+            stats_cursor,
+            txn_idx.index().posting_vector_len(),
+        ))
     }
 
     /// Return the given vector or a NotFound error.
@@ -148,8 +155,7 @@ impl<'a> CentroidPostingsMut<'a> {
     }
 
     /// Write all buffered changes to storage.
-    // XXX this should accept 'mut self'
-    pub fn flush(&mut self) -> Result<()> {
+    pub fn flush(mut self) -> Result<()> {
         let mut modify_buf = [WT_MODIFY::default(); 128];
         for (centroid_id, bs) in std::mem::take(&mut self.blocks) {
             match bs {
@@ -188,7 +194,8 @@ impl<'a> CentroidPostingsMut<'a> {
                             continue;
                         }
                     }
-                    self.posting_cursor.set(centroid_id, new_serialized.as_slice())?;
+                    self.posting_cursor
+                        .set(centroid_id, new_serialized.as_slice())?;
                     // Update stats: write the new count of vectors for this centroid
                     let count = CentroidCounts {
                         primary: block.len() as u32,

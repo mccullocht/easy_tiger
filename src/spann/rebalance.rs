@@ -382,7 +382,7 @@ mod parallel {
             self.postings.insert(target, record_id, &v)
         }
 
-        pub fn flush(mut self) -> Result<()> {
+        pub fn flush(self) -> Result<()> {
             self.postings.flush()
         }
     }

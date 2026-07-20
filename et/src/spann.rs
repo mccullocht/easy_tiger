@@ -1,5 +1,6 @@
 mod bulk_load;
 mod centroid_stats;
+mod delete_sim;
 mod drop_index;
 mod export_head;
 mod init_index;
@@ -14,6 +15,7 @@ use clap::{Args, Subcommand};
 use crate::wt_args::WiredTigerArgs;
 use bulk_load::{bulk_load, BulkLoadArgs};
 use centroid_stats::centroid_stats;
+use delete_sim::{delete_sim, DeleteSimArgs};
 use drop_index::drop_index;
 use export_head::{export_head, ExportHeadArgs};
 use init_index::{init_index, InitIndexArgs};
@@ -46,6 +48,9 @@ pub enum Command {
     ExportHead(ExportHeadArgs),
     /// Rebalance the SPANN index.
     Rebalance(RebalanceArgs),
+    /// Simulate deletes: for every rerank vector, search the head and read postings until the
+    /// record is located, reporting the depth and how many records could not be found.
+    DeleteSim(DeleteSimArgs),
     /// Remove an existing index.
     DropIndex,
 }
@@ -62,6 +67,7 @@ pub fn spann_command(args: SpannArgs) -> io::Result<()> {
         Command::CentroidStats => centroid_stats(connection, index_name),
         Command::ExportHead(args) => export_head(connection, index_name, args),
         Command::Rebalance(args) => rebalance(connection, index_name, args),
+        Command::DeleteSim(args) => delete_sim(connection, index_name, args),
         Command::DropIndex => drop_index(connection, index_name),
     }?;
     cmd_connection.checkpoint()?;

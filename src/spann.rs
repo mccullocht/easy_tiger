@@ -44,9 +44,8 @@ pub struct IndexConfig {
     /// Centroids with more vectors than this will be split into 2 centroids and their vectors will
     /// be reassigned to other centroids. Vectors in nearby centroids may also be reassigned.
     pub max_centroid_len: usize,
-    /// If set, build a vector id keyed vector table in this format for re-ranking results.
-    // XXX this can no longer be optional.
-    pub rerank_format: Option<F32VectorCoding>,
+    /// A vector id keyed vector table in this format for re-ranking results.
+    pub rerank_format: F32VectorCoding,
 }
 
 impl IndexConfig {

@@ -145,7 +145,6 @@ pub fn load_raw_vectors(
     let coder = index
         .config()
         .rerank_format
-        .unwrap()
         .coder(index.head_config().config().similarity, None);
     let mut encoded = vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())];
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {

@@ -263,15 +263,11 @@ impl Searcher {
         result_queue: ResultQueue<'_>,
         reader: &TransactionIndex,
     ) -> Result<Vec<Neighbor>> {
-        if self.params.num_rerank == 0 || reader.index().config().rerank_format.is_none() {
+        if self.params.num_rerank == 0 {
             return Ok(result_queue.into_results());
         }
 
-        let format = reader
-            .index()
-            .config()
-            .rerank_format
-            .expect("rerank format is set");
+        let format = reader.index().config().rerank_format;
         let query = format.query_distance_asymmetric(reader.head.config().similarity, query, None);
         let mut raw_cursor = reader
             .transaction()

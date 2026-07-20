@@ -4,12 +4,12 @@ use clap::Args;
 use easy_tiger::{
     spann::{IndexConfig, TableIndex},
     vamana::{
-        GraphConfig, GraphSearchParams, PatienceParams, mutate::insert_vector,
-        wt::TransactionGraphVectorIndex,
+        mutate::insert_vector, wt::TransactionGraphVectorIndex, GraphConfig, GraphSearchParams,
+        PatienceParams,
     },
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{Connection, connection::DropOptionsBuilder};
+use wt_mdb::{connection::DropOptionsBuilder, Connection};
 
 use crate::vamana::{EdgePruningArgs, EdgeTypeArg};
 
@@ -80,9 +80,9 @@ pub struct InitIndexArgs {
     #[arg(long)]
     posting_coder: F32VectorCoding,
 
-    /// Format to use for a rerank table. May be omitted.
-    #[arg(long)]
-    rerank_format: Option<F32VectorCoding>,
+    /// Format to use for a rerank table.
+    #[arg(long, default_value_t = F32VectorCoding::TLVQ8)]
+    rerank_format: F32VectorCoding,
 
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value_t = false)]

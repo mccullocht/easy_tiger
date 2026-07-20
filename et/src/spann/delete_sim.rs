@@ -7,6 +7,7 @@
 //! records that cannot be found in any of the centroids returned by the head search.
 
 use std::{
+    collections::{HashMap, HashSet},
     io::{self},
     num::NonZero,
     sync::Arc,
@@ -45,6 +46,15 @@ pub struct DeleteSimArgs {
     /// Maximum number of records to simulate. If unset, process every record in the corpus.
     #[arg(short, long)]
     limit: Option<usize>,
+    /// After the simulation, run a second phase that scans every posting to locate the records
+    /// that could not be found, then compares the true distance to the centroid they actually
+    /// live in against the distances returned by the head search. This is expensive (a full
+    /// posting scan) but explains whether misses are due to head-search approximation.
+    #[arg(long, default_value_t = false)]
+    diagnose_missing: bool,
+    /// Maximum number of per-record diagnostic lines to print in the diagnosis phase.
+    #[arg(long, default_value_t = 50)]
+    diagnose_sample: usize,
 }
 
 pub fn delete_sim(
@@ -53,6 +63,12 @@ pub fn delete_sim(
     args: DeleteSimArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
+    if index.config().rerank_format.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "index has no rerank format; there are no rerank vectors to simulate deletes over",
+        ));
+    }
 
     let head_params = GraphSearchParams {
         beam_width: args.head_candidates,
@@ -73,7 +89,7 @@ pub fn delete_sim(
         let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
         let mut cursor = txn_idx
             .transaction()
-            .open_cursor::<i64, Vec<u8>>(index.rerank_vectors_table_name())?;
+            .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?;
         match cursor.largest_key() {
             Some(Ok(k)) => k,
             Some(Err(e)) => return Err(e.into()),
@@ -101,7 +117,7 @@ pub fn delete_sim(
         record_ids
             .into_par_iter()
             .map_init(
-                || Worker::new(&index, &connection, head_params),
+                || Worker::new(&index, &connection, head_params, args.diagnose_missing),
                 |worker, record_id| {
                     let stats = worker.simulate(record_id, max_postings);
                     progress.inc(1);
@@ -113,6 +129,11 @@ pub fn delete_sim(
 
     progress.finish_using_style();
     stats.report();
+
+    if args.diagnose_missing {
+        diagnose_missing(&connection, &index, &stats.missing, args.diagnose_sample)?;
+    }
+
     Ok(())
 }
 
@@ -120,6 +141,7 @@ struct Worker {
     connection: Arc<Connection>,
     index: Arc<TableIndex>,
     searcher: GraphSearcher,
+    diagnose: bool,
 }
 
 impl Worker {
@@ -127,11 +149,13 @@ impl Worker {
         index: &Arc<TableIndex>,
         connection: &Arc<Connection>,
         head_params: GraphSearchParams,
+        diagnose: bool,
     ) -> Self {
         Self {
             connection: Arc::clone(connection),
             index: Arc::clone(index),
             searcher: GraphSearcher::new(head_params),
+            diagnose,
         }
     }
 
@@ -146,11 +170,12 @@ impl Worker {
             .index
             .config()
             .rerank_format
+            .expect("rerank format is set")
             .coder(self.index.head_config().config().similarity, None);
         let query: Vec<f32> = {
             let mut raw_cursor = reader
                 .transaction()
-                .open_record_cursor(self.index.rerank_vectors_table_name())?;
+                .open_record_cursor(self.index.raw_vectors_table_name())?;
             // SAFETY: no other WT operations occur before the returned slice is decoded.
             match unsafe { raw_cursor.seek_exact_unsafe(record_id) } {
                 Some(Ok(encoded)) => rerank_coder.decode(encoded),
@@ -162,7 +187,7 @@ impl Worker {
 
         let centroids: Vec<Neighbor> = self.searcher.search(&query, reader.head())?;
         if centroids.is_empty() {
-            return Ok(SimStats::not_found());
+            return Ok(SimStats::not_found(self.make_missing(record_id, query, &[])));
         }
 
         let vector_len = self.index.posting_vector_len();
@@ -187,8 +212,43 @@ impl Worker {
             }
         }
 
-        Ok(SimStats::not_found())
+        Ok(SimStats::not_found(
+            self.make_missing(record_id, query, &centroids),
+        ))
     }
+
+    /// Build a [`MissingRecord`] describing this not-found record and the centroids the head
+    /// search returned, but only when the diagnosis phase is enabled (otherwise `None` to avoid
+    /// retaining query vectors for the whole corpus).
+    fn make_missing(
+        &self,
+        record_id: i64,
+        query: Vec<f32>,
+        head_centroids: &[Neighbor],
+    ) -> Option<MissingRecord> {
+        if !self.diagnose {
+            return None;
+        }
+        Some(MissingRecord {
+            record_id,
+            query,
+            head: head_centroids
+                .iter()
+                .map(|n| (n.vertex(), n.distance()))
+                .collect(),
+        })
+    }
+}
+
+/// Details about a record that the head search failed to locate, retained for the optional
+/// diagnosis phase.
+#[derive(Clone)]
+struct MissingRecord {
+    record_id: i64,
+    /// The record's rerank vector, used as the query.
+    query: Vec<f32>,
+    /// Centroids returned by the head search, as (centroid_id, search distance), ascending.
+    head: Vec<(i64, f64)>,
 }
 
 #[derive(Default, Clone)]
@@ -202,6 +262,8 @@ struct SimStats {
     max_depth: usize,
     /// Number of records found at each depth (index 0 == depth 1).
     depth_histogram: Vec<usize>,
+    /// Not-found records retained for diagnosis (empty unless --diagnose-missing).
+    missing: Vec<MissingRecord>,
 }
 
 impl SimStats {
@@ -218,10 +280,11 @@ impl SimStats {
         }
     }
 
-    fn not_found() -> Self {
+    fn not_found(missing: Option<MissingRecord>) -> Self {
         Self {
             processed: 1,
             not_found: 1,
+            missing: missing.into_iter().collect(),
             ..Default::default()
         }
     }
@@ -284,7 +347,7 @@ impl SimStats {
 impl std::ops::Add for SimStats {
     type Output = SimStats;
 
-    fn add(mut self, rhs: SimStats) -> SimStats {
+    fn add(mut self, mut rhs: SimStats) -> SimStats {
         self.skipped += rhs.skipped;
         self.processed += rhs.processed;
         self.found += rhs.found;
@@ -301,6 +364,187 @@ impl std::ops::Add for SimStats {
         {
             *slot += count;
         }
+        self.missing.append(&mut rhs.missing);
         self
     }
+}
+
+/// Second, expensive phase: scan every posting to find where each not-found record actually lives,
+/// then compare the true distance to that centroid against the distances the head search returned.
+///
+/// This distinguishes two failure modes:
+///   * `search-miss`: the record's true centroid is at least as close as the farthest centroid the
+///     head search *did* return, so the graph search should have reached it — an approximation
+///     failure in the head index search.
+///   * `beyond-candidates`: the true centroid is farther than every returned centroid, so it simply
+///     falls outside the candidate list at this `--head-candidates` setting.
+///   * `orphaned`: the record was not found in any posting at all.
+fn diagnose_missing(
+    connection: &Arc<Connection>,
+    index: &Arc<TableIndex>,
+    missing: &[MissingRecord],
+    sample: usize,
+) -> io::Result<()> {
+    if missing.is_empty() {
+        println!("\nno missing records to diagnose");
+        return Ok(());
+    }
+
+    println!(
+        "\n=== diagnosis: scanning all postings to locate {} missing records ===",
+        missing.len()
+    );
+
+    // record_id -> centroids whose posting contains it.
+    let missing_ids: HashSet<i64> = missing.iter().map(|m| m.record_id).collect();
+    let mut located: HashMap<i64, Vec<u32>> = HashMap::new();
+    // Total number of vectors in each centroid, captured during the scan.
+    let mut centroid_sizes: HashMap<u32, usize> = HashMap::new();
+
+    let reader = TransactionIndex::new(index, connection.begin_transaction(None)?);
+    let vector_len = index.posting_vector_len();
+    {
+        let cursor = reader
+            .transaction()
+            .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+        let progress = progress_bar(0, "scan-postings");
+        for item in cursor {
+            let (centroid_id, data) = item?;
+            progress.inc(1);
+            let Some(block) = PostingBlock::new(&data, vector_len) else {
+                continue;
+            };
+            centroid_sizes.insert(centroid_id, block.len());
+            for (record_id, _) in block.iter() {
+                if missing_ids.contains(&record_id) {
+                    located.entry(record_id).or_default().push(centroid_id);
+                }
+            }
+        }
+        progress.finish_using_style();
+    }
+
+    // Distance between the (raw f32) query and the centroid's quantized vector, computed with an
+    // asymmetric query distance in the head's coding rather than decoding the centroid.
+    let similarity = index.head_config().config().similarity;
+    let hf_table = reader.head().index().high_fidelity_table();
+    let hf_format = hf_table.format();
+    let hf_center = hf_table.centroid().map(|c| c.to_vec());
+    let hf_name = hf_table.name().to_owned();
+    let mut hf_cursor = reader.transaction().open_record_cursor(&hf_name)?;
+
+    let mut search_miss = 0usize;
+    let mut beyond_candidates = 0usize;
+    let mut orphaned = 0usize;
+    let mut printed = 0usize;
+    // How many missing records actually live in each centroid.
+    let mut per_centroid: HashMap<u32, usize> = HashMap::new();
+
+    for m in missing {
+        let centroids = located.get(&m.record_id);
+        let (worst_returned, closest_returned) = (
+            m.head.last().map(|(_, d)| *d),
+            m.head.first().map(|(_, d)| *d),
+        );
+
+        // Distance from this record's query to each candidate centroid, using an asymmetric
+        // quantized distance against the centroid's stored (encoded) vector.
+        let query_distance =
+            hf_format.query_distance_asymmetric(similarity, &m.query, hf_center.as_deref());
+        let mut best: Option<(u32, f64)> = None;
+        if let Some(centroids) = centroids {
+            for &centroid_id in centroids {
+                // SAFETY: the encoded vector is scored before the next cursor operation.
+                let encoded = match unsafe { hf_cursor.seek_exact_unsafe(centroid_id as i64) } {
+                    Some(Ok(encoded)) => encoded,
+                    Some(Err(e)) => return Err(e.into()),
+                    None => continue,
+                };
+                let dist = query_distance.distance(encoded);
+                if best.is_none_or(|(_, bd)| dist < bd) {
+                    best = Some((centroid_id, dist));
+                }
+            }
+        }
+
+        let Some((actual_centroid, actual_dist)) = best else {
+            orphaned += 1;
+            if printed < sample {
+                println!(
+                    "  record {:>10}: ORPHANED (not present in any posting)",
+                    m.record_id
+                );
+                printed += 1;
+            }
+            continue;
+        };
+
+        *per_centroid.entry(actual_centroid).or_default() += 1;
+
+        // How many returned centroids were strictly closer than the true centroid?
+        let closer_returned = m.head.iter().filter(|(_, d)| *d < actual_dist).count();
+        let classification = match worst_returned {
+            Some(worst) if actual_dist <= worst => {
+                search_miss += 1;
+                "search-miss"
+            }
+            _ => {
+                beyond_candidates += 1;
+                "beyond-candidates"
+            }
+        };
+
+        if printed < sample {
+            println!(
+                "  record {:>10}: {:<17} actual centroid {} dist {:.5} | head returned {} centroids, \
+                 closest {:.5} worst {:.5} | {} returned closer than actual",
+                m.record_id,
+                classification,
+                actual_centroid,
+                actual_dist,
+                m.head.len(),
+                closest_returned.unwrap_or(f64::NAN),
+                worst_returned.unwrap_or(f64::NAN),
+                closer_returned,
+            );
+            printed += 1;
+        }
+    }
+
+    if missing.len() > sample {
+        println!("  ... {} more not shown", missing.len() - sample);
+    }
+
+    println!("\ndiagnosis summary ({} missing records):", missing.len());
+    println!(
+        "  search-miss:       {} (true centroid within the returned distance range; head search approximation)",
+        search_miss
+    );
+    println!(
+        "  beyond-candidates: {} (true centroid farther than every returned centroid)",
+        beyond_candidates
+    );
+    println!(
+        "  orphaned:          {} (record absent from every posting)",
+        orphaned
+    );
+
+    if !per_centroid.is_empty() {
+        let mut ranked: Vec<(u32, usize)> = per_centroid.into_iter().collect();
+        // Sort by descending count, then ascending centroid id for stable output.
+        ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        println!(
+            "\ncentroids containing missing vectors: {} distinct centroids",
+            ranked.len()
+        );
+        for (centroid_id, count) in ranked.iter().take(sample) {
+            let total = centroid_sizes.get(centroid_id).copied().unwrap_or(0);
+            println!("  centroid {centroid_id:>10}: {count} missing of {total} total");
+        }
+        if ranked.len() > sample {
+            println!("  ... {} more centroids not shown", ranked.len() - sample);
+        }
+    }
+
+    Ok(())
 }

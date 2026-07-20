@@ -356,37 +356,6 @@ mod parallel {
         }
     }
 
-    // XXX fix this it's just a thin wrapper around CentroidPostingsMut.
-    struct PostingUpdater<'a> {
-        postings: CentroidPostingsMut<'a>,
-    }
-
-    impl<'a> PostingUpdater<'a> {
-        pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
-            Ok(Self {
-                postings: CentroidPostingsMut::from_txn(txn_idx)?,
-            })
-        }
-
-        pub fn read_centroid(&mut self, centroid_id: u32) -> Result<Vec<(i64, Vec<u8>)>> {
-            self.postings.read_centroid(centroid_id)
-        }
-
-        pub fn move_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
-            let v = self.postings.remove(source, record_id)?.unwrap().to_vec();
-            self.postings.insert(target, record_id, &v)
-        }
-
-        pub fn copy_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
-            let v = self.postings.get(source, record_id)?;
-            self.postings.insert(target, record_id, &v)
-        }
-
-        pub fn flush(self) -> Result<()> {
-            self.postings.flush()
-        }
-    }
-
     /// Get a list of all rebalancing operations that need to be performed.
     pub fn get_rebalance_ops(
         stats: &CentroidStats,
@@ -682,11 +651,12 @@ mod parallel {
             .par_iter()
             .try_for_each(|(target, reassignments)| {
                 let txn = TransactionIndex::new(index, connection.begin_transaction(None)?);
-                let mut updater = PostingUpdater::new(&txn)?;
-                for (source, vector_id) in reassignments {
-                    updater.copy_posting(*vector_id, *source, *target)?
+                let mut postings = CentroidPostingsMut::from_txn(&txn)?;
+                for (source, record_id) in reassignments {
+                    let v = postings.get(*source, *record_id)?;
+                    postings.insert(*target, *record_id, &v)?
                 }
-                updater.flush()?;
+                postings.flush()?;
                 txn.commit(None)?;
                 Ok::<_, Error>(())
             })
@@ -824,9 +794,9 @@ mod parallel {
                     )
                 },
                 |txn, (nearby, targets)| {
-                    let mut updater = PostingUpdater::new(txn)?;
+                    let mut postings = CentroidPostingsMut::from_txn(txn)?;
                     let mut f = CentroidDistanceFactory::new(txn)?;
-                    let postings = updater.read_centroid(*nearby)?;
+                    let postings = postings.read_centroid(*nearby)?;
                     let nearby_distfn = f.distance_to_centroid(*nearby)?;
                     let targets_distfn = targets
                         .iter()
@@ -881,11 +851,12 @@ mod parallel {
         }
 
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
-        let mut updater = PostingUpdater::new(&txn_idx)?;
+        let mut postings = CentroidPostingsMut::from_txn(&txn_idx)?;
         for &m in moves {
-            updater.move_posting(m.record_id, m.source, m.target)?;
+            let v = postings.remove(m.source, m.record_id)?.unwrap().to_vec();
+            postings.insert(m.target, m.record_id, &v)?;
         }
-        updater.flush()?;
+        postings.flush()?;
         txn_idx.commit(None)
     }
 }

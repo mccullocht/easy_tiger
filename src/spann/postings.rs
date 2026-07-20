@@ -183,6 +183,11 @@ impl<'a> CentroidPostingsMut<'a> {
                     }
                     let new_serialized = block.serialize();
                     let base = block.base_block();
+                    // Update stats: write the new count of vectors for this centroid. This must
+                    // happen regardless of which write path below is taken.
+                    let count = CentroidCounts {
+                        primary: block.len() as u32,
+                    };
                     if !base.is_empty() {
                         let max_diff = base.len() * MAX_DIFF_PCT / 100;
                         if let Some(deltas) = self.posting_cursor.calculate_modifications(
@@ -194,15 +199,12 @@ impl<'a> CentroidPostingsMut<'a> {
                             // SAFETY: modify_buf[..n] holds WT_MODIFY entries whose data pointers
                             // point into new_serialized, which remains alive for this call.
                             unsafe { self.posting_cursor.modify_unsafe(centroid_id, deltas)? };
+                            self.stats_cursor.set(centroid_id, count)?;
                             continue;
                         }
                     }
                     self.posting_cursor
                         .set(centroid_id, new_serialized.as_slice())?;
-                    // Update stats: write the new count of vectors for this centroid
-                    let count = CentroidCounts {
-                        primary: block.len() as u32,
-                    };
                     self.stats_cursor.set(centroid_id, count)?;
                 }
             }

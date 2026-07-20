@@ -1,13 +1,13 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use crate::{
     input::VectorStore,
-    spann::{centroid_stats::CentroidCounts, postings::CentroidPostingsMut, TableIndex},
+    spann::{centroid_stats::CentroidCounts, TableIndex},
     vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
 };
 use rayon::prelude::*;
 use thread_local::ThreadLocal;
-use wt_mdb::{Connection, Result};
+use wt_mdb::{connection::CreateOptionsBuilder, Connection, Result};
 
 /// Assign all the vectors to one centroid in the head index. This performs the same search
 /// as [`super::TransactionIndex`] does.
@@ -76,39 +76,60 @@ pub fn load_centroid_stats(
 /// changes, though `load_postings` calls it internally before returning.
 pub fn load_postings(
     index: &TableIndex,
-    postings: &mut CentroidPostingsMut<'_>,
+    connection: &Arc<Connection>,
     centroid_assignments: &[u32],
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
-    let mut posting_keys: Vec<(u32, i64)> = centroid_assignments
-        .iter()
-        .enumerate()
-        .map(|(i, &a)| (a, i as i64))
-        .collect();
-    posting_keys.par_sort_unstable();
-
-    let coder = index
-        .config()
-        .posting_coder
-        .coder(index.head_config().config().similarity, None);
-    // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
-    // this will also allow us to parallelize IO.
-    let mut encoded_buffer =
-        vec![vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())]; 1024];
-    for batch in posting_keys.chunks(1024) {
-        encoded_buffer
-            .par_iter_mut()
-            .zip(batch)
-            .for_each(|(buf, &(_, record_id))| {
-                coder.encode_to(&vectors[record_id as usize], buf);
+    let posting_keys: HashMap<u32, Vec<i64>> =
+        centroid_assignments
+            .iter()
+            .enumerate()
+            .fold(HashMap::new(), |mut acc, (i, &a)| {
+                acc.entry(a).or_default().push(i as i64);
+                acc
             });
-        for (&(centroid_id, record_id), buf) in batch.iter().zip(encoded_buffer.iter()) {
-            postings.insert(centroid_id, record_id, buf)?;
+    let max_centroid_id = *centroid_assignments.iter().max().unwrap();
+    let coder = index.new_posting_coder();
+    let leaf_page_size = crate::posting_block::leaf_page_max(
+        index.config().max_centroid_len,
+        coder.byte_len(index.head_config().config().dimensions.get()),
+        4096,
+    ) as u32;
+    let mut bulk_cursor = connection.new_bulk_load_cursor::<u32, Vec<u8>>(
+        &index.table_names.postings,
+        Some(
+            CreateOptionsBuilder::default()
+                .key_format::<u32>()
+                .value_format::<Vec<u8>>()
+                .app_metadata(&serde_json::to_string(&index.config()).unwrap())
+                .leaf_page_max(leaf_page_size)
+                .leaf_value_max(leaf_page_size),
+        ),
+    )?;
+
+    for i in (0..=max_centroid_id).step_by(64) {
+        let batch = i..((max_centroid_id + 1).min(i + 64));
+        let blocks = batch
+            .clone()
+            .into_par_iter()
+            .map(|i| {
+                let mut ids = posting_keys.get(&i).unwrap().clone();
+                ids.sort_unstable();
+                crate::posting_block::encode_f32(
+                    ids.into_iter().map(|j| (j, &vectors[j as usize])),
+                    coder.as_ref(),
+                    index.head_config().config().dimensions.get(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for (c, b) in batch.clone().zip(blocks) {
+            bulk_cursor.append(c, &b)?;
         }
         progress(batch.len() as u64);
     }
-    postings.flush()
+    Ok(())
 }
 
 /// Bulk load raw vector data into the raw vectors table for re-ranking.

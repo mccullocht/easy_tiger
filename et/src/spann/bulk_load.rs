@@ -6,8 +6,6 @@ use easy_tiger::{
     kmeans::{hierarchical_kmeans, HierarchicalKMeansParams, Params},
     spann::{
         bulk::{assign_to_centroids, load_centroid_stats, load_postings, load_raw_vectors},
-        centroid_stats::CentroidCounts,
-        postings::CentroidPostingsMut,
         IndexConfig, TableIndex,
     },
     vamana::{
@@ -258,22 +256,13 @@ pub fn bulk_load(
     {
         let posting_count = centroid_assignments.len();
         let progress = progress_bar(posting_count, "tail load postings");
-        let txn = connection.begin_transaction(None)?;
-        {
-            let posting_cursor = txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
-            let stats_cursor =
-                txn.open_cursor::<u32, CentroidCounts>(&index.centroid_stats_table_name())?;
-            let mut postings =
-                CentroidPostingsMut::new(posting_cursor, stats_cursor, index.posting_vector_len());
-            load_postings(
-                index.as_ref(),
-                &mut postings,
-                &centroid_assignments,
-                &f32_vectors,
-                |i| progress.inc(i),
-            )?;
-        }
-        txn.commit(None)?;
+        load_postings(
+            index.as_ref(),
+            &connection,
+            &centroid_assignments,
+            &f32_vectors,
+            |i| progress.inc(i),
+        )?;
     }
 
     Ok(())

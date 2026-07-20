@@ -435,7 +435,7 @@ fn insert_batch(
                 Some(
                     txn_idx
                         .transaction()
-                        .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?,
+                        .open_cursor::<i64, Vec<u8>>(index.rerank_vectors_table_name())?,
                 )
             } else {
                 None

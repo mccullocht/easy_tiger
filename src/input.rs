@@ -28,7 +28,7 @@ pub trait VectorStore: Index<usize, Output = [Self::Elem]> {
 }
 
 pub struct DerefVectorStore<E: 'static, D> {
-    // NB: the contents of data is referenced by raw_vectors.
+    // NB: the contents of data is referenced by rerank_vectors.
     #[allow(dead_code)]
     data: D,
     raw_vectors: &'static [E],

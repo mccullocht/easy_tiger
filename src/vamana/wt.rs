@@ -303,7 +303,7 @@ impl TableGraphVectorIndex {
     pub fn generate_table_names(index_name: &str) -> [String; 3] {
         [
             format!("{index_name}.graph"),
-            format!("{index_name}.raw_vectors"),
+            format!("{index_name}.rerank_vectors"),
             format!("{index_name}.nav_vectors"),
         ]
     }

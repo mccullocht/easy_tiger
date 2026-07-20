@@ -275,7 +275,7 @@ impl Searcher {
         let query = format.query_distance_asymmetric(reader.head.config().similarity, query, None);
         let mut raw_cursor = reader
             .transaction()
-            .open_record_cursor(&reader.index().table_names.raw_vectors)?;
+            .open_record_cursor(&reader.index().table_names.rerank_vectors)?;
         let mut reranked = result_queue
             .into_results()
             .into_iter()

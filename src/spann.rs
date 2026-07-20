@@ -66,7 +66,7 @@ struct TableNames {
     centroid_stats: String,
     // Table that maps record_id -> raw vector.
     // This is used for re-scoring after a SPANN search.
-    raw_vectors: String,
+    rerank_vectors: String,
 }
 
 impl TableNames {
@@ -74,19 +74,19 @@ impl TableNames {
         Self {
             postings: format!("{index_name}.postings"),
             centroid_stats: format!("{index_name}.centroid_stats"),
-            raw_vectors: format!("{index_name}.raw_vectors"),
+            rerank_vectors: format!("{index_name}.raw_vectors"),
         }
     }
 
     fn record_table_names(&self) -> impl Iterator<Item = &str> {
-        [self.raw_vectors.as_str()].into_iter()
+        [self.rerank_vectors.as_str()].into_iter()
     }
 
     fn all_names(&self) -> impl Iterator<Item = &str> {
         [
             self.postings.as_str(),
             self.centroid_stats.as_str(),
-            self.raw_vectors.as_str(),
+            self.rerank_vectors.as_str(),
         ]
         .into_iter()
     }
@@ -235,9 +235,8 @@ impl TableIndex {
         &self.table_names.centroid_stats
     }
 
-    // XXX this has to be renamed.
-    pub fn raw_vectors_table_name(&self) -> &str {
-        &self.table_names.raw_vectors
+    pub fn rerank_vectors_table_name(&self) -> &str {
+        &self.table_names.rerank_vectors
     }
 
     fn head_name(index_name: &str) -> String {

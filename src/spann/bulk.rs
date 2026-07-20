@@ -141,7 +141,7 @@ pub fn load_raw_vectors(
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
     let mut bulk_cursor =
-        connection.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
+        connection.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.rerank_vectors, None)?;
     let coder = index
         .config()
         .rerank_format

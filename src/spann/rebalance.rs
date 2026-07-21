@@ -286,7 +286,7 @@ mod parallel {
             CentroidAssignment, TableIndex, TransactionIndex,
         },
         vamana::{
-            mutate::{delete_vector, upsert_vector},
+            mutate::{delete_vector, upsert_vector_with_options},
             search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
             wt::CursorVectorStore,
             GraphVectorIndex, GraphVectorStore,
@@ -464,19 +464,38 @@ mod parallel {
     }
 
     /// Insert pre-computed split centroids into the head index.
+    ///
+    /// Excludes every source centroid in `ops` (both merge and split sources) from selection as
+    /// an edge for the newly inserted centroids. Source centroids are still present in the graph
+    /// at this point and will be removed later by `remove_source_centroids`; since a split
+    /// centroid is a near-duplicate of its source, allowing an edge to form between them can
+    /// trigger pruning that evicts one of the source's other edges before it's deleted, silently
+    /// dropping connectivity that `remove_source_centroids`'s cross-linking can no longer repair.
     // NB: deliberately sequential to avoid conflicts.
     pub fn insert_split_centroids(
         connection: &Arc<Connection>,
         index: &Arc<TableIndex>,
+        ops: &[RebalanceOp],
         split_centroids: &[(u32, u32, VecVectorStore<f32>)],
     ) -> Result<()> {
         if split_centroids.is_empty() {
             return Ok(());
         }
+        let sources = ops.iter().map(RebalanceOp::source).collect::<HashSet<_>>();
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
         for (t0, t1, centroids) in split_centroids {
-            upsert_vector(*t0 as i64, &centroids[0], txn_idx.head())?;
-            upsert_vector(*t1 as i64, &centroids[1], txn_idx.head())?;
+            upsert_vector_with_options(
+                *t0 as i64,
+                &centroids[0],
+                txn_idx.head(),
+                GraphSearchOptions::with_filter(|i: i64| !sources.contains(&(i as u32))),
+            )?;
+            upsert_vector_with_options(
+                *t1 as i64,
+                &centroids[1],
+                txn_idx.head(),
+                GraphSearchOptions::with_filter(|i: i64| !sources.contains(&(i as u32))),
+            )?;
         }
         txn_idx.commit(None)
     }
@@ -917,7 +936,7 @@ pub fn parallel_rebalance<R: Rng>(
     let split_update_head = start.elapsed();
 
     let start = std::time::Instant::now();
-    parallel::insert_split_centroids(connection, index, &split_centroids)?;
+    parallel::insert_split_centroids(connection, index, &ops, &split_centroids)?;
     let insert_split_centroids = start.elapsed();
 
     let start = std::time::Instant::now();

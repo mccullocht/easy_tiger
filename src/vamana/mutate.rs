@@ -1,7 +1,8 @@
 //! Tools for mutating a vamana graph vector index.
 use crate::vamana::{
-    prune_edges, search::GraphSearcher, EdgePruningConfig, EdgeSetDistanceComputer, EdgeType,
-    Graph, GraphVectorIndex, GraphVectorStore,
+    prune_edges,
+    search::{GraphSearcher, Options as GraphSearchOptions},
+    EdgePruningConfig, EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex, GraphVectorStore,
 };
 use crate::Neighbor;
 use std::collections::{hash_map::Entry, HashMap};
@@ -10,8 +11,21 @@ use wt_mdb::{Error, Result};
 
 /// Insert a vertex for `vector` and return the id assigned to the vector.
 pub fn insert_vector(vector: &[f32], index: &impl GraphVectorIndex) -> Result<i64> {
+    insert_vector_with_options(vector, index, GraphSearchOptions::default())
+}
+
+/// Insert a vertex for `vector` and return the id assigned to the vector.
+///
+/// `options` is used for the graph search that selects candidate edges for the new vertex; in
+/// particular a filter may be used to exclude specific vertex ids from being selected as edges
+/// (their edges are still traversed during the search, they are just never linked to).
+pub fn insert_vector_with_options<F: FnMut(i64) -> bool>(
+    vector: &[f32],
+    index: &impl GraphVectorIndex,
+    options: GraphSearchOptions<F>,
+) -> Result<i64> {
     let vertex_id = index.graph()?.next_available_vertex_id()?;
-    insert_internal(vertex_id, vector, index).map(|_| vertex_id)
+    insert_internal(vertex_id, vector, index, options).map(|_| vertex_id)
 }
 
 /// Delete `vertex_id` from the graph index.
@@ -220,11 +234,25 @@ fn delete_vector_directed(vertex_id: i64, index: &impl GraphVectorIndex) -> Resu
 
 /// Upsert vector with the externally assigned `vertex_id`.
 pub fn upsert_vector(vertex_id: i64, vector: &[f32], index: &impl GraphVectorIndex) -> Result<()> {
+    upsert_vector_with_options(vertex_id, vector, index, GraphSearchOptions::default())
+}
+
+/// Upsert vector with the externally assigned `vertex_id`.
+///
+/// `options` is used for the graph search that selects candidate edges for the (re-)inserted
+/// vertex; in particular a filter may be used to exclude specific vertex ids from being selected
+/// as edges (their edges are still traversed during the search, they are just never linked to).
+pub fn upsert_vector_with_options<F: FnMut(i64) -> bool>(
+    vertex_id: i64,
+    vector: &[f32],
+    index: &impl GraphVectorIndex,
+    options: GraphSearchOptions<F>,
+) -> Result<()> {
     let mut graph = index.graph()?;
     if graph.edges(vertex_id).is_some() {
         delete_vector(vertex_id, index)?;
     }
-    insert_internal(vertex_id, vector, index)
+    insert_internal(vertex_id, vector, index, options)
 }
 
 /// Insert `vector` at `vertex_id` into the index.
@@ -234,12 +262,17 @@ pub fn upsert_vector(vertex_id: i64, vector: &[f32], index: &impl GraphVectorInd
 /// prune out edges in backlink nodes to maintain the max_edges limit.
 ///
 /// This method assumes that `vertex_id` does not already exist.
-fn insert_internal(vertex_id: i64, vector: &[f32], index: &impl GraphVectorIndex) -> Result<()> {
+fn insert_internal<F: FnMut(i64) -> bool>(
+    vertex_id: i64,
+    vector: &[f32],
+    index: &impl GraphVectorIndex,
+    options: GraphSearchOptions<F>,
+) -> Result<()> {
     // TODO: make this an error instead of panicking.
     assert_eq!(index.config().dimensions.get(), vector.len());
 
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
-    let mut candidate_edges = searcher.search(vector, index)?;
+    let mut candidate_edges = searcher.search_with_options(vector, options, index)?;
     let mut graph = index.graph()?;
     if candidate_edges.is_empty() {
         graph.set_entry_point(vertex_id)?;
@@ -450,8 +483,8 @@ mod tests {
     use wt_mdb::{Connection, Result};
 
     use crate::vamana::{
-        mutate::{delete_vector, insert_vector, upsert_vector},
-        search::GraphSearcher,
+        mutate::{delete_vector, insert_vector, upsert_vector, upsert_vector_with_options},
+        search::{GraphSearcher, Options as GraphSearchOptions},
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
         EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphSearchParams, GraphVectorIndex,
     };
@@ -704,6 +737,56 @@ mod tests {
         txn_index.commit(None)?;
 
         assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![1, 2, 3, 5, 4, 0]));
+
+        Ok(())
+    }
+
+    // Verify that a filter passed via upsert_vector_with_options excludes the filtered vertex
+    // from selection as an edge, even when it would otherwise be the closest candidate.
+    #[test]
+    fn upsert_with_options_filter_excludes_vertex() -> Result<()> {
+        let fixture = Fixture::default();
+
+        let vertex_ids = fixture.insert_many(&[
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [-0.1, 0.1],
+            [0.1, -0.1],
+            [-0.2, -0.2],
+            [-0.1, -0.1],
+        ])?;
+        let reader = fixture.new_txn_index();
+        let mut graph = reader.graph()?;
+        assert!(graph
+            .edges(vertex_ids[0])
+            .unwrap()?
+            .collect::<Vec<_>>()
+            .contains(&vertex_ids[1]));
+
+        let txn_index = fixture.new_txn_index();
+        upsert_vector_with_options(
+            vertex_ids[0],
+            &[0.0, 0.0],
+            &txn_index,
+            GraphSearchOptions::with_filter(|i: i64| i != vertex_ids[1]),
+        )?;
+        txn_index.commit(None)?;
+
+        let reader = fixture.new_txn_index();
+        let mut graph = reader.graph()?;
+        let edges = graph
+            .edges(vertex_ids[0])
+            .unwrap()?
+            .collect::<Vec<_>>();
+        assert!(
+            !edges.contains(&vertex_ids[1]),
+            "filtered vertex should never be selected as an edge, got {edges:?}"
+        );
+        // The rest of the graph should still be reachable through the other edges.
+        assert_eq!(
+            fixture.search(&[0.0, 0.0])?.into_iter().collect::<std::collections::HashSet<_>>(),
+            vertex_ids.iter().copied().collect::<std::collections::HashSet<_>>()
+        );
 
         Ok(())
     }

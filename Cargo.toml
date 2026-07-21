@@ -68,6 +68,9 @@ tempfile = { workspace = true }
 [build-dependencies]
 cc = { workspace = true }
 
+[profile.release]
+debug = "line-tables-only"
+
 [profile.profiling]
 inherits = "release"
 debug = true

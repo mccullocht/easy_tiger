@@ -1,11 +1,11 @@
 //! Tools for mutating a vamana graph vector index.
-use crate::vamana::{
-    prune_edges,
-    search::{GraphSearcher, Options as GraphSearchOptions},
-    EdgePruningConfig, EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex, GraphVectorStore,
-};
 use crate::Neighbor;
-use std::collections::{hash_map::Entry, HashMap};
+use crate::vamana::{
+    EdgePruningConfig, EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex,
+    GraphVectorStore, prune_edges,
+    search::{GraphSearcher, Options as GraphSearchOptions},
+};
+use std::collections::{HashMap, hash_map::Entry};
 use vectors::VectorDistance;
 use wt_mdb::{Error, Result};
 
@@ -72,13 +72,7 @@ fn delete_vector_undirected(vertex_id: i64, index: &impl GraphVectorIndex) -> Re
         .collect::<Result<Result<Vec<_>>>>()??;
 
     // Create links between edges of the deleted node if needed.
-    cross_link_peer_vertices(
-        index,
-        &mut graph,
-        &mut vectors,
-        &vertex_data,
-        distance_fn.as_ref(),
-    )?;
+    cross_link_peer_vertices(index, &mut graph, &vertex_data, distance_fn.as_ref())?;
 
     // Oh no, we've deleted the entry point! Find the closest point amongst the edges of this node
     // to use as a new entry point.
@@ -200,8 +194,12 @@ fn delete_vector_directed(vertex_id: i64, index: &impl GraphVectorIndex) -> Resu
 
         // If there are now too many edges, rehydrate the edge list and prune.
         if edges.len() > index.config().pruning.max_edges.get() {
-            let (neighbors, keep) =
-                rehydrate_and_prune_directed(&cvector, &mut vectors, edges, &index.config().pruning)?;
+            let (neighbors, keep) = rehydrate_and_prune_directed(
+                &cvector,
+                &mut vectors,
+                edges,
+                &index.config().pruning,
+            )?;
             edges.clear();
             edges.extend(neighbors.iter().take(keep).map(Neighbor::vertex));
         }
@@ -405,7 +403,6 @@ fn remove_edge_directed(
 fn cross_link_peer_vertices(
     index: &impl GraphVectorIndex,
     graph: &mut impl Graph,
-    vectors: &mut impl GraphVectorStore,
     vertex_data: &[(i64, Vec<u8>, Vec<i64>)],
     distance_fn: &dyn VectorDistance,
 ) -> Result<()> {
@@ -433,43 +430,33 @@ fn cross_link_peer_vertices(
         scored_edges.retain(|n| !current_edges.contains(&n.vertex()));
     }
 
-    let mut pruned_edges = vec![];
+    let max_edges = index.config().pruning.max_edges.get();
     for (src_vertex_id, dst_vertex_id) in vertex_data
         .iter()
         .zip(edge_scores)
         .flat_map(|(v, e)| std::iter::repeat(v.0).zip(e.into_iter().map(|n| n.vertex())))
     {
         // Insert edge symmetrically to maintain an undirected graph.
-        let src_edges = insert_edge_directed(
-            index,
-            graph,
-            vectors,
-            src_vertex_id,
-            dst_vertex_id,
-            &mut pruned_edges,
-        )?;
-        let dst_edges = insert_edge_directed(
-            index,
-            graph,
-            vectors,
-            dst_vertex_id,
-            src_vertex_id,
-            &mut pruned_edges,
-        )?;
-
-        // If the edge was not inserted in both directions, then do not commit any of the
-        // changes that were made here.
-        if !src_edges.contains(&dst_vertex_id) || !dst_edges.contains(&src_vertex_id) {
-            pruned_edges.clear();
+        let mut src_edges = graph
+            .edges(src_vertex_id)
+            .unwrap_or_else(|| Err(Error::not_found_error()))?
+            .collect::<Vec<_>>();
+        if src_edges.len() >= max_edges || src_edges.contains(&dst_vertex_id) {
+            continue;
+        }
+        let mut dst_edges = graph
+            .edges(dst_vertex_id)
+            .unwrap_or_else(|| Err(Error::not_found_error()))?
+            .collect::<Vec<_>>();
+        if dst_edges.len() >= max_edges {
             continue;
         }
 
         // Apply the changes to src and dst vertexes and remove any pruned edges.
+        src_edges.push(dst_vertex_id);
         graph.set_edges(src_vertex_id, src_edges)?;
+        dst_edges.push(src_vertex_id);
         graph.set_edges(dst_vertex_id, dst_edges)?;
-        for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
-            remove_edge_directed(graph, src_vertex_id, dst_vertex_id)?;
-        }
     }
 
     Ok(())
@@ -483,10 +470,10 @@ mod tests {
     use wt_mdb::{Connection, Result};
 
     use crate::vamana::{
+        EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphSearchParams, GraphVectorIndex,
         mutate::{delete_vector, insert_vector, upsert_vector, upsert_vector_with_options},
         search::{GraphSearcher, Options as GraphSearchOptions},
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
-        EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphSearchParams, GraphVectorIndex,
     };
 
     struct Fixture {
@@ -757,11 +744,13 @@ mod tests {
         ])?;
         let reader = fixture.new_txn_index();
         let mut graph = reader.graph()?;
-        assert!(graph
-            .edges(vertex_ids[0])
-            .unwrap()?
-            .collect::<Vec<_>>()
-            .contains(&vertex_ids[1]));
+        assert!(
+            graph
+                .edges(vertex_ids[0])
+                .unwrap()?
+                .collect::<Vec<_>>()
+                .contains(&vertex_ids[1])
+        );
 
         let txn_index = fixture.new_txn_index();
         upsert_vector_with_options(
@@ -774,18 +763,21 @@ mod tests {
 
         let reader = fixture.new_txn_index();
         let mut graph = reader.graph()?;
-        let edges = graph
-            .edges(vertex_ids[0])
-            .unwrap()?
-            .collect::<Vec<_>>();
+        let edges = graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>();
         assert!(
             !edges.contains(&vertex_ids[1]),
             "filtered vertex should never be selected as an edge, got {edges:?}"
         );
         // The rest of the graph should still be reachable through the other edges.
         assert_eq!(
-            fixture.search(&[0.0, 0.0])?.into_iter().collect::<std::collections::HashSet<_>>(),
-            vertex_ids.iter().copied().collect::<std::collections::HashSet<_>>()
+            fixture
+                .search(&[0.0, 0.0])?
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            vertex_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
         );
 
         Ok(())

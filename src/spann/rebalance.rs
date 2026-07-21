@@ -4,7 +4,7 @@ use rand::Rng;
 use wt_mdb::{Connection, Result};
 
 use crate::{
-    spann::{centroid_stats::CentroidStats, TableIndex, TransactionIndex},
+    spann::{TableIndex, TransactionIndex, centroid_stats::CentroidStats},
     vamana::search::GraphSearchStats,
 };
 
@@ -280,16 +280,16 @@ mod parallel {
         input::VecVectorStore,
         posting_block::PostingBlock,
         spann::{
+            CentroidAssignment, TableIndex, TransactionIndex,
             centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
             postings::BlockPostingsMut,
             rebalance::{MergeStats, RebalanceStats, SplitStats},
-            CentroidAssignment, TableIndex, TransactionIndex,
         },
         vamana::{
+            GraphVectorIndex, GraphVectorStore,
             mutate::{delete_vector, upsert_vector_with_options},
             search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
             wt::CursorVectorStore,
-            GraphVectorIndex, GraphVectorStore,
         },
     };
 
@@ -465,13 +465,8 @@ mod parallel {
 
     /// Insert pre-computed split centroids into the head index.
     ///
-    /// Excludes every source centroid in `ops` (both merge and split sources) from selection as
-    /// an edge for the newly inserted centroids. Source centroids are still present in the graph
-    /// at this point and will be removed later by `remove_source_centroids`; since a split
-    /// centroid is a near-duplicate of its source, allowing an edge to form between them can
-    /// trigger pruning that evicts one of the source's other edges before it's deleted, silently
-    /// dropping connectivity that `remove_source_centroids`'s cross-linking can no longer repair.
-    // NB: deliberately sequential to avoid conflicts.
+    /// Exclude connections to the source centroid because it introduces of a cluster of 3 related
+    /// centroids with the source as a hub, which makes it difficult to remove the hub.
     pub fn insert_split_centroids(
         connection: &Arc<Connection>,
         index: &Arc<TableIndex>,
@@ -481,20 +476,28 @@ mod parallel {
         if split_centroids.is_empty() {
             return Ok(());
         }
-        let sources = ops.iter().map(RebalanceOp::source).collect::<HashSet<_>>();
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
         for (t0, t1, centroids) in split_centroids {
+            let RebalanceOp::Split(source, tt, tu) = ops
+                .iter()
+                .find(|op| matches!(op, RebalanceOp::Split(_, tt, _) if *tt == *t0))
+                .expect("matching split op")
+            else {
+                unreachable!("must be split op")
+            };
+            assert_eq!(*t0, *tt);
+            assert_eq!(*t1, *tu);
             upsert_vector_with_options(
                 *t0 as i64,
                 &centroids[0],
                 txn_idx.head(),
-                GraphSearchOptions::with_filter(|i: i64| !sources.contains(&(i as u32))),
+                GraphSearchOptions::with_filter(|i: i64| i != *source as i64),
             )?;
             upsert_vector_with_options(
                 *t1 as i64,
                 &centroids[1],
                 txn_idx.head(),
-                GraphSearchOptions::with_filter(|i: i64| !sources.contains(&(i as u32))),
+                GraphSearchOptions::with_filter(|i: i64| i != *source as i64),
             )?;
         }
         txn_idx.commit(None)

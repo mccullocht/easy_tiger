@@ -359,14 +359,14 @@ fn select_pruned_edges(
     // TODO: replace with a fixed length bitset
     let mut selected = BTreeSet::new();
     selected.insert(0); // we always keep the first node.
-    let mut alpha = 1.0;
+    let mut alpha = config.max_alpha;
     while alpha <= config.max_alpha {
         for i in 1..edges.len() {
             if selected.contains(&i)
                 || selected
                     .iter()
                     .take_while(|&&j| j < i)
-                    .any(|&j| edges[j].distance / edge_distance_computer.distance(i, j) > alpha)
+                    .any(|&j| edges[i].distance / edge_distance_computer.distance(i, j) > alpha)
             {
                 continue;
             }

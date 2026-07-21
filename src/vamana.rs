@@ -6,11 +6,13 @@ pub mod mutate;
 pub mod search;
 pub mod wt;
 
-use std::{collections::BTreeSet, num::NonZero};
+use std::{borrow::Cow, collections::BTreeSet, num::NonZero};
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
-use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity};
+use vectors::{
+    F32VectorCoder, F32VectorCoding, QueryVectorDistance, VectorDistance, VectorSimilarity,
+};
 use wt_mdb::{Error, Result};
 
 use crate::Neighbor;
@@ -228,6 +230,14 @@ pub trait GraphVectorStore {
     fn new_distance_function(&self) -> Box<dyn VectorDistance> {
         self.format()
             .distance_symmetric(self.similarity(), self.centroid())
+    }
+
+    fn query_distance_asymmetric<'q>(
+        &self,
+        query: impl Into<Cow<'q, [f32]>>,
+    ) -> Box<dyn QueryVectorDistance + 'q> {
+        self.format()
+            .query_distance_asymmetric(self.similarity(), query, self.centroid())
     }
 
     /// Create a new coder for vectors of this type.

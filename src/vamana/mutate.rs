@@ -96,6 +96,65 @@ fn delete_vector_undirected(vertex_id: i64, index: &impl GraphVectorIndex) -> Re
     Ok(())
 }
 
+/// Implement selection of candidates to repair `repair_vertex` after the deletion of `delete_vertex`.
+/// See https://www.vldb.org/pvldb/vol18/p2268-zheng.pdf
+fn wolverine_repair_candidates(
+    repair_vertex: i64,
+    delete_vertex: i64,
+    delete_hf_vector: &[u8],
+    one_hop_edges: &[i64],
+    two_hop_edges: &[i64],
+    index: &impl GraphVectorIndex,
+) -> Result<Vec<i64>> {
+    // XXX I might want to read the repair_vertex just to filter out candidates that I already have.
+    let mut vectors = index.high_fidelity_vectors()?;
+    let coder = vectors.new_coder();
+    let repair_vector = coder.decode(
+        vectors
+            .get(repair_vertex)
+            .unwrap_or_else(|| Err(Error::not_found_error()))?,
+    );
+
+    let mut candidates = vec![];
+    let repair_dist = vectors.query_distance_asymmetric(repair_vector);
+    let delete_neighbor = Neighbor::new(delete_vertex, repair_dist.distance(delete_hf_vector));
+    for &e in one_hop_edges.iter().filter(|&&e| e != repair_vertex) {
+        let v = vectors
+            .get(e)
+            .unwrap_or_else(|| Err(Error::not_found_error()))?;
+        let n = Neighbor::new(e, repair_dist.distance(v));
+        if n < delete_neighbor {
+            candidates.push(n);
+        }
+    }
+
+    let delete_dist = vectors.query_distance_asymmetric(coder.decode(delete_hf_vector));
+    for &e in two_hop_edges.iter().filter(|&&e| e != repair_vertex) {
+        let v = vectors
+            .get(e)
+            .unwrap_or_else(|| Err(Error::not_found_error()))?;
+        let n = Neighbor::new(e, repair_dist.distance(v));
+        // Candidate edge must be closer to the repair vertex than the original centroid.
+        if n >= delete_neighbor {
+            continue;
+        }
+
+        // XXX candidate must be farther from delete_vertex than repair_vertex is.
+        // XXX d(c, d) > d(d, r)
+
+        // XXX consider acute angle d(c, r)^2 + d(d, r)^2 > d(c, r)^2.
+        todo!()
+    }
+
+    candidates.sort_unstable();
+    let mut edges = candidates
+        .into_iter()
+        .map(|n| n.vertex())
+        .collect::<Vec<_>>();
+    edges.sort_unstable();
+    Ok(edges)
+}
+
 /// Delete a vector in a directed graph.
 ///
 /// This utilizes Inplace Delete (Algorithm 6) from https://www.vldb.org/pvldb/vol18/p5166-upreti.pdf

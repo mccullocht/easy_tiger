@@ -35,17 +35,11 @@ pub struct EdgePruningArgs {
     /// Maximum number of edges for any vertex.
     #[arg(short, long, default_value = "32")]
     max_edges: NonZero<usize>,
-    /// Maximum alpha value used to prune edges. Large values keep more edges.
+    /// Alpha value used to prune edges. Large values keep more edges.
     ///
     /// Must be >= 1.0.
     #[arg(long, default_value_t = 1.2)]
-    max_alpha: f64,
-    /// Alpha value scaling factor.
-    ///
-    /// This value is multiplied by the current alpha value (starting at 1.0) until max_alpha is
-    /// exceeded. Lower values will trigger fewer iterations. Must be >= 1.0.
-    #[arg(long, default_value_t = 1.2)]
-    alpha_scale: f64,
+    alpha: f64,
 }
 
 #[derive(Copy, Clone, Debug, Default, clap::ValueEnum)]
@@ -68,8 +62,7 @@ impl From<EdgePruningArgs> for EdgePruningConfig {
     fn from(value: EdgePruningArgs) -> Self {
         Self {
             max_edges: value.max_edges,
-            max_alpha: value.max_alpha,
-            alpha_scale: value.alpha_scale,
+            alpha: value.alpha,
         }
     }
 }

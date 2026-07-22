@@ -360,7 +360,7 @@ fn select_pruned_edges(
     for i in 1..edges.len() {
         if selected
             .iter()
-            .any(|&j| edges[j].distance / edge_distance_computer.distance(i, j) > config.alpha)
+            .any(|&j| edges[i].distance / edge_distance_computer.distance(i, j) > config.alpha)
         {
             continue;
         }

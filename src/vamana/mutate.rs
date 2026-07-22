@@ -492,7 +492,7 @@ fn repair_deleted_vertex(
 
         // Connect each gathered candidate to p_out. Pruning maintains the degree bound.
         for cid in candidates {
-            insert_undirected_edge(index, graph, vectors, cid, *pout_id)?;
+            insert_undirected_edge(index, graph, cid, *pout_id)?;
         }
     }
 
@@ -520,28 +520,44 @@ fn in_candidate_region(
         && d_c_pout * d_c_pout + d_p_pout * d_p_pout > d_c_p * d_c_p
 }
 
-/// Attempt to insert an undirected edge between `a` and `b`, pruning as needed. If pruning drops the
-/// edge in either direction then no changes are committed.
+/// Attempt to insert an undirected edge between `a` and `b` on a best-effort basis. The edge is only
+/// added if it fits within the edge policy (`max_edges`) for both vertexes; edges are never pruned to
+/// make room, so if either vertex is already full the edge is dropped and no changes are committed.
 fn insert_undirected_edge(
     index: &impl GraphVectorIndex,
     graph: &mut impl Graph,
-    vectors: &mut impl GraphVectorStore,
     a: i64,
     b: i64,
 ) -> Result<()> {
-    let mut pruned_edges = vec![];
-    let a_edges = insert_edge_directed(index, graph, vectors, a, b, &mut pruned_edges)?;
-    let b_edges = insert_edge_directed(index, graph, vectors, b, a, &mut pruned_edges)?;
+    let max_edges = index.config().pruning.max_edges.get();
 
-    // If the edge was not inserted in both directions, do not commit any of the changes.
-    if !a_edges.contains(&b) || !b_edges.contains(&a) {
+    let mut a_edges = graph
+        .edges(a)
+        .unwrap_or_else(|| Err(Error::not_found_error()))?
+        .collect::<Vec<_>>();
+    let mut b_edges = graph
+        .edges(b)
+        .unwrap_or_else(|| Err(Error::not_found_error()))?
+        .collect::<Vec<_>>();
+
+    let add_to_a = !a_edges.contains(&b);
+    let add_to_b = !b_edges.contains(&a);
+    if !add_to_a && !add_to_b {
+        return Ok(()); // edge already present.
+    }
+
+    // Best effort: only insert if the edge fits within policy for both vertexes without pruning.
+    if (add_to_a && a_edges.len() >= max_edges) || (add_to_b && b_edges.len() >= max_edges) {
         return Ok(());
     }
 
-    graph.set_edges(a, a_edges)?;
-    graph.set_edges(b, b_edges)?;
-    for (src, dst) in pruned_edges {
-        remove_edge_directed(graph, src, dst)?;
+    if add_to_a {
+        a_edges.push(b);
+        graph.set_edges(a, a_edges)?;
+    }
+    if add_to_b {
+        b_edges.push(a);
+        graph.set_edges(b, b_edges)?;
     }
     Ok(())
 }

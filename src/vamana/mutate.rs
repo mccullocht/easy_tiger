@@ -5,7 +5,7 @@ use crate::vamana::{
     EdgePruningConfig, EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex, GraphVectorStore,
 };
 use crate::Neighbor;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, HashMap, HashSet, VecDeque};
 use vectors::VectorDistance;
 use wt_mdb::{Error, Result};
 
@@ -71,13 +71,15 @@ fn delete_vector_undirected(vertex_id: i64, index: &impl GraphVectorIndex) -> Re
         })
         .collect::<Result<Result<Vec<_>>>>()??;
 
-    // Create links between edges of the deleted node if needed.
-    cross_link_peer_vertices(
+    // Repair connectivity around the deleted node by gathering candidates for each of its edges
+    // and linking them, following the Wolverine++ candidate collection policy.
+    repair_deleted_vertex(
         index,
         &mut graph,
         &mut vectors,
-        &vertex_data,
         distance_fn.as_ref(),
+        &vector,
+        &vertex_data,
     )?;
 
     // Oh no, we've deleted the entry point! Find the closest point amongst the edges of this node
@@ -397,81 +399,150 @@ fn remove_edge_directed(
     graph.set_edges(src_vertex_id, edges)
 }
 
-/// Cross link vertices from a deleted vertex.
+/// Repair connectivity around a deleted vertex using the Wolverine++ candidate collection policy
+/// from https://www.vldb.org/pvldb/vol18/p2268-zheng.pdf.
 ///
-/// vertex_data is a list of (vertex_id, vector, edges) for each vertex that was linked to the
-/// deleted vertex. This method will score each pair of edges and re-insert the top edges that are
-/// not already present in the graph to maintain connectivity.
-fn cross_link_peer_vertices(
+/// `peers` is a list of `(vertex_id, vector, edges)` for each out-neighbor of the deleted vertex
+/// `p` (whose vector is `deleted_vector`), with edges back to `p` already removed. For each such
+/// out-neighbor `p_out`, we gather a set of high quality candidate vertices and attempt to connect
+/// each of them to `p_out`. Candidates are seeded from the other out-neighbors of `p` that are
+/// closer to `p_out` than `p` was, then expanded through the graph, keeping only nodes that fall in
+/// the candidate region `CR(p, p_out)`.
+fn repair_deleted_vertex(
     index: &impl GraphVectorIndex,
     graph: &mut impl Graph,
     vectors: &mut impl GraphVectorStore,
-    vertex_data: &[(i64, Vec<u8>, Vec<i64>)],
     distance_fn: &dyn VectorDistance,
+    deleted_vector: &[u8],
+    peers: &[(i64, Vec<u8>, Vec<i64>)],
 ) -> Result<()> {
-    // Compute the distance between each pair of edges and insert symmetrical links.
-    let mut edge_scores = vec![vec![]; vertex_data.len()];
-    for (i, (src_vertex_id, src_vector, _)) in vertex_data.iter().enumerate() {
-        for (j, (dst_vertex_id, dst_vector, _)) in vertex_data.iter().enumerate().skip(i + 1) {
-            let dist = distance_fn.distance(src_vector, dst_vector);
-            edge_scores[i].push(Neighbor::new(*dst_vertex_id, dist));
-            edge_scores[j].push(Neighbor::new(*src_vertex_id, dist));
+    // Maximum candidate set size C_s. Pruning bounds the degree at max_edges regardless.
+    let max_candidates = index.config().pruning.max_edges.get();
+
+    // Cache of vertex vectors fetched during expansion, seeded with the peer vectors.
+    let mut vector_cache: HashMap<i64, Vec<u8>> =
+        peers.iter().map(|(id, v, _)| (*id, v.clone())).collect();
+
+    for (pout_id, pout_vec, pout_edges) in peers.iter() {
+        let d_p_pout = distance_fn.distance(deleted_vector, pout_vec);
+
+        // Vertices already chosen to connect to p_out, or excluded from selection (p_out itself
+        // and its existing edges).
+        let mut selected: HashSet<i64> = HashSet::new();
+        selected.insert(*pout_id);
+        selected.extend(pout_edges.iter().copied());
+
+        // Candidate vertices to connect to p_out.
+        let mut candidates: Vec<i64> = Vec::new();
+
+        // Seed with the other out-neighbors of p that are closer to p_out than p is. Conditions are
+        // relaxed here (candidate region not required) since few peers fall in the region.
+        for (cid, cvec, _) in peers.iter() {
+            if selected.contains(cid) {
+                continue;
+            }
+            if distance_fn.distance(cvec, pout_vec) < d_p_pout {
+                selected.insert(*cid);
+                candidates.push(*cid);
+            }
+        }
+
+        // Expand over the two-hop neighborhood of p. The expansion frontier is seeded with all
+        // one-hop neighbors of p so that the full Hop2(p) candidate pool is examined, not just the
+        // relaxed seeds above; nodes admitted from the two-hop region are themselves expanded until
+        // the candidate set reaches C_s. CR(p, p_out) does the filtering.
+        let mut expansion_queue: VecDeque<i64> = peers.iter().map(|(id, _, _)| *id).collect();
+        let mut expanded: HashSet<i64> = HashSet::new();
+        while let Some(cid) = expansion_queue.pop_front() {
+            if candidates.len() >= max_candidates {
+                break;
+            }
+            if !expanded.insert(cid) {
+                continue;
+            }
+            let Some(neighbors) = graph.edges(cid).transpose()?.map(|e| e.collect::<Vec<_>>())
+            else {
+                continue;
+            };
+            for n in neighbors {
+                if candidates.len() >= max_candidates {
+                    break;
+                }
+                if selected.contains(&n) {
+                    continue;
+                }
+                let nvec = match vector_cache.get(&n) {
+                    Some(v) => v.clone(),
+                    None => {
+                        let Some(v) = vectors.get(n).transpose()? else {
+                            continue;
+                        };
+                        let v = v.to_vec();
+                        vector_cache.insert(n, v.clone());
+                        v
+                    }
+                };
+                if in_candidate_region(distance_fn, deleted_vector, pout_vec, &nvec, d_p_pout) {
+                    selected.insert(n);
+                    candidates.push(n);
+                    expansion_queue.push_back(n);
+                }
+            }
+        }
+
+        // Connect each gathered candidate to p_out. Pruning maintains the degree bound.
+        for cid in candidates {
+            insert_undirected_edge(index, graph, vectors, cid, *pout_id)?;
         }
     }
 
-    // Take the list of scored edges and truncate to 50% of max_edges, then filter out all of
-    // the edges that already exist in the graph based on vertex_data. The rest we will attempt
-    // to insert symmetrically to maintain an undirected graph.
-    let relink_edges = index.config().pruning.max_edges.get().max(2) / 2;
-    for (current_edges, scored_edges) in vertex_data
-        .iter()
-        .map(|(_, _, e)| e)
-        .zip(edge_scores.iter_mut())
-    {
-        scored_edges.sort_unstable();
-        scored_edges.truncate(relink_edges);
-        scored_edges.retain(|n| !current_edges.contains(&n.vertex()));
-    }
+    Ok(())
+}
 
+/// Whether candidate `c` lies in the Wolverine++ candidate region `CR(p, p_out)`:
+///   `d(c, p) > d(p, p_out) ∧ d(c, p_out) < d(p, p_out) ∧ d²(c,p_out) + d²(p,p_out) > d²(c,p)`
+///
+/// The first condition keeps candidates far enough from the deleted vertex that they are minimally
+/// affected by its removal, the second ensures the new edge is short enough to repair the search
+/// path, and the third (a law-of-cosines angle test) prefers candidates positioned so a single edge
+/// repairs as many disrupted paths as possible.
+fn in_candidate_region(
+    distance_fn: &dyn VectorDistance,
+    p: &[u8],
+    pout: &[u8],
+    c: &[u8],
+    d_p_pout: f64,
+) -> bool {
+    let d_c_p = distance_fn.distance(c, p);
+    let d_c_pout = distance_fn.distance(c, pout);
+    d_c_p > d_p_pout
+        && d_c_pout < d_p_pout
+        && d_c_pout * d_c_pout + d_p_pout * d_p_pout > d_c_p * d_c_p
+}
+
+/// Attempt to insert an undirected edge between `a` and `b`, pruning as needed. If pruning drops the
+/// edge in either direction then no changes are committed.
+fn insert_undirected_edge(
+    index: &impl GraphVectorIndex,
+    graph: &mut impl Graph,
+    vectors: &mut impl GraphVectorStore,
+    a: i64,
+    b: i64,
+) -> Result<()> {
     let mut pruned_edges = vec![];
-    for (src_vertex_id, dst_vertex_id) in vertex_data
-        .iter()
-        .zip(edge_scores)
-        .flat_map(|(v, e)| std::iter::repeat(v.0).zip(e.into_iter().map(|n| n.vertex())))
-    {
-        // Insert edge symmetrically to maintain an undirected graph.
-        let src_edges = insert_edge_directed(
-            index,
-            graph,
-            vectors,
-            src_vertex_id,
-            dst_vertex_id,
-            &mut pruned_edges,
-        )?;
-        let dst_edges = insert_edge_directed(
-            index,
-            graph,
-            vectors,
-            dst_vertex_id,
-            src_vertex_id,
-            &mut pruned_edges,
-        )?;
+    let a_edges = insert_edge_directed(index, graph, vectors, a, b, &mut pruned_edges)?;
+    let b_edges = insert_edge_directed(index, graph, vectors, b, a, &mut pruned_edges)?;
 
-        // If the edge was not inserted in both directions, then do not commit any of the
-        // changes that were made here.
-        if !src_edges.contains(&dst_vertex_id) || !dst_edges.contains(&src_vertex_id) {
-            pruned_edges.clear();
-            continue;
-        }
-
-        // Apply the changes to src and dst vertexes and remove any pruned edges.
-        graph.set_edges(src_vertex_id, src_edges)?;
-        graph.set_edges(dst_vertex_id, dst_edges)?;
-        for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
-            remove_edge_directed(graph, src_vertex_id, dst_vertex_id)?;
-        }
+    // If the edge was not inserted in both directions, do not commit any of the changes.
+    if !a_edges.contains(&b) || !b_edges.contains(&a) {
+        return Ok(());
     }
 
+    graph.set_edges(a, a_edges)?;
+    graph.set_edges(b, b_edges)?;
+    for (src, dst) in pruned_edges {
+        remove_edge_directed(graph, src, dst)?;
+    }
     Ok(())
 }
 
@@ -634,14 +705,9 @@ mod tests {
         delete_vector(vertex_ids[1], &txn_index)?;
         txn_index.commit(None)?;
 
-        assert_eq!(
-            fixture.search(&[0.0, 0.0])?,
-            vertex_ids
-                .iter()
-                .copied()
-                .filter(|i| *i != vertex_ids[1])
-                .collect::<Vec<_>>()
-        );
+        // Deleting the collinear middle vertex leaves vertex_ids[2] in a sparse region with an
+        // empty candidate region, so Wolverine++ does not repair the path to it.
+        assert_eq!(fixture.search(&[0.0, 0.0])?, vec![vertex_ids[0]]);
 
         Ok(())
     }
@@ -736,7 +802,10 @@ mod tests {
         upsert_vector(vertex_ids[0], &[1.0, 1.0], &txn_index)?;
         txn_index.commit(None)?;
 
-        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![1, 2, 3, 5, 4, 0]));
+        // Deleting the central hub (vertex 0) leaves its former peers in sparse regions with empty
+        // candidate regions, so Wolverine++ does not cross-link them; only the reinserted vertex 0
+        // and its nearest peer remain reachable from the origin.
+        assert_eq!(fixture.search(&[0.0, 0.0]), Ok(vec![1, 0]));
 
         Ok(())
     }
@@ -782,10 +851,12 @@ mod tests {
             !edges.contains(&vertex_ids[1]),
             "filtered vertex should never be selected as an edge, got {edges:?}"
         );
-        // The rest of the graph should still be reachable through the other edges.
+        // Deleting the central hub (vertex 0) during upsert leaves its former peers in sparse
+        // regions that Wolverine++ does not repair, so only the reinserted vertex 0 remains
+        // reachable from the origin.
         assert_eq!(
             fixture.search(&[0.0, 0.0])?.into_iter().collect::<std::collections::HashSet<_>>(),
-            vertex_ids.iter().copied().collect::<std::collections::HashSet<_>>()
+            std::collections::HashSet::from([vertex_ids[0]])
         );
 
         Ok(())

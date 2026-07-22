@@ -6,7 +6,7 @@ pub mod mutate;
 pub mod search;
 pub mod wt;
 
-use std::{collections::BTreeSet, num::NonZero};
+use std::num::NonZero;
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -51,31 +51,21 @@ pub struct PatienceParams {
 pub struct EdgePruningConfig {
     /// Number of edges to keep for each vertex.
     pub max_edges: NonZero<usize>,
-    /// Maximum alpha value to use for edge pruning.
+    /// Alpha value to use for edge pruning.
     ///
     /// Larger values result in retain longer edges while still saying below `max_edges`.
     ///
     /// Must be >= 1.0. Default value is 1.2.
-    pub max_alpha: f64,
-    /// Alpha value scaling factor.
-    ///
-    /// This is the rate at which we scale from an alpha value of 1.0 up to `max_alpha`. Slowly
-    /// scaling up the alpha value gives preference to shorter edges, but may result in more
-    /// iterations in pruning.
-    ///
-    /// Must be >= 1.0. Default value is 1.2.
-    pub alpha_scale: f64,
+    pub alpha: f64,
 }
 
 impl EdgePruningConfig {
-    pub const DEFAULT_MAX_ALPHA: f64 = 1.2;
-    pub const DEFAULT_ALPHA_SCALE: f64 = 1.2;
+    pub const DEFAULT_ALPHA: f64 = 1.2;
 
     pub fn new(max_edges: NonZero<usize>) -> Self {
         Self {
             max_edges,
-            max_alpha: Self::DEFAULT_MAX_ALPHA,
-            alpha_scale: Self::DEFAULT_ALPHA_SCALE,
+            alpha: Self::DEFAULT_ALPHA,
         }
     }
 }
@@ -349,39 +339,26 @@ fn select_pruned_edges(
     edges: &[Neighbor],
     config: &EdgePruningConfig,
     edge_distance_computer: EdgeSetDistanceComputer,
-) -> BTreeSet<usize> {
+) -> Vec<usize> {
     if edges.is_empty() {
-        return BTreeSet::new();
+        return Vec::new();
     }
 
     debug_assert!(edges.is_sorted());
 
-    // TODO: replace with a fixed length bitset
-    let mut selected = BTreeSet::new();
-    selected.insert(0); // we always keep the first node.
-    let mut alpha = 1.0;
-    while alpha <= config.max_alpha {
-        for i in 1..edges.len() {
-            if selected.contains(&i)
-                || selected
-                    .iter()
-                    .take_while(|&&j| j < i)
-                    .any(|&j| edges[j].distance / edge_distance_computer.distance(i, j) > alpha)
-            {
-                continue;
-            }
-
-            selected.insert(i);
-            if selected.len() >= config.max_edges.get() {
-                break;
-            }
+    let mut selected = vec![0]; // we always keep the first node.
+    for i in 1..edges.len() {
+        if selected
+            .iter()
+            .any(|&j| edges[j].distance / edge_distance_computer.distance(i, j) > config.alpha)
+        {
+            continue;
         }
 
+        selected.push(i);
         if selected.len() >= config.max_edges.get() {
             break;
         }
-
-        alpha *= config.alpha_scale;
     }
 
     selected

@@ -4,6 +4,7 @@ mod drop_index;
 mod init_index;
 mod insert;
 mod lookup;
+mod reinsert;
 mod search;
 
 use std::{io, num::NonZero, sync::Arc};
@@ -17,6 +18,7 @@ use easy_tiger::vamana::{EdgePruningConfig, EdgeType};
 use init_index::{InitIndexArgs, init_index};
 use insert::{InsertArgs, insert};
 use lookup::{LookupArgs, lookup};
+use reinsert::{ReinsertArgs, reinsert};
 use search::{SearchArgs, search};
 
 use crate::wt_args::WiredTigerArgs;
@@ -89,6 +91,8 @@ pub enum Command {
     Lookup(LookupArgs),
     /// Insert a vectors from a file into the index.
     Insert(InsertArgs),
+    /// Re-perform insertion for a single vertex, rebuilding its edges.
+    Reinsert(ReinsertArgs),
     /// Check whether every vertex in the graph is reachable from the entry point.
     CheckReachability(CheckReachabilityArgs),
 }
@@ -104,6 +108,7 @@ pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
         Command::DropIndex => drop_index(connection, index_name),
         Command::Lookup(args) => lookup(connection, index_name, args),
         Command::Insert(args) => insert(connection, index_name, args),
+        Command::Reinsert(args) => reinsert(connection, index_name, args),
         Command::CheckReachability(args) => check_reachability(connection, index_name, args),
     }?;
     cmd_connection.checkpoint()?;

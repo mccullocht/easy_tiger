@@ -1,6 +1,6 @@
 //! Tools for mutating a vamana graph vector index.
 use crate::vamana::{
-    prune_edges,
+    prune_edges, prune_edges_saturating,
     search::{GraphSearcher, Options as GraphSearchOptions},
     EdgePruningConfig, EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex, GraphVectorStore,
 };
@@ -279,7 +279,7 @@ fn insert_internal<F: FnMut(i64) -> bool>(
     }
 
     let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &candidate_edges)?;
-    let selected_len = prune_edges(
+    let selected_len = prune_edges_saturating(
         &mut candidate_edges,
         &index.config().pruning,
         edge_set_distance_computer,

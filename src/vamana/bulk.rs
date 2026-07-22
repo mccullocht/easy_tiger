@@ -33,7 +33,8 @@ use crate::{
     vamana::search::GraphSearcher,
     vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
     vamana::{
-        prune_edges, select_pruned_edges, EdgeSetDistanceComputer, EdgeType, Graph, GraphConfig,
+        prune_edges, prune_edges_saturating, select_pruned_edges, EdgeSetDistanceComputer, EdgeType,
+        Graph, GraphConfig,
         GraphVectorIndex, GraphVectorStore,
     },
     Neighbor,
@@ -391,7 +392,7 @@ where
         // TODO: return any vectors used for re-ranking here so that we can use them for pruning.
         let mut candidates = searcher.search_for_insert(vertex_id as i64, reader)?;
         let edge_set_distance_computer = EdgeSetDistanceComputer::new(reader, &candidates)?;
-        let split = prune_edges(
+        let split = prune_edges_saturating(
             &mut candidates,
             &self.index.config().pruning,
             edge_set_distance_computer,
@@ -616,7 +617,7 @@ where
         entry_point: &Mutex<(i64, f64)>,
     ) -> Result<()> {
         let computer = EdgeSetDistanceComputer::new(reader, &edges)?;
-        let keep = prune_edges(&mut edges, &self.index.config().pruning, computer);
+        let keep = prune_edges_saturating(&mut edges, &self.index.config().pruning, computer);
         edges.truncate(keep);
         // Note that we have to add the edges -- concurrent threads may have already inserted back
         // edges to vertex.

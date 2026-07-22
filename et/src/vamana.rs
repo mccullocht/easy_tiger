@@ -40,6 +40,12 @@ pub struct EdgePruningArgs {
     /// Must be >= 1.0.
     #[arg(long, default_value_t = 1.2)]
     alpha: f64,
+    /// Saturate the edge set up to max_edges after pruning during insert.
+    ///
+    /// When set, the best pruned candidate edges are added back to fill the edge set up to
+    /// max_edges, producing a denser graph that may yield higher recall.
+    #[arg(long, default_value_t = false)]
+    saturate_graph: bool,
 }
 
 #[derive(Copy, Clone, Debug, Default, clap::ValueEnum)]
@@ -63,6 +69,7 @@ impl From<EdgePruningArgs> for EdgePruningConfig {
         Self {
             max_edges: value.max_edges,
             alpha: value.alpha,
+            saturate_graph: value.saturate_graph,
         }
     }
 }

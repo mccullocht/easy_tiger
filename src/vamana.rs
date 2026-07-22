@@ -57,6 +57,15 @@ pub struct EdgePruningConfig {
     ///
     /// Must be >= 1.0. Default value is 1.2.
     pub alpha: f64,
+    /// Whether to saturate the edge set up to `max_edges` after pruning.
+    ///
+    /// When true, inserting a vector into the graph first prunes the candidate edges, then adds
+    /// back the best pruned candidates to fill the edge set up to `max_edges`. This produces a
+    /// denser, saturated graph that may yield higher recall.
+    ///
+    /// Default value is false.
+    #[serde(default)]
+    pub saturate_graph: bool,
 }
 
 impl EdgePruningConfig {
@@ -66,6 +75,7 @@ impl EdgePruningConfig {
         Self {
             max_edges,
             alpha: Self::DEFAULT_ALPHA,
+            saturate_graph: false,
         }
     }
 }
@@ -378,4 +388,23 @@ pub(crate) fn prune_edges(
         edges.swap(i, *j);
     }
     selected.len()
+}
+
+/// Prune `edges` and, if `config.saturate_graph` is set, add back the best pruned edges to fill the
+/// edge set up to `max_edges`. Returns the number of leading edges in `edges` that should be
+/// retained; the caller is responsible for truncating to this length.
+/// REQUIRES: `edges.is_sorted()`.
+pub(crate) fn prune_edges_saturating(
+    edges: &mut [Neighbor],
+    config: &EdgePruningConfig,
+    edge_distance_computer: EdgeSetDistanceComputer,
+) -> usize {
+    let selected = prune_edges(edges, config, edge_distance_computer);
+    if config.saturate_graph {
+        // Sort the pruned tail so the closest dropped edges fill the edge set up to max_edges.
+        edges[selected..].sort_unstable();
+        config.max_edges.get().min(edges.len())
+    } else {
+        selected
+    }
 }

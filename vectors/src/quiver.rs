@@ -17,7 +17,7 @@ impl F32VectorCoder for Coder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let tau = vector.iter().copied().map(f32::abs).sum::<f32>() / vector.len() as f32;
         out[..4].copy_from_slice(&tau.to_le_bytes());
-        for (c, o) in vector.chunks(4).skip(1).zip(out.iter_mut()) {
+        for (c, o) in vector.chunks(4).zip(out[4..].iter_mut()) {
             *o = c
                 .iter()
                 .enumerate()

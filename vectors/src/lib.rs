@@ -6,6 +6,7 @@ mod binary;
 mod float16;
 mod float32;
 mod lvq;
+mod quiver;
 pub mod rotate;
 
 use serde::{Deserialize, Serialize};

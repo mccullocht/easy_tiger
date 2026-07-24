@@ -71,22 +71,19 @@ impl F32VectorCoder for Coder {
         let mut weak = MeanComputer::default();
 
         let (header_bytes, vector_bytes) = Header::split_mut(out);
-        for (c, o) in vector.chunks(4).zip(vector_bytes.iter_mut()) {
-            *o = c
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| {
-                    let q = if v > 0.0 { 2u8 } else { 0u8 }
-                        | if v.abs() > tau {
-                            strong.add(v.abs());
-                            1u8
-                        } else {
-                            weak.add(v.abs());
-                            0u8
-                        };
-                    q << (i * 2)
-                })
-                .fold(0u8, |x, q| x | q)
+        vector_bytes.fill(0);
+        for (i, ic) in vector.chunks(vector_bytes.len()).enumerate() {
+            for (&v, o) in ic.iter().zip(vector_bytes.iter_mut()) {
+                let q = if v > 0.0 { 2u8 } else { 0u8 }
+                    | if v.abs() > tau {
+                        strong.add(v.abs());
+                        1u8
+                    } else {
+                        weak.add(v.abs());
+                        0u8
+                    };
+                *o |= q << (i * 2);
+            }
         }
         Header {
             weak: weak.mean,
@@ -221,23 +218,45 @@ impl QueryVectorDistance for QueryDistance {
     fn distance(&self, vector: &[u8]) -> f64 {
         // Read strong/weak value and encode as i8
         let (header, vector) = Header::split_and_decode(vector);
-        let strong = quantize_i8(header.strong, self.scale) as i32;
-        let weak = quantize_i8(header.weak, self.scale) as i32;
-        let decode_table = [-weak, -strong, weak, strong];
+        let strong = quantize_i8(header.strong, self.scale);
+        let weak = quantize_i8(header.weak, self.scale);
+        let decode_table = [
+            -weak, -strong, weak, strong, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
 
-        let raw_dist = self
-            .query
-            .chunks(4)
-            .zip(vector.iter())
-            .map(|(c, &q)| {
-                c.iter()
-                    .enumerate()
-                    .map(|(i, &v)| v as i32 * decode_table[(q as usize >> (i * 2)) & 3])
-                    .sum::<i32>()
-            })
-            .sum::<i32>();
-        let doc_magnitude = (strong * strong * header.strong_count as i32)
-            + (weak * weak * (self.query.len() as i32 - header.strong_count as i32));
+        let mut raw_dist = 0i32;
+        let stride = self.query.len() / 4;
+        // XXX this generates SDOT, which is good, but access to the decode table is dogshit
+        // scalar code.
+        for (i, c) in vector.as_chunks::<16>().0.iter().enumerate() {
+            let q0 = i * 16;
+            raw_dist += c
+                .iter()
+                .zip(&self.query[q0..q0 + 16])
+                .map(|(&q, &v)| decode_table[(q & 3) as usize] as i32 * v as i32)
+                .sum::<i32>();
+            let q1 = i * 16 + stride;
+            raw_dist += c
+                .iter()
+                .zip(&self.query[q1..q1 + 16])
+                .map(|(&q, &v)| decode_table[((q >> 2) & 3) as usize] as i32 * v as i32)
+                .sum::<i32>();
+            let q2 = i * 16 + stride * 2;
+            raw_dist += c
+                .iter()
+                .zip(&self.query[q2..q2 + 16])
+                .map(|(&q, &v)| decode_table[((q >> 4) & 3) as usize] as i32 * v as i32)
+                .sum::<i32>();
+            let q3 = i * 16 + stride * 3;
+            raw_dist += c
+                .iter()
+                .zip(&self.query[q3..q3 + 16])
+                .map(|(&q, &v)| decode_table[((q >> 6) & 3) as usize] as i32 * v as i32)
+                .sum::<i32>();
+        }
+
+        let doc_magnitude = (strong as i32 * strong as i32 * header.strong_count as i32)
+            + (weak as i32 * weak as i32 * (self.query.len() as i32 - header.strong_count as i32));
         let distance_scale = (self.magnitude as f64 * doc_magnitude as f64).sqrt();
 
         (raw_dist as f64 / distance_scale) * -0.5 + 0.5

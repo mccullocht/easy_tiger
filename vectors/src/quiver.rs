@@ -1,8 +1,5 @@
 //! QuiVer two-bit training free quantization: https://arxiv.org/html/2605.02171v1
 
-// TODO: consider something more geometric for the encoding, possible record a "weak" value that
-// preserves the magnitude of the vector.
-
 use crate::{F32VectorCoder, VectorDistance};
 
 const HEADER_LEN: usize = 8;
@@ -16,7 +13,7 @@ struct MeanComputer {
 impl MeanComputer {
     fn add(&mut self, value: f32) {
         self.count += 1.0;
-        self.mean += value / self.count;
+        self.mean += (value - self.mean) / self.count;
     }
 }
 
@@ -61,13 +58,10 @@ impl F32VectorCoder for Coder {
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         let strong = f32::from_le_bytes(encoded[..4].try_into().unwrap());
         let weak = f32::from_le_bytes(encoded[4..HEADER_LEN].try_into().unwrap());
+        let decode_table = [-weak, -strong, weak, strong];
         for (&qc, oc) in encoded[HEADER_LEN..].iter().zip(out.chunks_mut(4)) {
             for (i, o) in oc.iter_mut().enumerate() {
-                let q = (qc >> (i * 2)) & 0x3;
-                *o = if q & 1 == 1 { strong } else { weak };
-                if q & 2 == 0 {
-                    *o = -*o;
-                }
+                *o = decode_table[(qc as usize >> (i * 2)) & 0x3];
             }
         }
     }

@@ -2,8 +2,6 @@
 
 use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 
-const HEADER_LEN: usize = 8;
-
 #[derive(Default, Debug, Copy, Clone)]
 struct MeanComputer {
     count: f32,
@@ -17,11 +15,52 @@ impl MeanComputer {
     }
 }
 
+struct Header {
+    weak: f32,
+    strong: f32,
+    strong_count: u32,
+}
+
+impl Header {
+    const LEN: usize = 12;
+
+    fn split(data: &[u8]) -> ([u8; Self::LEN], &[u8]) {
+        let (header, vector) = data.split_at(Self::LEN);
+        (header.as_chunks::<{ Self::LEN }>().0[0], vector)
+    }
+
+    fn split_mut(data: &mut [u8]) -> (&mut [u8; Self::LEN], &mut [u8]) {
+        let (header, vector) = data.split_at_mut(Self::LEN);
+        (&mut header.as_chunks_mut::<{ Self::LEN }>().0[0], vector)
+    }
+
+    fn decode(raw: [u8; Self::LEN]) -> Self {
+        let items = raw.as_ref().as_chunks::<4>().0;
+        Self {
+            weak: f32::from_le_bytes(items[0]),
+            strong: f32::from_le_bytes(items[1]),
+            strong_count: u32::from_le_bytes(items[2]),
+        }
+    }
+
+    fn encode(&self, raw: &mut [u8; Self::LEN]) {
+        let items = raw.as_mut().as_chunks_mut::<4>().0;
+        items[0] = self.weak.to_le_bytes();
+        items[1] = self.strong.to_le_bytes();
+        items[2] = self.strong_count.to_le_bytes();
+    }
+
+    fn split_and_decode(data: &[u8]) -> (Header, &[u8]) {
+        let (h, v) = Self::split(data);
+        (Self::decode(h), v)
+    }
+}
+
 /// Coder for QuiVer format.
 ///
 /// The stored encoding contains 2 bits for every dimension packed into bytes.
-/// The vector is suffixed with a 32-bit float containing the "strong" boundary value that is used
-/// to "decode" the vector.
+///
+/// The vector begins with additional terms defined by the `Header` struct.
 #[derive(Default)]
 pub struct Coder;
 
@@ -30,7 +69,9 @@ impl F32VectorCoder for Coder {
         let tau = vector.iter().copied().map(f32::abs).sum::<f32>() / vector.len() as f32;
         let mut strong = MeanComputer::default();
         let mut weak = MeanComputer::default();
-        for (c, o) in vector.chunks(4).zip(out[HEADER_LEN..].iter_mut()) {
+
+        let (header_bytes, vector_bytes) = Header::split_mut(out);
+        for (c, o) in vector.chunks(4).zip(vector_bytes.iter_mut()) {
             *o = c
                 .iter()
                 .enumerate()
@@ -47,19 +88,23 @@ impl F32VectorCoder for Coder {
                 })
                 .fold(0u8, |x, q| x | q)
         }
-        out[..4].copy_from_slice(&strong.mean.to_le_bytes());
-        out[4..HEADER_LEN].copy_from_slice(&weak.mean.to_le_bytes());
+        Header {
+            weak: weak.mean,
+            strong: strong.mean,
+            strong_count: strong.count as u32,
+        }
+        .encode(header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        dimensions.div_ceil(4) + HEADER_LEN
+        dimensions.div_ceil(4) + Header::LEN
     }
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
-        let strong = f32::from_le_bytes(encoded[..4].try_into().unwrap());
-        let weak = f32::from_le_bytes(encoded[4..HEADER_LEN].try_into().unwrap());
-        let decode_table = [-weak, -strong, weak, strong];
-        for (&qc, oc) in encoded[HEADER_LEN..].iter().zip(out.chunks_mut(4)) {
+        let (header_bytes, vector_bytes) = Header::split(encoded);
+        let header = Header::decode(header_bytes);
+        let decode_table = [-header.weak, -header.strong, header.weak, header.strong];
+        for (&qc, oc) in vector_bytes.iter().zip(out.chunks_mut(4)) {
             for (i, o) in oc.iter_mut().enumerate() {
                 *o = decode_table[(qc as usize >> (i * 2)) & 0x3];
             }
@@ -67,7 +112,7 @@ impl F32VectorCoder for Coder {
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
-        (byte_len - HEADER_LEN) / 4
+        (byte_len - Header::LEN) / 4
     }
 }
 
@@ -113,20 +158,22 @@ pub struct Distance;
 
 impl VectorDistance for Distance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let (_, query) = Header::split(query);
+        let (_, doc) = Header::split(doc);
         // TODO: there has got to be a better way to normalize this.
         let raw_dist = query
             .iter()
-            .skip(HEADER_LEN)
-            .zip(doc.iter().skip(HEADER_LEN))
+            .zip(doc.iter())
             .map(|(&q, &d)| {
                 let lo_key = ((q & 0xf) | (d << 4)) as usize;
                 let hi_key = ((q >> 4) | (d & 0xf0)) as usize;
                 DISTANCE_LUT[lo_key] as i32 + DISTANCE_LUT[hi_key] as i32
             })
             .sum::<i32>();
+        // XXX if I have strong_count I may be able to generate a more accurate normalization factor.
         // 4 dimensions per byte, maximum value of 4 per dimension.
         // identical vector will have this score, antiparallel vector will have negative of this.
-        let norm_factor = query.len() * 4 * 4;
+        let norm_factor = ((query.len() * 4 * 4) as f64).sqrt();
         // Divide raw distance by norm_factor to get value in [-1,+1], then invert and add to get a
         // distance in [0,1].
         (raw_dist as f64 / norm_factor as f64) * -0.5 + 0.5
@@ -142,6 +189,7 @@ fn quantize_i8(value: f32, scale: f32) -> i8 {
 pub struct QueryDistance {
     query: Vec<i8>,
     scale: f32,
+    magnitude: i32,
 }
 
 impl QueryDistance {
@@ -153,28 +201,31 @@ impl QueryDistance {
             .max_by(f32::total_cmp)
             .unwrap();
         let scale = 127.0 / max;
-        let query = query.iter().map(|&d| quantize_i8(d, scale)).collect();
-        Self { query, scale }
+        let query = query
+            .iter()
+            .map(|&d| quantize_i8(d, scale))
+            .collect::<Vec<_>>();
+        let magnitude = query.iter().map(|&d| d as i32 * d as i32).sum::<i32>();
+        Self {
+            query,
+            scale,
+            magnitude,
+        }
     }
 }
 
 impl QueryVectorDistance for QueryDistance {
     fn distance(&self, vector: &[u8]) -> f64 {
         // Read strong/weak value and encode as i8
-        let strong = quantize_i8(
-            f32::from_le_bytes(vector[..4].try_into().unwrap()),
-            self.scale,
-        ) as i32;
-        let weak = quantize_i8(
-            f32::from_le_bytes(vector[4..HEADER_LEN].try_into().unwrap()),
-            self.scale,
-        ) as i32;
+        let (header, vector) = Header::split_and_decode(vector);
+        let strong = quantize_i8(header.strong, self.scale) as i32;
+        let weak = quantize_i8(header.weak, self.scale) as i32;
         let decode_table = [-weak, -strong, weak, strong];
 
         let raw_dist = self
             .query
             .chunks(4)
-            .zip(vector[HEADER_LEN..].iter())
+            .zip(vector.iter())
             .map(|(c, &q)| {
                 c.iter()
                     .enumerate()
@@ -182,8 +233,9 @@ impl QueryVectorDistance for QueryDistance {
                     .sum::<i32>()
             })
             .sum::<i32>();
-        // XXX would be better to compute the magnitude of query.
-        let distance_scale = ((strong * 127) as usize * self.query.len()) as f64;
+        let doc_magnitude = (strong * strong * header.strong_count as i32)
+            + (weak * weak * (self.query.len() as i32 - header.strong_count as i32));
+        let distance_scale = (self.magnitude as f64 * doc_magnitude as f64).sqrt();
 
         (raw_dist as f64 / distance_scale) * -0.5 + 0.5
     }

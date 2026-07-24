@@ -158,9 +158,9 @@ pub struct Distance;
 
 impl VectorDistance for Distance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let (_, query) = Header::split(query);
-        let (_, doc) = Header::split(doc);
-        // TODO: there has got to be a better way to normalize this.
+        let (query_header, query) = Header::split_and_decode(query);
+        let (doc_header, doc) = Header::split_and_decode(doc);
+
         let raw_dist = query
             .iter()
             .zip(doc.iter())
@@ -170,10 +170,13 @@ impl VectorDistance for Distance {
                 DISTANCE_LUT[lo_key] as i32 + DISTANCE_LUT[hi_key] as i32
             })
             .sum::<i32>();
-        // XXX if I have strong_count I may be able to generate a more accurate normalization factor.
-        // 4 dimensions per byte, maximum value of 4 per dimension.
-        // identical vector will have this score, antiparallel vector will have negative of this.
-        let norm_factor = ((query.len() * 4 * 4) as f64).sqrt();
+
+        // Use strong count to compute a more accurate denominator for cosine similarity.
+        let dim = query.len() as u32 * 4;
+        let q_mag = query_header.strong_count * 4 + (dim - query_header.strong_count);
+        let d_mag = doc_header.strong_count * 4 + (dim - doc_header.strong_count);
+        let norm_factor = ((q_mag as u64 * d_mag as u64) as f64).sqrt();
+
         // Divide raw distance by norm_factor to get value in [-1,+1], then invert and add to get a
         // distance in [0,1].
         (raw_dist as f64 / norm_factor as f64) * -0.5 + 0.5

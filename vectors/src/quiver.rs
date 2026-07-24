@@ -164,11 +164,11 @@ impl QueryVectorDistance for QueryDistance {
         let strong = quantize_i8(
             f32::from_le_bytes(vector[..4].try_into().unwrap()),
             self.scale,
-        );
+        ) as i32;
         let weak = quantize_i8(
             f32::from_le_bytes(vector[4..HEADER_LEN].try_into().unwrap()),
             self.scale,
-        );
+        ) as i32;
         let decode_table = [-weak, -strong, weak, strong];
 
         let raw_dist = self
@@ -178,10 +178,11 @@ impl QueryVectorDistance for QueryDistance {
             .map(|(c, &q)| {
                 c.iter()
                     .enumerate()
-                    .map(|(i, &v)| (v * decode_table[(q as usize >> (i * 2)) & 3]) as i32)
+                    .map(|(i, &v)| v as i32 * decode_table[(q as usize >> (i * 2)) & 3])
                     .sum::<i32>()
             })
             .sum::<i32>();
+        // XXX would be better to compute the magnitude of query.
         let distance_scale = ((strong * 127) as usize * self.query.len()) as f64;
 
         (raw_dist as f64 / distance_scale) * -0.5 + 0.5

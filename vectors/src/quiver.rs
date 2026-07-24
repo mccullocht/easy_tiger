@@ -5,6 +5,21 @@
 
 use crate::{F32VectorCoder, VectorDistance};
 
+const HEADER_LEN: usize = 8;
+
+#[derive(Default, Debug, Copy, Clone)]
+struct MeanComputer {
+    count: f32,
+    mean: f32,
+}
+
+impl MeanComputer {
+    fn add(&mut self, value: f32) {
+        self.count += 1.0;
+        self.mean += value / self.count;
+    }
+}
+
 /// Coder for QuiVer format.
 ///
 /// The stored encoding contains 2 bits for every dimension packed into bytes.
@@ -16,30 +31,40 @@ pub struct Coder;
 impl F32VectorCoder for Coder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let tau = vector.iter().copied().map(f32::abs).sum::<f32>() / vector.len() as f32;
-        out[..4].copy_from_slice(&tau.to_le_bytes());
-        for (c, o) in vector.chunks(4).zip(out[4..].iter_mut()) {
+        let mut strong = MeanComputer::default();
+        let mut weak = MeanComputer::default();
+        for (c, o) in vector.chunks(4).zip(out[HEADER_LEN..].iter_mut()) {
             *o = c
                 .iter()
                 .enumerate()
                 .map(|(i, &v)| {
-                    let q = if v > 0.0 { 2u8 } else { 0u8 } | if v.abs() > tau { 1u8 } else { 0u8 };
+                    let q = if v > 0.0 { 2u8 } else { 0u8 }
+                        | if v.abs() > tau {
+                            strong.add(v.abs());
+                            1u8
+                        } else {
+                            weak.add(v.abs());
+                            0u8
+                        };
                     q << (i * 2)
                 })
                 .fold(0u8, |x, q| x | q)
         }
+        out[..4].copy_from_slice(&strong.mean.to_le_bytes());
+        out[4..HEADER_LEN].copy_from_slice(&weak.mean.to_le_bytes());
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
-        dimensions.div_ceil(4) + std::mem::size_of::<u32>()
+        dimensions.div_ceil(4) + HEADER_LEN
     }
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
-        let tau = f32::from_le_bytes(encoded[..4].try_into().unwrap());
-        let weak = tau / 2.0;
-        for (&qc, oc) in encoded[4..].iter().zip(out.chunks_mut(4)) {
+        let strong = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let weak = f32::from_le_bytes(encoded[4..HEADER_LEN].try_into().unwrap());
+        for (&qc, oc) in encoded[HEADER_LEN..].iter().zip(out.chunks_mut(4)) {
             for (i, o) in oc.iter_mut().enumerate() {
                 let q = (qc >> (i * 2)) & 0x3;
-                *o = if q & 1 == 1 { tau } else { weak };
+                *o = if q & 1 == 1 { strong } else { weak };
                 if q & 2 == 0 {
                     *o = -*o;
                 }
@@ -48,7 +73,7 @@ impl F32VectorCoder for Coder {
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
-        (byte_len - std::mem::size_of::<u32>()) / 4
+        (byte_len - HEADER_LEN) / 4
     }
 }
 
@@ -97,7 +122,8 @@ impl VectorDistance for Distance {
         // TODO: there has got to be a better way to normalize this.
         let raw_dist = query
             .iter()
-            .zip(doc.iter())
+            .skip(HEADER_LEN)
+            .zip(doc.iter().skip(HEADER_LEN))
             .map(|(&q, &d)| {
                 let lo_key = ((q & 0xf) | (d << 4)) as usize;
                 let hi_key = ((q >> 4) | (d & 0xf0)) as usize;

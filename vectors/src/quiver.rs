@@ -1,6 +1,6 @@
 //! QuiVer two-bit training free quantization: https://arxiv.org/html/2605.02171v1
 
-use crate::{F32VectorCoder, VectorDistance};
+use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 
 const HEADER_LEN: usize = 8;
 
@@ -130,5 +130,60 @@ impl VectorDistance for Distance {
         // Divide raw distance by norm_factor to get value in [-1,+1], then invert and add to get a
         // distance in [0,1].
         (raw_dist as f64 / norm_factor as f64) * -0.5 + 0.5
+    }
+}
+
+#[inline(always)]
+fn quantize_i8(value: f32, scale: f32) -> i8 {
+    (value * scale).round() as i8
+}
+
+#[derive(Default)]
+pub struct QueryDistance {
+    query: Vec<i8>,
+    scale: f32,
+}
+
+impl QueryDistance {
+    pub fn new(query: &[f32]) -> Self {
+        let max = query
+            .iter()
+            .copied()
+            .map(f32::abs)
+            .max_by(f32::total_cmp)
+            .unwrap();
+        let scale = 127.0 / max;
+        let query = query.iter().map(|&d| quantize_i8(d, scale)).collect();
+        Self { query, scale }
+    }
+}
+
+impl QueryVectorDistance for QueryDistance {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        // Read strong/weak value and encode as i8
+        let strong = quantize_i8(
+            f32::from_le_bytes(vector[..4].try_into().unwrap()),
+            self.scale,
+        );
+        let weak = quantize_i8(
+            f32::from_le_bytes(vector[4..HEADER_LEN].try_into().unwrap()),
+            self.scale,
+        );
+        let decode_table = [-weak, -strong, weak, strong];
+
+        let raw_dist = self
+            .query
+            .chunks(4)
+            .zip(vector[HEADER_LEN..].iter())
+            .map(|(c, &q)| {
+                c.iter()
+                    .enumerate()
+                    .map(|(i, &v)| (v * decode_table[(q as usize >> (i * 2)) & 3]) as i32)
+                    .sum::<i32>()
+            })
+            .sum::<i32>();
+        let distance_scale = ((strong * 127) as usize * self.query.len()) as f64;
+
+        (raw_dist as f64 / distance_scale) * -0.5 + 0.5
     }
 }

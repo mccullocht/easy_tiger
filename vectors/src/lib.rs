@@ -320,10 +320,7 @@ impl F32VectorCoding {
                 query.into(),
                 center,
             )),
-            (Self::QuiVer, _) => Box::new(QuantizedQueryVectorDistance::new(
-                quiver::Distance::default(),
-                quiver::Coder::default().encode(query.into().as_ref()),
-            )),
+            (Self::QuiVer, _) => Box::new(quiver::QueryDistance::new(query.into().as_ref())),
         }
     }
 

@@ -72,18 +72,17 @@ impl F32VectorCoder for Coder {
 
         let (header_bytes, vector_bytes) = Header::split_mut(out);
         vector_bytes.fill(0);
-        for (i, ic) in vector.chunks(vector_bytes.len()).enumerate() {
-            for (&v, o) in ic.iter().zip(vector_bytes.iter_mut()) {
-                let q = if v > 0.0 { 2u8 } else { 0u8 }
-                    | if v.abs() > tau {
-                        strong.add(v.abs());
-                        1u8
-                    } else {
-                        weak.add(v.abs());
-                        0u8
-                    };
-                *o |= q << (i * 2);
-            }
+        let mut packer = super::lvq::packing::TurboPacker::<2>::new(vector_bytes);
+        for &v in vector.iter() {
+            let q = if v > 0.0 { 2u8 } else { 0u8 }
+                | if v.abs() > tau {
+                    strong.add(v.abs());
+                    1u8
+                } else {
+                    weak.add(v.abs());
+                    0u8
+                };
+            packer.push(q);
         }
         Header {
             weak: weak.mean,
@@ -101,10 +100,9 @@ impl F32VectorCoder for Coder {
         let (header_bytes, vector_bytes) = Header::split(encoded);
         let header = Header::decode(header_bytes);
         let decode_table = [-header.weak, -header.strong, header.weak, header.strong];
-        for (&qc, oc) in vector_bytes.iter().zip(out.chunks_mut(4)) {
-            for (i, o) in oc.iter_mut().enumerate() {
-                *o = decode_table[(qc as usize >> (i * 2)) & 0x3];
-            }
+        for (i, o) in super::lvq::packing::TurboUnpacker::<2>::new(vector_bytes).zip(out.iter_mut())
+        {
+            *o = decode_table[i as usize];
         }
     }
 
@@ -128,7 +126,11 @@ const fn distance(a: u8, b: u8) -> i8 {
         2
     };
     // If the signs differ the result is negative.
-    if h & 2 == 0 { r } else { -r }
+    if h & 2 == 0 {
+        r
+    } else {
+        -r
+    }
 }
 
 /// Precompute a table of distances where the low nibble is 2 dimensions from one vector and the
@@ -214,47 +216,31 @@ impl QueryDistance {
     }
 }
 
+unsafe extern "C" {
+    unsafe fn et_quiver_asymmetric_ip(
+        query: *const i8,
+        len: usize,
+        doc: *const u8,
+        table: *const i8,
+    ) -> i32;
+}
+
 impl QueryVectorDistance for QueryDistance {
     fn distance(&self, vector: &[u8]) -> f64 {
         // Read strong/weak value and encode as i8
         let (header, vector) = Header::split_and_decode(vector);
         let strong = quantize_i8(header.strong, self.scale);
         let weak = quantize_i8(header.weak, self.scale);
-        let decode_table = [
-            -weak, -strong, weak, strong, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
+        let decode_table = [-weak, -strong, weak, strong];
 
-        let mut raw_dist = 0i32;
-        let stride = self.query.len() / 4;
-        // XXX this generates SDOT, which is good, but access to the decode table is dogshit
-        // scalar code.
-        for (i, c) in vector.as_chunks::<16>().0.iter().enumerate() {
-            let q0 = i * 16;
-            raw_dist += c
-                .iter()
-                .zip(&self.query[q0..q0 + 16])
-                .map(|(&q, &v)| decode_table[(q & 3) as usize] as i32 * v as i32)
-                .sum::<i32>();
-            let q1 = i * 16 + stride;
-            raw_dist += c
-                .iter()
-                .zip(&self.query[q1..q1 + 16])
-                .map(|(&q, &v)| decode_table[((q >> 2) & 3) as usize] as i32 * v as i32)
-                .sum::<i32>();
-            let q2 = i * 16 + stride * 2;
-            raw_dist += c
-                .iter()
-                .zip(&self.query[q2..q2 + 16])
-                .map(|(&q, &v)| decode_table[((q >> 4) & 3) as usize] as i32 * v as i32)
-                .sum::<i32>();
-            let q3 = i * 16 + stride * 3;
-            raw_dist += c
-                .iter()
-                .zip(&self.query[q3..q3 + 16])
-                .map(|(&q, &v)| decode_table[((q >> 6) & 3) as usize] as i32 * v as i32)
-                .sum::<i32>();
-        }
-
+        let raw_dist = unsafe {
+            et_quiver_asymmetric_ip(
+                self.query.as_ptr(),
+                self.query.len(),
+                vector.as_ptr(),
+                decode_table.as_ptr(),
+            )
+        };
         let doc_magnitude = (strong as i32 * strong as i32 * header.strong_count as i32)
             + (weak as i32 * weak as i32 * (self.query.len() as i32 - header.strong_count as i32));
         let distance_scale = (self.magnitude as f64 * doc_magnitude as f64).sqrt();

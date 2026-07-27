@@ -111,11 +111,14 @@ impl F32VectorCoder for Coder {
     }
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 const SGN_MASK: u128 = 0x5555_5555_5555_5555_5555_5555_5555_5555;
+#[cfg(not(target_arch = "aarch64"))]
 const MAG_MASK: u128 = 0xAAAA_AAAA_AAAA_AAAA_AAAA_AAAA_AAAA_AAAA;
 
 /// Take 256 bits of interleaved (sign,magnitude) input and generate two 128 bit outputs that
 /// contain all of the signs and all of the magnitudes in consistent order.
+#[cfg(not(target_arch = "aarch64"))]
 #[inline]
 fn bitplane_split256(v: [u8; 32]) -> (u128, u128) {
     let parts = v.as_chunks::<16>().0;
@@ -123,6 +126,7 @@ fn bitplane_split256(v: [u8; 32]) -> (u128, u128) {
     let b = u128::from_le_bytes(parts[1]);
 
     // Dims from 'a' are in even bits; dims from 'b' are in odd bits.
+    // XXX is this wrong???
     let sgn = (a & SGN_MASK) | ((b & SGN_MASK) << 1);
     let mag = ((a & MAG_MASK) >> 1) | (b & MAG_MASK);
     (sgn, mag)
@@ -130,6 +134,7 @@ fn bitplane_split256(v: [u8; 32]) -> (u128, u128) {
 
 /// Compute raw distance between two vectors with interleaved packed (sign,magnitude) values for
 /// 256 bits of input.
+#[cfg(not(target_arch = "aarch64"))]
 #[inline]
 fn distance256(a: [u8; 32], b: [u8; 32]) -> i32 {
     let (a_s, a_m) = bitplane_split256(a);
@@ -148,6 +153,80 @@ fn distance256(a: [u8; 32], b: [u8; 32]) -> i32 {
         + (m_w & s_x).count_ones() as i32 * -1
         + (m_x & !s_x).count_ones() as i32 * 2
         + (m_x & s_x).count_ones() as i32 * -2
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn bitplane_split256(
+    v: [u8; 32],
+) -> (
+    std::arch::aarch64::uint8x16_t,
+    std::arch::aarch64::uint8x16_t,
+) {
+    use std::arch::aarch64::{vbslq_u8, vld1q_u8, vshlq_n_u8, vshrq_n_u8};
+
+    unsafe {
+        let a = vld1q_u8(v.as_ptr());
+        let b = vld1q_u8(v.as_ptr().add(16));
+        let m = vld1q_u8([0x55; 16].as_ptr());
+
+        let sgn = vbslq_u8(m, vshrq_n_u8::<1>(a), b);
+        let mag = vbslq_u8(m, a, vshlq_n_u8::<1>(b));
+        (sgn, mag)
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn distance256(a: [u8; 32], b: [u8; 32]) -> i32 {
+    let (a_s, a_m) = bitplane_split256(a);
+    let (b_s, b_m) = bitplane_split256(b);
+
+    unsafe {
+        use std::arch::aarch64::{
+            vaddlvq_s8, vandq_u8, vcntq_u8, vdupq_n_s8, veorq_u8, vmlaq_s8, vmulq_s8, vmvnq_u8,
+            vorrq_u8, vreinterpretq_s8_u8,
+        };
+
+        let s_x = veorq_u8(a_s, b_s); // signs mismatch
+        let s_m = vmvnq_u8(s_x); // signs match
+        let m_x = veorq_u8(a_m, b_m); // magnitudes mismatch
+        let m_s = vandq_u8(a_m, b_m); // both magnitudes strong
+        let m_w = vmvnq_u8(vorrq_u8(a_m, b_m)); // both magnitudes weak
+
+        // Use bitmask combinations + popcnt to count each of our 6 states: (all strong, all weak,
+        // mixed) x (positive, negative).
+        let mut r = vmulq_s8(
+            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_s, s_m))),
+            vdupq_n_s8(4),
+        );
+        r = vmlaq_s8(
+            r,
+            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_s, s_x))),
+            vdupq_n_s8(-4),
+        );
+        r = vmlaq_s8(
+            r,
+            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_w, s_m))),
+            vdupq_n_s8(1),
+        );
+        r = vmlaq_s8(
+            r,
+            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_w, s_x))),
+            vdupq_n_s8(-1),
+        );
+        r = vmlaq_s8(
+            r,
+            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_x, s_m))),
+            vdupq_n_s8(2),
+        );
+        r = vmlaq_s8(
+            r,
+            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_x, s_x))),
+            vdupq_n_s8(-2),
+        );
+        vaddlvq_s8(r) as i32
+    }
 }
 
 /// Symmetric distance computation for QuiVer vectors.

@@ -184,8 +184,8 @@ fn distance256(a: [u8; 32], b: [u8; 32]) -> i32 {
 
     unsafe {
         use std::arch::aarch64::{
-            vaddlvq_s8, vandq_u8, vcntq_u8, vdupq_n_s8, veorq_u8, vmlaq_s8, vmulq_s8, vmvnq_u8,
-            vorrq_u8, vreinterpretq_s8_u8,
+            vaddlvq_s8, vandq_u8, vcntq_u8, veorq_u8, vmvnq_u8, vorrq_u8, vreinterpretq_s8_u8,
+            vsubq_s8,
         };
 
         let s_x = veorq_u8(a_s, b_s); // signs mismatch
@@ -194,38 +194,20 @@ fn distance256(a: [u8; 32], b: [u8; 32]) -> i32 {
         let m_s = vandq_u8(a_m, b_m); // both magnitudes strong
         let m_w = vmvnq_u8(vorrq_u8(a_m, b_m)); // both magnitudes weak
 
-        // Use bitmask combinations + popcnt to count each of our 6 states: (all strong, all weak,
-        // mixed) x (positive, negative).
-        let mut r = vmulq_s8(
-            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_s, s_m))),
-            vdupq_n_s8(4),
-        );
-        r = vmlaq_s8(
-            r,
-            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_s, s_x))),
-            vdupq_n_s8(-4),
-        );
-        r = vmlaq_s8(
-            r,
+        let weak = vsubq_s8(
             vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_w, s_m))),
-            vdupq_n_s8(1),
-        );
-        r = vmlaq_s8(
-            r,
             vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_w, s_x))),
-            vdupq_n_s8(-1),
         );
-        r = vmlaq_s8(
-            r,
+        let mixed = vsubq_s8(
             vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_x, s_m))),
-            vdupq_n_s8(2),
-        );
-        r = vmlaq_s8(
-            r,
             vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_x, s_x))),
-            vdupq_n_s8(-2),
         );
-        vaddlvq_s8(r) as i32
+        let strong = vsubq_s8(
+            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_s, s_m))),
+            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_s, s_x))),
+        );
+
+        vaddlvq_s8(weak) as i32 + vaddlvq_s8(mixed) as i32 * 2 + vaddlvq_s8(strong) as i32 * 4
     }
 }
 

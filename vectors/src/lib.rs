@@ -320,7 +320,7 @@ impl F32VectorCoding {
                 query.into(),
                 center,
             )),
-            (Self::QuiVer, _) => Box::new(quiver::QueryDistance::new(query.into().as_ref())),
+            (Self::QuiVer, _) => quiver::new_asymmetric_distance(query.into().as_ref()),
         }
     }
 

@@ -70,4 +70,14 @@ impl Kernel for Scalar {
         }
         dist
     }
+
+    #[inline]
+    fn asymmetric_distance(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
+        let table = [-weak as i32, -strong as i32, weak as i32, strong as i32];
+        q.iter()
+            .map(|x| *x as i32)
+            .zip(crate::lvq::packing::TurboUnpacker::<2>::new(d).map(|x| table[x as usize]))
+            .map(|(q, d)| q * d)
+            .sum::<i32>()
+    }
 }

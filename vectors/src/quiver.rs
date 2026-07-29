@@ -11,6 +11,10 @@ use std::borrow::Cow;
 trait Kernel: Send + Sync {
     /// Compute symmetric distance between two vectors packed using `TurboPacker<2>`.
     fn symmetric_distance(a: &[u8], b: &[u8]) -> i32;
+
+    /// Compute the asymmetric distance between an i8 quantized query vector and a document vector
+    /// packed using `TurboPacker<2>` where the magnitude bit represents `weak` or `strong`.
+    fn asymmetric_distance(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32;
 }
 
 #[derive(Default, Debug, Copy, Clone)]
@@ -171,14 +175,15 @@ fn quantize_i8(value: f32, scale: f32) -> i8 {
     (value * scale).round() as i8
 }
 
-pub struct QueryDistance {
+struct QueryDistance<K: Kernel> {
+    _kernel: K,
     query: Vec<i8>,
     scale: f32,
     magnitude: i32,
 }
 
-impl QueryDistance {
-    pub fn new(query: &[f32]) -> Self {
+impl<K: Kernel> QueryDistance<K> {
+    pub fn new(kernel: K, query: &[f32]) -> Self {
         let max = query
             .iter()
             .copied()
@@ -192,6 +197,7 @@ impl QueryDistance {
             .collect::<Vec<_>>();
         let magnitude = query.iter().map(|&d| d as i32 * d as i32).sum::<i32>();
         Self {
+            _kernel: kernel,
             query,
             scale,
             magnitude,
@@ -199,31 +205,14 @@ impl QueryDistance {
     }
 }
 
-unsafe extern "C" {
-    unsafe fn et_quiver_asymmetric_ip(
-        query: *const i8,
-        len: usize,
-        doc: *const u8,
-        table: *const i8,
-    ) -> i32;
-}
-
-impl QueryVectorDistance for QueryDistance {
+impl<K: Kernel> QueryVectorDistance for QueryDistance<K> {
     fn distance(&self, vector: &[u8]) -> f64 {
         // Read strong/weak value and encode as i8
         let (header, vector) = Header::split_and_decode(vector);
         let strong = quantize_i8(header.strong, self.scale);
         let weak = quantize_i8(header.weak, self.scale);
-        let decode_table = [-weak, -strong, weak, strong];
 
-        let raw_dist = unsafe {
-            et_quiver_asymmetric_ip(
-                self.query.as_ptr(),
-                self.query.len(),
-                vector.as_ptr(),
-                decode_table.as_ptr(),
-            )
-        };
+        let raw_dist = K::asymmetric_distance(&self.query, vector, weak, strong);
         let doc_magnitude = (strong as i32 * strong as i32 * header.strong_count as i32)
             + (weak as i32 * weak as i32 * (self.query.len() as i32 - header.strong_count as i32));
         let distance_scale = (self.magnitude as f64 * doc_magnitude as f64).sqrt();
@@ -247,3 +236,13 @@ pub fn new_symmetric_query_distance<'a>(query: Cow<'a, [u8]>) -> Box<dyn QueryVe
         Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
     }
 }
+
+pub fn new_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
+    if cfg!(target_arch = "aarch64") {
+        Box::new(QueryDistance::new(aarch64::Neon, query))
+    } else {
+        Box::new(QueryDistance::new(scalar::Scalar, query))
+    }
+}
+
+// XXX for testing add a mechanism to get scalar implementations

@@ -6,6 +6,16 @@ use std::arch::aarch64::{
     veorq_s8, vld1q_s8, vmvnq_s8, vorrq_s8, vshlq_n_s8, vshrq_n_s8, vsubq_s8,
 };
 
+unsafe extern "C" {
+    /// vdotq_s32() intrinsic is unstable until rust 1.98 so call a C function instead.
+    unsafe fn et_quiver_asymmetric_ip(
+        query: *const i8,
+        len: usize,
+        doc: *const u8,
+        table: *const i8,
+    ) -> i32;
+}
+
 /// NEON kernel for QuIVer operations.
 ///
 /// This requires the `dotprod` feature.
@@ -29,6 +39,7 @@ impl Neon {
 }
 
 impl Kernel for Neon {
+    #[inline]
     fn symmetric_distance(a: &[u8], b: &[u8]) -> i32 {
         // TODO: consider an SDOT accumulation strategy that is not vulnerable to over or
         // underflow.
@@ -68,5 +79,11 @@ impl Kernel for Neon {
             dist += Scalar::symmetric_distance(arem, brem);
         }
         dist
+    }
+
+    #[inline]
+    fn asymmetric_distance(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
+        let decode_table = [-weak, -strong, weak, strong];
+        unsafe { et_quiver_asymmetric_ip(q.as_ptr(), q.len(), d.as_ptr(), decode_table.as_ptr()) }
     }
 }

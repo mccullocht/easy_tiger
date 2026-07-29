@@ -1,6 +1,17 @@
-//! QuiVer two-bit training free quantization: https://arxiv.org/html/2605.02171v1
+//! QuIVer two-bit training free quantization: https://arxiv.org/html/2605.02171v1
+
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+mod scalar;
 
 use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance};
+use std::borrow::Cow;
+
+/// Encapsulates operations that we may choose to accelerate using platform-specific intrinsics.
+trait Kernel: Send + Sync {
+    /// Compute symmetric distance between two vectors packed using `TurboPacker<2>`.
+    fn symmetric_distance(a: &[u8], b: &[u8]) -> i32;
+}
 
 #[derive(Default, Debug, Copy, Clone)]
 struct MeanComputer {
@@ -111,127 +122,18 @@ impl F32VectorCoder for Coder {
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
-const SGN_MASK: u128 = 0x5555_5555_5555_5555_5555_5555_5555_5555;
-#[cfg(not(target_arch = "aarch64"))]
-const MAG_MASK: u128 = 0xAAAA_AAAA_AAAA_AAAA_AAAA_AAAA_AAAA_AAAA;
-
-/// Take 256 bits of interleaved (sign,magnitude) input and generate two 128 bit outputs that
-/// contain all of the signs and all of the magnitudes in consistent order.
-#[cfg(not(target_arch = "aarch64"))]
-#[inline]
-fn bitplane_split256(v: [u8; 32]) -> (u128, u128) {
-    let parts = v.as_chunks::<16>().0;
-    let a = u128::from_le_bytes(parts[0]);
-    let b = u128::from_le_bytes(parts[1]);
-
-    // Dims from 'a' are in even bits; dims from 'b' are in odd bits.
-    // XXX is this wrong???
-    let sgn = (a & SGN_MASK) | ((b & SGN_MASK) << 1);
-    let mag = ((a & MAG_MASK) >> 1) | (b & MAG_MASK);
-    (sgn, mag)
-}
-
-/// Compute raw distance between two vectors with interleaved packed (sign,magnitude) values for
-/// 256 bits of input.
-#[cfg(not(target_arch = "aarch64"))]
-#[inline]
-fn distance256(a: [u8; 32], b: [u8; 32]) -> i32 {
-    let (a_s, a_m) = bitplane_split256(a);
-    let (b_s, b_m) = bitplane_split256(b);
-
-    let s_x = a_s ^ b_s; // signs mismatch
-    let m_x = a_m ^ b_m; // magnitudes mismatch
-    let m_s = a_m & b_m; // both magnitudes strong
-    let m_w = !(a_m | b_m); // both magnitudes weak
-
-    // Use bitmask combinations + popcnt to count each of our 6 states: (all strong, all weak,
-    // mixed) x (positive, negative).
-    (m_s & !s_x).count_ones() as i32 * 4
-        + (m_s & s_x).count_ones() as i32 * -4
-        + (m_w & !s_x).count_ones() as i32 * 1
-        + (m_w & s_x).count_ones() as i32 * -1
-        + (m_x & !s_x).count_ones() as i32 * 2
-        + (m_x & s_x).count_ones() as i32 * -2
-}
-
-#[cfg(target_arch = "aarch64")]
-#[inline]
-fn bitplane_split256(
-    v: [u8; 32],
-) -> (
-    std::arch::aarch64::uint8x16_t,
-    std::arch::aarch64::uint8x16_t,
-) {
-    use std::arch::aarch64::{vbslq_u8, vld1q_u8, vshlq_n_u8, vshrq_n_u8};
-
-    unsafe {
-        let a = vld1q_u8(v.as_ptr());
-        let b = vld1q_u8(v.as_ptr().add(16));
-        let m = vld1q_u8([0x55; 16].as_ptr());
-
-        let sgn = vbslq_u8(m, vshrq_n_u8::<1>(a), b);
-        let mag = vbslq_u8(m, a, vshlq_n_u8::<1>(b));
-        (sgn, mag)
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[inline]
-fn distance256(a: [u8; 32], b: [u8; 32]) -> i32 {
-    let (a_s, a_m) = bitplane_split256(a);
-    let (b_s, b_m) = bitplane_split256(b);
-
-    unsafe {
-        use std::arch::aarch64::{
-            vaddlvq_s8, vandq_u8, vcntq_u8, veorq_u8, vmvnq_u8, vorrq_u8, vreinterpretq_s8_u8,
-            vsubq_s8,
-        };
-
-        let s_x = veorq_u8(a_s, b_s); // signs mismatch
-        let s_m = vmvnq_u8(s_x); // signs match
-        let m_x = veorq_u8(a_m, b_m); // magnitudes mismatch
-        let m_s = vandq_u8(a_m, b_m); // both magnitudes strong
-        let m_w = vmvnq_u8(vorrq_u8(a_m, b_m)); // both magnitudes weak
-
-        let weak = vsubq_s8(
-            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_w, s_m))),
-            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_w, s_x))),
-        );
-        let mixed = vsubq_s8(
-            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_x, s_m))),
-            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_x, s_x))),
-        );
-        let strong = vsubq_s8(
-            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_s, s_m))),
-            vreinterpretq_s8_u8(vcntq_u8(vandq_u8(m_s, s_x))),
-        );
-
-        vaddlvq_s8(weak) as i32 + vaddlvq_s8(mixed) as i32 * 2 + vaddlvq_s8(strong) as i32 * 4
-    }
-}
-
 /// Symmetric distance computation for QuiVer vectors.
 ///
 /// Distance computation ignores the stored tau value. The score most closely resembles an inner
 /// product and is normalized as such since the min/max values are [-D*4, +D*4].
-#[derive(Default)]
-pub struct Distance;
+struct Distance<K: Kernel>(K);
 
-impl VectorDistance for Distance {
+impl<K: Kernel> VectorDistance for Distance<K> {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let (query_header, query) = Header::split_and_decode(query);
         let (doc_header, doc) = Header::split_and_decode(doc);
 
-        // XXX need to process tails
-        let raw_dist = query
-            .as_chunks::<32>()
-            .0
-            .iter()
-            .zip(doc.as_chunks::<32>().0.iter())
-            .map(|(&q, &d)| distance256(q, d))
-            .sum::<i32>();
-
+        let raw_dist = K::symmetric_distance(query, doc);
         // Use strong count to compute a more accurate denominator for cosine similarity.
         let dim = query.len() as u32 * 4;
         let q_mag = query_header.strong_count * 4 + (dim - query_header.strong_count);
@@ -244,12 +146,31 @@ impl VectorDistance for Distance {
     }
 }
 
+struct SymmetricalQueryDistance<'q, K: Kernel> {
+    dist: Distance<K>,
+    query: Cow<'q, [u8]>,
+}
+
+impl<'q, K: Kernel> SymmetricalQueryDistance<'q, K> {
+    fn new(kernel: K, query: Cow<'q, [u8]>) -> Self {
+        Self {
+            dist: Distance(kernel),
+            query,
+        }
+    }
+}
+
+impl<K: Kernel> QueryVectorDistance for SymmetricalQueryDistance<'_, K> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.dist.distance(self.query.as_ref(), vector)
+    }
+}
+
 #[inline(always)]
 fn quantize_i8(value: f32, scale: f32) -> i8 {
     (value * scale).round() as i8
 }
 
-#[derive(Default)]
 pub struct QueryDistance {
     query: Vec<i8>,
     scale: f32,
@@ -308,5 +229,21 @@ impl QueryVectorDistance for QueryDistance {
         let distance_scale = (self.magnitude as f64 * doc_magnitude as f64).sqrt();
 
         (raw_dist as f64 / distance_scale) * -0.5 + 0.5
+    }
+}
+
+pub fn new_symmetric_distance() -> Box<dyn VectorDistance> {
+    if cfg!(target_arch = "aarch64") {
+        Box::new(Distance(aarch64::Neon))
+    } else {
+        Box::new(Distance(scalar::Scalar))
+    }
+}
+
+pub fn new_symmetric_query_distance<'a>(query: Cow<'a, [u8]>) -> Box<dyn QueryVectorDistance + 'a> {
+    if cfg!(target_arch = "aarch64") {
+        Box::new(SymmetricalQueryDistance::new(aarch64::Neon, query))
+    } else {
+        Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
     }
 }

@@ -12,25 +12,16 @@ trait Kernel: Send + Sync {
     /// Compute `tau` parameter: the mean absolute value of every element in `v`.
     fn tau(v: &[f32]) -> f32;
 
+    /// Quantize `v` to `out` using `tau` to split the magnitude bit.
+    /// Returns the sum of the weak values, sum of the strong values, and number of strong values.
+    fn quantize(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32);
+
     /// Compute symmetric distance between two vectors packed using `TurboPacker<2>`.
     fn symmetric_distance(a: &[u8], b: &[u8]) -> i32;
 
     /// Compute the asymmetric distance between an i8 quantized query vector and a document vector
     /// packed using `TurboPacker<2>` where the magnitude bit represents `weak` or `strong`.
     fn asymmetric_distance(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32;
-}
-
-#[derive(Default, Debug, Copy, Clone)]
-struct MeanComputer {
-    count: f32,
-    mean: f32,
-}
-
-impl MeanComputer {
-    fn add(&mut self, value: f32) {
-        self.count += 1.0;
-        self.mean += (value - self.mean) / self.count;
-    }
 }
 
 struct Header {
@@ -84,27 +75,13 @@ struct Coder<K: Kernel>(K);
 impl<K: Kernel> F32VectorCoder for Coder<K> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let tau = K::tau(vector);
-        let mut strong = MeanComputer::default();
-        let mut weak = MeanComputer::default();
 
         let (header_bytes, vector_bytes) = Header::split_mut(out);
-        vector_bytes.fill(0);
-        let mut packer = super::lvq::packing::TurboPacker::<2>::new(vector_bytes);
-        for &v in vector.iter() {
-            let q = if v > 0.0 { 2u8 } else { 0u8 }
-                | if v.abs() > tau {
-                    strong.add(v.abs());
-                    1u8
-                } else {
-                    weak.add(v.abs());
-                    0u8
-                };
-            packer.push(q);
-        }
+        let (weak_sum, strong_sum, strong_count) = K::quantize(vector, tau, vector_bytes);
         Header {
-            weak: weak.mean,
-            strong: strong.mean,
-            strong_count: strong.count as u32,
+            weak: weak_sum / (vector.len() - strong_count as usize) as f32,
+            strong: strong_sum / strong_count as f32,
+            strong_count,
         }
         .encode(header_bytes);
     }
@@ -130,8 +107,8 @@ impl<K: Kernel> F32VectorCoder for Coder<K> {
 
 /// Symmetric distance computation for QuiVer vectors.
 ///
-/// Distance computation ignores the stored tau value. The score most closely resembles an inner
-/// product and is normalized as such since the min/max values are [-D*4, +D*4].
+/// Distance computation is a cosine similarity considering magnitude; stored weak/strong values
+/// are not considered as part of the product or magnitude.
 struct Distance<K: Kernel>(K);
 
 impl<K: Kernel> VectorDistance for Distance<K> {

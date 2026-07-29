@@ -38,6 +38,28 @@ impl Kernel for Scalar {
     }
 
     #[inline]
+    fn quantize(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
+        let mut weak_sum = 0.0f32;
+        let mut strong_sum = 0.0f32;
+        let mut strong_count = 0u32;
+        out.fill(0);
+        let mut packer = crate::lvq::packing::TurboPacker::<2>::new(out);
+        for &d in v.iter() {
+            let q = if d > 0.0 { 2u8 } else { 0u8 }
+                | if d.abs() > tau {
+                    strong_sum += d.abs();
+                    strong_count += 1;
+                    1u8
+                } else {
+                    weak_sum += d.abs();
+                    0u8
+                };
+            packer.push(q);
+        }
+        (weak_sum, strong_sum, strong_count)
+    }
+
+    #[inline]
     fn symmetric_distance(a: &[u8], b: &[u8]) -> i32 {
         let (ac, ar) = a.as_chunks::<16>();
         let (bc, br) = b.as_chunks::<16>();

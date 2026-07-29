@@ -2,8 +2,9 @@ use super::scalar::Scalar;
 use super::Kernel;
 
 use std::arch::aarch64::{
-    int8x16_t, vaddlvq_s8, vaddq_s8, vandq_s8, vbslq_s8, vcntq_s8, vdupq_n_s8, vdupq_n_u8,
-    veorq_s8, vld1q_s8, vmvnq_s8, vorrq_s8, vshlq_n_s8, vshrq_n_s8, vsubq_s8,
+    int8x16_t, vabsq_f32, vaddlvq_s8, vaddq_f32, vaddq_s8, vaddvq_f32, vandq_s8, vbslq_s8,
+    vcntq_s8, vdupq_n_f32, vdupq_n_s8, vdupq_n_u8, veorq_s8, vld1q_f32, vld1q_s8, vmvnq_s8,
+    vorrq_s8, vshlq_n_s8, vshrq_n_s8, vsubq_s8,
 };
 
 unsafe extern "C" {
@@ -39,6 +40,20 @@ impl Neon {
 }
 
 impl Kernel for Neon {
+    #[inline]
+    fn tau(v: &[f32]) -> f32 {
+        let (c, r) = v.as_chunks::<4>();
+        let c_sum = unsafe {
+            vaddvq_f32(
+                c.iter()
+                    .map(|x| vabsq_f32(vld1q_f32(x.as_ptr())))
+                    .fold(vdupq_n_f32(0.0), |a, x| vaddq_f32(a, x)),
+            )
+        };
+        let r_sum = r.iter().copied().map(f32::abs).sum::<f32>();
+        (c_sum + r_sum) / v.len() as f32
+    }
+
     #[inline]
     fn symmetric_distance(a: &[u8], b: &[u8]) -> i32 {
         // TODO: consider an SDOT accumulation strategy that is not vulnerable to over or

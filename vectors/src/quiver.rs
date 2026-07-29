@@ -9,6 +9,9 @@ use std::borrow::Cow;
 
 /// Encapsulates operations that we may choose to accelerate using platform-specific intrinsics.
 trait Kernel: Send + Sync {
+    /// Compute `tau` parameter: the mean absolute value of every element in `v`.
+    fn tau(v: &[f32]) -> f32;
+
     /// Compute symmetric distance between two vectors packed using `TurboPacker<2>`.
     fn symmetric_distance(a: &[u8], b: &[u8]) -> i32;
 
@@ -76,12 +79,11 @@ impl Header {
 /// The stored encoding contains 2 bits for every dimension packed into bytes.
 ///
 /// The vector begins with additional terms defined by the `Header` struct.
-#[derive(Default)]
-pub struct Coder;
+struct Coder<K: Kernel>(K);
 
-impl F32VectorCoder for Coder {
+impl<K: Kernel> F32VectorCoder for Coder<K> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let tau = vector.iter().copied().map(f32::abs).sum::<f32>() / vector.len() as f32;
+        let tau = K::tau(vector);
         let mut strong = MeanComputer::default();
         let mut weak = MeanComputer::default();
 
@@ -218,6 +220,14 @@ impl<K: Kernel> QueryVectorDistance for QueryDistance<K> {
         let distance_scale = (self.magnitude as f64 * doc_magnitude as f64).sqrt();
 
         (raw_dist as f64 / distance_scale) * -0.5 + 0.5
+    }
+}
+
+pub fn new_coder() -> Box<dyn F32VectorCoder> {
+    if cfg!(target_arch = "aarch64") {
+        Box::new(Coder(aarch64::Neon))
+    } else {
+        Box::new(Coder(scalar::Scalar))
     }
 }
 

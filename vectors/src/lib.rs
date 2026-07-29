@@ -209,7 +209,7 @@ impl F32VectorCoding {
             (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualCoder::<2>::new(similarity, center)),
             (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualCoder::<4>::new(similarity, center)),
             (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualCoder::<8>::new(similarity, center)),
-            (Self::QuIVer, _) => Box::new(quiver::Coder::default()),
+            (Self::QuIVer, _) => quiver::new_coder(),
         }
     }
 

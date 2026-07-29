@@ -33,6 +33,11 @@ impl Scalar {
 
 impl Kernel for Scalar {
     #[inline]
+    fn tau(v: &[f32]) -> f32 {
+        v.iter().copied().map(f32::abs).sum::<f32>() / v.len() as f32
+    }
+
+    #[inline]
     fn symmetric_distance(a: &[u8], b: &[u8]) -> i32 {
         let (ac, ar) = a.as_chunks::<16>();
         let (bc, br) = b.as_chunks::<16>();

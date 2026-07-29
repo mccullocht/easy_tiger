@@ -181,8 +181,8 @@ pub enum F32VectorCoding {
     ///
     /// This encoding is optimized for cases where dimensionality is a multiple of 16.
     TLVQ8x8,
-    /// QuiVer; 2 bit binary quantization with sign + magnitude.
-    QuiVer,
+    /// QuIVer; 2 bit binary quantization with sign + magnitude.
+    QuIVer,
 }
 
 impl F32VectorCoding {
@@ -209,7 +209,7 @@ impl F32VectorCoding {
             (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualCoder::<2>::new(similarity, center)),
             (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualCoder::<4>::new(similarity, center)),
             (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualCoder::<8>::new(similarity, center)),
-            (Self::QuiVer, _) => Box::new(quiver::Coder::default()),
+            (Self::QuIVer, _) => Box::new(quiver::Coder::default()),
         }
     }
 
@@ -249,7 +249,7 @@ impl F32VectorCoding {
             (Self::TLVQ8x8, _) => {
                 Box::new(lvq::TurboResidualDistance::<8>::new(similarity, center))
             }
-            (Self::QuiVer, _) => quiver::new_symmetric_distance(),
+            (Self::QuIVer, _) => quiver::new_symmetric_distance(),
         }
     }
 
@@ -320,7 +320,7 @@ impl F32VectorCoding {
                 query.into(),
                 center,
             )),
-            (Self::QuiVer, _) => quiver::new_asymmetric_distance(query.into().as_ref()),
+            (Self::QuIVer, _) => quiver::new_asymmetric_distance(query.into().as_ref()),
         }
     }
 
@@ -409,7 +409,7 @@ impl F32VectorCoding {
                     query
                 )
             }
-            (_, Self::QuiVer) => quiver::new_symmetric_query_distance(query.into()),
+            (_, Self::QuIVer) => quiver::new_symmetric_query_distance(query.into()),
         }
     }
 }
@@ -431,7 +431,7 @@ impl FromStr for F32VectorCoding {
             "tlvq2x8" => Ok(Self::TLVQ2x8),
             "tlvq4x8" => Ok(Self::TLVQ4x8),
             "tlvq8x8" => Ok(Self::TLVQ8x8),
-            "QuiVer" => Ok(Self::QuiVer),
+            "QuIVer" => Ok(Self::QuIVer),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -451,7 +451,7 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TLVQ2x8 => write!(f, "tlvq2x8"),
             Self::TLVQ4x8 => write!(f, "tlvq4x8"),
             Self::TLVQ8x8 => write!(f, "tlvq8x8"),
-            Self::QuiVer => write!(f, "QuiVer"),
+            Self::QuIVer => write!(f, "QuIVer"),
         }
     }
 }

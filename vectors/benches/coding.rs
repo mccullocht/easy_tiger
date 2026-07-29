@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use rand::{Rng, SeedableRng};
 use vectors::rotate::Rotator;
 use vectors::{F32VectorCoding, VectorSimilarity};
@@ -50,6 +50,7 @@ fn float16_benchmarks(c: &mut Criterion) {
 
 fn binary_benchmarks(c: &mut Criterion) {
     benchmark_coding(c, F32VectorCoding::BinaryQuantized, None);
+    benchmark_coding(c, F32VectorCoding::QuIVer, None);
 }
 
 fn lvq_benchmarks(c: &mut Criterion) {

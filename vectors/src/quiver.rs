@@ -201,35 +201,35 @@ impl<K: Kernel> QueryVectorDistance for QueryDistance<K> {
 }
 
 pub fn new_coder() -> Box<dyn F32VectorCoder> {
-    if cfg!(target_arch = "aarch64") {
-        Box::new(Coder(aarch64::Neon))
-    } else {
-        Box::new(Coder(scalar::Scalar))
+    #[cfg(target_arch = "aarch64")]
+    {
+        return Box::new(Coder(aarch64::Neon));
     }
+    Box::new(Coder(scalar::Scalar))
 }
 
 pub fn new_symmetric_distance() -> Box<dyn VectorDistance> {
-    if cfg!(target_arch = "aarch64") {
-        Box::new(Distance(aarch64::Neon))
-    } else {
-        Box::new(Distance(scalar::Scalar))
+    #[cfg(target_arch = "aarch64")]
+    {
+        return Box::new(Distance(aarch64::Neon));
     }
+    Box::new(Distance(scalar::Scalar))
 }
 
 pub fn new_symmetric_query_distance<'a>(query: Cow<'a, [u8]>) -> Box<dyn QueryVectorDistance + 'a> {
-    if cfg!(target_arch = "aarch64") {
-        Box::new(SymmetricalQueryDistance::new(aarch64::Neon, query))
-    } else {
-        Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
+    #[cfg(target_arch = "aarch64")]
+    {
+        return Box::new(SymmetricalQueryDistance::new(aarch64::Neon, query));
     }
+    Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
 }
 
 pub fn new_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
-    if cfg!(target_arch = "aarch64") {
-        Box::new(QueryDistance::new(aarch64::Neon, query))
-    } else {
-        Box::new(QueryDistance::new(scalar::Scalar, query))
+    #[cfg(target_arch = "aarch64")]
+    {
+        return Box::new(QueryDistance::new(aarch64::Neon, query));
     }
+    Box::new(QueryDistance::new(scalar::Scalar, query))
 }
 
 // XXX for testing add a mechanism to get scalar implementations

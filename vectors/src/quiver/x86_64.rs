@@ -1,9 +1,11 @@
 use super::{Kernel, scalar::Scalar};
 
 use std::arch::x86_64::{
-    __m512i, _mm512_add_epi64, _mm512_loadu_epi8, _mm512_popcnt_epi64, _mm512_reduce_add_epi64,
-    _mm512_set1_epi8, _mm512_set1_epi64, _mm512_slli_epi64, _mm512_srli_epi64, _mm512_sub_epi64,
-    _mm512_ternarylogic_epi64, _mm512_xor_si512,
+    __m128i, __m512i, _mm_set_epi8, _mm512_add_epi32, _mm512_and_si512, _mm512_broadcast_i32x4,
+    _mm512_cvtepi8_epi16, _mm512_dpwssd_epi32, _mm512_extracti64x4_epi64, _mm512_loadu_epi8,
+    _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_set_epi64, _mm512_set1_epi8,
+    _mm512_set1_epi32, _mm512_shuffle_epi8, _mm512_slli_epi32, _mm512_srli_epi32,
+    _mm512_srlv_epi64, _mm512_sub_epi32, _mm512_ternarylogic_epi32, _mm512_xor_si512,
 };
 
 pub struct Avx512;
@@ -26,52 +28,81 @@ impl Avx512 {
     unsafe fn symmetric_distance_unsafe(a: &[u8], b: &[u8]) -> i32 {
         let (ac, ar) = a.as_chunks::<128>();
         let (bc, br) = b.as_chunks::<128>();
-        let dist = unsafe {
-            // XXX maybe switch to 32 and avoid the cast at the end???
-            let mut w = _mm512_set1_epi64(0);
-            let mut m = _mm512_set1_epi64(0);
-            let mut s = _mm512_set1_epi64(0);
+        let mut dist = unsafe {
+            let mut w = _mm512_set1_epi32(0);
+            let mut m = _mm512_set1_epi32(0);
+            let mut s = _mm512_set1_epi32(0);
             for (a, b) in ac.iter().zip(bc.iter()) {
                 let (a_s, a_m) = Self::bitplane_split1024(a);
                 let (b_s, b_m) = Self::bitplane_split1024(b);
 
                 let smm = _mm512_xor_si512(a_s, b_s);
-                s = _mm512_add_epi64(
+                s = _mm512_add_epi32(
                     s,
-                    _mm512_popcnt_epi64(_mm512_ternarylogic_epi64::<0x40>(a_m, b_m, smm)),
+                    _mm512_popcnt_epi32(_mm512_ternarylogic_epi32::<0x40>(a_m, b_m, smm)),
                 );
-                s = _mm512_sub_epi64(
+                s = _mm512_sub_epi32(
                     s,
-                    _mm512_popcnt_epi64(_mm512_ternarylogic_epi64::<0x80>(a_m, b_m, smm)),
+                    _mm512_popcnt_epi32(_mm512_ternarylogic_epi32::<0x80>(a_m, b_m, smm)),
                 );
-                m = _mm512_add_epi64(
+                m = _mm512_add_epi32(
                     m,
-                    _mm512_popcnt_epi64(_mm512_ternarylogic_epi64::<0x14>(a_m, b_m, smm)),
+                    _mm512_popcnt_epi32(_mm512_ternarylogic_epi32::<0x14>(a_m, b_m, smm)),
                 );
-                m = _mm512_sub_epi64(
+                m = _mm512_sub_epi32(
                     m,
-                    _mm512_popcnt_epi64(_mm512_ternarylogic_epi64::<0x28>(a_m, b_m, smm)),
+                    _mm512_popcnt_epi32(_mm512_ternarylogic_epi32::<0x28>(a_m, b_m, smm)),
                 );
-                w = _mm512_add_epi64(
+                w = _mm512_add_epi32(
                     w,
-                    _mm512_popcnt_epi64(_mm512_ternarylogic_epi64::<0x01>(a_m, b_m, smm)),
+                    _mm512_popcnt_epi32(_mm512_ternarylogic_epi32::<0x01>(a_m, b_m, smm)),
                 );
-                w = _mm512_sub_epi64(
+                w = _mm512_sub_epi32(
                     w,
-                    _mm512_popcnt_epi64(_mm512_ternarylogic_epi64::<0x02>(a_m, b_m, smm)),
+                    _mm512_popcnt_epi32(_mm512_ternarylogic_epi32::<0x02>(a_m, b_m, smm)),
                 );
             }
-            _mm512_reduce_add_epi64(w) as i32
-                + _mm512_reduce_add_epi64(m) as i32 * 2
-                + _mm512_reduce_add_epi64(s) as i32 * 4
+            _mm512_reduce_add_epi32(w) as i32
+                + _mm512_reduce_add_epi32(m) as i32 * 2
+                + _mm512_reduce_add_epi32(s) as i32 * 4
         };
-        dist + Scalar::symmetric_distance(ar, br)
+        if !ar.is_empty() {
+            dist += Scalar::symmetric_distance(ar, br)
+        }
+        dist
     }
 
-    #[target_feature(enable = "avx512f,avx512vnni")]
+    #[target_feature(enable = "avx512f,avx512vnni,avx512bw")]
     #[inline]
     unsafe fn asymmetric_distance_unsafe(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
-        Scalar::asymmetric_distance(q, d, weak, strong)
+        let (qc, qr) = q.as_chunks::<64>();
+        let (dc, dr) = d.as_chunks::<16>();
+        let dist = unsafe {
+            let shift_mask = _mm512_set_epi64(6, 6, 4, 4, 2, 2, 0, 0);
+            let value_mask = _mm512_set1_epi8(3);
+            let shuffle_mask = _mm512_broadcast_i32x4(_mm_set_epi8(
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, strong, weak, -strong, -weak,
+            ));
+            let mut dot0 = _mm512_set1_epi32(0);
+            let mut dot1 = _mm512_set1_epi32(0);
+            // TODO: it would be better to do the unsigned x signed trick (a * b - 128 * sum(b)) but
+            // this is hard to do with a potential scalar split.
+            for (q, d) in qc.iter().zip(dc.iter()) {
+                let qv = _mm512_loadu_epi8(q.as_ptr() as *const i8);
+                let mut dv = _mm512_broadcast_i32x4(*(d.as_ptr() as *const __m128i));
+                dv = _mm512_and_si512(_mm512_srlv_epi64(dv, shift_mask), value_mask);
+                dv = _mm512_shuffle_epi8(dv, shuffle_mask);
+
+                let qv0 = _mm512_cvtepi8_epi16(_mm512_extracti64x4_epi64(qv, 0));
+                let dv0 = _mm512_cvtepi8_epi16(_mm512_extracti64x4_epi64(dv, 0));
+                dot0 = _mm512_dpwssd_epi32(dot0, qv0, dv0);
+                let qv1 = _mm512_cvtepi8_epi16(_mm512_extracti64x4_epi64(qv, 1));
+                let dv1 = _mm512_cvtepi8_epi16(_mm512_extracti64x4_epi64(dv, 1));
+                dot1 = _mm512_dpwssd_epi32(dot1, qv1, dv1);
+            }
+            _mm512_reduce_add_epi32(_mm512_add_epi32(dot0, dot1))
+        };
+        dist + Scalar::asymmetric_distance(qr, dr, weak, strong)
     }
 
     #[target_feature(enable = "avx512f")]
@@ -80,8 +111,8 @@ impl Avx512 {
             let a = _mm512_loadu_epi8(v.as_ptr() as *const i8);
             let b = _mm512_loadu_epi8(v.as_ptr().add(64) as *const i8);
             let m = _mm512_set1_epi8(0x55);
-            let sgn = _mm512_ternarylogic_epi64::<0xCA>(m, _mm512_srli_epi64::<1>(a), b);
-            let mag = _mm512_ternarylogic_epi64::<0xCA>(m, a, _mm512_slli_epi64::<1>(b));
+            let sgn = _mm512_ternarylogic_epi32::<0xCA>(m, _mm512_srli_epi32::<1>(a), b);
+            let mag = _mm512_ternarylogic_epi32::<0xCA>(m, a, _mm512_slli_epi32::<1>(b));
             (sgn, mag)
         }
     }

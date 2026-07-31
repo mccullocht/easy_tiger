@@ -1,12 +1,68 @@
 use super::{Kernel, scalar::Scalar};
 
 use std::arch::x86_64::{
-    __m128i, __m512i, _mm_set_epi8, _mm512_add_epi32, _mm512_and_si512, _mm512_broadcast_i32x4,
-    _mm512_cvtepi8_epi16, _mm512_dpwssd_epi32, _mm512_extracti64x4_epi64, _mm512_loadu_epi8,
-    _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_set_epi64, _mm512_set1_epi8,
-    _mm512_set1_epi32, _mm512_shuffle_epi8, _mm512_slli_epi32, _mm512_srli_epi32,
-    _mm512_srlv_epi64, _mm512_sub_epi32, _mm512_ternarylogic_epi32, _mm512_xor_si512,
+    __m128i, __m512, __m512i, _CMP_GT_OQ, _mm_and_si128, _mm_movm_epi8, _mm_or_epi32, _mm_set_epi8,
+    _mm_set1_epi8, _mm_srli_epi32, _mm_storeu_epi8, _mm512_abs_ps, _mm512_add_epi32, _mm512_add_ps,
+    _mm512_and_si512, _mm512_broadcast_i32x4, _mm512_cmp_ps_mask, _mm512_cvtepi8_epi16,
+    _mm512_dpwssd_epi32, _mm512_extracti64x4_epi64, _mm512_loadu_epi8, _mm512_loadu_ps,
+    _mm512_maskz_mov_ps, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
+    _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_epi8,
+    _mm512_slli_epi32, _mm512_srli_epi32, _mm512_srlv_epi64, _mm512_sub_epi32,
+    _mm512_ternarylogic_epi32, _mm512_xor_si512,
 };
+
+struct QuantizationState {
+    tau: __m512,
+    zero: __m512,
+
+    weak_sum: __m512,
+    strong_sum: __m512,
+    strong_count: u32,
+}
+
+impl QuantizationState {
+    fn new(tau: f32) -> Self {
+        unsafe {
+            Self {
+                tau: _mm512_set1_ps(tau),
+                zero: _mm512_set1_ps(0.0),
+                weak_sum: _mm512_set1_ps(0.0),
+                strong_sum: _mm512_set1_ps(0.0),
+                strong_count: 0,
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl")]
+    #[inline]
+    unsafe fn quantize16(&mut self, v: &[f32; 16]) -> __m128i {
+        unsafe {
+            let v = _mm512_loadu_ps(v.as_ptr());
+            let sgn_mask = _mm512_cmp_ps_mask::<{ _CMP_GT_OQ }>(v, self.zero);
+            let v = _mm512_abs_ps(v);
+            let mag_mask = _mm512_cmp_ps_mask::<{ _CMP_GT_OQ }>(v, self.tau);
+
+            self.strong_count += mag_mask.count_ones();
+            self.strong_sum = _mm512_add_ps(self.strong_sum, _mm512_maskz_mov_ps(mag_mask, v));
+            self.weak_sum = _mm512_add_ps(self.weak_sum, _mm512_maskz_mov_ps(!mag_mask, v));
+
+            let sgn = _mm_and_si128(_mm_movm_epi8(sgn_mask), _mm_set1_epi8(2));
+            let mag = _mm_and_si128(_mm_movm_epi8(mag_mask), _mm_set1_epi8(1));
+            _mm_or_epi32(sgn, mag)
+        }
+    }
+
+    #[inline]
+    fn header_sums(&self) -> (f32, f32, u32) {
+        unsafe {
+            (
+                _mm512_reduce_add_ps(self.weak_sum),
+                _mm512_reduce_add_ps(self.strong_sum),
+                self.strong_count,
+            )
+        }
+    }
+}
 
 pub struct Avx512;
 
@@ -17,10 +73,30 @@ impl Avx512 {
         Scalar::tau(v)
     }
 
-    #[target_feature(enable = "avx512f")]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl")]
     #[inline]
     unsafe fn quantize_unsafe(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
-        Scalar::quantize(v, tau, out)
+        let (vc, vr) = v.as_chunks::<64>();
+        let (oc, or) = out.as_chunks_mut::<16>();
+        let (mut weak_sum, mut strong_sum, mut strong_count) = unsafe {
+            let mut state = QuantizationState::new(tau);
+            for (v, o) in vc.iter().zip(oc.iter_mut()) {
+                let v16 = v.as_chunks::<16>().0;
+                let mut q = state.quantize16(&v16[0]);
+                q = _mm_or_epi32(q, _mm_srli_epi32::<2>(state.quantize16(&v16[1])));
+                q = _mm_or_epi32(q, _mm_srli_epi32::<4>(state.quantize16(&v16[2])));
+                q = _mm_or_epi32(q, _mm_srli_epi32::<6>(state.quantize16(&v16[3])));
+                _mm_storeu_epi8(o.as_mut_ptr() as *mut i8, q);
+            }
+            state.header_sums()
+        };
+        if !vr.is_empty() {
+            let (w, s, c) = Scalar::quantize(vr, tau, or);
+            weak_sum += w;
+            strong_sum += s;
+            strong_count += c;
+        }
+        (weak_sum, strong_sum, strong_count)
     }
 
     #[target_feature(enable = "avx512f,avx512vpopcntdq")]

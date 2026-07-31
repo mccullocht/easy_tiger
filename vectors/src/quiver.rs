@@ -3,6 +3,8 @@
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 mod scalar;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 use std::borrow::Cow;
@@ -125,7 +127,7 @@ impl<K: Kernel> VectorDistance for Distance<K> {
 
         // Divide raw distance by norm_factor to get value in [-1,+1], then invert and add to get a
         // distance in [0,1].
-        (raw_dist as f64 / norm_factor as f64) * -0.5 + 0.5
+        (raw_dist as f64 / norm_factor) * -0.5 + 0.5
     }
 }
 
@@ -205,6 +207,10 @@ pub fn new_coder() -> Box<dyn F32VectorCoder> {
     {
         return Box::new(Coder(aarch64::Neon));
     }
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx512f") {
+        return Box::new(Coder(x86_64::Avx512));
+    }
     Box::new(Coder(scalar::Scalar))
 }
 
@@ -212,6 +218,10 @@ pub fn new_symmetric_distance() -> Box<dyn VectorDistance> {
     #[cfg(target_arch = "aarch64")]
     {
         return Box::new(Distance(aarch64::Neon));
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx512f") {
+        return Box::new(Distance(x86_64::Avx512));
     }
     Box::new(Distance(scalar::Scalar))
 }
@@ -221,13 +231,24 @@ pub fn new_symmetric_query_distance<'a>(query: Cow<'a, [u8]>) -> Box<dyn QueryVe
     {
         return Box::new(SymmetricalQueryDistance::new(aarch64::Neon, query));
     }
+    // XXX should check if necessary features are available.
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx512f") {
+        return Box::new(SymmetricalQueryDistance::new(x86_64::Avx512, query));
+    }
     Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
 }
 
 pub fn new_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
+    // XXX this should check if +dotprod is available first.
     #[cfg(target_arch = "aarch64")]
     {
         return Box::new(QueryDistance::new(aarch64::Neon, query));
+    }
+    // XXX should check if necessary features are available.
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx512f") {
+        return Box::new(QueryDistance::new(x86_64::Avx512, query));
     }
     Box::new(QueryDistance::new(scalar::Scalar, query))
 }

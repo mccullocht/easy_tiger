@@ -77,7 +77,12 @@ impl Avx512 {
     #[inline]
     unsafe fn quantize_unsafe(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
         let (vc, vr) = v.as_chunks::<64>();
-        let (oc, or) = out.as_chunks_mut::<16>();
+        // Split `out` by `vc.len()` rather than chunking it independently by 16 bytes: the
+        // packed size of the tail `vr` (`vr.len().div_ceil(4)` bytes) can be as large as 16
+        // bytes, which would otherwise misalign `oc`/`or` against `vc`/`vr` and leave `or` too
+        // small (or empty) to hold the scalar fallback's output.
+        let (oc, or) = out.split_at_mut(vc.len() * 16);
+        let oc = oc.as_chunks_mut::<16>().0;
         let (mut weak_sum, mut strong_sum, mut strong_count) = unsafe {
             let mut state = QuantizationState::new(tau);
             for (v, o) in vc.iter().zip(oc.iter_mut()) {

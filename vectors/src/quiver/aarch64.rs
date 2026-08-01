@@ -138,7 +138,12 @@ impl Kernel for Neon {
     fn quantize(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
         // Quantize 64 dimensions at a time to pack into a single 128 bit register.
         let (cv, rv) = v.as_chunks::<64>();
-        let (co, ro) = out.as_chunks_mut::<16>();
+        // Split `out` by `cv.len()` rather than chunking it independently by 16 bytes: the
+        // packed size of the tail `rv` (`rv.len().div_ceil(4)` bytes) can be as large as 16
+        // bytes, which would otherwise misalign `co`/`ro` against `cv`/`rv` and leave `ro` too
+        // small (or empty) to hold the scalar fallback's output.
+        let (co, ro) = out.split_at_mut(cv.len() * 16);
+        let co = co.as_chunks_mut::<16>().0;
         let mut state = QuantizationState::new(tau);
 
         unsafe {

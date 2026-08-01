@@ -3,6 +3,8 @@
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 mod scalar;
+#[cfg(test)]
+mod test;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
@@ -202,9 +204,12 @@ impl<K: Kernel> QueryVectorDistance for QueryDistance<K> {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::is_aarch64_feature_detected as cpu_feature;
+
 pub fn new_coder() -> Box<dyn F32VectorCoder> {
     #[cfg(target_arch = "aarch64")]
-    {
+    if cpu_feature!("neon") {
         return Box::new(Coder(aarch64::Neon));
     }
     #[cfg(target_arch = "x86_64")]
@@ -214,9 +219,13 @@ pub fn new_coder() -> Box<dyn F32VectorCoder> {
     Box::new(Coder(scalar::Scalar))
 }
 
+pub(crate) fn new_scalar_coder() -> Box<dyn F32VectorCoder> {
+    Box::new(Coder(scalar::Scalar))
+}
+
 pub fn new_symmetric_distance() -> Box<dyn VectorDistance> {
     #[cfg(target_arch = "aarch64")]
-    {
+    if cpu_feature!("neon") {
         return Box::new(Distance(aarch64::Neon));
     }
     #[cfg(target_arch = "x86_64")]
@@ -226,9 +235,13 @@ pub fn new_symmetric_distance() -> Box<dyn VectorDistance> {
     Box::new(Distance(scalar::Scalar))
 }
 
+pub(crate) fn new_scalar_symmetric_distance() -> Box<dyn VectorDistance> {
+    Box::new(Distance(scalar::Scalar))
+}
+
 pub fn new_symmetric_query_distance<'a>(query: Cow<'a, [u8]>) -> Box<dyn QueryVectorDistance + 'a> {
     #[cfg(target_arch = "aarch64")]
-    {
+    if cpu_feature!("neon") {
         return Box::new(SymmetricalQueryDistance::new(aarch64::Neon, query));
     }
     // XXX should check if necessary features are available.
@@ -239,10 +252,13 @@ pub fn new_symmetric_query_distance<'a>(query: Cow<'a, [u8]>) -> Box<dyn QueryVe
     Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
 }
 
+pub(crate) fn new_scalar_symmetric_query_distance<'a>(query: Cow<'a, [u8]>) -> Box<dyn QueryVectorDistance + 'a> {
+    Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
+}
+
 pub fn new_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
-    // XXX this should check if +dotprod is available first.
     #[cfg(target_arch = "aarch64")]
-    {
+    if cpu_feature!("neon") && cpu_feature!("dotprod") {
         return Box::new(QueryDistance::new(aarch64::Neon, query));
     }
     // XXX should check if necessary features are available.
@@ -253,4 +269,7 @@ pub fn new_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
     Box::new(QueryDistance::new(scalar::Scalar, query))
 }
 
-// XXX for testing add a mechanism to get scalar implementations
+pub(crate) fn new_scalar_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
+    Box::new(QueryDistance::new(scalar::Scalar, query))
+}
+

@@ -167,7 +167,7 @@ impl Avx512 {
                 let qv = _mm512_loadu_epi8(q.as_ptr() as *const i8);
                 let mut dv = _mm512_broadcast_i32x4(_mm_loadu_si128(d.as_ptr() as *const __m128i));
                 dv = _mm512_and_si512(_mm512_srlv_epi64(dv, shift_mask), value_mask);
-                dv = _mm512_shuffle_epi8(dv, shuffle_mask);
+                dv = _mm512_shuffle_epi8(shuffle_mask, dv);
 
                 let qv0 = _mm512_cvtepi8_epi16(_mm512_extracti64x4_epi64(qv, 0));
                 let dv0 = _mm512_cvtepi8_epi16(_mm512_extracti64x4_epi64(dv, 0));

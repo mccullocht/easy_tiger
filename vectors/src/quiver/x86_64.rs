@@ -2,7 +2,7 @@ use super::{Kernel, scalar::Scalar};
 
 use std::arch::x86_64::{
     __m128i, __m512, __m512i, _CMP_GT_OQ, _mm_and_si128, _mm_loadu_si128, _mm_movm_epi8,
-    _mm_or_epi32, _mm_set_epi8, _mm_set1_epi8, _mm_srli_epi32, _mm_storeu_epi8, _mm512_abs_ps,
+    _mm_or_epi32, _mm_set_epi8, _mm_set1_epi8, _mm_slli_epi32, _mm_storeu_epi8, _mm512_abs_ps,
     _mm512_add_epi32, _mm512_add_ps, _mm512_and_si512, _mm512_broadcast_i32x4, _mm512_cmp_ps_mask,
     _mm512_cvtepi8_epi16, _mm512_dpwssd_epi32, _mm512_extracti64x4_epi64, _mm512_loadu_epi8,
     _mm512_loadu_ps, _mm512_maskz_mov_ps, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
@@ -83,9 +83,9 @@ impl Avx512 {
             for (v, o) in vc.iter().zip(oc.iter_mut()) {
                 let v16 = v.as_chunks::<16>().0;
                 let mut q = state.quantize16(&v16[0]);
-                q = _mm_or_epi32(q, _mm_srli_epi32::<2>(state.quantize16(&v16[1])));
-                q = _mm_or_epi32(q, _mm_srli_epi32::<4>(state.quantize16(&v16[2])));
-                q = _mm_or_epi32(q, _mm_srli_epi32::<6>(state.quantize16(&v16[3])));
+                q = _mm_or_epi32(q, _mm_slli_epi32::<2>(state.quantize16(&v16[1])));
+                q = _mm_or_epi32(q, _mm_slli_epi32::<4>(state.quantize16(&v16[2])));
+                q = _mm_or_epi32(q, _mm_slli_epi32::<6>(state.quantize16(&v16[3])));
                 _mm_storeu_epi8(o.as_mut_ptr() as *mut i8, q);
             }
             state.header_sums()

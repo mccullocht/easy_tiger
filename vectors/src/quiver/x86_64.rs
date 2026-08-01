@@ -1,13 +1,13 @@
 use super::{Kernel, scalar::Scalar};
 
 use std::arch::x86_64::{
-    __m128i, __m512, __m512i, _CMP_GT_OQ, _mm_and_si128, _mm_movm_epi8, _mm_or_epi32, _mm_set_epi8,
-    _mm_set1_epi8, _mm_srli_epi32, _mm_storeu_epi8, _mm512_abs_ps, _mm512_add_epi32, _mm512_add_ps,
-    _mm512_and_si512, _mm512_broadcast_i32x4, _mm512_cmp_ps_mask, _mm512_cvtepi8_epi16,
-    _mm512_dpwssd_epi32, _mm512_extracti64x4_epi64, _mm512_loadu_epi8, _mm512_loadu_ps,
-    _mm512_maskz_mov_ps, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
-    _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_epi8,
-    _mm512_slli_epi32, _mm512_srli_epi32, _mm512_srlv_epi64, _mm512_sub_epi32,
+    __m128i, __m512, __m512i, _CMP_GT_OQ, _mm_and_si128, _mm_loadu_si128, _mm_movm_epi8,
+    _mm_or_epi32, _mm_set_epi8, _mm_set1_epi8, _mm_srli_epi32, _mm_storeu_epi8, _mm512_abs_ps,
+    _mm512_add_epi32, _mm512_add_ps, _mm512_and_si512, _mm512_broadcast_i32x4, _mm512_cmp_ps_mask,
+    _mm512_cvtepi8_epi16, _mm512_dpwssd_epi32, _mm512_extracti64x4_epi64, _mm512_loadu_epi8,
+    _mm512_loadu_ps, _mm512_maskz_mov_ps, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
+    _mm512_reduce_add_ps, _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps,
+    _mm512_shuffle_epi8, _mm512_slli_epi32, _mm512_srli_epi32, _mm512_srlv_epi64, _mm512_sub_epi32,
     _mm512_ternarylogic_epi32, _mm512_xor_si512,
 };
 
@@ -165,7 +165,7 @@ impl Avx512 {
             // this is hard to do with a potential scalar split.
             for (q, d) in qc.iter().zip(dc.iter()) {
                 let qv = _mm512_loadu_epi8(q.as_ptr() as *const i8);
-                let mut dv = _mm512_broadcast_i32x4(*(d.as_ptr() as *const __m128i));
+                let mut dv = _mm512_broadcast_i32x4(_mm_loadu_si128(d.as_ptr() as *const __m128i));
                 dv = _mm512_and_si512(_mm512_srlv_epi64(dv, shift_mask), value_mask);
                 dv = _mm512_shuffle_epi8(dv, shuffle_mask);
 

@@ -68,13 +68,13 @@ pub struct Avx512;
 
 impl Avx512 {
     #[target_feature(enable = "avx512f")]
-    #[inline]
+    #[inline(always)]
     unsafe fn tau_unsafe(v: &[f32]) -> f32 {
         Scalar::tau(v)
     }
 
     #[target_feature(enable = "avx512f,avx512bw,avx512vl")]
-    #[inline]
+    #[inline(always)]
     unsafe fn quantize_unsafe(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
         let (vc, vr) = v.as_chunks::<64>();
         // Split `out` by `vc.len()` rather than chunking it independently by 16 bytes: the
@@ -105,7 +105,7 @@ impl Avx512 {
     }
 
     #[target_feature(enable = "avx512f,avx512vpopcntdq")]
-    #[inline]
+    #[inline(always)]
     unsafe fn symmetric_distance_unsafe(a: &[u8], b: &[u8]) -> i32 {
         let (ac, ar) = a.as_chunks::<128>();
         let (bc, br) = b.as_chunks::<128>();
@@ -154,7 +154,7 @@ impl Avx512 {
     }
 
     #[target_feature(enable = "avx512f,avx512vnni,avx512bw")]
-    #[inline]
+    #[inline(always)]
     unsafe fn asymmetric_distance_unsafe(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
         let (qc, qr) = q.as_chunks::<64>();
         let (dc, dr) = d.as_chunks::<16>();
@@ -188,6 +188,7 @@ impl Avx512 {
     }
 
     #[target_feature(enable = "avx512f")]
+    #[inline(always)]
     unsafe fn bitplane_split1024(v: &[u8; 128]) -> (__m512i, __m512i) {
         unsafe {
             let a = _mm512_loadu_epi8(v.as_ptr() as *const i8);
@@ -202,12 +203,12 @@ impl Avx512 {
 
 impl Kernel for Avx512 {
     #[inline]
-    fn tau(v: &[f32]) -> f32 {
+    fn tau(&self, v: &[f32]) -> f32 {
         unsafe { Self::tau_unsafe(v) }
     }
 
     #[inline]
-    fn quantize(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
+    fn quantize(&self, v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
         unsafe { Self::quantize_unsafe(v, tau, out) }
     }
 

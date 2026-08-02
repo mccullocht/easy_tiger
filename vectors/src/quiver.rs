@@ -12,21 +12,20 @@ use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 use std::borrow::Cow;
 
 /// Encapsulates operations that we may choose to accelerate using platform-specific intrinsics.
-// XXX each function should take &self
 trait Kernel: Send + Sync {
     /// Compute `tau` parameter: the mean absolute value of every element in `v`.
-    fn tau(v: &[f32]) -> f32;
+    fn tau(&self, v: &[f32]) -> f32;
 
     /// Quantize `v` to `out` using `tau` to split the magnitude bit.
     /// Returns the sum of the weak values, sum of the strong values, and number of strong values.
-    fn quantize(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32);
+    fn quantize(&self, v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32);
 
     /// Compute symmetric distance between two vectors packed using `TurboPacker<2>`.
-    fn symmetric_distance(a: &[u8], b: &[u8]) -> i32;
+    fn symmetric_distance(&self, a: &[u8], b: &[u8]) -> i32;
 
     /// Compute the asymmetric distance between an i8 quantized query vector and a document vector
     /// packed using `TurboPacker<2>` where the magnitude bit represents `weak` or `strong`.
-    fn asymmetric_distance(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32;
+    fn asymmetric_distance(&self, q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32;
 }
 
 struct Header {
@@ -79,10 +78,10 @@ struct Coder<K: Kernel>(K);
 
 impl<K: Kernel> F32VectorCoder for Coder<K> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let tau = K::tau(vector);
+        let tau = self.0.tau(vector);
 
         let (header_bytes, vector_bytes) = Header::split_mut(out);
-        let (weak_sum, strong_sum, strong_count) = K::quantize(vector, tau, vector_bytes);
+        let (weak_sum, strong_sum, strong_count) = self.0.quantize(vector, tau, vector_bytes);
         Header {
             weak: weak_sum / (vector.len() - strong_count as usize) as f32,
             strong: strong_sum / strong_count as f32,
@@ -121,7 +120,7 @@ impl<K: Kernel> VectorDistance for Distance<K> {
         let (query_header, query) = Header::split_and_decode(query);
         let (doc_header, doc) = Header::split_and_decode(doc);
 
-        let raw_dist = K::symmetric_distance(query, doc);
+        let raw_dist = self.0.symmetric_distance(query, doc);
         // Use strong count to compute a more accurate denominator for cosine similarity.
         let dim = query.len() as u32 * 4;
         let q_mag = query_header.strong_count * 4 + (dim - query_header.strong_count);
@@ -160,7 +159,7 @@ fn quantize_i8(value: f32, scale: f32) -> i8 {
 }
 
 struct QueryDistance<K: Kernel> {
-    _kernel: K,
+    kernel: K,
     query: Vec<i8>,
     scale: f32,
     magnitude: i32,
@@ -181,7 +180,7 @@ impl<K: Kernel> QueryDistance<K> {
             .collect::<Vec<_>>();
         let magnitude = query.iter().map(|&d| d as i32 * d as i32).sum::<i32>();
         Self {
-            _kernel: kernel,
+            kernel,
             query,
             scale,
             magnitude,
@@ -196,7 +195,9 @@ impl<K: Kernel> QueryVectorDistance for QueryDistance<K> {
         let strong = quantize_i8(header.strong, self.scale);
         let weak = quantize_i8(header.weak, self.scale);
 
-        let raw_dist = K::asymmetric_distance(&self.query, vector, weak, strong);
+        let raw_dist = self
+            .kernel
+            .asymmetric_distance(&self.query, vector, weak, strong);
         let doc_magnitude = (strong as i32 * strong as i32 * header.strong_count as i32)
             + (weak as i32 * weak as i32 * (self.query.len() as i32 - header.strong_count as i32));
         let distance_scale = (self.magnitude as f64 * doc_magnitude as f64).sqrt();

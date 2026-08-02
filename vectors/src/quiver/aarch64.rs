@@ -121,7 +121,7 @@ impl Neon {
 
 impl Kernel for Neon {
     #[inline]
-    fn tau(v: &[f32]) -> f32 {
+    fn tau(&self, v: &[f32]) -> f32 {
         let (c, r) = v.as_chunks::<4>();
         let c_sum = unsafe {
             vaddvq_f32(
@@ -135,7 +135,7 @@ impl Kernel for Neon {
     }
 
     #[inline]
-    fn quantize(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
+    fn quantize(&self, v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
         // Quantize 64 dimensions at a time to pack into a single 128 bit register.
         let (cv, rv) = v.as_chunks::<64>();
         // Split `out` by `cv.len()` rather than chunking it independently by 16 bytes: the
@@ -159,7 +159,7 @@ impl Kernel for Neon {
 
         let (mut weak_sum, mut strong_sum, mut strong_count) = state.header_sums();
         if !rv.is_empty() {
-            let (w, s, c) = Scalar::quantize(rv, tau, ro);
+            let (w, s, c) = Scalar.quantize(rv, tau, ro);
             weak_sum += w;
             strong_sum += s;
             strong_count += c;
@@ -168,7 +168,7 @@ impl Kernel for Neon {
     }
 
     #[inline]
-    fn symmetric_distance(a: &[u8], b: &[u8]) -> i32 {
+    fn symmetric_distance(&self, a: &[u8], b: &[u8]) -> i32 {
         // TODO: consider an SDOT accumulation strategy that is not vulnerable to over or
         // underflow.
         let (achunks, arem) = a.as_chunks::<32>();
@@ -204,13 +204,13 @@ impl Kernel for Neon {
         let mut dist =
             unsafe { vaddlvq_s8(w) as i32 + vaddlvq_s8(m) as i32 * 2 + vaddlvq_s8(s) as i32 * 4 };
         if !arem.is_empty() {
-            dist += Scalar::symmetric_distance(arem, brem);
+            dist += Scalar.symmetric_distance(arem, brem);
         }
         dist
     }
 
     #[inline]
-    fn asymmetric_distance(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
+    fn asymmetric_distance(&self, q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
         // The C kernel for asymmetric distance only handles 64 element chunks, so truncate to that
         // size and process any tail using the Scalar implementation.
         let full_len = (q.len() / 64) * 64;
@@ -223,7 +223,7 @@ impl Kernel for Neon {
             et_quiver_asymmetric_ip(q.as_ptr(), full_len, d.as_ptr(), decode_table.as_ptr())
         };
         if full_len < q.len() {
-            dist += Scalar::asymmetric_distance(&q[full_len..], dr, weak, strong);
+            dist += Scalar.asymmetric_distance(&q[full_len..], dr, weak, strong);
         }
         dist
     }

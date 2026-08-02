@@ -33,12 +33,12 @@ impl Scalar {
 
 impl Kernel for Scalar {
     #[inline]
-    fn tau(v: &[f32]) -> f32 {
+    fn tau(&self, v: &[f32]) -> f32 {
         v.iter().copied().map(f32::abs).sum::<f32>() / v.len() as f32
     }
 
     #[inline]
-    fn quantize(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
+    fn quantize(&self, v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
         let mut weak_sum = 0.0f32;
         let mut strong_sum = 0.0f32;
         let mut strong_count = 0u32;
@@ -60,7 +60,7 @@ impl Kernel for Scalar {
     }
 
     #[inline]
-    fn symmetric_distance(a: &[u8], b: &[u8]) -> i32 {
+    fn symmetric_distance(&self, a: &[u8], b: &[u8]) -> i32 {
         let (ac, ar) = a.as_chunks::<16>();
         let (bc, br) = b.as_chunks::<16>();
 
@@ -99,7 +99,7 @@ impl Kernel for Scalar {
     }
 
     #[inline]
-    fn asymmetric_distance(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
+    fn asymmetric_distance(&self, q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
         let table = [-weak as i32, -strong as i32, weak as i32, strong as i32];
         q.iter()
             .map(|x| *x as i32)

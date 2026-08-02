@@ -24,10 +24,10 @@ __attribute__((target("+dotprod"))) EXPORT int32_t et_quiver_asymmetric_ip(
   uint8x16_t mask = vdupq_n_u8(3);
 
   for (size_t i = 0; i < len; i += 64) {
-    int8x16_t q0 = vld1q_u8((const uint8_t *)query + i);
-    int8x16_t q1 = vld1q_u8((const uint8_t *)query + i + 16);
-    int8x16_t q2 = vld1q_u8((const uint8_t *)query + i + 32);
-    int8x16_t q3 = vld1q_u8((const uint8_t *)query + i + 48);
+    int8x16_t q0 = vld1q_s8((const int8_t *)query + i);
+    int8x16_t q1 = vld1q_s8((const int8_t *)query + i + 16);
+    int8x16_t q2 = vld1q_s8((const int8_t *)query + i + 32);
+    int8x16_t q3 = vld1q_s8((const int8_t *)query + i + 48);
     uint8x16_t d = vld1q_u8(doc + (i / 4));
 
     int8x16_t d0 = vqtbl1q_s8(decode_table, vandq_u8(d, mask));

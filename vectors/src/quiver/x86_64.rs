@@ -168,6 +168,7 @@ impl Avx512 {
             let mut dot1 = _mm512_set1_epi32(0);
             // TODO: it would be better to do the unsigned x signed trick (a * b - 128 * sum(b)) but
             // this is hard to do with a potential scalar split.
+            // XXX resolve this before merging
             for (q, d) in qc.iter().zip(dc.iter()) {
                 let qv = _mm512_loadu_epi8(q.as_ptr() as *const i8);
                 let mut dv = _mm512_broadcast_i32x4(_mm_loadu_si128(d.as_ptr() as *const __m128i));

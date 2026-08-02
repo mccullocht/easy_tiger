@@ -12,6 +12,7 @@ use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 use std::borrow::Cow;
 
 /// Encapsulates operations that we may choose to accelerate using platform-specific intrinsics.
+// XXX each function should take &self
 trait Kernel: Send + Sync {
     /// Compute `tau` parameter: the mean absolute value of every element in `v`.
     fn tau(v: &[f32]) -> f32;
@@ -206,6 +207,8 @@ impl<K: Kernel> QueryVectorDistance for QueryDistance<K> {
 
 #[cfg(target_arch = "aarch64")]
 use std::arch::is_aarch64_feature_detected as cpu_feature;
+#[cfg(target_arch = "x86_64")]
+use std::arch::is_x86_feature_detected as cpu_feature;
 
 pub fn new_coder() -> Box<dyn F32VectorCoder> {
     #[cfg(target_arch = "aarch64")]
@@ -213,12 +216,13 @@ pub fn new_coder() -> Box<dyn F32VectorCoder> {
         return Box::new(Coder(aarch64::Neon));
     }
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx512f") {
+    if cpu_feature!("avx512f") && cpu_feature!("avx512bw") && cpu_feature!("avx512vl") {
         return Box::new(Coder(x86_64::Avx512));
     }
     Box::new(Coder(scalar::Scalar))
 }
 
+#[cfg(test)]
 pub(crate) fn new_scalar_coder() -> Box<dyn F32VectorCoder> {
     Box::new(Coder(scalar::Scalar))
 }
@@ -235,6 +239,7 @@ pub fn new_symmetric_distance() -> Box<dyn VectorDistance> {
     Box::new(Distance(scalar::Scalar))
 }
 
+#[cfg(test)]
 pub(crate) fn new_scalar_symmetric_distance() -> Box<dyn VectorDistance> {
     Box::new(Distance(scalar::Scalar))
 }
@@ -244,15 +249,17 @@ pub fn new_symmetric_query_distance<'a>(query: Cow<'a, [u8]>) -> Box<dyn QueryVe
     if cpu_feature!("neon") {
         return Box::new(SymmetricalQueryDistance::new(aarch64::Neon, query));
     }
-    // XXX should check if necessary features are available.
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx512f") {
+    if cpu_feature!("avx512f") && cpu_feature!("avx512vpopcntdq") {
         return Box::new(SymmetricalQueryDistance::new(x86_64::Avx512, query));
     }
     Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
 }
 
-pub(crate) fn new_scalar_symmetric_query_distance<'a>(query: Cow<'a, [u8]>) -> Box<dyn QueryVectorDistance + 'a> {
+#[cfg(test)]
+pub(crate) fn new_scalar_symmetric_query_distance<'a>(
+    query: Cow<'a, [u8]>,
+) -> Box<dyn QueryVectorDistance + 'a> {
     Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
 }
 
@@ -261,15 +268,14 @@ pub fn new_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
     if cpu_feature!("neon") && cpu_feature!("dotprod") {
         return Box::new(QueryDistance::new(aarch64::Neon, query));
     }
-    // XXX should check if necessary features are available.
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx512f") {
+    if cpu_feature!("avx512f") && cpu_feature!("avx512vnni") && cpu_feature!("avx512bw") {
         return Box::new(QueryDistance::new(x86_64::Avx512, query));
     }
     Box::new(QueryDistance::new(scalar::Scalar, query))
 }
 
+#[cfg(test)]
 pub(crate) fn new_scalar_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
     Box::new(QueryDistance::new(scalar::Scalar, query))
 }
-

@@ -211,18 +211,17 @@ impl Kernel for Neon {
 
     #[inline]
     fn asymmetric_distance(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
-        // `et_quiver_asymmetric_ip` only handles whole 64-element chunks (see its "XXX support
-        // tails" comment) -- it does not bounds-check, so passing it a length that isn't a
-        // multiple of 64 reads past the end of `q` and `d`. Round the length down ourselves and
-        // handle the remainder with the scalar kernel, same as the other kernels' tails.
+        // The C kernel for asymmetric distance only handles 64 element chunks, so truncate to that
+        // size and process any tail using the Scalar implementation.
         let full_len = (q.len() / 64) * 64;
         // Split `d` by `full_len / 4` rather than chunking it independently by 16 bytes: the
         // packed size of the tail can be as large as 16 bytes (when the tail is 61-63
         // elements), which would otherwise misalign the split against `full_len`.
         let (d, dr) = d.split_at(full_len / 4);
         let decode_table = [-weak, -strong, weak, strong];
-        let mut dist =
-            unsafe { et_quiver_asymmetric_ip(q.as_ptr(), full_len, d.as_ptr(), decode_table.as_ptr()) };
+        let mut dist = unsafe {
+            et_quiver_asymmetric_ip(q.as_ptr(), full_len, d.as_ptr(), decode_table.as_ptr())
+        };
         if full_len < q.len() {
             dist += Scalar::asymmetric_distance(&q[full_len..], dr, weak, strong);
         }

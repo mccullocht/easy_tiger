@@ -40,7 +40,6 @@ __attribute__((target("+dotprod"))) EXPORT int32_t et_quiver_asymmetric_ip(
     ip3 = vdotq_s32(ip3, q3, d3);
   }
 
-  // XXX support tails.
   return vaddvq_s32(vaddq_s32(vaddq_s32(ip0, ip1), vaddq_s32(ip2, ip3)));
 }
 

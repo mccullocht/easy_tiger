@@ -4,11 +4,11 @@ use std::arch::x86_64::{
     __m128i, __m512, __m512i, _CMP_GT_OQ, _mm_and_si128, _mm_loadu_si128, _mm_movm_epi8,
     _mm_or_epi32, _mm_set_epi8, _mm_set1_epi8, _mm_slli_epi32, _mm_storeu_epi8, _mm512_abs_ps,
     _mm512_add_epi32, _mm512_add_ps, _mm512_and_si512, _mm512_broadcast_i32x4, _mm512_cmp_ps_mask,
-    _mm512_cvtepi8_epi16, _mm512_dpwssd_epi32, _mm512_extracti64x4_epi64, _mm512_loadu_epi8,
-    _mm512_loadu_ps, _mm512_maskz_mov_ps, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
-    _mm512_reduce_add_ps, _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps,
-    _mm512_shuffle_epi8, _mm512_slli_epi32, _mm512_srli_epi32, _mm512_srlv_epi64, _mm512_sub_epi32,
-    _mm512_ternarylogic_epi32, _mm512_xor_si512,
+    _mm512_dpbusd_epi32, _mm512_loadu_epi8, _mm512_loadu_ps, _mm512_maskz_mov_ps,
+    _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_set_epi64,
+    _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_epi8, _mm512_slli_epi32,
+    _mm512_srli_epi32, _mm512_srlv_epi64, _mm512_sub_epi32, _mm512_ternarylogic_epi32,
+    _mm512_xor_si512,
 };
 
 struct QuantizationState {
@@ -68,13 +68,13 @@ pub struct Avx512;
 
 impl Avx512 {
     #[target_feature(enable = "avx512f")]
-    #[inline(always)]
+    #[inline]
     unsafe fn tau_unsafe(v: &[f32]) -> f32 {
-        Scalar::tau(v)
+        Scalar.tau(v)
     }
 
     #[target_feature(enable = "avx512f,avx512bw,avx512vl")]
-    #[inline(always)]
+    #[inline]
     unsafe fn quantize_unsafe(v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
         let (vc, vr) = v.as_chunks::<64>();
         // Split `out` by `vc.len()` rather than chunking it independently by 16 bytes: the
@@ -96,7 +96,7 @@ impl Avx512 {
             state.header_sums()
         };
         if !vr.is_empty() {
-            let (w, s, c) = Scalar::quantize(vr, tau, or);
+            let (w, s, c) = Scalar.quantize(vr, tau, or);
             weak_sum += w;
             strong_sum += s;
             strong_count += c;
@@ -105,7 +105,7 @@ impl Avx512 {
     }
 
     #[target_feature(enable = "avx512f,avx512vpopcntdq")]
-    #[inline(always)]
+    #[inline]
     unsafe fn symmetric_distance_unsafe(a: &[u8], b: &[u8]) -> i32 {
         let (ac, ar) = a.as_chunks::<128>();
         let (bc, br) = b.as_chunks::<128>();
@@ -148,13 +148,13 @@ impl Avx512 {
                 + _mm512_reduce_add_epi32(s) as i32 * 4
         };
         if !ar.is_empty() {
-            dist += Scalar::symmetric_distance(ar, br)
+            dist += Scalar.symmetric_distance(ar, br)
         }
         dist
     }
 
     #[target_feature(enable = "avx512f,avx512vnni,avx512bw")]
-    #[inline(always)]
+    #[inline]
     unsafe fn asymmetric_distance_unsafe(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
         let (qc, qr) = q.as_chunks::<64>();
         let (dc, dr) = d.as_chunks::<16>();
@@ -164,31 +164,33 @@ impl Avx512 {
             let shuffle_mask = _mm512_broadcast_i32x4(_mm_set_epi8(
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, strong, weak, -strong, -weak,
             ));
-            let mut dot0 = _mm512_set1_epi32(0);
-            let mut dot1 = _mm512_set1_epi32(0);
+
+            let mut dot = _mm512_set1_epi32(0);
+            let mut sumd = _mm512_set1_epi32(0);
             // TODO: it would be better to do the unsigned x signed trick (a * b - 128 * sum(b)) but
             // this is hard to do with a potential scalar split.
+            // a is _unsigned_, b is _signed_.
+            //
             // XXX resolve this before merging
             for (q, d) in qc.iter().zip(dc.iter()) {
-                let qv = _mm512_loadu_epi8(q.as_ptr() as *const i8);
+                let qv = _mm512_xor_si512(
+                    _mm512_loadu_epi8(q.as_ptr() as *const i8),
+                    _mm512_set1_epi8(-128),
+                );
                 let mut dv = _mm512_broadcast_i32x4(_mm_loadu_si128(d.as_ptr() as *const __m128i));
                 dv = _mm512_and_si512(_mm512_srlv_epi64(dv, shift_mask), value_mask);
                 dv = _mm512_shuffle_epi8(shuffle_mask, dv);
 
-                let qv0 = _mm512_cvtepi8_epi16(_mm512_extracti64x4_epi64(qv, 0));
-                let dv0 = _mm512_cvtepi8_epi16(_mm512_extracti64x4_epi64(dv, 0));
-                dot0 = _mm512_dpwssd_epi32(dot0, qv0, dv0);
-                let qv1 = _mm512_cvtepi8_epi16(_mm512_extracti64x4_epi64(qv, 1));
-                let dv1 = _mm512_cvtepi8_epi16(_mm512_extracti64x4_epi64(dv, 1));
-                dot1 = _mm512_dpwssd_epi32(dot1, qv1, dv1);
+                dot = _mm512_dpbusd_epi32(dot, qv, dv);
+                sumd = _mm512_dpbusd_epi32(sumd, _mm512_set1_epi8(1), dv);
             }
-            _mm512_reduce_add_epi32(_mm512_add_epi32(dot0, dot1))
+            _mm512_reduce_add_epi32(dot) - 128 * _mm512_reduce_add_epi32(sumd)
         };
-        dist + Scalar::asymmetric_distance(qr, dr, weak, strong)
+        dist + Scalar.asymmetric_distance(qr, dr, weak, strong)
     }
 
     #[target_feature(enable = "avx512f")]
-    #[inline(always)]
+    #[inline]
     unsafe fn bitplane_split1024(v: &[u8; 128]) -> (__m512i, __m512i) {
         unsafe {
             let a = _mm512_loadu_epi8(v.as_ptr() as *const i8);
@@ -213,12 +215,12 @@ impl Kernel for Avx512 {
     }
 
     #[inline]
-    fn symmetric_distance(a: &[u8], b: &[u8]) -> i32 {
+    fn symmetric_distance(&self, a: &[u8], b: &[u8]) -> i32 {
         unsafe { Self::symmetric_distance_unsafe(a, b) }
     }
 
     #[inline]
-    fn asymmetric_distance(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
+    fn asymmetric_distance(&self, q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
         unsafe { Self::asymmetric_distance_unsafe(q, d, weak, strong) }
     }
 }

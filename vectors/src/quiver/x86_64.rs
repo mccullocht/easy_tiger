@@ -165,13 +165,10 @@ impl Avx512 {
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, strong, weak, -strong, -weak,
             ));
 
+            // vpbusd performs unsigned x signed dot, but we need full signed. Transform the query
+            // input into unsigned (xor 0x80) and compute sum(d) to unbias the result.
             let mut dot = _mm512_set1_epi32(0);
             let mut sumd = _mm512_set1_epi32(0);
-            // TODO: it would be better to do the unsigned x signed trick (a * b - 128 * sum(b)) but
-            // this is hard to do with a potential scalar split.
-            // a is _unsigned_, b is _signed_.
-            //
-            // XXX resolve this before merging
             for (q, d) in qc.iter().zip(dc.iter()) {
                 let qv = _mm512_xor_si512(
                     _mm512_loadu_epi8(q.as_ptr() as *const i8),

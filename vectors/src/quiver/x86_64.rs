@@ -170,10 +170,7 @@ impl Avx512 {
             let mut dot = _mm512_set1_epi32(0);
             let mut sumd = _mm512_set1_epi32(0);
             for (q, d) in qc.iter().zip(dc.iter()) {
-                let qv = _mm512_xor_si512(
-                    _mm512_loadu_epi8(q.as_ptr() as *const i8),
-                    _mm512_set1_epi8(-128),
-                );
+                let qv = _mm512_xor_si512(_mm512_loadu_epi8(q.as_ptr()), _mm512_set1_epi8(-128));
                 let mut dv = _mm512_broadcast_i32x4(_mm_loadu_si128(d.as_ptr() as *const __m128i));
                 dv = _mm512_and_si512(_mm512_srlv_epi64(dv, shift_mask), value_mask);
                 dv = _mm512_shuffle_epi8(shuffle_mask, dv);

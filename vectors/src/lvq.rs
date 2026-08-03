@@ -1397,7 +1397,7 @@ impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
     }
 }
 
-mod packing {
+pub(super) mod packing {
     use std::iter::FusedIterator;
 
     use crate::lvq::TURBO_BLOCK_SIZE;

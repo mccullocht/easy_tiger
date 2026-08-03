@@ -1,4 +1,4 @@
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use half::f16;
 use rand::{Rng, SeedableRng};
 use vectors::{F32VectorCoding, VectorSimilarity};
@@ -138,6 +138,7 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
     // product similarity since other types are unlikely to vary all that much.
     let encodings = [
         F32VectorCoding::BinaryQuantized,
+        F32VectorCoding::QuIVer,
         F32VectorCoding::TLVQ1,
         F32VectorCoding::TLVQ2,
         F32VectorCoding::TLVQ4,

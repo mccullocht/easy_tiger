@@ -27,6 +27,15 @@ pub enum RecallMetric {
     /// When computing DCG for the actual result set, distances are replaced with values from the
     /// expected result set (or 0) to account for quantization error.
     Ndcg,
+    /// Estimates the depth into the actual result set required to recover the expected top-k
+    /// results with full-fidelity reranking.
+    ///
+    /// Rather than a [0,1] ratio, this reports the minimum number of leading results from the
+    /// actual set that must be re-ranked to surface all of the expected top-k neighbors. If any
+    /// expected neighbor is missing from the actual set, the depth is counted as the length of the
+    /// actual set. Averaged across queries this estimates how deep retrieval must go to achieve
+    /// perfect recall@k.
+    Depth,
 }
 
 #[derive(Args)]
@@ -92,11 +101,38 @@ impl RecallComputer {
         match self.metric {
             RecallMetric::Simple => format!("Recall@{}", self.k),
             RecallMetric::Ndcg => format!("NDCG@{}", self.k),
+            RecallMetric::Depth => format!("Depth@{}", self.k),
         }
     }
 
     pub fn neighbors_len(&self) -> usize {
         self.neighbors.len()
+    }
+
+    /// Format a summary line for the per-query results in `values`.
+    ///
+    /// For ratio metrics (Simple/Ndcg) this reports the mean. For [`RecallMetric::Depth`] it also
+    /// reports the standard deviation and maximum depth across queries.
+    pub fn summarize(&self, values: &[f64]) -> String {
+        let n = values.len().max(1) as f64;
+        let mean = values.iter().sum::<f64>() / n;
+        match self.metric {
+            RecallMetric::Simple | RecallMetric::Ndcg => {
+                format!("{}: {:.6}", self.label(), mean)
+            }
+            RecallMetric::Depth => {
+                let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+                let stddev = variance.sqrt();
+                let max = values.iter().copied().fold(0.0f64, f64::max);
+                format!(
+                    "{}: mean {:.2} stddev {:.2} max {:.0}",
+                    self.label(),
+                    mean,
+                    stddev,
+                    max
+                )
+            }
+        }
     }
 
     /// Compute the recall based on golden data for `query_index` given `query_results`.
@@ -113,7 +149,28 @@ impl RecallComputer {
         match self.metric {
             RecallMetric::Simple => self.simple_recall(expected, actual),
             RecallMetric::Ndcg => self.ndcg_recall(expected, actual),
+            RecallMetric::Depth => Self::required_depth(expected, actual),
         }
+    }
+
+    /// Compute the depth into `actual` required to recover every vertex in `expected`.
+    ///
+    /// Returns the 1-based position of the last expected vertex encountered while scanning `actual`
+    /// in order. If any expected vertex is missing, returns the length of `actual`.
+    fn required_depth(
+        expected: impl Iterator<Item = Neighbor>,
+        actual: impl Iterator<Item = Neighbor>,
+    ) -> f64 {
+        let mut expected = expected.map(|n| n.vertex()).collect::<HashSet<_>>();
+        let mut depth = 0usize;
+        for (i, n) in actual.enumerate() {
+            depth = i + 1;
+            if expected.remove(&n.vertex()) && expected.is_empty() {
+                return (i + 1) as f64;
+            }
+        }
+        // Not every expected vertex was found; count as the length of the actual set.
+        depth as f64
     }
 
     fn simple_recall(

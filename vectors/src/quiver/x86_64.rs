@@ -157,7 +157,8 @@ impl Avx512 {
     #[inline]
     unsafe fn asymmetric_distance_unsafe(q: &[i8], d: &[u8], weak: i8, strong: i8) -> i32 {
         let (qc, qr) = q.as_chunks::<64>();
-        let (dc, dr) = d.as_chunks::<16>();
+        let (dc, dr) = d.split_at(qc.len() * 16);
+        let dc = dc.as_chunks::<16>().0;
         let dist = unsafe {
             let shift_mask = _mm512_set_epi64(6, 6, 4, 4, 2, 2, 0, 0);
             let value_mask = _mm512_set1_epi8(3);

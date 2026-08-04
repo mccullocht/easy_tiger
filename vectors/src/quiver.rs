@@ -74,14 +74,43 @@ impl Header {
 /// The stored encoding contains 2 bits for every dimension packed into bytes.
 ///
 /// The vector begins with additional terms defined by the `Header` struct.
-struct Coder<K: Kernel>(K);
+///
+/// # Centering
+///
+/// An optional centering vector may be provided during construction. When set, encoding subtracts
+/// this vector from the input before quantization, and decoding adds it back after lookup. This is
+/// useful for zero-centering data to improve compression ratios.
+struct Coder<K: Kernel> {
+    kernel: K,
+    center: Option<Vec<f32>>,
+}
 
 impl<K: Kernel> F32VectorCoder for Coder<K> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let tau = self.0.tau(vector);
+        // If we have a centering vector, work on centered data.
+        let (tau, quantize_input) = if let Some(center) = self.center.as_deref() {
+            assert_eq!(
+                vector.len(),
+                center.len(),
+                "centering vector length must match input vector length"
+            );
+            let vector: Cow<'static, [f32]> = Cow::Owned(
+                vector
+                    .iter()
+                    .zip(center.iter())
+                    .map(|(&v, &c)| v - c)
+                    .collect::<Vec<_>>(),
+            );
+            let tau = self.kernel.tau(vector.as_ref());
+            (tau, vector)
+        } else {
+            (self.kernel.tau(vector), Cow::Borrowed(vector))
+        };
 
         let (header_bytes, vector_bytes) = Header::split_mut(out);
-        let (weak_sum, strong_sum, strong_count) = self.0.quantize(vector, tau, vector_bytes);
+        let (weak_sum, strong_sum, strong_count) =
+            self.kernel
+                .quantize(quantize_input.as_ref(), tau, vector_bytes);
         Header {
             weak: weak_sum / (vector.len() - strong_count as usize) as f32,
             strong: strong_sum / strong_count as f32,
@@ -98,9 +127,23 @@ impl<K: Kernel> F32VectorCoder for Coder<K> {
         let (header_bytes, vector_bytes) = Header::split(encoded);
         let header = Header::decode(header_bytes);
         let decode_table = [-header.weak, -header.strong, header.weak, header.strong];
+
+        // Decode packed values into output
         for (i, o) in super::lvq::packing::TurboUnpacker::<2>::new(vector_bytes).zip(out.iter_mut())
         {
             *o = decode_table[i as usize];
+        }
+
+        // Add centering vector back if present
+        if let Some(center) = self.center.as_deref() {
+            assert_eq!(
+                out.len(),
+                center.len(),
+                "centering vector length must match output vector length"
+            );
+            for (o, &c) in out.iter_mut().zip(center.iter()) {
+                *o += c;
+            }
         }
     }
 
@@ -211,21 +254,34 @@ use std::arch::is_aarch64_feature_detected as cpu_feature;
 #[cfg(target_arch = "x86_64")]
 use std::arch::is_x86_feature_detected as cpu_feature;
 
-pub fn new_coder() -> Box<dyn F32VectorCoder> {
+/// Create a new QuiVer coder with no centering vector.
+pub fn new_coder(center: Option<Vec<f32>>) -> Box<dyn F32VectorCoder> {
     #[cfg(target_arch = "aarch64")]
     if cpu_feature!("neon") {
-        return Box::new(Coder(aarch64::Neon));
+        return Box::new(Coder {
+            kernel: aarch64::Neon,
+            center,
+        });
     }
     #[cfg(target_arch = "x86_64")]
     if cpu_feature!("avx512f") && cpu_feature!("avx512bw") && cpu_feature!("avx512vl") {
-        return Box::new(Coder(x86_64::Avx512));
+        return Box::new(Coder {
+            kernel: x86_64::Avx512,
+            center,
+        });
     }
-    Box::new(Coder(scalar::Scalar))
+    Box::new(Coder {
+        kernel: scalar::Scalar,
+        center,
+    })
 }
 
 #[cfg(test)]
-pub(crate) fn new_scalar_coder() -> Box<dyn F32VectorCoder> {
-    Box::new(Coder(scalar::Scalar))
+pub(crate) fn new_scalar_coder(center: Option<Vec<f32>>) -> Box<dyn F32VectorCoder> {
+    Box::new(Coder {
+        kernel: scalar::Scalar,
+        center,
+    })
 }
 
 pub fn new_symmetric_distance() -> Box<dyn VectorDistance> {

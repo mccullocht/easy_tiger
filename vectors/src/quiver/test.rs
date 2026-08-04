@@ -1,15 +1,15 @@
 use std::borrow::Cow;
 
 use approx::assert_abs_diff_eq;
-use rand::{rngs::OsRng, Rng, SeedableRng, TryRngCore};
+use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::l2_normalize;
 
 use super::{
-    new_asymmetric_distance, new_coder, new_scalar_asymmetric_distance, new_scalar_coder,
+    Header, new_asymmetric_distance, new_coder, new_scalar_asymmetric_distance, new_scalar_coder,
     new_scalar_symmetric_distance, new_scalar_symmetric_query_distance, new_symmetric_distance,
-    new_symmetric_query_distance, Header,
+    new_symmetric_query_distance,
 };
 
 /// Number of trials to run per test. Each trial uses a freshly generated random unit vector.
@@ -37,7 +37,7 @@ fn random_unit_vector(rng: &mut impl Rng, dimensions: usize) -> Vec<f32> {
 /// (see `assert_encode_matches_scalar`) are a separate concern from whether the accelerated and
 /// scalar *distance* kernels agree on a given pair of encoded vectors.
 fn encode_vector(vector: &[f32]) -> Vec<u8> {
-    new_scalar_coder().encode(vector)
+    new_scalar_coder(None).encode(vector)
 }
 
 /// Assert that the platform-accelerated coder and the scalar reference coder produce equivalent
@@ -50,8 +50,8 @@ fn encode_vector(vector: &[f32]) -> Vec<u8> {
 /// by SIMD vs. scalar kernels (tree reduction vs. sequential), so those are compared with a
 /// small tolerance rather than bit-for-bit.
 fn assert_encode_matches_scalar(trial: usize, vector: &[f32]) {
-    let simd = new_coder();
-    let scalar = new_scalar_coder();
+    let simd = new_coder(None);
+    let scalar = new_scalar_coder(None);
 
     let simd_encoded = simd.encode(vector);
     let scalar_encoded = scalar.encode(vector);
@@ -106,7 +106,7 @@ fn encode_matches_scalar_tail_dimensions() {
 #[test]
 fn decode_roundtrip_is_sane() {
     let mut rng = seeded_rng();
-    let coder = new_coder();
+    let coder = new_coder(None);
     for trial in 0..TRIALS {
         let extra = rng.random_range(0..=128);
         let vector = random_unit_vector(&mut rng, BASE_DIMENSIONS + extra);

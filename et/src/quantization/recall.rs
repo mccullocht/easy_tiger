@@ -177,16 +177,12 @@ pub fn recall(
         })
         .reduce(|| (0usize, 0usize), |a, b| (a.0 + b.0, a.1 + b.1));
 
-    let sum_recall = query_k
+    let recall_values = query_k
         .into_iter()
         .enumerate()
         .map(|(i, r)| recall_computer.compute_recall(i, &r.into_neighbors()))
-        .sum::<f64>();
-    println!(
-        "{}: {:.6}",
-        recall_computer.label(),
-        sum_recall / query_limit as f64
-    );
+        .collect::<Vec<_>>();
+    println!("{}", recall_computer.summarize(&recall_values));
     if total_competitive != total_scored {
         println!(
             "scored: {} competitive: {} ratio: {:.6}",

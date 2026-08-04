@@ -105,7 +105,7 @@ impl<K: Kernel> F32VectorCoder for Coder<K> {
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
-        (byte_len - Header::LEN) / 4
+        (byte_len - Header::LEN) * 4
     }
 }
 

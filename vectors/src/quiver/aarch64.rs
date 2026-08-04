@@ -1,11 +1,11 @@
-use super::scalar::Scalar;
 use super::Kernel;
+use super::scalar::Scalar;
 
 use std::arch::aarch64::{
-    float32x4_t, int8x16_t, uint32x4_t, uint8x16_t, uint8x16x4_t, vabsq_f32, vaddlvq_s8, vaddq_f32,
+    float32x4_t, int8x16_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vabsq_f32, vaddlvq_s8, vaddq_f32,
     vaddq_s8, vaddq_u32, vaddvq_f32, vaddvq_u32, vandq_s8, vandq_u32, vbslq_f32, vbslq_s8,
-    vcgtq_f32, vcntq_s8, vdupq_n_f32, vdupq_n_s8, vdupq_n_u32, vdupq_n_u8, veorq_s8, vld1q_f32,
-    vld1q_s8, vld1q_u8, vmvnq_s8, vmvnq_u32, vorrq_s8, vorrq_u32, vorrq_u8, vqtbl4q_u8,
+    vcgtq_f32, vcntq_s8, vdupq_n_f32, vdupq_n_s8, vdupq_n_u8, vdupq_n_u32, veorq_s8, vld1q_f32,
+    vld1q_s8, vld1q_u8, vmvnq_s8, vmvnq_u32, vorrq_s8, vorrq_u8, vorrq_u32, vqtbl4q_u8,
     vreinterpretq_u8_u32, vshlq_n_s8, vshlq_n_u8, vshrq_n_s8, vst1q_u8, vsubq_s8,
 };
 
@@ -138,10 +138,6 @@ impl Kernel for Neon {
     fn quantize(&self, v: &[f32], tau: f32, out: &mut [u8]) -> (f32, f32, u32) {
         // Quantize 64 dimensions at a time to pack into a single 128 bit register.
         let (cv, rv) = v.as_chunks::<64>();
-        // Split `out` by `cv.len()` rather than chunking it independently by 16 bytes: the
-        // packed size of the tail `rv` (`rv.len().div_ceil(4)` bytes) can be as large as 16
-        // bytes, which would otherwise misalign `co`/`ro` against `cv`/`rv` and leave `ro` too
-        // small (or empty) to hold the scalar fallback's output.
         let (co, ro) = out.split_at_mut(cv.len() * 16);
         let co = co.as_chunks_mut::<16>().0;
         let mut state = QuantizationState::new(tau);

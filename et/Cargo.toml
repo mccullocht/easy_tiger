@@ -10,6 +10,7 @@ pollster = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 crossbeam-utils = { workspace = true }
 easy_tiger = { path = "../" }
+glob = { workspace = true }
 histogram = { workspace = true }
 indicatif = { workspace = true, features = ["rayon"] }
 memmap2 = { workspace = true }

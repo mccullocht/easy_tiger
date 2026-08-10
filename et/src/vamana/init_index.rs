@@ -2,7 +2,7 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::vamana::{
-    wt::TableGraphVectorIndex, GraphConfig, GraphSearchParams, PatienceParams,
+    GraphConfig, GraphSearchParams, PatienceParams, wt::TableGraphVectorIndex,
 };
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::Connection;

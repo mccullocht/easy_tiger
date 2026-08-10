@@ -16,7 +16,7 @@ use rustix::io::Errno;
 use wt_sys::wiredtiger_strerror;
 
 use std::backtrace::Backtrace;
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 use std::io;
 use std::io::ErrorKind;
 use std::num::NonZero;
@@ -299,12 +299,12 @@ mod test {
     use tempfile::TempDir;
 
     use crate::{
+        Error, RecordCursorGuard, Result, Statistics, Transaction, ValueDelta, WiredTigerError,
         connection::{
             Connection, CreateOptions, CreateOptionsBuilder, QueryGlobalTimestampType,
             SetGlobalTimestampType,
         },
         session::{Formatted, QueryTransactionTimestampType, SetTransactionTimestampType},
-        Error, RecordCursorGuard, Result, Statistics, Transaction, ValueDelta, WiredTigerError,
     };
 
     fn conn_options() -> Option<crate::connection::Options> {

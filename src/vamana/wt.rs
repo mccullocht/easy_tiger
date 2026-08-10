@@ -9,10 +9,10 @@ use std::{ffi::CString, io, sync::Arc};
 use rustix::io::Errno;
 use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity};
 use wt_mdb::{
+    Connection, Error, RecordCursorGuard, Result, Transaction,
     config::{ConfigItem, ConfigParser},
     connection::{CreateOptionsBuilder, DropOptions},
     session::{CommitTransactionOptions, RollbackTransactionOptions},
-    Connection, Error, RecordCursorGuard, Result, Transaction,
 };
 
 use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore};

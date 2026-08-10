@@ -3,8 +3,8 @@
 use std::{
     borrow::Cow,
     collections::{
-        hash_map::Entry::{Occupied, Vacant},
         HashMap,
+        hash_map::Entry::{Occupied, Vacant},
     },
 };
 

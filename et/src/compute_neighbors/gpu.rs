@@ -148,20 +148,18 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     // Request the maximum buffer limits the adapter supports so we can use the largest
     // possible batches on this hardware.
     let adapter_limits = adapter.limits();
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("compute_neighbors"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits {
-                max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
-                max_buffer_size: adapter_limits.max_buffer_size,
-                ..wgpu::Limits::default()
-            },
-            memory_hints: wgpu::MemoryHints::Performance,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            trace: wgpu::Trace::Off,
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("compute_neighbors"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits {
+            max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+            max_buffer_size: adapter_limits.max_buffer_size,
+            ..wgpu::Limits::default()
         },
-    ))
+        memory_hints: wgpu::MemoryHints::Performance,
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        trace: wgpu::Trace::Off,
+    }))
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     // Compute batch sizes from the limits actually granted by the device. Three buffers are

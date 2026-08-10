@@ -1,4 +1,4 @@
-use std::sync::{atomic::AtomicU64, Mutex};
+use std::sync::{Mutex, atomic::AtomicU64};
 
 use crossbeam_utils::CachePadded;
 use easy_tiger::Neighbor;

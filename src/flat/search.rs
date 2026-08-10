@@ -5,8 +5,8 @@ use std::{io, num::NonZero};
 use vectors::QueryVectorDistance;
 use wt_mdb::RecordCursorGuard;
 
-use crate::posting_block::PostingBlock;
 use crate::Neighbor;
+use crate::posting_block::PostingBlock;
 
 /// Search `cursor` exhaustively and return the `k` nearest neighbors by `distance_fn`.
 pub fn exhaustive_search(

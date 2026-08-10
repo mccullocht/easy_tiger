@@ -1,6 +1,6 @@
 //! Vector handling: formatting/quantization and distance computation.
 
-use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
+use std::{borrow::Cow, fmt::Debug, io, ops::RangeInclusive, str::FromStr};
 
 mod binary;
 mod float16;
@@ -105,6 +105,20 @@ pub trait VectorDistance: Send + Sync {
     /// This function is not required to be commutative and may panic if
     /// one of the inputs is misshapen.
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64;
+
+    /// Compute lower and upper bounds on the distance between the `query` vector and the `doc`
+    /// vector.
+    ///
+    /// Quantized codings may only be able to estimate the distance; this returns the interval the
+    /// true distance is expected to fall within. Implementations that compute an exact distance
+    /// (or cannot estimate an error term) return a degenerate `d..=d` range.
+    ///
+    /// This function is not required to be commutative and may panic if one of the inputs is
+    /// misshapen.
+    fn distance_bounds(&self, query: &[u8], doc: &[u8]) -> RangeInclusive<f64> {
+        let d = self.distance(query, doc);
+        d..=d
+    }
 
     /// Compute the distance between the `query` vector and each of the `docs` vectors, writing
     /// the results to `out`.
@@ -499,6 +513,18 @@ pub trait QueryVectorDistance: Send + Sync {
     ///
     /// May panic if `vector` has an unexpected shape.
     fn distance(&self, vector: &[u8]) -> f64;
+
+    /// Compute lower and upper bounds on the distance between the bound query vector and `vector`.
+    ///
+    /// Quantized codings may only be able to estimate the distance; this returns the interval the
+    /// true distance is expected to fall within. Implementations that compute an exact distance
+    /// (or cannot estimate an error term) return a degenerate `d..=d` range.
+    ///
+    /// May panic if `vector` has an unexpected shape.
+    fn distance_bounds(&self, vector: &[u8]) -> RangeInclusive<f64> {
+        let d = self.distance(vector);
+        d..=d
+    }
 
     /// Compute the distance between the bound query vector and `vectors`, writing the results to
     /// `out`.

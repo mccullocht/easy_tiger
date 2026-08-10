@@ -940,6 +940,11 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
 /// short circuits residual evaluation if the result would not fall below the maximum distance.
 /// This can provide significant savings, particularly when using memory bound indexes like a flat
 /// index or partitioned index.
+///
+/// Currently unused: `TLVQ1` queries use [`TurboPrimaryQueryDistance<1>`] instead so that the more
+/// accurate asymmetric distance bounds are always available.
+// XXX
+#[allow(dead_code)]
 pub struct TurboPrimaryQueryDistance1 {
     similarity: VectorSimilarity,
     primary_query: Vec<u8>,
@@ -952,6 +957,7 @@ pub struct TurboPrimaryQueryDistance1 {
     inst: InstructionSet,
 }
 
+#[allow(dead_code)]
 impl TurboPrimaryQueryDistance1 {
     pub fn new(
         similarity: VectorSimilarity,

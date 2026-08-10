@@ -294,7 +294,7 @@ impl F32VectorCoding {
             (F32VectorCoding::BinaryQuantized, _) => Box::new(
                 binary::I1DotProductQueryDistance::new(query.into().as_ref()),
             ),
-            (F32VectorCoding::TLVQ1, _) => Box::new(lvq::TurboPrimaryQueryDistance1::new(
+            (F32VectorCoding::TLVQ1, _) => Box::new(lvq::TurboPrimaryQueryDistance::<1>::new(
                 similarity,
                 query.into(),
                 center,

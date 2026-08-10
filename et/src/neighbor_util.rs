@@ -1,4 +1,7 @@
-use std::sync::{atomic::AtomicU64, Mutex};
+use std::{
+    ops::RangeInclusive,
+    sync::{atomic::AtomicU64, Mutex},
+};
 
 use crossbeam_utils::CachePadded;
 use easy_tiger::Neighbor;
@@ -56,5 +59,113 @@ impl TopNeighbors {
         neighbors.sort_unstable();
         neighbors.truncate(n);
         neighbors
+    }
+}
+
+/// A candidate scored with a lower and upper bound on its true distance.
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct BoundedNeighbor {
+    vertex: i64,
+    lower: f64,
+    upper: f64,
+}
+
+impl BoundedNeighbor {
+    pub fn new(vertex: i64, bounds: RangeInclusive<f64>) -> Self {
+        Self {
+            vertex,
+            lower: *bounds.start(),
+            upper: *bounds.end(),
+        }
+    }
+}
+
+impl From<BoundedNeighbor> for Neighbor {
+    /// Represent the candidate by its upper bound distance, the value it is ordered by.
+    fn from(value: BoundedNeighbor) -> Self {
+        Neighbor::new(value.vertex, value.upper)
+    }
+}
+
+struct BoundedNeighborsRep {
+    candidates: Vec<BoundedNeighbor>,
+    /// Prune once the candidate list reaches this length.
+    prune_at: usize,
+}
+
+/// Maintain the set of candidates that could still enter the top `k` given per-candidate distance
+/// bounds.
+///
+/// Candidates are ordered by their upper bound distance; any candidate whose *lower* bound is no
+/// greater than the upper bound of the `k`-th candidate is retained, since a more accurate distance
+/// computation could still promote it into the top `k`. The size of this set is the depth a
+/// reranking pass must reach to be sure it has not missed a true top-`k` neighbor.
+pub(crate) struct BoundedNeighbors {
+    rep: CachePadded<(Mutex<BoundedNeighborsRep>, usize)>,
+    // The upper bound distance of the k-th candidate. Candidates with a larger lower bound can be
+    // discarded without locking.
+    threshold: CachePadded<AtomicU64>,
+}
+
+impl BoundedNeighbors {
+    /// Create a list tracking everything competitive with the top `k`.
+    pub fn new(k: usize) -> Self {
+        Self {
+            rep: CachePadded::new((
+                Mutex::new(BoundedNeighborsRep {
+                    candidates: Vec::with_capacity(k * 2),
+                    prune_at: k * 2,
+                }),
+                k,
+            )),
+            threshold: CachePadded::new(AtomicU64::new(f64::MAX.to_bits())),
+        }
+    }
+
+    /// Add a new candidate. It may be discarded if it cannot enter the top `k`.
+    pub fn add(&self, candidate: BoundedNeighbor) {
+        use std::sync::atomic::Ordering;
+
+        // Skip non-competitive values without locking. Like `TopNeighbors` a stale threshold only
+        // costs us an unnecessary lock, never correctness.
+        if f64::from_bits(self.threshold.load(Ordering::Relaxed)) < candidate.lower {
+            return;
+        }
+
+        let mut rep = self.rep.0.lock().unwrap();
+        rep.candidates.push(candidate);
+        if rep.candidates.len() >= rep.prune_at {
+            let threshold = Self::prune(&mut rep, self.rep.1);
+            self.threshold.store(threshold.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// Drop candidates that cannot enter the top `k`, returning the new threshold.
+    fn prune(rep: &mut BoundedNeighborsRep, k: usize) -> f64 {
+        if rep.candidates.len() <= k {
+            return f64::MAX;
+        }
+
+        let (_, kth, _) = rep
+            .candidates
+            .select_nth_unstable_by(k - 1, |a, b| a.upper.total_cmp(&b.upper));
+        let threshold = kth.upper;
+        rep.candidates.retain(|c| c.lower <= threshold);
+        // Amortize pruning: never prune more often than once per doubling of the retained set.
+        rep.prune_at = (k * 2).max(rep.candidates.len() * 2);
+        threshold
+    }
+
+    /// Extract the competitive candidates ordered by upper bound distance.
+    pub fn into_neighbors(self) -> Vec<Neighbor> {
+        let (rep_mu, k) = self.rep.into_inner();
+        let mut rep = rep_mu.into_inner().unwrap();
+        Self::prune(&mut rep, k);
+        rep.candidates.sort_unstable_by(|a, b| {
+            a.upper
+                .total_cmp(&b.upper)
+                .then_with(|| a.vertex.cmp(&b.vertex))
+        });
+        rep.candidates.into_iter().map(Neighbor::from).collect()
     }
 }

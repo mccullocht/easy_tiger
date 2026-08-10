@@ -1,38 +1,17 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf};
+use std::io;
 
 use crate::{neighbor_util::TopNeighbors, recall::RecallComputer, ui::progress_bar};
 use clap::Args;
-use easy_tiger::{
-    Neighbor,
-    input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
-    kmeans::{Params, kmeans},
-};
+use easy_tiger::{Neighbor, input::VectorStore};
 use indicatif::ParallelProgressIterator;
-use memmap2::Mmap;
-use rand::SeedableRng;
 use rayon::prelude::*;
-use vectors::{F32VectorCoding, VectorSimilarity};
+
+use super::exhaustive::ExhaustiveArgs;
 
 #[derive(Args)]
 pub struct RecallArgs {
-    /// Little-endian f32 vectors as a flat file where each vector has --dimensions
-    #[arg(long)]
-    query_vectors: PathBuf,
-    /// If set, only process this many input queries.
-    #[arg(long)]
-    query_limit: Option<usize>,
-    /// If true, quantize the query before scoring.
-    ///
-    /// Some format implement f32 x quantized scoring which is more accurate but slower.
-    #[arg(long, default_value_t = false)]
-    quantize_query: bool,
-
-    /// Vector coding to test.
-    #[arg(long)]
-    format: F32VectorCoding,
-    /// Similarity function to use.
-    #[arg(long)]
-    similarity: VectorSimilarity,
+    #[command(flatten)]
+    exhaustive: ExhaustiveArgs,
 
     #[command(flatten)]
     recall: crate::recall::RecallArgs,
@@ -43,132 +22,36 @@ pub struct RecallArgs {
     /// simulates recall with full-fidelity reranking where we over retrieve to get the final set.
     #[arg(long, default_value_t = 1.0)]
     k_mult: f64,
-
-    /// Number of centers to compute and use.
-    ///
-    /// If 0, the data set will be uncentered.
-    ///
-    /// If 1, a mean vector will be computed and used as the center for all queries and docs.
-    ///
-    /// If >1, k-means will be used to compute centers. Each comparison will happen relative to
-    /// the closest center for each doc.
-    #[arg(long, default_value_t = 0)]
-    centers: usize,
-
-    /// When computing 2 or more centers, sample the data set to at most this many vectors.
-    #[arg(long, default_value_t = 100_000)]
-    center_sample_size: usize,
-
-    /// Random seed used for clustering computations.
-    /// Use a fixed value for repeatability.
-    #[arg(long, default_value_t = 0x7774_7370414E4E)]
-    seed: u64,
 }
 
 pub fn recall(
     args: RecallArgs,
     doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
 ) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
-        NonZero::new(doc_vectors.elem_stride()).unwrap(),
-    )?;
-    let query_limit = args
-        .query_limit
-        .unwrap_or(query_vectors.len())
-        .min(query_vectors.len());
-
-    let recall_computer = RecallComputer::from_args(args.recall, args.similarity)?.ok_or(
-        io::Error::new(io::ErrorKind::InvalidInput, "must provide recall args"),
-    )?;
-
-    let centers = match args.centers {
-        0 => None,
-        1 => {
-            let vectors = SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect());
-            let mean = super::compute_center(&vectors);
-            let mut centers = VecVectorStore::with_capacity(doc_vectors.elem_stride(), 1);
-            centers.push(&mean);
-            Some(centers)
-        }
-        _ => {
-            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(args.seed);
-            let sample_size = args.center_sample_size.min(doc_vectors.len());
-            let sample_vectors = if sample_size < doc_vectors.len() {
-                let indices = rand::seq::index::sample(&mut rng, doc_vectors.len(), sample_size);
-                SubsetViewVectorStore::new(doc_vectors, indices.into_vec())
-            } else {
-                SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect())
-            };
-            println!(
-                "Computing {} centers from a sample of {} vectors",
-                args.centers,
-                sample_vectors.len()
-            );
-            let centers = kmeans(
-                &sample_vectors,
-                args.centers,
-                &Params {
-                    iters: 100,
-                    epsilon: 0.0001,
-                    ..Params::default()
-                },
-                &mut rng,
-            );
-            Some(centers.unwrap_or_else(|e| e))
-        }
-    };
-
-    let coders: Vec<Box<dyn vectors::F32VectorCoder>> = match centers.as_ref() {
-        None => vec![args.format.coder(args.similarity, None)],
-        Some(cs) => cs
-            .iter()
-            .map(|c| args.format.coder(args.similarity, Some(c.to_vec())))
-            .collect(),
-    };
-
-    let query_scorers = (0..query_limit)
-        .into_par_iter()
-        .map(|i| {
-            coders
-                .iter()
-                .enumerate()
-                .map(|(ci, coder)| {
-                    let center = centers.as_ref().map(|cs| &cs[ci]);
-                    if args.quantize_query {
-                        args.format.query_distance_symmetric(
-                            args.similarity,
-                            coder.encode(&query_vectors[i]),
-                            center,
-                        )
-                    } else {
-                        args.format.query_distance_asymmetric(
-                            args.similarity,
-                            &query_vectors[i][..],
-                            center,
-                        )
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+    let exhaustive = args.exhaustive.setup(doc_vectors)?;
+    let recall_computer =
+        RecallComputer::from_args(args.recall, args.exhaustive.similarity)?.ok_or(
+            io::Error::new(io::ErrorKind::InvalidInput, "must provide recall args"),
+        )?;
 
     let k = recall_computer.k();
     let result_len = (k as f64 * args.k_mult) as usize;
-    let mut query_k = Vec::with_capacity(query_limit);
-    query_k.resize_with(query_limit, || TopNeighbors::new(result_len));
+    let mut query_k = Vec::with_capacity(exhaustive.num_queries());
+    query_k.resize_with(exhaustive.num_queries(), || TopNeighbors::new(result_len));
     let (total_scored, total_competitive) = (0..doc_vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .map(|d| {
-            let center = select_center_for_doc(&doc_vectors[d], centers.as_ref(), args.similarity);
-            let doc = coders[center].encode(&doc_vectors[d]);
+            let (center, doc) = exhaustive.encode_doc(&doc_vectors[d]);
             let mut total_scored = 0;
             let mut total_competitive = 0;
-            for (q, s) in query_scorers.iter().enumerate() {
-                let max_distance = query_k[q].max_distance();
-                if let Some(distance) = s[center].distance_with_bound(&doc, max_distance) {
-                    query_k[q].add(Neighbor::new(d as i64, distance));
+            for (q, results) in query_k.iter().enumerate() {
+                let max_distance = results.max_distance();
+                if let Some(distance) = exhaustive
+                    .scorer(q, center)
+                    .distance_with_bound(&doc, max_distance)
+                {
+                    results.add(Neighbor::new(d as i64, distance));
                     total_competitive += 1;
                 }
                 total_scored += 1;
@@ -193,27 +76,4 @@ pub fn recall(
     }
 
     Ok(())
-}
-
-fn select_center_for_doc(
-    doc: &[f32],
-    centers: Option<&VecVectorStore<f32>>,
-    similarity: VectorSimilarity,
-) -> usize {
-    if let Some(centers) = centers {
-        if centers.len() == 1 {
-            0
-        } else {
-            let dist = similarity.new_distance_function();
-            centers
-                .iter()
-                .enumerate()
-                .map(|(i, c)| (i, dist.distance_f32(doc, &c)))
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|(i, _)| i)
-                .unwrap()
-        }
-    } else {
-        0
-    }
 }

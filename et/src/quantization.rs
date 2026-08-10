@@ -1,4 +1,6 @@
+mod bound_depth;
 mod distance_loss;
+mod exhaustive;
 mod loss;
 mod recall;
 mod rotate;
@@ -11,6 +13,7 @@ use easy_tiger::input::{DerefVectorStore, SubsetViewVectorStore, VectorStore};
 use indicatif::ProgressIterator;
 use memmap2::Mmap;
 
+use bound_depth::{bound_depth, BoundDepthArgs};
 use distance_loss::{distance_loss, DistanceLossArgs};
 use loss::{loss, LossArgs};
 use recall::{recall, RecallArgs};
@@ -41,6 +44,8 @@ pub enum Command {
     DistanceLoss(DistanceLossArgs),
     /// Compute recall difference with quantization using exhaustive search.
     Recall(RecallArgs),
+    /// Estimate the reranking depth implied by quantized distance bounds.
+    BoundDepth(BoundDepthArgs),
     /// Apply an orthogonal rotation to each vector and write to an output file.
     Rotate(RotateArgs),
 }
@@ -64,6 +69,7 @@ fn cmd(cmd: Command, vectors: &(impl VectorStore<Elem = f32> + Send + Sync)) -> 
         Command::Loss(args) => loss(args, vectors),
         Command::DistanceLoss(args) => distance_loss(args, vectors),
         Command::Recall(args) => recall(args, vectors),
+        Command::BoundDepth(args) => bound_depth(args, vectors),
         Command::Rotate(args) => rotate(args, vectors),
     }
 }

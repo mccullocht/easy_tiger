@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
+use std::{fs::File, io, num::NonZero, path::PathBuf};
 
 use clap::Args;
 use easy_tiger::input::{DerefVectorStore, VectorStore};
@@ -80,44 +80,34 @@ pub fn distance_loss(
     let (count, error_sum, error_sq_sum, in_range_count) = (0..vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "scoring"))
-        .flat_map(|d| {
-            let doc_f32 = Arc::new(vectors[d].to_vec());
-            let doc = Arc::new(coder.encode(&doc_f32));
-            let doc_decoded = coder.decode(&doc);
-            let error_term = (doc_f32
+        .map(|d| {
+            let doc_f32 = &vectors[d];
+            let doc_q = coder.encode(&doc_f32);
+            query_scorers
                 .iter()
-                .zip(doc_decoded.iter())
-                .map(|(a, b)| {
-                    let diff = a - b;
-                    diff * diff
+                .map(|(q_f32, q_q)| {
+                    let expected = q_f32.as_ref().distance(bytemuck::cast_slice(&doc_f32));
+                    let actual_range = q_q.as_ref().distance_bounds(&doc_q);
+                    let actual = (*actual_range.start() + *actual_range.end()) / 2.0;
+                    let diff = expected - actual;
+                    (
+                        1,
+                        diff.abs(),
+                        diff * diff,
+                        if actual_range.contains(&expected) {
+                            1
+                        } else {
+                            0
+                        },
+                    )
                 })
-                .sum::<f32>()
-                / doc_f32.len() as f32)
-                .sqrt();
-            (0..query_limit)
-                .into_par_iter()
-                .map(move |q| (q, Arc::clone(&doc), Arc::clone(&doc_f32), error_term))
-        })
-        .map(|(q, doc, doc_f32, error_term)| {
-            let (f32_dist, qdist) = &query_scorers[q];
-            let expected = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32));
-            let actual = qdist.as_ref().distance(doc.as_ref());
-            let actual_est_error = 1.96 * error_term as f64 * 2.0;
-            let actual_range = (actual - actual_est_error)..=(actual + actual_est_error);
-            let diff = expected - actual;
-            (
-                1,
-                diff.abs(),
-                diff * diff,
-                if actual_range.contains(&expected) {
-                    1
-                } else {
-                    0
-                },
-            )
+                .reduce(
+                    |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3)
+                )
+                .unwrap()
         })
         .reduce(
-            || (0, 0.0f64, 0.0f64, 0),
+            || (0usize, 0.0f64, 0.0f64, 0usize),
             |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
         );
 

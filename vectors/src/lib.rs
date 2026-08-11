@@ -11,7 +11,7 @@ pub mod rotate;
 
 use serde::{Deserialize, Serialize};
 
-pub use float32::{l2_norm, l2_normalize, CosineDistance, DotProductDistance, EuclideanDistance};
+pub use float32::{CosineDistance, DotProductDistance, EuclideanDistance, l2_norm, l2_normalize};
 
 /// Functions used for to compute the distance between two vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -521,6 +521,8 @@ pub trait QueryVectorDistance: Send + Sync {
     /// (or cannot estimate an error term) return a degenerate `d..=d` range.
     ///
     /// May panic if `vector` has an unexpected shape.
+    // XXX consider providing (estimated distance, bound value) without z-score adjustment. This
+    // would allow callers to adjust up and down.
     fn distance_bounds(&self, vector: &[u8]) -> RangeInclusive<f64> {
         let d = self.distance(vector);
         d..=d
@@ -569,9 +571,8 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
 #[cfg(test)]
 mod test {
     use crate::{
-        l2_normalize,
+        F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize,
         lvq::{TurboPrimaryCoder, TurboResidualCoder},
-        F32VectorCoder, F32VectorCoding, VectorSimilarity,
     };
 
     struct TestVector {
@@ -660,9 +661,9 @@ mod test {
         assert_float_near!(f32_dist, query_dist, threshold, index);
     }
 
-    use rand::{rngs::OsRng, Rng, SeedableRng, TryRngCore};
-    use F32VectorCoding::{TLVQ1x8, TLVQ2x8, TLVQ4x8, TLVQ8x8, F16, TLVQ1, TLVQ2, TLVQ4, TLVQ8};
+    use F32VectorCoding::{F16, TLVQ1, TLVQ1x8, TLVQ2, TLVQ2x8, TLVQ4, TLVQ4x8, TLVQ8, TLVQ8x8};
     use VectorSimilarity::{Cosine, Dot, Euclidean};
+    use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
 
     macro_rules! distance_test {
         ($name:ident, $sim:path, $coder:path, $epsilon:literal) => {

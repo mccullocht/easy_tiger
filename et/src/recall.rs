@@ -139,18 +139,45 @@ impl RecallComputer {
     ///
     /// *Panics* if `query_index` is out of bounds in the golden file.
     pub fn compute_recall(&self, query_index: usize, query_results: &[Neighbor]) -> f64 {
-        let expected = self.neighbors[query_index]
-            .as_chunks::<{ Self::NEIGHBOR_LEN }>()
-            .0
-            .iter()
-            .take(self.k)
-            .map(|n| Neighbor::from(*n));
+        let expected = self.expected(query_index);
         let actual = query_results.iter().copied();
         match self.metric {
             RecallMetric::Simple => self.simple_recall(expected, actual),
             RecallMetric::Ndcg => self.ndcg_recall(expected, actual),
             RecallMetric::Depth => Self::required_depth(expected, actual),
         }
+    }
+
+    /// The golden top-`k` neighbors for `query_index`.
+    ///
+    /// *Panics* if `query_index` is out of bounds in the golden file.
+    fn expected(&self, query_index: usize) -> impl Iterator<Item = Neighbor> + Clone + '_ {
+        self.neighbors[query_index]
+            .as_chunks::<{ Self::NEIGHBOR_LEN }>()
+            .0
+            .iter()
+            .take(self.k)
+            .map(|n| Neighbor::from(*n))
+    }
+
+    /// Depth into `query_results` required to recover every golden top-`k` neighbor, or `None` if
+    /// any of them is absent.
+    ///
+    /// Unlike [`RecallMetric::Depth`] a miss is reported as `None` rather than the length of
+    /// `query_results`. Callers whose result set size is itself the variable under test cannot use
+    /// that substitution: it ties the penalty for a miss to the quantity being measured, so misses
+    /// saturate to whatever ceiling the caller happened to retain.
+    pub fn realized_depth(&self, query_index: usize, query_results: &[Neighbor]) -> Option<usize> {
+        let mut expected = self
+            .expected(query_index)
+            .map(|n| n.vertex())
+            .collect::<HashSet<_>>();
+        for (i, n) in query_results.iter().enumerate() {
+            if expected.remove(&n.vertex()) && expected.is_empty() {
+                return Some(i + 1);
+            }
+        }
+        None
     }
 
     /// Compute the depth into `actual` required to recover every vertex in `expected`.

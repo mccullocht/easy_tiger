@@ -3,14 +3,45 @@ use std::ops::Range;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
+/// Random shuffle of the vector: forward (encode) and backward (decode).
+///
+/// This is necessary when vector size is not a power of two since we will only shuffle within
+/// power of two sized blocks.
+struct Shuffle {
+    forward: Vec<u32>,
+    backward: Vec<u32>,
+}
+
+impl Shuffle {
+    fn new(dims: usize, rng: &mut impl Rng) -> Self {
+        let mut forward = (0..dims as u32).collect::<Vec<u32>>();
+        forward.shuffle(rng);
+        let mut backward = vec![0; dims];
+        for (i, &j) in forward.iter().enumerate() {
+            backward[j as usize] = i as u32;
+        }
+        Self { forward, backward }
+    }
+
+    fn forward(&self, unpermuted: &[f32], permuted: &mut [f32]) {
+        for (&i, o) in self.forward.iter().zip(permuted.iter_mut()) {
+            *o = unpermuted[i as usize];
+        }
+    }
+
+    fn backward(&self, permuted: &[f32], unpermuted: &mut [f32]) {
+        for (&i, o) in self.backward.iter().zip(unpermuted.iter_mut()) {
+            *o = permuted[i as usize];
+        }
+    }
+}
+
 /// Implement orthogonal rotation of a vector for quantization to preserve distances and inner
 /// products while changing the distribution of the vector's components to minimize quantization
 /// error.
-///
-/// Implement fast Hadamard transform, permutation, and sign flip
 pub struct Rotator {
-    forward_permutation: Vec<usize>,
-    backward_permutation: Vec<usize>,
+    /// Vector dimensions are shuffled in the event that there are multiple blocks.
+    shuffle: Option<Shuffle>,
     sign_flips: Vec<f32>,
     blocks: Vec<Range<usize>>,
 }
@@ -24,14 +55,14 @@ impl Rotator {
     /// decomposition of `dims`.
     pub fn new(dims: usize, seed: u64) -> Self {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
-        let mut forward_permutation = (0..dims).collect::<Vec<usize>>();
-        forward_permutation.shuffle(&mut rng);
-        let mut backward_permutation = vec![0; dims];
-        for (i, &j) in forward_permutation.iter().enumerate() {
-            backward_permutation[j] = i;
-        }
+        let shuffle = if !dims.is_power_of_two() {
+            Some(Shuffle::new(dims, &mut rng))
+        } else {
+            None
+        };
+
         let sign_flips = (0..dims)
-            .map(|_| if rng.random_bool(0.5) { 1.0 } else { -1.0 })
+            .map(|_| if rng.random_bool(0.5) { 0.0 } else { -0.0 })
             .collect::<Vec<f32>>();
 
         let mut blocks: Vec<Range<usize>> = vec![];
@@ -44,8 +75,7 @@ impl Rotator {
         }
 
         Self {
-            forward_permutation,
-            backward_permutation,
+            shuffle,
             sign_flips,
             blocks,
         }
@@ -55,18 +85,17 @@ impl Rotator {
     ///
     /// This applies sign flips, then permutation, then block diagonal Hadamard transforms.
     pub fn forward(&self, v: &[f32]) -> Vec<f32> {
-        let signed = self
-            .sign_flips
-            .iter()
-            .zip(v.iter())
-            .map(|(s, &x)| s * x)
-            .collect::<Vec<f32>>();
-        let mut rotated = self
-            .forward_permutation
-            .iter()
-            .map(|&i| signed[i])
-            .collect::<Vec<f32>>();
+        let mut rotated = if let Some(p) = self.shuffle.as_ref() {
+            let mut r = vec![0.0f32; v.len()];
+            p.forward(v, &mut r);
+            r
+        } else {
+            v.to_vec()
+        };
 
+        for (&s, v) in self.sign_flips.iter().zip(rotated.iter_mut()) {
+            *v = f32::from_bits(v.to_bits() ^ s.to_bits());
+        }
         for block in self.blocks.iter() {
             Self::walsh_hadamard_transform(&mut rotated[block.clone()]);
         }
@@ -82,15 +111,17 @@ impl Rotator {
         for block in self.blocks.iter() {
             Self::walsh_hadamard_transform(&mut tmp[block.clone()]);
         }
-
-        let mut b = self
-            .backward_permutation
-            .iter()
-            .map(|&i| tmp[i])
-            .collect::<Vec<f32>>();
-        for (i, v) in b.iter_mut().enumerate() {
-            *v *= self.sign_flips[i];
+        for (&s, v) in self.sign_flips.iter().zip(tmp.iter_mut()) {
+            *v = f32::from_bits(v.to_bits() ^ s.to_bits());
         }
+
+        let b = if let Some(p) = self.shuffle.as_ref() {
+            let mut r = tmp.clone();
+            p.backward(&tmp, &mut r);
+            r
+        } else {
+            tmp
+        };
         b
     }
 
@@ -147,7 +178,11 @@ mod tests {
         let v = make_vec(128, 1);
         let rotated = rotator.forward(&v);
         let recovered = rotator.backward(&rotated);
-        assert!(v.iter().zip(&recovered).all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5)));
+        assert!(
+            v.iter()
+                .zip(&recovered)
+                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5))
+        );
     }
 
     #[test]
@@ -157,7 +192,11 @@ mod tests {
         let v = make_vec(192, 2);
         let rotated = rotator.forward(&v);
         let recovered = rotator.backward(&rotated);
-        assert!(v.iter().zip(&recovered).all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5)));
+        assert!(
+            v.iter()
+                .zip(&recovered)
+                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5))
+        );
     }
 
     #[test]
@@ -167,7 +206,11 @@ mod tests {
         let v = make_vec(100, 3);
         let rotated = rotator.forward(&v);
         let recovered = rotator.backward(&rotated);
-        assert!(v.iter().zip(&recovered).all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5)));
+        assert!(
+            v.iter()
+                .zip(&recovered)
+                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5))
+        );
     }
 
     #[test]
@@ -229,6 +272,11 @@ mod tests {
         let original = v.clone();
         Rotator::walsh_hadamard_transform(&mut v);
         Rotator::walsh_hadamard_transform(&mut v);
-        assert!(original.iter().zip(&v).all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-6)));
+        assert!(
+            original
+                .iter()
+                .zip(&v)
+                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-6))
+        );
     }
 }

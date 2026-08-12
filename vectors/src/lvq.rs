@@ -264,6 +264,26 @@ impl DistanceCorrectionTerms {
     }
 }
 
+/// Correct an estimated dot product for the part of each side's quantization residual that lies
+/// parallel to that side's own vector.
+///
+/// Writing `r` for the residual of `v` and `c = (v . r) / |v|^2`, the residual splits into `c*v`
+/// plus a part perpendicular to `v`. Substituting that into `q^ . d^ = (q - r_q) . (d - r_d)` and
+/// dropping the second order `r_q . r_d` term gives
+///
+/// ```text
+/// q^ . d^ ~= (q . d)(1 - c_q - c_d) - (q . r_d_perp + d . r_q_perp)
+/// ```
+///
+/// so dividing the estimate by `1 - c_q - c_d` removes a bias that would otherwise have to be
+/// absorbed by the error interval. Both terms are small, so `1 / (1 - c)` is applied as `1 + c`; the
+/// dropped `c^2` is far below the precision of the estimate it corrects. What remains is the
+/// perpendicular part, which really is noise -- see [`ErrorBoundTerms::error_bound`].
+#[inline(always)]
+fn correct_dot_parallel(dot: f32, query_parallel: f32, doc_parallel: f32) -> f32 {
+    dot * (1.0 + query_parallel + doc_parallel)
+}
+
 /// Terms needed to compute the statistical bound on an estimated distance from the perspective of
 /// one side of the comparison (usually the query).
 #[derive(Debug, Clone)]
@@ -284,12 +304,14 @@ impl ErrorBoundTerms {
         dim: usize,
         similarity: VectorSimilarity,
     ) -> Self {
+        // The residual that remains after the parallel correction is perpendicular to the vector,
+        // so it is isotropic over the dim-1 dimensional space orthogonal to it.
         let mult = (ESTIMATED_DISTANCE_Z_SCORE
             * match similarity {
                 VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
                 VectorSimilarity::Euclidean => 2.0,
             })
-            / (dim as f32).sqrt();
+            / (dim.saturating_sub(1).max(1) as f32).sqrt();
         Self {
             l2_norm,
             residual_error_term,
@@ -304,6 +326,11 @@ impl ErrorBoundTerms {
     /// quadrature rather than additively -- summing them overstates the error by up to a factor of
     /// sqrt(2), which is worst when the two sides are quantized at the same bit rate and their
     /// terms are of equal size.
+    ///
+    /// Both residual terms are perpendicular to their own vector, the parallel part having already
+    /// been corrected out of the estimate by [`correct_dot_parallel`]. Using the full vector
+    /// magnitudes rather than their perpendicular components is a small overestimate, and avoids
+    /// making the interval depend on the estimate.
     fn error_bound<const B: usize>(&self, vector: &TurboPrimaryVector<B>) -> f32 {
         let ours = self.residual_error_term * vector.l2_norm;
         let theirs = vector.residual_error_term * self.l2_norm;
@@ -322,9 +349,24 @@ struct PrimaryVectorHeader {
     /// L2 norm (magnitude) of the vector.
     /// This is used to compute euclidean distance and the statistical bound on estimated distance.
     l2_norm: f32,
-    /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
-    /// This term can be used to compute a statistical bound on the estimated distance.
+    /// The L2 norm of the part of the residual vector `r = v - dequantize(quantize(v))` that is
+    /// perpendicular to `v`.
+    ///
+    /// This term can be used to compute a statistical bound on the estimated distance. Only the
+    /// perpendicular part appears here because the parallel part is corrected for directly; see
+    /// [`Self::parallel_error_term`].
     residual_error_term: f32,
+    /// `(v . r) / |v|^2`: the fraction of `v` that quantization lost along `v`'s own direction.
+    ///
+    /// The residual splits into a part parallel to `v` and a part perpendicular to it. The parallel
+    /// part scales every dot product involving `v` by a known constant rather than perturbing it
+    /// randomly, so it is a bias that can be divided out instead of a source of error that has to
+    /// be covered by a wider interval. See [`correct_dot_parallel`].
+    ///
+    /// Interval optimization deliberately minimizes this term (see [`LAMBDA`]), so it is small, and
+    /// it is stored as an f16 deviation from zero rather than as the scale factor `1 / (1 - c)` --
+    /// f16 has no precision to spare next to 1.0, but plenty at the magnitudes this takes.
+    parallel_error_term: f32,
     /// Lower interval bound used for quantization, no smaller than the minimum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     lower: f32,
@@ -342,26 +384,76 @@ struct PrimaryVectorHeader {
 impl PrimaryVectorHeader {
     /// Length of the encoded header in bytes.
     ///
-    /// Stores 5 values -- two 16-bit values and 3 32-bit values.
+    /// Stores 6 values -- four 16-bit values and 2 32-bit values.
     /// * l2_norm or center_dot (f32)
-    /// * residual_error_term (f32)
+    /// * residual_error_term, relative to l2_norm (f16)
+    /// * parallel_error_term (f16)
     /// * lower (f16)
     /// * upper (f16)
     /// * component_sum (u32)
     ///
-    /// The first two terms are stored as f32 as they have a greater effect on precision.
-    const LEN: usize = std::mem::size_of::<f32>() * 2
-        + std::mem::size_of::<f16>() * 2
-        + std::mem::size_of::<u32>();
+    /// `l2_norm`/`center_dot` is stored as f32 because it enters the distance directly, so its
+    /// absolute error lands in the result unattenuated. The two error terms only size and center a
+    /// correction whose own magnitude is small, so f16's relative precision is sufficient. Both are
+    /// stored dimensionless -- as a ratio to the vector magnitude -- so that vectors of any scale
+    /// land in the same part of f16's range.
+    const LEN: usize =
+        std::mem::size_of::<f32>() + std::mem::size_of::<f16>() * 4 + std::mem::size_of::<u32>();
 
     fn new(stats: VectorStats, center_dot: f32) -> Self {
         Self {
             l2_norm: stats.l2_norm_sq.sqrt(),
             residual_error_term: 0.0,
+            parallel_error_term: 0.0,
             center_dot,
             lower: stats.min,
             upper: stats.max,
             component_sum: 0,
+        }
+    }
+
+    /// Round the quantization interval to the precision it is stored at.
+    ///
+    /// `lower` and `upper` are stored as f16, so a scorer dequantizes against the rounded interval.
+    /// Quantizing against the unrounded interval would leave the encoder and the scorer working
+    /// from slightly different dequantized values, which shows up in the error terms: they would
+    /// describe a residual that never actually occurs. Rounding before quantizing keeps the two
+    /// consistent and picks codes against the interval that will really be used.
+    fn round_interval(&mut self) {
+        self.lower = f16::from_f32(self.lower).to_f32();
+        self.upper = f16::from_f32(self.upper).to_f32();
+    }
+
+    /// Derive the two error terms from the quantization `stats`.
+    ///
+    /// Splits the residual into the part parallel to the vector, stored as a correctable scale
+    /// factor, and the perpendicular remainder, whose magnitude sizes the error interval.
+    fn set_error_terms(&mut self, stats: &QuantizeStats) {
+        let l2_norm_sq = self.l2_norm * self.l2_norm;
+        // Also catches NaN: a zero-magnitude vector has no direction to decompose against.
+        if l2_norm_sq <= 0.0 || l2_norm_sq.is_nan() {
+            self.residual_error_term = stats.residual_error_sq.max(0.0).sqrt();
+            self.parallel_error_term = 0.0;
+            return;
+        }
+        self.parallel_error_term = stats.residual_dot / l2_norm_sq;
+        // |r_perp|^2 = |r|^2 - (v . r)^2 / |v|^2, clamped against accumulated rounding error.
+        let perpendicular_sq =
+            stats.residual_error_sq - (stats.residual_dot * stats.residual_dot / l2_norm_sq);
+        self.residual_error_term = perpendicular_sq.max(0.0).sqrt();
+    }
+
+    /// Scale used to store `residual_error_term` dimensionless.
+    ///
+    /// This must agree between [`Self::serialize`] and [`Self::deserialize`]. For angular
+    /// similarity `l2_norm` is not stored at all -- the slot holds `center_dot` and deserialize
+    /// reports a norm of 1.0 -- so there is nothing to divide by and the term is stored as is.
+    #[inline]
+    fn residual_error_scale(l2_norm: f32, similarity: VectorSimilarity) -> f32 {
+        if similarity.angular() || l2_norm <= 0.0 || l2_norm.is_nan() {
+            1.0
+        } else {
+            l2_norm
         }
     }
 
@@ -377,8 +469,12 @@ impl PrimaryVectorHeader {
         } else {
             self.l2_norm
         };
+        let residual_error_scale = Self::residual_error_scale(self.l2_norm, similarity);
         header_bytes[0..4].copy_from_slice(&first.to_le_bytes());
-        header_bytes[4..8].copy_from_slice(&self.residual_error_term.to_le_bytes());
+        header_bytes[4..6].copy_from_slice(
+            &f16::from_f32(self.residual_error_term / residual_error_scale).to_le_bytes(),
+        );
+        header_bytes[6..8].copy_from_slice(&f16::from_f32(self.parallel_error_term).to_le_bytes());
         header_bytes[8..10].copy_from_slice(&f16::from_f32(self.lower).to_le_bytes());
         header_bytes[10..12].copy_from_slice(&f16::from_f32(self.upper).to_le_bytes());
         header_bytes[12..16].copy_from_slice(&self.component_sum.to_le_bytes());
@@ -396,7 +492,11 @@ impl PrimaryVectorHeader {
         Some((
             Self {
                 l2_norm,
-                residual_error_term: f32::from_le_bytes(header_bytes[4..8].try_into().unwrap()),
+                residual_error_term: f16::from_le_bytes(header_bytes[4..6].try_into().unwrap())
+                    .to_f32()
+                    * Self::residual_error_scale(l2_norm, similarity),
+                parallel_error_term: f16::from_le_bytes(header_bytes[6..8].try_into().unwrap())
+                    .to_f32(),
                 lower: f16::from_le_bytes(header_bytes[8..10].try_into().unwrap()).to_f32(),
                 upper: f16::from_le_bytes(header_bytes[10..12].try_into().unwrap()).to_f32(),
                 center_dot,
@@ -471,6 +571,32 @@ impl VectorDecodeTerms {
             delta: header.magnitude / RESIDUAL_MAX,
             component_sum: header.component_sum,
         }
+    }
+}
+
+/// Statistics accumulated while quantizing a vector.
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub(super) struct QuantizeStats {
+    /// Sum of all the quantized primary components.
+    pub component_sum: u32,
+    /// Sum of all the quantized residual components. Zero when no residual is written.
+    pub residual_component_sum: u32,
+    /// Squared l2 norm of the residual vector `r = v - dequantize(quantize(v))`.
+    pub residual_error_sq: f32,
+    /// `v . r`, the projection of the residual onto the vector itself.
+    ///
+    /// Divided by `|v|^2` this is the fraction of `v` lost to quantization along `v`'s own
+    /// direction. That part of the residual is a correctable scale error on any dot product
+    /// involving `v` rather than noise; see [`PrimaryVectorHeader::parallel_error_term`].
+    pub residual_dot: f32,
+}
+
+impl AddAssign for QuantizeStats {
+    fn add_assign(&mut self, rhs: Self) {
+        self.component_sum += rhs.component_sum;
+        self.residual_component_sum += rhs.residual_component_sum;
+        self.residual_error_sq += rhs.residual_error_sq;
+        self.residual_dot += rhs.residual_dot;
     }
 }
 
@@ -569,6 +695,7 @@ struct TurboPrimaryVector<'a, const B: usize> {
     rep: EncodedVector<'a>,
     l2_norm: f32,
     residual_error_term: f32,
+    parallel_error_term: f32,
     center_dot: f32,
 }
 
@@ -582,6 +709,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             },
             l2_norm: header.l2_norm,
             residual_error_term: header.residual_error_term,
+            parallel_error_term: header.parallel_error_term,
             center_dot: header.center_dot,
         })
     }
@@ -599,12 +727,14 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
                 rep: headv,
                 l2_norm: self.l2_norm,
                 residual_error_term: self.residual_error_term,
+                parallel_error_term: self.parallel_error_term,
                 center_dot: self.center_dot,
             },
             Self {
                 rep: tailv,
                 l2_norm: self.l2_norm,
                 residual_error_term: self.residual_error_term,
+                parallel_error_term: self.parallel_error_term,
                 center_dot: self.center_dot,
             },
         )
@@ -677,10 +807,10 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         let stats = VectorStats::from(vector);
         let mut header = PrimaryVectorHeader::new(stats, center_dot);
         (header.lower, header.upper) = optimize_interval(vector, &stats, B);
+        header.round_interval();
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
-        let residual_error_sq;
-        (header.component_sum, residual_error_sq) = match inst {
+        let stats = match inst {
             InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
             InstructionSet::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
@@ -689,7 +819,8 @@ impl<const B: usize> TurboPrimaryCoder<B> {
                 x86_64::primary_quantize_and_pack_avx512::<B>(vector, terms, out)
             },
         };
-        header.residual_error_term = residual_error_sq.sqrt();
+        header.component_sum = stats.component_sum;
+        header.set_error_terms(&stats);
 
         header
     }
@@ -796,7 +927,11 @@ impl<const B: usize> TurboPrimaryDistance<B> {
                 x86_64::dot_u8_avx512::<B>(query.rep.data, doc.rep.data)
             },
         };
-        let dot = correct_dot_uint(uint_dot, query.dim(), &query.rep.terms, &doc.rep.terms);
+        let dot = correct_dot_parallel(
+            correct_dot_uint(uint_dot, query.dim(), &query.rep.terms, &doc.rep.terms),
+            query.parallel_error_term,
+            doc.parallel_error_term,
+        );
         let distance: f64 = correction_terms
             .distance_from_dot_unnormalized(dot, doc.l2_norm, doc.center_dot)
             .into();
@@ -861,6 +996,8 @@ pub struct TurboPrimaryQueryDistance<const B: usize> {
     terms: VectorDecodeTerms,
     correction_terms: DistanceCorrectionTerms,
     error_terms: ErrorBoundTerms,
+    /// The query's own parallel error term; see [`correct_dot_parallel`].
+    parallel_error_term: f32,
 
     inst: InstructionSet,
 }
@@ -889,6 +1026,7 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
             terms,
             correction_terms,
             error_terms,
+            parallel_error_term: header.parallel_error_term,
             inst,
         }
     }
@@ -915,7 +1053,11 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
                 x86_64::primary_query8_dot_unnormalized_avx512::<B>(&self.query, &vector)
             },
         };
-        let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);
+        let dot = correct_dot_parallel(
+            correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms),
+            self.parallel_error_term,
+            vector.parallel_error_term,
+        );
         let distance: f64 = self
             .correction_terms
             .distance_from_dot_unnormalized(dot, vector.l2_norm, vector.center_dot)
@@ -965,6 +1107,8 @@ pub struct TurboPrimaryQueryDistance1 {
     residual_terms: VectorDecodeTerms,
     correction_terms: DistanceCorrectionTerms,
     error_terms: ErrorBoundTerms,
+    /// The query's own parallel error term; see [`correct_dot_parallel`].
+    parallel_error_term: f32,
 
     inst: InstructionSet,
 }
@@ -988,12 +1132,17 @@ impl TurboPrimaryQueryDistance1 {
             residual_terms: VectorDecodeTerms::from_residual(residual_header),
             correction_terms,
             error_terms: ErrorBoundTerms::from_header(&primary_header, query.len(), similarity),
+            parallel_error_term: primary_header.parallel_error_term,
             inst,
         }
     }
 
     /// Compute the unnormalized dot product and distance using only the primary (one-bit) portion
     /// of `vector`.
+    ///
+    /// The returned dot product is *not* corrected for parallel error -- the caller refines it with
+    /// the residual, which subsumes that correction -- but the returned distance is, since it is
+    /// derived from the primary representation alone.
     #[inline(always)]
     fn distance_primary(&self, vector: &TurboPrimaryVector<'_, 1>) -> (f32, f32) {
         let uint8_dot_primary = match self.inst {
@@ -1014,7 +1163,11 @@ impl TurboPrimaryQueryDistance1 {
         (
             dot_primary,
             self.correction_terms.distance_from_dot_unnormalized(
-                dot_primary,
+                correct_dot_parallel(
+                    dot_primary,
+                    self.parallel_error_term,
+                    vector.parallel_error_term,
+                ),
                 vector.l2_norm,
                 vector.center_dot,
             ),
@@ -1267,6 +1420,7 @@ impl<const B: usize> TurboResidualCoder<B> {
         .max_by(f32::total_cmp)
         .expect("3 values input");
         (primary_header.lower, primary_header.upper) = interval;
+        primary_header.round_interval();
         let mut residual_header = ResidualVectorHeader {
             magnitude: residual_magnitude,
             component_sum: 0,
@@ -1274,12 +1428,7 @@ impl<const B: usize> TurboResidualCoder<B> {
 
         let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
         let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
-        let residual_error_sq;
-        (
-            primary_header.component_sum,
-            residual_header.component_sum,
-            residual_error_sq,
-        ) = match inst {
+        let stats = match inst {
             InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,
@@ -1306,7 +1455,12 @@ impl<const B: usize> TurboResidualCoder<B> {
                 )
             },
         };
-        primary_header.residual_error_term = residual_error_sq.sqrt();
+        primary_header.component_sum = stats.component_sum;
+        residual_header.component_sum = stats.residual_component_sum;
+        // NB: these terms describe the primary vector alone -- the residual vector corrects most of
+        // what they measure -- so they are only meaningful to a scorer working from the primary
+        // representation without the residual.
+        primary_header.set_error_terms(&stats);
 
         (primary_header, residual_header)
     }

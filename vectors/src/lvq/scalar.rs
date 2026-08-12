@@ -3,8 +3,8 @@
 #![allow(dead_code)]
 
 use super::{
-    LAMBDA, MINIMUM_MSE_GRID, RESIDUAL_BITS, ResidualDotComponents, TurboPrimaryVector,
-    TurboResidualVector, VectorEncodeTerms, VectorStats,
+    LAMBDA, MINIMUM_MSE_GRID, QuantizeStats, RESIDUAL_BITS, ResidualDotComponents,
+    TurboPrimaryVector, TurboResidualVector, VectorEncodeTerms, VectorStats,
     packing::{TurboPacker, TurboUnpacker},
 };
 
@@ -108,20 +108,22 @@ pub fn primary_quantize_and_pack<const B: usize>(
     vector: &[f32],
     terms: VectorEncodeTerms,
     out: &mut [u8],
-) -> (u32, f32) {
+) -> QuantizeStats {
     let mut packer = TurboPacker::<B>::new(out);
-    let (component_sum, residual_error_sq) = vector
+    vector
         .iter()
         .map(|&v| {
             let q = ((v.clamp(terms.lower, terms.upper) - terms.lower) * terms.delta_inv).round();
             let r = v - q.mul_add(terms.delta, terms.lower);
             packer.push(q as u8);
-            (q as u32, r)
+            (q as u32, v, r)
         })
-        .fold((0, 0.0), |(sum, rsum), (q, r)| {
-            (sum + q, r.mul_add(r, rsum))
-        });
-    (component_sum, residual_error_sq)
+        .fold(QuantizeStats::default(), |mut stats, (q, v, r)| {
+            stats.component_sum += q;
+            stats.residual_error_sq = r.mul_add(r, stats.residual_error_sq);
+            stats.residual_dot = v.mul_add(r, stats.residual_dot);
+            stats
+        })
 }
 
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
@@ -136,10 +138,10 @@ pub fn residual_quantize_and_pack<const B: usize>(
     residual_terms: VectorEncodeTerms,
     primary: &mut [u8],
     residual: &mut [u8],
-) -> (u32, u32, f32) {
+) -> QuantizeStats {
     let mut primary_packer = TurboPacker::<B>::new(primary);
     let mut residual_packer = TurboPacker::<RESIDUAL_BITS>::new(residual);
-    let (primary_sum, residual_sum, residual_error_sq) = vector
+    vector
         .iter()
         .map(|&v| {
             let p = ((v.clamp(primary_terms.lower, primary_terms.upper) - primary_terms.lower)
@@ -153,12 +155,15 @@ pub fn residual_quantize_and_pack<const B: usize>(
                 * residual_terms.delta_inv)
                 .round() as u8;
             residual_packer.push(r);
-            (u32::from(p), u32::from(r), res)
+            (u32::from(p), u32::from(r), v, res)
         })
-        .fold((0, 0, 0.0f32), |(psum, rsum, rerr), (p, r, e)| {
-            (psum + p, rsum + r, e.mul_add(e, rerr))
-        });
-    (primary_sum, residual_sum, residual_error_sq)
+        .fold(QuantizeStats::default(), |mut stats, (p, r, v, e)| {
+            stats.component_sum += p;
+            stats.residual_component_sum += r;
+            stats.residual_error_sq = e.mul_add(e, stats.residual_error_sq);
+            stats.residual_dot = v.mul_add(e, stats.residual_dot);
+            stats
+        })
 }
 
 pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {

@@ -1,4 +1,6 @@
 use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
+use half::f16;
+use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
 
 use crate::lvq::{
     PrimaryVectorHeader, ResidualVectorHeader, TurboPrimaryCoder, TurboResidualCoder, VectorStats,
@@ -19,6 +21,11 @@ impl AbsDiffEq for PrimaryVectorHeader {
             && abs_diff_eq!(
                 self.residual_error_term,
                 other.residual_error_term,
+                epsilon = epsilon
+            )
+            && abs_diff_eq!(
+                self.parallel_error_term,
+                other.parallel_error_term,
                 epsilon = epsilon
             )
             && abs_diff_eq!(self.component_sum, other.component_sum)
@@ -92,7 +99,9 @@ macro_rules! tlvq_coder_test {
             };
             let encoded = coder.encode(&TEST_VECTOR);
             assert_abs_diff_eq!(
-                PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean).unwrap().0,
+                PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean)
+                    .unwrap()
+                    .0,
                 $primary_header
             );
             let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -130,7 +139,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 1.163901,
+        residual_error_term: 1.1627843,
+        parallel_error_term: 0.021774292,
         center_dot: 0.0,
         lower: -0.49560547,
         upper: 0.7055664,
@@ -165,7 +175,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.8178981,
+        residual_error_term: 0.81660825,
+        parallel_error_term: 0.028503418,
         center_dot: 0.0,
         lower: -0.60498047,
         upper: 0.23901367,
@@ -200,7 +211,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.6714753,
+        residual_error_term: 0.67131084,
+        parallel_error_term: 0.0073165894,
         center_dot: 0.0,
         lower: -0.67089844,
         upper: 0.8408203,
@@ -235,7 +247,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.5325365,
+        residual_error_term: 0.5321589,
+        parallel_error_term: 0.011878967,
         center_dot: 0.0,
         lower: -0.5571289,
         upper: 0.5683594,
@@ -270,7 +283,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.11848368,
+        residual_error_term: 0.118480206,
+        parallel_error_term: 0.00030064583,
         center_dot: 0.0,
         lower: -0.9345703,
         upper: 0.91308594,
@@ -305,7 +319,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.09595752,
+        residual_error_term: 0.09596851,
+        parallel_error_term: 0.00025558472,
         center_dot: 0.0,
         lower: -0.69091797,
         upper: 0.56347656,
@@ -340,11 +355,12 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.007704542,
+        residual_error_term: 0.0075108674,
+        parallel_error_term: -0.00057935715,
         center_dot: 0.0,
         lower: -0.9199219,
         upper: 0.9116211,
-        component_sum: 2876,
+        component_sum: 2875,
     },
     [
         -0.9199219,
@@ -356,7 +372,7 @@ tlvq_coder_test!(
         0.64586776,
         -0.0005591512,
         -0.20166975,
-        -0.4243279,
+        -0.43151042,
         0.73205805,
         -0.70444626,
         -0.27349496,
@@ -375,7 +391,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.00552745,
+        residual_error_term: 0.005533458,
+        parallel_error_term: 8.994341e-5,
         center_dot: 0.0,
         lower: -0.6953125,
         upper: 0.57470703,
@@ -410,7 +427,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 1.163901,
+        residual_error_term: 1.1627843,
+        parallel_error_term: 0.021774292,
         center_dot: 0.0,
         lower: -0.49560547,
         upper: 0.7055664,
@@ -449,7 +467,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.8178981,
+        residual_error_term: 0.81660825,
+        parallel_error_term: 0.028503418,
         center_dot: 0.0,
         lower: -0.60498047,
         upper: 0.23901367,
@@ -488,7 +507,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.6714753,
+        residual_error_term: 0.67131084,
+        parallel_error_term: 0.0073165894,
         center_dot: 0.0,
         lower: -0.67089844,
         upper: 0.8408203,
@@ -501,7 +521,7 @@ tlvq_coder_test!(
     [
         -0.9209126,
         -0.06125498,
-        0.6580036,
+        0.65998,
         0.669862,
         0.5730934,
         0.4307929,
@@ -527,7 +547,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.5325365,
+        residual_error_term: 0.5321589,
+        parallel_error_term: 0.011878967,
         center_dot: 0.0,
         lower: -0.5571289,
         upper: 0.5683594,
@@ -535,7 +556,7 @@ tlvq_coder_test!(
     },
     ResidualVectorHeader {
         magnitude: 0.37513867,
-        component_sum: 2453,
+        component_sum: 2451,
     },
     [
         -0.921412,
@@ -544,13 +565,13 @@ tlvq_coder_test!(
         0.67059726,
         0.57307553,
         0.43066216,
-        0.6469206,
+        0.6454495,
         0.0016366243,
         -0.19963597,
         -0.42732865,
         0.72952104,
         -0.70354,
-        -0.27223182,
+        -0.27370292,
         0.5389795,
         -0.73067975,
         0.43605912,
@@ -566,15 +587,16 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.11848368,
+        residual_error_term: 0.118480206,
+        parallel_error_term: 0.00030064583,
         center_dot: 0.0,
         lower: -0.9345703,
         upper: 0.91308594,
         component_sum: 170,
     },
     ResidualVectorHeader {
-        magnitude: 0.123191215,
-        component_sum: 2407,
+        magnitude: 0.12319123,
+        component_sum: 2405,
     },
     [
         -0.9208019,
@@ -582,7 +604,7 @@ tlvq_coder_test!(
         0.65876055,
         0.66987187,
         0.5727824,
-        0.43124738,
+        0.4307643,
         0.6461998,
         0.00084519386,
         -0.20009731,
@@ -595,7 +617,7 @@ tlvq_coder_test!(
         0.43607843,
         0.91284436,
         0.694027,
-        0.20228493
+        0.20180184
     ]
 );
 
@@ -605,7 +627,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.09595752,
+        residual_error_term: 0.09596851,
+        parallel_error_term: 0.00025558472,
         center_dot: 0.0,
         lower: -0.69091797,
         upper: 0.56347656,
@@ -620,7 +643,7 @@ tlvq_coder_test!(
         -0.060892347,
         0.658903,
         0.6698685,
-        0.5728339,
+        0.5731618,
         0.430899,
         0.64595914,
         0.0010004044,
@@ -628,7 +651,7 @@ tlvq_coder_test!(
         -0.42815322,
         0.729962,
         -0.704054,
-        -0.27283216,
+        -0.27316004,
         0.53911716,
         -0.73101676,
         0.43591526,
@@ -645,23 +668,25 @@ tlvq_coder_test!(
 fn tlvq8x8() {
     let coder = TurboResidualCoder::<8>::new(VectorSimilarity::Euclidean, None);
     let encoded = coder.encode(&TEST_VECTOR);
-    let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean).unwrap();
+    let (primary_header, vector_bytes) =
+        PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean).unwrap();
     assert_abs_diff_eq!(
         primary_header,
         PrimaryVectorHeader {
             l2_norm: 2.5226507,
             lower: -0.9199219,
             upper: 0.9116211,
-            residual_error_term: 0.007704542,
+            residual_error_term: 0.0075108674,
+            parallel_error_term: -0.00057935715,
             center_dot: 0.0,
-            component_sum: 2876,
+            component_sum: 2875,
         }
     );
     assert_abs_diff_eq!(
         ResidualVectorHeader::deserialize(&vector_bytes).unwrap().0,
         ResidualVectorHeader {
             magnitude: 0.0071822493,
-            component_sum: 2422,
+            component_sum: 2590,
         }
     );
     let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -669,25 +694,25 @@ fn tlvq8x8() {
     assert_abs_diff_eq!(
         decoded.as_ref(),
         [
-            -0.92092174f32,
-            -0.06087814,
-            0.6591484,
-            0.6701333,
-            0.57312715,
-            0.43113852,
-            0.64613533,
-            0.0011167069,
-            -0.19988123,
-            -0.42789087,
-            0.73015684,
-            -0.703897,
-            -0.2728894,
-            0.5391298,
-            -0.730909,
-            0.43612412,
-            0.9131561,
-            0.69415975,
-            0.20211464
+            -0.92100626f32,
+            -0.060990803,
+            0.65900755,
+            0.6699925,
+            0.57298636,
+            0.43099767,
+            0.6459945,
+            0.0010040442,
+            -0.1999939,
+            -0.4280038,
+            0.72998786,
+            -0.7040097,
+            -0.27300206,
+            0.538989,
+            -0.7309935,
+            0.43601146,
+            0.91298705,
+            0.69399077,
+            0.20200199
         ]
         .as_ref(),
         epsilon = 0.00005
@@ -700,7 +725,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.00552745,
+        residual_error_term: 0.005533458,
+        parallel_error_term: 8.994341e-5,
         center_dot: 0.0,
         lower: -0.6953125,
         upper: 0.57470703,
@@ -708,28 +734,28 @@ tlvq_coder_test!(
     },
     ResidualVectorHeader {
         magnitude: 0.0049809623,
-        component_sum: 2425,
+        component_sum: 2478,
     },
     [
-        -0.92106426,
-        -0.06105667,
-        0.65892005,
-        0.6699396,
-        0.5729785,
-        0.43097466,
-        0.64590824,
-        0.0010098219,
-        -0.20007992,
-        -0.42802155,
-        0.7299434,
-        -0.70405287,
-        -0.27307612,
-        0.5388731,
-        -0.73099023,
-        0.43593144,
-        0.9129158,
-        0.69390017,
-        0.20198229
+        -0.92100567,
+        -0.060998067,
+        0.6589982,
+        0.66999817,
+        0.57299805,
+        0.43099418,
+        0.64600587,
+        0.0009902716,
+        -0.20000179,
+        -0.428002,
+        0.730002,
+        -0.7039943,
+        -0.27299798,
+        0.53899026,
+        -0.7310097,
+        0.4360096,
+        0.9129939,
+        0.6939978,
+        0.20200181
     ]
 );
 
@@ -830,6 +856,150 @@ lvq_distance_135_test!(distance_135_tlvq1x8, F32VectorCoding::TLVQ1x8);
 lvq_distance_135_test!(distance_135_tlvq2x8, F32VectorCoding::TLVQ2x8);
 lvq_distance_135_test!(distance_135_tlvq4x8, F32VectorCoding::TLVQ4x8);
 lvq_distance_135_test!(distance_135_tlvq8x8, F32VectorCoding::TLVQ8x8);
+
+/// Compute the header error terms directly from a vector and its dequantized value.
+///
+/// This mirrors [`PrimaryVectorHeader::set_error_terms`] in plain f64 without any of the
+/// accumulation the quantize kernels do, returning `(perpendicular_norm, parallel_fraction)`.
+fn reference_error_terms(vector: &[f32], dequantized: &[f32]) -> (f32, f32) {
+    let mut l2_norm_sq = 0.0f64;
+    let mut residual_error_sq = 0.0f64;
+    let mut residual_dot = 0.0f64;
+    for (&v, &d) in vector.iter().zip(dequantized.iter()) {
+        let v = f64::from(v);
+        let r = v - f64::from(d);
+        l2_norm_sq += v * v;
+        residual_error_sq += r * r;
+        residual_dot += v * r;
+    }
+    let parallel = residual_dot / l2_norm_sq;
+    let perpendicular = (residual_error_sq - (residual_dot * residual_dot / l2_norm_sq)).max(0.0);
+    // Both terms are stored as f16 -- the perpendicular norm relative to the vector magnitude --
+    // so round the reference through the same representation before comparing. At high bit rates
+    // the parallel term lands in f16's subnormal range, where only a few bits of mantissa survive;
+    // that is harmless because the correction it applies is proportionally tiny.
+    let l2_norm = l2_norm_sq.sqrt() as f32;
+    (
+        f16::from_f32(perpendicular.sqrt() as f32 / l2_norm).to_f32() * l2_norm,
+        f16::from_f32(parallel as f32).to_f32(),
+    )
+}
+
+fn assert_close_relative(actual: f32, expected: f32, tolerance: f32, what: &str) {
+    let scale = expected.abs().max(1e-6);
+    assert!(
+        (actual - expected).abs() <= tolerance * scale,
+        "{what}: expected {expected} got {actual} (relative tolerance {tolerance})"
+    );
+}
+
+/// Check the residual error terms in the header against a reference computed from the decoded
+/// vector.
+///
+/// This validates the terms the SIMD quantize kernels accumulate, and covers vectors far from unit
+/// magnitude to exercise storing both terms dimensionless -- an absolute f16 would overflow or go
+/// subnormal at these scales.
+macro_rules! error_terms_test {
+    ($name:ident, $coder:ty) => {
+        #[test]
+        fn $name() {
+            let seed = OsRng::default().try_next_u64().unwrap();
+            println!("SEED {seed:#016x}");
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+            for scale in [0.001f32, 1.0, 1000.0] {
+                for i in 0..64 {
+                    let dim = rng.random_range(128..=256);
+                    let vector = (0..dim)
+                        .map(|_| rng.random_range(-1.0f32..=1.0) * scale)
+                        .collect::<Vec<_>>();
+                    // Euclidean and uncentered so that the encoder quantizes the input vector as
+                    // given and `decode` returns exactly its dequantized value.
+                    let coder = <$coder>::new(VectorSimilarity::Euclidean, None);
+                    let encoded = coder.encode(&vector);
+                    let decoded = coder.decode(&encoded);
+                    let (header, _) =
+                        PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean)
+                            .unwrap();
+                    let (perpendicular, parallel) = reference_error_terms(&vector, &decoded);
+                    // Both terms are stored as f16, so only their relative precision survives.
+                    assert_close_relative(
+                        header.residual_error_term,
+                        perpendicular,
+                        0.005,
+                        &format!("residual_error_term scale {scale} index {i}"),
+                    );
+                    assert_close_relative(
+                        header.parallel_error_term,
+                        parallel,
+                        0.005,
+                        &format!("parallel_error_term scale {scale} index {i}"),
+                    );
+                }
+            }
+        }
+    };
+}
+
+error_terms_test!(tlvq1_error_terms, TurboPrimaryCoder::<1>);
+error_terms_test!(tlvq2_error_terms, TurboPrimaryCoder::<2>);
+error_terms_test!(tlvq4_error_terms, TurboPrimaryCoder::<4>);
+error_terms_test!(tlvq8_error_terms, TurboPrimaryCoder::<8>);
+
+/// Check that the scalar and SIMD quantize kernels agree on the header error terms.
+///
+/// The kernels accumulate in different orders so the terms will not be bit-identical, but a
+/// backend that fails to accumulate `v . r` at all, or accumulates it over the wrong lanes, shows
+/// up here. This is the only coverage the residual coders' terms get, since `decode` returns the
+/// residual-corrected vector rather than the primary-only value those terms describe.
+macro_rules! error_terms_simd_test {
+    ($name:ident, $coder:ty) => {
+        #[test]
+        fn $name() {
+            let seed = OsRng::default().try_next_u64().unwrap();
+            println!("SEED {seed:#016x}");
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+            let scoder = <$coder>::scalar(VectorSimilarity::Euclidean, None);
+            let ocoder = <$coder>::new(VectorSimilarity::Euclidean, None);
+            for i in 0..256 {
+                let dim = rng.random_range(128..=256);
+                let vector = (0..dim)
+                    .map(|_| rng.random_range(-1.0f32..=1.0))
+                    .collect::<Vec<_>>();
+                let (sheader, _) = PrimaryVectorHeader::deserialize(
+                    &scoder.encode(&vector),
+                    VectorSimilarity::Euclidean,
+                )
+                .unwrap();
+                let (oheader, _) = PrimaryVectorHeader::deserialize(
+                    &ocoder.encode(&vector),
+                    VectorSimilarity::Euclidean,
+                )
+                .unwrap();
+                assert_close_relative(
+                    oheader.residual_error_term,
+                    sheader.residual_error_term,
+                    0.005,
+                    &format!("residual_error_term index {i}"),
+                );
+                assert_close_relative(
+                    oheader.parallel_error_term,
+                    sheader.parallel_error_term,
+                    0.005,
+                    &format!("parallel_error_term index {i}"),
+                );
+            }
+        }
+    };
+}
+
+error_terms_simd_test!(tlvq1_error_terms_simd, TurboPrimaryCoder::<1>);
+error_terms_simd_test!(tlvq2_error_terms_simd, TurboPrimaryCoder::<2>);
+error_terms_simd_test!(tlvq4_error_terms_simd, TurboPrimaryCoder::<4>);
+error_terms_simd_test!(tlvq8_error_terms_simd, TurboPrimaryCoder::<8>);
+error_terms_simd_test!(tlvq1x8_error_terms_simd, TurboResidualCoder::<1>);
+error_terms_simd_test!(tlvq2x8_error_terms_simd, TurboResidualCoder::<2>);
+error_terms_simd_test!(tlvq4x8_error_terms_simd, TurboResidualCoder::<4>);
+error_terms_simd_test!(tlvq8x8_error_terms_simd, TurboResidualCoder::<8>);
 
 #[test]
 fn null_vector_decode() {

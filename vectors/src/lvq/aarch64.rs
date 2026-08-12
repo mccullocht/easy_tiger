@@ -18,7 +18,7 @@ use crate::lvq::{
     TurboResidualVector, VectorDecodeTerms, VectorEncodeTerms, scalar,
 };
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, VectorStats, packing};
+use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizeStats, VectorStats, packing};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let tail_split = vector.len() & !3;
@@ -231,13 +231,12 @@ pub fn primary_quantize_and_pack<const B: usize>(
     vector: &[f32],
     terms: VectorEncodeTerms,
     out: &mut [u8],
-) -> (u32, f32) {
+) -> QuantizeStats {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
     let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
-    let mut component_sum = 0u32;
-    let mut residual_error_sq = 0.0f32;
+    let mut stats = QuantizeStats::default();
     if !vector_head.is_empty() {
         unsafe {
             let terms = NeonVectorEncodeTerms::from_terms(&terms);
@@ -256,20 +255,31 @@ pub fn primary_quantize_and_pack<const B: usize>(
                 vdupq_n_f32(0.0),
                 vdupq_n_f32(0.0),
             ];
+            let mut residual_dotv = [
+                vdupq_n_f32(0.0),
+                vdupq_n_f32(0.0),
+                vdupq_n_f32(0.0),
+                vdupq_n_f32(0.0),
+            ];
             for i in (0..tail_split).step_by(16) {
-                let (qa, qa_error) =
-                    quantize4_residual_error(vld1q_f32(vector_head.as_ptr().add(i)), &terms);
-                let (qb, qb_error) =
-                    quantize4_residual_error(vld1q_f32(vector_head.as_ptr().add(i + 4)), &terms);
-                let (qc, qc_error) =
-                    quantize4_residual_error(vld1q_f32(vector_head.as_ptr().add(i + 8)), &terms);
-                let (qd, qd_error) =
-                    quantize4_residual_error(vld1q_f32(vector_head.as_ptr().add(i + 12)), &terms);
+                let va = vld1q_f32(vector_head.as_ptr().add(i));
+                let vb = vld1q_f32(vector_head.as_ptr().add(i + 4));
+                let vc = vld1q_f32(vector_head.as_ptr().add(i + 8));
+                let vd = vld1q_f32(vector_head.as_ptr().add(i + 12));
+                let (qa, qa_error) = quantize4_residual_error(va, &terms);
+                let (qb, qb_error) = quantize4_residual_error(vb, &terms);
+                let (qc, qc_error) = quantize4_residual_error(vc, &terms);
+                let (qd, qd_error) = quantize4_residual_error(vd, &terms);
 
                 residual_errorv[0] = vfmaq_f32(residual_errorv[0], qa_error, qa_error);
                 residual_errorv[1] = vfmaq_f32(residual_errorv[1], qb_error, qb_error);
                 residual_errorv[2] = vfmaq_f32(residual_errorv[2], qc_error, qc_error);
                 residual_errorv[3] = vfmaq_f32(residual_errorv[3], qd_error, qd_error);
+
+                residual_dotv[0] = vfmaq_f32(residual_dotv[0], va, qa_error);
+                residual_dotv[1] = vfmaq_f32(residual_dotv[1], vb, qb_error);
+                residual_dotv[2] = vfmaq_f32(residual_dotv[2], vc, qc_error);
+                residual_dotv[3] = vfmaq_f32(residual_dotv[3], vd, qd_error);
 
                 let qabcd = vqtbl4q_u8(
                     uint8x16x4_t(
@@ -280,7 +290,7 @@ pub fn primary_quantize_and_pack<const B: usize>(
                     ),
                     shuffle_mask,
                 );
-                component_sum += u32::from(vaddlvq_u8(qabcd));
+                stats.component_sum += u32::from(vaddlvq_u8(qabcd));
 
                 d = vorrq_u8(d, vshlq_u8(qabcd, vdupq_n_s8(shift)));
                 shift += B as i8;
@@ -292,19 +302,21 @@ pub fn primary_quantize_and_pack<const B: usize>(
                 }
             }
 
-            residual_error_sq = vaddvq_f32(vaddq_f32(
+            stats.residual_error_sq = vaddvq_f32(vaddq_f32(
                 vaddq_f32(residual_errorv[0], residual_errorv[1]),
                 vaddq_f32(residual_errorv[2], residual_errorv[3]),
+            ));
+            stats.residual_dot = vaddvq_f32(vaddq_f32(
+                vaddq_f32(residual_dotv[0], residual_dotv[1]),
+                vaddq_f32(residual_dotv[2], residual_dotv[3]),
             ));
         }
     }
 
     if !vector_tail.is_empty() {
-        let (cs, re) = scalar::primary_quantize_and_pack::<B>(vector_tail, terms, out_tail);
-        residual_error_sq += re;
-        component_sum += cs;
+        stats += scalar::primary_quantize_and_pack::<B>(vector_tail, terms, out_tail);
     }
-    (component_sum, residual_error_sq)
+    stats
 }
 
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
@@ -346,16 +358,14 @@ pub fn residual_quantize_and_pack<const B: usize>(
     residual_terms: VectorEncodeTerms,
     primary_out: &mut [u8],
     residual_out: &mut [u8],
-) -> (u32, u32, f32) {
+) -> QuantizeStats {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
     let (primary_out_head, primary_out_tail) =
         primary_out.split_at_mut(packing::byte_len(tail_split, B));
     let (residual_out_head, residual_out_tail) = residual_out.split_at_mut(tail_split);
-    let mut primary_component_sum = 0u32;
-    let mut residual_component_sum = 0u32;
-    let mut residual_error_sq = 0.0f32;
+    let mut stats = QuantizeStats::default();
     if !vector_head.is_empty() {
         unsafe {
             let primary_terms = NeonVectorEncodeTerms::from_terms(&primary_terms);
@@ -376,32 +386,31 @@ pub fn residual_quantize_and_pack<const B: usize>(
                 vdupq_n_f32(0.0),
                 vdupq_n_f32(0.0),
             ];
+            let mut residual_dotv = [
+                vdupq_n_f32(0.0),
+                vdupq_n_f32(0.0),
+                vdupq_n_f32(0.0),
+                vdupq_n_f32(0.0),
+            ];
             for i in (0..tail_split).step_by(16) {
-                let (pa, ra, ea) = quantize4_residual(
-                    vld1q_f32(vector_head.as_ptr().add(i)),
-                    &primary_terms,
-                    &residual_terms,
-                );
-                let (pb, rb, eb) = quantize4_residual(
-                    vld1q_f32(vector_head.as_ptr().add(i + 4)),
-                    &primary_terms,
-                    &residual_terms,
-                );
-                let (pc, rc, ec) = quantize4_residual(
-                    vld1q_f32(vector_head.as_ptr().add(i + 8)),
-                    &primary_terms,
-                    &residual_terms,
-                );
-                let (pd, rd, ed) = quantize4_residual(
-                    vld1q_f32(vector_head.as_ptr().add(i + 12)),
-                    &primary_terms,
-                    &residual_terms,
-                );
+                let va = vld1q_f32(vector_head.as_ptr().add(i));
+                let vb = vld1q_f32(vector_head.as_ptr().add(i + 4));
+                let vc = vld1q_f32(vector_head.as_ptr().add(i + 8));
+                let vd = vld1q_f32(vector_head.as_ptr().add(i + 12));
+                let (pa, ra, ea) = quantize4_residual(va, &primary_terms, &residual_terms);
+                let (pb, rb, eb) = quantize4_residual(vb, &primary_terms, &residual_terms);
+                let (pc, rc, ec) = quantize4_residual(vc, &primary_terms, &residual_terms);
+                let (pd, rd, ed) = quantize4_residual(vd, &primary_terms, &residual_terms);
 
                 residual_errorv[0] = vfmaq_f32(residual_errorv[0], ea, ea);
                 residual_errorv[1] = vfmaq_f32(residual_errorv[1], eb, eb);
                 residual_errorv[2] = vfmaq_f32(residual_errorv[2], ec, ec);
                 residual_errorv[3] = vfmaq_f32(residual_errorv[3], ed, ed);
+
+                residual_dotv[0] = vfmaq_f32(residual_dotv[0], va, ea);
+                residual_dotv[1] = vfmaq_f32(residual_dotv[1], vb, eb);
+                residual_dotv[2] = vfmaq_f32(residual_dotv[2], vc, ec);
+                residual_dotv[3] = vfmaq_f32(residual_dotv[3], vd, ed);
 
                 let pabcd = vqtbl4q_u8(
                     uint8x16x4_t(
@@ -412,7 +421,7 @@ pub fn residual_quantize_and_pack<const B: usize>(
                     ),
                     shuffle_mask,
                 );
-                primary_component_sum += u32::from(vaddlvq_u8(pabcd));
+                stats.component_sum += u32::from(vaddlvq_u8(pabcd));
 
                 d = vorrq_u8(d, vshlq_u8(pabcd, vdupq_n_s8(shift)));
                 shift += B as i8;
@@ -432,34 +441,31 @@ pub fn residual_quantize_and_pack<const B: usize>(
                     ),
                     shuffle_mask,
                 );
-                residual_component_sum += u32::from(vaddlvq_u8(rabcd));
+                stats.residual_component_sum += u32::from(vaddlvq_u8(rabcd));
                 vst1q_u8(residual_out_head.as_mut_ptr().add(i), rabcd);
             }
 
-            residual_error_sq = vaddvq_f32(vaddq_f32(
+            stats.residual_error_sq = vaddvq_f32(vaddq_f32(
                 vaddq_f32(residual_errorv[0], residual_errorv[1]),
                 vaddq_f32(residual_errorv[2], residual_errorv[3]),
+            ));
+            stats.residual_dot = vaddvq_f32(vaddq_f32(
+                vaddq_f32(residual_dotv[0], residual_dotv[1]),
+                vaddq_f32(residual_dotv[2], residual_dotv[3]),
             ));
         }
     }
 
     if !vector_tail.is_empty() {
-        let (ps, rs, re) = scalar::residual_quantize_and_pack::<B>(
+        stats += scalar::residual_quantize_and_pack::<B>(
             vector_tail,
             primary_terms,
             residual_terms,
             primary_out_tail,
             residual_out_tail,
         );
-        primary_component_sum += ps;
-        residual_component_sum += rs;
-        residual_error_sq += re;
     }
-    (
-        primary_component_sum,
-        residual_component_sum,
-        residual_error_sq,
-    )
+    stats
 }
 
 pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {

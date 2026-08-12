@@ -25,7 +25,7 @@ use crate::lvq::{
     VectorEncodeTerms, packing,
 };
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, ResidualDotComponents, VectorStats};
+use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizeStats, ResidualDotComponents, VectorStats};
 
 /// For an input vector `v` where all values are non-negative, round each value with ties (e.g. 0.5)
 /// rounding away from zero.
@@ -271,16 +271,17 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
     vector: &[f32],
     terms: VectorEncodeTerms,
     out: &mut [u8],
-) -> (u32, f32) {
+) -> QuantizeStats {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     let (in_head, in_tail) = vector.split_at(tail_split);
     let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
 
-    let (mut component_sum, mut residual_error_sq) = if !in_head.is_empty() {
+    let mut stats = if !in_head.is_empty() {
         let terms = VectorEncodeTermsAvx512::from_terms(&terms);
         let mut qbuf = _mm512_set1_epi32(0);
         let mut component_sum = _mm512_set1_epi32(0);
         let mut residual_error_sq = _mm512_set1_ps(0.0);
+        let mut residual_dot = _mm512_set1_ps(0.0);
         let mut shift = 0;
         for i in (0..tail_split).step_by(16) {
             let v = _mm512_loadu_ps(in_head.as_ptr().add(i));
@@ -288,6 +289,7 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
             let d = terms.dequantize(q);
             let diff = _mm512_sub_ps(v, d);
             residual_error_sq = _mm512_fmadd_ps(diff, diff, residual_error_sq);
+            residual_dot = _mm512_fmadd_ps(v, diff, residual_dot);
             component_sum = _mm512_add_epi32(component_sum, q);
             qbuf = _mm512_or_si512(qbuf, _mm512_sll_epi32(q, _mm_set1_epi64x(shift as i64)));
             shift += B;
@@ -304,21 +306,21 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
         // tail_split should be a multiple of the number of dimensions per block.
         assert_eq!(shift, 0);
 
-        (
-            _mm512_reduce_add_epi32(component_sum) as u32,
-            _mm512_reduce_add_ps(residual_error_sq),
-        )
+        QuantizeStats {
+            component_sum: _mm512_reduce_add_epi32(component_sum) as u32,
+            residual_component_sum: 0,
+            residual_error_sq: _mm512_reduce_add_ps(residual_error_sq),
+            residual_dot: _mm512_reduce_add_ps(residual_dot),
+        }
     } else {
-        (0, 0.0)
+        QuantizeStats::default()
     };
 
     if !in_tail.is_empty() {
-        let (c, r) = super::scalar::primary_quantize_and_pack::<B>(in_tail, terms, out_tail);
-        component_sum += c;
-        residual_error_sq += r;
+        stats += super::scalar::primary_quantize_and_pack::<B>(in_tail, terms, out_tail);
     }
 
-    (component_sum, residual_error_sq)
+    stats
 }
 
 #[target_feature(enable = "avx512f,avx512bw,avx2")]
@@ -376,7 +378,7 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
     residual_terms: VectorEncodeTerms,
     primary_out: &mut [u8],
     residual_out: &mut [u8],
-) -> (u32, u32, f32) {
+) -> QuantizeStats {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
@@ -384,75 +386,70 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
         primary_out.split_at_mut(packing::byte_len(tail_split, B));
     let (residual_out_head, residual_out_tail) = residual_out.split_at_mut(tail_split);
 
-    let (mut primary_component_sum, mut residual_component_sum, mut residual_error_sq) =
-        if !vector_head.is_empty() {
-            let primary_terms = VectorEncodeTermsAvx512::from_terms(&primary_terms);
-            let residual_terms = VectorEncodeTermsAvx512::from_terms(&residual_terms);
-            let mut primary_component_sum = _mm512_set1_epi32(0);
-            let mut residual_component_sum = _mm512_set1_epi32(0);
-            let mut residual_error_sq = _mm512_set1_ps(0.0);
-            let mut pbuf = _mm512_set1_epi32(0);
-            let mut block = 0usize;
-            let mut shift = 0i64;
-            for i in (0..tail_split).step_by(16) {
-                let v = _mm512_loadu_ps(vector_head.as_ptr().add(i));
-                let p = primary_terms.quantize(v);
-                let dq = primary_terms.dequantize(p);
-                let diff = _mm512_sub_ps(v, dq);
-                residual_error_sq = _mm512_fmadd_ps(diff, diff, residual_error_sq);
-                let r = residual_terms.quantize(diff);
+    let mut stats = if !vector_head.is_empty() {
+        let primary_terms = VectorEncodeTermsAvx512::from_terms(&primary_terms);
+        let residual_terms = VectorEncodeTermsAvx512::from_terms(&residual_terms);
+        let mut primary_component_sum = _mm512_set1_epi32(0);
+        let mut residual_component_sum = _mm512_set1_epi32(0);
+        let mut residual_error_sq = _mm512_set1_ps(0.0);
+        let mut residual_dot = _mm512_set1_ps(0.0);
+        let mut pbuf = _mm512_set1_epi32(0);
+        let mut block = 0usize;
+        let mut shift = 0i64;
+        for i in (0..tail_split).step_by(16) {
+            let v = _mm512_loadu_ps(vector_head.as_ptr().add(i));
+            let p = primary_terms.quantize(v);
+            let dq = primary_terms.dequantize(p);
+            let diff = _mm512_sub_ps(v, dq);
+            residual_error_sq = _mm512_fmadd_ps(diff, diff, residual_error_sq);
+            residual_dot = _mm512_fmadd_ps(v, diff, residual_dot);
+            let r = residual_terms.quantize(diff);
 
-                primary_component_sum = _mm512_add_epi32(primary_component_sum, p);
-                residual_component_sum = _mm512_add_epi32(residual_component_sum, r);
+            primary_component_sum = _mm512_add_epi32(primary_component_sum, p);
+            residual_component_sum = _mm512_add_epi32(residual_component_sum, r);
 
-                pbuf = _mm512_or_si512(pbuf, _mm512_sll_epi64(p, _mm_set1_epi64x(shift)));
-                shift += B as i64;
-                if shift == 8 {
-                    _mm_storeu_si128(
-                        primary_out_head.as_mut_ptr().add(block * 16) as *mut __m128i,
-                        _mm512_cvtepi32_epi8(pbuf),
-                    );
-                    pbuf = _mm512_set1_epi32(0);
-                    shift = 0;
-                    block += 1;
-                }
-
+            pbuf = _mm512_or_si512(pbuf, _mm512_sll_epi64(p, _mm_set1_epi64x(shift)));
+            shift += B as i64;
+            if shift == 8 {
                 _mm_storeu_si128(
-                    residual_out_head.as_mut_ptr().add(i) as *mut __m128i,
-                    _mm512_cvtepi32_epi8(r),
-                )
+                    primary_out_head.as_mut_ptr().add(block * 16) as *mut __m128i,
+                    _mm512_cvtepi32_epi8(pbuf),
+                );
+                pbuf = _mm512_set1_epi32(0);
+                shift = 0;
+                block += 1;
             }
 
-            // tail_split should be a multiple of the number of dimensions per block.
-            assert_eq!(shift, 0);
-
-            (
-                _mm512_reduce_add_epi32(primary_component_sum) as u32,
-                _mm512_reduce_add_epi32(residual_component_sum) as u32,
-                _mm512_reduce_add_ps(residual_error_sq),
+            _mm_storeu_si128(
+                residual_out_head.as_mut_ptr().add(i) as *mut __m128i,
+                _mm512_cvtepi32_epi8(r),
             )
-        } else {
-            (0, 0, 0.0)
-        };
+        }
+
+        // tail_split should be a multiple of the number of dimensions per block.
+        assert_eq!(shift, 0);
+
+        QuantizeStats {
+            component_sum: _mm512_reduce_add_epi32(primary_component_sum) as u32,
+            residual_component_sum: _mm512_reduce_add_epi32(residual_component_sum) as u32,
+            residual_error_sq: _mm512_reduce_add_ps(residual_error_sq),
+            residual_dot: _mm512_reduce_add_ps(residual_dot),
+        }
+    } else {
+        QuantizeStats::default()
+    };
 
     if !vector_tail.is_empty() {
-        let (p, r, e) = super::scalar::residual_quantize_and_pack::<B>(
+        stats += super::scalar::residual_quantize_and_pack::<B>(
             vector_tail,
             primary_terms,
             residual_terms,
             primary_out_tail,
             residual_out_tail,
         );
-        primary_component_sum += p;
-        residual_component_sum += r;
-        residual_error_sq += e;
     }
 
-    (
-        primary_component_sum,
-        residual_component_sum,
-        residual_error_sq,
-    )
+    stats
 }
 
 #[target_feature(enable = "avx512f")]

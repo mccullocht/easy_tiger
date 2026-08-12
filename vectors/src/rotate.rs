@@ -147,7 +147,11 @@ mod tests {
         let v = make_vec(128, 1);
         let rotated = rotator.forward(&v);
         let recovered = rotator.backward(&rotated);
-        assert!(v.iter().zip(&recovered).all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5)));
+        assert!(
+            v.iter()
+                .zip(&recovered)
+                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5))
+        );
     }
 
     #[test]
@@ -157,7 +161,11 @@ mod tests {
         let v = make_vec(192, 2);
         let rotated = rotator.forward(&v);
         let recovered = rotator.backward(&rotated);
-        assert!(v.iter().zip(&recovered).all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5)));
+        assert!(
+            v.iter()
+                .zip(&recovered)
+                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5))
+        );
     }
 
     #[test]
@@ -167,7 +175,11 @@ mod tests {
         let v = make_vec(100, 3);
         let rotated = rotator.forward(&v);
         let recovered = rotator.backward(&rotated);
-        assert!(v.iter().zip(&recovered).all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5)));
+        assert!(
+            v.iter()
+                .zip(&recovered)
+                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5))
+        );
     }
 
     #[test]
@@ -229,6 +241,11 @@ mod tests {
         let original = v.clone();
         Rotator::walsh_hadamard_transform(&mut v);
         Rotator::walsh_hadamard_transform(&mut v);
-        assert!(original.iter().zip(&v).all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-6)));
+        assert!(
+            original
+                .iter()
+                .zip(&v)
+                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-6))
+        );
     }
 }

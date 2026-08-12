@@ -264,6 +264,8 @@ impl DistanceCorrectionTerms {
     }
 }
 
+/// Terms needed to compute the statistical bound on an estimated distance from the perspective of
+/// one side of the comparison (usually the query).
 #[derive(Debug, Clone)]
 struct ErrorBoundTerms {
     l2_norm: f32,
@@ -295,9 +297,17 @@ impl ErrorBoundTerms {
         }
     }
 
+    /// Half-width of the interval the true distance is expected to fall within.
+    ///
+    /// Each side of the comparison contributes an error term: our residual against `vector`, and
+    /// `vector`'s residual against us. The two residuals are independent, so the terms combine in
+    /// quadrature rather than additively -- summing them overstates the error by up to a factor of
+    /// sqrt(2), which is worst when the two sides are quantized at the same bit rate and their
+    /// terms are of equal size.
     fn error_bound<const B: usize>(&self, vector: &TurboPrimaryVector<B>) -> f32 {
-        (self.residual_error_term * vector.l2_norm + vector.residual_error_term * self.l2_norm)
-            * self.mult
+        let ours = self.residual_error_term * vector.l2_norm;
+        let theirs = vector.residual_error_term * self.l2_norm;
+        ours.mul_add(ours, theirs * theirs).sqrt() * self.mult
     }
 }
 

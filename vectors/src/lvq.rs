@@ -44,7 +44,9 @@ const fn check_primary_bits(bits: usize) {
     assert!(is_supported_bits(bits, &SUPPORTED_PRIMARY_BITS));
 }
 
-const ESTIMATED_DISTANCE_Z_SCORE: f32 = 1.96;
+/// Z-score used to convert the modeled standard deviation of the estimated distance into the
+/// half-width of the interval returned by `distance_bounds()`.
+pub const ESTIMATED_DISTANCE_Z_SCORE: f32 = 1.96;
 
 #[derive(Debug, Copy, Clone)]
 enum InstructionSet {

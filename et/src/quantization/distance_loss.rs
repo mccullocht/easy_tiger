@@ -1,13 +1,118 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf};
+use std::{borrow::Cow, fs::File, io, num::NonZero, ops::RangeInclusive, path::PathBuf};
 
 use clap::Args;
 use easy_tiger::input::{DerefVectorStore, VectorStore};
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
-use vectors::{F32VectorCoding, VectorSimilarity};
+use vectors::{ESTIMATED_DISTANCE_Z_SCORE, F32VectorCoding, VectorSimilarity, l2_normalize};
 
 use crate::ui::progress_bar;
+
+/// L2-normalize `vector` if `similarity` is one the coders normalize during encoding, so that
+/// reference f32 distances are computed over the same vectors the quantized distances are.
+fn normalize_for<'a>(
+    similarity: VectorSimilarity,
+    vector: impl Into<Cow<'a, [f32]>>,
+) -> Cow<'a, [f32]> {
+    if similarity.angular() {
+        l2_normalize(vector)
+    } else {
+        vector.into()
+    }
+}
+
+/// Error statistics accumulated over (query, document) pairs.
+///
+/// Alongside the raw error magnitude this tracks the moments of the standardized error
+/// `z = (expected - estimated) / sigma`, where `sigma` is the modeled standard deviation recovered
+/// from the half-width of the returned bounds. Those moments separate the three ways the bounds can
+/// be miscalibrated: a nonzero mean means the estimate is biased so the interval is centered in the
+/// wrong place, a stddev away from one means `sigma` itself is the wrong size, and a large excess
+/// kurtosis means the error is too heavy-tailed for any single z-score to cover the nominal share of
+/// pairs.
+#[derive(Clone, Copy, Default)]
+struct LossStats {
+    count: usize,
+    error_sum: f64,
+    error_sq_sum: f64,
+    in_range_count: usize,
+    /// Number of pairs contributing to the `z_*` moments. Pairs with a degenerate (zero-width)
+    /// bound have no defined `sigma` and are excluded.
+    z_count: usize,
+    z_sum: f64,
+    z_sq_sum: f64,
+    z_cube_sum: f64,
+    z_quad_sum: f64,
+}
+
+impl LossStats {
+    fn observe(&mut self, expected: f64, bounds: &RangeInclusive<f64>) {
+        let estimated = (*bounds.start() + *bounds.end()) / 2.0;
+        let diff = expected - estimated;
+        self.count += 1;
+        self.error_sum += diff.abs();
+        self.error_sq_sum += diff * diff;
+        if bounds.contains(&expected) {
+            self.in_range_count += 1;
+        }
+
+        let sigma = (*bounds.end() - *bounds.start()) / 2.0 / ESTIMATED_DISTANCE_Z_SCORE as f64;
+        if sigma > 0.0 {
+            let z = diff / sigma;
+            self.z_count += 1;
+            self.z_sum += z;
+            self.z_sq_sum += z * z;
+            self.z_cube_sum += z * z * z;
+            self.z_quad_sum += z * z * z * z;
+        }
+    }
+
+    fn merge(mut self, other: Self) -> Self {
+        self.count += other.count;
+        self.error_sum += other.error_sum;
+        self.error_sq_sum += other.error_sq_sum;
+        self.in_range_count += other.in_range_count;
+        self.z_count += other.z_count;
+        self.z_sum += other.z_sum;
+        self.z_sq_sum += other.z_sq_sum;
+        self.z_cube_sum += other.z_cube_sum;
+        self.z_quad_sum += other.z_quad_sum;
+        self
+    }
+
+    fn print(&self) {
+        let count = self.count;
+        println!(
+            "Vectors: {count} mean abs error: {:.6} mean square error: {:.6} in range: {} ({:.2}%)",
+            self.error_sum / count as f64,
+            self.error_sq_sum / count as f64,
+            self.in_range_count,
+            self.in_range_count as f64 / count as f64 * 100.0
+        );
+
+        if self.z_count == 0 {
+            println!("No pairs with a non-degenerate bound; skipping standardized error moments.");
+            return;
+        }
+        // Central moments of z, derived from the raw moments.
+        let n = self.z_count as f64;
+        let m1 = self.z_sum / n;
+        let m2 = self.z_sq_sum / n - m1 * m1;
+        let m3 = self.z_cube_sum / n - 3.0 * m1 * self.z_sq_sum / n + 2.0 * m1 * m1 * m1;
+        let m4 = self.z_quad_sum / n - 4.0 * m1 * self.z_cube_sum / n
+            + 6.0 * m1 * m1 * self.z_sq_sum / n
+            - 3.0 * m1 * m1 * m1 * m1;
+        println!(
+            "Standardized error over {} pairs: mean {:.4} stddev {:.4} skew {:.4} excess kurtosis {:.4}",
+            self.z_count,
+            m1,
+            m2.max(0.0).sqrt(),
+            m3 / m2.powf(1.5),
+            m4 / (m2 * m2) - 3.0
+        );
+    }
+}
 
 #[derive(Args)]
 pub struct DistanceLossArgs {
@@ -68,54 +173,35 @@ pub fn distance_loss(
                     center.as_deref(),
                 )
             };
+            // The f32 distance functions assume angular vectors were normalized during encoding,
+            // so normalize here to match what the quantized coder does internally. Without this
+            // the reference distance disagrees with the quantized distance by a per-vector norm
+            // factor, which shows up as a bit-rate-independent error floor.
             let f32_dist = F32VectorCoding::F32.query_distance_asymmetric(
                 args.similarity,
-                query.to_vec(),
+                normalize_for(args.similarity, query.to_vec()),
                 None,
             );
             (f32_dist, qdist)
         })
         .collect::<Vec<_>>();
 
-    let (count, error_sum, error_sq_sum, in_range_count) = (0..vectors.len())
+    let stats = (0..vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "scoring"))
         .map(|d| {
             let doc_f32 = &vectors[d];
             let doc_q = coder.encode(&doc_f32);
-            query_scorers
-                .iter()
-                .map(|(q_f32, q_q)| {
-                    let expected = q_f32.as_ref().distance(bytemuck::cast_slice(&doc_f32));
-                    let actual_range = q_q.as_ref().distance_bounds(&doc_q);
-                    let actual = (*actual_range.start() + *actual_range.end()) / 2.0;
-                    let diff = expected - actual;
-                    (
-                        1,
-                        diff.abs(),
-                        diff * diff,
-                        if actual_range.contains(&expected) {
-                            1
-                        } else {
-                            0
-                        },
-                    )
-                })
-                .reduce(
-                    |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3)
-                )
-                .unwrap()
+            let doc_ref = normalize_for(args.similarity, doc_f32);
+            let mut stats = LossStats::default();
+            for (q_f32, q_q) in query_scorers.iter() {
+                let expected = q_f32.as_ref().distance(bytemuck::cast_slice(&doc_ref));
+                stats.observe(expected, &q_q.as_ref().distance_bounds(&doc_q));
+            }
+            stats
         })
-        .reduce(
-            || (0usize, 0.0f64, 0.0f64, 0usize),
-            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
-        );
+        .reduce(LossStats::default, LossStats::merge);
 
-    println!(
-        "Vectors: {count} mean abs error: {:.6} mean square error: {:.6} in range: {in_range_count} ({:.2}%)",
-        error_sum / count as f64,
-        error_sq_sum / count as f64,
-        in_range_count as f64 / count as f64 * 100.0
-    );
+    stats.print();
     Ok(())
 }

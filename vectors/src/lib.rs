@@ -12,6 +12,7 @@ pub mod rotate;
 use serde::{Deserialize, Serialize};
 
 pub use float32::{CosineDistance, DotProductDistance, EuclideanDistance, l2_norm, l2_normalize};
+pub use lvq::ESTIMATED_DISTANCE_Z_SCORE;
 
 /// Functions used for to compute the distance between two vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

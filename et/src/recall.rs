@@ -55,13 +55,46 @@ pub struct RecallArgs {
     neighbors_len: NonZero<usize>,
 }
 
+/// Golden top-k neighbors, either mapped from a file or computed in process.
+enum Golden {
+    /// Flat rows of 16 byte [`Neighbor`] records, one row per query.
+    Mapped(DerefVectorStore<u8, Mmap>),
+    /// One entry per query, already decoded and ordered by distance.
+    Memory(Vec<Vec<Neighbor>>),
+}
+
+impl Golden {
+    fn len(&self) -> usize {
+        match self {
+            Self::Mapped(n) => n.len(),
+            Self::Memory(n) => n.len(),
+        }
+    }
+
+    /// The first `k` golden neighbors for `query_index`.
+    ///
+    /// *Panics* if `query_index` is out of bounds.
+    fn row(&self, query_index: usize, k: usize) -> Vec<Neighbor> {
+        match self {
+            Self::Mapped(neighbors) => neighbors[query_index]
+                .as_chunks::<{ RecallComputer::NEIGHBOR_LEN }>()
+                .0
+                .iter()
+                .take(k)
+                .map(|n| Neighbor::from(*n))
+                .collect(),
+            Self::Memory(neighbors) => neighbors[query_index].iter().copied().take(k).collect(),
+        }
+    }
+}
+
 /// Computes the recall for a query from a golden file.
 // TODO: add an option for NDGC recall computation.
 pub struct RecallComputer {
     metric: RecallMetric,
     similarity: VectorSimilarity,
     k: usize,
-    neighbors: DerefVectorStore<u8, Mmap>,
+    golden: Golden,
 }
 
 impl RecallComputer {
@@ -80,7 +113,7 @@ impl RecallComputer {
                     metric: args.recall_metric,
                     similarity,
                     k: k.get(),
-                    neighbors,
+                    golden: Golden::Mapped(neighbors),
                 }))
             } else {
                 Err(io::Error::new(
@@ -90,6 +123,24 @@ impl RecallComputer {
             }
         } else {
             Ok(None)
+        }
+    }
+
+    /// Build a computer over golden neighbors computed in process rather than read from a file.
+    ///
+    /// `golden` holds one row per query ordered by ascending distance; rows shorter than `k` simply
+    /// yield fewer expected neighbors.
+    pub fn in_memory(
+        metric: RecallMetric,
+        similarity: VectorSimilarity,
+        k: NonZero<usize>,
+        golden: Vec<Vec<Neighbor>>,
+    ) -> Self {
+        Self {
+            metric,
+            similarity,
+            k: k.get(),
+            golden: Golden::Memory(golden),
         }
     }
 
@@ -106,7 +157,7 @@ impl RecallComputer {
     }
 
     pub fn neighbors_len(&self) -> usize {
-        self.neighbors.len()
+        self.golden.len()
     }
 
     /// Format a summary line for the per-query results in `values`.
@@ -140,6 +191,7 @@ impl RecallComputer {
     /// *Panics* if `query_index` is out of bounds in the golden file.
     pub fn compute_recall(&self, query_index: usize, query_results: &[Neighbor]) -> f64 {
         let expected = self.expected(query_index);
+        let expected = expected.iter().copied();
         let actual = query_results.iter().copied();
         match self.metric {
             RecallMetric::Simple => self.simple_recall(expected, actual),
@@ -150,14 +202,9 @@ impl RecallComputer {
 
     /// The golden top-`k` neighbors for `query_index`.
     ///
-    /// *Panics* if `query_index` is out of bounds in the golden file.
-    fn expected(&self, query_index: usize) -> impl Iterator<Item = Neighbor> + Clone + '_ {
-        self.neighbors[query_index]
-            .as_chunks::<{ Self::NEIGHBOR_LEN }>()
-            .0
-            .iter()
-            .take(self.k)
-            .map(|n| Neighbor::from(*n))
+    /// *Panics* if `query_index` is out of bounds in the golden set.
+    fn expected(&self, query_index: usize) -> Vec<Neighbor> {
+        self.golden.row(query_index, self.k)
     }
 
     /// Depth into `query_results` required to recover every golden top-`k` neighbor, or `None` if
@@ -170,6 +217,7 @@ impl RecallComputer {
     pub fn realized_depth(&self, query_index: usize, query_results: &[Neighbor]) -> Option<usize> {
         let mut expected = self
             .expected(query_index)
+            .iter()
             .map(|n| n.vertex())
             .collect::<HashSet<_>>();
         for (i, n) in query_results.iter().enumerate() {

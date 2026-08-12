@@ -10,7 +10,7 @@ use easy_tiger::input::VectorStore;
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 
-use super::exhaustive::ExhaustiveArgs;
+use super::exhaustive::{Exhaustive, ExhaustiveArgs};
 
 #[derive(Args)]
 pub struct BoundDepthArgs {
@@ -39,6 +39,54 @@ pub fn bound_depth(
             io::Error::new(io::ErrorKind::InvalidInput, "must provide recall args"),
         )?;
 
+    let report = measure(&exhaustive, doc_vectors, &recall_computer);
+    println!("{}", report.queue_depth.summarize("Queue depth"));
+    println!("{}", report.realized_depth.summarize("Realized depth"));
+    println!("{}", report.slop.summarize("Slop"));
+    println!(
+        "Bound misses: {}/{} ({:.4}%)",
+        report.misses,
+        report.num_queries,
+        report.miss_rate() * 100.0
+    );
+    println!("{}", recall_computer.summarize(&report.recall));
+
+    Ok(())
+}
+
+/// Bound-driven candidate set measurements for a single quantizer.
+pub(crate) struct BoundDepthReport {
+    /// Size of the retained candidate set, per query.
+    pub queue_depth: Distribution,
+    /// Depth within that set needed to recover the golden top-k, for queries with no bound miss.
+    pub realized_depth: Distribution,
+    /// Queue depth divided by realized depth, for queries with no bound miss.
+    pub slop: Distribution,
+    /// Queries where the bounds pruned at least one golden neighbor.
+    pub misses: usize,
+    pub num_queries: usize,
+    /// Per-query recall metric values.
+    pub recall: Vec<f64>,
+}
+
+impl BoundDepthReport {
+    pub fn miss_rate(&self) -> f64 {
+        self.misses as f64 / self.num_queries.max(1) as f64
+    }
+
+    pub fn mean_recall(&self) -> f64 {
+        self.recall.iter().sum::<f64>() / self.recall.len().max(1) as f64
+    }
+}
+
+/// Score every doc against every query with `exhaustive`, retaining candidates that the bounds
+/// cannot rule out of the top k, and measure the resulting candidate sets against the golden data
+/// in `recall_computer`.
+pub(crate) fn measure(
+    exhaustive: &Exhaustive,
+    doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    recall_computer: &RecallComputer,
+) -> BoundDepthReport {
     let k = recall_computer.k();
     let mut query_candidates = Vec::with_capacity(exhaustive.num_queries());
     query_candidates.resize_with(exhaustive.num_queries(), || BoundedNeighbors::new(k));
@@ -82,34 +130,34 @@ pub fn bound_depth(
         .map(|(i, r)| recall_computer.compute_recall(i, r))
         .collect::<Vec<_>>();
 
-    println!("{}", Distribution::new(queue_depths).summarize("Queue depth"));
-    println!(
-        "{}",
-        Distribution::new(realized_depths).summarize("Realized depth")
-    );
-    println!("{}", Distribution::new(slop).summarize("Slop"));
-    println!(
-        "Bound misses: {}/{} ({:.4}%)",
+    BoundDepthReport {
+        queue_depth: Distribution::new(queue_depths),
+        realized_depth: Distribution::new(realized_depths),
+        slop: Distribution::new(slop),
         misses,
-        results.len(),
-        100.0 * misses as f64 / results.len().max(1) as f64
-    );
-    println!("{}", recall_computer.summarize(&recall_values));
-
-    Ok(())
+        num_queries: results.len(),
+        recall: recall_values,
+    }
 }
 
 /// Per-query values summarized by mean and quantile.
-struct Distribution(Vec<f64>);
+pub(crate) struct Distribution(Vec<f64>);
 
 impl Distribution {
-    fn new(mut values: Vec<f64>) -> Self {
+    pub fn new(mut values: Vec<f64>) -> Self {
         values.sort_unstable_by(f64::total_cmp);
         Self(values)
     }
 
+    pub fn mean(&self) -> f64 {
+        if self.0.is_empty() {
+            return f64::NAN;
+        }
+        self.0.iter().sum::<f64>() / self.0.len() as f64
+    }
+
     /// Nearest-rank quantile of the sorted values.
-    fn quantile(&self, p: f64) -> f64 {
+    pub fn quantile(&self, p: f64) -> f64 {
         if self.0.is_empty() {
             return f64::NAN;
         }
@@ -121,11 +169,11 @@ impl Distribution {
     ///
     /// Depth distributions are strongly right skewed, so a stddev around the mean does not describe
     /// the tail that sets a work budget.
-    fn summarize(&self, label: &str) -> String {
+    pub fn summarize(&self, label: &str) -> String {
         if self.0.is_empty() {
             return format!("{label}: no values");
         }
-        let mean = self.0.iter().sum::<f64>() / self.0.len() as f64;
+        let mean = self.mean();
         format!(
             "{label}: n {} mean {:.2} p50 {:.2} p90 {:.2} p99 {:.2} max {:.2}",
             self.0.len(),

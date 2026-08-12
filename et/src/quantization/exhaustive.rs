@@ -82,15 +82,97 @@ impl ExhaustiveArgs {
             .min(query_vectors.len());
 
         let centers = self.compute_centers(doc_vectors);
+        let query_vectors =
+            SubsetViewVectorStore::new(&query_vectors, (0..query_limit).collect::<Vec<_>>());
+        Ok(Exhaustive::new(
+            self.similarity,
+            self.format,
+            self.quantize_query,
+            centers,
+            &query_vectors,
+        ))
+    }
+
+    /// Compute the centers implied by `--centers` over `doc_vectors`.
+    pub fn compute_centers(
+        &self,
+        doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    ) -> Option<VecVectorStore<f32>> {
+        compute_centers(
+            doc_vectors,
+            self.centers,
+            self.center_sample_size,
+            self.seed,
+        )
+    }
+}
+
+/// Compute `centers` centers over `doc_vectors`.
+///
+/// Returns `None` when `centers` is 0 (uncentered), the mean vector when it is 1, and k-means
+/// centers over a sample of at most `center_sample_size` vectors otherwise.
+pub fn compute_centers(
+    doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    centers: usize,
+    center_sample_size: usize,
+    seed: u64,
+) -> Option<VecVectorStore<f32>> {
+    match centers {
+        0 => None,
+        1 => {
+            let vectors = SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect());
+            let mean = super::compute_center(&vectors);
+            let mut centers = VecVectorStore::with_capacity(doc_vectors.elem_stride(), 1);
+            centers.push(&mean);
+            Some(centers)
+        }
+        _ => {
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+            let sample_size = center_sample_size.min(doc_vectors.len());
+            let sample_vectors = if sample_size < doc_vectors.len() {
+                let indices = rand::seq::index::sample(&mut rng, doc_vectors.len(), sample_size);
+                SubsetViewVectorStore::new(doc_vectors, indices.into_vec())
+            } else {
+                SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect())
+            };
+            println!(
+                "Computing {} centers from a sample of {} vectors",
+                centers,
+                sample_vectors.len()
+            );
+            let computed = kmeans(
+                &sample_vectors,
+                centers,
+                &Params {
+                    iters: 100,
+                    epsilon: 0.0001,
+                    ..Params::default()
+                },
+                &mut rng,
+            );
+            Some(computed.unwrap_or_else(|e| e))
+        }
+    }
+}
+
+impl Exhaustive {
+    /// Build coders for `format` against `centers` and quantize each query against every center.
+    pub fn new(
+        similarity: VectorSimilarity,
+        format: F32VectorCoding,
+        quantize_query: bool,
+        centers: Option<VecVectorStore<f32>>,
+        query_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    ) -> Self {
         let coders: Vec<Box<dyn F32VectorCoder>> = match centers.as_ref() {
-            None => vec![self.format.coder(self.similarity, None)],
+            None => vec![format.coder(similarity, None)],
             Some(cs) => cs
                 .iter()
-                .map(|c| self.format.coder(self.similarity, Some(c.to_vec())))
+                .map(|c| format.coder(similarity, Some(c.to_vec())))
                 .collect(),
         };
 
-        let query_scorers = (0..query_limit)
+        let query_scorers = (0..query_vectors.len())
             .into_par_iter()
             .map(|i| {
                 coders
@@ -100,15 +182,15 @@ impl ExhaustiveArgs {
                         let center = centers.as_ref().map(|cs| &cs[ci]);
                         // Queries are passed as owned values so the scorers do not borrow the
                         // mapped query vector file.
-                        if self.quantize_query {
-                            self.format.query_distance_symmetric(
-                                self.similarity,
+                        if quantize_query {
+                            format.query_distance_symmetric(
+                                similarity,
                                 coder.encode(&query_vectors[i]),
                                 center,
                             )
                         } else {
-                            self.format.query_distance_asymmetric(
-                                self.similarity,
+                            format.query_distance_asymmetric(
+                                similarity,
                                 query_vectors[i].to_vec(),
                                 center,
                             )
@@ -118,60 +200,14 @@ impl ExhaustiveArgs {
             })
             .collect::<Vec<_>>();
 
-        Ok(Exhaustive {
-            similarity: self.similarity,
+        Self {
+            similarity,
             centers,
             coders,
             query_scorers,
-        })
-    }
-
-    fn compute_centers(
-        &self,
-        doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
-    ) -> Option<VecVectorStore<f32>> {
-        match self.centers {
-            0 => None,
-            1 => {
-                let vectors =
-                    SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect());
-                let mean = super::compute_center(&vectors);
-                let mut centers = VecVectorStore::with_capacity(doc_vectors.elem_stride(), 1);
-                centers.push(&mean);
-                Some(centers)
-            }
-            _ => {
-                let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(self.seed);
-                let sample_size = self.center_sample_size.min(doc_vectors.len());
-                let sample_vectors = if sample_size < doc_vectors.len() {
-                    let indices =
-                        rand::seq::index::sample(&mut rng, doc_vectors.len(), sample_size);
-                    SubsetViewVectorStore::new(doc_vectors, indices.into_vec())
-                } else {
-                    SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect())
-                };
-                println!(
-                    "Computing {} centers from a sample of {} vectors",
-                    self.centers,
-                    sample_vectors.len()
-                );
-                let centers = kmeans(
-                    &sample_vectors,
-                    self.centers,
-                    &Params {
-                        iters: 100,
-                        epsilon: 0.0001,
-                        ..Params::default()
-                    },
-                    &mut rng,
-                );
-                Some(centers.unwrap_or_else(|e| e))
-            }
         }
     }
-}
 
-impl Exhaustive {
     pub fn num_queries(&self) -> usize {
         self.query_scorers.len()
     }

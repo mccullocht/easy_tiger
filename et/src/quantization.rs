@@ -4,6 +4,7 @@ mod exhaustive;
 mod loss;
 mod recall;
 mod rotate;
+mod sweep;
 
 use std::{fs::File, io, num::NonZero, path::PathBuf};
 
@@ -18,6 +19,7 @@ use distance_loss::{distance_loss, DistanceLossArgs};
 use loss::{loss, LossArgs};
 use recall::{recall, RecallArgs};
 use rotate::{rotate, RotateArgs};
+use sweep::{sweep, SweepArgs};
 
 #[derive(Args)]
 pub struct QuantizationArgs {
@@ -48,6 +50,8 @@ pub enum Command {
     BoundDepth(BoundDepthArgs),
     /// Apply an orthogonal rotation to each vector and write to an output file.
     Rotate(RotateArgs),
+    /// Compare quantizers by bound depth over a sampled index, computing exact neighbors in process.
+    Sweep(SweepArgs),
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
@@ -71,6 +75,7 @@ fn cmd(cmd: Command, vectors: &(impl VectorStore<Elem = f32> + Send + Sync)) -> 
         Command::Recall(args) => recall(args, vectors),
         Command::BoundDepth(args) => bound_depth(args, vectors),
         Command::Rotate(args) => rotate(args, vectors),
+        Command::Sweep(args) => sweep(args, vectors),
     }
 }
 

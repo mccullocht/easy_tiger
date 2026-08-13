@@ -138,24 +138,24 @@ impl Rotator {
                     *v = f32::from_bits(v.to_bits() ^ s);
                 }
             }
-            Self::wht_block(v, 1)
+            Self::wht_block::<1>(v)
         } else {
             // Perform the early strides of the block transformation together in 64 dimension chunks
             // in an effort to improve locality. v.len() is a power of 2 and there are at least 64
             // entries, so there will be no tail entries.
             let blocks = v.as_chunks_mut::<64>().0;
+            let sblocks = signs.as_chunks::<64>().0;
             if F {
-                let sblocks = signs.as_chunks::<64>().0;
                 for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
-                    Self::wht_fixed_block(b, Some(s));
+                    Self::wht_fixed_block::<true, 64>(b, s);
                 }
             } else {
-                for b in blocks.iter_mut() {
-                    Self::wht_fixed_block(b, None);
+                for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
+                    Self::wht_fixed_block::<false, 64>(b, s);
                 }
             }
             // Continue butterfly transformation at block size and beyond.
-            Self::wht_block(v, 64);
+            Self::wht_block::<64>(v);
         }
 
         // Normalize by 1/sqrt(n) to preserve distances and inner products.
@@ -172,13 +172,14 @@ impl Rotator {
         }
     }
 
-    fn wht_block(block: &mut [f32], initial_stride: usize) {
+    #[inline]
+    fn wht_block<const S: usize>(block: &mut [f32]) {
         let n = block.len();
         assert!(
             n.is_power_of_two(),
             "Hadamard transform requires power of 2 length"
         );
-        let mut h = initial_stride;
+        let mut h = S;
         while h < n {
             for i in (0..n).step_by(h * 2) {
                 for j in 0..h {
@@ -194,9 +195,10 @@ impl Rotator {
 
     /// Initial base Walsh-Hadamard Transform over a fixed size block.
     ///
-    /// This includes the sign flips that are needed before the operation begins.
-    fn wht_fixed_block<const N: usize>(block: &mut [f32; N], signs: Option<&[u32; N]>) {
-        if let Some(signs) = signs {
+    /// This includes the sign flips that are needed before the operation begins if `F` is true.
+    #[inline]
+    fn wht_fixed_block<const F: bool, const N: usize>(block: &mut [f32; N], signs: &[u32; N]) {
+        if F {
             for (&s, v) in signs.iter().zip(block.iter_mut()) {
                 *v = f32::from_bits(v.to_bits() ^ s);
             }

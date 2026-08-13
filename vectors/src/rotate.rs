@@ -1,7 +1,37 @@
+mod scalar;
+
 use std::ops::Range;
 
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_xoshiro::Xoshiro256PlusPlus;
+
+// XXX in general we need to test these implementations against one another.
+enum Kernel {
+    Scalar,
+}
+
+impl Kernel {
+    /// Walsh-Hadamard Transform vector `v` with `signs` random sign flips.
+    ///
+    /// `signs` are expected to contain 0 or 1 << 31 and will be XORed against floating point values to
+    /// flip the sign.
+    ///
+    /// `F` is true if this is a forward transform and false if this is a backward transform.
+    /// This determines whether the signs are applied before or after the butterfly transforms.
+    ///
+    /// *Panics* if `v.len()` is not a power of two, or if `v.len() != signs.len()`
+    pub fn walsh_hadamard_transform<const F: bool>(&self, v: &mut [f32], signs: &[u32]) {
+        match self {
+            Self::Scalar => scalar::walsh_hadamard_transform::<F>(v, signs),
+        }
+    }
+}
+
+impl Default for Kernel {
+    fn default() -> Self {
+        Self::Scalar
+    }
+}
 
 /// Random shuffle of the vector: forward (encode) and backward (decode).
 ///
@@ -55,6 +85,7 @@ impl Block {
 /// products while changing the distribution of the vector's components to minimize quantization
 /// error.
 pub struct Rotator {
+    kernel: Kernel,
     /// Vector dimensions are shuffled in the event that there are multiple blocks.
     // XXX should rep be an enum?
     shuffle: Option<Shuffle>,
@@ -85,7 +116,11 @@ impl Rotator {
             d ^= len;
         }
 
-        Self { shuffle, blocks }
+        Self {
+            kernel: Kernel::default(),
+            shuffle,
+            blocks,
+        }
     }
 
     /// Rotate forward for quantization.
@@ -101,7 +136,8 @@ impl Rotator {
         };
 
         for block in self.blocks.iter() {
-            Self::walsh_hadamard_transform::<true>(&mut rotated[block.dims.clone()], &block.sign);
+            self.kernel
+                .walsh_hadamard_transform::<true>(&mut rotated[block.dims.clone()], &block.sign);
         }
 
         rotated
@@ -113,7 +149,8 @@ impl Rotator {
     pub fn backward(&self, v: &[f32]) -> Vec<f32> {
         let mut tmp = v.to_vec();
         for block in self.blocks.iter() {
-            Self::walsh_hadamard_transform::<false>(&mut tmp[block.dims.clone()], &block.sign);
+            self.kernel
+                .walsh_hadamard_transform::<false>(&mut tmp[block.dims.clone()], &block.sign);
         }
 
         let b = if let Some(p) = self.shuffle.as_ref() {
@@ -124,98 +161,6 @@ impl Rotator {
             tmp
         };
         b
-    }
-
-    fn walsh_hadamard_transform<const F: bool>(v: &mut [f32], signs: &[u32]) {
-        assert!(
-            v.len().is_power_of_two(),
-            "Hadamard transform requires power of 2 length"
-        );
-        if v.len() < 64 {
-            if F {
-                // Forward must sign flip first.
-                for (&s, v) in signs.iter().zip(v.iter_mut()) {
-                    *v = f32::from_bits(v.to_bits() ^ s);
-                }
-            }
-            Self::wht_block::<1>(v)
-        } else {
-            // Perform the early strides of the block transformation together in 64 dimension chunks
-            // in an effort to improve locality. v.len() is a power of 2 and there are at least 64
-            // entries, so there will be no tail entries.
-            let blocks = v.as_chunks_mut::<64>().0;
-            let sblocks = signs.as_chunks::<64>().0;
-            if F {
-                for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
-                    Self::wht_fixed_block::<true, 64>(b, s);
-                }
-            } else {
-                for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
-                    Self::wht_fixed_block::<false, 64>(b, s);
-                }
-            }
-            // Continue butterfly transformation at block size and beyond.
-            Self::wht_block::<64>(v);
-        }
-
-        // Normalize by 1/sqrt(n) to preserve distances and inner products.
-        // For backwards transformation invert the sign flip here too.
-        let scale = 1.0 / (v.len() as f32).sqrt();
-        if F {
-            for x in v.iter_mut() {
-                *x *= scale;
-            }
-        } else {
-            for (&s, x) in signs.iter().zip(v.iter_mut()) {
-                *x *= f32::from_bits(scale.to_bits() ^ s);
-            }
-        }
-    }
-
-    #[inline]
-    fn wht_block<const S: usize>(block: &mut [f32]) {
-        let n = block.len();
-        assert!(
-            n.is_power_of_two(),
-            "Hadamard transform requires power of 2 length"
-        );
-        let mut h = S;
-        while h < n {
-            for i in (0..n).step_by(h * 2) {
-                for j in 0..h {
-                    let x = block[i + j];
-                    let y = block[i + j + h];
-                    block[i + j] = x + y;
-                    block[i + j + h] = x - y;
-                }
-            }
-            h *= 2;
-        }
-    }
-
-    /// Initial base Walsh-Hadamard Transform over a fixed size block.
-    ///
-    /// This includes the sign flips that are needed before the operation begins if `F` is true.
-    #[inline]
-    fn wht_fixed_block<const F: bool, const N: usize>(block: &mut [f32; N], signs: &[u32; N]) {
-        if F {
-            for (&s, v) in signs.iter().zip(block.iter_mut()) {
-                *v = f32::from_bits(v.to_bits() ^ s);
-            }
-        }
-
-        let mut h = 1;
-        while h < N {
-            for i in (0..N).step_by(h * 2) {
-                for j in 0..h {
-                    let x = block[i + j];
-                    let y = block[i + j + h];
-                    block[i + j] = x + y;
-                    block[i + j + h] = x - y;
-                }
-            }
-            h *= 2;
-        }
     }
 }
 
@@ -342,8 +287,8 @@ mod tests {
         let mut v = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let signs = vec![0u32; v.len()];
         let original = v.clone();
-        Rotator::walsh_hadamard_transform::<true>(&mut v, &signs);
-        Rotator::walsh_hadamard_transform::<true>(&mut v, &signs);
+        Kernel::Scalar.walsh_hadamard_transform::<true>(&mut v, &signs);
+        Kernel::Scalar.walsh_hadamard_transform::<true>(&mut v, &signs);
         assert!(
             original
                 .iter()

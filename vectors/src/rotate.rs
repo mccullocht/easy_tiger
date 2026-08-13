@@ -101,7 +101,7 @@ impl Rotator {
         };
 
         for block in self.blocks.iter() {
-            Self::walsh_hadamard_transform(&mut rotated[block.dims.clone()], Some(&block.sign));
+            Self::walsh_hadamard_transform::<true>(&mut rotated[block.dims.clone()], &block.sign);
         }
 
         rotated
@@ -113,16 +113,7 @@ impl Rotator {
     pub fn backward(&self, v: &[f32]) -> Vec<f32> {
         let mut tmp = v.to_vec();
         for block in self.blocks.iter() {
-            Self::walsh_hadamard_transform(&mut tmp[block.dims.clone()], None);
-            // XXX I hate this it should be fused inside the transform -- specifically backward
-            // should scale and sign flip together.
-
-            // Sign flips and the Hadamard transform don't commute, so unlike forward() (which fuses
-            // the flip immediately before each block's butterfly stages) the flip here must happen
-            // once, after every block has been fully transformed.
-            for (&s, v) in block.sign.iter().zip(tmp[block.dims.clone()].iter_mut()) {
-                *v = f32::from_bits(v.to_bits() ^ s);
-            }
+            Self::walsh_hadamard_transform::<false>(&mut tmp[block.dims.clone()], &block.sign);
         }
 
         let b = if let Some(p) = self.shuffle.as_ref() {
@@ -135,45 +126,49 @@ impl Rotator {
         b
     }
 
-    fn walsh_hadamard_transform(v: &mut [f32], signs: Option<&[u32]>) {
-        // Perform the early strides of the block transformation together in 64 dimension chunks
-        // in an effort to improve locality.
-        let (blocks, tail) = v.as_chunks_mut::<64>();
-        match signs {
-            Some(signs) => {
-                let (sblocks, stail) = signs.as_chunks::<64>();
+    fn walsh_hadamard_transform<const F: bool>(v: &mut [f32], signs: &[u32]) {
+        assert!(
+            v.len().is_power_of_two(),
+            "Hadamard transform requires power of 2 length"
+        );
+        if v.len() < 64 {
+            if F {
+                // Forward must sign flip first.
+                for (&s, v) in signs.iter().zip(v.iter_mut()) {
+                    *v = f32::from_bits(v.to_bits() ^ s);
+                }
+            }
+            Self::wht_block(v, 1)
+        } else {
+            // Perform the early strides of the block transformation together in 64 dimension chunks
+            // in an effort to improve locality. v.len() is a power of 2 and there are at least 64
+            // entries, so there will be no tail entries.
+            let blocks = v.as_chunks_mut::<64>().0;
+            if F {
+                let sblocks = signs.as_chunks::<64>().0;
                 for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
                     Self::wht_fixed_block(b, Some(s));
                 }
-
-                if tail.is_empty() {
-                    // Continue butterfly transformation at block size and beyond.
-                    Self::wht_block(v, 64);
-                } else {
-                    // In this case the whole vector length is a power of 2 less than 64.
-                    for (&s, v) in stail.iter().zip(tail.iter_mut()) {
-                        *v = f32::from_bits(v.to_bits() ^ s);
-                    }
-                    Self::wht_block(tail, 1);
-                }
-            }
-            None => {
+            } else {
                 for b in blocks.iter_mut() {
                     Self::wht_fixed_block(b, None);
                 }
-
-                if tail.is_empty() {
-                    Self::wht_block(v, 64);
-                } else {
-                    Self::wht_block(tail, 1);
-                }
             }
+            // Continue butterfly transformation at block size and beyond.
+            Self::wht_block(v, 64);
         }
 
-        // Normalize by 1/sqrt(n) to preserve distances and inner products
+        // Normalize by 1/sqrt(n) to preserve distances and inner products.
+        // For backwards transformation invert the sign flip here too.
         let scale = 1.0 / (v.len() as f32).sqrt();
-        for x in v.iter_mut() {
-            *x *= scale;
+        if F {
+            for x in v.iter_mut() {
+                *x *= scale;
+            }
+        } else {
+            for (&s, x) in signs.iter().zip(v.iter_mut()) {
+                *x *= f32::from_bits(scale.to_bits() ^ s);
+            }
         }
     }
 
@@ -345,8 +340,8 @@ mod tests {
         let mut v = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let signs = vec![0u32; v.len()];
         let original = v.clone();
-        Rotator::walsh_hadamard_transform(&mut v, Some(&signs));
-        Rotator::walsh_hadamard_transform(&mut v, Some(&signs));
+        Rotator::walsh_hadamard_transform::<true>(&mut v, &signs);
+        Rotator::walsh_hadamard_transform::<true>(&mut v, &signs);
         assert!(
             original
                 .iter()

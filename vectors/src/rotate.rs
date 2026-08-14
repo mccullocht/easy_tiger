@@ -1,3 +1,5 @@
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
 mod scalar;
 
 use std::ops::Range;
@@ -8,6 +10,8 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 // XXX in general we need to test these implementations against one another.
 enum Kernel {
     Scalar,
+    #[cfg(target_arch = "aarch64")]
+    Neon,
 }
 
 impl Kernel {
@@ -23,12 +27,17 @@ impl Kernel {
     pub fn walsh_hadamard_transform<const F: bool>(&self, v: &mut [f32], signs: &[u32]) {
         match self {
             Self::Scalar => scalar::walsh_hadamard_transform::<F>(v, signs),
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => aarch64::neon_walsh_hadamard_transform::<F>(v, signs),
         }
     }
 }
 
 impl Default for Kernel {
     fn default() -> Self {
+        if cfg!(target_arch = "aarch64") {
+            return Self::Neon;
+        }
         Self::Scalar
     }
 }

@@ -1,12 +1,4 @@
-/// Walsh-Hadamard Transform vector `v` with `signs` random sign flips.
-///
-/// `signs` are expected to contain 0 or 1 << 31 and will be XORed against floating point values to
-/// flip the sign.
-///
-/// `F` is true if this is a forward transform and false if this is a backward transform.
-/// This determines whether the signs are applied before or after the butterfly transforms.
-///
-/// *Panics* if `v.len()` is not a power of two, or if `v.len() != signs.len()`
+#[inline]
 pub fn walsh_hadamard_transform<const F: bool>(v: &mut [f32], signs: &[u32]) {
     assert!(
         v.len().is_power_of_two(),

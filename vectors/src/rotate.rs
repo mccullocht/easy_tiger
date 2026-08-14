@@ -183,14 +183,13 @@ impl Rotator {
                 .walsh_hadamard_transform::<false>(&mut tmp[block.dims.clone()], &block.sign);
         }
 
-        let b = if let Some(p) = self.shuffle.as_ref() {
+        if let Some(p) = self.shuffle.as_ref() {
             let mut r = tmp.clone();
             p.backward(&tmp, &mut r);
             r
         } else {
             tmp
-        };
-        b
+        }
     }
 }
 

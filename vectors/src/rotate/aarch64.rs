@@ -12,7 +12,7 @@ pub fn neon_walsh_hadamard_transform<const F: bool>(v: &mut [f32], signs: &[u32]
     );
     assert_eq!(v.len(), signs.len());
     if v.len() < 64 {
-        return super::scalar::walsh_hadamard_transform::<F>(v, signs);
+        super::scalar::walsh_hadamard_transform::<F>(v, signs)
     } else {
         // Perform the early strides of the block transformation together in 64 dimension chunks
         // in an effort to improve locality. v.len() is a power of 2 and there are at least 64

@@ -25,26 +25,40 @@ pub enum Kernel {
 }
 
 impl Kernel {
+    /// Every kernel that could be used on this target, fastest first. `Scalar` is always last and
+    /// is always usable; the others must be checked with `is_available()`.
+    const CANDIDATES: &'static [Self] = &[
+        #[cfg(target_arch = "aarch64")]
+        Self::Neon,
+        #[cfg(target_arch = "x86_64")]
+        Self::Avx512,
+        #[cfg(target_arch = "x86_64")]
+        Self::Avx,
+        Self::Scalar,
+    ];
+
+    /// True if this kernel may be used on this host.
+    fn is_available(&self) -> bool {
+        match self {
+            Self::Scalar => true,
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => true,
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 => is_x86_feature_detected!("avx512f"),
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx => is_x86_feature_detected!("avx"),
+        }
+    }
+
     /// All kernels that may be used on this host, fastest first.
     ///
     /// Accelerated kernels appear only if the host supports them; `Scalar` is always last.
-    // The set of pushes varies by target and by runtime feature detection.
-    #[allow(clippy::vec_init_then_push)]
     pub fn all() -> Vec<Self> {
-        let mut kernels = vec![];
-        #[cfg(target_arch = "aarch64")]
-        kernels.push(Self::Neon);
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx512f") {
-                kernels.push(Self::Avx512);
-            }
-            if is_x86_feature_detected!("avx") {
-                kernels.push(Self::Avx);
-            }
-        }
-        kernels.push(Self::Scalar);
-        kernels
+        Self::CANDIDATES
+            .iter()
+            .copied()
+            .filter(Self::is_available)
+            .collect()
     }
 
     /// Walsh-Hadamard Transform vector `v` with `signs` random sign flips.
@@ -74,8 +88,12 @@ impl Kernel {
 impl Default for Kernel {
     /// The fastest kernel available on this host.
     fn default() -> Self {
-        // `all()` is ordered fastest first and always contains at least `Scalar`.
-        Self::all().swap_remove(0)
+        // `CANDIDATES` is ordered fastest first and ends with `Scalar`, which is always available.
+        Self::CANDIDATES
+            .iter()
+            .copied()
+            .find(Self::is_available)
+            .expect("Scalar kernel is always available")
     }
 }
 

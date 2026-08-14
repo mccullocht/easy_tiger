@@ -1,5 +1,5 @@
 use std::arch::aarch64::{
-    float32x4_t, vaddq_f32, veorq_u32, vld1q_f32, vld1q_u32, vreinterpretq_f32_f64,
+    float32x4_t, vaddq_f32, veorq_u32, vld1q_f32, vld1q_u32, vmulq_n_f32, vreinterpretq_f32_f64,
     vreinterpretq_f32_u32, vreinterpretq_f64_f32, vreinterpretq_u32_f32, vst1q_f32, vsubq_f32,
     vuzp1q_f32, vuzp1q_f64, vuzp2q_f32, vuzp2q_f64, vzip1q_f32, vzip1q_f64, vzip2q_f32, vzip2q_f64,
 };
@@ -29,41 +29,82 @@ pub fn neon_walsh_hadamard_transform<const F: bool>(v: &mut [f32], signs: &[u32]
             }
         }
         // Continue butterfly transformation at block size and beyond.
-        wht_block::<64>(v);
-    }
-
-    // Normalize by 1/sqrt(n) to preserve distances and inner products.
-    // For backwards transformation invert the sign flip here too.
-    let scale = 1.0 / (v.len() as f32).sqrt();
-    if F {
-        for x in v.iter_mut() {
-            *x *= scale;
-        }
-    } else {
-        for (&s, x) in signs.iter().zip(v.iter_mut()) {
-            *x *= f32::from_bits(scale.to_bits() ^ s);
-        }
+        wht_block_from64::<F>(v, signs);
     }
 }
 
 #[inline]
-fn wht_block<const S: usize>(block: &mut [f32]) {
+fn wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) {
     let n = block.len();
     assert!(
         n.is_power_of_two(),
         "Hadamard transform requires power of 2 length"
     );
-    let mut h = S;
-    while h < n {
+    let scale = 1.0 / (n as f32).sqrt();
+
+    if n == 64 {
+        // The base 64-wide transform already completed every stride; there is no further
+        // butterfly stage to fuse the normalization into, so just scale (and sign-flip for
+        // backward) in place.
+        for i in (0..n).step_by(4) {
+            unsafe {
+                let x = vld1q_f32(block.as_ptr().add(i));
+                let mut v = vmulq_n_f32(x, scale);
+                if !F {
+                    v = vreinterpretq_f32_u32(veorq_u32(
+                        vreinterpretq_u32_f32(v),
+                        vld1q_u32(signs.as_ptr().add(i)),
+                    ));
+                }
+                vst1q_f32(block.as_mut_ptr().add(i), v);
+            }
+        }
+        return;
+    }
+
+    let mut h = 64;
+    while h < n / 2 {
         for i in (0..n).step_by(h * 2) {
-            for j in 0..h {
-                let x = block[i + j];
-                let y = block[i + j + h];
-                block[i + j] = x + y;
-                block[i + j + h] = x - y;
+            for j in (0..h).step_by(4) {
+                let x_off = i + j;
+                let y_off = i + j + h;
+                unsafe {
+                    let x = vld1q_f32(block.as_ptr().add(x_off));
+                    let y = vld1q_f32(block.as_ptr().add(y_off));
+                    vst1q_f32(block.as_mut_ptr().add(x_off), vaddq_f32(x, y));
+                    vst1q_f32(block.as_mut_ptr().add(y_off), vsubq_f32(x, y));
+                }
             }
         }
         h *= 2;
+    }
+
+    for i in (0..n).step_by(h * 2) {
+        for j in (0..h).step_by(4) {
+            let x_off = i + j;
+            let y_off = i + j + h;
+            unsafe {
+                let x = vld1q_f32(block.as_ptr().add(x_off));
+                let y = vld1q_f32(block.as_ptr().add(y_off));
+
+                let mut a = vmulq_n_f32(vaddq_f32(x, y), scale);
+                let mut b = vmulq_n_f32(vsubq_f32(x, y), scale);
+
+                if !F {
+                    a = vreinterpretq_f32_u32(veorq_u32(
+                        vreinterpretq_u32_f32(a),
+                        vld1q_u32(signs.as_ptr().add(x_off)),
+                    ));
+                    b = vreinterpretq_f32_u32(veorq_u32(
+                        vreinterpretq_u32_f32(b),
+                        vld1q_u32(signs.as_ptr().add(y_off)),
+                    ));
+                }
+
+                vst1q_f32(block.as_mut_ptr().add(x_off), a);
+                vst1q_f32(block.as_mut_ptr().add(y_off), b);
+            }
+        }
     }
 }
 

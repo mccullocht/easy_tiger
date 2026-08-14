@@ -20,20 +20,30 @@ pub enum Kernel {
     Neon,
     #[cfg(target_arch = "x86_64")]
     Avx512,
+    #[cfg(target_arch = "x86_64")]
+    Avx,
 }
 
 impl Kernel {
-    /// All kernels that may be used on this host, in no particular order.
+    /// All kernels that may be used on this host, fastest first.
     ///
-    /// `Scalar` is always included; accelerated kernels appear only if the host supports them.
+    /// Accelerated kernels appear only if the host supports them; `Scalar` is always last.
+    // The set of pushes varies by target and by runtime feature detection.
+    #[allow(clippy::vec_init_then_push)]
     pub fn all() -> Vec<Self> {
-        let mut kernels = vec![Self::Scalar];
+        let mut kernels = vec![];
         #[cfg(target_arch = "aarch64")]
         kernels.push(Self::Neon);
         #[cfg(target_arch = "x86_64")]
-        if is_x86_feature_detected!("avx512f") {
-            kernels.push(Self::Avx512);
+        {
+            if is_x86_feature_detected!("avx512f") {
+                kernels.push(Self::Avx512);
+            }
+            if is_x86_feature_detected!("avx") {
+                kernels.push(Self::Avx);
+            }
         }
+        kernels.push(Self::Scalar);
         kernels
     }
 
@@ -51,32 +61,21 @@ impl Kernel {
             Self::Scalar => scalar::walsh_hadamard_transform::<F>(v, signs),
             #[cfg(target_arch = "aarch64")]
             Self::Neon => aarch64::neon_walsh_hadamard_transform::<F>(v, signs),
-            // Safety: only constructed after `is_x86_feature_detected!("avx512f")` succeeded,
-            // see `Kernel::preferred` below.
+            // Safety: these are only constructed after the matching `is_x86_feature_detected!`
+            // check succeeded, see `Kernel::all` above.
             #[cfg(target_arch = "x86_64")]
             Self::Avx512 => unsafe { x86_64::avx512_walsh_hadamard_transform::<F>(v, signs) },
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx => unsafe { x86_64::avx_walsh_hadamard_transform::<F>(v, signs) },
         }
     }
 }
 
 impl Default for Kernel {
-    #[cfg(target_arch = "aarch64")]
+    /// The fastest kernel available on this host.
     fn default() -> Self {
-        Self::Neon
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    fn default() -> Self {
-        if is_x86_feature_detected!("avx512f") {
-            Self::Avx512
-        } else {
-            Self::Scalar
-        }
-    }
-
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    fn default() -> Self {
-        Self::Scalar
+        // `all()` is ordered fastest first and always contains at least `Scalar`.
+        Self::all().swap_remove(0)
     }
 }
 

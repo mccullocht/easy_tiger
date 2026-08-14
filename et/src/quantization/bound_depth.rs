@@ -149,11 +149,15 @@ impl Distribution {
         Self(values)
     }
 
+    pub fn sum(&self) -> f64 {
+        self.0.iter().sum()
+    }
+
     pub fn mean(&self) -> f64 {
         if self.0.is_empty() {
             return f64::NAN;
         }
-        self.0.iter().sum::<f64>() / self.0.len() as f64
+        self.sum() / self.0.len() as f64
     }
 
     /// Nearest-rank quantile of the sorted values.

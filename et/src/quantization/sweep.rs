@@ -176,24 +176,26 @@ pub fn sweep(
 
     println!();
     println!(
-        "{:<10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>12} {:>12}",
+        "{:<10} {:>10} {:>10} {:>10} {:>10} {:>14} {:>10} {:>12} {:>12}",
         "format",
         "depth p50",
         "depth p90",
         "depth p99",
         "depth max",
+        "rerank total",
         "slop p50",
         "miss rate",
         recall_computer.label(),
     );
     for (format, report) in &rows {
         println!(
-            "{:<10} {:>10.1} {:>10.1} {:>10.1} {:>10.0} {:>10.2} {:>11.4}% {:>12.4}",
+            "{:<10} {:>10.1} {:>10.1} {:>10.1} {:>10.0} {:>14.0} {:>10.2} {:>11.4}% {:>12.4}",
             format.to_string(),
             report.queue_depth.quantile(0.5),
             report.queue_depth.quantile(0.9),
             report.queue_depth.quantile(0.99),
             report.queue_depth.quantile(1.0),
+            report.queue_depth.sum(),
             report.slop.quantile(0.5),
             report.miss_rate() * 100.0,
             report.mean_recall(),

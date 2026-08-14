@@ -9,9 +9,12 @@ use std::ops::Range;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
-// XXX in general we need to test these implementations against one another.
-enum Kernel {
-    #[allow(dead_code)]
+/// Implementation of the Walsh-Hadamard transform used to rotate vectors.
+///
+/// Use [`Kernel::default()`] for the fastest kernel available on this host, or [`Kernel::all()`]
+/// to enumerate every kernel that may be used on this host.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum Kernel {
     Scalar,
     #[cfg(target_arch = "aarch64")]
     Neon,
@@ -20,6 +23,20 @@ enum Kernel {
 }
 
 impl Kernel {
+    /// All kernels that may be used on this host, in no particular order.
+    ///
+    /// `Scalar` is always included; accelerated kernels appear only if the host supports them.
+    pub fn all() -> Vec<Self> {
+        let mut kernels = vec![Self::Scalar];
+        #[cfg(target_arch = "aarch64")]
+        kernels.push(Self::Neon);
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx512f") {
+            kernels.push(Self::Avx512);
+        }
+        kernels
+    }
+
     /// Walsh-Hadamard Transform vector `v` with `signs` random sign flips.
     ///
     /// `signs` are expected to contain 0 or 1 << 31 and will be XORed against floating point values to
@@ -60,6 +77,12 @@ impl Default for Kernel {
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn default() -> Self {
         Self::Scalar
+    }
+}
+
+impl std::fmt::Display for Kernel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
     }
 }
 
@@ -130,6 +153,13 @@ impl Rotator {
     /// diagonal Hardamard transform will be used on blocks of dimensions dictated by a binary
     /// decomposition of `dims`.
     pub fn new(dims: usize, seed: u64) -> Self {
+        Self::with_kernel(dims, seed, Kernel::default())
+    }
+
+    /// Like [`Rotator::new()`] but uses `kernel` to compute the transforms instead of the fastest
+    /// kernel available on this host. All kernels produce equivalent results; this is intended for
+    /// testing and benchmarking.
+    pub fn with_kernel(dims: usize, seed: u64, kernel: Kernel) -> Self {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         let shuffle = if !dims.is_power_of_two() {
             Some(Shuffle::new(dims, &mut rng))
@@ -147,7 +177,7 @@ impl Rotator {
         }
 
         Self {
-            kernel: Kernel::default(),
+            kernel,
             shuffle,
             blocks,
         }
@@ -329,11 +359,11 @@ mod tests {
     /// The accelerated kernel available on the current hardware, e.g. `Neon` on aarch64 or
     /// `Avx512` on x86_64 with the necessary feature present. `None` if only `Scalar` is
     /// available (e.g. an x86_64 host without `avx512f`).
-    fn accelerated_kernel() -> Option<Kernel> {
-        match Kernel::default() {
-            Kernel::Scalar => None,
-            accelerated => Some(accelerated),
-        }
+    fn accelerated_kernels() -> Vec<Kernel> {
+        Kernel::all()
+            .into_iter()
+            .filter(|k| *k != Kernel::Scalar)
+            .collect()
     }
 
     fn make_signs(dims: usize, seed: u64) -> Vec<u32> {
@@ -349,36 +379,34 @@ mod tests {
     /// transform directions.
     #[test]
     fn accelerated_matches_scalar() {
-        let Some(accelerated) = accelerated_kernel() else {
-            // No accelerated kernel is available on this hardware; nothing to compare.
-            return;
-        };
+        // If no accelerated kernel is available on this hardware there is nothing to compare.
+        for accelerated in accelerated_kernels() {
+            for &dims in &[1usize, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
+                for seed in 0..5u64 {
+                    let v = make_vec(dims, seed);
+                    let signs = make_signs(dims, seed ^ 0xdead_beef);
 
-        for &dims in &[1usize, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
-            for seed in 0..5u64 {
-                let v = make_vec(dims, seed);
-                let signs = make_signs(dims, seed ^ 0xdead_beef);
+                    let mut forward_scalar = v.clone();
+                    let mut forward_accel = v.clone();
+                    Kernel::Scalar.walsh_hadamard_transform::<true>(&mut forward_scalar, &signs);
+                    accelerated.walsh_hadamard_transform::<true>(&mut forward_accel, &signs);
+                    for (i, (a, b)) in forward_scalar.iter().zip(&forward_accel).enumerate() {
+                        assert!(
+                            abs_diff_eq!(a, b, epsilon = 1e-4),
+                            "{accelerated} dims={dims} seed={seed} forward mismatch at {i}: scalar={a} accel={b}"
+                        );
+                    }
 
-                let mut forward_scalar = v.clone();
-                let mut forward_accel = v.clone();
-                Kernel::Scalar.walsh_hadamard_transform::<true>(&mut forward_scalar, &signs);
-                accelerated.walsh_hadamard_transform::<true>(&mut forward_accel, &signs);
-                for (i, (a, b)) in forward_scalar.iter().zip(&forward_accel).enumerate() {
-                    assert!(
-                        abs_diff_eq!(a, b, epsilon = 1e-4),
-                        "dims={dims} seed={seed} forward mismatch at {i}: scalar={a} accel={b}"
-                    );
-                }
-
-                let mut backward_scalar = forward_scalar.clone();
-                let mut backward_accel = forward_accel.clone();
-                Kernel::Scalar.walsh_hadamard_transform::<false>(&mut backward_scalar, &signs);
-                accelerated.walsh_hadamard_transform::<false>(&mut backward_accel, &signs);
-                for (i, (a, b)) in backward_scalar.iter().zip(&backward_accel).enumerate() {
-                    assert!(
-                        abs_diff_eq!(a, b, epsilon = 1e-4),
-                        "dims={dims} seed={seed} backward mismatch at {i}: scalar={a} accel={b}"
-                    );
+                    let mut backward_scalar = forward_scalar.clone();
+                    let mut backward_accel = forward_accel.clone();
+                    Kernel::Scalar.walsh_hadamard_transform::<false>(&mut backward_scalar, &signs);
+                    accelerated.walsh_hadamard_transform::<false>(&mut backward_accel, &signs);
+                    for (i, (a, b)) in backward_scalar.iter().zip(&backward_accel).enumerate() {
+                        assert!(
+                            abs_diff_eq!(a, b, epsilon = 1e-4),
+                            "{accelerated} dims={dims} seed={seed} backward mismatch at {i}: scalar={a} accel={b}"
+                        );
+                    }
                 }
             }
         }

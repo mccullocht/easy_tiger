@@ -1,6 +1,8 @@
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 mod scalar;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 use std::ops::Range;
 
@@ -12,6 +14,8 @@ enum Kernel {
     Scalar,
     #[cfg(target_arch = "aarch64")]
     Neon,
+    #[cfg(target_arch = "x86_64")]
+    Avx512,
 }
 
 impl Kernel {
@@ -29,15 +33,42 @@ impl Kernel {
             Self::Scalar => scalar::walsh_hadamard_transform::<F>(v, signs),
             #[cfg(target_arch = "aarch64")]
             Self::Neon => aarch64::neon_walsh_hadamard_transform::<F>(v, signs),
+            // Safety: only constructed after `is_x86_feature_detected!("avx512f")` succeeded,
+            // see `Kernel::preferred` below.
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 => unsafe { x86_64::avx512_walsh_hadamard_transform::<F>(v, signs) },
         }
     }
 }
 
 impl Default for Kernel {
     fn default() -> Self {
-        if cfg!(target_arch = "aarch64") {
-            return Self::Neon;
+        Self::preferred()
+    }
+}
+
+// XXX i hate this.
+#[cfg(target_arch = "aarch64")]
+impl Kernel {
+    fn preferred() -> Self {
+        Self::Neon
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Kernel {
+    fn preferred() -> Self {
+        if is_x86_feature_detected!("avx512f") {
+            Self::Avx512
+        } else {
+            Self::Scalar
         }
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl Kernel {
+    fn preferred() -> Self {
         Self::Scalar
     }
 }

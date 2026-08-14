@@ -11,6 +11,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 
 // XXX in general we need to test these implementations against one another.
 enum Kernel {
+    #[allow(dead_code)]
     Scalar,
     #[cfg(target_arch = "aarch64")]
     Neon,
@@ -42,33 +43,22 @@ impl Kernel {
 }
 
 impl Default for Kernel {
+    #[cfg(target_arch = "aarch64")]
     fn default() -> Self {
-        Self::preferred()
-    }
-}
-
-// XXX i hate this.
-#[cfg(target_arch = "aarch64")]
-impl Kernel {
-    fn preferred() -> Self {
         Self::Neon
     }
-}
 
-#[cfg(target_arch = "x86_64")]
-impl Kernel {
-    fn preferred() -> Self {
+    #[cfg(target_arch = "x86_64")]
+    fn default() -> Self {
         if is_x86_feature_detected!("avx512f") {
             Self::Avx512
         } else {
             Self::Scalar
         }
     }
-}
 
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-impl Kernel {
-    fn preferred() -> Self {
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn default() -> Self {
         Self::Scalar
     }
 }
@@ -335,5 +325,63 @@ mod tests {
                 .zip(&v)
                 .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-6))
         );
+    }
+
+    /// The accelerated kernel available on the current hardware, e.g. `Neon` on aarch64 or
+    /// `Avx512` on x86_64 with the necessary feature present. `None` if only `Scalar` is
+    /// available (e.g. an x86_64 host without `avx512f`).
+    fn accelerated_kernel() -> Option<Kernel> {
+        match Kernel::default() {
+            Kernel::Scalar => None,
+            accelerated => Some(accelerated),
+        }
+    }
+
+    fn make_signs(dims: usize, seed: u64) -> Vec<u32> {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+        (0..dims)
+            .map(|_| if rng.random_bool(0.5) { 0 } else { 1u32 << 31 })
+            .collect()
+    }
+
+    /// Change-detector test: any accelerated kernel (Neon, Avx512, ...) must produce bit-for-bit
+    /// equivalent (within float epsilon) results to the scalar reference implementation, across
+    /// every block-size code path (below 64, exactly 64, and multiple 64-blocks) and both
+    /// transform directions.
+    #[test]
+    fn accelerated_matches_scalar() {
+        let Some(accelerated) = accelerated_kernel() else {
+            // No accelerated kernel is available on this hardware; nothing to compare.
+            return;
+        };
+
+        for &dims in &[1usize, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
+            for seed in 0..5u64 {
+                let v = make_vec(dims, seed);
+                let signs = make_signs(dims, seed ^ 0xdead_beef);
+
+                let mut forward_scalar = v.clone();
+                let mut forward_accel = v.clone();
+                Kernel::Scalar.walsh_hadamard_transform::<true>(&mut forward_scalar, &signs);
+                accelerated.walsh_hadamard_transform::<true>(&mut forward_accel, &signs);
+                for (i, (a, b)) in forward_scalar.iter().zip(&forward_accel).enumerate() {
+                    assert!(
+                        abs_diff_eq!(a, b, epsilon = 1e-4),
+                        "dims={dims} seed={seed} forward mismatch at {i}: scalar={a} accel={b}"
+                    );
+                }
+
+                let mut backward_scalar = forward_scalar.clone();
+                let mut backward_accel = forward_accel.clone();
+                Kernel::Scalar.walsh_hadamard_transform::<false>(&mut backward_scalar, &signs);
+                accelerated.walsh_hadamard_transform::<false>(&mut backward_accel, &signs);
+                for (i, (a, b)) in backward_scalar.iter().zip(&backward_accel).enumerate() {
+                    assert!(
+                        abs_diff_eq!(a, b, epsilon = 1e-4),
+                        "dims={dims} seed={seed} backward mismatch at {i}: scalar={a} accel={b}"
+                    );
+                }
+            }
+        }
     }
 }

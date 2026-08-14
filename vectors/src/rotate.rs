@@ -157,7 +157,6 @@ impl Block {
 pub struct Rotator {
     kernel: Kernel,
     /// Vector dimensions are shuffled in the event that there are multiple blocks.
-    // XXX should rep be an enum?
     shuffle: Option<Shuffle>,
     blocks: Vec<Block>,
 }

@@ -14,8 +14,8 @@ use std::{
     num::NonZero,
     ops::Range,
     sync::{
-        atomic::{self, AtomicI64},
         Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        atomic::{self, AtomicI64},
     },
 };
 
@@ -26,17 +26,17 @@ use rustix::io::Errno;
 use thread_local::ThreadLocal;
 use tracing::warn;
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{connection::CreateOptionsBuilder, Connection, Error, Result, Transaction};
+use wt_mdb::{Connection, Error, Result, Transaction, connection::CreateOptionsBuilder};
 
 use crate::{
+    Neighbor,
     input::{DerefVectorStore, VectorStore},
     vamana::search::GraphSearcher,
-    vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
+    vamana::wt::{CursorVectorStore, ENTRY_POINT_KEY, TableGraphVectorIndex, encode_graph_vertex},
     vamana::{
-        prune_edges, select_pruned_edges, EdgeSetDistanceComputer, EdgeType, Graph, GraphConfig,
-        GraphVectorIndex, GraphVectorStore,
+        EdgeSetDistanceComputer, EdgeType, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
+        prune_edges, select_pruned_edges,
     },
-    Neighbor,
 };
 
 /// Stats for the built graph.
@@ -736,11 +736,7 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let vertex = self.0.entry_vertex.load(atomic::Ordering::Relaxed);
-        if vertex >= 0 {
-            Some(Ok(vertex))
-        } else {
-            None
-        }
+        if vertex >= 0 { Some(Ok(vertex)) } else { None }
     }
 
     fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {

@@ -13,15 +13,15 @@ use std::{io, sync::Arc};
 use clap::{Args, Subcommand};
 
 use crate::wt_args::WiredTigerArgs;
-use bulk_load::{bulk_load, BulkLoadArgs};
+use bulk_load::{BulkLoadArgs, bulk_load};
 use centroid_stats::centroid_stats;
-use delete_sim::{delete_sim, DeleteSimArgs};
+use delete_sim::{DeleteSimArgs, delete_sim};
 use drop_index::drop_index;
-use export_head::{export_head, ExportHeadArgs};
-use init_index::{init_index, InitIndexArgs};
-use insert_vectors::{insert_vectors, InsertVectorsArgs};
-use rebalance::{rebalance, RebalanceArgs};
-use search::{search, SearchArgs};
+use export_head::{ExportHeadArgs, export_head};
+use init_index::{InitIndexArgs, init_index};
+use insert_vectors::{InsertVectorsArgs, insert_vectors};
+use rebalance::{RebalanceArgs, rebalance};
+use search::{SearchArgs, search};
 
 #[derive(Args)]
 pub struct SpannArgs {

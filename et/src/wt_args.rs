@@ -1,7 +1,7 @@
 use std::{num::NonZero, sync::Arc};
 
 use clap::Args;
-use wt_mdb::{connection::OptionsBuilder, Connection, Result, Statistics};
+use wt_mdb::{Connection, Result, Statistics, connection::OptionsBuilder};
 
 #[derive(Args)]
 pub struct WiredTigerArgs {

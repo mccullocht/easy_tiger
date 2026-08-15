@@ -2,15 +2,15 @@ use std::{collections::HashMap, fs::File, io, num::NonZero, ops::Range, path::Pa
 
 use clap::Args;
 use easy_tiger::{
+    Neighbor,
     input::{DerefVectorStore, VectorStore},
     spann::{
+        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
         postings::BlockPostingsMut,
         rebalance::{BalanceSummary, RebalanceStats},
-        CentroidAssignment, TableIndex, TransactionIndex,
     },
     vamana::search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
-    Neighbor,
 };
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::SeedableRng;

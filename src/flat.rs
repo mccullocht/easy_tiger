@@ -7,8 +7,8 @@ use std::{io, num::NonZero, sync::Arc};
 use serde::{Deserialize, Serialize};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{
-    connection::{CreateOptionsBuilder, DropOptions},
     Connection,
+    connection::{CreateOptionsBuilder, DropOptions},
 };
 
 use crate::vamana::wt::read_app_metadata;

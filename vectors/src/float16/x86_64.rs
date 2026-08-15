@@ -1,8 +1,8 @@
 use std::arch::x86_64::{
-    __m128i, __m256, _mm_add_ps, _mm_cvtss_f32, _mm_hadd_ps, _mm_loadu_si128, _mm_shuffle_ps,
-    _mm_storeu_si128, _mm256_castps256_ps128, _mm256_cvtph_ps, _mm256_cvtps_ph,
-    _mm256_extractf128_ps, _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps,
-    _mm256_storeu_ps, _mm256_sub_ps, _MM_FROUND_TO_NEAREST_INT,
+    __m128i, __m256, _MM_FROUND_TO_NEAREST_INT, _mm_add_ps, _mm_cvtss_f32, _mm_hadd_ps,
+    _mm_loadu_si128, _mm_shuffle_ps, _mm_storeu_si128, _mm256_castps256_ps128, _mm256_cvtph_ps,
+    _mm256_cvtps_ph, _mm256_extractf128_ps, _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_mul_ps,
+    _mm256_set1_ps, _mm256_storeu_ps, _mm256_sub_ps,
 };
 
 /// Load 8 packed `f16` values (16 bytes), zero-filling missing entries.

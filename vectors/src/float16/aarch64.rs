@@ -1,5 +1,5 @@
 use std::arch::aarch64::{
-    float16x4_t, float16x8_t, float32x4_t, vaddq_f32, vaddvq_f32, vcvt_f32_f16, vcvt_f16_f32,
+    float16x4_t, float16x8_t, float32x4_t, vaddq_f32, vaddvq_f32, vcvt_f16_f32, vcvt_f32_f16,
     vcvt_high_f32_f16, vdupq_n_f32, vfmaq_f32, vfmlalq_high_f16, vfmlalq_low_f16, vget_high_f16,
     vget_low_f16, vld1_u16, vld1q_f32, vld1q_u16, vmulq_n_f32, vreinterpret_f16_u16,
     vreinterpret_u8_f16, vreinterpretq_f16_u16, vst1_u8, vst1q_f32, vsubq_f16, vsubq_f32,
@@ -87,7 +87,10 @@ pub unsafe fn serialize_f16(v: &[f32], scale: Option<f32>, out: &mut [u8]) {
                 in_ = vmulq_n_f32(in_, scale);
             }
             let mut tail_out = [0u8; 8];
-            vst1_u8(tail_out.as_mut_ptr(), vreinterpret_u8_f16(vcvt_f16_f32(in_)));
+            vst1_u8(
+                tail_out.as_mut_ptr(),
+                vreinterpret_u8_f16(vcvt_f16_f32(in_)),
+            );
             out[tail_split * 2..].copy_from_slice(&tail_out[..(v.len() - tail_split) * 2]);
         }
     }
@@ -108,7 +111,10 @@ pub unsafe fn deserialize_f16(v: &[u8], out: &mut [f32]) {
         unsafe {
             let in_ = load_f16x8(&v[i * 2..]);
             vst1q_f32(out.as_mut_ptr().add(i), vcvt_f32_f16(vget_low_f16(in_)));
-            vst1q_f32(out.as_mut_ptr().add(i + 4), vcvt_f32_f16(vget_high_f16(in_)));
+            vst1q_f32(
+                out.as_mut_ptr().add(i + 4),
+                vcvt_f32_f16(vget_high_f16(in_)),
+            );
         }
     }
 
@@ -117,7 +123,10 @@ pub unsafe fn deserialize_f16(v: &[u8], out: &mut [f32]) {
             let in_ = load_tail_f16x8(&v[tail_split * 2..len * 2]);
             let mut tail_out = [0.0f32; 8];
             vst1q_f32(tail_out.as_mut_ptr(), vcvt_f32_f16(vget_low_f16(in_)));
-            vst1q_f32(tail_out.as_mut_ptr().add(4), vcvt_f32_f16(vget_high_f16(in_)));
+            vst1q_f32(
+                tail_out.as_mut_ptr().add(4),
+                vcvt_f32_f16(vget_high_f16(in_)),
+            );
             out[tail_split..].copy_from_slice(&tail_out[..len - tail_split]);
         }
     }
@@ -203,7 +212,11 @@ pub unsafe fn dot_f32_f16(a: &[f32], b: &[u8]) -> f32 {
                 vld1q_f32(a.as_ptr().add(i)),
                 vcvt_f32_f16(vget_low_f16(bv16)),
             );
-            dot1 = vfmaq_f32(dot1, vld1q_f32(a.as_ptr().add(i + 4)), vcvt_high_f32_f16(bv16));
+            dot1 = vfmaq_f32(
+                dot1,
+                vld1q_f32(a.as_ptr().add(i + 4)),
+                vcvt_high_f32_f16(bv16),
+            );
 
             let bv16 = load_f16x8(&b[(i + 8) * 2..]);
             dot2 = vfmaq_f32(
@@ -211,7 +224,11 @@ pub unsafe fn dot_f32_f16(a: &[f32], b: &[u8]) -> f32 {
                 vld1q_f32(a.as_ptr().add(i + 8)),
                 vcvt_f32_f16(vget_low_f16(bv16)),
             );
-            dot3 = vfmaq_f32(dot3, vld1q_f32(a.as_ptr().add(i + 12)), vcvt_high_f32_f16(bv16));
+            dot3 = vfmaq_f32(
+                dot3,
+                vld1q_f32(a.as_ptr().add(i + 12)),
+                vcvt_high_f32_f16(bv16),
+            );
         }
     }
 
@@ -260,10 +277,7 @@ pub unsafe fn l2_f16_f16(a: &[u8], b: &[u8]) -> f32 {
             sum0 = vfmlalq_low_f16(sum0, dv, dv);
             sum1 = vfmlalq_high_f16(sum1, dv, dv);
 
-            let dv = vsubq_f16(
-                load_f16x8(&a[(i + 8) * 2..]),
-                load_f16x8(&b[(i + 8) * 2..]),
-            );
+            let dv = vsubq_f16(load_f16x8(&a[(i + 8) * 2..]), load_f16x8(&b[(i + 8) * 2..]));
             sum2 = vfmlalq_low_f16(sum2, dv, dv);
             sum3 = vfmlalq_high_f16(sum3, dv, dv);
         }
@@ -314,7 +328,10 @@ pub unsafe fn l2_f32_f16(a: &[f32], b: &[u8]) -> f32 {
     for i in (0..len16).step_by(16) {
         unsafe {
             let bv16 = load_f16x8(&b[i * 2..]);
-            let mut dv = vsubq_f32(vld1q_f32(a.as_ptr().add(i)), vcvt_f32_f16(vget_low_f16(bv16)));
+            let mut dv = vsubq_f32(
+                vld1q_f32(a.as_ptr().add(i)),
+                vcvt_f32_f16(vget_low_f16(bv16)),
+            );
             sum0 = vfmaq_f32(sum0, dv, dv);
             dv = vsubq_f32(vld1q_f32(a.as_ptr().add(i + 4)), vcvt_high_f32_f16(bv16));
             sum1 = vfmaq_f32(sum1, dv, dv);
@@ -334,7 +351,10 @@ pub unsafe fn l2_f32_f16(a: &[f32], b: &[u8]) -> f32 {
     let len4 = len & !3;
     for i in (len16..len4).step_by(4) {
         unsafe {
-            let dv = vsubq_f32(vld1q_f32(a.as_ptr().add(i)), vcvt_f32_f16(load_f16x4(&b[i * 2..])));
+            let dv = vsubq_f32(
+                vld1q_f32(a.as_ptr().add(i)),
+                vcvt_f32_f16(load_f16x4(&b[i * 2..])),
+            );
             sum0 = vfmaq_f32(sum0, dv, dv);
         }
     }

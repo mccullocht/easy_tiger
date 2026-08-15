@@ -45,7 +45,7 @@ where
 {
     /// Create a new store from byte de-refable `data` where each entry contains
     /// `stride` elements of of type `E`.
-    pub fn new(data: D, stride: NonZero<usize>) -> io::Result<Self> {
+    pub fn with_stride(data: D, stride: NonZero<usize>) -> io::Result<Self> {
         let elem_width = std::mem::size_of::<E>();
         let vectorp = data.as_ptr() as *const E;
         if !vectorp.is_aligned() {
@@ -78,7 +78,7 @@ where
 
     /// Create a new store from a de-refable `data` in BigANN format where the file begins with two
     /// 32-bit integers: <len, dim>.
-    pub fn new_bigann(data: D) -> io::Result<Self> {
+    pub fn new(data: D) -> io::Result<Self> {
         if data.len() < 8 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -117,17 +117,20 @@ where
 impl<E> DerefVectorStore<E, Mmap> {
     /// Create a new store by mmapping the file at `path`, where each entry contains
     /// `stride` elements of type `E`.
-    pub fn from_file(path: impl AsRef<Path>, stride: NonZero<usize>) -> io::Result<Self> {
+    pub fn from_file_with_stride(
+        path: impl AsRef<Path>,
+        stride: NonZero<usize>,
+    ) -> io::Result<Self> {
         let mmap = unsafe { Mmap::map(&File::open(path)?)? };
-        Self::new(mmap, stride)
+        Self::with_stride(mmap, stride)
     }
 
     /// Create a new store by mapping the file at `path` an interpreting as a BigANN benchmark
     /// input that begins with a <len,dim> header. The length of each vector is interpreted based
     /// on the size of `E`, so this cannot be used for sub-byte inputs.
-    pub fn from_bigann_file(path: impl AsRef<Path>) -> io::Result<Self> {
+    pub fn from_file(path: impl AsRef<Path>) -> io::Result<Self> {
         let mmap = unsafe { Mmap::map(&File::open(path)?)? };
-        Self::new_bigann(mmap)
+        Self::new(mmap)
     }
 }
 
@@ -160,91 +163,6 @@ impl<E, D> Index<usize> for DerefVectorStore<E, D> {
         &self.raw_vectors[start..end]
     }
 }
-
-pub struct CompositeVectorStore<S> {
-    children: Vec<S>,
-    len: usize,
-}
-
-impl<S: VectorStore> CompositeVectorStore<S> {
-    /// Create a new composite store from a list of children.
-    ///
-    /// May return `None` if children are empty or do not have the same elem stride.
-    pub fn from_children(children: Vec<S>) -> Option<Self> {
-        if children.is_empty() {
-            return None;
-        }
-        if children
-            .iter()
-            .any(|s| s.elem_stride() != children[0].elem_stride())
-        {
-            return None;
-        }
-        let len = children.iter().map(VectorStore::len).sum::<usize>();
-        Some(Self { children, len })
-    }
-}
-
-impl<S: VectorStore> VectorStore for CompositeVectorStore<S> {
-    type Elem = S::Elem;
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    fn elem_stride(&self) -> usize {
-        self.children[0].elem_stride()
-    }
-
-    fn iter(&self) -> impl ExactSizeIterator<Item = &[Self::Elem]> {
-        CompositeVectorStoreIter {
-            iter: self.children.iter().flat_map(|s| s.iter()),
-            remaining: self.len,
-        }
-    }
-}
-
-impl<S: VectorStore> Index<usize> for CompositeVectorStore<S> {
-    type Output = [S::Elem];
-
-    fn index(&self, index: usize) -> &Self::Output {
-        let mut base = 0usize;
-        for c in self.children.iter() {
-            if index < base + c.len() {
-                return &c[index - base];
-            } else {
-                base += c.len();
-            }
-        }
-        panic!("index {index} out of bounds");
-    }
-}
-
-pub struct CompositeVectorStoreIter<I> {
-    iter: I,
-    remaining: usize,
-}
-
-impl<I: Iterator> Iterator for CompositeVectorStoreIter<I> {
-    type Item = I::Item;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let item = self.iter.next();
-        if item.is_some() {
-            self.remaining -= 1;
-        }
-        item
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.remaining, Some(self.remaining))
-    }
-}
-
-impl<I: Iterator> ExactSizeIterator for CompositeVectorStoreIter<I> {}
 
 #[derive(Debug, Clone)]
 pub struct VecVectorStore<E: 'static> {

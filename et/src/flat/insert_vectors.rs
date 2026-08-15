@@ -31,7 +31,7 @@ pub fn insert_vectors(
     let config = flat::open_config(&connection, index_name)?;
     let table_name = flat::table_name(index_name);
 
-    let f32_vectors = DerefVectorStore::new(
+    let f32_vectors = DerefVectorStore::with_stride(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
         config.dimensions,
     )?;

@@ -69,7 +69,7 @@ pub fn recall(
     args: RecallArgs,
     doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
 ) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
+    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::with_stride(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         NonZero::new(doc_vectors.elem_stride()).unwrap(),
     )?;

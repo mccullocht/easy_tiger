@@ -5,7 +5,6 @@ mod neighbor_util;
 mod quantization;
 mod recall;
 mod spann;
-mod transcode_flatten;
 mod ui;
 mod vamana;
 mod wt_args;
@@ -21,7 +20,6 @@ use quantization::{QuantizationArgs, quantization};
 use spann::{SpannArgs, spann_command};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
-use transcode_flatten::{TranscodeFlattenArgs, transcode_flatten};
 use vamana::{VamanaArgs, vamana_command};
 
 #[derive(Parser)]
@@ -46,8 +44,6 @@ enum Commands {
     Quantization(QuantizationArgs),
     /// Generate random vectors and write them to a file.
     Generate(GenerateArgs),
-    /// Transcode a glob of BigANN-format encoded vector shards into a single flat f32 vector file.
-    TranscodeFlatten(TranscodeFlattenArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -68,6 +64,5 @@ fn main() -> io::Result<()> {
         Commands::ComputeNeighbors(args) => compute_neighbors(args),
         Commands::Quantization(args) => quantization(args),
         Commands::Generate(args) => generate(args),
-        Commands::TranscodeFlatten(args) => transcode_flatten(args),
     }
 }

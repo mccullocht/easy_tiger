@@ -84,7 +84,7 @@ pub struct SearchArgs {
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    let query_vectors = easy_tiger::input::DerefVectorStore::new(
+    let query_vectors = easy_tiger::input::DerefVectorStore::with_stride(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         index.head_config().config().dimensions,
     )?;

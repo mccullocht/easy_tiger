@@ -58,7 +58,7 @@ fn insert_all<'a>(
 
 pub fn insert(connection: Arc<Connection>, index_name: &str, args: InsertArgs) -> io::Result<()> {
     let index = Arc::new(TableGraphVectorIndex::from_db(&connection, index_name)?);
-    let vectors = DerefVectorStore::<f32, _>::new(
+    let vectors = DerefVectorStore::<f32, _>::with_stride(
         unsafe { memmap2::Mmap::map(&File::open(args.vectors)?)? },
         index.config().dimensions,
     )?;

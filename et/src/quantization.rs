@@ -46,7 +46,7 @@ pub enum Command {
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
-    let vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
+    let vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::with_stride(
         unsafe { Mmap::map(&File::open(args.doc_vectors)?)? },
         args.dimensions,
     )?;

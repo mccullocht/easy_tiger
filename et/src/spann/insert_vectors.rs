@@ -52,7 +52,7 @@ pub fn insert_vectors(
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
 
     // Map the input vectors.
-    let f32_vectors = DerefVectorStore::new(
+    let f32_vectors = DerefVectorStore::with_stride(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
         index.head_config().config().dimensions,
     )?;

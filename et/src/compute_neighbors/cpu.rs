@@ -16,12 +16,12 @@ use crate::neighbor_util::TopNeighbors;
 use super::ComputeNeighborsArgs;
 
 pub fn run(args: &ComputeNeighborsArgs) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
+    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::with_stride(
         unsafe { Mmap::map(&File::open(&args.query_vectors)?)? },
         args.dimensions,
     )?;
     let query_limit = args.query_limit.unwrap_or(query_vectors.len());
-    let doc_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
+    let doc_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::with_stride(
         unsafe { Mmap::map(&File::open(&args.doc_vectors)?)? },
         args.dimensions,
     )?;

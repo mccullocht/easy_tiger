@@ -130,7 +130,7 @@ pub fn bulk_load(
     index_name: &str,
     args: BulkLoadArgs,
 ) -> io::Result<()> {
-    let f32_vectors = DerefVectorStore::new(
+    let f32_vectors = DerefVectorStore::with_stride(
         unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
         args.dimensions,
     )?;

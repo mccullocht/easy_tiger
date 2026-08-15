@@ -70,7 +70,7 @@ impl RecallComputer {
     pub fn from_args(args: RecallArgs, similarity: VectorSimilarity) -> io::Result<Option<Self>> {
         if let Some((neighbors, k)) = args.neighbors.zip(args.recall_k) {
             let elem_stride = Self::NEIGHBOR_LEN * args.neighbors_len.get();
-            let neighbors: DerefVectorStore<u8, Mmap> = DerefVectorStore::<u8, _>::new(
+            let neighbors: DerefVectorStore<u8, Mmap> = DerefVectorStore::<u8, _>::with_stride(
                 unsafe { Mmap::map(&File::open(neighbors)?)? },
                 NonZero::new(elem_stride).unwrap(),
             )?;

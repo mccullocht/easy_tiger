@@ -47,7 +47,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     let config = flat::open_config(&connection, index_name)?;
     let table_name = flat::table_name(index_name);
 
-    let query_vectors = DerefVectorStore::new(
+    let query_vectors = DerefVectorStore::with_stride(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         config.dimensions,
     )?;

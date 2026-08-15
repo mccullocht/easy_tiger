@@ -38,7 +38,7 @@ pub fn distance_loss(
     args: DistanceLossArgs,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
 ) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
+    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::with_stride(
         unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
         NonZero::new(vectors.elem_stride()).unwrap(),
     )?;

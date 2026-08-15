@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
+use std::{io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::input::{DerefVectorStore, VectorStore};
@@ -38,8 +38,8 @@ pub fn distance_loss(
     args: DistanceLossArgs,
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
 ) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::with_stride(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
+    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::from_file_with_stride(
+        args.query_vectors,
         NonZero::new(vectors.elem_stride()).unwrap(),
     )?;
     let query_limit = args

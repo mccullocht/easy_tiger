@@ -187,7 +187,11 @@ impl Worker {
 
         let centroids: Vec<Neighbor> = self.searcher.search(&query, reader.head())?;
         if centroids.is_empty() {
-            return Ok(SimStats::not_found(self.make_missing(record_id, query, &[])));
+            return Ok(SimStats::not_found(self.make_missing(
+                record_id,
+                query,
+                &[],
+            )));
         }
 
         let vector_len = self.index.posting_vector_len();

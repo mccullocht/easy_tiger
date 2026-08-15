@@ -1,9 +1,9 @@
 use std::arch::x86_64::{
     __m256, __m512, __m512i, __mmask16, _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps,
-    _mm256_permute2f128_ps, _mm256_permute_ps, _mm256_set1_ps, _mm256_storeu_ps, _mm256_sub_ps,
+    _mm256_permute_ps, _mm256_permute2f128_ps, _mm256_set1_ps, _mm256_storeu_ps, _mm256_sub_ps,
     _mm256_xor_ps, _mm512_add_ps, _mm512_castps_si512, _mm512_castsi512_ps, _mm512_loadu_ps,
-    _mm512_loadu_si512, _mm512_mask_sub_ps, _mm512_mul_ps, _mm512_permutexvar_ps, _mm512_set1_ps,
-    _mm512_set_epi32, _mm512_storeu_ps, _mm512_sub_ps, _mm512_xor_si512,
+    _mm512_loadu_si512, _mm512_mask_sub_ps, _mm512_mul_ps, _mm512_permutexvar_ps, _mm512_set_epi32,
+    _mm512_set1_ps, _mm512_storeu_ps, _mm512_sub_ps, _mm512_xor_si512,
 };
 
 /// Walsh-Hadamard Transform vector `v` with `signs` random sign flips, using AVX-512F.
@@ -353,8 +353,14 @@ unsafe fn avx_load8<const F: bool>(b: *const f32, s: *const u32, off: usize) -> 
 #[target_feature(enable = "avx")]
 unsafe fn avx_butterfly8(x: __m256) -> __m256 {
     // Stride 1 and 2 swap lanes within each 128 bit half; stride 4 swaps the halves.
-    let x = _mm256_add_ps(_mm256_permute_ps::<0b10_11_00_01>(x), _mm256_xor_ps(x, NEG1));
-    let x = _mm256_add_ps(_mm256_permute_ps::<0b01_00_11_10>(x), _mm256_xor_ps(x, NEG2));
+    let x = _mm256_add_ps(
+        _mm256_permute_ps::<0b10_11_00_01>(x),
+        _mm256_xor_ps(x, NEG1),
+    );
+    let x = _mm256_add_ps(
+        _mm256_permute_ps::<0b01_00_11_10>(x),
+        _mm256_xor_ps(x, NEG2),
+    );
     _mm256_add_ps(_mm256_permute2f128_ps::<0x01>(x, x), _mm256_xor_ps(x, NEG4))
 }
 

@@ -1,11 +1,11 @@
 //! Tools for mutating a vamana graph vector index.
-use crate::vamana::{
-    prune_edges,
-    search::{GraphSearcher, Options as GraphSearchOptions},
-    EdgePruningConfig, EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex, GraphVectorStore,
-};
 use crate::Neighbor;
-use std::collections::{hash_map::Entry, HashMap};
+use crate::vamana::{
+    EdgePruningConfig, EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex,
+    GraphVectorStore, prune_edges,
+    search::{GraphSearcher, Options as GraphSearchOptions},
+};
+use std::collections::{HashMap, hash_map::Entry};
 use vectors::VectorDistance;
 use wt_mdb::{Error, Result};
 
@@ -200,8 +200,12 @@ fn delete_vector_directed(vertex_id: i64, index: &impl GraphVectorIndex) -> Resu
 
         // If there are now too many edges, rehydrate the edge list and prune.
         if edges.len() > index.config().pruning.max_edges.get() {
-            let (neighbors, keep) =
-                rehydrate_and_prune_directed(&cvector, &mut vectors, edges, &index.config().pruning)?;
+            let (neighbors, keep) = rehydrate_and_prune_directed(
+                &cvector,
+                &mut vectors,
+                edges,
+                &index.config().pruning,
+            )?;
             edges.clear();
             edges.extend(neighbors.iter().take(keep).map(Neighbor::vertex));
         }
@@ -483,10 +487,10 @@ mod tests {
     use wt_mdb::{Connection, Result};
 
     use crate::vamana::{
+        EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphSearchParams, GraphVectorIndex,
         mutate::{delete_vector, insert_vector, upsert_vector, upsert_vector_with_options},
         search::{GraphSearcher, Options as GraphSearchOptions},
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
-        EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphSearchParams, GraphVectorIndex,
     };
 
     struct Fixture {
@@ -757,11 +761,13 @@ mod tests {
         ])?;
         let reader = fixture.new_txn_index();
         let mut graph = reader.graph()?;
-        assert!(graph
-            .edges(vertex_ids[0])
-            .unwrap()?
-            .collect::<Vec<_>>()
-            .contains(&vertex_ids[1]));
+        assert!(
+            graph
+                .edges(vertex_ids[0])
+                .unwrap()?
+                .collect::<Vec<_>>()
+                .contains(&vertex_ids[1])
+        );
 
         let txn_index = fixture.new_txn_index();
         upsert_vector_with_options(
@@ -774,18 +780,21 @@ mod tests {
 
         let reader = fixture.new_txn_index();
         let mut graph = reader.graph()?;
-        let edges = graph
-            .edges(vertex_ids[0])
-            .unwrap()?
-            .collect::<Vec<_>>();
+        let edges = graph.edges(vertex_ids[0]).unwrap()?.collect::<Vec<_>>();
         assert!(
             !edges.contains(&vertex_ids[1]),
             "filtered vertex should never be selected as an edge, got {edges:?}"
         );
         // The rest of the graph should still be reachable through the other edges.
         assert_eq!(
-            fixture.search(&[0.0, 0.0])?.into_iter().collect::<std::collections::HashSet<_>>(),
-            vertex_ids.iter().copied().collect::<std::collections::HashSet<_>>()
+            fixture
+                .search(&[0.0, 0.0])?
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            vertex_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
         );
 
         Ok(())

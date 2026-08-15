@@ -1,13 +1,13 @@
 use std::{ffi::CString, sync::Arc};
 
 use crate::{
-    session::{
-        table_uri, BeginTransactionOptions, CommitTransactionOptions, Formatted,
-        MetadataCursorGuard, QueryTransactionTimestampType, RollbackTransactionOptions, Session,
-        SetTransactionTimestampType, StatValue, METADATA_URI,
-    },
     Connection, IndexCursorGuard, RecordCursorGuard, Result, StatCursor, Statistics,
     TypedCursorGuard,
+    session::{
+        BeginTransactionOptions, CommitTransactionOptions, Formatted, METADATA_URI,
+        MetadataCursorGuard, QueryTransactionTimestampType, RollbackTransactionOptions, Session,
+        SetTransactionTimestampType, StatValue, table_uri,
+    },
 };
 
 /// A new Transaction over a WiredTiger database.

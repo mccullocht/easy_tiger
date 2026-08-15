@@ -3,8 +3,7 @@ use std::{cell::RefCell, sync::Arc};
 use crate::{
     input::VectorStore,
     spann::{
-        centroid_stats::CentroidCounts, postings::BlockPostingsMut, CentroidAssignment,
-        TableIndex,
+        CentroidAssignment, TableIndex, centroid_stats::CentroidCounts, postings::BlockPostingsMut,
     },
     vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
 };

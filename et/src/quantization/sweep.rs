@@ -70,6 +70,21 @@ pub struct SweepArgs {
     /// Random seed used for sampling and clustering. Use a fixed value for repeatability.
     #[arg(long, default_value_t = 0x7774_7370414E4E)]
     seed: u64,
+
+    /// Number of docs in the full corpus, used to project the storage cost of each format.
+    ///
+    /// The projected cost is the byte length of a vector in the given format times this count,
+    /// plus --rerank-byte-len times the average query depth (the rerank cost). When unset, no
+    /// cost column is reported.
+    #[arg(long)]
+    cost_doc_count: Option<u64>,
+    /// Bytes read per candidate when reranking, used to compute the rerank cost.
+    ///
+    /// This should reflect the cost of reading a block of rerank vectors off disk (e.g. a page or
+    /// other storage unit), not just the byte length of a single rerank vector, since reranking
+    /// reads are rarely tightly packed at the single-vector granularity.
+    #[arg(long)]
+    rerank_byte_len: Option<u64>,
 }
 
 /// Sample docs and queries, compute exact neighbors over the sample, then report bound depth for
@@ -161,6 +176,8 @@ pub fn sweep(
     let centers =
         super::exhaustive::compute_centers(&docs, args.centers, args.center_sample_size, args.seed);
 
+    let cost_params = args.cost_doc_count.zip(args.rerank_byte_len);
+
     let mut rows = Vec::with_capacity(args.formats.len());
     for format in args.formats.iter().copied() {
         let exhaustive = Exhaustive::new(
@@ -171,24 +188,46 @@ pub fn sweep(
             &queries,
         );
         let report = bound_depth::measure(&exhaustive, &docs, &recall_computer);
-        rows.push((format, report));
+        let format_byte_len = format.coder(args.similarity, None).byte_len(docs.elem_stride());
+        let cost_mib = cost_params.map(|(doc_count, rerank_byte_len)| {
+            let cost_bytes = format_byte_len as f64 * doc_count as f64
+                + rerank_byte_len as f64 * report.queue_depth.mean();
+            cost_bytes / (1024.0 * 1024.0)
+        });
+        rows.push((format, report, cost_mib));
     }
 
     println!();
-    println!(
-        "{:<10} {:>10} {:>10} {:>10} {:>10} {:>14} {:>10} {:>12} {:>12}",
-        "format",
-        "depth p50",
-        "depth p90",
-        "depth p99",
-        "depth max",
-        "rerank total",
-        "slop p50",
-        "miss rate",
-        recall_computer.label(),
-    );
-    for (format, report) in &rows {
+    if cost_params.is_some() {
         println!(
+            "{:<10} {:>10} {:>10} {:>10} {:>10} {:>14} {:>10} {:>12} {:>12} {:>14}",
+            "format",
+            "depth p50",
+            "depth p90",
+            "depth p99",
+            "depth max",
+            "rerank total",
+            "slop p50",
+            "miss rate",
+            recall_computer.label(),
+            "cost (MiB)",
+        );
+    } else {
+        println!(
+            "{:<10} {:>10} {:>10} {:>10} {:>10} {:>14} {:>10} {:>12} {:>12}",
+            "format",
+            "depth p50",
+            "depth p90",
+            "depth p99",
+            "depth max",
+            "rerank total",
+            "slop p50",
+            "miss rate",
+            recall_computer.label(),
+        );
+    }
+    for (format, report, cost_mib) in &rows {
+        print!(
             "{:<10} {:>10.1} {:>10.1} {:>10.1} {:>10.0} {:>14.0} {:>10.2} {:>11.4}% {:>12.4}",
             format.to_string(),
             report.queue_depth.quantile(0.5),
@@ -200,6 +239,10 @@ pub fn sweep(
             report.miss_rate() * 100.0,
             report.mean_recall(),
         );
+        if let Some(cost_mib) = cost_mib {
+            print!(" {:>14.2}", cost_mib);
+        }
+        println!();
     }
 
     Ok(())

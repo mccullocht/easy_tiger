@@ -1,3 +1,8 @@
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
 use std::borrow::Cow;
 
 use half::f16;
@@ -39,34 +44,6 @@ impl Default for InstructionSet {
     }
 }
 
-// While the `half` crate supports f16, SIMD features are limited to nightly and even the related
-// intrinsics are not stable on aarch64, so resort to C linkage.
-#[allow(dead_code)]
-#[cfg(target_arch = "aarch64")]
-unsafe extern "C" {
-    unsafe fn et_serialize_f16(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
-    unsafe fn et_deserialize_f16(v: *const u16, len: usize, out: *mut f32);
-
-    unsafe fn et_dot_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
-    unsafe fn et_dot_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
-
-    unsafe fn et_l2_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
-    unsafe fn et_l2_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
-}
-
-#[allow(dead_code)]
-#[cfg(target_arch = "x86_64")]
-unsafe extern "C" {
-    unsafe fn et_serialize_f16_avx512(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
-    unsafe fn et_deserialize_f16_avx512(v: *const u16, len: usize, out: *mut f32);
-
-    unsafe fn et_dot_f16_f16_avx512(a: *const u16, b: *const u16, len: usize) -> f32;
-    unsafe fn et_dot_f32_f16_avx512(a: *const f32, b: *const u16, len: usize) -> f32;
-
-    unsafe fn et_l2_f16_f16_avx512(a: *const u16, b: *const u16, len: usize) -> f32;
-    unsafe fn et_l2_f32_f16_avx512(a: *const f32, b: *const u16, len: usize) -> f32;
-}
-
 #[derive(Debug, Copy, Clone)]
 pub struct VectorCoder(VectorSimilarity, InstructionSet);
 
@@ -97,29 +74,9 @@ impl VectorCoder {
                 }
             }
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_serialize_f16(
-                    vector.as_ptr(),
-                    vector.len(),
-                    scale
-                        .as_ref()
-                        .map(std::ptr::from_ref)
-                        .unwrap_or(std::ptr::null()),
-                    out.as_mut_ptr(),
-                )
-            },
+            InstructionSet::Neon => unsafe { aarch64::serialize_f16(vector, scale, out) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_serialize_f16_avx512(
-                    vector.as_ptr(),
-                    vector.len(),
-                    scale
-                        .as_ref()
-                        .map(std::ptr::from_ref)
-                        .unwrap_or(std::ptr::null()),
-                    out.as_mut_ptr(),
-                )
-            },
+            InstructionSet::AvxF16c => unsafe { x86_64::serialize_f16(vector, scale, out) },
         }
     }
 }
@@ -146,21 +103,9 @@ impl F32VectorCoder for VectorCoder {
                 }
             }
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_deserialize_f16(
-                    encoded.as_ptr() as *const u16,
-                    encoded.len() / 2,
-                    out.as_mut_ptr(),
-                )
-            },
+            InstructionSet::Neon => unsafe { aarch64::deserialize_f16(encoded, out) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_deserialize_f16_avx512(
-                    encoded.as_ptr() as *const u16,
-                    encoded.len() / 2,
-                    out.as_mut_ptr(),
-                )
-            },
+            InstructionSet::AvxF16c => unsafe { x86_64::deserialize_f16(encoded, out) },
         }
     }
 
@@ -190,21 +135,9 @@ impl DotProductDistance {
                 .map(|(a, b)| a.to_f32() * b.to_f32())
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_dot_f16_f16(
-                    a.as_ptr() as *const u16,
-                    b.as_ptr() as *const u16,
-                    a.len() / 2,
-                )
-            },
+            InstructionSet::Neon => unsafe { aarch64::dot_f16_f16(a, b) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_dot_f16_f16_avx512(
-                    a.as_ptr() as *const u16,
-                    b.as_ptr() as *const u16,
-                    a.len() / 2,
-                )
-            },
+            InstructionSet::AvxF16c => unsafe { x86_64::dot_f16_f16(a, b) },
         }
     }
 }
@@ -233,13 +166,9 @@ impl<'a> DotProductQueryDistance<'a> {
                 .map(|(s, o)| *s * o)
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_dot_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
-            },
+            InstructionSet::Neon => unsafe { aarch64::dot_f32_f16(&self.0, v) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_dot_f32_f16_avx512(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
-            },
+            InstructionSet::AvxF16c => unsafe { x86_64::dot_f32_f16(&self.0, v) },
         }
     }
 }
@@ -265,21 +194,9 @@ impl EuclideanDistance {
                 })
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_l2_f16_f16(
-                    a.as_ptr() as *const u16,
-                    b.as_ptr() as *const u16,
-                    a.len() / 2,
-                )
-            },
+            InstructionSet::Neon => unsafe { aarch64::l2_f16_f16(a, b) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_l2_f16_f16_avx512(
-                    a.as_ptr() as *const u16,
-                    b.as_ptr() as *const u16,
-                    a.len() / 2,
-                )
-            },
+            InstructionSet::AvxF16c => unsafe { x86_64::l2_f16_f16(a, b) },
         }
     }
 }
@@ -310,13 +227,9 @@ impl<'a> EuclideanQueryDistance<'a> {
                 })
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_l2_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
-            },
+            InstructionSet::Neon => unsafe { aarch64::l2_f32_f16(&self.0, v) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_l2_f32_f16_avx512(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
-            },
+            InstructionSet::AvxF16c => unsafe { x86_64::l2_f32_f16(&self.0, v) },
         }
     }
 }

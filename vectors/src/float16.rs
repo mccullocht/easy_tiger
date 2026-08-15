@@ -1,3 +1,8 @@
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
 use std::borrow::Cow;
 
 use half::f16;
@@ -5,7 +10,7 @@ use half::f16;
 use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity};
 
 #[derive(Debug, Copy, Clone)]
-enum InstructionSet {
+enum Kernel {
     Scalar,
     #[cfg(target_arch = "aarch64")]
     Neon,
@@ -13,18 +18,18 @@ enum InstructionSet {
     AvxF16c,
 }
 
-impl Default for InstructionSet {
+impl Default for Kernel {
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn default() -> Self {
-        InstructionSet::Scalar
+        Kernel::Scalar
     }
 
     #[cfg(target_arch = "aarch64")]
     fn default() -> Self {
         if std::arch::is_aarch64_feature_detected!("fp16") {
-            InstructionSet::Neon
+            Kernel::Neon
         } else {
-            InstructionSet::Scalar
+            Kernel::Scalar
         }
     }
 
@@ -32,47 +37,19 @@ impl Default for InstructionSet {
     fn default() -> Self {
         use std::arch::is_x86_feature_detected as feature;
         if feature!("avx") && feature!("f16c") {
-            InstructionSet::AvxF16c
+            Kernel::AvxF16c
         } else {
-            InstructionSet::Scalar
+            Kernel::Scalar
         }
     }
 }
 
-// While the `half` crate supports f16, SIMD features are limited to nightly and even the related
-// intrinsics are not stable on aarch64, so resort to C linkage.
-#[allow(dead_code)]
-#[cfg(target_arch = "aarch64")]
-unsafe extern "C" {
-    unsafe fn et_serialize_f16(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
-    unsafe fn et_deserialize_f16(v: *const u16, len: usize, out: *mut f32);
-
-    unsafe fn et_dot_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
-    unsafe fn et_dot_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
-
-    unsafe fn et_l2_f16_f16(a: *const u16, b: *const u16, len: usize) -> f32;
-    unsafe fn et_l2_f32_f16(a: *const f32, b: *const u16, len: usize) -> f32;
-}
-
-#[allow(dead_code)]
-#[cfg(target_arch = "x86_64")]
-unsafe extern "C" {
-    unsafe fn et_serialize_f16_avx512(v: *const f32, len: usize, scale: *const f32, out: *mut u8);
-    unsafe fn et_deserialize_f16_avx512(v: *const u16, len: usize, out: *mut f32);
-
-    unsafe fn et_dot_f16_f16_avx512(a: *const u16, b: *const u16, len: usize) -> f32;
-    unsafe fn et_dot_f32_f16_avx512(a: *const f32, b: *const u16, len: usize) -> f32;
-
-    unsafe fn et_l2_f16_f16_avx512(a: *const u16, b: *const u16, len: usize) -> f32;
-    unsafe fn et_l2_f32_f16_avx512(a: *const f32, b: *const u16, len: usize) -> f32;
-}
-
 #[derive(Debug, Copy, Clone)]
-pub struct VectorCoder(VectorSimilarity, InstructionSet);
+pub struct VectorCoder(VectorSimilarity, Kernel);
 
 impl VectorCoder {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity, InstructionSet::default())
+        Self(similarity, Kernel::default())
     }
 
     fn convert_and_encode_scalar(
@@ -88,7 +65,7 @@ impl VectorCoder {
 
     fn convert_and_encode(&self, vector: &[f32], scale: Option<f32>, out: &mut [u8]) {
         match self.1 {
-            InstructionSet::Scalar => {
+            Kernel::Scalar => {
                 let vector_it = vector.iter().copied();
                 if let Some(scale) = scale {
                     self.convert_and_encode_scalar(vector_it.map(|d| d * scale), out)
@@ -97,29 +74,9 @@ impl VectorCoder {
                 }
             }
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_serialize_f16(
-                    vector.as_ptr(),
-                    vector.len(),
-                    scale
-                        .as_ref()
-                        .map(std::ptr::from_ref)
-                        .unwrap_or(std::ptr::null()),
-                    out.as_mut_ptr(),
-                )
-            },
+            Kernel::Neon => unsafe { aarch64::serialize_f16(vector, scale, out) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_serialize_f16_avx512(
-                    vector.as_ptr(),
-                    vector.len(),
-                    scale
-                        .as_ref()
-                        .map(std::ptr::from_ref)
-                        .unwrap_or(std::ptr::null()),
-                    out.as_mut_ptr(),
-                )
-            },
+            Kernel::AvxF16c => unsafe { x86_64::serialize_f16(vector, scale, out) },
         }
     }
 }
@@ -140,27 +97,15 @@ impl F32VectorCoder for VectorCoder {
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         match self.1 {
-            InstructionSet::Scalar => {
+            Kernel::Scalar => {
                 for (d, o) in f16_iter(encoded).zip(out.iter_mut()) {
                     *o = d.to_f32();
                 }
             }
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_deserialize_f16(
-                    encoded.as_ptr() as *const u16,
-                    encoded.len() / 2,
-                    out.as_mut_ptr(),
-                )
-            },
+            Kernel::Neon => unsafe { aarch64::deserialize_f16(encoded, out) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_deserialize_f16_avx512(
-                    encoded.as_ptr() as *const u16,
-                    encoded.len() / 2,
-                    out.as_mut_ptr(),
-                )
-            },
+            Kernel::AvxF16c => unsafe { x86_64::deserialize_f16(encoded, out) },
         }
     }
 
@@ -180,31 +125,19 @@ fn f16_iter(raw: &[u8]) -> impl ExactSizeIterator<Item = f16> + '_ {
 }
 
 #[derive(Debug, Copy, Clone, Default)]
-pub struct DotProductDistance(InstructionSet);
+pub struct DotProductDistance(Kernel);
 
 impl DotProductDistance {
     fn dot(&self, a: &[u8], b: &[u8]) -> f32 {
         match self.0 {
-            InstructionSet::Scalar => f16_iter(a)
+            Kernel::Scalar => f16_iter(a)
                 .zip(f16_iter(b))
                 .map(|(a, b)| a.to_f32() * b.to_f32())
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_dot_f16_f16(
-                    a.as_ptr() as *const u16,
-                    b.as_ptr() as *const u16,
-                    a.len() / 2,
-                )
-            },
+            Kernel::Neon => unsafe { aarch64::dot_f16_f16(a, b) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_dot_f16_f16_avx512(
-                    a.as_ptr() as *const u16,
-                    b.as_ptr() as *const u16,
-                    a.len() / 2,
-                )
-            },
+            Kernel::AvxF16c => unsafe { x86_64::dot_f16_f16(a, b) },
         }
     }
 }
@@ -217,29 +150,25 @@ impl VectorDistance for DotProductDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct DotProductQueryDistance<'a>(Cow<'a, [f32]>, InstructionSet);
+pub struct DotProductQueryDistance<'a>(Cow<'a, [f32]>, Kernel);
 
 impl<'a> DotProductQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(query, InstructionSet::default())
+        Self(query, Kernel::default())
     }
 
     fn dot(&self, v: &[u8]) -> f32 {
         match self.1 {
-            InstructionSet::Scalar => self
+            Kernel::Scalar => self
                 .0
                 .iter()
                 .zip(f16_iter(v).map(f16::to_f32))
                 .map(|(s, o)| *s * o)
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_dot_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
-            },
+            Kernel::Neon => unsafe { aarch64::dot_f32_f16(&self.0, v) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_dot_f32_f16_avx512(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
-            },
+            Kernel::AvxF16c => unsafe { x86_64::dot_f32_f16(&self.0, v) },
         }
     }
 }
@@ -252,12 +181,12 @@ impl QueryVectorDistance for DotProductQueryDistance<'_> {
 }
 
 #[derive(Debug, Copy, Clone, Default)]
-pub struct EuclideanDistance(InstructionSet);
+pub struct EuclideanDistance(Kernel);
 
 impl EuclideanDistance {
     fn l2(&self, a: &[u8], b: &[u8]) -> f32 {
         match self.0 {
-            InstructionSet::Scalar => f16_iter(a)
+            Kernel::Scalar => f16_iter(a)
                 .zip(f16_iter(b))
                 .map(|(a, b)| {
                     let diff = a.to_f32() - b.to_f32();
@@ -265,21 +194,9 @@ impl EuclideanDistance {
                 })
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_l2_f16_f16(
-                    a.as_ptr() as *const u16,
-                    b.as_ptr() as *const u16,
-                    a.len() / 2,
-                )
-            },
+            Kernel::Neon => unsafe { aarch64::l2_f16_f16(a, b) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_l2_f16_f16_avx512(
-                    a.as_ptr() as *const u16,
-                    b.as_ptr() as *const u16,
-                    a.len() / 2,
-                )
-            },
+            Kernel::AvxF16c => unsafe { x86_64::l2_f16_f16(a, b) },
         }
     }
 }
@@ -291,16 +208,16 @@ impl VectorDistance for EuclideanDistance {
 }
 
 #[derive(Debug, Clone)]
-pub struct EuclideanQueryDistance<'a>(Cow<'a, [f32]>, InstructionSet);
+pub struct EuclideanQueryDistance<'a>(Cow<'a, [f32]>, Kernel);
 
 impl<'a> EuclideanQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(query, InstructionSet::default())
+        Self(query, Kernel::default())
     }
 
     fn l2(&self, v: &[u8]) -> f32 {
         match self.1 {
-            InstructionSet::Scalar => self
+            Kernel::Scalar => self
                 .0
                 .iter()
                 .zip(f16_iter(v).map(f16::to_f32))
@@ -310,13 +227,9 @@ impl<'a> EuclideanQueryDistance<'a> {
                 })
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => unsafe {
-                et_l2_f32_f16(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
-            },
+            Kernel::Neon => unsafe { aarch64::l2_f32_f16(&self.0, v) },
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::AvxF16c => unsafe {
-                et_l2_f32_f16_avx512(self.0.as_ptr(), v.as_ptr() as *const u16, self.0.len())
-            },
+            Kernel::AvxF16c => unsafe { x86_64::l2_f32_f16(&self.0, v) },
         }
     }
 }

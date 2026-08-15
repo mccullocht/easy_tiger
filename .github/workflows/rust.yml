@@ -21,11 +21,11 @@ jobs:
     - uses: actions/checkout@v4
     - name: WiredTiger submodule init
       run: git submodule update --init --recursive
+    - name: Fmt
+      run: cargo fmt --check
     - name: Build
       run: cargo build --workspace
     - name: Run tests
       run: cargo test --workspace
     - name: Clippy
       run: cargo clippy -- -D warnings
-    - name: Fmt
-      run: cargo fmt --check

@@ -17,8 +17,7 @@ pub fn run(args: &ComputeNeighborsArgs) -> io::Result<()> {
     let query_vectors: DerefVectorStore<f16, Mmap> =
         DerefVectorStore::from_file(&args.query_vectors)?;
     let query_limit = args.query_limit.unwrap_or(query_vectors.len());
-    let doc_vectors: DerefVectorStore<f16, Mmap> =
-        DerefVectorStore::from_file(&args.doc_vectors)?;
+    let doc_vectors: DerefVectorStore<f16, Mmap> = DerefVectorStore::from_file(&args.doc_vectors)?;
     let doc_limit = args
         .doc_limit
         .unwrap_or(doc_vectors.len())

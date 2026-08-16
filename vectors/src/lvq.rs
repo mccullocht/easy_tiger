@@ -25,7 +25,9 @@ use std::{
 use half::f16;
 use thread_local::ThreadLocal;
 
-use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity, l2_norm};
+use crate::{
+    F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity, float32::l2_norm,
+};
 
 const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
 

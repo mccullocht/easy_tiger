@@ -67,7 +67,7 @@ impl VectorCoder {
 impl F32VectorCoder for VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let scale = if self.0.l2_normalize() {
-            Some(1.0 / super::l2_norm(vector))
+            Some(1.0 / crate::float32::l2_norm(vector))
         } else {
             None
         };

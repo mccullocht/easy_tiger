@@ -11,7 +11,7 @@ pub mod rotate;
 
 use serde::{Deserialize, Serialize};
 
-pub use float32::{CosineDistance, DotProductDistance, EuclideanDistance, l2_norm, l2_normalize};
+pub use half::f16;
 
 /// Functions used for to compute the distance between two vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,15 +119,19 @@ pub trait VectorDistance: Send + Sync {
 }
 
 /// Distance function for `f32` vectors.
-///
-/// This trait is object-safe; it may be instantiated at runtime based on
-/// data that appears in a file or other backing store.
 pub trait F32VectorDistance: VectorDistance {
-    /// Score vectors `a` and `b` against one another. Returns a score
-    /// where larger values are better matches.
+    /// Compute the distance between `a` and `b`; smaller values are better.
     ///
     /// Input vectors must be the same length or this function may panic.
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
+}
+
+/// Distance function for `f16` vectors.
+pub trait F16VectorDistance: VectorDistance {
+    /// Compute the distance between `a` and `b`; smaller values are better.
+    ///
+    /// Input vectors must be the same length or this function may panic.
+    fn distance_f16(&self, a: &[f16], b: &[f16]) -> f64;
 }
 
 /// Supported coding schemes for input f32 vectors.
@@ -269,7 +273,7 @@ impl F32VectorCoding {
                 float32::new_query_vector_distance(similarity, query.into())
             }
             (F32VectorCoding::F16, VectorSimilarity::Cosine) => Box::new(
-                float16::DotProductQueryDistance::new(l2_normalize(query.into())),
+                float16::DotProductQueryDistance::new(float32::l2_normalize(query.into())),
             ),
             (F32VectorCoding::F16, VectorSimilarity::Dot) => {
                 Box::new(float16::DotProductQueryDistance::new(query.into()))

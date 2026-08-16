@@ -1,10 +1,10 @@
 use crate::{
-    make_result,
+    ConfigurationString, Error, Result, Statistics, make_result,
     session::{
-        table_uri, BeginTransactionOptions, FormatString, Formatted, InnerCursor, Item, Session,
+        BeginTransactionOptions, FormatString, Formatted, InnerCursor, Item, Session, table_uri,
     },
     transaction::Transaction,
-    wt_call, ConfigurationString, Error, Result, Statistics,
+    wt_call,
 };
 use std::{
     ffi::{CStr, CString},
@@ -15,7 +15,7 @@ use std::{
 };
 
 use tracing::error;
-use wt_sys::{wiredtiger_open, WT_CONNECTION, WT_SESSION};
+use wt_sys::{WT_CONNECTION, WT_SESSION, wiredtiger_open};
 
 /// Global timestamp types that may be written by application code.
 pub enum SetGlobalTimestampType {

@@ -32,6 +32,8 @@ struct Params {
     doc_count: u32,
     dimensions: u32,
     similarity: u32,
+    q_offset: u32,
+    d_offset: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -41,8 +43,8 @@ struct Params {
 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let q = gid.x;
-    let d = gid.y;
+    let q = gid.x + params.q_offset;
+    let d = gid.y + params.d_offset;
 
     if q >= params.query_count || d >= params.doc_count {
         return;
@@ -98,10 +100,21 @@ struct GpuParams {
     doc_count: u32,
     dimensions: u32,
     similarity: u32,
+    q_offset: u32,
+    d_offset: u32,
 }
 
 const WG_Q: usize = 16;
 const WG_D: usize = 16;
+
+/// Upper bound on scalar multiply-add operations (~query * doc * dims) issued by a single
+/// dispatch. The memory-driven batch sizes below can produce dispatches with hundreds of
+/// millions of threads, each running an O(dims) loop; on a single command buffer that can run
+/// long enough to trip a driver watchdog (e.g. Windows TDR, or Linux GPU hangcheck), which kills
+/// the device ("device lost") well before the GPU is actually short on memory. Splitting a
+/// memory-sized batch into several dispatches bounded by this budget keeps each individual
+/// dispatch short, independent of how much buffer memory is available.
+const MAX_DISPATCH_OPS: usize = 1 << 30;
 
 /// Try to obtain a high-performance GPU adapter. Returns `None` if no suitable adapter is found.
 pub fn try_adapter() -> Option<wgpu::Adapter> {
@@ -144,20 +157,18 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     // Request the maximum buffer limits the adapter supports so we can use the largest
     // possible batches on this hardware.
     let adapter_limits = adapter.limits();
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("compute_neighbors"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits {
-                max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
-                max_buffer_size: adapter_limits.max_buffer_size,
-                ..wgpu::Limits::default()
-            },
-            memory_hints: wgpu::MemoryHints::Performance,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            trace: wgpu::Trace::Off,
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("compute_neighbors"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits {
+            max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+            max_buffer_size: adapter_limits.max_buffer_size,
+            ..wgpu::Limits::default()
         },
-    ))
+        memory_hints: wgpu::MemoryHints::Performance,
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        trace: wgpu::Trace::Off,
+    }))
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     // Compute batch sizes from the limits actually granted by the device. Three buffers are
@@ -310,37 +321,72 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
                 .collect();
             queue.write_buffer(&doc_buffer, 0, bytemuck::cast_slice(&doc_data));
 
-            queue.write_buffer(
-                &params_buffer,
-                0,
-                bytemuck::bytes_of(&GpuParams {
-                    query_count: current_q as u32,
-                    doc_count: current_d as u32,
-                    dimensions: dims as u32,
-                    similarity: similarity_code,
-                }),
-            );
+            // Split this memory-sized batch into smaller dispatches so no single command buffer
+            // runs long enough to trip a driver watchdog. Query/doc buffers already hold the
+            // full batch, so sub-dispatches just cover different (q, d) sub-ranges of it via
+            // q_offset/d_offset; only the distances buffer copy needs to wait for all of them.
+            let dispatch_pairs = (MAX_DISPATCH_OPS / dims).max(1);
+            let dispatch_side = (dispatch_pairs as f64).sqrt() as usize;
+            let dispatch_q = dispatch_side.min(current_q).max(1);
+            let dispatch_d = dispatch_side.min(current_d).max(1);
 
-            // Dispatch compute and copy results to staging.
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("compute_encoder"),
-            });
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("distance_pass"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
-                pass.dispatch_workgroups(
-                    current_q.div_ceil(WG_Q) as u32,
-                    current_d.div_ceil(WG_D) as u32,
-                    1,
-                );
+            let mut sq_start = 0usize;
+            while sq_start < current_q {
+                let sq_end = (sq_start + dispatch_q).min(current_q);
+                let mut sd_start = 0usize;
+                while sd_start < current_d {
+                    let sd_end = (sd_start + dispatch_d).min(current_d);
+
+                    queue.write_buffer(
+                        &params_buffer,
+                        0,
+                        bytemuck::bytes_of(&GpuParams {
+                            query_count: current_q as u32,
+                            doc_count: current_d as u32,
+                            dimensions: dims as u32,
+                            similarity: similarity_code,
+                            q_offset: sq_start as u32,
+                            d_offset: sd_start as u32,
+                        }),
+                    );
+
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("compute_encoder"),
+                        });
+                    {
+                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("distance_pass"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&pipeline);
+                        pass.set_bind_group(0, &bind_group, &[]);
+                        pass.dispatch_workgroups(
+                            (sq_end - sq_start).div_ceil(WG_Q) as u32,
+                            (sd_end - sd_start).div_ceil(WG_D) as u32,
+                            1,
+                        );
+                    }
+                    queue.submit([encoder.finish()]);
+
+                    sd_start = sd_end;
+                }
+                sq_start = sq_end;
             }
+
+            // Copy the full batch of results to staging once all sub-dispatches have completed.
             let copy_bytes = (current_q * current_d * std::mem::size_of::<f32>()) as u64;
-            encoder.copy_buffer_to_buffer(&distances_buffer, 0, &staging_buffer, 0, copy_bytes);
-            queue.submit([encoder.finish()]);
+            let mut copy_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("copy_encoder"),
+            });
+            copy_encoder.copy_buffer_to_buffer(
+                &distances_buffer,
+                0,
+                &staging_buffer,
+                0,
+                copy_bytes,
+            );
+            queue.submit([copy_encoder.finish()]);
 
             // Map the staging buffer and block until GPU work is done.
             let (tx, rx) = mpsc::channel();

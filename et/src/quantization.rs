@@ -11,10 +11,10 @@ use easy_tiger::input::{DerefVectorStore, SubsetViewVectorStore, VectorStore};
 use indicatif::ProgressIterator;
 use memmap2::Mmap;
 
-use distance_loss::{distance_loss, DistanceLossArgs};
-use loss::{loss, LossArgs};
-use recall::{recall, RecallArgs};
-use rotate::{rotate, RotateArgs};
+use distance_loss::{DistanceLossArgs, distance_loss};
+use loss::{LossArgs, loss};
+use recall::{RecallArgs, recall};
+use rotate::{RotateArgs, rotate};
 
 #[derive(Args)]
 pub struct QuantizationArgs {
@@ -49,7 +49,9 @@ pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
     let vectors: DerefVectorStore<f32, Mmap> =
         DerefVectorStore::from_file_with_stride(args.doc_vectors, args.dimensions)?;
 
-    if let Some(limit) = args.doc_limit && limit < vectors.len() {
+    if let Some(limit) = args.doc_limit
+        && limit < vectors.len()
+    {
         let vectors = SubsetViewVectorStore::new(&vectors, (0..limit).collect());
         cmd(args.command, &vectors)
     } else {

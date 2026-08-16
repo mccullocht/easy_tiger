@@ -9,7 +9,7 @@ use std::{
 
 use clap::Args;
 use easy_tiger::{
-    flat::{self, search::exhaustive_search, FlatIndexConfig},
+    flat::{self, FlatIndexConfig, search::exhaustive_search},
     input::{DerefVectorStore, VectorStore},
 };
 use wt_mdb::Connection;

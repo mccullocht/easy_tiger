@@ -1,6 +1,6 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use rand::{Rng, SeedableRng};
-use vectors::rotate::Rotator;
+use vectors::rotate::{Kernel, Rotator};
 use vectors::{F32VectorCoding, VectorSimilarity};
 
 fn generate_test_vector(dim: usize) -> Vec<f32> {
@@ -69,16 +69,18 @@ fn lvq_benchmarks(c: &mut Criterion) {
 }
 
 fn rotator_benchmarks(c: &mut Criterion) {
-    for dim in [512usize, 768, 1024, 1536, 2048] {
-        let vector = generate_test_vector(dim);
-        let rotator = Rotator::new(dim, 0x455A_5469676572);
-        c.bench_function(&format!("rotate/forward/{dim}"), |b| {
-            b.iter(|| rotator.forward(std::hint::black_box(&vector)))
-        });
-        let rotated = rotator.forward(&vector);
-        c.bench_function(&format!("rotate/backward/{dim}"), |b| {
-            b.iter(|| rotator.backward(std::hint::black_box(&rotated)))
-        });
+    for kernel in Kernel::all() {
+        for dim in [512usize, 768, 1024, 1536, 2048] {
+            let vector = generate_test_vector(dim);
+            let rotator = Rotator::with_kernel(dim, 0x455A_5469676572, kernel);
+            c.bench_function(&format!("rotate/{kernel}/forward/{dim}"), |b| {
+                b.iter(|| rotator.forward(std::hint::black_box(&vector)))
+            });
+            let rotated = rotator.forward(&vector);
+            c.bench_function(&format!("rotate/{kernel}/backward/{dim}"), |b| {
+                b.iter(|| rotator.backward(std::hint::black_box(&rotated)))
+            });
+        }
     }
 }
 

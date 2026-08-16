@@ -1,8 +1,8 @@
 //! Wrap WT routines to pack and unpack values store in a table.
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_void};
 
-use crate::{make_result, Error, Result};
+use crate::{Error, Result, make_result};
 
 /// A validated WiredTiger format string.
 ///

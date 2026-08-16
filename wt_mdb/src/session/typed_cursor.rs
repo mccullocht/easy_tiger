@@ -11,9 +11,9 @@ use smallvec::SmallVec;
 use wt_sys::{WT_ITEM, WT_MODIFY};
 
 use crate::{
-    map_not_found,
-    session::{format::Formatted, InnerCursor, Item},
-    wt_call, Error, Result,
+    Error, Result, map_not_found,
+    session::{InnerCursor, Item, format::Formatted},
+    wt_call,
 };
 
 use super::Session;
@@ -23,9 +23,7 @@ use super::Session;
 /// This is an end run around lifetime issues as Formatted::pack_trivial and the buffer will have
 /// different lifetimes.
 macro_rules! format_to_buf {
-    ($var:expr, $formatter:ident, $buf:expr) => {{
-        $formatter::pack($var, &mut $buf).map(|()| $buf.as_slice())
-    }};
+    ($var:expr, $formatter:ident, $buf:expr) => {{ $formatter::pack($var, &mut $buf).map(|()| $buf.as_slice()) }};
 }
 
 /// A delta to be applied to an existing value using [`TypedCursor::modify`].

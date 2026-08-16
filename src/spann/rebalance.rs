@@ -4,7 +4,7 @@ use rand::Rng;
 use wt_mdb::{Connection, Result};
 
 use crate::{
-    spann::{centroid_stats::CentroidStats, TableIndex, TransactionIndex},
+    spann::{TableIndex, TransactionIndex, centroid_stats::CentroidStats},
     vamana::search::GraphSearchStats,
 };
 
@@ -280,16 +280,16 @@ mod parallel {
         input::VecVectorStore,
         posting_block::PostingBlock,
         spann::{
+            CentroidAssignment, TableIndex, TransactionIndex,
             centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
             postings::BlockPostingsMut,
             rebalance::{MergeStats, RebalanceStats, SplitStats},
-            CentroidAssignment, TableIndex, TransactionIndex,
         },
         vamana::{
+            GraphVectorIndex, GraphVectorStore,
             mutate::{delete_vector, upsert_vector_with_options},
             search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
             wt::CursorVectorStore,
-            GraphVectorIndex, GraphVectorStore,
         },
     };
 

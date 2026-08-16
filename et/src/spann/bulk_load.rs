@@ -21,7 +21,10 @@ use rand_xoshiro::{Xoshiro128PlusPlus, rand_core::SeedableRng};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
-use crate::{ui::progress_bar, vamana::{EdgePruningArgs, EdgeTypeArg}};
+use crate::{
+    ui::progress_bar,
+    vamana::{EdgePruningArgs, EdgeTypeArg},
+};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -263,8 +266,7 @@ pub fn bulk_load(
         let progress = progress_bar(posting_count, "tail load postings");
         let txn = connection.begin_transaction(None)?;
         {
-            let cursor =
-                txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+            let cursor = txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
             let mut postings = BlockPostingsMut::new(cursor, index.posting_vector_len());
             load_postings(
                 index.as_ref(),

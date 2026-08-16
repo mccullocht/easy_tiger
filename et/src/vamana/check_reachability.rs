@@ -1,9 +1,13 @@
-use std::{collections::{HashSet, VecDeque}, io, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    io,
+    sync::Arc,
+};
 
 use clap::Args;
 use easy_tiger::vamana::{
     Graph,
-    wt::{CursorGraph, TableGraphVectorIndex, ENTRY_POINT_KEY},
+    wt::{CursorGraph, ENTRY_POINT_KEY, TableGraphVectorIndex},
 };
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro128PlusPlus;

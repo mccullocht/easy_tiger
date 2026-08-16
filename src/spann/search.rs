@@ -14,13 +14,13 @@ use vectors::QueryVectorDistance;
 use wt_mdb::{Result, TypedCursorGuard};
 
 use crate::{
-    posting_block::PostingBlock,
-    spann::{centroid_stats::CentroidStats, TransactionIndex},
-    vamana::{
-        search::{GraphSearchStats, GraphSearcher},
-        GraphSearchParams, GraphVectorIndex,
-    },
     Neighbor,
+    posting_block::PostingBlock,
+    spann::{TransactionIndex, centroid_stats::CentroidStats},
+    vamana::{
+        GraphSearchParams, GraphVectorIndex,
+        search::{GraphSearchStats, GraphSearcher},
+    },
 };
 
 /// The algorithm used to select centroids to search in the tail index.

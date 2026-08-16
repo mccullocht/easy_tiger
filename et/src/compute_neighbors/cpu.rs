@@ -4,8 +4,8 @@ use std::{
 };
 
 use easy_tiger::{
-    input::{DerefVectorStore, VectorStore},
     Neighbor,
+    input::{DerefVectorStore, VectorStore},
 };
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;

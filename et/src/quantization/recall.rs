@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf};
+use std::{io, num::NonZero, path::PathBuf};
 
 use crate::{neighbor_util::TopNeighbors, recall::RecallComputer, ui::progress_bar};
 use clap::Args;
@@ -69,8 +69,8 @@ pub fn recall(
     args: RecallArgs,
     doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
 ) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
+    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::from_file_with_stride(
+        args.query_vectors,
         NonZero::new(doc_vectors.elem_stride()).unwrap(),
     )?;
     let query_limit = args

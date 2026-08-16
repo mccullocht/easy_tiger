@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
     io,
     num::NonZero,
     path::PathBuf,
@@ -70,10 +69,11 @@ impl RecallComputer {
     pub fn from_args(args: RecallArgs, similarity: VectorSimilarity) -> io::Result<Option<Self>> {
         if let Some((neighbors, k)) = args.neighbors.zip(args.recall_k) {
             let elem_stride = Self::NEIGHBOR_LEN * args.neighbors_len.get();
-            let neighbors: DerefVectorStore<u8, Mmap> = DerefVectorStore::<u8, _>::new(
-                unsafe { Mmap::map(&File::open(neighbors)?)? },
-                NonZero::new(elem_stride).unwrap(),
-            )?;
+            let neighbors: DerefVectorStore<u8, Mmap> =
+                DerefVectorStore::<u8, _>::from_file_with_stride(
+                    neighbors,
+                    NonZero::new(elem_stride).unwrap(),
+                )?;
 
             if k.get() <= args.neighbors_len.get() {
                 Ok(Some(Self {

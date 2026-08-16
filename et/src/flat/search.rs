@@ -1,5 +1,4 @@
 use std::{
-    fs::File,
     io,
     num::NonZero,
     ops::Add,
@@ -13,7 +12,6 @@ use easy_tiger::{
     flat::{self, FlatIndexConfig, search::exhaustive_search},
     input::{DerefVectorStore, VectorStore},
 };
-use memmap2::Mmap;
 use wt_mdb::Connection;
 
 use crate::{
@@ -47,10 +45,8 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     let config = flat::open_config(&connection, index_name)?;
     let table_name = flat::table_name(index_name);
 
-    let query_vectors = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
-        config.dimensions,
-    )?;
+    let query_vectors =
+        DerefVectorStore::from_file_with_stride(args.query_vectors, config.dimensions)?;
     let limit = args
         .limit
         .unwrap_or(query_vectors.len())

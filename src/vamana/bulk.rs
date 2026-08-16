@@ -218,7 +218,7 @@ where
         }
 
         self.quantized_vectors = quantized_vectors.map(|m| {
-            DerefVectorStore::new(
+            DerefVectorStore::with_stride(
                 m.make_read_only().unwrap(),
                 NonZero::new(nav_coder.byte_len(dim)).unwrap(),
             )

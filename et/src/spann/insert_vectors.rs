@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
@@ -52,8 +52,8 @@ pub fn insert_vectors(
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
 
     // Map the input vectors.
-    let f32_vectors = DerefVectorStore::new(
-        unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
+    let f32_vectors = DerefVectorStore::from_file_with_stride(
+        args.f32_vectors,
         index.head_config().config().dimensions,
     )?;
     // Advise random access since we might be jumping around (though sequentially in patches).

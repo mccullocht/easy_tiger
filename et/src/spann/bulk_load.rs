@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc, time::Duration};
+use std::{io, num::NonZero, path::PathBuf, sync::Arc, time::Duration};
 
 use clap::Args;
 use easy_tiger::{
@@ -133,10 +133,7 @@ pub fn bulk_load(
     index_name: &str,
     args: BulkLoadArgs,
 ) -> io::Result<()> {
-    let f32_vectors = DerefVectorStore::new(
-        unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
-        args.dimensions,
-    )?;
+    let f32_vectors = DerefVectorStore::from_file_with_stride(args.f32_vectors, args.dimensions)?;
     f32_vectors.data().advise(memmap2::Advice::Random)?;
 
     if args.drop_tables {

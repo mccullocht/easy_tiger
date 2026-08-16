@@ -128,19 +128,15 @@ pub fn try_adapter() -> Option<wgpu::Adapter> {
 }
 
 pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(&args.query_vectors)?)? },
-        args.dimensions,
-    )?;
+    let query_vectors: DerefVectorStore<f32, Mmap> =
+        DerefVectorStore::from_file_with_stride(&args.query_vectors, args.dimensions)?;
     let query_limit = args
         .query_limit
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
 
-    let doc_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(&args.doc_vectors)?)? },
-        args.dimensions,
-    )?;
+    let doc_vectors: DerefVectorStore<f32, Mmap> =
+        DerefVectorStore::from_file_with_stride(&args.doc_vectors, args.dimensions)?;
     let doc_limit = args
         .doc_limit
         .unwrap_or(doc_vectors.len())

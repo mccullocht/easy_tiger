@@ -1,5 +1,4 @@
 use std::{
-    fs::File,
     io::{self},
     num::NonZero,
     ops::Add,
@@ -17,7 +16,6 @@ use easy_tiger::{
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
     },
 };
-use memmap2::Mmap;
 use wt_mdb::Connection;
 
 use crate::{
@@ -69,8 +67,8 @@ pub struct SearchArgs {
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
     let index = Arc::new(TableGraphVectorIndex::from_db(&connection, index_name)?);
-    let query_vectors = easy_tiger::input::DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
+    let query_vectors = easy_tiger::input::DerefVectorStore::from_file_with_stride(
+        args.query_vectors,
         index.config().dimensions,
     )?;
     let limit = std::cmp::min(

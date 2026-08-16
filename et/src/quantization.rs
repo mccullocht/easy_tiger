@@ -3,7 +3,7 @@ mod loss;
 mod recall;
 mod rotate;
 
-use std::{fs::File, io, num::NonZero, path::PathBuf};
+use std::{io, num::NonZero, path::PathBuf};
 
 use clap::{Args, Subcommand};
 
@@ -46,10 +46,8 @@ pub enum Command {
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
-    let vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.doc_vectors)?)? },
-        args.dimensions,
-    )?;
+    let vectors: DerefVectorStore<f32, Mmap> =
+        DerefVectorStore::from_file_with_stride(args.doc_vectors, args.dimensions)?;
 
     if let Some(limit) = args.doc_limit
         && limit < vectors.len()

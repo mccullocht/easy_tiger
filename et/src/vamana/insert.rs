@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
+use std::{io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
@@ -58,10 +58,8 @@ fn insert_all<'a>(
 
 pub fn insert(connection: Arc<Connection>, index_name: &str, args: InsertArgs) -> io::Result<()> {
     let index = Arc::new(TableGraphVectorIndex::from_db(&connection, index_name)?);
-    let vectors = DerefVectorStore::<f32, _>::new(
-        unsafe { memmap2::Mmap::map(&File::open(args.vectors)?)? },
-        index.config().dimensions,
-    )?;
+    let vectors =
+        DerefVectorStore::<f32, _>::from_file_with_stride(args.vectors, index.config().dimensions)?;
 
     match insert_all(
         &connection,

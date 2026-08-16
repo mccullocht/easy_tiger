@@ -1,5 +1,6 @@
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
+mod scalar;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
@@ -52,27 +53,9 @@ impl VectorCoder {
         Self(similarity, Kernel::default())
     }
 
-    fn convert_and_encode_scalar(
-        &self,
-        vector: impl ExactSizeIterator<Item = f32> + Clone,
-        out: &mut [u8],
-    ) {
-        let encode_it = vector.zip(out.chunks_mut(2));
-        for (d, o) in encode_it {
-            o.copy_from_slice(&f16::from_f32(d).to_le_bytes());
-        }
-    }
-
     fn convert_and_encode(&self, vector: &[f32], scale: Option<f32>, out: &mut [u8]) {
         match self.1 {
-            Kernel::Scalar => {
-                let vector_it = vector.iter().copied();
-                if let Some(scale) = scale {
-                    self.convert_and_encode_scalar(vector_it.map(|d| d * scale), out)
-                } else {
-                    self.convert_and_encode_scalar(vector_it, out)
-                }
-            }
+            Kernel::Scalar => scalar::serialize_f16(vector, scale, out),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => unsafe { aarch64::serialize_f16(vector, scale, out) },
             #[cfg(target_arch = "x86_64")]
@@ -97,11 +80,7 @@ impl F32VectorCoder for VectorCoder {
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         match self.1 {
-            Kernel::Scalar => {
-                for (d, o) in unaligned_f16_iter(encoded).zip(out.iter_mut()) {
-                    *o = d.to_f32();
-                }
-            }
+            Kernel::Scalar => scalar::deserialize_f16(encoded, out),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => unsafe { aarch64::deserialize_f16(encoded, out) },
             #[cfg(target_arch = "x86_64")]
@@ -114,22 +93,13 @@ impl F32VectorCoder for VectorCoder {
     }
 }
 
-fn unaligned_f16_iter(raw: &[u8]) -> impl ExactSizeIterator<Item = f16> + '_ {
-    let (chunks, rem) = raw.as_chunks::<{ std::mem::size_of::<f16>() }>();
-    debug_assert!(rem.is_empty());
-    chunks.iter().map(|c| f16::from_le_bytes(*c))
-}
-
 #[derive(Debug, Copy, Clone, Default)]
 pub struct DotProductDistance(Kernel);
 
 impl DotProductDistance {
     fn dot(&self, a: &[u8], b: &[u8]) -> f32 {
         match self.0 {
-            Kernel::Scalar => unaligned_f16_iter(a)
-                .zip(unaligned_f16_iter(b))
-                .map(|(a, b)| a.to_f32() * b.to_f32())
-                .sum::<f32>(),
+            Kernel::Scalar => scalar::dot_f16_f16(a, b),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => unsafe { aarch64::dot_f16_f16(a, b) },
             #[cfg(target_arch = "x86_64")]
@@ -155,12 +125,7 @@ impl<'a> DotProductQueryDistance<'a> {
 
     fn dot(&self, v: &[u8]) -> f32 {
         match self.1 {
-            Kernel::Scalar => self
-                .0
-                .iter()
-                .zip(unaligned_f16_iter(v).map(f16::to_f32))
-                .map(|(&s, o)| s * o)
-                .sum::<f32>(),
+            Kernel::Scalar => scalar::dot_f32_f16(&self.0, v),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => unsafe { aarch64::dot_f32_f16(&self.0, v) },
             #[cfg(target_arch = "x86_64")]
@@ -182,13 +147,7 @@ pub struct EuclideanDistance(Kernel);
 impl EuclideanDistance {
     fn l2(&self, a: &[u8], b: &[u8]) -> f32 {
         match self.0 {
-            Kernel::Scalar => unaligned_f16_iter(a)
-                .zip(unaligned_f16_iter(b))
-                .map(|(a, b)| {
-                    let diff = a.to_f32() - b.to_f32();
-                    diff * diff
-                })
-                .sum::<f32>(),
+            Kernel::Scalar => scalar::l2_f16_f16(a, b),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => unsafe { aarch64::l2_f16_f16(a, b) },
             #[cfg(target_arch = "x86_64")]
@@ -213,15 +172,7 @@ impl<'a> EuclideanQueryDistance<'a> {
 
     fn l2(&self, v: &[u8]) -> f32 {
         match self.1 {
-            Kernel::Scalar => self
-                .0
-                .iter()
-                .zip(unaligned_f16_iter(v).map(f16::to_f32))
-                .map(|(s, o)| {
-                    let diff = *s - o;
-                    diff * diff
-                })
-                .sum::<f32>(),
+            Kernel::Scalar => scalar::l2_f32_f16(&self.0, v),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => unsafe { aarch64::l2_f32_f16(&self.0, v) },
             #[cfg(target_arch = "x86_64")]

@@ -1,10 +1,10 @@
-mod convert;
+mod convert_f16;
 
 use std::io;
 
 use clap::{Args, Subcommand};
 
-use convert::{ConvertArgs, convert};
+use convert_f16::{ConvertF16Args, convert_f16};
 
 #[derive(Args)]
 pub struct DataArgs {
@@ -15,11 +15,11 @@ pub struct DataArgs {
 #[derive(Subcommand)]
 pub enum Command {
     /// Convert f32 vector data to f16 and write in BigANN format.
-    Convert(ConvertArgs),
+    ConvertF16(ConvertF16Args),
 }
 
 pub fn data_command(args: DataArgs) -> io::Result<()> {
     match args.command {
-        Command::Convert(args) => convert(args),
+        Command::ConvertF16(args) => convert_f16(args),
     }
 }

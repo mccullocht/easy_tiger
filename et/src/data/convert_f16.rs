@@ -7,13 +7,13 @@ use std::{
 
 use clap::Args;
 use easy_tiger::input::{DerefVectorStore, VectorStore};
+use half::{f16, slice::HalfFloatSliceExt};
 use memmap2::Mmap;
-use vectors::{F32VectorCoding, VectorSimilarity};
 
 use crate::ui::progress_bar;
 
 #[derive(Args)]
-pub struct ConvertArgs {
+pub struct ConvertF16Args {
     /// Input file containing raw little-endian f32 vectors with no header.
     #[arg(short, long)]
     input: PathBuf,
@@ -25,20 +25,21 @@ pub struct ConvertArgs {
     output: PathBuf,
 }
 
-pub fn convert(args: ConvertArgs) -> io::Result<()> {
+pub fn convert_f16(args: ConvertF16Args) -> io::Result<()> {
     let vectors: DerefVectorStore<f32, Mmap> =
         DerefVectorStore::from_file_with_stride(args.input, args.dimensions)?;
-    let coder = F32VectorCoding::F16.coder(VectorSimilarity::Euclidean, None);
 
     let mut out = BufWriter::new(File::create(&args.output)?);
     out.write_all(&(vectors.len() as u32).to_le_bytes())?;
     out.write_all(&(args.dimensions.get() as u32).to_le_bytes())?;
 
     let progress = progress_bar(vectors.len(), "convert");
-    let mut buf = vec![0u8; coder.byte_len(args.dimensions.get())];
+    let mut buf = vec![f16::ZERO; args.dimensions.get()];
     for v in vectors.iter() {
-        coder.encode_to(v, &mut buf);
-        out.write_all(&buf)?;
+        buf.convert_from_f32_slice(v);
+        for &x in buf.iter() {
+            out.write_all(&x.to_le_bytes())?;
+        }
         progress.inc(1);
     }
 

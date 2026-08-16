@@ -3,7 +3,7 @@ use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
 use crate::lvq::{
     PrimaryVectorHeader, ResidualVectorHeader, TurboPrimaryCoder, TurboResidualCoder, VectorStats,
 };
-use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize};
+use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity, float32::l2_normalize};
 
 impl AbsDiffEq for PrimaryVectorHeader {
     type Epsilon = f32;
@@ -772,7 +772,7 @@ fn check_lvq_distance(
         (a.to_vec(), b.to_vec())
     };
 
-    let f32_dist = sim.new_distance_function().distance_f32(&a, &b);
+    let f32_dist = sim.distance_f32().distance_f32(&a, &b);
 
     let coder = format.coder(sim, center.map(|c| c.to_vec()));
     let enc_a = coder.encode(&a);

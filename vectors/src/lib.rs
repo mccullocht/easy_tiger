@@ -3,15 +3,15 @@
 use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 
 mod binary;
-mod float16;
-mod float32;
+pub mod float16;
+pub mod float32;
 mod lvq;
 mod quiver;
 pub mod rotate;
 
 use serde::{Deserialize, Serialize};
 
-pub use float32::{CosineDistance, DotProductDistance, EuclideanDistance, l2_norm, l2_normalize};
+pub use half::f16;
 
 /// Functions used for to compute the distance between two vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,11 +39,20 @@ pub enum VectorSimilarity {
 
 impl VectorSimilarity {
     /// Return an [`F32VectorDistance`] for this similarity function.
-    pub fn new_distance_function(self) -> Box<dyn F32VectorDistance> {
+    pub fn distance_f32(&self) -> Box<dyn F32VectorDistance> {
         match self {
             Self::Euclidean => Box::new(float32::EuclideanDistance::default()),
             Self::Dot => Box::new(float32::DotProductDistance::default()),
             Self::Cosine => Box::new(float32::CosineDistance::default()),
+        }
+    }
+
+    /// Return an [`F16VectorDistance`] for this similarity function.
+    pub fn distance_f16(&self) -> Box<dyn F16VectorDistance> {
+        match self {
+            Self::Euclidean => Box::new(float16::EuclideanDistance::default()),
+            Self::Dot => Box::new(float16::DotProductDistance::default()),
+            Self::Cosine => Box::new(float16::CosineDistance::default()),
         }
     }
 
@@ -119,15 +128,19 @@ pub trait VectorDistance: Send + Sync {
 }
 
 /// Distance function for `f32` vectors.
-///
-/// This trait is object-safe; it may be instantiated at runtime based on
-/// data that appears in a file or other backing store.
 pub trait F32VectorDistance: VectorDistance {
-    /// Score vectors `a` and `b` against one another. Returns a score
-    /// where larger values are better matches.
+    /// Compute the distance between `a` and `b`; smaller values are better.
     ///
     /// Input vectors must be the same length or this function may panic.
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
+}
+
+/// Distance function for `f16` vectors.
+pub trait F16VectorDistance: VectorDistance {
+    /// Compute the distance between `a` and `b`; smaller values are better.
+    ///
+    /// Input vectors must be the same length or this function may panic.
+    fn distance_f16(&self, a: &[f16], b: &[f16]) -> f64;
 }
 
 /// Supported coding schemes for input f32 vectors.
@@ -269,7 +282,7 @@ impl F32VectorCoding {
                 float32::new_query_vector_distance(similarity, query.into())
             }
             (F32VectorCoding::F16, VectorSimilarity::Cosine) => Box::new(
-                float16::DotProductQueryDistance::new(l2_normalize(query.into())),
+                float16::DotProductQueryDistance::new(float32::l2_normalize(query.into())),
             ),
             (F32VectorCoding::F16, VectorSimilarity::Dot) => {
                 Box::new(float16::DotProductQueryDistance::new(query.into()))
@@ -543,7 +556,8 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
 #[cfg(test)]
 mod test {
     use crate::{
-        F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize,
+        F32VectorCoder, F32VectorCoding, VectorSimilarity,
+        float32::l2_normalize,
         lvq::{TurboPrimaryCoder, TurboResidualCoder},
     };
 
@@ -601,7 +615,7 @@ mod test {
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 
-        let f32_dist_fn = similarity.new_distance_function();
+        let f32_dist_fn = similarity.distance_f32();
         let rf32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
         let ru8_dist =
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
@@ -624,7 +638,7 @@ mod test {
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 
-        let f32_dist_fn = similarity.new_distance_function();
+        let f32_dist_fn = similarity.distance_f32();
         let f32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
 
         let query_dist_fn = format.query_distance_asymmetric(similarity, &a.rvec, None);

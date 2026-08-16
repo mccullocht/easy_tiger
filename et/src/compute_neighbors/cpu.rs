@@ -26,7 +26,7 @@ pub fn run(args: &ComputeNeighborsArgs) -> io::Result<()> {
         .unwrap_or(doc_vectors.len())
         .min(doc_vectors.len());
 
-    let distance_fn = args.similarity.new_distance_function();
+    let distance_fn = args.similarity.distance_f32();
     let k = args.neighbors_len.get();
     let mut results = Vec::with_capacity(query_limit);
     results.resize_with(query_limit, || TopNeighbors::new(args.neighbors_len.get()));

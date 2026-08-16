@@ -4,7 +4,7 @@ use approx::assert_abs_diff_eq;
 use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
-use crate::l2_normalize;
+use crate::float32::l2_normalize;
 
 use super::{
     Header, new_asymmetric_distance, new_coder, new_scalar_asymmetric_distance, new_scalar_coder,

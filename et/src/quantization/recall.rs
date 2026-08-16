@@ -204,7 +204,7 @@ fn select_center_for_doc(
         if centers.len() == 1 {
             0
         } else {
-            let dist = similarity.new_distance_function();
+            let dist = similarity.distance_f32();
             centers
                 .iter()
                 .enumerate()

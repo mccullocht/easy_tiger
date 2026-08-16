@@ -133,8 +133,7 @@ pub fn bulk_load(
     index_name: &str,
     args: BulkLoadArgs,
 ) -> io::Result<()> {
-    let f32_vectors =
-        DerefVectorStore::from_file_with_stride(args.f32_vectors, args.dimensions)?;
+    let f32_vectors = DerefVectorStore::from_file_with_stride(args.f32_vectors, args.dimensions)?;
     f32_vectors.data().advise(memmap2::Advice::Random)?;
 
     if args.drop_tables {

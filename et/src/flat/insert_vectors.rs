@@ -31,8 +31,7 @@ pub fn insert_vectors(
     let config = flat::open_config(&connection, index_name)?;
     let table_name = flat::table_name(index_name);
 
-    let f32_vectors =
-        DerefVectorStore::from_file_with_stride(args.f32_vectors, config.dimensions)?;
+    let f32_vectors = DerefVectorStore::from_file_with_stride(args.f32_vectors, config.dimensions)?;
     f32_vectors.data().advise(memmap2::Advice::Sequential)?;
 
     if args.start > f32_vectors.len() {

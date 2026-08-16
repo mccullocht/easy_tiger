@@ -223,9 +223,21 @@ impl VectorDistance for CosineDistance {
 
 impl F32VectorDistance for CosineDistance {
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
-        let ab = self.0.distance_f32(a, b);
-        let aa = self.0.distance_f32(a, a);
-        let bb = self.0.distance_f32(b, b);
+        let ab = dot(
+            bytemuck::cast_slice(a),
+            bytemuck::cast_slice(b),
+            Some(self.0.0),
+        );
+        let aa = dot(
+            bytemuck::cast_slice(a),
+            bytemuck::cast_slice(a),
+            Some(self.0.0),
+        );
+        let bb = dot(
+            bytemuck::cast_slice(b),
+            bytemuck::cast_slice(b),
+            Some(self.0.0),
+        );
         let cos = ab / (aa * bb).sqrt();
         (-cos as f64 + 1.0) / 2.0
     }

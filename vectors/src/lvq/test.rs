@@ -772,7 +772,7 @@ fn check_lvq_distance(
         (a.to_vec(), b.to_vec())
     };
 
-    let f32_dist = sim.new_distance_function().distance_f32(&a, &b);
+    let f32_dist = sim.distance_f32().distance_f32(&a, &b);
 
     let coder = format.coder(sim, center.map(|c| c.to_vec()));
     let enc_a = coder.encode(&a);

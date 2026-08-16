@@ -4,7 +4,7 @@ use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 
 mod binary;
 mod float16;
-mod float32;
+pub mod float32;
 mod lvq;
 mod quiver;
 pub mod rotate;
@@ -39,7 +39,7 @@ pub enum VectorSimilarity {
 
 impl VectorSimilarity {
     /// Return an [`F32VectorDistance`] for this similarity function.
-    pub fn new_distance_function(self) -> Box<dyn F32VectorDistance> {
+    pub fn distance_f32(self) -> Box<dyn F32VectorDistance> {
         match self {
             Self::Euclidean => Box::new(float32::EuclideanDistance::default()),
             Self::Dot => Box::new(float32::DotProductDistance::default()),
@@ -601,7 +601,7 @@ mod test {
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 
-        let f32_dist_fn = similarity.new_distance_function();
+        let f32_dist_fn = similarity.distance_f32();
         let rf32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
         let ru8_dist =
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
@@ -624,7 +624,7 @@ mod test {
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 
-        let f32_dist_fn = similarity.new_distance_function();
+        let f32_dist_fn = similarity.distance_f32();
         let f32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
 
         let query_dist_fn = format.query_distance_asymmetric(similarity, &a.rvec, None);

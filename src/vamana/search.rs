@@ -784,7 +784,7 @@ mod test {
         let dim_values = [-0.25, -0.125, 0.125, 0.25];
         TestGraphVectorIndex::new(
             NonZero::new(max_edges).unwrap(),
-            VectorSimilarity::Dot.new_distance_function(),
+            VectorSimilarity::Dot.distance_f32(),
             (0..256).map(|v| {
                 Vec::from([
                     dim_values[v & 0x3],
@@ -803,7 +803,7 @@ mod test {
         let dim_values = [-0.25, -0.125, 0.125, 0.25];
         TestGraphVectorIndex::new_with_centroid(
             NonZero::new(max_edges).unwrap(),
-            VectorSimilarity::Dot.new_distance_function(),
+            VectorSimilarity::Dot.distance_f32(),
             (0..256).map(|v| {
                 Vec::from([
                     dim_values[v & 0x3],

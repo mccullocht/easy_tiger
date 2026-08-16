@@ -16,22 +16,21 @@ use crate::neighbor_util::TopNeighbors;
 
 #[derive(Args)]
 pub struct ComputeNeighborsArgs {
-    /// Path to numpy formatted little-endian float vectors.
+    /// Path to f16 vectors in BigANN format: an 8 byte `<len,dim>` header followed by
+    /// little-endian f16 vector data.
     #[arg(long)]
     query_vectors: PathBuf,
     /// Maximum number of query vectors to process.
     #[arg(long)]
     query_limit: Option<usize>,
-    /// Path to numpy formatted little-endian float vectors.
+    /// Path to f16 vectors in BigANN format: an 8 byte `<len,dim>` header followed by
+    /// little-endian f16 vector data.
     #[arg(long)]
     doc_vectors: PathBuf,
     /// Maximum number of doc vectors to process.
     #[arg(long)]
     doc_limit: Option<usize>,
 
-    /// Number of dimensions for both query and doc vectors.
-    #[arg(short, long)]
-    dimensions: NonZero<usize>,
     /// Similarity function to use.
     #[arg(short, long)]
     similarity: VectorSimilarity,
@@ -57,7 +56,13 @@ pub fn compute_neighbors(args: ComputeNeighborsArgs) -> io::Result<()> {
     if let Some(adapter) = gpu::try_adapter()
         && !args.force_cpu
     {
-        return gpu::run(adapter, &args);
+        if gpu::supports_f16(&adapter) {
+            return gpu::run(adapter, &args);
+        }
+        tracing::warn!(
+            "GPU adapter {} does not support f16 shaders; falling back to CPU",
+            adapter.get_info().name
+        );
     }
     cpu::run(&args)
 }

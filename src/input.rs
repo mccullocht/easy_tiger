@@ -89,22 +89,23 @@ where
         let header_parts = header.as_chunks::<4>().0;
         let len = u32::from_le_bytes(header_parts[0]) as usize;
         let dim = u32::from_le_bytes(header_parts[1]) as usize;
-        let stride = dim * std::mem::size_of::<E>();
-        if len * stride != vectors.len() {
+        let elem_width = std::mem::size_of::<E>();
+        let row_bytes = dim * elem_width;
+        if len * row_bytes != vectors.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("input vector data must have exactly {len} entries of {stride} length"),
+                format!("input vector data must have exactly {len} entries of {row_bytes} length"),
             ));
         }
 
         // Safety: StableDeref guarantees the pointer is stable even after a move.
         let raw_vectors: &'static [E] = unsafe {
-            std::slice::from_raw_parts(vectors.as_ptr() as *const E, vectors.len() / stride)
+            std::slice::from_raw_parts(vectors.as_ptr() as *const E, vectors.len() / elem_width)
         };
         Ok(Self {
             data,
             raw_vectors,
-            stride,
+            stride: dim,
             len,
         })
     }
@@ -303,5 +304,38 @@ impl<V: VectorStore> Index<usize> for SubsetViewVectorStore<'_, V> {
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.parent[self.subset[index]]
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{DerefVectorStore, VectorStore};
+
+    /// Build a BigANN-formatted byte buffer: an 8 byte `<len,dim>` header followed by
+    /// `len * dim` little-endian `f32` values counting up from 0.0.
+    fn bigann_f32(len: usize, dim: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(8 + len * dim * 4);
+        data.extend_from_slice(&(len as u32).to_le_bytes());
+        data.extend_from_slice(&(dim as u32).to_le_bytes());
+        for i in 0..(len * dim) {
+            data.extend_from_slice(&(i as f32).to_le_bytes());
+        }
+        data
+    }
+
+    #[test]
+    fn new_multi_dim_multi_byte_elem() {
+        let len = 5;
+        let dim = 4;
+        let data = bigann_f32(len, dim);
+        let store: DerefVectorStore<f32, Vec<u8>> = DerefVectorStore::new(data).unwrap();
+
+        assert_eq!(store.len(), len);
+        assert_eq!(store.elem_stride(), dim);
+        for i in 0..len {
+            let expected: Vec<f32> = (i * dim..(i + 1) * dim).map(|x| x as f32).collect();
+            assert_eq!(&store[i], expected.as_slice());
+        }
+        assert_eq!(store.iter().count(), len);
     }
 }

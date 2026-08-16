@@ -98,7 +98,7 @@ impl F32VectorCoder for VectorCoder {
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         match self.1 {
             Kernel::Scalar => {
-                for (d, o) in f16_iter(encoded).zip(out.iter_mut()) {
+                for (d, o) in unaligned_f16_iter(encoded).zip(out.iter_mut()) {
                     *o = d.to_f32();
                 }
             }
@@ -114,14 +114,10 @@ impl F32VectorCoder for VectorCoder {
     }
 }
 
-fn f16_iter(raw: &[u8]) -> impl ExactSizeIterator<Item = f16> + '_ {
+fn unaligned_f16_iter(raw: &[u8]) -> impl ExactSizeIterator<Item = f16> + '_ {
     let (chunks, rem) = raw.as_chunks::<{ std::mem::size_of::<f16>() }>();
     debug_assert!(rem.is_empty());
-    chunks.iter().map(|c| {
-        f16::from_bits(u16::from_le(unsafe {
-            std::ptr::read_unaligned(c.as_ptr() as *const u16)
-        }))
-    })
+    chunks.iter().map(|c| f16::from_le_bytes(*c))
 }
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -130,8 +126,8 @@ pub struct DotProductDistance(Kernel);
 impl DotProductDistance {
     fn dot(&self, a: &[u8], b: &[u8]) -> f32 {
         match self.0 {
-            Kernel::Scalar => f16_iter(a)
-                .zip(f16_iter(b))
+            Kernel::Scalar => unaligned_f16_iter(a)
+                .zip(unaligned_f16_iter(b))
                 .map(|(a, b)| a.to_f32() * b.to_f32())
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
@@ -162,8 +158,8 @@ impl<'a> DotProductQueryDistance<'a> {
             Kernel::Scalar => self
                 .0
                 .iter()
-                .zip(f16_iter(v).map(f16::to_f32))
-                .map(|(s, o)| *s * o)
+                .zip(unaligned_f16_iter(v).map(f16::to_f32))
+                .map(|(&s, o)| s * o)
                 .sum::<f32>(),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => unsafe { aarch64::dot_f32_f16(&self.0, v) },
@@ -186,8 +182,8 @@ pub struct EuclideanDistance(Kernel);
 impl EuclideanDistance {
     fn l2(&self, a: &[u8], b: &[u8]) -> f32 {
         match self.0 {
-            Kernel::Scalar => f16_iter(a)
-                .zip(f16_iter(b))
+            Kernel::Scalar => unaligned_f16_iter(a)
+                .zip(unaligned_f16_iter(b))
                 .map(|(a, b)| {
                     let diff = a.to_f32() - b.to_f32();
                     diff * diff
@@ -220,7 +216,7 @@ impl<'a> EuclideanQueryDistance<'a> {
             Kernel::Scalar => self
                 .0
                 .iter()
-                .zip(f16_iter(v).map(f16::to_f32))
+                .zip(unaligned_f16_iter(v).map(f16::to_f32))
                 .map(|(s, o)| {
                     let diff = *s - o;
                     diff * diff

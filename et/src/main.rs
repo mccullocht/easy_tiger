@@ -1,4 +1,5 @@
 mod compute_neighbors;
+mod data;
 mod flat;
 mod generate;
 mod neighbor_util;
@@ -14,6 +15,7 @@ use std::io::{self};
 
 use clap::{Parser, Subcommand};
 use compute_neighbors::{ComputeNeighborsArgs, compute_neighbors};
+use data::{DataArgs, data_command};
 use flat::{FlatArgs, flat_command};
 use generate::{GenerateArgs, generate};
 use quantization::{QuantizationArgs, quantization};
@@ -44,6 +46,8 @@ enum Commands {
     Quantization(QuantizationArgs),
     /// Generate random vectors and write them to a file.
     Generate(GenerateArgs),
+    /// Vector data file utilities.
+    Data(DataArgs),
 }
 
 fn main() -> io::Result<()> {
@@ -64,5 +68,6 @@ fn main() -> io::Result<()> {
         Commands::ComputeNeighbors(args) => compute_neighbors(args),
         Commands::Quantization(args) => quantization(args),
         Commands::Generate(args) => generate(args),
+        Commands::Data(args) => data_command(args),
     }
 }

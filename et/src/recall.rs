@@ -49,9 +49,6 @@ pub struct RecallArgs {
     /// This should include one row of length neighbors_len for each vector in the query set.
     #[arg(long)]
     neighbors: Option<PathBuf>,
-    /// Number of neighbors for each query in the neighbors file.
-    #[arg(long, default_value_t = NonZero::new(100).unwrap())]
-    neighbors_len: NonZero<usize>,
 }
 
 /// Computes the recall for a query from a golden file.
@@ -60,7 +57,7 @@ pub struct RecallComputer {
     metric: RecallMetric,
     similarity: VectorSimilarity,
     k: usize,
-    neighbors: DerefVectorStore<u8, Mmap>,
+    neighbors: DerefVectorStore<[u8; Self::NEIGHBOR_LEN], Mmap>,
 }
 
 impl RecallComputer {
@@ -68,14 +65,9 @@ impl RecallComputer {
 
     pub fn from_args(args: RecallArgs, similarity: VectorSimilarity) -> io::Result<Option<Self>> {
         if let Some((neighbors, k)) = args.neighbors.zip(args.recall_k) {
-            let elem_stride = Self::NEIGHBOR_LEN * args.neighbors_len.get();
-            let neighbors: DerefVectorStore<u8, Mmap> =
-                DerefVectorStore::<u8, _>::from_file_with_stride(
-                    neighbors,
-                    NonZero::new(elem_stride).unwrap(),
-                )?;
+            let neighbors = DerefVectorStore::<[u8; Self::NEIGHBOR_LEN], _>::from_file(neighbors)?;
 
-            if k.get() <= args.neighbors_len.get() {
+            if k.get() <= neighbors.elem_stride() {
                 Ok(Some(Self {
                     metric: args.recall_metric,
                     similarity,
@@ -140,8 +132,6 @@ impl RecallComputer {
     /// *Panics* if `query_index` is out of bounds in the golden file.
     pub fn compute_recall(&self, query_index: usize, query_results: &[Neighbor]) -> f64 {
         let expected = self.neighbors[query_index]
-            .as_chunks::<{ Self::NEIGHBOR_LEN }>()
-            .0
             .iter()
             .take(self.k)
             .map(|n| Neighbor::from(*n));

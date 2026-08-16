@@ -3,7 +3,7 @@
 use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 
 mod binary;
-mod float16;
+pub mod float16;
 pub mod float32;
 mod lvq;
 mod quiver;
@@ -39,11 +39,20 @@ pub enum VectorSimilarity {
 
 impl VectorSimilarity {
     /// Return an [`F32VectorDistance`] for this similarity function.
-    pub fn distance_f32(self) -> Box<dyn F32VectorDistance> {
+    pub fn distance_f32(&self) -> Box<dyn F32VectorDistance> {
         match self {
             Self::Euclidean => Box::new(float32::EuclideanDistance::default()),
             Self::Dot => Box::new(float32::DotProductDistance::default()),
             Self::Cosine => Box::new(float32::CosineDistance::default()),
+        }
+    }
+
+    /// Return an [`F16VectorDistance`] for this similarity function.
+    pub fn distance_f16(&self) -> Box<dyn F16VectorDistance> {
+        match self {
+            Self::Euclidean => Box::new(float16::EuclideanDistance::default()),
+            Self::Dot => Box::new(float16::DotProductDistance::default()),
+            Self::Cosine => Box::new(float16::CosineDistance::default()),
         }
     }
 
@@ -547,7 +556,8 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
 #[cfg(test)]
 mod test {
     use crate::{
-        F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize,
+        F32VectorCoder, F32VectorCoding, VectorSimilarity,
+        float32::l2_normalize,
         lvq::{TurboPrimaryCoder, TurboResidualCoder},
     };
 

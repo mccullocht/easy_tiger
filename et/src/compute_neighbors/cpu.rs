@@ -1,7 +1,4 @@
-use std::{
-    fs::File,
-    io::{self, BufWriter, Write},
-};
+use std::io;
 
 use easy_tiger::{
     Neighbor,
@@ -13,7 +10,7 @@ use rayon::prelude::*;
 
 use crate::neighbor_util::TopNeighbors;
 
-use super::ComputeNeighborsArgs;
+use super::{ComputeNeighborsArgs, write_neighbors};
 
 pub fn run(args: &ComputeNeighborsArgs) -> io::Result<()> {
     let query_vectors: DerefVectorStore<f32, Mmap> =
@@ -27,7 +24,6 @@ pub fn run(args: &ComputeNeighborsArgs) -> io::Result<()> {
         .min(doc_vectors.len());
 
     let distance_fn = args.similarity.new_distance_function();
-    let k = args.neighbors_len.get();
     let mut results = Vec::with_capacity(query_limit);
     results.resize_with(query_limit, || TopNeighbors::new(args.neighbors_len.get()));
     (0..doc_limit)
@@ -42,12 +38,5 @@ pub fn run(args: &ComputeNeighborsArgs) -> io::Result<()> {
             }
         });
 
-    let mut writer = BufWriter::new(File::create(&args.neighbors)?);
-    for neighbors in results.into_iter().map(|r| r.into_neighbors()) {
-        for n in neighbors.into_iter().take(k) {
-            writer.write_all(&<[u8; 16]>::from(n))?;
-        }
-    }
-
-    Ok(())
+    write_neighbors(args, results)
 }

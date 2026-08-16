@@ -1,9 +1,4 @@
-use std::{
-    fs::File,
-    io::{self, BufWriter, Write},
-    sync::mpsc,
-    time::Duration,
-};
+use std::{io, sync::mpsc, time::Duration};
 
 use bytemuck::{Pod, Zeroable};
 use easy_tiger::{
@@ -15,7 +10,7 @@ use vectors::VectorSimilarity;
 
 use crate::{neighbor_util::TopNeighbors, ui::progress_bar};
 
-use super::ComputeNeighborsArgs;
+use super::{ComputeNeighborsArgs, write_neighbors};
 
 /// WGSL compute shader for pairwise distance computation.
 ///
@@ -429,14 +424,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     }
 
     // --- Write output ---
-    let mut writer = BufWriter::new(File::create(&args.neighbors)?);
-    for neighbors in results.into_iter().map(|r| r.into_neighbors()) {
-        for n in neighbors.into_iter().take(k) {
-            writer.write_all(&<[u8; 16]>::from(n))?;
-        }
-    }
-
-    Ok(())
+    write_neighbors(args, results)
 }
 
 fn bgl_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {

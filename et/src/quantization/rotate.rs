@@ -6,43 +6,41 @@ use std::{
 
 use clap::Args;
 use easy_tiger::input::VectorStore;
-use rayon::prelude::*;
-use vectors::rotate::Rotator;
+use half::slice::HalfFloatSliceExt;
+use vectors::{f16, rotate::Rotator};
 
 use crate::ui::progress_bar;
-
-const BATCH_SIZE: usize = 8192;
 
 #[derive(Args)]
 pub struct RotateArgs {
     /// Random seed for the rotation. Must remain fixed for all vectors that will be compared.
     #[arg(long)]
     seed: u64,
-    /// Output file to write rotated vectors to as little-endian f32 values.
+    /// Output file to write rotated f16 vectors to in BigANN format.
     #[arg(short, long)]
     output: PathBuf,
 }
 
 pub fn rotate(
     args: RotateArgs,
-    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
     let rotator = Rotator::new(vectors.elem_stride(), args.seed);
     let mut out = BufWriter::new(File::create(&args.output)?);
-    let progress = progress_bar(vectors.len(), "rotate");
+    out.write_all(&(vectors.len() as u32).to_le_bytes())?;
+    out.write_all(&(vectors.elem_stride() as u32).to_le_bytes())?;
 
-    for batch_start in (0..vectors.len()).step_by(BATCH_SIZE) {
-        let batch_end = (batch_start + BATCH_SIZE).min(vectors.len());
-        let rotated: Vec<Vec<f32>> = (batch_start..batch_end)
-            .into_par_iter()
-            .map(|i| rotator.forward(&vectors[i]))
-            .collect();
-        for v in &rotated {
-            for &x in v {
-                out.write_all(&x.to_le_bytes())?;
-            }
+    let progress = progress_bar(vectors.len(), "rotate");
+    let mut widened = vec![0.0f32; vectors.elem_stride()];
+    let mut narrowed = vec![f16::ZERO; vectors.elem_stride()];
+    for i in 0..vectors.len() {
+        vectors[i].convert_to_f32_slice(&mut widened);
+        let rotated = rotator.forward(&widened);
+        narrowed.convert_from_f32_slice(&rotated);
+        for &x in narrowed.iter() {
+            out.write_all(&x.to_le_bytes())?;
         }
-        progress.inc((batch_end - batch_start) as u64);
+        progress.inc(1);
     }
 
     Ok(())

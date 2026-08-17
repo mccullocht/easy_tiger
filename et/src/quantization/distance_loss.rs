@@ -1,17 +1,19 @@
-use std::{io, num::NonZero, path::PathBuf, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::input::{DerefVectorStore, VectorStore};
+use half::slice::HalfFloatSliceExt;
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
-use vectors::{F32VectorCoding, VectorSimilarity};
+use vectors::{F32VectorCoding, VectorSimilarity, f16};
 
 use crate::ui::progress_bar;
 
 #[derive(Args)]
 pub struct DistanceLossArgs {
-    /// Little-endian f32 vectors of some dimensionality as input vectors.
+    /// Query vectors: f16 vectors in BigANN format (an 8 byte `<len,dim>` header followed by
+    /// little-endian f16 vector data).
     #[arg(long)]
     query_vectors: PathBuf,
     /// If true, quantize queries before computing loss, bypassing any f32 x quantized query
@@ -36,12 +38,20 @@ pub struct DistanceLossArgs {
 
 pub fn distance_loss(
     args: DistanceLossArgs,
-    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::from_file_with_stride(
-        args.query_vectors,
-        NonZero::new(vectors.elem_stride()).unwrap(),
-    )?;
+    let query_vectors: DerefVectorStore<f16, Mmap> =
+        DerefVectorStore::from_file(args.query_vectors)?;
+    if query_vectors.elem_stride() != vectors.elem_stride() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "query and doc vectors must have the same dimensionality ({} vs {})",
+                query_vectors.elem_stride(),
+                vectors.elem_stride()
+            ),
+        ));
+    }
     let query_limit = args
         .query_limit
         .unwrap_or(query_vectors.len())
@@ -57,22 +67,20 @@ pub fn distance_loss(
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
-            let query = &query_vectors[i];
+            let mut query = vec![0.0f32; query_vectors.elem_stride()];
+            query_vectors[i].convert_to_f32_slice(&mut query);
             let qdist = if args.quantize_query {
                 args.format
                     .query_distance_symmetric(args.similarity, coder.encode(&query), None)
             } else {
                 args.format.query_distance_asymmetric(
                     args.similarity,
-                    query.to_vec(),
+                    query.clone(),
                     center.as_deref(),
                 )
             };
-            let f32_dist = F32VectorCoding::F32.query_distance_asymmetric(
-                args.similarity,
-                query.to_vec(),
-                None,
-            );
+            let f32_dist =
+                F32VectorCoding::F32.query_distance_asymmetric(args.similarity, query, None);
             (f32_dist, qdist)
         })
         .collect::<Vec<_>>();
@@ -81,7 +89,9 @@ pub fn distance_loss(
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "scoring"))
         .flat_map(|d| {
-            let doc_f32 = Arc::new(vectors[d].to_vec());
+            let mut doc_f32 = vec![0.0f32; vectors.elem_stride()];
+            vectors[d].convert_to_f32_slice(&mut doc_f32);
+            let doc_f32 = Arc::new(doc_f32);
             let doc = Arc::new(coder.encode(&doc_f32));
             let doc_decoded = coder.decode(&doc);
             let error_term = (doc_f32

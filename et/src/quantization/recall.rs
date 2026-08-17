@@ -1,4 +1,4 @@
-use std::{io, num::NonZero, path::PathBuf};
+use std::{io, path::PathBuf};
 
 use crate::{neighbor_util::TopNeighbors, recall::RecallComputer, ui::progress_bar};
 use clap::Args;
@@ -7,15 +7,17 @@ use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
     kmeans::{Params, kmeans},
 };
+use half::slice::HalfFloatSliceExt;
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rand::SeedableRng;
 use rayon::prelude::*;
-use vectors::{F32VectorCoding, VectorSimilarity};
+use vectors::{F32VectorCoding, VectorSimilarity, f16};
 
 #[derive(Args)]
-pub struct RecallArgs {
-    /// Little-endian f32 vectors as a flat file where each vector has --dimensions
+pub struct QuantizationRecallArgs {
+    /// Query vectors: f16 vectors in BigANN format (an 8 byte `<len,dim>` header followed by
+    /// little-endian f16 vector data).
     #[arg(long)]
     query_vectors: PathBuf,
     /// If set, only process this many input queries.
@@ -66,13 +68,21 @@ pub struct RecallArgs {
 }
 
 pub fn recall(
-    args: RecallArgs,
-    doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    args: QuantizationRecallArgs,
+    doc_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::from_file_with_stride(
-        args.query_vectors,
-        NonZero::new(doc_vectors.elem_stride()).unwrap(),
-    )?;
+    let query_vectors: DerefVectorStore<f16, Mmap> =
+        DerefVectorStore::from_file(args.query_vectors)?;
+    if query_vectors.elem_stride() != doc_vectors.elem_stride() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "query and doc vectors must have the same dimensionality ({} vs {})",
+                query_vectors.elem_stride(),
+                doc_vectors.elem_stride()
+            ),
+        ));
+    }
     let query_limit = args
         .query_limit
         .unwrap_or(query_vectors.len())
@@ -106,8 +116,15 @@ pub fn recall(
                 args.centers,
                 sample_vectors.len()
             );
+            let mut widened_sample =
+                VecVectorStore::with_capacity(doc_vectors.elem_stride(), sample_vectors.len());
+            let mut buf = vec![0.0f32; doc_vectors.elem_stride()];
+            for v in sample_vectors.iter() {
+                v.convert_to_f32_slice(&mut buf);
+                widened_sample.push(&buf);
+            }
             let centers = kmeans(
-                &sample_vectors,
+                &widened_sample,
                 args.centers,
                 &Params {
                     iters: 100,
@@ -131,6 +148,8 @@ pub fn recall(
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
+            let mut query = vec![0.0f32; query_vectors.elem_stride()];
+            query_vectors[i].convert_to_f32_slice(&mut query);
             coders
                 .iter()
                 .enumerate()
@@ -139,13 +158,13 @@ pub fn recall(
                     if args.quantize_query {
                         args.format.query_distance_symmetric(
                             args.similarity,
-                            coder.encode(&query_vectors[i]),
+                            coder.encode(&query),
                             center,
                         )
                     } else {
                         args.format.query_distance_asymmetric(
                             args.similarity,
-                            &query_vectors[i][..],
+                            query.clone(),
                             center,
                         )
                     }
@@ -162,8 +181,10 @@ pub fn recall(
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .map(|d| {
-            let center = select_center_for_doc(&doc_vectors[d], centers.as_ref(), args.similarity);
-            let doc = coders[center].encode(&doc_vectors[d]);
+            let mut doc_f32 = vec![0.0f32; doc_vectors.elem_stride()];
+            doc_vectors[d].convert_to_f32_slice(&mut doc_f32);
+            let center = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
+            let doc = coders[center].encode(&doc_f32);
             let mut total_scored = 0;
             let mut total_competitive = 0;
             for (q, s) in query_scorers.iter().enumerate() {

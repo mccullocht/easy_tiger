@@ -34,8 +34,9 @@ pub fn run(args: &ComputeNeighborsArgs) -> io::Result<()> {
     }
 
     let distance_fn = args.similarity.distance_f16();
+    let top_k = super::top_k(args);
     let mut results = Vec::with_capacity(query_limit);
-    results.resize_with(query_limit, || TopNeighbors::new(args.neighbors_len.get()));
+    results.resize_with(query_limit, || TopNeighbors::new(top_k));
     (0..doc_limit)
         .into_par_iter()
         .progress_count(doc_limit as u64)

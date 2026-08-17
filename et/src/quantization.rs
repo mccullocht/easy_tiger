@@ -3,17 +3,19 @@ mod loss;
 mod recall;
 mod rotate;
 
-use std::{io, num::NonZero, path::PathBuf};
+use std::{io, path::PathBuf};
 
 use clap::{Args, Subcommand};
 
 use easy_tiger::input::{DerefVectorStore, SubsetViewVectorStore, VectorStore};
+use half::slice::HalfFloatSliceExt;
 use indicatif::ProgressIterator;
 use memmap2::Mmap;
+use vectors::f16;
 
 use distance_loss::{DistanceLossArgs, distance_loss};
 use loss::{LossArgs, loss};
-use recall::{RecallArgs, recall};
+use recall::{QuantizationRecallArgs, recall};
 use rotate::{RotateArgs, rotate};
 
 #[derive(Args)]
@@ -21,12 +23,10 @@ pub struct QuantizationArgs {
     #[command(subcommand)]
     command: Command,
 
-    /// Input doc vector file for quantization.
+    /// Input doc vector file: f16 vectors in BigANN format (an 8 byte `<len,dim>` header
+    /// followed by little-endian f16 vector data).
     #[arg(short = 'v', long)]
     doc_vectors: PathBuf,
-    /// Vector dimensions for --input-vectors
-    #[arg(short, long)]
-    dimensions: NonZero<usize>,
 
     /// Maximum number of vectors to process.
     #[arg(long)]
@@ -40,14 +40,13 @@ pub enum Command {
     /// Compute loss in distance computation resulting from quantization.
     DistanceLoss(DistanceLossArgs),
     /// Compute recall difference with quantization using exhaustive search.
-    Recall(RecallArgs),
+    Recall(QuantizationRecallArgs),
     /// Apply an orthogonal rotation to each vector and write to an output file.
     Rotate(RotateArgs),
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
-    let vectors: DerefVectorStore<f32, Mmap> =
-        DerefVectorStore::from_file_with_stride(args.doc_vectors, args.dimensions)?;
+    let vectors: DerefVectorStore<f16, Mmap> = DerefVectorStore::from_file(args.doc_vectors)?;
 
     if let Some(limit) = args.doc_limit
         && limit < vectors.len()
@@ -59,7 +58,7 @@ pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
     }
 }
 
-fn cmd(cmd: Command, vectors: &(impl VectorStore<Elem = f32> + Send + Sync)) -> io::Result<()> {
+fn cmd(cmd: Command, vectors: &(impl VectorStore<Elem = f16> + Send + Sync)) -> io::Result<()> {
     match cmd {
         Command::Loss(args) => loss(args, vectors),
         Command::DistanceLoss(args) => distance_loss(args, vectors),
@@ -68,14 +67,16 @@ fn cmd(cmd: Command, vectors: &(impl VectorStore<Elem = f32> + Send + Sync)) -> 
     }
 }
 
-fn compute_center(vectors: &impl VectorStore<Elem = f32>) -> Vec<f32> {
+fn compute_center(vectors: &impl VectorStore<Elem = f16>) -> Vec<f32> {
     let mut mean = vec![0.0; vectors.elem_stride()];
+    let mut widened = vec![0.0f32; vectors.elem_stride()];
     for (i, v) in vectors
         .iter()
         .enumerate()
         .progress_with(crate::ui::progress_bar(vectors.len(), "Computing center"))
     {
-        for (d, m) in v.iter().zip(mean.iter_mut()) {
+        v.convert_to_f32_slice(&mut widened);
+        for (d, m) in widened.iter().zip(mean.iter_mut()) {
             let delta = *d as f64 - *m;
             *m += delta / (i + 1) as f64;
         }

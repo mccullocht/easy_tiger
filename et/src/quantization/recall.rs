@@ -162,8 +162,11 @@ pub fn recall(
                             center,
                         )
                     } else {
-                        args.format
-                            .query_distance_asymmetric(args.similarity, query.clone(), center)
+                        args.format.query_distance_asymmetric(
+                            args.similarity,
+                            query.clone(),
+                            center,
+                        )
                     }
                 })
                 .collect::<Vec<_>>()

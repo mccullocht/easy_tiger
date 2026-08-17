@@ -157,7 +157,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         ));
     }
     let dims = query_vectors.elem_stride();
-    let k = args.neighbors_len.get();
+    let k = super::top_k(args);
 
     let similarity_code: u32 = match args.similarity {
         VectorSimilarity::Euclidean => 0,

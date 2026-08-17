@@ -2,9 +2,10 @@ use std::io;
 
 use clap::Args;
 use easy_tiger::input::VectorStore;
+use half::slice::HalfFloatSliceExt;
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
-use vectors::{F32VectorCoding, VectorSimilarity};
+use vectors::{F32VectorCoding, VectorSimilarity, f16};
 
 use crate::ui::progress_bar;
 
@@ -20,7 +21,7 @@ pub struct LossArgs {
 
 pub fn loss(
     args: LossArgs,
-    vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
     let mean = if args.center {
         Some(super::compute_center(vectors))
@@ -35,7 +36,8 @@ pub fn loss(
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "loss"))
         .map(|i| {
-            let v = &vectors[i];
+            let mut v = vec![0.0f32; vectors.elem_stride()];
+            vectors[i].convert_to_f32_slice(&mut v);
             let encoded = coder.encode(&v);
             let q = coder.decode(&encoded);
             let (abs_error, sq_error, sq_magnitude) = v

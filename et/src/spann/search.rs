@@ -109,8 +109,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             .posting_rerank_budget
             .unwrap_or(args.posting_candidates.get()),
     };
-    let recall_computer =
-        RecallComputer::from_args(args.recall, index.head_config().config().similarity)?;
+    let recall_computer = RecallComputer::from_args(args.recall)?;
     if let Some(computer) = recall_computer.as_ref() {
         if computer.neighbors_len() < limit {
             return Err(io::Error::new(

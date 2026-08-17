@@ -20,7 +20,8 @@ pub struct DataArgs {
 pub enum Command {
     /// Convert f32 vector data to f16 and write in BigANN format.
     ConvertF16(ConvertF16Args),
-    /// Add a BigANN header to a headerless neighbors (recall ground truth) file.
+    /// Convert a headerless (vertex, distance) neighbors (recall ground truth) file into a
+    /// BigANN-formatted file of vertex ids, dropping distances.
     ConvertNeighbors(ConvertNeighborsArgs),
     /// Read a BigANN header and print count, dimensionality, and entry width.
     Check(CheckArgs),

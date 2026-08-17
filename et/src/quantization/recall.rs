@@ -78,7 +78,7 @@ pub fn recall(
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
 
-    let recall_computer = RecallComputer::from_args(args.recall, args.similarity)?.ok_or(
+    let recall_computer = RecallComputer::from_args(args.recall)?.ok_or(
         io::Error::new(io::ErrorKind::InvalidInput, "must provide recall args"),
     )?;
 

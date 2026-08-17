@@ -134,16 +134,22 @@ impl From<&[f32]> for VectorStats {
 fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     // There are several spots in the optimization routine where we may divide by the input range
     // and if that range is zero then it produces NaNs.
-    if stats.min == stats.max {
-        return (stats.min, stats.min + f32::MIN_POSITIVE);
-    }
-    match InstructionSet::default() {
-        InstructionSet::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
-        #[cfg(target_arch = "aarch64")]
-        InstructionSet::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
-        #[cfg(target_arch = "x86_64")]
-        InstructionSet::Avx512 => unsafe { x86_64::optimize_interval_avx512(vector, stats, bits) },
-    }
+    let (lower, upper) = if stats.min == stats.max {
+        (stats.min, stats.min + f32::MIN_POSITIVE)
+    } else {
+        match InstructionSet::default() {
+            InstructionSet::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
+            #[cfg(target_arch = "aarch64")]
+            InstructionSet::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
+            #[cfg(target_arch = "x86_64")]
+            InstructionSet::Avx512 => unsafe {
+                x86_64::optimize_interval_avx512(vector, stats, bits)
+            },
+        }
+    };
+    // The interval bounds are stored as f16, so round them here to keep the values used to
+    // quantize the vector consistent with the values a caller sees when decoding it.
+    (f16::from_f32(lower).to_f32(), f16::from_f32(upper).to_f32())
 }
 
 /// Prepare a vector for quantization: optionally l2-normalize (for angular similarity) and/or

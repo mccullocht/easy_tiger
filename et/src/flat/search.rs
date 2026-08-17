@@ -52,7 +52,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
 
-    let recall_computer = RecallComputer::from_args(args.recall, config.similarity)?;
+    let recall_computer = RecallComputer::from_args(args.recall)?;
     if let Some(computer) = recall_computer.as_ref() {
         if computer.neighbors_len() < limit {
             return Err(io::Error::new(

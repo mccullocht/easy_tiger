@@ -1,13 +1,15 @@
 use std::{
     fs::File,
-    io::{self, BufReader, BufWriter, Write},
+    io::{self, BufReader, BufWriter, Read, Write},
     num::NonZero,
     path::PathBuf,
 };
 
 use clap::Args;
+use easy_tiger::Neighbor;
 
-/// Size in bytes of a single serialized `easy_tiger::Neighbor` (vertex: i64, distance: f64).
+/// Size in bytes of a single raw input neighbor entry: `easy_tiger::Neighbor` (vertex: i64,
+/// distance: f64).
 const NEIGHBOR_LEN: usize = 16;
 
 #[derive(Args)]
@@ -19,8 +21,8 @@ pub struct ConvertNeighborsArgs {
     /// Number of neighbor entries per query in the input file.
     #[arg(short = 'n', long, default_value_t = NonZero::new(100).unwrap())]
     neighbors_len: NonZero<usize>,
-    /// Output file to write in BigANN format (<count,dim> header followed by the input data
-    /// unchanged).
+    /// Output file to write in BigANN format: a <count,neighbors_len> header followed by each
+    /// entry's vertex id as a little-endian u32 (distance is dropped).
     #[arg(short, long)]
     output: PathBuf,
 }
@@ -42,7 +44,13 @@ pub fn convert_neighbors(args: ConvertNeighborsArgs) -> io::Result<()> {
     let mut out = BufWriter::new(File::create(&args.output)?);
     out.write_all(&(count as u32).to_le_bytes())?;
     out.write_all(&(args.neighbors_len.get() as u32).to_le_bytes())?;
-    io::copy(&mut input, &mut out)?;
+
+    let mut entry = [0u8; NEIGHBOR_LEN];
+    for _ in 0..(count * args.neighbors_len.get() as u64) {
+        input.read_exact(&mut entry)?;
+        let vertex = Neighbor::from(entry).vertex();
+        out.write_all(&(vertex as u32).to_le_bytes())?;
+    }
 
     Ok(())
 }

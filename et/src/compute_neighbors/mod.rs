@@ -38,8 +38,8 @@ pub struct ComputeNeighborsArgs {
     /// Path to neighbors file to write.
     ///
     /// The output file is written in BigANN format: a <count,neighbors_len> header followed by
-    /// one row for each vector in query_vectors, each row containing neighbors_len entries of
-    /// Neighbor, an (i64, f64) tuple.
+    /// one row for each vector in query_vectors, each row containing neighbors_len vertex ids as
+    /// little-endian u32.
     #[arg(short, long)]
     neighbors: PathBuf,
     /// Number of neighbors for each query in the neighbors file.
@@ -68,7 +68,8 @@ pub fn compute_neighbors(args: ComputeNeighborsArgs) -> io::Result<()> {
 }
 
 /// Write `results` (one entry per query) to `args.neighbors` in BigANN format: a
-/// `<count,neighbors_len>` header followed by up to `neighbors_len` [`Neighbor`] entries per row.
+/// `<count,neighbors_len>` header followed by up to `neighbors_len` little-endian `u32` vertex
+/// ids per row.
 fn write_neighbors(args: &ComputeNeighborsArgs, results: Vec<TopNeighbors>) -> io::Result<()> {
     let k = args.neighbors_len.get();
     let mut writer = BufWriter::new(File::create(&args.neighbors)?);
@@ -76,7 +77,7 @@ fn write_neighbors(args: &ComputeNeighborsArgs, results: Vec<TopNeighbors>) -> i
     writer.write_all(&(k as u32).to_le_bytes())?;
     for neighbors in results.into_iter().map(TopNeighbors::into_neighbors) {
         for n in neighbors.into_iter().take(k) {
-            writer.write_all(&<[u8; 16]>::from(n))?;
+            writer.write_all(&(n.vertex() as u32).to_le_bytes())?;
         }
     }
     Ok(())

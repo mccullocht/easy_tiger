@@ -1,19 +1,18 @@
 use super::{Kernel, scalar::Scalar};
 
 use std::arch::x86_64::{
-    __m128i, __m512, __m512i, _CMP_GT_OQ, _mm_and_si128, _mm_loadu_si128, _mm_movm_epi8,
-    _mm_or_epi32, _mm_set_epi8, _mm_set1_epi8, _mm_slli_epi32, _mm_storeu_epi8, _mm512_abs_ps,
-    _mm512_add_epi32, _mm512_add_ps, _mm512_and_si512, _mm512_broadcast_i32x4, _mm512_cmp_ps_mask,
-    _mm512_dpbusd_epi32, _mm512_loadu_epi8, _mm512_loadu_ps, _mm512_maskz_mov_ps,
-    _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_set_epi64,
-    _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_epi8, _mm512_slli_epi32,
-    _mm512_srli_epi32, _mm512_srlv_epi64, _mm512_sub_epi32, _mm512_ternarylogic_epi32,
-    _mm512_xor_si512,
+    __m128i, __m512, __m512i, _CMP_GT_OQ, _MM_CMPINT_NLT, _mm_and_si128, _mm_loadu_si128,
+    _mm_movm_epi8, _mm_or_epi32, _mm_set_epi8, _mm_set1_epi8, _mm_slli_epi32, _mm_storeu_epi8,
+    _mm512_abs_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_si512, _mm512_broadcast_i32x4,
+    _mm512_castps_si512, _mm512_cmp_epi32_mask, _mm512_cmp_ps_mask, _mm512_dpbusd_epi32,
+    _mm512_loadu_epi8, _mm512_loadu_ps, _mm512_maskz_mov_ps, _mm512_popcnt_epi32,
+    _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_set_epi64, _mm512_set1_epi8,
+    _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_epi8, _mm512_slli_epi32, _mm512_srli_epi32,
+    _mm512_srlv_epi64, _mm512_sub_epi32, _mm512_ternarylogic_epi32, _mm512_xor_si512,
 };
 
 struct QuantizationState {
     tau: __m512,
-    zero: __m512,
 
     weak_sum: __m512,
     strong_sum: __m512,
@@ -25,7 +24,6 @@ impl QuantizationState {
         unsafe {
             Self {
                 tau: _mm512_set1_ps(tau),
-                zero: _mm512_set1_ps(0.0),
                 weak_sum: _mm512_set1_ps(0.0),
                 strong_sum: _mm512_set1_ps(0.0),
                 strong_count: 0,
@@ -38,7 +36,13 @@ impl QuantizationState {
     unsafe fn quantize16(&mut self, v: &[f32; 16]) -> __m128i {
         unsafe {
             let v = _mm512_loadu_ps(v.as_ptr());
-            let sgn_mask = _mm512_cmp_ps_mask::<{ _CMP_GT_OQ }>(v, self.zero);
+            // Compare the sign bit directly (rather than `v > 0.0`) so that +0.0 and -0.0 are
+            // classified consistently with `f32::is_sign_positive`/`signum`, which distinguish
+            // them even though they compare equal.
+            let sgn_mask = _mm512_cmp_epi32_mask::<{ _MM_CMPINT_NLT }>(
+                _mm512_castps_si512(v),
+                _mm512_set1_epi32(0),
+            );
             let v = _mm512_abs_ps(v);
             let mag_mask = _mm512_cmp_ps_mask::<{ _CMP_GT_OQ }>(v, self.tau);
 

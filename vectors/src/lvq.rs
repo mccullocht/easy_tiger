@@ -48,8 +48,8 @@ const fn check_primary_bits(bits: usize) {
 
 const ESTIMATED_DISTANCE_Z_SCORE: f32 = 1.96;
 
-#[derive(Debug, Copy, Clone)]
-enum InstructionSet {
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum Kernel {
     Scalar,
     #[cfg(target_arch = "aarch64")]
     Neon,
@@ -57,35 +57,51 @@ enum InstructionSet {
     Avx512,
 }
 
-impl Default for InstructionSet {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    fn default() -> Self {
-        InstructionSet::Scalar
-    }
+impl Kernel {
+    const CANDIDATES: &'static [Self] = &[
+        #[cfg(target_arch = "aarch64")]
+        Self::Neon,
+        #[cfg(target_arch = "x86_64")]
+        Self::Avx512,
+        Self::Scalar,
+    ];
 
-    #[cfg(target_arch = "aarch64")]
-    fn default() -> Self {
-        if std::arch::is_aarch64_feature_detected!("dotprod") {
-            InstructionSet::Neon
-        } else {
-            InstructionSet::Scalar
+    /// Returns true if the specificed kernel is available for use on this cost.
+    fn is_available(&self) -> bool {
+        match self {
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => std::arch::is_aarch64_feature_detected!("dotprod"),
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 => {
+                use std::arch::is_x86_feature_detected as feature;
+                feature!("avx2")
+                    && feature!("avx512f")
+                    && feature!("avx512bw")
+                    && feature!("avx512vl")
+                    && feature!("avx512vpopcntdq")
+                    && feature!("avx512vnni")
+            }
+            Self::Scalar => true,
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    /// Return all of the non-Scalar Kernels that are available on this host.
+    #[cfg(test)]
+    fn accelerated() -> impl Iterator<Item = Self> {
+        Self::CANDIDATES
+            .iter()
+            .copied()
+            .filter(|&k| k.is_available() && k != Self::Scalar)
+    }
+}
+
+impl Default for Kernel {
     fn default() -> Self {
-        use std::arch::is_x86_feature_detected as feature;
-        if feature!("avx2")
-            && feature!("avx512f")
-            && feature!("avx512bw")
-            && feature!("avx512vl")
-            && feature!("avx512vpopcntdq")
-            && feature!("avx512vnni")
-        {
-            InstructionSet::Avx512
-        } else {
-            InstructionSet::Scalar
-        }
+        Self::CANDIDATES
+            .iter()
+            .copied()
+            .find(Self::is_available)
+            .expect("Scalar is always available")
     }
 }
 
@@ -99,8 +115,7 @@ struct VectorStats {
 }
 
 impl VectorStats {
-    #[allow(dead_code)]
-    fn from_scalar(value: &[f32]) -> Self {
+    fn new(k: Kernel, value: &[f32]) -> Self {
         if value.is_empty() {
             return VectorStats {
                 l2_norm_sq: 1.0,
@@ -108,43 +123,28 @@ impl VectorStats {
             };
         }
 
-        scalar::compute_vector_stats(value)
-    }
-}
-
-impl From<&[f32]> for VectorStats {
-    fn from(value: &[f32]) -> Self {
-        if value.is_empty() {
-            return VectorStats {
-                l2_norm_sq: 1.0,
-                ..Default::default()
-            };
-        }
-
-        match InstructionSet::default() {
-            InstructionSet::Scalar => scalar::compute_vector_stats(value),
+        match k {
+            Kernel::Scalar => scalar::compute_vector_stats(value),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::compute_vector_stats(value),
+            Kernel::Neon => aarch64::compute_vector_stats(value),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe { x86_64::compute_vector_stats_avx512(value) },
+            Kernel::Avx512 => unsafe { x86_64::compute_vector_stats_avx512(value) },
         }
     }
 }
 
-fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     // There are several spots in the optimization routine where we may divide by the input range
     // and if that range is zero then it produces NaNs.
     let (lower, upper) = if stats.min == stats.max {
         (stats.min, stats.min + f32::MIN_POSITIVE)
     } else {
-        match InstructionSet::default() {
-            InstructionSet::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
+        match k {
+            Kernel::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
+            Kernel::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::optimize_interval_avx512(vector, stats, bits)
-            },
+            Kernel::Avx512 => unsafe { x86_64::optimize_interval_avx512(vector, stats, bits) },
         }
     };
     // The interval bounds are stored as f16, so round them here to keep the values used to
@@ -602,7 +602,7 @@ pub struct TurboPrimaryCoder<const B: usize> {
     similarity: VectorSimilarity,
     center: Option<Vec<f32>>,
     scratch: ThreadLocal<RefCell<Vec<f32>>>,
-    inst: InstructionSet,
+    k: Kernel,
 }
 
 impl<const B: usize> TurboPrimaryCoder<B> {
@@ -615,24 +615,25 @@ impl<const B: usize> TurboPrimaryCoder<B> {
             similarity,
             center,
             scratch: ThreadLocal::new(),
-            inst: InstructionSet::default(),
+            k: Kernel::default(),
         }
     }
 
-    #[allow(unused)]
-    pub fn scalar(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+    #[cfg(test)]
+    fn with_kernel(k: Kernel, similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+        assert!(k.is_available(), "{k:?}");
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
         Self {
             similarity,
             center,
             scratch: ThreadLocal::new(),
-            inst: InstructionSet::Scalar,
+            k,
         }
     }
 
     fn encode_parts(
-        inst: InstructionSet,
+        k: Kernel,
         similarity: VectorSimilarity,
         vector: &[f32],
         center: Option<&[f32]>,
@@ -650,28 +651,28 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         };
         let (prepared, center_dot) = prepare_vector(vector, scratch, center, similarity);
         let mut out = vec![0u8; packing::byte_len(vector.len(), B)];
-        let header = Self::encode_parts_to(inst, prepared, center_dot, &mut out);
+        let header = Self::encode_parts_to(k, prepared, center_dot, &mut out);
         (header, out)
     }
 
     fn encode_parts_to(
-        inst: InstructionSet,
+        k: Kernel,
         vector: &[f32],
         center_dot: f32,
         out: &mut [u8],
     ) -> PrimaryVectorHeader {
-        let stats = VectorStats::from(vector);
+        let stats = VectorStats::new(k, vector);
         let mut header = PrimaryVectorHeader::new(stats, center_dot);
-        (header.lower, header.upper) = optimize_interval(vector, &stats, B);
+        (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
         let residual_error_sq;
-        (header.component_sum, residual_error_sq) = match inst {
-            InstructionSet::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
+        (header.component_sum, residual_error_sq) = match k {
+            Kernel::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
+            Kernel::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
+            Kernel::Avx512 => unsafe {
                 x86_64::primary_quantize_and_pack_avx512::<B>(vector, terms, out)
             },
         };
@@ -699,7 +700,7 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             self.center.as_deref(),
             self.similarity,
         );
-        let header = Self::encode_parts_to(self.inst, prepared, center_dot, vector_bytes);
+        let header = Self::encode_parts_to(self.k, prepared, center_dot, vector_bytes);
         header.serialize(header_bytes, self.similarity);
     }
 
@@ -710,12 +711,12 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
         let vector =
             TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
-        match self.inst {
-            InstructionSet::Scalar => scalar::primary_decode::<B>(vector, out),
+        match self.k {
+            Kernel::Scalar => scalar::primary_decode::<B>(vector, out),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::primary_decode::<B>(vector, out),
+            Kernel::Neon => aarch64::primary_decode::<B>(vector, out),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe { x86_64::primary_decode_avx512::<B>(vector, out) },
+            Kernel::Avx512 => unsafe { x86_64::primary_decode_avx512::<B>(vector, out) },
         };
         if let Some(c) = &self.center {
             uncenter_vector(c, out);
@@ -732,7 +733,7 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
 pub struct TurboPrimaryDistance<const B: usize> {
     similarity: VectorSimilarity,
     center_center_dot: f32,
-    inst: InstructionSet,
+    inst: Kernel,
 }
 
 impl<const B: usize> TurboPrimaryDistance<B> {
@@ -747,7 +748,7 @@ impl<const B: usize> TurboPrimaryDistance<B> {
         Self {
             similarity,
             center_center_dot,
-            inst: InstructionSet::default(),
+            inst: Kernel::default(),
         }
     }
 
@@ -760,13 +761,11 @@ impl<const B: usize> TurboPrimaryDistance<B> {
     ) -> f64 {
         let doc = TurboPrimaryVector::<B>::new(doc, self.similarity).unwrap();
         let uint_dot = match self.inst {
-            InstructionSet::Scalar => scalar::dot_u8::<B>(query.rep.data, doc.rep.data),
+            Kernel::Scalar => scalar::dot_u8::<B>(query.rep.data, doc.rep.data),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::dot_u8::<B>(query.rep.data, doc.rep.data),
+            Kernel::Neon => aarch64::dot_u8::<B>(query.rep.data, doc.rep.data),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
-                x86_64::dot_u8_avx512::<B>(query.rep.data, doc.rep.data)
-            },
+            Kernel::Avx512 => unsafe { x86_64::dot_u8_avx512::<B>(query.rep.data, doc.rep.data) },
         };
         let dot = correct_dot_uint(uint_dot, query.dim(), &query.rep.terms, &doc.rep.terms);
         correction_terms
@@ -810,7 +809,7 @@ pub struct TurboPrimaryQueryDistance<const B: usize> {
     terms: VectorDecodeTerms,
     correction_terms: DistanceCorrectionTerms,
 
-    inst: InstructionSet,
+    inst: Kernel,
 }
 
 impl<const B: usize> TurboPrimaryQueryDistance<B> {
@@ -819,7 +818,7 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
         query: Cow<'_, [f32]>,
         center: Option<&[f32]>,
     ) -> Self {
-        let inst = InstructionSet::default();
+        let inst = Kernel::default();
         let (header, query) = TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(
             inst,
             similarity,
@@ -843,15 +842,11 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
         let vector =
             TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
         let uint8_dot = match self.inst {
-            InstructionSet::Scalar => {
-                scalar::primary_query8_dot_unnormalized::<B>(&self.query, &vector)
-            }
+            Kernel::Scalar => scalar::primary_query8_dot_unnormalized::<B>(&self.query, &vector),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => {
-                aarch64::primary_query8_dot_unnormalized::<B>(&self.query, &vector)
-            }
+            Kernel::Neon => aarch64::primary_query8_dot_unnormalized::<B>(&self.query, &vector),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
+            Kernel::Avx512 => unsafe {
                 x86_64::primary_query8_dot_unnormalized_avx512::<B>(&self.query, &vector)
             },
         };
@@ -889,7 +884,7 @@ pub struct TurboPrimaryQueryDistance1 {
     correction_terms: DistanceCorrectionTerms,
     error_terms: ErrorBoundTerms,
 
-    inst: InstructionSet,
+    inst: Kernel,
 }
 
 impl TurboPrimaryQueryDistance1 {
@@ -898,7 +893,7 @@ impl TurboPrimaryQueryDistance1 {
         query: Cow<'_, [f32]>,
         center: Option<&[f32]>,
     ) -> Self {
-        let inst = InstructionSet::default();
+        let inst = Kernel::default();
         let (primary_header, primary_query, residual_header, residual_query) =
             TurboResidualCoder::<1>::encode_parts(inst, similarity, query.as_ref(), center);
         let correction_terms = DistanceCorrectionTerms::new(&primary_header, center, similarity);
@@ -924,11 +919,11 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
         let vector =
             TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
         let uint8_dot_primary = match self.inst {
-            InstructionSet::Scalar => scalar::dot_u8::<1>(&self.primary_query, vector.rep.data),
+            Kernel::Scalar => scalar::dot_u8::<1>(&self.primary_query, vector.rep.data),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::dot_u8::<1>(&self.primary_query, vector.rep.data),
+            Kernel::Neon => aarch64::dot_u8::<1>(&self.primary_query, vector.rep.data),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
+            Kernel::Avx512 => unsafe {
                 x86_64::dot_u8_avx512::<1>(&self.primary_query, vector.rep.data)
             },
         };
@@ -949,15 +944,15 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
         }
 
         let uint8_dot_residual = match self.inst {
-            InstructionSet::Scalar => {
+            Kernel::Scalar => {
                 scalar::primary_query8_dot_unnormalized::<1>(&self.residual_query, &vector)
             }
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => {
+            Kernel::Neon => {
                 aarch64::primary_query8_dot_unnormalized::<1>(&self.residual_query, &vector)
             }
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
+            Kernel::Avx512 => unsafe {
                 x86_64::primary_query8_dot_unnormalized_avx512::<1>(&self.residual_query, &vector)
             },
         };
@@ -1092,35 +1087,37 @@ pub struct TurboResidualCoder<const B: usize> {
     similarity: VectorSimilarity,
     center: Option<Vec<f32>>,
     scratch: ThreadLocal<RefCell<Vec<f32>>>,
-    inst: InstructionSet,
+    k: Kernel,
 }
 
 impl<const B: usize> TurboResidualCoder<B> {
     const B_CHECK: () = { check_primary_bits(B) };
 
     pub fn new(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
-        Self {
-            similarity,
-            center,
-            scratch: ThreadLocal::new(),
-            inst: InstructionSet::default(),
-        }
-    }
-
-    #[allow(unused)]
-    pub fn scalar(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
         Self {
             similarity,
             center,
             scratch: ThreadLocal::new(),
-            inst: InstructionSet::Scalar,
+            k: Kernel::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_kernel(k: Kernel, similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+        Self {
+            similarity,
+            center,
+            scratch: ThreadLocal::new(),
+            k,
         }
     }
 
     fn encode_parts(
-        inst: InstructionSet,
+        k: Kernel,
         similarity: VectorSimilarity,
         vector: &[f32],
         center: Option<&[f32]>,
@@ -1140,25 +1137,24 @@ impl<const B: usize> TurboResidualCoder<B> {
         let mut primary = vec![0u8; packing::byte_len(vector.len(), B)];
         let mut residual = vec![0u8; vector.len()];
         let (primary_header, residual_header) =
-            Self::encode_parts_to(inst, prepared, center_dot, &mut primary, &mut residual);
+            Self::encode_parts_to(k, prepared, center_dot, &mut primary, &mut residual);
         (primary_header, primary, residual_header, residual)
     }
 
     fn encode_parts_to(
-        inst: InstructionSet,
+        k: Kernel,
         vector: &[f32],
         center_dot: f32,
         primary: &mut [u8],
         residual: &mut [u8],
     ) -> (PrimaryVectorHeader, ResidualVectorHeader) {
-        let stats = VectorStats::from(vector);
+        let stats = VectorStats::new(k, vector);
         let mut primary_header = PrimaryVectorHeader::new(stats, center_dot);
         // NB: this interval optimization reduces loss for the primary vector, but this loss
         // reduction can make the residual vector more lossy if we derive the delta from the primary
         // interval as described in the LVQ paper. Compute and store a residual delta that is large
         // enough to encode both the min and max value in the vector.
-        // TODO: investigate interval optimization on the derived residual vector.
-        let interval = optimize_interval(vector, &stats, B);
+        let interval = optimize_interval(k, vector, &stats, B);
         // For the residual interval choose the maximum based on primary delta, or the min/max
         // values we may need to encode based on the gap between the initial and optimized interval.
         let residual_magnitude = [
@@ -1182,8 +1178,8 @@ impl<const B: usize> TurboResidualCoder<B> {
             primary_header.component_sum,
             residual_header.component_sum,
             residual_error_sq,
-        ) = match inst {
-            InstructionSet::Scalar => scalar::residual_quantize_and_pack::<B>(
+        ) = match k {
+            Kernel::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,
                 residual_terms,
@@ -1191,7 +1187,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                 residual,
             ),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::residual_quantize_and_pack::<B>(
+            Kernel::Neon => aarch64::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,
                 residual_terms,
@@ -1199,7 +1195,7 @@ impl<const B: usize> TurboResidualCoder<B> {
                 residual,
             ),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
+            Kernel::Avx512 => unsafe {
                 x86_64::residual_quantize_and_pack_avx512::<B>(
                     vector,
                     primary_terms,
@@ -1239,7 +1235,7 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
             self.similarity,
         );
         let (primary_header, residual_header) =
-            Self::encode_parts_to(self.inst, prepared, center_dot, primary, residual);
+            Self::encode_parts_to(self.k, prepared, center_dot, primary, residual);
         primary_header.serialize(primary_header_bytes, self.similarity);
         residual_header.serialize(residual_header_bytes);
     }
@@ -1253,12 +1249,12 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
         let vector = TurboResidualVector::<B>::new(vector, self.similarity).expect("valid vector");
-        match self.inst {
-            InstructionSet::Scalar => scalar::residual_decode::<B>(&vector, out),
+        match self.k {
+            Kernel::Scalar => scalar::residual_decode::<B>(&vector, out),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::residual_decode::<B>(&vector, out),
+            Kernel::Neon => aarch64::residual_decode::<B>(&vector, out),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe { x86_64::residual_decode_avx512::<B>(&vector, out) },
+            Kernel::Avx512 => unsafe { x86_64::residual_decode_avx512::<B>(&vector, out) },
         }
         if let Some(c) = &self.center {
             uncenter_vector(c, out);
@@ -1278,7 +1274,7 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
 pub struct TurboResidualDistance<const B: usize> {
     similarity: VectorSimilarity,
     center_center_dot: f32,
-    inst: InstructionSet,
+    inst: Kernel,
 }
 
 impl<const B: usize> TurboResidualDistance<B> {
@@ -1293,7 +1289,7 @@ impl<const B: usize> TurboResidualDistance<B> {
         Self {
             similarity,
             center_center_dot,
-            inst: InstructionSet::default(),
+            inst: Kernel::default(),
         }
     }
 }
@@ -1304,17 +1300,17 @@ impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
         let doc = TurboResidualVector::<B>::new(doc, self.similarity).unwrap();
 
         let component_dot = match self.inst {
-            InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B>(
+            Kernel::Scalar => scalar::residual_dot_unnormalized::<B>(
                 (query.primary.data, query.residual.data),
                 (doc.primary.data, doc.residual.data),
             ),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::residual_dot_unnormalized::<B>(
+            Kernel::Neon => aarch64::residual_dot_unnormalized::<B>(
                 (query.primary.data, query.residual.data),
                 (doc.primary.data, doc.residual.data),
             ),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
+            Kernel::Avx512 => unsafe {
                 x86_64::residual_dot_unnormalized_avx512::<B>(
                     (query.primary.data, query.residual.data),
                     (doc.primary.data, doc.residual.data),
@@ -1346,7 +1342,7 @@ pub struct TurboResidualQueryDistance<const B: usize> {
     residual_terms: VectorDecodeTerms,
     correction_terms: DistanceCorrectionTerms,
 
-    inst: InstructionSet,
+    inst: Kernel,
 }
 
 impl<const B: usize> TurboResidualQueryDistance<B> {
@@ -1355,7 +1351,7 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
         query: Cow<'_, [f32]>,
         center: Option<&[f32]>,
     ) -> Self {
-        let inst = InstructionSet::default();
+        let inst = Kernel::default();
         let (primary_header, primary_vector, residual_header, residual_vector) =
             TurboResidualCoder::<B>::encode_parts(inst, similarity, query.as_ref(), center);
         let primary_terms = VectorDecodeTerms::from_primary::<B>(primary_header);
@@ -1368,7 +1364,7 @@ impl<const B: usize> TurboResidualQueryDistance<B> {
             residual_vector,
             residual_terms,
             correction_terms,
-            inst: InstructionSet::default(),
+            inst: Kernel::default(),
         }
     }
 }
@@ -1377,17 +1373,17 @@ impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let vector = TurboResidualVector::<B>::new(vector, self.similarity).expect("valid vector");
         let component_dot = match self.inst {
-            InstructionSet::Scalar => scalar::residual_dot_unnormalized::<B>(
+            Kernel::Scalar => scalar::residual_dot_unnormalized::<B>(
                 (&self.primary_vector, &self.residual_vector),
                 (vector.primary.data, vector.residual.data),
             ),
             #[cfg(target_arch = "aarch64")]
-            InstructionSet::Neon => aarch64::residual_dot_unnormalized::<B>(
+            Kernel::Neon => aarch64::residual_dot_unnormalized::<B>(
                 (&self.primary_vector, &self.residual_vector),
                 (vector.primary.data, vector.residual.data),
             ),
             #[cfg(target_arch = "x86_64")]
-            InstructionSet::Avx512 => unsafe {
+            Kernel::Avx512 => unsafe {
                 x86_64::residual_dot_unnormalized_avx512::<B>(
                     (&self.primary_vector, &self.residual_vector),
                     (vector.primary.data, vector.residual.data),

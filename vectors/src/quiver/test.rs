@@ -78,7 +78,10 @@ fn assert_encode_matches_scalar(trial: usize, vector: &[f32]) {
     // Every boundary flip moves `strong_count` by at most one, so its drift is bounded by the
     // same budget as the body's bit mismatches.
     assert!(
-        simd_header.strong_count.abs_diff(scalar_header.strong_count) <= MAX_TAU_BOUNDARY_FLIPS,
+        simd_header
+            .strong_count
+            .abs_diff(scalar_header.strong_count)
+            <= MAX_TAU_BOUNDARY_FLIPS,
         "{}",
         ctx()
     );

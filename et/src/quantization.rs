@@ -1,5 +1,6 @@
 mod distance_loss;
 mod loss;
+mod mrl;
 mod recall;
 mod rotate;
 
@@ -15,6 +16,7 @@ use vectors::f16;
 
 use distance_loss::{DistanceLossArgs, distance_loss};
 use loss::{LossArgs, loss};
+use mrl::{MrlArgs, mrl};
 use recall::{QuantizationRecallArgs, recall};
 use rotate::{RotateArgs, rotate};
 
@@ -43,6 +45,8 @@ pub enum Command {
     Recall(QuantizationRecallArgs),
     /// Apply an orthogonal rotation to each vector and write to an output file.
     Rotate(RotateArgs),
+    /// Compute MRL efficacy stats.
+    Mrl(MrlArgs),
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
@@ -64,6 +68,7 @@ fn cmd(cmd: Command, vectors: &(impl VectorStore<Elem = f16> + Send + Sync)) -> 
         Command::DistanceLoss(args) => distance_loss(args, vectors),
         Command::Recall(args) => recall(args, vectors),
         Command::Rotate(args) => rotate(args, vectors),
+        Command::Mrl(args) => mrl(args, vectors),
     }
 }
 

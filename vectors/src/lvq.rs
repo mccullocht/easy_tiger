@@ -48,7 +48,7 @@ const fn check_primary_bits(bits: usize) {
 
 const ESTIMATED_DISTANCE_Z_SCORE: f32 = 1.96;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Kernel {
     Scalar,
     #[cfg(target_arch = "aarch64")]
@@ -57,35 +57,51 @@ enum Kernel {
     Avx512,
 }
 
+impl Kernel {
+    const CANDIDATES: &'static [Self] = &[
+        #[cfg(target_arch = "aarch64")]
+        Self::Neon,
+        #[cfg(target_arch = "x86_64")]
+        Self::Avx512,
+        Self::Scalar,
+    ];
+
+    /// Returns true if the specificed kernel is available for use on this cost.
+    fn is_available(&self) -> bool {
+        match self {
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => std::arch::is_aarch64_feature_detected!("dotprod"),
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 => {
+                use std::arch::is_x86_feature_detected as feature;
+                feature!("avx2")
+                    && feature!("avx512f")
+                    && feature!("avx512bw")
+                    && feature!("avx512vl")
+                    && feature!("avx512vpopcntdq")
+                    && feature!("avx512vnni")
+            }
+            Self::Scalar => true,
+        }
+    }
+
+    /// Return all of the non-Scalar Kernels that are available on this host.
+    #[cfg(test)]
+    fn accelerated() -> impl Iterator<Item = Self> {
+        Self::CANDIDATES
+            .iter()
+            .copied()
+            .filter(|&k| k.is_available() && k != Self::Scalar)
+    }
+}
+
 impl Default for Kernel {
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn default() -> Self {
-        Kernel::Scalar
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn default() -> Self {
-        if std::arch::is_aarch64_feature_detected!("dotprod") {
-            Kernel::Neon
-        } else {
-            Kernel::Scalar
-        }
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    fn default() -> Self {
-        use std::arch::is_x86_feature_detected as feature;
-        if feature!("avx2")
-            && feature!("avx512f")
-            && feature!("avx512bw")
-            && feature!("avx512vl")
-            && feature!("avx512vpopcntdq")
-            && feature!("avx512vnni")
-        {
-            Kernel::Avx512
-        } else {
-            Kernel::Scalar
-        }
+        Self::CANDIDATES
+            .iter()
+            .copied()
+            .find(Self::is_available)
+            .expect("Scalar is always available")
     }
 }
 
@@ -586,7 +602,7 @@ pub struct TurboPrimaryCoder<const B: usize> {
     similarity: VectorSimilarity,
     center: Option<Vec<f32>>,
     scratch: ThreadLocal<RefCell<Vec<f32>>>,
-    inst: Kernel,
+    k: Kernel,
 }
 
 impl<const B: usize> TurboPrimaryCoder<B> {
@@ -599,24 +615,25 @@ impl<const B: usize> TurboPrimaryCoder<B> {
             similarity,
             center,
             scratch: ThreadLocal::new(),
-            inst: Kernel::default(),
+            k: Kernel::default(),
         }
     }
 
-    #[allow(unused)]
-    pub fn scalar(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+    #[cfg(test)]
+    fn with_kernel(k: Kernel, similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+        assert!(k.is_available(), "{k:?}");
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
         Self {
             similarity,
             center,
             scratch: ThreadLocal::new(),
-            inst: Kernel::Scalar,
+            k,
         }
     }
 
     fn encode_parts(
-        inst: Kernel,
+        k: Kernel,
         similarity: VectorSimilarity,
         vector: &[f32],
         center: Option<&[f32]>,
@@ -634,7 +651,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         };
         let (prepared, center_dot) = prepare_vector(vector, scratch, center, similarity);
         let mut out = vec![0u8; packing::byte_len(vector.len(), B)];
-        let header = Self::encode_parts_to(inst, prepared, center_dot, &mut out);
+        let header = Self::encode_parts_to(k, prepared, center_dot, &mut out);
         (header, out)
     }
 
@@ -683,7 +700,7 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             self.center.as_deref(),
             self.similarity,
         );
-        let header = Self::encode_parts_to(self.inst, prepared, center_dot, vector_bytes);
+        let header = Self::encode_parts_to(self.k, prepared, center_dot, vector_bytes);
         header.serialize(header_bytes, self.similarity);
     }
 
@@ -694,7 +711,7 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
         let vector =
             TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
-        match self.inst {
+        match self.k {
             Kernel::Scalar => scalar::primary_decode::<B>(vector, out),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::primary_decode::<B>(vector, out),
@@ -1070,35 +1087,37 @@ pub struct TurboResidualCoder<const B: usize> {
     similarity: VectorSimilarity,
     center: Option<Vec<f32>>,
     scratch: ThreadLocal<RefCell<Vec<f32>>>,
-    inst: Kernel,
+    k: Kernel,
 }
 
 impl<const B: usize> TurboResidualCoder<B> {
     const B_CHECK: () = { check_primary_bits(B) };
 
     pub fn new(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
-        Self {
-            similarity,
-            center,
-            scratch: ThreadLocal::new(),
-            inst: Kernel::default(),
-        }
-    }
-
-    #[allow(unused)]
-    pub fn scalar(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
         Self {
             similarity,
             center,
             scratch: ThreadLocal::new(),
-            inst: Kernel::Scalar,
+            k: Kernel::default(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_kernel(k: Kernel, similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::B_CHECK;
+        Self {
+            similarity,
+            center,
+            scratch: ThreadLocal::new(),
+            k,
         }
     }
 
     fn encode_parts(
-        inst: Kernel,
+        k: Kernel,
         similarity: VectorSimilarity,
         vector: &[f32],
         center: Option<&[f32]>,
@@ -1118,7 +1137,7 @@ impl<const B: usize> TurboResidualCoder<B> {
         let mut primary = vec![0u8; packing::byte_len(vector.len(), B)];
         let mut residual = vec![0u8; vector.len()];
         let (primary_header, residual_header) =
-            Self::encode_parts_to(inst, prepared, center_dot, &mut primary, &mut residual);
+            Self::encode_parts_to(k, prepared, center_dot, &mut primary, &mut residual);
         (primary_header, primary, residual_header, residual)
     }
 
@@ -1216,7 +1235,7 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
             self.similarity,
         );
         let (primary_header, residual_header) =
-            Self::encode_parts_to(self.inst, prepared, center_dot, primary, residual);
+            Self::encode_parts_to(self.k, prepared, center_dot, primary, residual);
         primary_header.serialize(primary_header_bytes, self.similarity);
         residual_header.serialize(residual_header_bytes);
     }
@@ -1230,7 +1249,7 @@ impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
         let vector = TurboResidualVector::<B>::new(vector, self.similarity).expect("valid vector");
-        match self.inst {
+        match self.k {
             Kernel::Scalar => scalar::residual_decode::<B>(&vector, out),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::residual_decode::<B>(&vector, out),

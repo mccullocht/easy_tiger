@@ -1,0 +1,6 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (/Users/trevormcculloch/Documents/Projects/easy_tiger/target/debug/deps/vectors-545d9c9ce72dd154)
+     Running unittests src/lib.rs (/Users/trevormcculloch/Documents/Projects/easy_tiger/target/debug/deps/vectors-545d9c9ce72dd154)
+   Doc-tests vectors
+   Doc-tests vectors

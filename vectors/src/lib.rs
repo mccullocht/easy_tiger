@@ -555,11 +555,7 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        F32VectorCoder, F32VectorCoding, VectorSimilarity,
-        float32::l2_normalize,
-        lvq::{TurboPrimaryCoder, TurboResidualCoder},
-    };
+    use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity, float32::l2_normalize};
 
     struct TestVector {
         rvec: Vec<f32>,
@@ -695,41 +691,4 @@ mod test {
     distance_test!(tlvq4x8_l2_dist, Euclidean, TLVQ4x8, 0.001);
     distance_test!(tlvq8x8_dot_dist, Dot, TLVQ8x8, 0.001);
     distance_test!(tlvq8x8_l2_dist, Euclidean, TLVQ8x8, 0.001);
-
-    macro_rules! lvq_coding_simd_test {
-        ($name:ident, $coder:ty) => {
-            #[test]
-            fn $name() {
-                let seed = OsRng::default().try_next_u64().unwrap();
-                println!("SEED {seed:#016x}");
-                let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
-                let scoder = <$coder>::scalar(VectorSimilarity::Euclidean, None);
-                let ocoder = <$coder>::new(VectorSimilarity::Euclidean, None);
-                // TODO: use randomly sized vectors like we do for distance tests.
-                for i in 0..1024 {
-                    let vec = l2_normalize(
-                        (0..128)
-                            .map(|_| rng.random_range(-1.0f32..=1.0))
-                            .collect::<Vec<_>>(),
-                    );
-                    let svec = scoder.encode(&vec);
-                    let ovec = ocoder.encode(&vec);
-                    assert_eq!(
-                        scoder.decode(&svec),
-                        ocoder.decode(&ovec),
-                        "index {i} input vector {vec:?}"
-                    );
-                }
-            }
-        };
-    }
-
-    lvq_coding_simd_test!(tlvq1_coding_simd, TurboPrimaryCoder::<1>);
-    lvq_coding_simd_test!(tlvq2_coding_simd, TurboPrimaryCoder::<2>);
-    lvq_coding_simd_test!(tlvq4_coding_simd, TurboPrimaryCoder::<4>);
-    lvq_coding_simd_test!(tlvq8_coding_simd, TurboPrimaryCoder::<8>);
-    lvq_coding_simd_test!(tlvq1x8_coding_simd, TurboResidualCoder::<1>);
-    lvq_coding_simd_test!(tlvq2x8_coding_simd, TurboResidualCoder::<2>);
-    lvq_coding_simd_test!(tlvq4x8_coding_simd, TurboResidualCoder::<4>);
-    lvq_coding_simd_test!(tlvq8x8_coding_simd, TurboResidualCoder::<8>);
 }

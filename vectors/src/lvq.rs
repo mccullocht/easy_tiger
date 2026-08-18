@@ -99,8 +99,7 @@ struct VectorStats {
 }
 
 impl VectorStats {
-    #[allow(dead_code)]
-    fn from_scalar(value: &[f32]) -> Self {
+    fn new(k: Kernel, value: &[f32]) -> Self {
         if value.is_empty() {
             return VectorStats {
                 l2_norm_sq: 1.0,
@@ -108,20 +107,7 @@ impl VectorStats {
             };
         }
 
-        scalar::compute_vector_stats(value)
-    }
-}
-
-impl From<&[f32]> for VectorStats {
-    fn from(value: &[f32]) -> Self {
-        if value.is_empty() {
-            return VectorStats {
-                l2_norm_sq: 1.0,
-                ..Default::default()
-            };
-        }
-
-        match Kernel::default() {
+        match k {
             Kernel::Scalar => scalar::compute_vector_stats(value),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::compute_vector_stats(value),
@@ -131,13 +117,13 @@ impl From<&[f32]> for VectorStats {
     }
 }
 
-fn optimize_interval(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
+fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     // There are several spots in the optimization routine where we may divide by the input range
     // and if that range is zero then it produces NaNs.
     let (lower, upper) = if stats.min == stats.max {
         (stats.min, stats.min + f32::MIN_POSITIVE)
     } else {
-        match Kernel::default() {
+        match k {
             Kernel::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
@@ -653,18 +639,18 @@ impl<const B: usize> TurboPrimaryCoder<B> {
     }
 
     fn encode_parts_to(
-        inst: Kernel,
+        k: Kernel,
         vector: &[f32],
         center_dot: f32,
         out: &mut [u8],
     ) -> PrimaryVectorHeader {
-        let stats = VectorStats::from(vector);
+        let stats = VectorStats::new(k, vector);
         let mut header = PrimaryVectorHeader::new(stats, center_dot);
-        (header.lower, header.upper) = optimize_interval(vector, &stats, B);
+        (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
         let residual_error_sq;
-        (header.component_sum, residual_error_sq) = match inst {
+        (header.component_sum, residual_error_sq) = match k {
             Kernel::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
@@ -1137,20 +1123,19 @@ impl<const B: usize> TurboResidualCoder<B> {
     }
 
     fn encode_parts_to(
-        inst: Kernel,
+        k: Kernel,
         vector: &[f32],
         center_dot: f32,
         primary: &mut [u8],
         residual: &mut [u8],
     ) -> (PrimaryVectorHeader, ResidualVectorHeader) {
-        let stats = VectorStats::from(vector);
+        let stats = VectorStats::new(k, vector);
         let mut primary_header = PrimaryVectorHeader::new(stats, center_dot);
         // NB: this interval optimization reduces loss for the primary vector, but this loss
         // reduction can make the residual vector more lossy if we derive the delta from the primary
         // interval as described in the LVQ paper. Compute and store a residual delta that is large
         // enough to encode both the min and max value in the vector.
-        // TODO: investigate interval optimization on the derived residual vector.
-        let interval = optimize_interval(vector, &stats, B);
+        let interval = optimize_interval(k, vector, &stats, B);
         // For the residual interval choose the maximum based on primary delta, or the min/max
         // values we may need to encode based on the gap between the initial and optimized interval.
         let residual_magnitude = [
@@ -1174,7 +1159,7 @@ impl<const B: usize> TurboResidualCoder<B> {
             primary_header.component_sum,
             residual_header.component_sum,
             residual_error_sq,
-        ) = match inst {
+        ) = match k {
             Kernel::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,

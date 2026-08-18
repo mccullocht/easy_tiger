@@ -43,12 +43,15 @@ fn encode_vector(vector: &[f32]) -> Vec<u8> {
 /// Assert that the platform-accelerated coder and the scalar reference coder produce equivalent
 /// output for `vector`.
 ///
-/// The packed 2-bit quantization decisions (which dominate the encoded bytes) must match
-/// exactly -- they're derived from simple per-element comparisons against `tau` that don't
-/// depend on summation order. The header's aggregate `weak`/`strong` magnitudes, however, are
-/// each the mean of up to `vector.len()` floating point terms accumulated in a different order
-/// by SIMD vs. scalar kernels (tree reduction vs. sequential), so those are compared with a
-/// small tolerance rather than bit-for-bit.
+/// The packed 2-bit quantization decisions are derived from per-element comparisons against
+/// `tau`, but `tau` itself is the mean of up to `vector.len()` floating point terms accumulated
+/// in a different order by SIMD vs. scalar kernels (tree reduction vs. sequential), so the two
+/// kernels can compute slightly different `tau` values (differing by a handful of ULPs). An
+/// element whose magnitude lands within that gap of the true tau can be classified as `strong`
+/// by one kernel and `weak` by the other, flipping exactly one magnitude bit in the packed body
+/// and shifting `strong_count` by one. Tolerate a small number of such boundary flips -- measured
+/// as the Hamming distance between the two packed bodies -- rather than requiring bit-for-bit
+/// agreement; a real bug would produce far more than a handful of flipped bits.
 fn assert_encode_matches_scalar(trial: usize, vector: &[f32]) {
     let simd = new_coder();
     let scalar = new_scalar_coder();
@@ -60,15 +63,27 @@ fn assert_encode_matches_scalar(trial: usize, vector: &[f32]) {
     let (scalar_header, scalar_body) = Header::split_and_decode(&scalar_encoded);
 
     let ctx = || format!("trial {trial} dimensions {}", vector.len());
-    assert_eq!(
-        simd_header.strong_count,
-        scalar_header.strong_count,
+
+    let bit_mismatches: u32 = simd_body
+        .iter()
+        .zip(scalar_body.iter())
+        .map(|(&a, &b)| (a ^ b).count_ones())
+        .sum();
+    const MAX_TAU_BOUNDARY_FLIPS: u32 = 4;
+    assert!(
+        bit_mismatches <= MAX_TAU_BOUNDARY_FLIPS,
+        "{}: {bit_mismatches} packed body bits differ (allowing up to {MAX_TAU_BOUNDARY_FLIPS} tau boundary flips)",
+        ctx()
+    );
+    // Every boundary flip moves `strong_count` by at most one, so its drift is bounded by the
+    // same budget as the body's bit mismatches.
+    assert!(
+        simd_header.strong_count.abs_diff(scalar_header.strong_count) <= MAX_TAU_BOUNDARY_FLIPS,
         "{}",
         ctx()
     );
     assert_abs_diff_eq!(simd_header.weak, scalar_header.weak, epsilon = 1e-4);
     assert_abs_diff_eq!(simd_header.strong, scalar_header.strong, epsilon = 1e-4);
-    assert_eq!(simd_body, scalar_body, "{}", ctx());
 
     // Byte length and dimension accounting should agree between implementations too.
     assert_eq!(simd.byte_len(vector.len()), scalar.byte_len(vector.len()));
@@ -125,8 +140,9 @@ fn decode_roundtrip_is_sane() {
             "trial {trial} produced non-finite decoded values: {decoded:?}"
         );
 
-        // Sign should be preserved for (almost) every dimension: QuIVer only loses magnitude
-        // precision, not direction, except right at the tau threshold.
+        // Sign should be preserved exactly: QuIVer only loses magnitude precision, not direction.
+        // The sign bit is derived from `is_sign_positive()`, which (unlike a `> 0.0` or `>= 0.0`
+        // comparison) agrees with `f32::signum()` for +0.0 and -0.0 too.
         let sign_mismatches = vector
             .iter()
             .zip(decoded.iter())

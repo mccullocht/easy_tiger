@@ -45,7 +45,7 @@ impl Kernel for Scalar {
         out.fill(0);
         let mut packer = crate::lvq::packing::TurboPacker::<2>::new(out);
         for &d in v.iter() {
-            let q = if d > 0.0 { 2u8 } else { 0u8 }
+            let q = if d.is_sign_positive() { 2u8 } else { 0u8 }
                 | if d.abs() > tau {
                     strong_sum += d.abs();
                     strong_count += 1;

@@ -9,7 +9,7 @@ use easy_tiger::{
         wt::TableGraphVectorIndex,
     },
 };
-use vectors::{F32VectorCoding, VectorSimilarity};
+use vectors::{F32VectorCoding, VectorSimilarity, f16};
 use wt_mdb::Connection;
 
 use crate::{
@@ -20,12 +20,10 @@ use crate::{
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
-    /// Path to the input vectors to bulk ingest.
+    /// Path to f16 vectors to bulk ingest, in BigANN format: an 8 byte `<len,dim>` header
+    /// followed by little-endian f16 vector data.
     #[arg(short, long)]
-    f32_vectors: PathBuf,
-    /// Number of dimensions in input vectors.
-    #[arg(short, long)]
-    dimensions: NonZero<usize>,
+    vectors: PathBuf,
     /// Similarity function to use for vector scoring.
     #[arg(long)]
     similarity: VectorSimilarity,
@@ -91,17 +89,22 @@ pub fn bulk_load(
     index_name: &str,
     args: BulkLoadArgs,
 ) -> io::Result<()> {
-    let f32_vectors = DerefVectorStore::from_file_with_stride(args.f32_vectors, args.dimensions)?;
+    let vectors: DerefVectorStore<f16, _> = DerefVectorStore::from_file(args.vectors)?;
+    let dimensions = NonZero::new(vectors.elem_stride()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "input vectors have no dimensions",
+        )
+    })?;
 
-    let num_vectors = f32_vectors.len();
+    let num_vectors = vectors.len();
     let limit = args.limit.unwrap_or(num_vectors);
 
     let centroid = if args.center {
-        let dims = args.dimensions.get();
-        let mut sum = vec![0.0f64; dims];
-        for v in f32_vectors.iter().take(limit) {
+        let mut sum = vec![0.0f64; dimensions.get()];
+        for v in vectors.iter().take(limit) {
             for (s, x) in sum.iter_mut().zip(v.iter()) {
-                *s += *x as f64;
+                *s += x.to_f64();
             }
         }
         let n = limit as f64;
@@ -111,7 +114,7 @@ pub fn bulk_load(
     };
 
     let config = GraphConfig {
-        dimensions: args.dimensions,
+        dimensions,
         similarity: args.similarity,
         nav_format: args.nav_format,
         rerank_format: args.rerank_format,
@@ -138,7 +141,7 @@ pub fn bulk_load(
     let mut builder = BulkLoadBuilder::new(
         connection.clone(),
         index,
-        f32_vectors,
+        vectors,
         Options {
             memory_quantized_vectors: args.memory_quantized_vectors,
         },

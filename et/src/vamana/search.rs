@@ -16,6 +16,7 @@ use easy_tiger::{
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
     },
 };
+use vectors::f16;
 use wt_mdb::Connection;
 
 use crate::{
@@ -26,7 +27,8 @@ use crate::{
 
 #[derive(Args)]
 pub struct SearchArgs {
-    /// Path to numpy formatted little-endian float vectors.
+    /// Path to f16 query vectors in BigANN format: an 8 byte `<len,dim>` header followed by
+    /// little-endian f16 vector data.
     #[arg(short, long)]
     query_vectors: PathBuf,
     /// Number candidates in the search list.
@@ -67,10 +69,17 @@ pub struct SearchArgs {
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
     let index = Arc::new(TableGraphVectorIndex::from_db(&connection, index_name)?);
-    let query_vectors = easy_tiger::input::DerefVectorStore::from_file_with_stride(
-        args.query_vectors,
-        index.config().dimensions,
-    )?;
+    let query_vectors: DerefVectorStore<f16, _> = DerefVectorStore::from_file(args.query_vectors)?;
+    if query_vectors.elem_stride() != index.config().dimensions.get() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "query vectors have {} dimensions but index expects {}",
+                query_vectors.elem_stride(),
+                index.config().dimensions.get()
+            ),
+        ));
+    }
     let limit = std::cmp::min(
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
@@ -87,7 +96,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     };
     let recall_computer = RecallComputer::from_args(args.recall)?;
     if let Some(computer) = recall_computer.as_ref() {
-        if computer.neighbors_len() != query_vectors.len() {
+        if computer.neighbors_len() < limit {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -161,7 +170,7 @@ fn search_phase<Q: Send + Sync>(
     iters: usize,
     limit: usize,
     record_limit: i64,
-    query_vectors: &DerefVectorStore<f32, Q>,
+    query_vectors: &DerefVectorStore<f16, Q>,
     index: &Arc<TableGraphVectorIndex>,
     connection: &Arc<Connection>,
     search_params: GraphSearchParams,
@@ -211,6 +220,7 @@ struct SearcherState {
     connection: Arc<Connection>,
     index: Arc<TableGraphVectorIndex>,
     searcher: GraphSearcher,
+    query_buf: Vec<f32>,
 }
 
 impl SearcherState {
@@ -223,13 +233,14 @@ impl SearcherState {
             connection: Arc::clone(connection),
             index: Arc::clone(index),
             searcher: GraphSearcher::new(search_params),
+            query_buf: vec![0.0f32; index.config().dimensions.get()],
         })
     }
 
     fn query(
         &mut self,
         index: usize,
-        query: &[f32],
+        query: &[f16],
         record_limit: i64,
         recall_computer: Option<&RecallComputer>,
     ) -> io::Result<AggregateSearchStats> {
@@ -237,9 +248,12 @@ impl SearcherState {
             Arc::clone(&self.index),
             self.connection.begin_transaction(None)?,
         );
+        for (o, x) in self.query_buf.iter_mut().zip(query.iter()) {
+            *o = x.to_f32();
+        }
         let start = Instant::now();
         let results = self.searcher.search_with_options(
-            query,
+            &self.query_buf,
             GraphSearchOptions::with_filter(|i| i < record_limit),
             &reader,
         )?;

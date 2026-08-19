@@ -2,7 +2,7 @@ use std::{io, num::NonZero, path::PathBuf, sync::Arc, time::Duration};
 
 use clap::Args;
 use easy_tiger::{
-    input::{DerefVectorStore, SubsetViewVectorStore, VectorStore},
+    input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
     kmeans::{HierarchicalKMeansParams, Params, hierarchical_kmeans},
     spann::{
         IndexConfig, TableIndex,
@@ -18,7 +18,7 @@ use easy_tiger::{
     },
 };
 use rand_xoshiro::{Xoshiro128PlusPlus, rand_core::SeedableRng};
-use vectors::{F32VectorCoding, VectorSimilarity};
+use vectors::{F32VectorCoding, VectorSimilarity, f16};
 use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
 use crate::{
@@ -216,12 +216,19 @@ pub fn bulk_load(
         )
     };
     let centroids_len = centroids.len();
+    let centroids_f16 = {
+        let mut store = VecVectorStore::with_capacity(centroids.elem_stride(), centroids.len());
+        for v in centroids.iter() {
+            store.push(&v.iter().map(|x| f16::from_f32(*x)).collect::<Vec<f16>>());
+        }
+        store
+    };
 
     {
         let mut head_loader = BulkLoadBuilder::new(
             connection.clone(),
             Arc::unwrap_or_clone(index.head_config().clone()),
-            centroids,
+            centroids_f16,
             bulk::Options {
                 memory_quantized_vectors: false,
             },

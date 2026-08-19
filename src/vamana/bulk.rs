@@ -201,11 +201,9 @@ where
         };
 
         for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
-            for (o, x) in vector_f32.iter_mut().zip(v.iter()) {
-                *o = x.to_f32();
-            }
-            for (i, o) in vector_f32.iter().zip(sum.iter_mut()) {
-                *o += *i as f64;
+            for (&i, (o, s)) in v.iter().zip(vector_f32.iter_mut().zip(sum.iter_mut())) {
+                *o = i.to_f32();
+                *s += i.to_f64();
             }
             nav_coder.encode_to(&vector_f32, &mut nav_vector);
             if let Some(q) = quantized_vectors.as_mut() {

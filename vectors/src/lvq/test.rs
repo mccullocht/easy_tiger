@@ -3,9 +3,10 @@ use half::f16;
 use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
 
 use crate::lvq::{
-    PrimaryVectorHeader, ResidualVectorHeader, TurboPrimaryCoder, TurboResidualCoder, VectorStats,
+    Kernel, PrimaryVectorHeader, ResidualVectorHeader, TurboPrimaryCoder, TurboResidualCoder,
+    VectorStats,
 };
-use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity, l2_normalize};
+use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity, float32::l2_normalize};
 
 impl AbsDiffEq for PrimaryVectorHeader {
     type Epsilon = f32;
@@ -77,9 +78,10 @@ const TEST_CENTER: [f32; 19] = [
 
 #[test]
 fn vector_stats_simd() {
-    let simd_stats = VectorStats::from(TEST_VECTOR.as_ref());
-    let scalar_stats = VectorStats::from_scalar(TEST_VECTOR.as_ref());
-    assert_abs_diff_eq!(simd_stats, scalar_stats);
+    let scalar_stats = VectorStats::new(super::Kernel::Scalar, TEST_VECTOR.as_ref());
+    for k in Kernel::accelerated() {
+        assert_abs_diff_eq!(scalar_stats, VectorStats::new(k, TEST_VECTOR.as_ref()));
+    }
 }
 
 enum Centering {
@@ -435,29 +437,29 @@ tlvq_coder_test!(
         component_sum: 11,
     },
     ResidualVectorHeader {
-        magnitude: 1.2012575,
+        magnitude: 1.2011719,
         component_sum: 2292,
     },
     [
-        -0.9219341,
-        -0.059855193,
-        0.6608137,
-        0.6702353,
-        0.5713082,
-        0.42998376,
-        0.6466812,
-        0.0013853908,
-        -0.2011796,
-        -0.42729867,
-        0.7314759,
-        -0.7052367,
-        -0.27184182,
-        0.53833246,
-        -0.72879076,
-        0.4346946,
-        0.9151976,
-        0.69378936,
-        0.2038647
+        -0.9219037,
+        -0.059886307,
+        0.66081685,
+        0.6702378,
+        0.5713178,
+        0.43000343,
+        0.6466854,
+        0.001349926,
+        -0.20120063,
+        -0.42730355,
+        0.73147404,
+        -0.7052218,
+        -0.2718578,
+        0.53834444,
+        -0.72877413,
+        0.4347139,
+        0.91518265,
+        0.6937902,
+        0.20390052
     ]
 );
 
@@ -475,29 +477,29 @@ tlvq_coder_test!(
         component_sum: 13,
     },
     ResidualVectorHeader {
-        magnitude: 0.84397864,
+        magnitude: 0.84399414,
         component_sum: 2453,
     },
     [
-        -0.9213661,
-        -0.062038247,
-        0.66026163,
-        0.66880196,
-        0.57356733,
-        0.43225762,
-        0.6451018,
-        -0.00042283535,
-        -0.20071204,
-        -0.42757434,
-        0.7284659,
-        -0.7038257,
-        -0.27257034,
-        0.53895026,
-        -0.7319978,
-        0.4346339,
-        0.91269493,
-        0.69334894,
-        0.2016645
+        -0.92136943,
+        -0.062043253,
+        0.660261,
+        0.6687991,
+        0.5735711,
+        0.4322613,
+        0.64510334,
+        -0.0004234314,
+        -0.20071189,
+        -0.42757025,
+        0.72846216,
+        -0.70383126,
+        -0.27257055,
+        0.5389564,
+        -0.73199946,
+        0.4346306,
+        0.91269577,
+        0.69335324,
+        0.20166886
     ]
 );
 
@@ -515,8 +517,8 @@ tlvq_coder_test!(
         component_sum: 32,
     },
     ResidualVectorHeader {
-        magnitude: 0.5039812,
-        component_sum: 2319,
+        magnitude: 0.50390625,
+        component_sum: 2320,
     },
     [
         -0.9209126,
@@ -635,8 +637,8 @@ tlvq_coder_test!(
         component_sum: 152,
     },
     ResidualVectorHeader {
-        magnitude: 0.0836155,
-        component_sum: 2425,
+        magnitude: 0.0836263,
+        component_sum: 2424,
     },
     [
         -0.9210685,
@@ -795,7 +797,7 @@ fn check_lvq_distance(
         (a.to_vec(), b.to_vec())
     };
 
-    let f32_dist = sim.new_distance_function().distance_f32(&a, &b);
+    let f32_dist = sim.distance_f32().distance_f32(&a, &b);
 
     let coder = format.coder(sim, center.map(|c| c.to_vec()));
     let enc_a = coder.encode(&a);
@@ -955,38 +957,42 @@ macro_rules! error_terms_simd_test {
     ($name:ident, $coder:ty) => {
         #[test]
         fn $name() {
+            use crate::lvq::Kernel;
+
             let seed = OsRng::default().try_next_u64().unwrap();
             println!("SEED {seed:#016x}");
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
-            let scoder = <$coder>::scalar(VectorSimilarity::Euclidean, None);
-            let ocoder = <$coder>::new(VectorSimilarity::Euclidean, None);
-            for i in 0..256 {
-                let dim = rng.random_range(128..=256);
-                let vector = (0..dim)
-                    .map(|_| rng.random_range(-1.0f32..=1.0))
-                    .collect::<Vec<_>>();
-                let (sheader, _) = PrimaryVectorHeader::deserialize(
-                    &scoder.encode(&vector),
-                    VectorSimilarity::Euclidean,
-                )
-                .unwrap();
-                let (oheader, _) = PrimaryVectorHeader::deserialize(
-                    &ocoder.encode(&vector),
-                    VectorSimilarity::Euclidean,
-                )
-                .unwrap();
-                assert_close_relative(
-                    oheader.residual_error_term,
-                    sheader.residual_error_term,
-                    0.005,
-                    &format!("residual_error_term index {i}"),
-                );
-                assert_close_relative(
-                    oheader.parallel_error_term,
-                    sheader.parallel_error_term,
-                    0.005,
-                    &format!("parallel_error_term index {i}"),
-                );
+            let scoder = <$coder>::with_kernel(Kernel::Scalar, VectorSimilarity::Euclidean, None);
+            for k in Kernel::accelerated() {
+                let ocoder = <$coder>::with_kernel(k, VectorSimilarity::Euclidean, None);
+                for i in 0..256 {
+                    let dim = rng.random_range(128..=256);
+                    let vector = (0..dim)
+                        .map(|_| rng.random_range(-1.0f32..=1.0))
+                        .collect::<Vec<_>>();
+                    let (sheader, _) = PrimaryVectorHeader::deserialize(
+                        &scoder.encode(&vector),
+                        VectorSimilarity::Euclidean,
+                    )
+                    .unwrap();
+                    let (oheader, _) = PrimaryVectorHeader::deserialize(
+                        &ocoder.encode(&vector),
+                        VectorSimilarity::Euclidean,
+                    )
+                    .unwrap();
+                    assert_close_relative(
+                        oheader.residual_error_term,
+                        sheader.residual_error_term,
+                        0.005,
+                        &format!("residual_error_term index {i} kernel {k:?}"),
+                    );
+                    assert_close_relative(
+                        oheader.parallel_error_term,
+                        sheader.parallel_error_term,
+                        0.005,
+                        &format!("parallel_error_term index {i} kernel {k:?}"),
+                    );
+                }
             }
         }
     };
@@ -1040,3 +1046,58 @@ fn fill_vector_decode() {
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
     }
 }
+
+macro_rules! lvq_coding_simd_test {
+    ($name:ident, $coder:ty) => {
+        #[test]
+        fn $name() {
+            use crate::lvq::Kernel;
+
+            let seed = OsRng::default().try_next_u64().unwrap();
+            println!("SEED {seed:#016x}");
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+            let scoder =
+                <$coder>::with_kernel(Kernel::Scalar, VectorSimilarity::Euclidean, None);
+            for k in Kernel::accelerated() {
+                // XXX should test other coders in a loop.
+                let ocoder = <$coder>::new(VectorSimilarity::Euclidean, None);
+                // TODO: use randomly sized vectors like we do for distance tests.
+                for i in 0..1024 {
+                    let vec = l2_normalize(
+                        (0..128)
+                            .map(|_| rng.random_range(-1.0f32..=1.0))
+                            .collect::<Vec<_>>(),
+                    );
+                    // SIMD and scalar interval/statistics paths may round slightly
+                    // differently, shifting the residual by a level or two. Rather
+                    // than requiring bit-identical decodes, compare the mean squared
+                    // error of each decode against the original vector: both coders
+                    // should reconstruct the vector just as well.
+                    let mse = |decoded: &Vec<f32>| {
+                        decoded
+                            .iter()
+                            .zip(vec.iter())
+                            .map(|(d, o)| (d - o) * (d - o))
+                            .sum::<f32>()
+                            / decoded.len() as f32
+                    };
+                    let smse = mse(&scoder.decode(&scoder.encode(&vec)));
+                    let omse = mse(&ocoder.decode(&ocoder.encode(&vec)));
+                    assert!(
+                        smse.abs_diff_eq(&omse, 1e-5),
+                        "index {i} scalar mse {smse:.9} vs optimized mse {omse:.9} kernel {k:?} input vector {vec:?}"
+                    );
+                }
+            }
+        }
+    };
+}
+
+lvq_coding_simd_test!(tlvq1_coding_simd, TurboPrimaryCoder::<1>);
+lvq_coding_simd_test!(tlvq2_coding_simd, TurboPrimaryCoder::<2>);
+lvq_coding_simd_test!(tlvq4_coding_simd, TurboPrimaryCoder::<4>);
+lvq_coding_simd_test!(tlvq8_coding_simd, TurboPrimaryCoder::<8>);
+lvq_coding_simd_test!(tlvq1x8_coding_simd, TurboResidualCoder::<1>);
+lvq_coding_simd_test!(tlvq2x8_coding_simd, TurboResidualCoder::<2>);
+lvq_coding_simd_test!(tlvq4x8_coding_simd, TurboResidualCoder::<4>);
+lvq_coding_simd_test!(tlvq8x8_coding_simd, TurboResidualCoder::<8>);

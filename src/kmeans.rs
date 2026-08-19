@@ -7,7 +7,7 @@ use rand::seq::index;
 use rand::{distr::weighted::WeightedIndex, prelude::*};
 use rayon::prelude::*;
 use tracing::warn;
-use vectors::{EuclideanDistance, F32VectorDistance};
+use vectors::{F32VectorDistance, float32::EuclideanDistance};
 
 use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
 
@@ -155,7 +155,7 @@ mod bp {
 
     use rand::{distr::weighted::WeightedIndex, prelude::*};
     use rayon::prelude::*;
-    use vectors::{EuclideanDistance, F32VectorDistance};
+    use vectors::{F32VectorDistance, float32::EuclideanDistance};
 
     use crate::input::{VecVectorStore, VectorStore};
 

@@ -1,7 +1,6 @@
 // TODO: factor out common components with vamana graph search.
 
 use std::{
-    fs::File,
     io::{self},
     num::NonZero,
     ops::Add,
@@ -21,7 +20,6 @@ use easy_tiger::{
     },
     vamana::{GraphSearchParams, PatienceParams},
 };
-use memmap2::Mmap;
 use wt_mdb::Connection;
 
 use crate::{
@@ -84,8 +82,8 @@ pub struct SearchArgs {
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    let query_vectors = easy_tiger::input::DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
+    let query_vectors = easy_tiger::input::DerefVectorStore::from_file_with_stride(
+        args.query_vectors,
         index.head_config().config().dimensions,
     )?;
     let limit = std::cmp::min(
@@ -111,8 +109,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             .posting_rerank_budget
             .unwrap_or(args.posting_candidates.get()),
     };
-    let recall_computer =
-        RecallComputer::from_args(args.recall, index.head_config().config().similarity)?;
+    let recall_computer = RecallComputer::from_args(args.recall)?;
     if let Some(computer) = recall_computer.as_ref() {
         if computer.neighbors_len() < limit {
             return Err(io::Error::new(

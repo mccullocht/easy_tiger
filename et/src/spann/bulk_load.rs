@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc, time::Duration};
+use std::{io, num::NonZero, path::PathBuf, sync::Arc, time::Duration};
 
 use clap::Args;
 use easy_tiger::{
@@ -21,7 +21,10 @@ use rand_xoshiro::{Xoshiro128PlusPlus, rand_core::SeedableRng};
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
-use crate::{ui::progress_bar, vamana::{EdgePruningArgs, EdgeTypeArg}};
+use crate::{
+    ui::progress_bar,
+    vamana::{EdgePruningArgs, EdgeTypeArg},
+};
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
@@ -130,10 +133,7 @@ pub fn bulk_load(
     index_name: &str,
     args: BulkLoadArgs,
 ) -> io::Result<()> {
-    let f32_vectors = DerefVectorStore::new(
-        unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
-        args.dimensions,
-    )?;
+    let f32_vectors = DerefVectorStore::from_file_with_stride(args.f32_vectors, args.dimensions)?;
     f32_vectors.data().advise(memmap2::Advice::Random)?;
 
     if args.drop_tables {
@@ -265,8 +265,7 @@ pub fn bulk_load(
         let progress = progress_bar(posting_count, "tail load postings");
         let txn = connection.begin_transaction(None)?;
         {
-            let cursor =
-                txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+            let cursor = txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
             let mut postings = BlockPostingsMut::new(cursor, index.posting_vector_len());
             load_postings(
                 index.as_ref(),

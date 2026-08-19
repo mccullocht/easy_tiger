@@ -3,7 +3,7 @@ use std::{io, num::NonZero, sync::Arc};
 use clap::Args;
 use easy_tiger::flat::{self, FlatIndexConfig};
 use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{connection::DropOptionsBuilder, Connection};
+use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
 #[derive(Args)]
 pub struct InitIndexArgs {

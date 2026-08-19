@@ -1,6 +1,6 @@
 use std::{
     ops::RangeInclusive,
-    sync::{atomic::AtomicU64, Mutex},
+    sync::{Mutex, atomic::AtomicU64},
 };
 
 use crossbeam_utils::CachePadded;

@@ -7,8 +7,10 @@ use crate::{
 };
 use clap::Args;
 use easy_tiger::input::VectorStore;
+use half::slice::HalfFloatSliceExt;
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
+use vectors::f16;
 
 use super::exhaustive::{Exhaustive, ExhaustiveArgs};
 
@@ -31,13 +33,13 @@ pub struct BoundDepthArgs {
 /// will fix them.
 pub fn bound_depth(
     args: BoundDepthArgs,
-    doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    doc_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
     let exhaustive = args.exhaustive.setup(doc_vectors)?;
-    let recall_computer =
-        RecallComputer::from_args(args.recall, args.exhaustive.similarity)?.ok_or(
-            io::Error::new(io::ErrorKind::InvalidInput, "must provide recall args"),
-        )?;
+    let recall_computer = RecallComputer::from_args(args.recall)?.ok_or(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "must provide recall args",
+    ))?;
 
     let report = measure(&exhaustive, doc_vectors, &recall_computer);
     println!("{}", report.queue_depth.summarize("Queue depth"));
@@ -84,7 +86,7 @@ impl BoundDepthReport {
 /// in `recall_computer`.
 pub(crate) fn measure(
     exhaustive: &Exhaustive,
-    doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    doc_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
     recall_computer: &RecallComputer,
 ) -> BoundDepthReport {
     let k = recall_computer.k();
@@ -94,7 +96,7 @@ pub(crate) fn measure(
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .for_each(|d| {
-            let (center, doc) = exhaustive.encode_doc(&doc_vectors[d]);
+            let (center, doc) = exhaustive.encode_doc(&doc_vectors[d].to_f32_vec());
             for (q, candidates) in query_candidates.iter().enumerate() {
                 let bounds = exhaustive.scorer(q, center).distance_bounds(&doc);
                 candidates.add(BoundedNeighbor::new(d as i64, bounds));

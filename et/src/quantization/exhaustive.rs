@@ -3,17 +3,18 @@
 //! Centers, coders, and per-query distance functions are built the same way whether we are
 //! measuring recall or bound-driven queue depth.
 
-use std::{fs::File, io, num::NonZero, path::PathBuf};
+use std::{io, path::PathBuf};
 
 use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
     kmeans::{Params, kmeans},
 };
+use half::slice::HalfFloatSliceExt;
 use memmap2::Mmap;
 use rand::SeedableRng;
 use rayon::prelude::*;
-use vectors::{F32VectorCoder, F32VectorCoding, QueryVectorDistance, VectorSimilarity};
+use vectors::{F32VectorCoder, F32VectorCoding, QueryVectorDistance, VectorSimilarity, f16};
 
 #[derive(Args)]
 pub struct ExhaustiveArgs {
@@ -70,12 +71,10 @@ impl ExhaustiveArgs {
     /// Compute centers, build coders, and quantize each query against every center.
     pub fn setup(
         &self,
-        doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+        doc_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
     ) -> io::Result<Exhaustive> {
-        let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-            unsafe { Mmap::map(&File::open(&self.query_vectors)?)? },
-            NonZero::new(doc_vectors.elem_stride()).unwrap(),
-        )?;
+        let query_vectors: DerefVectorStore<f16, Mmap> =
+            DerefVectorStore::from_file(&self.query_vectors)?;
         let query_limit = self
             .query_limit
             .unwrap_or(query_vectors.len())
@@ -96,7 +95,7 @@ impl ExhaustiveArgs {
     /// Compute the centers implied by `--centers` over `doc_vectors`.
     pub fn compute_centers(
         &self,
-        doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+        doc_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
     ) -> Option<VecVectorStore<f32>> {
         compute_centers(
             doc_vectors,
@@ -112,7 +111,7 @@ impl ExhaustiveArgs {
 /// Returns `None` when `centers` is 0 (uncentered), the mean vector when it is 1, and k-means
 /// centers over a sample of at most `center_sample_size` vectors otherwise.
 pub fn compute_centers(
-    doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    doc_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
     centers: usize,
     center_sample_size: usize,
     seed: u64,
@@ -140,8 +139,13 @@ pub fn compute_centers(
                 centers,
                 sample_vectors.len()
             );
+            let mut sample_vectors_f32 =
+                VecVectorStore::with_capacity(sample_vectors.elem_stride(), sample_vectors.len());
+            for v in sample_vectors.iter() {
+                sample_vectors_f32.push(&v.to_f32_vec());
+            }
             let computed = kmeans(
-                &sample_vectors,
+                &sample_vectors_f32,
                 centers,
                 &Params {
                     iters: 100,
@@ -162,7 +166,7 @@ impl Exhaustive {
         format: F32VectorCoding,
         quantize_query: bool,
         centers: Option<VecVectorStore<f32>>,
-        query_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+        query_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
     ) -> Self {
         let coders: Vec<Box<dyn F32VectorCoder>> = match centers.as_ref() {
             None => vec![format.coder(similarity, None)],
@@ -185,13 +189,13 @@ impl Exhaustive {
                         if quantize_query {
                             format.query_distance_symmetric(
                                 similarity,
-                                coder.encode(&query_vectors[i]),
+                                coder.encode(&query_vectors[i].to_f32_vec()),
                                 center,
                             )
                         } else {
                             format.query_distance_asymmetric(
                                 similarity,
-                                query_vectors[i].to_vec(),
+                                query_vectors[i].to_f32_vec(),
                                 center,
                             )
                         }
@@ -228,7 +232,7 @@ impl Exhaustive {
             None => 0,
             Some(centers) if centers.len() == 1 => 0,
             Some(centers) => {
-                let dist = self.similarity.new_distance_function();
+                let dist = self.similarity.distance_f32();
                 centers
                     .iter()
                     .enumerate()

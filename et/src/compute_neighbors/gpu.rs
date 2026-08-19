@@ -1,9 +1,4 @@
-use std::{
-    fs::File,
-    io::{self, BufWriter, Write},
-    sync::mpsc,
-    time::Duration,
-};
+use std::{io, sync::mpsc, time::Duration};
 
 use bytemuck::{Pod, Zeroable};
 use easy_tiger::{
@@ -11,38 +6,44 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
 };
 use memmap2::Mmap;
-use vectors::VectorSimilarity;
+use vectors::{VectorSimilarity, f16};
 
 use crate::{neighbor_util::TopNeighbors, ui::progress_bar};
 
-use super::ComputeNeighborsArgs;
+use super::{ComputeNeighborsArgs, write_neighbors};
 
 /// WGSL compute shader for pairwise distance computation.
 ///
-/// Each thread computes the distance between one (query, doc) pair. Three distance functions are
-/// supported, selected at runtime via the `similarity` uniform:
+/// Each thread computes the distance between one (query, doc) pair. Query and doc vectors are
+/// stored as f16 to match the input format, but every accumulation is carried out in f32 for
+/// precision. Three distance functions are supported, selected at runtime via the `similarity`
+/// uniform:
 ///   0 = Euclidean (squared L2)
 ///   1 = Dot product distance – assumes pre-normalized vectors: (-dot + 1) / 2
 ///   2 = Cosine distance – full cosine with per-pair normalization
 ///
 /// Output distances are written row-major as `distances[q * doc_count + d]`.
 const SHADER: &str = r#"
+enable f16;
+
 struct Params {
     query_count: u32,
     doc_count: u32,
     dimensions: u32,
     similarity: u32,
+    q_offset: u32,
+    d_offset: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> query_vectors: array<f32>;
-@group(0) @binding(2) var<storage, read> doc_vectors: array<f32>;
+@group(0) @binding(1) var<storage, read> query_vectors: array<f16>;
+@group(0) @binding(2) var<storage, read> doc_vectors: array<f16>;
 @group(0) @binding(3) var<storage, read_write> distances: array<f32>;
 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let q = gid.x;
-    let d = gid.y;
+    let q = gid.x + params.q_offset;
+    let d = gid.y + params.d_offset;
 
     if q >= params.query_count || d >= params.doc_count {
         return;
@@ -57,7 +58,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Euclidean: squared L2 distance
             var acc: f32 = 0.0;
             for (var i: u32 = 0u; i < params.dimensions; i++) {
-                let diff = query_vectors[q_base + i] - doc_vectors[d_base + i];
+                let diff = f32(query_vectors[q_base + i]) - f32(doc_vectors[d_base + i]);
                 acc = fma(diff, diff, acc);
             }
             result = acc;
@@ -66,7 +67,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Dot product distance (vectors assumed to be normalized): (-dot + 1) / 2
             var acc: f32 = 0.0;
             for (var i: u32 = 0u; i < params.dimensions; i++) {
-                acc = fma(query_vectors[q_base + i], doc_vectors[d_base + i], acc);
+                acc = fma(f32(query_vectors[q_base + i]), f32(doc_vectors[d_base + i]), acc);
             }
             result = (-acc + 1.0) / 2.0;
         }
@@ -76,8 +77,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             var norm_q: f32 = 0.0;
             var norm_d: f32 = 0.0;
             for (var i: u32 = 0u; i < params.dimensions; i++) {
-                let qv = query_vectors[q_base + i];
-                let dv = doc_vectors[d_base + i];
+                let qv = f32(query_vectors[q_base + i]);
+                let dv = f32(doc_vectors[d_base + i]);
                 dot_qd = fma(qv, dv, dot_qd);
                 norm_q = fma(qv, qv, norm_q);
                 norm_d = fma(dv, dv, norm_d);
@@ -98,10 +99,21 @@ struct GpuParams {
     doc_count: u32,
     dimensions: u32,
     similarity: u32,
+    q_offset: u32,
+    d_offset: u32,
 }
 
 const WG_Q: usize = 16;
 const WG_D: usize = 16;
+
+/// Upper bound on scalar multiply-add operations (~query * doc * dims) issued by a single
+/// dispatch. The memory-driven batch sizes below can produce dispatches with hundreds of
+/// millions of threads, each running an O(dims) loop; on a single command buffer that can run
+/// long enough to trip a driver watchdog (e.g. Windows TDR, or Linux GPU hangcheck), which kills
+/// the device ("device lost") well before the GPU is actually short on memory. Splitting a
+/// memory-sized batch into several dispatches bounded by this budget keeps each individual
+/// dispatch short, independent of how much buffer memory is available.
+const MAX_DISPATCH_OPS: usize = 1 << 30;
 
 /// Try to obtain a high-performance GPU adapter. Returns `None` if no suitable adapter is found.
 pub fn try_adapter() -> Option<wgpu::Adapter> {
@@ -114,27 +126,38 @@ pub fn try_adapter() -> Option<wgpu::Adapter> {
     .ok()
 }
 
+/// Return true if `adapter` can run WGSL shaders that use the `f16` type, which this module
+/// requires since input vectors are stored as f16.
+pub fn supports_f16(adapter: &wgpu::Adapter) -> bool {
+    adapter.features().contains(wgpu::Features::SHADER_F16)
+}
+
 pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(&args.query_vectors)?)? },
-        args.dimensions,
-    )?;
+    let query_vectors: DerefVectorStore<f16, Mmap> =
+        DerefVectorStore::from_file(&args.query_vectors)?;
     let query_limit = args
         .query_limit
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
 
-    let doc_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(&args.doc_vectors)?)? },
-        args.dimensions,
-    )?;
+    let doc_vectors: DerefVectorStore<f16, Mmap> = DerefVectorStore::from_file(&args.doc_vectors)?;
     let doc_limit = args
         .doc_limit
         .unwrap_or(doc_vectors.len())
         .min(doc_vectors.len());
 
-    let dims = args.dimensions.get();
-    let k = args.neighbors_len.get();
+    if query_vectors.elem_stride() != doc_vectors.elem_stride() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "query and doc vectors must have the same dimensionality ({} vs {})",
+                query_vectors.elem_stride(),
+                doc_vectors.elem_stride()
+            ),
+        ));
+    }
+    let dims = query_vectors.elem_stride();
+    let k = super::top_k(args);
 
     let similarity_code: u32 = match args.similarity {
         VectorSimilarity::Euclidean => 0,
@@ -148,38 +171,36 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     // Request the maximum buffer limits the adapter supports so we can use the largest
     // possible batches on this hardware.
     let adapter_limits = adapter.limits();
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("compute_neighbors"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits {
-                max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
-                max_buffer_size: adapter_limits.max_buffer_size,
-                ..wgpu::Limits::default()
-            },
-            memory_hints: wgpu::MemoryHints::Performance,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            trace: wgpu::Trace::Off,
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("compute_neighbors"),
+        required_features: wgpu::Features::SHADER_F16,
+        required_limits: wgpu::Limits {
+            max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+            max_buffer_size: adapter_limits.max_buffer_size,
+            ..wgpu::Limits::default()
         },
-    ))
+        memory_hints: wgpu::MemoryHints::Performance,
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        trace: wgpu::Trace::Off,
+    }))
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     // Compute batch sizes from the limits actually granted by the device. Three buffers are
     // constrained:
-    //   query buffer:    q_batch * dims * 4  <= max_buf_bytes
-    //   doc buffer:      d_batch * dims * 4  <= max_buf_bytes
+    //   query buffer:    q_batch * dims * 2  <= max_buf_bytes
+    //   doc buffer:      d_batch * dims * 2  <= max_buf_bytes
     //   distances buffer: q_batch * d_batch * 4 <= max_buf_bytes
     //
     // To maximise GPU utilisation we size batches symmetrically: q_batch ≈ d_batch ≈
     // sqrt(max_pairs) so the distances buffer fills the allowed budget. Both vector buffers
-    // are also checked against max_vecs = max_buf_bytes / (dims * 4).
+    // are also checked against max_vecs = max_buf_bytes / (dims * 2).
     let device_limits = device.limits();
     let max_buf_bytes = (device_limits.max_buffer_size as usize)
         .min(device_limits.max_storage_buffer_binding_size as usize);
     let (q_batch, d_batch) = if query_limit == 0 || doc_limit == 0 {
         (1, 1) // buffers are created but the processing loop won't execute
     } else {
-        let max_vecs = max_buf_bytes / (dims * std::mem::size_of::<f32>());
+        let max_vecs = max_buf_bytes / (dims * std::mem::size_of::<f16>());
         let max_pairs = max_buf_bytes / std::mem::size_of::<f32>();
         let sq = (max_pairs as f64).sqrt() as usize;
         let q = sq.min(max_vecs).min(query_limit).max(1);
@@ -226,16 +247,19 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
 
     // --- Buffers ---
 
-    // Query and doc buffers are refilled each batch; both need COPY_DST.
+    // Query and doc buffers are refilled each batch; both need COPY_DST. Sizes are rounded up to
+    // wgpu::COPY_BUFFER_ALIGNMENT (4 bytes) since f16 elements are only 2 bytes wide and
+    // write_buffer/copy_buffer_to_buffer require 4-byte aligned sizes; the batch loop below pads
+    // the write payload to match.
     let query_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("query_buffer"),
-        size: (q_batch * dims * std::mem::size_of::<f32>()) as u64,
+        size: round_up_copy_alignment(q_batch * dims * std::mem::size_of::<f16>()) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let doc_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("doc_buffer"),
-        size: (d_batch * dims * std::mem::size_of::<f32>()) as u64,
+        size: round_up_copy_alignment(d_batch * dims * std::mem::size_of::<f16>()) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -299,9 +323,10 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         let q_end = (q_start + q_batch).min(query_limit);
         let current_q = q_end - q_start;
 
-        let query_data: Vec<f32> = (q_start..q_end)
+        let mut query_data: Vec<f16> = (q_start..q_end)
             .flat_map(|q| query_vectors[q].iter().copied())
             .collect();
+        pad_to_copy_alignment(&mut query_data);
         queue.write_buffer(&query_buffer, 0, bytemuck::cast_slice(&query_data));
 
         let mut d_start = 0usize;
@@ -309,42 +334,78 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
             let d_end = (d_start + d_batch).min(doc_limit);
             let current_d = d_end - d_start;
 
-            let doc_data: Vec<f32> = (d_start..d_end)
+            let mut doc_data: Vec<f16> = (d_start..d_end)
                 .flat_map(|d| doc_vectors[d].iter().copied())
                 .collect();
+            pad_to_copy_alignment(&mut doc_data);
             queue.write_buffer(&doc_buffer, 0, bytemuck::cast_slice(&doc_data));
 
-            queue.write_buffer(
-                &params_buffer,
-                0,
-                bytemuck::bytes_of(&GpuParams {
-                    query_count: current_q as u32,
-                    doc_count: current_d as u32,
-                    dimensions: dims as u32,
-                    similarity: similarity_code,
-                }),
-            );
+            // Split this memory-sized batch into smaller dispatches so no single command buffer
+            // runs long enough to trip a driver watchdog. Query/doc buffers already hold the
+            // full batch, so sub-dispatches just cover different (q, d) sub-ranges of it via
+            // q_offset/d_offset; only the distances buffer copy needs to wait for all of them.
+            let dispatch_pairs = (MAX_DISPATCH_OPS / dims).max(1);
+            let dispatch_side = (dispatch_pairs as f64).sqrt() as usize;
+            let dispatch_q = dispatch_side.min(current_q).max(1);
+            let dispatch_d = dispatch_side.min(current_d).max(1);
 
-            // Dispatch compute and copy results to staging.
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("compute_encoder"),
-            });
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("distance_pass"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
-                pass.dispatch_workgroups(
-                    current_q.div_ceil(WG_Q) as u32,
-                    current_d.div_ceil(WG_D) as u32,
-                    1,
-                );
+            let mut sq_start = 0usize;
+            while sq_start < current_q {
+                let sq_end = (sq_start + dispatch_q).min(current_q);
+                let mut sd_start = 0usize;
+                while sd_start < current_d {
+                    let sd_end = (sd_start + dispatch_d).min(current_d);
+
+                    queue.write_buffer(
+                        &params_buffer,
+                        0,
+                        bytemuck::bytes_of(&GpuParams {
+                            query_count: current_q as u32,
+                            doc_count: current_d as u32,
+                            dimensions: dims as u32,
+                            similarity: similarity_code,
+                            q_offset: sq_start as u32,
+                            d_offset: sd_start as u32,
+                        }),
+                    );
+
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("compute_encoder"),
+                        });
+                    {
+                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("distance_pass"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&pipeline);
+                        pass.set_bind_group(0, &bind_group, &[]);
+                        pass.dispatch_workgroups(
+                            (sq_end - sq_start).div_ceil(WG_Q) as u32,
+                            (sd_end - sd_start).div_ceil(WG_D) as u32,
+                            1,
+                        );
+                    }
+                    queue.submit([encoder.finish()]);
+
+                    sd_start = sd_end;
+                }
+                sq_start = sq_end;
             }
+
+            // Copy the full batch of results to staging once all sub-dispatches have completed.
             let copy_bytes = (current_q * current_d * std::mem::size_of::<f32>()) as u64;
-            encoder.copy_buffer_to_buffer(&distances_buffer, 0, &staging_buffer, 0, copy_bytes);
-            queue.submit([encoder.finish()]);
+            let mut copy_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("copy_encoder"),
+            });
+            copy_encoder.copy_buffer_to_buffer(
+                &distances_buffer,
+                0,
+                &staging_buffer,
+                0,
+                copy_bytes,
+            );
+            queue.submit([copy_encoder.finish()]);
 
             // Map the staging buffer and block until GPU work is done.
             let (tx, rx) = mpsc::channel();
@@ -387,14 +448,22 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     }
 
     // --- Write output ---
-    let mut writer = BufWriter::new(File::create(&args.neighbors)?);
-    for neighbors in results.into_iter().map(|r| r.into_neighbors()) {
-        for n in neighbors.into_iter().take(k) {
-            writer.write_all(&<[u8; 16]>::from(n))?;
-        }
-    }
+    write_neighbors(args, results)
+}
 
-    Ok(())
+/// Round `bytes` up to `wgpu::COPY_BUFFER_ALIGNMENT` (4 bytes), the minimum granularity for
+/// `write_buffer`/`copy_buffer_to_buffer` calls.
+fn round_up_copy_alignment(bytes: usize) -> usize {
+    bytes.div_ceil(wgpu::COPY_BUFFER_ALIGNMENT as usize) * wgpu::COPY_BUFFER_ALIGNMENT as usize
+}
+
+/// Pad `data` with trailing zero elements so its byte length is a multiple of
+/// `wgpu::COPY_BUFFER_ALIGNMENT`. The padding elements sit past the last index any dispatch
+/// reads (bounded by `params.query_count`/`params.doc_count`), so they never affect results.
+fn pad_to_copy_alignment(data: &mut Vec<f16>) {
+    let byte_len = data.len() * std::mem::size_of::<f16>();
+    let padded_elems = round_up_copy_alignment(byte_len) / std::mem::size_of::<f16>();
+    data.resize(padded_elems, f16::default());
 }
 
 fn bgl_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {

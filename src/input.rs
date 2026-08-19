@@ -3,11 +3,14 @@
 // TODO: rename this module
 
 use std::{
+    fs::File,
     io,
     num::NonZero,
     ops::{Index, IndexMut, Range},
+    path::Path,
 };
 
+use memmap2::Mmap;
 use stable_deref_trait::StableDeref;
 
 /// A store of vector data indexed by a densely assigned range of values.
@@ -29,7 +32,6 @@ pub trait VectorStore: Index<usize, Output = [Self::Elem]> {
 
 pub struct DerefVectorStore<E: 'static, D> {
     // NB: the contents of data is referenced by raw_vectors.
-    #[allow(dead_code)]
     data: D,
     raw_vectors: &'static [E],
 
@@ -43,7 +45,7 @@ where
 {
     /// Create a new store from byte de-refable `data` where each entry contains
     /// `stride` elements of of type `E`.
-    pub fn new(data: D, stride: NonZero<usize>) -> io::Result<Self> {
+    pub fn with_stride(data: D, stride: NonZero<usize>) -> io::Result<Self> {
         let elem_width = std::mem::size_of::<E>();
         let vectorp = data.as_ptr() as *const E;
         if !vectorp.is_aligned() {
@@ -74,8 +76,62 @@ where
         })
     }
 
+    /// Create a new store from a de-refable `data` in BigANN format where the file begins with two
+    /// 32-bit integers: <len, dim>.
+    pub fn new(data: D) -> io::Result<Self> {
+        if data.len() < 8 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "input vector data not long enough; must be at least 8 bytes".to_string(),
+            ));
+        }
+        let (header, vectors) = data.split_at(8);
+        let header_parts = header.as_chunks::<4>().0;
+        let len = u32::from_le_bytes(header_parts[0]) as usize;
+        let dim = u32::from_le_bytes(header_parts[1]) as usize;
+        let elem_width = std::mem::size_of::<E>();
+        let row_bytes = dim * elem_width;
+        if len * row_bytes != vectors.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("input vector data must have exactly {len} entries of {row_bytes} length"),
+            ));
+        }
+
+        // Safety: StableDeref guarantees the pointer is stable even after a move.
+        let raw_vectors: &'static [E] = unsafe {
+            std::slice::from_raw_parts(vectors.as_ptr() as *const E, vectors.len() / elem_width)
+        };
+        Ok(Self {
+            data,
+            raw_vectors,
+            stride: dim,
+            len,
+        })
+    }
+
     pub fn data(&self) -> &D {
         &self.data
+    }
+}
+
+impl<E> DerefVectorStore<E, Mmap> {
+    /// Create a new store by mmapping the file at `path`, where each entry contains
+    /// `stride` elements of type `E`.
+    pub fn from_file_with_stride(
+        path: impl AsRef<Path>,
+        stride: NonZero<usize>,
+    ) -> io::Result<Self> {
+        let mmap = unsafe { Mmap::map(&File::open(path)?)? };
+        Self::with_stride(mmap, stride)
+    }
+
+    /// Create a new store by mapping the file at `path` an interpreting as a BigANN benchmark
+    /// input that begins with a <len,dim> header. The length of each vector is interpreted based
+    /// on the size of `E`, so this cannot be used for sub-byte inputs.
+    pub fn from_file(path: impl AsRef<Path>) -> io::Result<Self> {
+        let mmap = unsafe { Mmap::map(&File::open(path)?)? };
+        Self::new(mmap)
     }
 }
 
@@ -248,5 +304,38 @@ impl<V: VectorStore> Index<usize> for SubsetViewVectorStore<'_, V> {
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.parent[self.subset[index]]
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{DerefVectorStore, VectorStore};
+
+    /// Build a BigANN-formatted byte buffer: an 8 byte `<len,dim>` header followed by
+    /// `len * dim` little-endian `f32` values counting up from 0.0.
+    fn bigann_f32(len: usize, dim: usize) -> Vec<u8> {
+        let mut data = Vec::with_capacity(8 + len * dim * 4);
+        data.extend_from_slice(&(len as u32).to_le_bytes());
+        data.extend_from_slice(&(dim as u32).to_le_bytes());
+        for i in 0..(len * dim) {
+            data.extend_from_slice(&(i as f32).to_le_bytes());
+        }
+        data
+    }
+
+    #[test]
+    fn new_multi_dim_multi_byte_elem() {
+        let len = 5;
+        let dim = 4;
+        let data = bigann_f32(len, dim);
+        let store: DerefVectorStore<f32, Vec<u8>> = DerefVectorStore::new(data).unwrap();
+
+        assert_eq!(store.len(), len);
+        assert_eq!(store.elem_stride(), dim);
+        for i in 0..len {
+            let expected: Vec<f32> = (i * dim..(i + 1) * dim).map(|x| x as f32).collect();
+            assert_eq!(&store[i], expected.as_slice());
+        }
+        assert_eq!(store.iter().count(), len);
     }
 }

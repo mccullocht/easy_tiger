@@ -3,13 +3,15 @@ use std::io;
 use crate::{neighbor_util::TopNeighbors, recall::RecallComputer, ui::progress_bar};
 use clap::Args;
 use easy_tiger::{Neighbor, input::VectorStore};
+use half::slice::HalfFloatSliceExt;
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
+use vectors::f16;
 
 use super::exhaustive::ExhaustiveArgs;
 
 #[derive(Args)]
-pub struct RecallArgs {
+pub struct QuantizationRecallArgs {
     #[command(flatten)]
     exhaustive: ExhaustiveArgs,
 
@@ -25,14 +27,14 @@ pub struct RecallArgs {
 }
 
 pub fn recall(
-    args: RecallArgs,
-    doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    args: QuantizationRecallArgs,
+    doc_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
     let exhaustive = args.exhaustive.setup(doc_vectors)?;
-    let recall_computer =
-        RecallComputer::from_args(args.recall, args.exhaustive.similarity)?.ok_or(
-            io::Error::new(io::ErrorKind::InvalidInput, "must provide recall args"),
-        )?;
+    let recall_computer = RecallComputer::from_args(args.recall)?.ok_or(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "must provide recall args",
+    ))?;
 
     let k = recall_computer.k();
     let result_len = (k as f64 * args.k_mult) as usize;
@@ -42,7 +44,7 @@ pub fn recall(
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .map(|d| {
-            let (center, doc) = exhaustive.encode_doc(&doc_vectors[d]);
+            let (center, doc) = exhaustive.encode_doc(&doc_vectors[d].to_f32_vec());
             let mut total_scored = 0;
             let mut total_competitive = 0;
             for (q, results) in query_k.iter().enumerate() {

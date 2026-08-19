@@ -1,7 +1,7 @@
 use std::{io, sync::Arc};
 
 use easy_tiger::vamana::wt::TableGraphVectorIndex;
-use wt_mdb::{connection::DropOptionsBuilder, Connection};
+use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
 pub fn drop_index(connection: Arc<Connection>, index_name: &str) -> io::Result<()> {
     for table_name in TableGraphVectorIndex::generate_table_names(index_name) {

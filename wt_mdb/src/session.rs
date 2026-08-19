@@ -4,7 +4,7 @@ mod typed_cursor;
 use std::{
     borrow::Cow,
     cell::RefCell,
-    ffi::{c_char, c_void, CStr, CString},
+    ffi::{CStr, CString, c_char, c_void},
     ptr::NonNull,
     sync::Arc,
 };
@@ -13,11 +13,12 @@ use tracing::error;
 use wt_sys::{WT_CURSOR, WT_ITEM, WT_SESSION};
 
 use crate::{
+    ConfigurationString, Error, Result,
     connection::{Connection, CreateOptions, DropOptions},
-    wt_call, ConfigurationString, Error, Result,
+    wt_call,
 };
 
-pub use format::{pack1, pack2, pack3, unpack1, unpack2, unpack3, FormatString, Formatted};
+pub use format::{FormatString, Formatted, pack1, pack2, pack3, unpack1, unpack2, unpack3};
 pub use typed_cursor::{TypedCursor, TypedCursorGuard, ValueDelta};
 
 pub(crate) const METADATA_URI: &CStr = c"metadata:";

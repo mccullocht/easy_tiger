@@ -1,5 +1,4 @@
 use std::{
-    fs::File,
     io::{self},
     num::NonZero,
     ops::Add,
@@ -12,12 +11,11 @@ use clap::Args;
 use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
+        GraphSearchParams, PatienceParams,
         search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
-        GraphSearchParams, PatienceParams,
     },
 };
-use memmap2::Mmap;
 use wt_mdb::Connection;
 
 use crate::{
@@ -69,8 +67,8 @@ pub struct SearchArgs {
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
     let index = Arc::new(TableGraphVectorIndex::from_db(&connection, index_name)?);
-    let query_vectors = easy_tiger::input::DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
+    let query_vectors = easy_tiger::input::DerefVectorStore::from_file_with_stride(
+        args.query_vectors,
         index.config().dimensions,
     )?;
     let limit = std::cmp::min(
@@ -87,7 +85,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
         patience,
     };
-    let recall_computer = RecallComputer::from_args(args.recall, index.config().similarity)?;
+    let recall_computer = RecallComputer::from_args(args.recall)?;
     if let Some(computer) = recall_computer.as_ref() {
         if computer.neighbors_len() != query_vectors.len() {
             return Err(io::Error::new(
@@ -240,9 +238,11 @@ impl SearcherState {
             self.connection.begin_transaction(None)?,
         );
         let start = Instant::now();
-        let results = self
-            .searcher
-            .search_with_options(query, GraphSearchOptions::with_filter(|i| i < record_limit), &reader)?;
+        let results = self.searcher.search_with_options(
+            query,
+            GraphSearchOptions::with_filter(|i| i < record_limit),
+            &reader,
+        )?;
         let duration = Instant::now() - start;
         Ok(AggregateSearchStats::new(
             duration,

@@ -5,7 +5,7 @@
 //! format against the same samples and golden data. Because the samples are small the whole sweep
 //! runs in seconds and needs no precomputed neighbors file.
 
-use std::{fs::File, io, num::NonZero, path::PathBuf};
+use std::{io, num::NonZero, path::PathBuf};
 
 use clap::Args;
 use easy_tiger::{
@@ -16,7 +16,7 @@ use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rand::SeedableRng;
 use rayon::prelude::*;
-use vectors::{F32VectorCoding, VectorSimilarity};
+use vectors::{F32VectorCoding, VectorSimilarity, f16};
 
 use crate::{
     neighbor_util::TopNeighbors,
@@ -95,7 +95,7 @@ pub struct SweepArgs {
 /// the cheapest quantizer that still supports exact reranking to the golden top-k.
 pub fn sweep(
     args: SweepArgs,
-    doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    doc_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
     if args.formats.is_empty() {
         return Err(io::Error::new(
@@ -108,12 +108,7 @@ pub fn sweep(
     let query_file = args
         .query_vectors
         .as_ref()
-        .map(|p| -> io::Result<DerefVectorStore<f32, Mmap>> {
-            DerefVectorStore::new(
-                unsafe { Mmap::map(&File::open(p)?)? },
-                NonZero::new(doc_vectors.elem_stride()).unwrap(),
-            )
-        })
+        .map(|p| -> io::Result<DerefVectorStore<f16, Mmap>> { DerefVectorStore::from_file(p) })
         .transpose()?;
 
     // Sample docs first; when queries come from the same file they are drawn from what is left so
@@ -168,8 +163,7 @@ pub fn sweep(
     }
 
     let golden = exact_neighbors(&docs, &queries, args.similarity, args.k);
-    let recall_computer =
-        RecallComputer::in_memory(args.recall_metric, args.similarity, args.k, golden);
+    let recall_computer = RecallComputer::in_memory(args.recall_metric, args.k, golden);
 
     // Centers depend only on the docs and the similarity, so compute them once and share them
     // across formats. This also keeps the comparison fair when k-means is in play.
@@ -188,7 +182,9 @@ pub fn sweep(
             &queries,
         );
         let report = bound_depth::measure(&exhaustive, &docs, &recall_computer);
-        let format_byte_len = format.coder(args.similarity, None).byte_len(docs.elem_stride());
+        let format_byte_len = format
+            .coder(args.similarity, None)
+            .byte_len(docs.elem_stride());
         let cost_mib = cost_params.map(|(doc_count, rerank_byte_len)| {
             let cost_bytes = format_byte_len as f64 * doc_count as f64
                 + rerank_byte_len as f64 * report.queue_depth.mean();
@@ -259,12 +255,12 @@ fn sample(rng: &mut impl rand::Rng, len: usize, n: usize) -> Vec<usize> {
 
 /// Brute force the exact top-`k` docs for each query using full fidelity f32 distances.
 fn exact_neighbors(
-    docs: &(impl VectorStore<Elem = f32> + Send + Sync),
-    queries: &(impl VectorStore<Elem = f32> + Send + Sync),
+    docs: &(impl VectorStore<Elem = f16> + Send + Sync),
+    queries: &(impl VectorStore<Elem = f16> + Send + Sync),
     similarity: VectorSimilarity,
     k: NonZero<usize>,
 ) -> Vec<Vec<Neighbor>> {
-    let distance_fn = similarity.new_distance_function();
+    let distance_fn = similarity.distance_f16();
     let mut results = Vec::with_capacity(queries.len());
     results.resize_with(queries.len(), || TopNeighbors::new(k.get()));
     (0..docs.len())
@@ -274,7 +270,7 @@ fn exact_neighbors(
             for (q, result) in results.iter().enumerate() {
                 result.add(Neighbor::new(
                     d as i64,
-                    distance_fn.distance_f32(&queries[q], &docs[d]),
+                    distance_fn.distance_f16(&queries[q], &docs[d]),
                 ));
             }
         });

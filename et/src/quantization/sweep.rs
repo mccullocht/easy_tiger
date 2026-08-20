@@ -12,11 +12,12 @@ use easy_tiger::{
     Neighbor,
     input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
 };
+use half::slice::HalfFloatSliceExt;
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rand::SeedableRng;
 use rayon::prelude::*;
-use vectors::{F32VectorCoding, VectorSimilarity, f16};
+use vectors::{F32VectorCoding, VectorSimilarity, f16, rotate::Rotator};
 
 use crate::{
     neighbor_util::TopNeighbors,
@@ -70,6 +71,12 @@ pub struct SweepArgs {
     /// Random seed used for sampling and clustering. Use a fixed value for repeatability.
     #[arg(long, default_value_t = 0x7774_7370414E4E)]
     seed: u64,
+    /// If set, rotate docs and queries with a [`Rotator`] seeded with this value before quantizing.
+    ///
+    /// The golden neighbors are still computed on the unrotated vectors; rotation is orthogonal so
+    /// it preserves distances, it only changes the component distribution seen by the quantizer.
+    #[arg(long)]
+    rotator_seed: Option<u64>,
 
     /// Number of docs in the full corpus, used to project the storage cost of each format.
     ///
@@ -165,33 +172,16 @@ pub fn sweep(
     let golden = exact_neighbors(&docs, &queries, args.similarity, args.k);
     let recall_computer = RecallComputer::in_memory(args.recall_metric, args.k, golden);
 
-    // Centers depend only on the docs and the similarity, so compute them once and share them
-    // across formats. This also keeps the comparison fair when k-means is in play.
-    let centers =
-        super::exhaustive::compute_centers(&docs, args.centers, args.center_sample_size, args.seed);
-
     let cost_params = args.cost_doc_count.zip(args.rerank_byte_len);
-
-    let mut rows = Vec::with_capacity(args.formats.len());
-    for format in args.formats.iter().copied() {
-        let exhaustive = Exhaustive::new(
-            args.similarity,
-            format,
-            args.quantize_query,
-            centers.clone(),
-            &queries,
-        );
-        let report = bound_depth::measure(&exhaustive, &docs, &recall_computer);
-        let format_byte_len = format
-            .coder(args.similarity, None)
-            .byte_len(docs.elem_stride());
-        let cost_mib = cost_params.map(|(doc_count, rerank_byte_len)| {
-            let cost_bytes = format_byte_len as f64 * doc_count as f64
-                + rerank_byte_len as f64 * report.queue_depth.mean();
-            cost_bytes / (1024.0 * 1024.0)
-        });
-        rows.push((format, report, cost_mib));
-    }
+    let rows = match args.rotator_seed {
+        Some(seed) => {
+            let rotator = Rotator::new(docs.elem_stride(), seed);
+            let rotated_docs = rotate_store(&rotator, &docs);
+            let rotated_queries = rotate_store(&rotator, &queries);
+            measure_formats(&args, &rotated_docs, &rotated_queries, &recall_computer)
+        }
+        None => measure_formats(&args, &docs, &queries, &recall_computer),
+    };
 
     println!();
     if cost_params.is_some() {
@@ -242,6 +232,57 @@ pub fn sweep(
     }
 
     Ok(())
+}
+
+/// Run every requested format against the same docs, queries, and golden data.
+///
+/// Returns one row per format in the order they were requested.
+fn measure_formats(
+    args: &SweepArgs,
+    docs: &(impl VectorStore<Elem = f16> + Send + Sync),
+    queries: &(impl VectorStore<Elem = f16> + Send + Sync),
+    recall_computer: &RecallComputer,
+) -> Vec<(F32VectorCoding, bound_depth::BoundDepthReport, Option<f64>)> {
+    // Centers depend only on the docs and the similarity, so compute them once and share them
+    // across formats. This also keeps the comparison fair when k-means is in play.
+    let centers =
+        super::exhaustive::compute_centers(docs, args.centers, args.center_sample_size, args.seed);
+    let cost_params = args.cost_doc_count.zip(args.rerank_byte_len);
+
+    let mut rows = Vec::with_capacity(args.formats.len());
+    for format in args.formats.iter().copied() {
+        let exhaustive = Exhaustive::new(
+            args.similarity,
+            format,
+            args.quantize_query,
+            centers.clone(),
+            queries,
+        );
+        let report = bound_depth::measure(&exhaustive, docs, recall_computer);
+        let format_byte_len = format
+            .coder(args.similarity, None)
+            .byte_len(docs.elem_stride());
+        let cost_mib = cost_params.map(|(doc_count, rerank_byte_len)| {
+            let cost_bytes = format_byte_len as f64 * doc_count as f64
+                + rerank_byte_len as f64 * report.queue_depth.mean();
+            cost_bytes / (1024.0 * 1024.0)
+        });
+        rows.push((format, report, cost_mib));
+    }
+    rows
+}
+
+/// Apply `rotator` to every vector in `store`, returning an owned store of the same shape.
+fn rotate_store(rotator: &Rotator, store: &impl VectorStore<Elem = f16>) -> VecVectorStore<f16> {
+    let mut out = VecVectorStore::with_capacity(store.elem_stride(), store.len());
+    let mut widened = vec![0.0f32; store.elem_stride()];
+    let mut narrowed = vec![f16::ZERO; store.elem_stride()];
+    for i in 0..store.len() {
+        store[i].convert_to_f32_slice(&mut widened);
+        narrowed.convert_from_f32_slice(&rotator.forward(&widened));
+        out.push(&narrowed);
+    }
+    out
 }
 
 /// Draw `n` distinct indices from `[0, len)`, or all of them when `n >= len`.

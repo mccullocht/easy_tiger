@@ -3,21 +3,47 @@ use super::scalar::Scalar;
 
 use std::arch::aarch64::{
     float32x4_t, int8x16_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vabsq_f32, vaddlvq_s8, vaddq_f32,
-    vaddq_s8, vaddq_u32, vaddvq_f32, vaddvq_u32, vandq_s8, vandq_u32, vbslq_f32, vbslq_s8,
-    vcgeq_s32, vcgtq_f32, vcntq_s8, vdupq_n_f32, vdupq_n_s8, vdupq_n_s32, vdupq_n_u8, vdupq_n_u32,
-    veorq_s8, vld1q_f32, vld1q_s8, vld1q_u8, vmvnq_s8, vmvnq_u32, vorrq_s8, vorrq_u8, vorrq_u32,
-    vqtbl4q_u8, vreinterpretq_s32_f32, vreinterpretq_u8_u32, vshlq_n_s8, vshlq_n_u8, vshrq_n_s8,
+    vaddq_s8, vaddq_s32, vaddq_u32, vaddvq_f32, vaddvq_s32, vaddvq_u32, vandq_s8, vandq_u8,
+    vandq_u32, vbslq_f32, vbslq_s8, vcgeq_s32, vcgtq_f32, vcntq_s8, vdotq_s32, vdupq_n_f32,
+    vdupq_n_s8, vdupq_n_s32, vdupq_n_u8, vdupq_n_u32, veorq_s8, vld1q_f32, vld1q_s8, vld1q_u8,
+    vmvnq_s8, vmvnq_u32, vorrq_s8, vorrq_u8, vorrq_u32, vqtbl1q_s8, vqtbl4q_u8,
+    vreinterpretq_s32_f32, vreinterpretq_u8_u32, vshlq_n_s8, vshlq_n_u8, vshrq_n_s8, vshrq_n_u8,
     vst1q_u8, vsubq_s8,
 };
 
-unsafe extern "C" {
-    /// vdotq_s32() intrinsic is unstable until rust 1.98 so call a C function instead.
-    unsafe fn et_quiver_asymmetric_ip(
-        query: *const i8,
-        len: usize,
-        doc: *const u8,
-        table: *const i8,
-    ) -> i32;
+/// `query.len()` must be a multiple of 64. `table` decodes a 2-bit magnitude/sign code as
+/// `[-weak, -strong, weak, strong]`.
+unsafe fn quiver_asymmetric_ip(query: &[i8], doc: &[u8], table: [i8; 4]) -> i32 {
+    unsafe {
+        let mut tmp_table = [0i8; 16];
+        tmp_table[..4].copy_from_slice(&table);
+        let decode_table = vld1q_s8(tmp_table.as_ptr());
+
+        let mut ip0 = vdupq_n_s32(0);
+        let mut ip1 = vdupq_n_s32(0);
+        let mut ip2 = vdupq_n_s32(0);
+        let mut ip3 = vdupq_n_s32(0);
+        let mask = vdupq_n_u8(3);
+
+        for i in (0..query.len()).step_by(64) {
+            let q0 = vld1q_s8(query.as_ptr().add(i));
+            let q1 = vld1q_s8(query.as_ptr().add(i + 16));
+            let q2 = vld1q_s8(query.as_ptr().add(i + 32));
+            let q3 = vld1q_s8(query.as_ptr().add(i + 48));
+            let d = vld1q_u8(doc.as_ptr().add(i / 4));
+
+            let d0 = vqtbl1q_s8(decode_table, vandq_u8(d, mask));
+            ip0 = vdotq_s32(ip0, q0, d0);
+            let d1 = vqtbl1q_s8(decode_table, vandq_u8(vshrq_n_u8::<2>(d), mask));
+            ip1 = vdotq_s32(ip1, q1, d1);
+            let d2 = vqtbl1q_s8(decode_table, vandq_u8(vshrq_n_u8::<4>(d), mask));
+            ip2 = vdotq_s32(ip2, q2, d2);
+            let d3 = vqtbl1q_s8(decode_table, vandq_u8(vshrq_n_u8::<6>(d), mask));
+            ip3 = vdotq_s32(ip3, q3, d3);
+        }
+
+        vaddvq_s32(vaddq_s32(vaddq_s32(ip0, ip1), vaddq_s32(ip2, ip3)))
+    }
 }
 
 struct QuantizationState {
@@ -219,9 +245,7 @@ impl Kernel for Neon {
         // elements), which would otherwise misalign the split against `full_len`.
         let (d, dr) = d.split_at(full_len / 4);
         let decode_table = [-weak, -strong, weak, strong];
-        let mut dist = unsafe {
-            et_quiver_asymmetric_ip(q.as_ptr(), full_len, d.as_ptr(), decode_table.as_ptr())
-        };
+        let mut dist = unsafe { quiver_asymmetric_ip(&q[..full_len], d, decode_table) };
         if full_len < q.len() {
             dist += Scalar.asymmetric_distance(&q[full_len..], dr, weak, strong);
         }

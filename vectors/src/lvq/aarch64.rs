@@ -4,13 +4,13 @@
 
 use std::arch::aarch64::{
     float32x4_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32,
-    vaddq_f64, vaddq_u16, vaddvq_f32, vandq_u8, vandq_u32, vcntq_u8, vcvt_f64_f32,
-    vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdupq_n_f32, vdupq_n_f64,
-    vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64, vfmaq_f32, vfmaq_f64,
-    vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32,
-    vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8,
-    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8, vshrq_n_u32, vst1q_f32,
-    vst1q_u8, vsubq_f32, vsubq_f64,
+    vaddq_f64, vaddq_u16, vaddq_u32, vaddvq_f32, vaddvq_u32, vandq_u8, vandq_u32, vcntq_u8,
+    vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdotq_u32,
+    vdupq_n_f32, vdupq_n_f64, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64,
+    vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vmaxq_f32, vmaxvq_f32,
+    vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8,
+    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8, vshrq_n_u8, vshrq_n_u32,
+    vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use crate::lvq::{
@@ -591,55 +591,384 @@ unsafe fn quantize4_residual(
     (primary, quantize4(residual, residual_terms), residual)
 }
 
-unsafe extern "C" {
-    // Symmetric dot product 2 bit
-    unsafe fn et_lvq_dot_u2(a: *const u8, b: *const u8, len: usize) -> u32;
-    // Symmetric dot product 4 bit
-    unsafe fn et_lvq_dot_u4(a: *const u8, b: *const u8, len: usize) -> u32;
-    // Symmetric dot product 8 bit
-    unsafe fn et_lvq_dot_u8(a: *const u8, b: *const u8, len: usize) -> u32;
-    // Asymmetric dot product 8 bit-1 bit. len must be a multiple of 128.
-    unsafe fn et_lvq_dot_u8_u1(q: *const u8, d: *const u8, len: usize) -> u32;
-    // Asymmetric dot product 8 bit-2 bit. len must be a multiple of 64.
-    unsafe fn et_lvq_dot_u8_u2(q: *const u8, d: *const u8, len: usize) -> u32;
-    // Asymmetric dot product 8 bit-4 bit. len must be a multiple of 32.
-    unsafe fn et_lvq_dot_u8_u4(q: *const u8, d: *const u8, len: usize) -> u32;
+// Symmetric dot product 2 bit
+unsafe fn lvq_dot_u2(a: &[u8], b: &[u8]) -> u32 {
+    let len = a.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let dibit_mask = vdupq_n_u8(0x3);
+    let len16 = len & !15;
+    for i in (0..len16).step_by(16) {
+        let av = vld1q_u8(a.as_ptr().add(i));
+        let bv = vld1q_u8(b.as_ptr().add(i));
+        dot0 = vdotq_u32(dot0, vandq_u8(av, dibit_mask), vandq_u8(bv, dibit_mask));
+        dot1 = vdotq_u32(
+            dot1,
+            vandq_u8(vshrq_n_u8::<2>(av), dibit_mask),
+            vandq_u8(vshrq_n_u8::<2>(bv), dibit_mask),
+        );
+        dot2 = vdotq_u32(
+            dot2,
+            vandq_u8(vshrq_n_u8::<4>(av), dibit_mask),
+            vandq_u8(vshrq_n_u8::<4>(bv), dibit_mask),
+        );
+        dot3 = vdotq_u32(dot3, vshrq_n_u8::<6>(av), vshrq_n_u8::<6>(bv));
+    }
 
-    // This function requires that len is a multiple of 128.
-    unsafe fn et_residual_dot_u1_u8(
-        ap: *const u8,
-        ar: *const u8,
-        bp: *const u8,
-        br: *const u8,
-        len: usize,
-    ) -> ResidualDotComponents;
+    let mut dot = vaddvq_u32(vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3)));
+    for i in len16..len {
+        let av = a[i] as u32;
+        let bv = b[i] as u32;
+        dot += (av & 0x3) * (bv & 0x3)
+            + ((av >> 2) & 0x3) * ((bv >> 2) & 0x3)
+            + ((av >> 4) & 0x3) * ((bv >> 4) & 0x3)
+            + ((av >> 6) & 0x3) * ((bv >> 6) & 0x3);
+    }
+    dot
+}
 
-    // This function requires that len is a multiple of 64.
-    unsafe fn et_residual_dot_u2_u8(
-        ap: *const u8,
-        ar: *const u8,
-        bp: *const u8,
-        br: *const u8,
-        len: usize,
-    ) -> ResidualDotComponents;
+// Symmetric dot product 4 bit
+unsafe fn lvq_dot_u4(a: &[u8], b: &[u8]) -> u32 {
+    let len = a.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let nibble_mask = vdupq_n_u8(0xf);
+    let len32 = len & !31;
+    for i in (0..len32).step_by(32) {
+        let mut av = vld1q_u8(a.as_ptr().add(i));
+        let mut bv = vld1q_u8(b.as_ptr().add(i));
+        dot0 = vdotq_u32(dot0, vandq_u8(av, nibble_mask), vandq_u8(bv, nibble_mask));
+        dot1 = vdotq_u32(dot1, vshrq_n_u8::<4>(av), vshrq_n_u8::<4>(bv));
 
-    // This function requires that len is a multiple of 32.
-    unsafe fn et_residual_dot_u4_u8(
-        ap: *const u8,
-        ar: *const u8,
-        bp: *const u8,
-        br: *const u8,
-        len: usize,
-    ) -> ResidualDotComponents;
+        av = vld1q_u8(a.as_ptr().add(i + 16));
+        bv = vld1q_u8(b.as_ptr().add(i + 16));
+        dot2 = vdotq_u32(dot2, vandq_u8(av, nibble_mask), vandq_u8(bv, nibble_mask));
+        dot3 = vdotq_u32(dot3, vshrq_n_u8::<4>(av), vshrq_n_u8::<4>(bv));
+    }
 
-    // This function requires that len is a multiple of 16.
-    unsafe fn et_residual_dot_u8_u8(
-        ap: *const u8,
-        ar: *const u8,
-        bp: *const u8,
-        br: *const u8,
-        len: usize,
-    ) -> ResidualDotComponents;
+    dot0 = vaddq_u32(dot0, dot2);
+    dot1 = vaddq_u32(dot1, dot3);
+    let len16 = len & !15;
+    if len32 < len16 {
+        let av = vld1q_u8(a.as_ptr().add(len32));
+        let bv = vld1q_u8(b.as_ptr().add(len32));
+        dot0 = vdotq_u32(dot0, vandq_u8(av, nibble_mask), vandq_u8(bv, nibble_mask));
+        dot1 = vdotq_u32(dot1, vshrq_n_u8::<4>(av), vshrq_n_u8::<4>(bv));
+    }
+
+    let mut dot = vaddvq_u32(vaddq_u32(dot0, dot1));
+    for i in len16..len {
+        let av = a[i] as u32;
+        let bv = b[i] as u32;
+        dot += (av & 0xf) * (bv & 0xf) + (av >> 4) * (bv >> 4);
+    }
+    dot
+}
+
+// Symmetric dot product 8 bit
+unsafe fn lvq_dot_u8(a: &[u8], b: &[u8]) -> u32 {
+    let len = a.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let len64 = len & !63;
+    for i in (0..len64).step_by(64) {
+        let mut av = vld1q_u8(a.as_ptr().add(i));
+        let mut bv = vld1q_u8(b.as_ptr().add(i));
+        dot0 = vdotq_u32(dot0, av, bv);
+
+        av = vld1q_u8(a.as_ptr().add(i + 16));
+        bv = vld1q_u8(b.as_ptr().add(i + 16));
+        dot1 = vdotq_u32(dot1, av, bv);
+
+        av = vld1q_u8(a.as_ptr().add(i + 32));
+        bv = vld1q_u8(b.as_ptr().add(i + 32));
+        dot2 = vdotq_u32(dot2, av, bv);
+
+        av = vld1q_u8(a.as_ptr().add(i + 48));
+        bv = vld1q_u8(b.as_ptr().add(i + 48));
+        dot3 = vdotq_u32(dot3, av, bv);
+    }
+
+    dot0 = vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3));
+    let len16 = len & !15;
+    for i in (len64..len16).step_by(16) {
+        let av = vld1q_u8(a.as_ptr().add(i));
+        let bv = vld1q_u8(b.as_ptr().add(i));
+        dot0 = vdotq_u32(dot0, av, bv);
+    }
+
+    let mut dot = vaddvq_u32(dot0);
+    for i in len16..len {
+        dot += a[i] as u32 * b[i] as u32;
+    }
+    dot
+}
+
+// Asymmetric dot product 8 bit-1 bit. `q.len()` must be a multiple of 128.
+unsafe fn lvq_dot_u8_u1(q: &[u8], d: &[u8]) -> u32 {
+    let len = q.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let mask = vdupq_n_u8(0x1);
+    let len128 = len & !127;
+    for i in (0..len128).step_by(128) {
+        let dv = vld1q_u8(d.as_ptr().add(i / 128 * 16));
+
+        dot0 = vdotq_u32(dot0, vld1q_u8(q.as_ptr().add(i)), vandq_u8(dv, mask));
+        dot1 = vdotq_u32(
+            dot1,
+            vld1q_u8(q.as_ptr().add(i + 16)),
+            vandq_u8(vshrq_n_u8::<1>(dv), mask),
+        );
+        dot2 = vdotq_u32(
+            dot2,
+            vld1q_u8(q.as_ptr().add(i + 32)),
+            vandq_u8(vshrq_n_u8::<2>(dv), mask),
+        );
+        dot3 = vdotq_u32(
+            dot3,
+            vld1q_u8(q.as_ptr().add(i + 48)),
+            vandq_u8(vshrq_n_u8::<3>(dv), mask),
+        );
+        dot0 = vdotq_u32(
+            dot0,
+            vld1q_u8(q.as_ptr().add(i + 64)),
+            vandq_u8(vshrq_n_u8::<4>(dv), mask),
+        );
+        dot1 = vdotq_u32(
+            dot1,
+            vld1q_u8(q.as_ptr().add(i + 80)),
+            vandq_u8(vshrq_n_u8::<5>(dv), mask),
+        );
+        dot2 = vdotq_u32(
+            dot2,
+            vld1q_u8(q.as_ptr().add(i + 96)),
+            vandq_u8(vshrq_n_u8::<6>(dv), mask),
+        );
+        dot3 = vdotq_u32(
+            dot3,
+            vld1q_u8(q.as_ptr().add(i + 112)),
+            vandq_u8(vshrq_n_u8::<7>(dv), mask),
+        );
+    }
+
+    vaddvq_u32(vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3)))
+}
+
+// Asymmetric dot product 8 bit-2 bit. `q.len()` must be a multiple of 64.
+unsafe fn lvq_dot_u8_u2(q: &[u8], d: &[u8]) -> u32 {
+    let len = q.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let mask = vdupq_n_u8(0x3);
+    let len64 = len & !63;
+    for i in (0..len64).step_by(64) {
+        let dv = vld1q_u8(d.as_ptr().add(i / 64 * 16));
+
+        dot0 = vdotq_u32(dot0, vld1q_u8(q.as_ptr().add(i)), vandq_u8(dv, mask));
+        dot1 = vdotq_u32(
+            dot1,
+            vld1q_u8(q.as_ptr().add(i + 16)),
+            vandq_u8(vshrq_n_u8::<2>(dv), mask),
+        );
+        dot2 = vdotq_u32(
+            dot2,
+            vld1q_u8(q.as_ptr().add(i + 32)),
+            vandq_u8(vshrq_n_u8::<4>(dv), mask),
+        );
+        dot3 = vdotq_u32(
+            dot3,
+            vld1q_u8(q.as_ptr().add(i + 48)),
+            vandq_u8(vshrq_n_u8::<6>(dv), mask),
+        );
+    }
+
+    vaddvq_u32(vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3)))
+}
+
+// Asymmetric dot product 8 bit-4 bit. `q.len()` must be a multiple of 32.
+unsafe fn lvq_dot_u8_u4(q: &[u8], d: &[u8]) -> u32 {
+    let len = q.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let mask = vdupq_n_u8(0xf);
+    let len64 = len & !63;
+    for i in (0..len64).step_by(64) {
+        let dv0 = vld1q_u8(d.as_ptr().add(i / 64 * 32));
+        let dv1 = vld1q_u8(d.as_ptr().add(i / 64 * 32 + 16));
+
+        dot0 = vdotq_u32(dot0, vld1q_u8(q.as_ptr().add(i)), vandq_u8(dv0, mask));
+        dot1 = vdotq_u32(dot1, vld1q_u8(q.as_ptr().add(i + 16)), vshrq_n_u8::<4>(dv0));
+        dot2 = vdotq_u32(dot2, vld1q_u8(q.as_ptr().add(i + 32)), vandq_u8(dv1, mask));
+        dot3 = vdotq_u32(dot3, vld1q_u8(q.as_ptr().add(i + 48)), vshrq_n_u8::<4>(dv1));
+    }
+
+    dot0 = vaddq_u32(dot0, dot1);
+    dot2 = vaddq_u32(dot2, dot3);
+    if len64 < len {
+        let dv = vld1q_u8(d.as_ptr().add(len64 / 64 * 32));
+        dot0 = vdotq_u32(dot0, vld1q_u8(q.as_ptr().add(len64)), vandq_u8(dv, mask));
+        dot2 = vdotq_u32(
+            dot2,
+            vld1q_u8(q.as_ptr().add(len64 + 16)),
+            vshrq_n_u8::<4>(dv),
+        );
+    }
+
+    vaddvq_u32(vaddq_u32(dot0, dot2))
+}
+
+// `ar.len()` must be a multiple of 128.
+unsafe fn residual_dot_u1_u8(ap: &[u8], ar: &[u8], bp: &[u8], br: &[u8]) -> ResidualDotComponents {
+    let len = ar.len();
+    let mut ap_dot_bp = 0u32;
+    let mut ap_dot_br = vdupq_n_u32(0);
+    let mut ar_dot_bp = vdupq_n_u32(0);
+    let mut ar_dot_br = vdupq_n_u32(0);
+    let mut ap_buf = vdupq_n_u8(0);
+    let mut bp_buf = vdupq_n_u8(0);
+    let mask = vdupq_n_u8(1);
+    let len16 = len & !15;
+    for i in (0..len16).step_by(16) {
+        if i % 128 == 0 {
+            ap_buf = vld1q_u8(ap.as_ptr().add(i / 128 * 16));
+            bp_buf = vld1q_u8(bp.as_ptr().add(i / 128 * 16));
+            ap_dot_bp += u32::from(vaddlvq_u8(vcntq_u8(vandq_u8(ap_buf, bp_buf))));
+        } else {
+            ap_buf = vshrq_n_u8::<1>(ap_buf);
+            bp_buf = vshrq_n_u8::<1>(bp_buf);
+        }
+
+        let apv = vandq_u8(ap_buf, mask);
+        let arv = vld1q_u8(ar.as_ptr().add(i));
+        let bpv = vandq_u8(bp_buf, mask);
+        let brv = vld1q_u8(br.as_ptr().add(i));
+        ap_dot_br = vdotq_u32(ap_dot_br, apv, brv);
+        ar_dot_bp = vdotq_u32(ar_dot_bp, arv, bpv);
+        ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
+    }
+
+    ResidualDotComponents {
+        ap_dot_bp,
+        ap_dot_br: vaddvq_u32(ap_dot_br),
+        ar_dot_bp: vaddvq_u32(ar_dot_bp),
+        ar_dot_br: vaddvq_u32(ar_dot_br),
+    }
+}
+
+// `ar.len()` must be a multiple of 64.
+unsafe fn residual_dot_u2_u8(ap: &[u8], ar: &[u8], bp: &[u8], br: &[u8]) -> ResidualDotComponents {
+    let len = ar.len();
+    let mut ap_dot_bp = vdupq_n_u32(0);
+    let mut ap_dot_br = vdupq_n_u32(0);
+    let mut ar_dot_bp = vdupq_n_u32(0);
+    let mut ar_dot_br = vdupq_n_u32(0);
+    let mut ap_buf = vdupq_n_u8(0);
+    let mut bp_buf = vdupq_n_u8(0);
+    let mask = vdupq_n_u8(3);
+    let len16 = len & !15;
+    for i in (0..len16).step_by(16) {
+        if i % 64 == 0 {
+            ap_buf = vld1q_u8(ap.as_ptr().add(i / 64 * 16));
+            bp_buf = vld1q_u8(bp.as_ptr().add(i / 64 * 16));
+        } else {
+            ap_buf = vshrq_n_u8::<2>(ap_buf);
+            bp_buf = vshrq_n_u8::<2>(bp_buf);
+        }
+
+        let apv = vandq_u8(ap_buf, mask);
+        let arv = vld1q_u8(ar.as_ptr().add(i));
+        let bpv = vandq_u8(bp_buf, mask);
+        let brv = vld1q_u8(br.as_ptr().add(i));
+        ap_dot_bp = vdotq_u32(ap_dot_bp, apv, bpv);
+        ap_dot_br = vdotq_u32(ap_dot_br, apv, brv);
+        ar_dot_bp = vdotq_u32(ar_dot_bp, arv, bpv);
+        ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
+    }
+
+    ResidualDotComponents {
+        ap_dot_bp: vaddvq_u32(ap_dot_bp),
+        ap_dot_br: vaddvq_u32(ap_dot_br),
+        ar_dot_bp: vaddvq_u32(ar_dot_bp),
+        ar_dot_br: vaddvq_u32(ar_dot_br),
+    }
+}
+
+// `ar.len()` must be a multiple of 32.
+unsafe fn residual_dot_u4_u8(ap: &[u8], ar: &[u8], bp: &[u8], br: &[u8]) -> ResidualDotComponents {
+    let len = ar.len();
+    let mut ap_dot_bp = vdupq_n_u32(0);
+    let mut ap_dot_br = vdupq_n_u32(0);
+    let mut ar_dot_bp = vdupq_n_u32(0);
+    let mut ar_dot_br = vdupq_n_u32(0);
+    let mut ap_buf = vdupq_n_u8(0);
+    let mut bp_buf = vdupq_n_u8(0);
+    let mask = vdupq_n_u8(0xf);
+    let len16 = len & !15;
+    for i in (0..len16).step_by(16) {
+        if i % 32 == 0 {
+            ap_buf = vld1q_u8(ap.as_ptr().add(i / 32 * 16));
+            bp_buf = vld1q_u8(bp.as_ptr().add(i / 32 * 16));
+        } else {
+            ap_buf = vshrq_n_u8::<4>(ap_buf);
+            bp_buf = vshrq_n_u8::<4>(bp_buf);
+        }
+
+        let apv = vandq_u8(ap_buf, mask);
+        let arv = vld1q_u8(ar.as_ptr().add(i));
+        let bpv = vandq_u8(bp_buf, mask);
+        let brv = vld1q_u8(br.as_ptr().add(i));
+        ap_dot_bp = vdotq_u32(ap_dot_bp, apv, bpv);
+        ap_dot_br = vdotq_u32(ap_dot_br, apv, brv);
+        ar_dot_bp = vdotq_u32(ar_dot_bp, arv, bpv);
+        ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
+    }
+
+    ResidualDotComponents {
+        ap_dot_bp: vaddvq_u32(ap_dot_bp),
+        ap_dot_br: vaddvq_u32(ap_dot_br),
+        ar_dot_bp: vaddvq_u32(ar_dot_bp),
+        ar_dot_br: vaddvq_u32(ar_dot_br),
+    }
+}
+
+// `ar.len()` must be a multiple of 16.
+unsafe fn residual_dot_u8_u8(ap: &[u8], ar: &[u8], bp: &[u8], br: &[u8]) -> ResidualDotComponents {
+    let len = ar.len();
+    let mut ap_dot_bp = vdupq_n_u32(0);
+    let mut ap_dot_br = vdupq_n_u32(0);
+    let mut ar_dot_bp = vdupq_n_u32(0);
+    let mut ar_dot_br = vdupq_n_u32(0);
+    let len16 = len & !15;
+    for i in (0..len16).step_by(16) {
+        let apv = vld1q_u8(ap.as_ptr().add(i));
+        let arv = vld1q_u8(ar.as_ptr().add(i));
+        let bpv = vld1q_u8(bp.as_ptr().add(i));
+        let brv = vld1q_u8(br.as_ptr().add(i));
+        ap_dot_bp = vdotq_u32(ap_dot_bp, apv, bpv);
+        ap_dot_br = vdotq_u32(ap_dot_br, apv, brv);
+        ar_dot_bp = vdotq_u32(ar_dot_bp, arv, bpv);
+        ar_dot_br = vdotq_u32(ar_dot_br, arv, brv);
+    }
+
+    ResidualDotComponents {
+        ap_dot_bp: vaddvq_u32(ap_dot_bp),
+        ap_dot_br: vaddvq_u32(ap_dot_br),
+        ar_dot_bp: vaddvq_u32(ar_dot_bp),
+        ar_dot_br: vaddvq_u32(ar_dot_br),
+    }
 }
 
 #[inline]
@@ -673,9 +1002,9 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
             }
             dot
         },
-        2 => unsafe { et_lvq_dot_u2(a.as_ptr(), b.as_ptr(), a.len()) },
-        4 => unsafe { et_lvq_dot_u4(a.as_ptr(), b.as_ptr(), a.len()) },
-        8 => unsafe { et_lvq_dot_u8(a.as_ptr(), b.as_ptr(), a.len()) },
+        2 => unsafe { lvq_dot_u2(a, b) },
+        4 => unsafe { lvq_dot_u4(a, b) },
+        8 => unsafe { lvq_dot_u8(a, b) },
         _ => unimplemented!(),
     }
 }
@@ -776,34 +1105,16 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
     doc: &TurboPrimaryVector<'_, B>,
 ) -> u32 {
     if B == 8 {
-        return unsafe { et_lvq_dot_u8(query.as_ptr(), doc.rep.data.as_ptr(), query.len()) };
+        return unsafe { lvq_dot_u8(query, doc.rep.data) };
     }
 
     let (tail_split, doc_head, doc_tail) = doc.split_tail(query.len());
     let (query_head, query_tail) = query.split_at(tail_split);
     let mut dot = if !query_head.is_empty() {
         match B {
-            1 => unsafe {
-                et_lvq_dot_u8_u1(
-                    query_head.as_ptr(),
-                    doc_head.rep.data.as_ptr(),
-                    query_head.len(),
-                )
-            },
-            2 => unsafe {
-                et_lvq_dot_u8_u2(
-                    query_head.as_ptr(),
-                    doc_head.rep.data.as_ptr(),
-                    query_head.len(),
-                )
-            },
-            4 => unsafe {
-                et_lvq_dot_u8_u4(
-                    query_head.as_ptr(),
-                    doc_head.rep.data.as_ptr(),
-                    query_head.len(),
-                )
-            },
+            1 => unsafe { lvq_dot_u8_u1(query_head, doc_head.rep.data) },
+            2 => unsafe { lvq_dot_u8_u2(query_head, doc_head.rep.data) },
+            4 => unsafe { lvq_dot_u8_u4(query_head, doc_head.rep.data) },
             _ => unimplemented!(),
         }
     } else {
@@ -826,42 +1137,10 @@ pub fn residual_dot_unnormalized<const B: usize>(
 
     let mut dot = if !query_head.0.is_empty() {
         match B {
-            1 => unsafe {
-                et_residual_dot_u1_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
-            2 => unsafe {
-                et_residual_dot_u2_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
-            4 => unsafe {
-                et_residual_dot_u4_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
-            8 => unsafe {
-                et_residual_dot_u8_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
+            1 => unsafe { residual_dot_u1_u8(query_head.0, query_head.1, doc_head.0, doc_head.1) },
+            2 => unsafe { residual_dot_u2_u8(query_head.0, query_head.1, doc_head.0, doc_head.1) },
+            4 => unsafe { residual_dot_u4_u8(query_head.0, query_head.1, doc_head.0, doc_head.1) },
+            8 => unsafe { residual_dot_u8_u8(query_head.0, query_head.1, doc_head.0, doc_head.1) },
             _ => scalar::residual_dot_unnormalized::<B>(query_head, doc_head),
         }
     } else {

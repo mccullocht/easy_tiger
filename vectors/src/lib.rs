@@ -7,6 +7,7 @@ pub mod float16;
 pub mod float32;
 mod lvq;
 mod quiver;
+mod rabitq;
 pub mod rotate;
 
 use serde::{Deserialize, Serialize};

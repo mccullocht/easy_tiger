@@ -103,46 +103,6 @@ impl std::fmt::Display for VectorSimilarity {
     }
 }
 
-/// Distance function for coded vectors.
-///
-/// This trait is object-safe; it may be instantiated at runtime based on
-/// data that appears in a file or other backing store.
-pub trait VectorDistance: Send + Sync {
-    /// Score the `query` vector against the `doc` vector. Returns a score
-    /// where larger values are better matches.
-    ///
-    /// This function is not required to be commutative and may panic if
-    /// one of the inputs is misshapen.
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64;
-
-    /// Compute the distance between the `query` vector and each of the `docs` vectors, writing
-    /// the results to `out`.
-    ///
-    /// This function is not required to be commutative and may panic if one of the inputs is
-    /// misshapen. It may also panic if `docs` and `out` are not the same length.
-    fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
-        for (doc, out) in docs.iter().zip(out.iter_mut()) {
-            *out = self.distance(query, doc);
-        }
-    }
-}
-
-/// Distance function for `f32` vectors.
-pub trait F32VectorDistance: VectorDistance {
-    /// Compute the distance between `a` and `b`; smaller values are better.
-    ///
-    /// Input vectors must be the same length or this function may panic.
-    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
-}
-
-/// Distance function for `f16` vectors.
-pub trait F16VectorDistance: VectorDistance {
-    /// Compute the distance between `a` and `b`; smaller values are better.
-    ///
-    /// Input vectors must be the same length or this function may panic.
-    fn distance_f16(&self, a: &[f16], b: &[f16]) -> f64;
-}
-
 /// Supported coding schemes for input f32 vectors.
 ///
 /// Raw vectors are stored little endian but the remaining formats are all lossy in some way with
@@ -505,6 +465,58 @@ pub trait F32VectorCoder: Send + Sync {
     fn dimensions(&self, byte_len: usize) -> usize;
 }
 
+/// Distance function for coded vectors.
+///
+/// This trait is object-safe; it may be instantiated at runtime based on
+/// data that appears in a file or other backing store.
+pub trait VectorDistance: Send + Sync {
+    /// Score the `query` vector against the `doc` vector. Returns a score
+    /// where larger values are better matches.
+    ///
+    /// This function is not required to be commutative and may panic if
+    /// one of the inputs is misshapen.
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64;
+
+    /// Compute the distance between the `query` vector and each of the `docs` vectors, writing
+    /// the results to `out`.
+    ///
+    /// This function is not required to be commutative and may panic if one of the inputs is
+    /// misshapen. It may also panic if `docs` and `out` are not the same length.
+    fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
+        for (doc, out) in docs.iter().zip(out.iter_mut()) {
+            *out = self.distance(query, doc);
+        }
+    }
+}
+
+/// Distance function for `f32` vectors.
+pub trait F32VectorDistance: VectorDistance {
+    /// Compute the distance between `a` and `b`; smaller values are better.
+    ///
+    /// Input vectors must be the same length or this function may panic.
+    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
+}
+
+/// Distance function for `f16` vectors.
+pub trait F16VectorDistance: VectorDistance {
+    /// Compute the distance between `a` and `b`; smaller values are better.
+    ///
+    /// Input vectors must be the same length or this function may panic.
+    fn distance_f16(&self, a: &[f16], b: &[f16]) -> f64;
+}
+
+/// Estimated distance between two vectors including an error bound.
+///
+/// The error bound is expected to be a statistical bound as opposed to an arithmetic bound.
+/// If the input vector components have a Gaussian distribution then the error bounds should
+/// correspond to a Z score of 1.0; callers may adjust the bound depending on their tolerance.
+pub struct EstimatedDistance {
+    /// Estimated distance.
+    pub distance: f64,
+    /// Error; actual distance is expected to be `distance +/- error`.
+    pub error: f64,
+}
+
 /// Compute the distance between a fixed vector provided at creation time and other vectors.
 /// This is often useful in query flows where everything references a specific point.
 pub trait QueryVectorDistance: Send + Sync {
@@ -521,6 +533,17 @@ pub trait QueryVectorDistance: Send + Sync {
     fn bulk_distance(&self, vectors: &[&[u8]], out: &mut [f64]) {
         for (vector, out) in vectors.iter().zip(out.iter_mut()) {
             *out = self.distance(vector);
+        }
+    }
+
+    /// Estimated distance between the bound query vector and `vector`.
+    ///
+    /// Note that not all distance functions will support this so callers should be prepared for the
+    /// degenerate case where the error bound is 0.0.
+    fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
+        EstimatedDistance {
+            distance: self.distance(vector),
+            error: 0.0,
         }
     }
 

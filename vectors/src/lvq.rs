@@ -875,7 +875,7 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
         }
     }
 
-    // XXX we need tests.
+    // TODO: add tests for this. Right now it is not accurate enough to write good tests.
     fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
         let vector =
             TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");

@@ -10,7 +10,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  test:
+    strategy:
+      matrix:
+        target: [ubuntu-24.04, ubuntu-24.04-arm]
+    
+    runs-on: ${{ matrix.target }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: WiredTiger submodule init
+      run: git submodule update --init --recursive
+    - name: Build
+      run: cargo build --workspace
+    - name: Run tests
+      run: cargo test --workspace
+
+  lint:
     strategy:
       matrix:
         target: [ubuntu-24.04, ubuntu-24.04-arm]
@@ -23,9 +39,5 @@ jobs:
       run: git submodule update --init --recursive
     - name: Fmt
       run: cargo fmt --check
-    - name: Build
-      run: cargo build --workspace
-    - name: Run tests
-      run: cargo test --workspace
     - name: Clippy
       run: cargo clippy -- -D warnings

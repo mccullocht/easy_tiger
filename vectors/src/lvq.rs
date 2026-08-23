@@ -26,7 +26,8 @@ use half::f16;
 use thread_local::ThreadLocal;
 
 use crate::{
-    F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity, float32::l2_norm,
+    EstimatedDistance, F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
+    float32::l2_norm,
 };
 
 const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
@@ -45,8 +46,6 @@ const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
 const fn check_primary_bits(bits: usize) {
     assert!(is_supported_bits(bits, &SUPPORTED_PRIMARY_BITS));
 }
-
-const ESTIMATED_DISTANCE_Z_SCORE: f32 = 1.96;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Kernel {
@@ -270,6 +269,7 @@ impl DistanceCorrectionTerms {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
 struct ErrorBoundTerms {
     l2_norm: f32,
     residual_error_term: f32,
@@ -278,12 +278,10 @@ struct ErrorBoundTerms {
 
 impl ErrorBoundTerms {
     fn from_header(header: &PrimaryVectorHeader, dim: usize, similarity: VectorSimilarity) -> Self {
-        let mult = (ESTIMATED_DISTANCE_Z_SCORE
-            * match similarity {
-                VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
-                VectorSimilarity::Euclidean => 2.0,
-            })
-            / (dim as f32).sqrt();
+        let mult = match similarity {
+            VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
+            VectorSimilarity::Euclidean => 2.0,
+        } / (dim as f32).sqrt();
         Self {
             l2_norm: header.l2_norm,
             residual_error_term: header.residual_error_term,
@@ -292,8 +290,9 @@ impl ErrorBoundTerms {
     }
 
     fn error_bound<const B: usize>(&self, vector: &TurboPrimaryVector<B>) -> f32 {
-        (self.residual_error_term * vector.l2_norm + vector.residual_error_term * self.l2_norm)
-            * self.mult
+        let query_error = self.residual_error_term * vector.l2_norm;
+        let doc_error = vector.residual_error_term * self.l2_norm;
+        (query_error.powi(2) + doc_error.powi(2)).sqrt() * self.mult
     }
 }
 
@@ -804,12 +803,13 @@ const PRIMARY_QUERY_BITS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct TurboPrimaryQueryDistance<const B: usize> {
+    k: Kernel,
     similarity: VectorSimilarity,
+
     query: Vec<u8>,
     terms: VectorDecodeTerms,
     correction_terms: DistanceCorrectionTerms,
-
-    inst: Kernel,
+    error_terms: ErrorBoundTerms,
 }
 
 impl<const B: usize> TurboPrimaryQueryDistance<B> {
@@ -818,36 +818,43 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
         query: Cow<'_, [f32]>,
         center: Option<&[f32]>,
     ) -> Self {
-        let inst = Kernel::default();
+        let k = Kernel::default();
         let (header, query) = TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(
-            inst,
+            k,
             similarity,
             query.as_ref(),
             center,
         );
         let terms = VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
         let correction_terms = DistanceCorrectionTerms::new(&header, center, similarity);
+        let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
 
         Self {
+            k,
             similarity,
             query,
             terms,
             correction_terms,
-            inst,
+            error_terms,
         }
     }
 
     #[inline(always)]
-    fn distance_internal(&self, vector: &[u8]) -> f64 {
+    fn distance_internal_raw(&self, vector: &[u8]) -> f64 {
         let vector =
             TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
-        let uint8_dot = match self.inst {
-            Kernel::Scalar => scalar::primary_query8_dot_unnormalized::<B>(&self.query, &vector),
+        self.distance_internal(&vector)
+    }
+
+    #[inline(always)]
+    fn distance_internal(&self, vector: &TurboPrimaryVector<B>) -> f64 {
+        let uint8_dot = match self.k {
+            Kernel::Scalar => scalar::primary_query8_dot_unnormalized::<B>(&self.query, vector),
             #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::primary_query8_dot_unnormalized::<B>(&self.query, &vector),
+            Kernel::Neon => aarch64::primary_query8_dot_unnormalized::<B>(&self.query, vector),
             #[cfg(target_arch = "x86_64")]
             Kernel::Avx512 => unsafe {
-                x86_64::primary_query8_dot_unnormalized_avx512::<B>(&self.query, &vector)
+                x86_64::primary_query8_dot_unnormalized_avx512::<B>(&self.query, vector)
             },
         };
         let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);
@@ -859,13 +866,22 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
 
 impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        self.distance_internal(vector)
+        self.distance_internal_raw(vector)
     }
 
     fn bulk_distance(&self, vectors: &[&[u8]], out: &mut [f64]) {
         for (vector, out) in vectors.iter().zip(out.iter_mut()) {
-            *out = self.distance_internal(vector);
+            *out = self.distance_internal_raw(vector);
         }
+    }
+
+    // TODO: add tests for this. Right now it is not accurate enough to write good tests.
+    fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
+        let vector =
+            TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
+        let distance = self.distance_internal(&vector);
+        let error = self.error_terms.error_bound(&vector).into();
+        EstimatedDistance { distance, error }
     }
 }
 
@@ -876,15 +892,15 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
 /// This can provide significant savings, particularly when using memory bound indexes like a flat
 /// index or partitioned index.
 pub struct TurboPrimaryQueryDistance1 {
+    k: Kernel,
     similarity: VectorSimilarity,
+
     primary_query: Vec<u8>,
     primary_terms: VectorDecodeTerms,
     residual_query: Vec<u8>,
     residual_terms: VectorDecodeTerms,
     correction_terms: DistanceCorrectionTerms,
     error_terms: ErrorBoundTerms,
-
-    inst: Kernel,
 }
 
 impl TurboPrimaryQueryDistance1 {
@@ -893,11 +909,12 @@ impl TurboPrimaryQueryDistance1 {
         query: Cow<'_, [f32]>,
         center: Option<&[f32]>,
     ) -> Self {
-        let inst = Kernel::default();
+        let k = Kernel::default();
         let (primary_header, primary_query, residual_header, residual_query) =
-            TurboResidualCoder::<1>::encode_parts(inst, similarity, query.as_ref(), center);
+            TurboResidualCoder::<1>::encode_parts(k, similarity, query.as_ref(), center);
         let correction_terms = DistanceCorrectionTerms::new(&primary_header, center, similarity);
         Self {
+            k,
             similarity,
             primary_query,
             primary_terms: VectorDecodeTerms::from_primary::<1>(primary_header),
@@ -905,7 +922,6 @@ impl TurboPrimaryQueryDistance1 {
             residual_terms: VectorDecodeTerms::from_residual(residual_header),
             correction_terms,
             error_terms: ErrorBoundTerms::from_header(&primary_header, query.len(), similarity),
-            inst,
         }
     }
 }
@@ -915,10 +931,41 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
         self.distance_with_bound(vector, f64::INFINITY).unwrap()
     }
 
+    fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
+        let vector =
+            TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
+        let uint8_dot_primary = match self.k {
+            Kernel::Scalar => scalar::dot_u8::<1>(&self.primary_query, vector.rep.data),
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::dot_u8::<1>(&self.primary_query, vector.rep.data),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                x86_64::dot_u8_avx512::<1>(&self.primary_query, vector.rep.data)
+            },
+        };
+        let dot_primary = correct_dot_uint(
+            uint8_dot_primary,
+            self.residual_query.len(),
+            &self.primary_terms,
+            &vector.rep.terms,
+        );
+        let distance_primary = self.correction_terms.distance_from_dot_unnormalized(
+            dot_primary,
+            vector.l2_norm,
+            vector.center_dot,
+        );
+        let error = self.error_terms.error_bound(&vector);
+        EstimatedDistance {
+            distance: distance_primary.into(),
+            error: error.into(),
+        }
+    }
+
+    // TODO: replace this API. It should refine the score based on the initial score.
     fn distance_with_bound(&self, vector: &[u8], max_distance: f64) -> Option<f64> {
         let vector =
             TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
-        let uint8_dot_primary = match self.inst {
+        let uint8_dot_primary = match self.k {
             Kernel::Scalar => scalar::dot_u8::<1>(&self.primary_query, vector.rep.data),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::dot_u8::<1>(&self.primary_query, vector.rep.data),
@@ -943,7 +990,7 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
             return None;
         }
 
-        let uint8_dot_residual = match self.inst {
+        let uint8_dot_residual = match self.k {
             Kernel::Scalar => {
                 scalar::primary_query8_dot_unnormalized::<1>(&self.residual_query, &vector)
             }

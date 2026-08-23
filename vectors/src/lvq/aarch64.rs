@@ -14,7 +14,7 @@ use std::arch::aarch64::{
 };
 
 use crate::lvq::{
-    RESIDUAL_BITS, ResidualDotComponents, TURBO_BLOCK_SIZE, TurboPrimaryVector,
+    QuantizationStats, RESIDUAL_BITS, ResidualDotComponents, TURBO_BLOCK_SIZE, TurboPrimaryVector,
     TurboResidualVector, VectorDecodeTerms, VectorEncodeTerms, scalar,
 };
 
@@ -231,13 +231,12 @@ pub fn primary_quantize_and_pack<const B: usize>(
     vector: &[f32],
     terms: VectorEncodeTerms,
     out: &mut [u8],
-) -> (u32, f32) {
+) -> QuantizationStats {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
     let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
-    let mut component_sum = 0u32;
-    let mut residual_error_sq = 0.0f32;
+    let mut stats = QuantizationStats::default();
     if !vector_head.is_empty() {
         unsafe {
             let terms = NeonVectorEncodeTerms::from_terms(&terms);
@@ -280,7 +279,7 @@ pub fn primary_quantize_and_pack<const B: usize>(
                     ),
                     shuffle_mask,
                 );
-                component_sum += u32::from(vaddlvq_u8(qabcd));
+                stats.primary_component_sum += u32::from(vaddlvq_u8(qabcd));
 
                 d = vorrq_u8(d, vshlq_u8(qabcd, vdupq_n_s8(shift)));
                 shift += B as i8;
@@ -292,7 +291,7 @@ pub fn primary_quantize_and_pack<const B: usize>(
                 }
             }
 
-            residual_error_sq = vaddvq_f32(vaddq_f32(
+            stats.residual_error_sq = vaddvq_f32(vaddq_f32(
                 vaddq_f32(residual_errorv[0], residual_errorv[1]),
                 vaddq_f32(residual_errorv[2], residual_errorv[3]),
             ));
@@ -300,11 +299,9 @@ pub fn primary_quantize_and_pack<const B: usize>(
     }
 
     if !vector_tail.is_empty() {
-        let (cs, re) = scalar::primary_quantize_and_pack::<B>(vector_tail, terms, out_tail);
-        residual_error_sq += re;
-        component_sum += cs;
+        stats += scalar::primary_quantize_and_pack::<B>(vector_tail, terms, out_tail);
     }
-    (component_sum, residual_error_sq)
+    stats
 }
 
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
@@ -346,16 +343,14 @@ pub fn residual_quantize_and_pack<const B: usize>(
     residual_terms: VectorEncodeTerms,
     primary_out: &mut [u8],
     residual_out: &mut [u8],
-) -> (u32, u32, f32) {
+) -> QuantizationStats {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
     let (primary_out_head, primary_out_tail) =
         primary_out.split_at_mut(packing::byte_len(tail_split, B));
     let (residual_out_head, residual_out_tail) = residual_out.split_at_mut(tail_split);
-    let mut primary_component_sum = 0u32;
-    let mut residual_component_sum = 0u32;
-    let mut residual_error_sq = 0.0f32;
+    let mut stats = QuantizationStats::default();
     if !vector_head.is_empty() {
         unsafe {
             let primary_terms = NeonVectorEncodeTerms::from_terms(&primary_terms);
@@ -412,7 +407,7 @@ pub fn residual_quantize_and_pack<const B: usize>(
                     ),
                     shuffle_mask,
                 );
-                primary_component_sum += u32::from(vaddlvq_u8(pabcd));
+                stats.primary_component_sum += u32::from(vaddlvq_u8(pabcd));
 
                 d = vorrq_u8(d, vshlq_u8(pabcd, vdupq_n_s8(shift)));
                 shift += B as i8;
@@ -432,11 +427,11 @@ pub fn residual_quantize_and_pack<const B: usize>(
                     ),
                     shuffle_mask,
                 );
-                residual_component_sum += u32::from(vaddlvq_u8(rabcd));
+                stats.residual_component_sum += u32::from(vaddlvq_u8(rabcd));
                 vst1q_u8(residual_out_head.as_mut_ptr().add(i), rabcd);
             }
 
-            residual_error_sq = vaddvq_f32(vaddq_f32(
+            stats.residual_error_sq = vaddvq_f32(vaddq_f32(
                 vaddq_f32(residual_errorv[0], residual_errorv[1]),
                 vaddq_f32(residual_errorv[2], residual_errorv[3]),
             ));
@@ -444,22 +439,15 @@ pub fn residual_quantize_and_pack<const B: usize>(
     }
 
     if !vector_tail.is_empty() {
-        let (ps, rs, re) = scalar::residual_quantize_and_pack::<B>(
+        stats += scalar::residual_quantize_and_pack::<B>(
             vector_tail,
             primary_terms,
             residual_terms,
             primary_out_tail,
             residual_out_tail,
         );
-        primary_component_sum += ps;
-        residual_component_sum += rs;
-        residual_error_sq += re;
     }
-    (
-        primary_component_sum,
-        residual_component_sum,
-        residual_error_sq,
-    )
+    stats
 }
 
 pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {

@@ -434,6 +434,44 @@ impl ResidualVectorHeader {
     }
 }
 
+#[derive(Default, Debug, Copy, Clone, PartialEq)]
+struct QuantizationStats {
+    /// Sum of all quantized primary components.
+    primary_component_sum: u32,
+    /// Sum of all quantized residual components. 0 for primary-only quantization.
+    residual_component_sum: u32,
+    /// The inner product of the residual after primary quantization.
+    residual_error_sq: f32,
+}
+
+impl QuantizationStats {
+    fn add_component(self, cp: u32, cr: u32, r: f32) -> Self {
+        Self {
+            primary_component_sum: self.primary_component_sum + cp,
+            residual_component_sum: self.residual_component_sum + cr,
+            residual_error_sq: r.mul_add(r, self.residual_error_sq),
+        }
+    }
+}
+
+impl Add<QuantizationStats> for QuantizationStats {
+    type Output = Self;
+
+    fn add(self, rhs: QuantizationStats) -> Self::Output {
+        Self {
+            primary_component_sum: self.primary_component_sum + rhs.primary_component_sum,
+            residual_component_sum: self.residual_component_sum + rhs.residual_component_sum,
+            residual_error_sq: self.residual_error_sq + rhs.residual_error_sq,
+        }
+    }
+}
+
+impl AddAssign<QuantizationStats> for QuantizationStats {
+    fn add_assign(&mut self, rhs: QuantizationStats) {
+        *self = *self + rhs;
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 struct VectorDecodeTerms {
     lower: f32,
@@ -665,8 +703,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
-        let residual_error_sq;
-        (header.component_sum, residual_error_sq) = match k {
+        let quant_stats = match k {
             Kernel::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
@@ -675,7 +712,8 @@ impl<const B: usize> TurboPrimaryCoder<B> {
                 x86_64::primary_quantize_and_pack_avx512::<B>(vector, terms, out)
             },
         };
-        header.residual_error_term = residual_error_sq.sqrt();
+        header.component_sum = quant_stats.primary_component_sum;
+        header.residual_error_term = quant_stats.residual_error_sq.sqrt();
 
         header
     }
@@ -1220,12 +1258,7 @@ impl<const B: usize> TurboResidualCoder<B> {
 
         let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
         let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
-        let residual_error_sq;
-        (
-            primary_header.component_sum,
-            residual_header.component_sum,
-            residual_error_sq,
-        ) = match k {
+        let quant_stats = match k {
             Kernel::Scalar => scalar::residual_quantize_and_pack::<B>(
                 vector,
                 primary_terms,
@@ -1252,7 +1285,9 @@ impl<const B: usize> TurboResidualCoder<B> {
                 )
             },
         };
-        primary_header.residual_error_term = residual_error_sq.sqrt();
+        primary_header.component_sum = quant_stats.primary_component_sum;
+        residual_header.component_sum = quant_stats.residual_component_sum;
+        primary_header.residual_error_term = quant_stats.residual_error_sq.sqrt();
 
         (primary_header, residual_header)
     }

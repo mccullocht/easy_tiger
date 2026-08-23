@@ -116,10 +116,10 @@ pub fn primary_quantize_and_pack<const B: usize>(
             let q = ((v.clamp(terms.lower, terms.upper) - terms.lower) * terms.delta_inv).round();
             let r = v - q.mul_add(terms.delta, terms.lower);
             packer.push(q as u8);
-            (q as u32, r)
+            (q as u32, v, r)
         })
-        .fold(QuantizationStats::default(), |stats, (q, r)| {
-            stats.add_component(q, 0, r)
+        .fold(QuantizationStats::default(), |stats, (q, v, r)| {
+            stats.add_component(q, 0, v, r)
         })
 }
 
@@ -152,10 +152,10 @@ pub fn residual_quantize_and_pack<const B: usize>(
                 * residual_terms.delta_inv)
                 .round() as u8;
             residual_packer.push(r);
-            (u32::from(p), u32::from(r), res)
+            (u32::from(p), u32::from(r), v, res)
         })
-        .fold(QuantizationStats::default(), |stats, (p, r, e)| {
-            stats.add_component(p, r, e)
+        .fold(QuantizationStats::default(), |stats, (p, r, v, e)| {
+            stats.add_component(p, r, v, e)
         })
 }
 

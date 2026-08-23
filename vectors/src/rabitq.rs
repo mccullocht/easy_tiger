@@ -135,3 +135,15 @@ impl F32VectorCoder for Coder {
         (byte_len - Header::LEN) * 8
     }
 }
+
+// XXX this might be able to use the turbo packer after all to speed up bitplane split for ADC.
+
+// XXX ADC
+// * Quantize the query and bitplane split.
+// * Use bitplane split hamming trick up to 4 bits, or maybe just use DOT.
+// * Do I have to perform signed quantization of the input vector?
+
+// XXX SDC
+// * Just use hamming distance.
+// * Euclidean is going to be less accurate unless I store the mean magnitude per dimension of the
+//   centered vector.

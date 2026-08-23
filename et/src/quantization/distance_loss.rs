@@ -208,7 +208,6 @@ impl Add<DistanceLossStats> for DistanceLossStats {
     }
 }
 
-// XXX should this be under/over estimate? yes this is confusing because below means "expected is below"
 #[derive(Debug, Copy, Clone, Default)]
 struct ZScoreStats {
     /// Number of samples within the error bound (expanded by Z score).

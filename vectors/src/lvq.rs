@@ -961,7 +961,7 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
         }
     }
 
-    // XXX next steps for this -- replace it with a refine_distance() call?
+    // TODO: replace this API. It should refine the score based on the initial score.
     fn distance_with_bound(&self, vector: &[u8], max_distance: f64) -> Option<f64> {
         let vector =
             TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");

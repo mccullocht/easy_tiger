@@ -889,7 +889,6 @@ macro_rules! lvq_coding_simd_test {
             let scoder =
                 <$coder>::with_kernel(Kernel::Scalar, VectorSimilarity::Euclidean, None);
             for k in Kernel::accelerated() {
-                // XXX should test other coders in a loop.
                 let ocoder = <$coder>::new(VectorSimilarity::Euclidean, None);
                 // TODO: use randomly sized vectors like we do for distance tests.
                 for i in 0..1024 {

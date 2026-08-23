@@ -281,6 +281,7 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
         let mut qbuf = _mm512_set1_epi32(0);
         let mut component_sum = _mm512_set1_epi32(0);
         let mut residual_error_sq = _mm512_set1_ps(0.0);
+        let mut residual_ip = _mm512_set1_ps(0.0);
         let mut shift = 0;
         for i in (0..tail_split).step_by(16) {
             let v = _mm512_loadu_ps(in_head.as_ptr().add(i));
@@ -288,6 +289,7 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
             let d = terms.dequantize(q);
             let diff = _mm512_sub_ps(v, d);
             residual_error_sq = _mm512_fmadd_ps(diff, diff, residual_error_sq);
+            residual_ip = _mm512_fmadd_ps(v, diff, residual_ip);
             component_sum = _mm512_add_epi32(component_sum, q);
             qbuf = _mm512_or_si512(qbuf, _mm512_sll_epi32(q, _mm_set1_epi64x(shift as i64)));
             shift += B;
@@ -308,6 +310,7 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
             primary_component_sum: _mm512_reduce_add_epi32(component_sum) as u32,
             residual_component_sum: 0,
             residual_error_sq: _mm512_reduce_add_ps(residual_error_sq),
+            residual_ip: _mm512_reduce_add_ps(residual_ip),
         }
     } else {
         QuantizationStats::default()
@@ -389,6 +392,7 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
         let mut primary_component_sum = _mm512_set1_epi32(0);
         let mut residual_component_sum = _mm512_set1_epi32(0);
         let mut residual_error_sq = _mm512_set1_ps(0.0);
+        let mut residual_ip = _mm512_set1_ps(0.0);
         let mut pbuf = _mm512_set1_epi32(0);
         let mut block = 0usize;
         let mut shift = 0i64;
@@ -398,6 +402,7 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
             let dq = primary_terms.dequantize(p);
             let diff = _mm512_sub_ps(v, dq);
             residual_error_sq = _mm512_fmadd_ps(diff, diff, residual_error_sq);
+            residual_ip = _mm512_fmadd_ps(v, diff, residual_ip);
             let r = residual_terms.quantize(diff);
 
             primary_component_sum = _mm512_add_epi32(primary_component_sum, p);
@@ -428,6 +433,7 @@ pub unsafe fn residual_quantize_and_pack_avx512<const B: usize>(
             primary_component_sum: _mm512_reduce_add_epi32(primary_component_sum) as u32,
             residual_component_sum: _mm512_reduce_add_epi32(residual_component_sum) as u32,
             residual_error_sq: _mm512_reduce_add_ps(residual_error_sq),
+            residual_ip: _mm512_reduce_add_ps(residual_ip),
         }
     } else {
         QuantizationStats::default()

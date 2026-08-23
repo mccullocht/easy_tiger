@@ -264,7 +264,7 @@ impl PrimaryStatsAccumulator {
             let (q, r) = quantize4_residual_error(v, &self.terms);
             self.residual_error_sq = vfmaq_f32(self.residual_error_sq, r, r);
             self.residual_ip = vfmaq_f32(self.residual_ip, v, r);
-            (q, quantize4(r, &residual_terms))
+            (q, quantize4(r, residual_terms))
         }
     }
 

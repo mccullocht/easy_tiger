@@ -97,9 +97,9 @@ pub fn distance_loss(
                 let doc_f32 = vectors[d].to_f32_vec();
                 let doc_q = coder.encode(&doc_f32);
 
-                let expected = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32));
-                let actual = qdist.as_ref().estimated_distance(&doc_q);
-                stats.add_sample(expected, actual);
+                let actual = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32));
+                let estimate = qdist.as_ref().estimated_distance(&doc_q);
+                stats.add_sample(actual, estimate);
             }
             stats
         })
@@ -114,10 +114,10 @@ pub fn distance_loss(
     );
     for (&z, s) in Z_SCORES.iter().zip(stats.zstats.iter()) {
         println!(
-            "Z={z:.2} in range {:5.2}% below {:5.2}% above {:5.2}%",
+            "Z={z:.2} in range {:5.2}% over estimate {:5.2}% under estimate {:5.2}%",
             (s.in_range as f64 / stats.count as f64) * 100.0,
-            (s.below_range as f64 / stats.count as f64) * 100.0,
-            (s.above_range as f64 / stats.count as f64) * 100.0,
+            (s.over as f64 / stats.count as f64) * 100.0,
+            (s.under as f64 / stats.count as f64) * 100.0,
         );
     }
     Ok(())
@@ -133,14 +133,14 @@ struct DistanceLossStats {
 }
 
 impl DistanceLossStats {
-    fn add_sample(&mut self, expected: f64, actual: EstimatedDistance) {
-        let diff = expected - actual.distance;
+    fn add_sample(&mut self, actual: f64, estimate: EstimatedDistance) {
+        let diff = actual - estimate.distance;
         self.count += 1;
         self.error_sum += diff.abs();
         self.error_sq_sum += diff.powi(2);
-        self.error_z_sum += diff.abs() / actual.error;
+        self.error_z_sum += diff.abs() / estimate.error;
         for (s, &z) in self.zstats.iter_mut().zip(Z_SCORES.iter()) {
-            s.add_sample(expected, actual, z);
+            s.add_sample(actual, estimate, z);
         }
     }
 }
@@ -179,18 +179,21 @@ impl Add<DistanceLossStats> for DistanceLossStats {
 // XXX should this be under/over estimate? yes this is confusing because below means "expected is below"
 #[derive(Debug, Copy, Clone, Default)]
 struct ZScoreStats {
+    /// Number of samples within the error bound (expanded by Z score).
     in_range: usize,
-    below_range: usize,
-    above_range: usize,
+    /// Number of samples where distance was an over estimate of actual distance.
+    over: usize,
+    /// Number of samples where distance was an under estimate of actual distance.
+    under: usize,
 }
 
 impl ZScoreStats {
-    fn add_sample(&mut self, expected: f64, actual: EstimatedDistance, z: f64) {
-        let e = actual.error * z;
-        if expected < actual.distance - e {
-            self.below_range += 1;
-        } else if expected > actual.distance + e {
-            self.above_range += 1;
+    fn add_sample(&mut self, actual: f64, estimate: EstimatedDistance, z: f64) {
+        let e = estimate.error * z;
+        if actual < estimate.distance - e {
+            self.over += 1;
+        } else if actual > estimate.distance + e {
+            self.under += 1;
         } else {
             self.in_range += 1;
         }
@@ -203,8 +206,8 @@ impl Add<ZScoreStats> for ZScoreStats {
     fn add(self, rhs: ZScoreStats) -> Self::Output {
         Self {
             in_range: self.in_range + rhs.in_range,
-            below_range: self.below_range + rhs.below_range,
-            above_range: self.above_range + rhs.above_range,
+            over: self.over + rhs.over,
+            under: self.under + rhs.under,
         }
     }
 }

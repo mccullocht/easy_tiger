@@ -510,6 +510,7 @@ pub trait F16VectorDistance: VectorDistance {
 /// The error bound is expected to be a statistical bound as opposed to an arithmetic bound.
 /// If the input vector components have a Gaussian distribution then the error bounds should
 /// correspond to a Z score of 1.0; callers may adjust the bound depending on their tolerance.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EstimatedDistance {
     /// Estimated distance.
     pub distance: f64,

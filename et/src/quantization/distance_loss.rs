@@ -7,7 +7,7 @@ use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use smallvec::smallvec;
-use vectors::{EstimatedDistance, F32VectorCoding, VectorSimilarity, f16};
+use vectors::{EstimatedDistance, F32VectorCoding, VectorSimilarity, f16, rotate::Rotator};
 
 use crate::ui::progress_bar;
 
@@ -37,12 +37,27 @@ pub struct DistanceLossArgs {
     /// If set, compute the center of the dataset and apply before computing distances.
     #[arg(long, default_value_t = false)]
     center: bool,
+
+    /// If set, rotate vectors before quantization.
+    #[arg(long, default_value_t = false)]
+    rotate: bool,
+
+    /// Seed for rotation.
+    #[arg(long, default_value_t = 11500348935374314158)]
+    rotate_seed: u64,
 }
 
 pub fn distance_loss(
     args: DistanceLossArgs,
     vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
+    if args.center && args.rotate {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "centering and rotation are incompatible",
+        ));
+    }
+
     let query_vectors: DerefVectorStore<f16, Mmap> =
         DerefVectorStore::from_file(args.query_vectors)?;
     if query_vectors.elem_stride() != vectors.elem_stride() {
@@ -65,16 +80,31 @@ pub fn distance_loss(
     } else {
         None
     };
+    let rotator = if args.rotate {
+        Some(Rotator::new(vectors.elem_stride(), args.rotate_seed))
+    } else {
+        None
+    };
 
     let coder = args.format.coder(args.similarity, center.clone());
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
-            let mut query = vec![0.0f32; query_vectors.elem_stride()];
-            query_vectors[i].convert_to_f32_slice(&mut query);
+            let mut query = query_vectors[i].to_f32_vec();
+            let f32_dist = F32VectorCoding::F32.query_distance_asymmetric(
+                args.similarity,
+                query.clone(),
+                center.as_deref(),
+            );
+            if let Some(r) = rotator.as_ref() {
+                query = r.forward(&query);
+            }
             let qdist = if args.quantize_query {
-                args.format
-                    .query_distance_symmetric(args.similarity, coder.encode(&query), None)
+                args.format.query_distance_symmetric(
+                    args.similarity,
+                    coder.encode(&query),
+                    center.as_deref(),
+                )
             } else {
                 args.format.query_distance_asymmetric(
                     args.similarity,
@@ -82,8 +112,6 @@ pub fn distance_loss(
                     center.as_deref(),
                 )
             };
-            let f32_dist =
-                F32VectorCoding::F32.query_distance_asymmetric(args.similarity, query, None);
             (f32_dist, qdist)
         })
         .collect::<Vec<_>>();
@@ -95,7 +123,11 @@ pub fn distance_loss(
             let mut stats = DistanceLossStats::default();
             for (f32_dist, qdist) in query_scorers.iter() {
                 let doc_f32 = vectors[d].to_f32_vec();
-                let doc_q = coder.encode(&doc_f32);
+                let doc_q = if let Some(r) = rotator.as_ref() {
+                    coder.encode(&r.forward(&doc_f32))
+                } else {
+                    coder.encode(&doc_f32)
+                };
 
                 let actual = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32));
                 let estimate = qdist.as_ref().estimated_distance(&doc_q);

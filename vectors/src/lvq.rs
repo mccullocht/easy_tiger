@@ -307,18 +307,23 @@ struct PrimaryVectorHeader {
     /// L2 norm (magnitude) of the vector.
     /// This is used to compute euclidean distance and the statistical bound on estimated distance.
     l2_norm: f32,
+    /// The dot product of the vector and the centroid.
+    /// This is used to compute angular distance when the vector is centered.
+    center_dot: f32,
     /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
     /// This term can be used to compute a statistical bound on the estimated distance.
     residual_error_term: f32,
+    /// Parallel error -- the projection of the vector onto the quantized residual divided by the
+    /// squared l2 norm.
+    ///
+    /// Interval optimization minimizes this term so it is typically small.
+    parallel_error_term: f32,
     /// Lower interval bound used for quantization, no smaller than the minimum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     lower: f32,
     /// Upper interval bound used for quantization, no larger than the maximum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     upper: f32,
-    /// The dot product of the vector and the centroid.
-    /// This is used to compute angular distance when the vector is centered.
-    center_dot: f32,
     /// Sum of all the quantized components of the vector. This is used to correct the uint dot
     /// product to an f32 dot product.
     component_sum: u32,
@@ -327,26 +332,27 @@ struct PrimaryVectorHeader {
 impl PrimaryVectorHeader {
     /// Length of the encoded header in bytes.
     ///
-    /// Stores 5 values -- two 16-bit values and 3 32-bit values.
+    /// Stores 6 values -- 4 16-bit values and 2 32-bit values.
     /// * l2_norm or center_dot (f32)
-    /// * residual_error_term (f32)
+    /// * component_sum (u32)
+    /// * residual_error_term (f16)
+    /// * parallel_error_term (f16)
     /// * lower (f16)
     /// * upper (f16)
-    /// * component_sum (u32)
     ///
-    /// The first two terms are stored as f32 as they have a greater effect on precision.
-    const LEN: usize = std::mem::size_of::<f32>() * 2
-        + std::mem::size_of::<f16>() * 2
-        + std::mem::size_of::<u32>();
+    /// The first term is stored as 32 bits as it is combined directly into the final distance.
+    const LEN: usize =
+        std::mem::size_of::<f32>() + std::mem::size_of::<u32>() + std::mem::size_of::<f16>() * 4;
 
     fn new(stats: VectorStats, center_dot: f32) -> Self {
         Self {
             l2_norm: stats.l2_norm_sq.sqrt(),
-            residual_error_term: 0.0,
             center_dot,
+            component_sum: 0,
+            residual_error_term: 0.0,
+            parallel_error_term: 0.0,
             lower: stats.min,
             upper: stats.max,
-            component_sum: 0,
         }
     }
 
@@ -357,35 +363,44 @@ impl PrimaryVectorHeader {
 
     #[inline]
     fn serialize(&self, header_bytes: &mut [u8], similarity: VectorSimilarity) {
+        let h32 = header_bytes[..8].as_chunks_mut::<4>().0;
         let first = if similarity.angular() {
             self.center_dot
         } else {
             self.l2_norm
         };
-        header_bytes[0..4].copy_from_slice(&first.to_le_bytes());
-        header_bytes[4..8].copy_from_slice(&self.residual_error_term.to_le_bytes());
-        header_bytes[8..10].copy_from_slice(&f16::from_f32(self.lower).to_le_bytes());
-        header_bytes[10..12].copy_from_slice(&f16::from_f32(self.upper).to_le_bytes());
-        header_bytes[12..16].copy_from_slice(&self.component_sum.to_le_bytes());
+        h32[0] = first.to_le_bytes();
+        h32[1] = self.component_sum.to_le_bytes();
+
+        let h16 = header_bytes[8..16].as_chunks_mut::<2>().0;
+        h16[0] = f16::from_f32(self.residual_error_term).to_le_bytes();
+        h16[1] = f16::from_f32(self.parallel_error_term).to_le_bytes();
+        h16[2] = f16::from_f32(self.lower).to_le_bytes();
+        h16[3] = f16::from_f32(self.upper).to_le_bytes();
     }
 
     #[inline]
     fn deserialize(raw: &[u8], similarity: VectorSimilarity) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
-        let first = f32::from_le_bytes(header_bytes[0..4].try_into().unwrap());
-        let (l2_norm, center_dot) = if similarity.angular() {
-            (1.0, first)
-        } else {
-            (first, 0.0)
-        };
+        let h32 = header_bytes[..8].as_chunks::<4>().0;
+        let h16 = header_bytes[8..16].as_chunks::<2>().0;
         Some((
             Self {
-                l2_norm,
-                residual_error_term: f32::from_le_bytes(header_bytes[4..8].try_into().unwrap()),
-                lower: f16::from_le_bytes(header_bytes[8..10].try_into().unwrap()).to_f32(),
-                upper: f16::from_le_bytes(header_bytes[10..12].try_into().unwrap()).to_f32(),
-                center_dot,
-                component_sum: u32::from_le_bytes(header_bytes[12..16].try_into().unwrap()),
+                l2_norm: if similarity.angular() {
+                    1.0
+                } else {
+                    f32::from_le_bytes(h32[0])
+                },
+                center_dot: if similarity.angular() {
+                    f32::from_le_bytes(h32[0])
+                } else {
+                    0.0
+                },
+                component_sum: u32::from_le_bytes(h32[1]),
+                residual_error_term: f16::from_le_bytes(h16[0]).to_f32(),
+                parallel_error_term: f16::from_le_bytes(h16[1]).to_f32(),
+                lower: f16::from_le_bytes(h16[2]).to_f32(),
+                upper: f16::from_le_bytes(h16[3]).to_f32(),
             },
             vector_bytes,
         ))
@@ -718,6 +733,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         };
         header.component_sum = quant_stats.primary_component_sum;
         header.residual_error_term = quant_stats.residual_error_sq.sqrt();
+        header.parallel_error_term = quant_stats.residual_ip / stats.l2_norm_sq;
 
         header
     }
@@ -1292,6 +1308,7 @@ impl<const B: usize> TurboResidualCoder<B> {
         primary_header.component_sum = quant_stats.primary_component_sum;
         residual_header.component_sum = quant_stats.residual_component_sum;
         primary_header.residual_error_term = quant_stats.residual_error_sq.sqrt();
+        primary_header.parallel_error_term = quant_stats.residual_ip / stats.l2_norm_sq;
 
         (primary_header, residual_header)
     }

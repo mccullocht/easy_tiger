@@ -23,6 +23,11 @@ impl AbsDiffEq for PrimaryVectorHeader {
                 other.residual_error_term,
                 epsilon = epsilon
             )
+            && abs_diff_eq!(
+                self.parallel_error_term,
+                other.parallel_error_term,
+                epsilon = epsilon
+            )
             && abs_diff_eq!(self.component_sum, other.component_sum)
     }
 }
@@ -135,7 +140,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 1.163828,
+        residual_error_term: 1.1640625,
+        parallel_error_term: 0.021774292,
         center_dot: 0.0,
         lower: -0.49560547,
         upper: 0.7055664,
@@ -170,7 +176,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.8179195,
+        residual_error_term: 0.8178711,
+        parallel_error_term: 0.028503418,
         center_dot: 0.0,
         lower: -0.60498047,
         upper: 0.23901367,
@@ -205,7 +212,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.6713635,
+        residual_error_term: 0.6713867,
+        parallel_error_term: 0.0073165894,
         center_dot: 0.0,
         lower: -0.67089844,
         upper: 0.8408203,
@@ -240,7 +248,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.53255266,
+        residual_error_term: 0.53271484,
+        parallel_error_term: 0.011878967,
         center_dot: 0.0,
         lower: -0.5571289,
         upper: 0.5683594,
@@ -275,7 +284,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.11848368,
+        residual_error_term: 0.11846924,
+        parallel_error_term: 0.00030064583,
         center_dot: 0.0,
         lower: -0.9345703,
         upper: 0.91308594,
@@ -310,7 +320,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.09596872,
+        residual_error_term: 0.095947266,
+        parallel_error_term: 0.00025558472,
         center_dot: 0.0,
         lower: -0.69091797,
         upper: 0.56347656,
@@ -345,7 +356,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.0076497365,
+        residual_error_term: 0.007648468,
+        parallel_error_term: -0.00057935715,
         center_dot: 0.0,
         lower: -0.9199219,
         upper: 0.9116211,
@@ -380,7 +392,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.00552745,
+        residual_error_term: 0.0055351257,
+        parallel_error_term: 8.994341e-5,
         center_dot: 0.0,
         lower: -0.6953125,
         upper: 0.57470703,
@@ -415,7 +428,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 1.163828,
+        residual_error_term: 1.1640625,
+        parallel_error_term: 0.021774292,
         center_dot: 0.0,
         lower: -0.49560547,
         upper: 0.7055664,
@@ -454,7 +468,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.8179195,
+        residual_error_term: 0.8178711,
+        parallel_error_term: 0.028503418,
         center_dot: 0.0,
         lower: -0.60498047,
         upper: 0.23901367,
@@ -493,7 +508,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.6713635,
+        residual_error_term: 0.6713867,
+        parallel_error_term: 0.0073165894,
         center_dot: 0.0,
         lower: -0.67089844,
         upper: 0.8408203,
@@ -532,7 +548,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.53255266,
+        residual_error_term: 0.53271484,
+        parallel_error_term: 0.011878967,
         center_dot: 0.0,
         lower: -0.5571289,
         upper: 0.5683594,
@@ -571,7 +588,8 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.118475676,
+        residual_error_term: 0.11846924,
+        parallel_error_term: 0.00030064583,
         center_dot: 0.0,
         lower: -0.9345703,
         upper: 0.91308594,
@@ -610,7 +628,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.09596872,
+        residual_error_term: 0.095947266,
+        parallel_error_term: 0.00025558472,
         center_dot: 0.0,
         lower: -0.69091797,
         upper: 0.56347656,
@@ -658,7 +677,8 @@ fn tlvq8x8() {
             l2_norm: 2.5226507,
             lower: -0.9199219,
             upper: 0.9116211,
-            residual_error_term: 0.0076497365,
+            residual_error_term: 0.007648468,
+            parallel_error_term: -0.00057935715,
             center_dot: 0.0,
             component_sum: 2875,
         }
@@ -706,7 +726,8 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.0055349832,
+        residual_error_term: 0.0055351257,
+        parallel_error_term: 8.994341e-5,
         center_dot: 0.0,
         lower: -0.6953125,
         upper: 0.57470703,

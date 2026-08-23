@@ -849,12 +849,12 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
     #[inline(always)]
     fn distance_internal(&self, vector: &TurboPrimaryVector<B>) -> f64 {
         let uint8_dot = match self.k {
-            Kernel::Scalar => scalar::primary_query8_dot_unnormalized::<B>(&self.query, &vector),
+            Kernel::Scalar => scalar::primary_query8_dot_unnormalized::<B>(&self.query, vector),
             #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::primary_query8_dot_unnormalized::<B>(&self.query, &vector),
+            Kernel::Neon => aarch64::primary_query8_dot_unnormalized::<B>(&self.query, vector),
             #[cfg(target_arch = "x86_64")]
             Kernel::Avx512 => unsafe {
-                x86_64::primary_query8_dot_unnormalized_avx512::<B>(&self.query, &vector)
+                x86_64::primary_query8_dot_unnormalized_avx512::<B>(&self.query, vector)
             },
         };
         let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);

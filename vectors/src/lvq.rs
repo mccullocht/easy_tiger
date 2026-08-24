@@ -281,7 +281,7 @@ impl ErrorBoundTerms {
         let mult = match similarity {
             VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
             VectorSimilarity::Euclidean => 2.0,
-        } / (dim as f32).sqrt();
+        } / ((dim.max(2) - 1) as f32).sqrt();
         Self {
             l2_norm: header.l2_norm,
             residual_error_term: header.residual_error_term,
@@ -496,6 +496,7 @@ struct VectorDecodeTerms {
     lower: f32,
     delta: f32,
     component_sum: u32,
+    parallel_error_term: f32,
 }
 
 impl VectorDecodeTerms {
@@ -504,6 +505,7 @@ impl VectorDecodeTerms {
             lower: header.lower,
             delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
             component_sum: header.component_sum,
+            parallel_error_term: header.parallel_error_term,
         }
     }
 
@@ -512,6 +514,7 @@ impl VectorDecodeTerms {
             lower: -header.magnitude / 2.0,
             delta: header.magnitude / RESIDUAL_MAX,
             component_sum: header.component_sum,
+            parallel_error_term: 0.0,
         }
     }
 }
@@ -556,10 +559,11 @@ fn correct_dot_uint(dot: u32, dim: usize, a: &VectorDecodeTerms, b: &VectorDecod
     // Note that any dot value larger than (2 << 24) will be rounded when converted to f32 which can
     // cause vector comparisons a <-> b and b <-> a to return slightly different results. To prevent
     // this convert dot to f64 before including it in the correction.
-    (dot as f64 * (a.delta * b.delta) as f64
+    let fdot = (dot as f64 * (a.delta * b.delta) as f64
         + (a.component_sum as f32 * a.delta * b.lower
             + b.component_sum as f32 * b.delta * a.lower
-            + a.lower * b.lower * dim as f32) as f64) as f32
+            + a.lower * b.lower * dim as f32) as f64) as f32;
+    fdot * (1.0 + a.parallel_error_term + b.parallel_error_term)
 }
 
 /// The four components of a residual dot product.

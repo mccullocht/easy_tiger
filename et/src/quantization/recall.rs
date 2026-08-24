@@ -177,27 +177,19 @@ pub fn recall(
     let result_len = (k as f64 * args.k_mult) as usize;
     let mut query_k = Vec::with_capacity(query_limit);
     query_k.resize_with(query_limit, || TopNeighbors::new(result_len));
-    let (total_scored, total_competitive) = (0..doc_vectors.len())
+    (0..doc_vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
-        .map(|d| {
+        .for_each(|d| {
             let mut doc_f32 = vec![0.0f32; doc_vectors.elem_stride()];
             doc_vectors[d].convert_to_f32_slice(&mut doc_f32);
             let center = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
             let doc = coders[center].encode(&doc_f32);
-            let mut total_scored = 0;
-            let mut total_competitive = 0;
             for (q, s) in query_scorers.iter().enumerate() {
-                let max_distance = query_k[q].max_distance();
-                if let Some(distance) = s[center].distance_with_bound(&doc, max_distance) {
-                    query_k[q].add(Neighbor::new(d as i64, distance));
-                    total_competitive += 1;
-                }
-                total_scored += 1;
+                let distance = s[center].distance(&doc);
+                query_k[q].add(Neighbor::new(d as i64, distance));
             }
-            (total_scored, total_competitive)
-        })
-        .reduce(|| (0usize, 0usize), |a, b| (a.0 + b.0, a.1 + b.1));
+        });
 
     let recall_values = query_k
         .into_iter()
@@ -205,14 +197,6 @@ pub fn recall(
         .map(|(i, r)| recall_computer.compute_recall(i, &r.into_neighbors()))
         .collect::<Vec<_>>();
     println!("{}", recall_computer.summarize(&recall_values));
-    if total_competitive != total_scored {
-        println!(
-            "scored: {} competitive: {} ratio: {:.6}",
-            total_scored,
-            total_competitive,
-            total_competitive as f64 / total_scored as f64
-        );
-    }
 
     Ok(())
 }

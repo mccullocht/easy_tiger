@@ -736,7 +736,10 @@ impl<const B: usize> TurboPrimaryCoder<B> {
             },
         };
         header.component_sum = quant_stats.primary_component_sum;
-        header.residual_error_term = quant_stats.residual_error_sq.sqrt();
+        // XXX correct the name in the header.
+        let perp_error_sq =
+            quant_stats.residual_error_sq - (quant_stats.residual_ip.powi(2) / stats.l2_norm_sq);
+        header.residual_error_term = perp_error_sq.sqrt() / header.l2_norm;
         header.parallel_error_term = quant_stats.residual_ip / stats.l2_norm_sq;
 
         header

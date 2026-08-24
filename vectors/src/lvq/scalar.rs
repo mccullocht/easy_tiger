@@ -3,8 +3,7 @@
 #![allow(dead_code)]
 
 use super::{
-    LAMBDA, MINIMUM_MSE_GRID, RESIDUAL_BITS, ResidualDotComponents, TurboPrimaryVector,
-    TurboResidualVector, VectorEncodeTerms, VectorStats,
+    LAMBDA, MINIMUM_MSE_GRID, TurboPrimaryVector, VectorEncodeTerms, VectorStats,
     packing::{TurboPacker, TurboUnpacker},
 };
 
@@ -130,47 +129,6 @@ pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &m
     }
 }
 
-pub fn residual_quantize_and_pack<const B: usize>(
-    vector: &[f32],
-    primary_terms: VectorEncodeTerms,
-    residual_terms: VectorEncodeTerms,
-    primary: &mut [u8],
-    residual: &mut [u8],
-) -> (u32, u32, f32) {
-    let mut primary_packer = TurboPacker::<B>::new(primary);
-    let mut residual_packer = TurboPacker::<RESIDUAL_BITS>::new(residual);
-    let (primary_sum, residual_sum, residual_error_sq) = vector
-        .iter()
-        .map(|&v| {
-            let p = ((v.clamp(primary_terms.lower, primary_terms.upper) - primary_terms.lower)
-                * primary_terms.delta_inv)
-                .round() as u8;
-            primary_packer.push(p);
-            // After producing the primary value, calculate the residual between the original value
-            // and the dequantized value and quantize that.
-            let res = v - (p as f32).mul_add(primary_terms.delta, primary_terms.lower);
-            let r = ((res.clamp(residual_terms.lower, residual_terms.upper) - residual_terms.lower)
-                * residual_terms.delta_inv)
-                .round() as u8;
-            residual_packer.push(r);
-            (u32::from(p), u32::from(r), res)
-        })
-        .fold((0, 0, 0.0f32), |(psum, rsum, rerr), (p, r, e)| {
-            (psum + p, rsum + r, e.mul_add(e, rerr))
-        });
-    (primary_sum, residual_sum, residual_error_sq)
-}
-
-pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {
-    for ((p, r), o) in TurboUnpacker::<B>::new(vector.primary.data)
-        .zip(vector.residual.data.iter().copied())
-        .zip(out.iter_mut())
-    {
-        *o = (p as f32).mul_add(vector.primary.terms.delta, vector.primary.terms.lower)
-            + (r as f32).mul_add(vector.residual.terms.delta, vector.residual.terms.lower);
-    }
-}
-
 #[inline]
 pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     a.iter()
@@ -204,28 +162,4 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
         .zip(TurboUnpacker::<B>::new(doc.rep.data))
         .map(|(&q, d)| q as u32 * d as u32)
         .sum::<u32>()
-}
-
-#[inline]
-pub fn residual_dot_unnormalized<const B: usize>(
-    query: (&[u8], &[u8]),
-    doc: (&[u8], &[u8]),
-) -> ResidualDotComponents {
-    TurboUnpacker::<B>::new(query.0)
-        .zip(query.1.iter().copied())
-        .zip(TurboUnpacker::<B>::new(doc.0).zip(doc.1.iter().copied()))
-        .map(|((qp, qr), (dp, dr))| ResidualDotComponents {
-            ap_dot_bp: qp as u32 * dp as u32,
-            ap_dot_br: qp as u32 * dr as u32,
-            ar_dot_bp: qr as u32 * dp as u32,
-            ar_dot_br: qr as u32 * dr as u32,
-        })
-        .fold(ResidualDotComponents::default(), |acc, dim| {
-            ResidualDotComponents {
-                ap_dot_bp: acc.ap_dot_bp + dim.ap_dot_bp,
-                ap_dot_br: acc.ap_dot_br + dim.ap_dot_br,
-                ar_dot_bp: acc.ar_dot_bp + dim.ar_dot_bp,
-                ar_dot_br: acc.ar_dot_br + dim.ar_dot_br,
-            }
-        })
 }

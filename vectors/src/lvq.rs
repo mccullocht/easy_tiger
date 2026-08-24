@@ -736,9 +736,11 @@ impl<const B: usize> TurboPrimaryCoder<B> {
             },
         };
         header.component_sum = quant_stats.primary_component_sum;
-        // XXX correct the name in the header.
+        // XXX correct the name in the header.:1
         let perp_error_sq =
             quant_stats.residual_error_sq - (quant_stats.residual_ip.powi(2) / stats.l2_norm_sq);
+        // XXX dividing by l2_norm is wrong -- this should happen at serialization time before storage
+        // and be inverted at deserialization time.
         header.residual_error_term = perp_error_sq.sqrt() / header.l2_norm;
         header.parallel_error_term = quant_stats.residual_ip / stats.l2_norm_sq;
 
@@ -996,6 +998,10 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
         self.distance_with_bound(vector, f64::INFINITY).unwrap()
     }
 
+    // XXX in this implementation we symmetrically compare a 1-bit representation of the vectors and
+    // the result is _butt_. If I compared 4x8 and bitplane split the 4 it might be accurate enough
+    // to use. 4 bits might also work for a LUT, but the LUT would have to be quite large, like at
+    // least twice the size of the vector (512 bytes?).
     fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
         let vector =
             TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");

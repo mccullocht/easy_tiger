@@ -1,5 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use vectors::rotate::{Kernel, Rotator};
 use vectors::{F32VectorCoding, VectorSimilarity};
 

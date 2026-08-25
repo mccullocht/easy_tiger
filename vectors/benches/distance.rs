@@ -1,6 +1,6 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use half::f16;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use vectors::{F32VectorCoding, VectorSimilarity};
 
 const DIMENSIONS: usize = 2048;

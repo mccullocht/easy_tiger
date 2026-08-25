@@ -16,8 +16,8 @@ impl AbsDiffEq for PrimaryVectorHeader {
             && abs_diff_eq!(self.lower, other.lower, epsilon = epsilon)
             && abs_diff_eq!(self.upper, other.upper, epsilon = epsilon)
             && abs_diff_eq!(
-                self.residual_error_term,
-                other.residual_error_term,
+                self.perpendicular_error_term,
+                other.perpendicular_error_term,
                 epsilon = epsilon
             )
             && abs_diff_eq!(
@@ -101,7 +101,7 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.4609375,
+        perpendicular_error_term: 0.4609375,
         parallel_error_term: 0.021774292,
         center_dot: 0.0,
         lower: -0.49560547,
@@ -137,7 +137,7 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.5263672,
+        perpendicular_error_term: 0.5263672,
         parallel_error_term: 0.028503418,
         center_dot: 0.0,
         lower: -0.60498047,
@@ -173,7 +173,7 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.26611328,
+        perpendicular_error_term: 0.26611328,
         parallel_error_term: 0.0073165894,
         center_dot: 0.0,
         lower: -0.67089844,
@@ -209,7 +209,7 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.34301758,
+        perpendicular_error_term: 0.34301758,
         parallel_error_term: 0.011878967,
         center_dot: 0.0,
         lower: -0.5571289,
@@ -245,7 +245,7 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.046966553,
+        perpendicular_error_term: 0.046966553,
         parallel_error_term: 0.00030064583,
         center_dot: 0.0,
         lower: -0.9345703,
@@ -281,7 +281,7 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.06185913,
+        perpendicular_error_term: 0.06185913,
         parallel_error_term: 0.00025558472,
         center_dot: 0.0,
         lower: -0.69091797,
@@ -317,7 +317,7 @@ tlvq_coder_test!(
     Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        residual_error_term: 0.0029773712,
+        perpendicular_error_term: 0.0029773712,
         parallel_error_term: -0.00057935715,
         center_dot: 0.0,
         lower: -0.9199219,
@@ -353,7 +353,7 @@ tlvq_coder_test!(
     Centering::Centered,
     PrimaryVectorHeader {
         l2_norm: 1.5514041,
-        residual_error_term: 0.003566742,
+        perpendicular_error_term: 0.003566742,
         parallel_error_term: 8.994341e-5,
         center_dot: 0.0,
         lower: -0.6953125,

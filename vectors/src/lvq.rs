@@ -269,7 +269,7 @@ impl DistanceCorrectionTerms {
 #[derive(Debug, Copy, Clone)]
 struct ErrorBoundTerms {
     l2_norm: f32,
-    residual_error_term: f32,
+    perpendicular_error_term: f32,
     mult: f32,
 }
 
@@ -281,14 +281,14 @@ impl ErrorBoundTerms {
         } / ((dim.max(2) - 1) as f32).sqrt();
         Self {
             l2_norm: header.l2_norm,
-            residual_error_term: header.residual_error_term,
+            perpendicular_error_term: header.perpendicular_error_term,
             mult,
         }
     }
 
     fn error_bound<const B: usize>(&self, vector: &TurboPrimaryVector<B>) -> f32 {
-        let query_error = self.residual_error_term * vector.l2_norm;
-        let doc_error = vector.residual_error_term * self.l2_norm;
+        let query_error = self.perpendicular_error_term * vector.l2_norm;
+        let doc_error = vector.perpendicular_error_term * self.l2_norm;
         (query_error.powi(2) + doc_error.powi(2)).sqrt() * self.mult
     }
 }
@@ -309,7 +309,7 @@ struct PrimaryVectorHeader {
     center_dot: f32,
     /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
     /// This term can be used to compute a statistical bound on the estimated distance.
-    residual_error_term: f32,
+    perpendicular_error_term: f32,
     /// Parallel error -- the projection of the vector onto the quantized residual divided by the
     /// squared l2 norm.
     ///
@@ -332,7 +332,7 @@ impl PrimaryVectorHeader {
     /// Stores 6 values -- 4 16-bit values and 2 32-bit values.
     /// * l2_norm or center_dot (f32)
     /// * component_sum (u32)
-    /// * residual_error_term (f16)
+    /// * perpendicular_error_term (f16)
     /// * parallel_error_term (f16)
     /// * lower (f16)
     /// * upper (f16)
@@ -346,7 +346,7 @@ impl PrimaryVectorHeader {
             l2_norm: stats.l2_norm_sq.sqrt(),
             center_dot,
             component_sum: 0,
-            residual_error_term: 0.0,
+            perpendicular_error_term: 0.0,
             parallel_error_term: 0.0,
             lower: stats.min,
             upper: stats.max,
@@ -370,7 +370,7 @@ impl PrimaryVectorHeader {
         h32[1] = self.component_sum.to_le_bytes();
 
         let h16 = header_bytes[8..16].as_chunks_mut::<2>().0;
-        h16[0] = f16::from_f32(self.residual_error_term).to_le_bytes();
+        h16[0] = f16::from_f32(self.perpendicular_error_term).to_le_bytes();
         h16[1] = f16::from_f32(self.parallel_error_term).to_le_bytes();
         h16[2] = f16::from_f32(self.lower).to_le_bytes();
         h16[3] = f16::from_f32(self.upper).to_le_bytes();
@@ -394,7 +394,7 @@ impl PrimaryVectorHeader {
                     0.0
                 },
                 component_sum: u32::from_le_bytes(h32[1]),
-                residual_error_term: f16::from_le_bytes(h16[0]).to_f32(),
+                perpendicular_error_term: f16::from_le_bytes(h16[0]).to_f32(),
                 parallel_error_term: f16::from_le_bytes(h16[1]).to_f32(),
                 lower: f16::from_le_bytes(h16[2]).to_f32(),
                 upper: f16::from_le_bytes(h16[3]).to_f32(),
@@ -514,7 +514,7 @@ const TURBO_BLOCK_SIZE: usize = 16;
 struct TurboPrimaryVector<'a, const B: usize> {
     rep: EncodedVector<'a>,
     l2_norm: f32,
-    residual_error_term: f32,
+    perpendicular_error_term: f32,
     center_dot: f32,
 }
 
@@ -527,7 +527,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
                 data: vector_bytes,
             },
             l2_norm: header.l2_norm,
-            residual_error_term: header.residual_error_term,
+            perpendicular_error_term: header.perpendicular_error_term,
             center_dot: header.center_dot,
         })
     }
@@ -544,13 +544,13 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             Self {
                 rep: headv,
                 l2_norm: self.l2_norm,
-                residual_error_term: self.residual_error_term,
+                perpendicular_error_term: self.perpendicular_error_term,
                 center_dot: self.center_dot,
             },
             Self {
                 rep: tailv,
                 l2_norm: self.l2_norm,
-                residual_error_term: self.residual_error_term,
+                perpendicular_error_term: self.perpendicular_error_term,
                 center_dot: self.center_dot,
             },
         )
@@ -636,12 +636,11 @@ impl<const B: usize> TurboPrimaryCoder<B> {
             },
         };
         header.component_sum = quant_stats.primary_component_sum;
-        // XXX correct the name in the header.:1
         let perp_error_sq =
             quant_stats.residual_error_sq - (quant_stats.residual_ip.powi(2) / stats.l2_norm_sq);
         // XXX dividing by l2_norm is wrong -- this should happen at serialization time before storage
         // and be inverted at deserialization time.
-        header.residual_error_term = perp_error_sq.sqrt() / header.l2_norm;
+        header.perpendicular_error_term = perp_error_sq.sqrt() / header.l2_norm;
         header.parallel_error_term = quant_stats.residual_ip / stats.l2_norm_sq;
 
         header

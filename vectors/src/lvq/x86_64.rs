@@ -560,29 +560,15 @@ pub unsafe fn query4_doc1_bitplane_dot_avx512(query: &[u8], doc: &[u8]) -> u32 {
     // the end: each iteration adds at most 32 to a lane, so this can absorb millions of
     // iterations before overflow.
     let mut dot = {
-        let mut acc0 = _mm512_set1_epi32(0);
-        let mut acc1 = _mm512_set1_epi32(0);
-        let (qpair, qodd) = qhead.as_chunks::<2>();
-        for (i, q) in qpair.iter().enumerate() {
-            let dp = dhead.as_ptr().add(i * 32);
-            let d0 = _mm512_broadcast_i32x4(_mm_lddqu_si128(dp as *const __m128i));
-            let d1 = _mm512_broadcast_i32x4(_mm_lddqu_si128(dp.add(16) as *const __m128i));
-            let q0 = _mm512_loadu_epi8(q[0].as_ptr() as *const i8);
-            let q1 = _mm512_loadu_epi8(q[1].as_ptr() as *const i8);
-            acc0 = _mm512_add_epi32(acc0, _mm512_popcnt_epi32(_mm512_and_si512(q0, d0)));
-            acc1 = _mm512_add_epi32(acc1, _mm512_popcnt_epi32(_mm512_and_si512(q1, d1)));
-        }
-        if let [q] = qodd {
-            let d = _mm512_broadcast_i32x4(_mm_lddqu_si128(
-                dhead.as_ptr().add(qpair.len() * 32) as *const __m128i
-            ));
+        let mut acc = _mm512_set1_epi32(0);
+        for (q, d) in qhead.iter().zip(dhead.as_chunks::<16>().0) {
             let q = _mm512_loadu_epi8(q.as_ptr() as *const i8);
-            acc0 = _mm512_add_epi32(acc0, _mm512_popcnt_epi32(_mm512_and_si512(q, d)));
+            let d = _mm512_broadcast_i32x4(_mm_lddqu_si128(d.as_ptr() as *const __m128i));
+            acc = _mm512_add_epi32(acc, _mm512_popcnt_epi32(_mm512_and_si512(q, d)));
         }
 
         // Weight each 128-bit lane (one bitplane) by its significance before reducing.
         let weights = _mm512_set_epi32(8, 8, 8, 8, 4, 4, 4, 4, 2, 2, 2, 2, 1, 1, 1, 1);
-        let acc = _mm512_add_epi32(acc0, acc1);
         _mm512_reduce_add_epi32(_mm512_mullo_epi32(acc, weights)) as u32
     };
 

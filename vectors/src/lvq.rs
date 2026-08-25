@@ -983,6 +983,64 @@ pub(super) mod packing {
 
     impl<'a, const B: usize> ExactSizeIterator for TurboUnpacker<'a, B> {}
 
+    /// Take a 4 bit encoded input and split it into 4 bitplanes.
+    ///
+    /// The resulting bitplanes are interleaved at 16 bytes chunks until the tail when they are
+    /// interleaved in the turbo packing format.
+    pub fn bitplane_split4(vector: &[u8]) -> Vec<u8> {
+        // 64 bytes contains 128 dims, which is enough to populate 4 128 bit bitplanes.
+        let dim = vector.len() * 2;
+        let len = dim.div_ceil(8) * 4;
+        let mut out = vec![0u8; len];
+        let (head, tail) = vector.as_chunks::<64>();
+        let (ohead, otail) = out.as_chunks_mut::<64>();
+        let nibble_mask = u128::from_ne_bytes([0xf; 16]);
+        let bit_mask = u128::from_ne_bytes([1; 16]);
+        for (c, o) in head.iter().zip(ohead.iter_mut()) {
+            let mut b0 = 0u128;
+            let mut b1 = 0u128;
+            let mut b2 = 0u128;
+            let mut b3 = 0u128;
+            for (i, b) in c.as_chunks::<16>().0.iter().enumerate() {
+                let b = u128::from_le_bytes(*b);
+                let lo = b & nibble_mask;
+                let hi = (b >> 4) & nibble_mask;
+
+                b0 |= (lo & bit_mask) << (i * 2);
+                b0 |= (hi & bit_mask) << (i * 2 + 1);
+                b1 |= ((lo >> 1) & bit_mask) << (i * 2);
+                b1 |= ((hi >> 1) & bit_mask) << (i * 2 + 1);
+                b2 |= ((lo >> 2) & bit_mask) << (i * 2);
+                b2 |= ((hi >> 2) & bit_mask) << (i * 2 + 1);
+                b3 |= ((lo >> 3) & bit_mask) << (i * 2);
+                b3 |= ((hi >> 3) & bit_mask) << (i * 2 + 1);
+            }
+
+            let planes = o.as_chunks_mut::<16>().0;
+            planes[0] = b0.to_le_bytes();
+            planes[1] = b1.to_le_bytes();
+            planes[2] = b2.to_le_bytes();
+            planes[3] = b3.to_le_bytes();
+        }
+
+        if !tail.is_empty() {
+            assert!(tail.len().is_multiple_of(4));
+            let mut oiter = otail.chunks_mut(tail.len() / 4);
+            let mut b0 = TurboPacker::<4>::new(oiter.next().unwrap());
+            let mut b1 = TurboPacker::<4>::new(oiter.next().unwrap());
+            let mut b2 = TurboPacker::<4>::new(oiter.next().unwrap());
+            let mut b3 = TurboPacker::<4>::new(oiter.next().unwrap());
+            for d in TurboUnpacker::<4>::new(tail) {
+                b0.push(d & 1);
+                b1.push((d >> 1) & 1);
+                b2.push((d >> 2) & 1);
+                b3.push((d >> 3) & 1);
+            }
+        }
+
+        out
+    }
+
     /// Return the number of dimensions that can be packed into a single block.
     ///
     /// So long as `bits` is a power of 2 the returned value will _also_ be a power of 2.

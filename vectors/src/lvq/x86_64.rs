@@ -21,7 +21,7 @@ use std::arch::x86_64::{
 
 use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorEncodeTerms, packing};
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, VectorStats};
+use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats};
 
 /// For an input vector `v` where all values are non-negative, round each value with ties (e.g. 0.5)
 /// rounding away from zero.
@@ -267,16 +267,17 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
     vector: &[f32],
     terms: VectorEncodeTerms,
     out: &mut [u8],
-) -> (u32, f32) {
+) -> QuantizationStats {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     let (in_head, in_tail) = vector.split_at(tail_split);
     let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
 
-    let (mut component_sum, mut residual_error_sq) = if !in_head.is_empty() {
+    let mut stats = if !in_head.is_empty() {
         let terms = VectorEncodeTermsAvx512::from_terms(&terms);
         let mut qbuf = _mm512_set1_epi32(0);
         let mut component_sum = _mm512_set1_epi32(0);
         let mut residual_error_sq = _mm512_set1_ps(0.0);
+        let mut residual_ip = _mm512_set1_ps(0.0);
         let mut shift = 0;
         for i in (0..tail_split).step_by(16) {
             let v = _mm512_loadu_ps(in_head.as_ptr().add(i));
@@ -284,6 +285,7 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
             let d = terms.dequantize(q);
             let diff = _mm512_sub_ps(v, d);
             residual_error_sq = _mm512_fmadd_ps(diff, diff, residual_error_sq);
+            residual_ip = _mm512_fmadd_ps(v, diff, residual_ip);
             component_sum = _mm512_add_epi32(component_sum, q);
             qbuf = _mm512_or_si512(qbuf, _mm512_sll_epi32(q, _mm_set1_epi64x(shift as i64)));
             shift += B;
@@ -300,21 +302,20 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
         // tail_split should be a multiple of the number of dimensions per block.
         assert_eq!(shift, 0);
 
-        (
-            _mm512_reduce_add_epi32(component_sum) as u32,
-            _mm512_reduce_add_ps(residual_error_sq),
-        )
+        QuantizationStats {
+            primary_component_sum: _mm512_reduce_add_epi32(component_sum) as u32,
+            residual_error_sq: _mm512_reduce_add_ps(residual_error_sq),
+            residual_ip: _mm512_reduce_add_ps(residual_ip),
+        }
     } else {
-        (0, 0.0)
+        QuantizationStats::default()
     };
 
     if !in_tail.is_empty() {
-        let (c, r) = super::scalar::primary_quantize_and_pack::<B>(in_tail, terms, out_tail);
-        component_sum += c;
-        residual_error_sq += r;
+        stats += super::scalar::primary_quantize_and_pack::<B>(in_tail, terms, out_tail);
     }
 
-    (component_sum, residual_error_sq)
+    stats
 }
 
 #[target_feature(enable = "avx512f,avx512bw,avx2")]

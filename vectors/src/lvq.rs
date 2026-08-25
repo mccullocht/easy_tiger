@@ -13,7 +13,11 @@ mod test;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
-use std::{borrow::Cow, cell::RefCell};
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    ops::{Add, AddAssign},
+};
 
 use half::f16;
 use thread_local::ThreadLocal;
@@ -265,7 +269,7 @@ impl DistanceCorrectionTerms {
 #[derive(Debug, Copy, Clone)]
 struct ErrorBoundTerms {
     l2_norm: f32,
-    residual_error_term: f32,
+    perpendicular_error_term: f32,
     mult: f32,
 }
 
@@ -274,17 +278,17 @@ impl ErrorBoundTerms {
         let mult = match similarity {
             VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
             VectorSimilarity::Euclidean => 2.0,
-        } / (dim as f32).sqrt();
+        } / ((dim.max(2) - 1) as f32).sqrt();
         Self {
             l2_norm: header.l2_norm,
-            residual_error_term: header.residual_error_term,
+            perpendicular_error_term: header.perpendicular_error_term,
             mult,
         }
     }
 
     fn error_bound<const B: usize>(&self, vector: &TurboPrimaryVector<B>) -> f32 {
-        let query_error = self.residual_error_term * vector.l2_norm;
-        let doc_error = vector.residual_error_term * self.l2_norm;
+        let query_error = self.perpendicular_error_term * vector.l2_norm;
+        let doc_error = vector.perpendicular_error_term * self.l2_norm;
         (query_error.powi(2) + doc_error.powi(2)).sqrt() * self.mult
     }
 }
@@ -300,18 +304,23 @@ struct PrimaryVectorHeader {
     /// L2 norm (magnitude) of the vector.
     /// This is used to compute euclidean distance and the statistical bound on estimated distance.
     l2_norm: f32,
+    /// The dot product of the vector and the centroid.
+    /// This is used to compute angular distance when the vector is centered.
+    center_dot: f32,
     /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
     /// This term can be used to compute a statistical bound on the estimated distance.
-    residual_error_term: f32,
+    perpendicular_error_term: f32,
+    /// Parallel error -- the projection of the vector onto the quantized residual divided by the
+    /// squared l2 norm.
+    ///
+    /// Interval optimization minimizes this term so it is typically small.
+    parallel_error_term: f32,
     /// Lower interval bound used for quantization, no smaller than the minimum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     lower: f32,
     /// Upper interval bound used for quantization, no larger than the maximum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     upper: f32,
-    /// The dot product of the vector and the centroid.
-    /// This is used to compute angular distance when the vector is centered.
-    center_dot: f32,
     /// Sum of all the quantized components of the vector. This is used to correct the uint dot
     /// product to an f32 dot product.
     component_sum: u32,
@@ -320,26 +329,27 @@ struct PrimaryVectorHeader {
 impl PrimaryVectorHeader {
     /// Length of the encoded header in bytes.
     ///
-    /// Stores 5 values -- two 16-bit values and 3 32-bit values.
+    /// Stores 6 values -- 4 16-bit values and 2 32-bit values.
     /// * l2_norm or center_dot (f32)
-    /// * residual_error_term (f32)
+    /// * component_sum (u32)
+    /// * perpendicular_error_term (f16)
+    /// * parallel_error_term (f16)
     /// * lower (f16)
     /// * upper (f16)
-    /// * component_sum (u32)
     ///
-    /// The first two terms are stored as f32 as they have a greater effect on precision.
-    const LEN: usize = std::mem::size_of::<f32>() * 2
-        + std::mem::size_of::<f16>() * 2
-        + std::mem::size_of::<u32>();
+    /// The first term is stored as 32 bits as it is combined directly into the final distance.
+    const LEN: usize =
+        std::mem::size_of::<f32>() + std::mem::size_of::<u32>() + std::mem::size_of::<f16>() * 4;
 
     fn new(stats: VectorStats, center_dot: f32) -> Self {
         Self {
             l2_norm: stats.l2_norm_sq.sqrt(),
-            residual_error_term: 0.0,
             center_dot,
+            component_sum: 0,
+            perpendicular_error_term: 0.0,
+            parallel_error_term: 0.0,
             lower: stats.min,
             upper: stats.max,
-            component_sum: 0,
         }
     }
 
@@ -350,38 +360,86 @@ impl PrimaryVectorHeader {
 
     #[inline]
     fn serialize(&self, header_bytes: &mut [u8], similarity: VectorSimilarity) {
+        let h32 = header_bytes[..8].as_chunks_mut::<4>().0;
         let first = if similarity.angular() {
             self.center_dot
         } else {
             self.l2_norm
         };
-        header_bytes[0..4].copy_from_slice(&first.to_le_bytes());
-        header_bytes[4..8].copy_from_slice(&self.residual_error_term.to_le_bytes());
-        header_bytes[8..10].copy_from_slice(&f16::from_f32(self.lower).to_le_bytes());
-        header_bytes[10..12].copy_from_slice(&f16::from_f32(self.upper).to_le_bytes());
-        header_bytes[12..16].copy_from_slice(&self.component_sum.to_le_bytes());
+        h32[0] = first.to_le_bytes();
+        h32[1] = self.component_sum.to_le_bytes();
+
+        let h16 = header_bytes[8..16].as_chunks_mut::<2>().0;
+        h16[0] = f16::from_f32(self.perpendicular_error_term / self.l2_norm).to_le_bytes();
+        h16[1] = f16::from_f32(self.parallel_error_term).to_le_bytes();
+        h16[2] = f16::from_f32(self.lower).to_le_bytes();
+        h16[3] = f16::from_f32(self.upper).to_le_bytes();
     }
 
     #[inline]
     fn deserialize(raw: &[u8], similarity: VectorSimilarity) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
-        let first = f32::from_le_bytes(header_bytes[0..4].try_into().unwrap());
-        let (l2_norm, center_dot) = if similarity.angular() {
-            (1.0, first)
+        let h32 = header_bytes[..8].as_chunks::<4>().0;
+        let h16 = header_bytes[8..16].as_chunks::<2>().0;
+        let l2_norm = if similarity.angular() {
+            1.0
         } else {
-            (first, 0.0)
+            f32::from_le_bytes(h32[0])
         };
         Some((
             Self {
                 l2_norm,
-                residual_error_term: f32::from_le_bytes(header_bytes[4..8].try_into().unwrap()),
-                lower: f16::from_le_bytes(header_bytes[8..10].try_into().unwrap()).to_f32(),
-                upper: f16::from_le_bytes(header_bytes[10..12].try_into().unwrap()).to_f32(),
-                center_dot,
-                component_sum: u32::from_le_bytes(header_bytes[12..16].try_into().unwrap()),
+                center_dot: if similarity.angular() {
+                    f32::from_le_bytes(h32[0])
+                } else {
+                    0.0
+                },
+                component_sum: u32::from_le_bytes(h32[1]),
+                perpendicular_error_term: f16::from_le_bytes(h16[0]).to_f32() * l2_norm,
+                parallel_error_term: f16::from_le_bytes(h16[1]).to_f32(),
+                lower: f16::from_le_bytes(h16[2]).to_f32(),
+                upper: f16::from_le_bytes(h16[3]).to_f32(),
             },
             vector_bytes,
         ))
+    }
+}
+
+#[derive(Default, Debug, Copy, Clone, PartialEq)]
+struct QuantizationStats {
+    /// Sum of all quantized primary components.
+    primary_component_sum: u32,
+    /// Squared error of the quantization residual.
+    residual_error_sq: f32,
+    /// The inner product of each vector component and it's primary quantization residual.
+    residual_ip: f32,
+}
+
+impl QuantizationStats {
+    fn add_component(self, cp: u32, v: f32, r: f32) -> Self {
+        Self {
+            primary_component_sum: self.primary_component_sum + cp,
+            residual_error_sq: r.mul_add(r, self.residual_error_sq),
+            residual_ip: v.mul_add(r, self.residual_ip),
+        }
+    }
+}
+
+impl Add<QuantizationStats> for QuantizationStats {
+    type Output = Self;
+
+    fn add(self, rhs: QuantizationStats) -> Self::Output {
+        Self {
+            primary_component_sum: self.primary_component_sum + rhs.primary_component_sum,
+            residual_error_sq: self.residual_error_sq + rhs.residual_error_sq,
+            residual_ip: self.residual_ip + rhs.residual_ip,
+        }
+    }
+}
+
+impl AddAssign<QuantizationStats> for QuantizationStats {
+    fn add_assign(&mut self, rhs: QuantizationStats) {
+        *self = *self + rhs;
     }
 }
 
@@ -390,6 +448,7 @@ struct VectorDecodeTerms {
     lower: f32,
     delta: f32,
     component_sum: u32,
+    parallel_error_term: f32,
 }
 
 impl VectorDecodeTerms {
@@ -398,6 +457,7 @@ impl VectorDecodeTerms {
             lower: header.lower,
             delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
             component_sum: header.component_sum,
+            parallel_error_term: header.parallel_error_term,
         }
     }
 }
@@ -442,10 +502,11 @@ fn correct_dot_uint(dot: u32, dim: usize, a: &VectorDecodeTerms, b: &VectorDecod
     // Note that any dot value larger than (2 << 24) will be rounded when converted to f32 which can
     // cause vector comparisons a <-> b and b <-> a to return slightly different results. To prevent
     // this convert dot to f64 before including it in the correction.
-    (dot as f64 * (a.delta * b.delta) as f64
+    let fdot = (dot as f64 * (a.delta * b.delta) as f64
         + (a.component_sum as f32 * a.delta * b.lower
             + b.component_sum as f32 * b.delta * a.lower
-            + a.lower * b.lower * dim as f32) as f64) as f32
+            + a.lower * b.lower * dim as f32) as f64) as f32;
+    fdot * (1.0 + a.parallel_error_term + b.parallel_error_term)
 }
 
 /// The turbo coder requires that all vector data be packed into 16-byte blocks.
@@ -454,7 +515,7 @@ const TURBO_BLOCK_SIZE: usize = 16;
 struct TurboPrimaryVector<'a, const B: usize> {
     rep: EncodedVector<'a>,
     l2_norm: f32,
-    residual_error_term: f32,
+    perpendicular_error_term: f32,
     center_dot: f32,
 }
 
@@ -467,7 +528,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
                 data: vector_bytes,
             },
             l2_norm: header.l2_norm,
-            residual_error_term: header.residual_error_term,
+            perpendicular_error_term: header.perpendicular_error_term,
             center_dot: header.center_dot,
         })
     }
@@ -484,13 +545,13 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             Self {
                 rep: headv,
                 l2_norm: self.l2_norm,
-                residual_error_term: self.residual_error_term,
+                perpendicular_error_term: self.perpendicular_error_term,
                 center_dot: self.center_dot,
             },
             Self {
                 rep: tailv,
                 l2_norm: self.l2_norm,
-                residual_error_term: self.residual_error_term,
+                perpendicular_error_term: self.perpendicular_error_term,
                 center_dot: self.center_dot,
             },
         )
@@ -566,8 +627,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
-        let residual_error_sq;
-        (header.component_sum, residual_error_sq) = match k {
+        let quant_stats = match k {
             Kernel::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
@@ -576,7 +636,11 @@ impl<const B: usize> TurboPrimaryCoder<B> {
                 x86_64::primary_quantize_and_pack_avx512::<B>(vector, terms, out)
             },
         };
-        header.residual_error_term = residual_error_sq.sqrt();
+        header.component_sum = quant_stats.primary_component_sum;
+        let perp_error_sq =
+            quant_stats.residual_error_sq - (quant_stats.residual_ip.powi(2) / stats.l2_norm_sq);
+        header.perpendicular_error_term = perp_error_sq.sqrt();
+        header.parallel_error_term = quant_stats.residual_ip / stats.l2_norm_sq;
 
         header
     }

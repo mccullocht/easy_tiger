@@ -3,7 +3,8 @@
 #![allow(dead_code)]
 
 use super::{
-    LAMBDA, MINIMUM_MSE_GRID, TurboPrimaryVector, VectorEncodeTerms, VectorStats,
+    LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, TurboPrimaryVector, VectorEncodeTerms,
+    VectorStats,
     packing::{TurboPacker, TurboUnpacker},
 };
 
@@ -107,20 +108,19 @@ pub fn primary_quantize_and_pack<const B: usize>(
     vector: &[f32],
     terms: VectorEncodeTerms,
     out: &mut [u8],
-) -> (u32, f32) {
+) -> QuantizationStats {
     let mut packer = TurboPacker::<B>::new(out);
-    let (component_sum, residual_error_sq) = vector
+    vector
         .iter()
         .map(|&v| {
             let q = ((v.clamp(terms.lower, terms.upper) - terms.lower) * terms.delta_inv).round();
             let r = v - q.mul_add(terms.delta, terms.lower);
             packer.push(q as u8);
-            (q as u32, r)
+            (q as u32, v, r)
         })
-        .fold((0, 0.0), |(sum, rsum), (q, r)| {
-            (sum + q, r.mul_add(r, rsum))
-        });
-    (component_sum, residual_error_sq)
+        .fold(QuantizationStats::default(), |stats, (q, v, r)| {
+            stats.add_component(q, v, r)
+        })
 }
 
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {

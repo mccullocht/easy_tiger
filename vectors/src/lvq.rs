@@ -902,6 +902,10 @@ impl TurboPrimaryQueryDistance1 {
         let uint8_dot = match self.k {
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::query4_doc1_bitplane_dot(&self.query, vector.rep.data),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                x86_64::query4_doc1_bitplane_dot_avx512(&self.query, vector.rep.data)
+            },
             _ => scalar::query4_doc1_bitplane_dot(&self.query, vector.rep.data),
         };
         let dot = correct_dot_uint(

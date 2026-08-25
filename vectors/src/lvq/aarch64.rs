@@ -810,9 +810,9 @@ pub fn query4_doc1_bitplane_dot(query: &[u8], doc: &[u8]) -> u32 {
             let qv = vld1q_u8_x4(q.as_ptr());
             let dv = vld1q_u8(dhead.as_ptr().add(i * 16));
             bdot[0] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.0, dv))) as u32;
-            bdot[1] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.0, dv))) as u32;
-            bdot[2] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.0, dv))) as u32;
-            bdot[3] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.0, dv))) as u32;
+            bdot[1] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.1, dv))) as u32;
+            bdot[2] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.2, dv))) as u32;
+            bdot[3] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.3, dv))) as u32;
         }
         bdot[0] + bdot[1] * 2 + bdot[2] * 4 + bdot[3] * 8
     };

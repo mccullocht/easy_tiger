@@ -850,6 +850,121 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
     }
 }
 
+/// Asymmetric distance for 1-bit document with a 4-bit query.
+///
+/// This trades some of the accuracy gain from asymmetric distance for speed. The query bitplane
+/// is split so that the dot product can be computed entirely with popcount.
+#[derive(Debug, Clone)]
+pub struct TurboPrimaryQueryDistance1 {
+    #[allow(dead_code)]
+    k: Kernel,
+    similarity: VectorSimilarity,
+
+    query: Vec<u8>,
+    terms: VectorDecodeTerms,
+    correction_terms: DistanceCorrectionTerms,
+    error_terms: ErrorBoundTerms,
+}
+
+impl TurboPrimaryQueryDistance1 {
+    pub fn new(
+        similarity: VectorSimilarity,
+        query: Cow<'_, [f32]>,
+        center: Option<&[f32]>,
+    ) -> Self {
+        let k = Kernel::default();
+        let (header, query) =
+            TurboPrimaryCoder::<4>::encode_parts(k, similarity, query.as_ref(), center);
+        let query = packing::bitplane_split4(&query);
+        let terms = VectorDecodeTerms::from_primary::<4>(header);
+        let correction_terms = DistanceCorrectionTerms::new(&header, center, similarity);
+        let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
+
+        Self {
+            k,
+            similarity,
+            query,
+            terms,
+            correction_terms,
+            error_terms,
+        }
+    }
+
+    #[inline(always)]
+    fn distance_internal_raw(&self, vector: &[u8]) -> f64 {
+        let vector =
+            TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
+        self.distance_internal(&vector)
+    }
+
+    #[inline(always)]
+    fn distance_internal(&self, vector: &TurboPrimaryVector<1>) -> f64 {
+        let uint8_dot = {
+            // XXX is this unsound? it feels like it shouldn't be at the same dimensionality but
+            // I've been wrong about this before.
+            let (qhead, qtail) = self.query.as_chunks::<64>();
+            let (dhead, dtail) = vector.rep.data.as_chunks::<16>();
+            let mut pdot = [0u32; 4];
+            for (q, d) in qhead.iter().zip(dhead.iter()) {
+                let qc = q.as_chunks::<16>().0;
+                let q0 = u128::from_le_bytes(qc[0]);
+                let q1 = u128::from_le_bytes(qc[1]);
+                let q2 = u128::from_le_bytes(qc[2]);
+                let q3 = u128::from_le_bytes(qc[3]);
+                let d = u128::from_le_bytes(*d);
+                pdot[0] += (q0 & d).count_ones();
+                pdot[1] += (q1 & d).count_ones();
+                pdot[2] += (q2 & d).count_ones();
+                pdot[3] += (q3 & d).count_ones();
+            }
+
+            if !qtail.is_empty() {
+                let mut qit = qtail.chunks(qtail.len() / 4);
+                let q = [
+                    qit.next().unwrap(),
+                    qit.next().unwrap(),
+                    qit.next().unwrap(),
+                    qit.next().unwrap(),
+                ];
+
+                for (i, &d) in dtail.iter().enumerate() {
+                    pdot[0] = (q[0][i] & d).count_ones();
+                    pdot[1] = (q[1][i] & d).count_ones();
+                    pdot[2] = (q[2][i] & d).count_ones();
+                    pdot[3] = (q[3][i] & d).count_ones();
+                }
+            }
+
+            pdot[0] + pdot[1] * 2 + pdot[2] * 4 + pdot[3] * 8
+        };
+        let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);
+        self.correction_terms
+            .distance_from_dot_unnormalized(dot, vector.l2_norm, vector.center_dot)
+            .into()
+    }
+}
+
+impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.distance_internal_raw(vector)
+    }
+
+    fn bulk_distance(&self, vectors: &[&[u8]], out: &mut [f64]) {
+        for (vector, out) in vectors.iter().zip(out.iter_mut()) {
+            *out = self.distance_internal_raw(vector);
+        }
+    }
+
+    // TODO: add tests for this. Right now it is not accurate enough to write good tests.
+    fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
+        let vector =
+            TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
+        let distance = self.distance_internal(&vector);
+        let error = self.error_terms.error_bound(&vector).into();
+        EstimatedDistance { distance, error }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct VectorEncodeTerms {
     lower: f32,
@@ -1024,8 +1139,8 @@ pub(super) mod packing {
         }
 
         if !tail.is_empty() {
-            assert!(tail.len().is_multiple_of(4));
-            let mut oiter = otail.chunks_mut(tail.len() / 4);
+            assert!(otail.len().is_multiple_of(4));
+            let mut oiter = otail.chunks_mut(otail.len() / 4);
             let mut b0 = TurboPacker::<4>::new(oiter.next().unwrap());
             let mut b1 = TurboPacker::<4>::new(oiter.next().unwrap());
             let mut b2 = TurboPacker::<4>::new(oiter.next().unwrap());

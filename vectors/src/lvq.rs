@@ -899,42 +899,10 @@ impl TurboPrimaryQueryDistance1 {
 
     #[inline(always)]
     fn distance_internal(&self, vector: &TurboPrimaryVector<1>) -> f64 {
-        let uint8_dot = {
-            let (qhead, qtail) = self.query.as_chunks::<64>();
-            let (dhead, dtail) = vector.rep.data.split_at(qhead.len() * 16);
-            let dhead = dhead.as_chunks::<16>().0;
-            let mut pdot = [0u32; 4];
-            for (q, d) in qhead.iter().zip(dhead.iter()) {
-                let qc = q.as_chunks::<16>().0;
-                let q0 = u128::from_le_bytes(qc[0]);
-                let q1 = u128::from_le_bytes(qc[1]);
-                let q2 = u128::from_le_bytes(qc[2]);
-                let q3 = u128::from_le_bytes(qc[3]);
-                let d = u128::from_le_bytes(*d);
-                pdot[0] += (q0 & d).count_ones();
-                pdot[1] += (q1 & d).count_ones();
-                pdot[2] += (q2 & d).count_ones();
-                pdot[3] += (q3 & d).count_ones();
-            }
-
-            if !qtail.is_empty() {
-                let mut qit = qtail.chunks(qtail.len() / 4);
-                let q = [
-                    qit.next().unwrap(),
-                    qit.next().unwrap(),
-                    qit.next().unwrap(),
-                    qit.next().unwrap(),
-                ];
-
-                for (i, &d) in dtail.iter().enumerate() {
-                    pdot[0] += (q[0][i] & d).count_ones();
-                    pdot[1] += (q[1][i] & d).count_ones();
-                    pdot[2] += (q[2][i] & d).count_ones();
-                    pdot[3] += (q[3][i] & d).count_ones();
-                }
-            }
-
-            pdot[0] + pdot[1] * 2 + pdot[2] * 4 + pdot[3] * 8
+        let uint8_dot = match self.k {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::query4_doc1_bitplane_dot(&self.query, vector.rep.data),
+            _ => scalar::query4_doc1_bitplane_dot(&self.query, vector.rep.data),
         };
         let dot = correct_dot_uint(
             uint8_dot,

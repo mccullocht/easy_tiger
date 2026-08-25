@@ -900,10 +900,9 @@ impl TurboPrimaryQueryDistance1 {
     #[inline(always)]
     fn distance_internal(&self, vector: &TurboPrimaryVector<1>) -> f64 {
         let uint8_dot = {
-            // XXX is this unsound? it feels like it shouldn't be at the same dimensionality but
-            // I've been wrong about this before.
             let (qhead, qtail) = self.query.as_chunks::<64>();
-            let (dhead, dtail) = vector.rep.data.as_chunks::<16>();
+            let (dhead, dtail) = vector.rep.data.split_at(qhead.len() * 16);
+            let dhead = dhead.as_chunks::<16>().0;
             let mut pdot = [0u32; 4];
             for (q, d) in qhead.iter().zip(dhead.iter()) {
                 let qc = q.as_chunks::<16>().0;
@@ -1109,11 +1108,14 @@ pub(super) mod packing {
     /// interleaved in the turbo packing format.
     pub fn bitplane_split4(vector: &[u8]) -> Vec<u8> {
         // 64 bytes contains 128 dims, which is enough to populate 4 128 bit bitplanes.
-        let dim = vector.len() * 2;
-        let len = dim.div_ceil(8) * 4;
+        let head_len = vector.len() & !63;
+        let tail_dim = (vector.len() & 63) * 2;
+        let tail_len = tail_dim.div_ceil(8) * 4;
+        let len = head_len + tail_len;
         let mut out = vec![0u8; len];
         let (head, tail) = vector.as_chunks::<64>();
-        let (ohead, otail) = out.as_chunks_mut::<64>();
+        let (ohead, otail) = out.split_at_mut(head.len() * 64);
+        let ohead = ohead.as_chunks_mut::<64>().0;
         let nibble_mask = u128::from_ne_bytes([0xf; 16]);
         let bit_mask = u128::from_ne_bytes([1; 16]);
         for (c, o) in head.iter().zip(ohead.iter_mut()) {

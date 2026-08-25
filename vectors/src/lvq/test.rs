@@ -558,3 +558,76 @@ lvq_coding_simd_test!(tlvq1_coding_simd, TurboPrimaryCoder::<1>);
 lvq_coding_simd_test!(tlvq2_coding_simd, TurboPrimaryCoder::<2>);
 lvq_coding_simd_test!(tlvq4_coding_simd, TurboPrimaryCoder::<4>);
 lvq_coding_simd_test!(tlvq8_coding_simd, TurboPrimaryCoder::<8>);
+
+/// Reconstruct the 4 bit dimension values from the output of `bitplane_split4`.
+///
+/// The head of the split is interleaved in 64 byte groups (4 x 16 byte bitplanes covering 128
+/// dimensions); the tail is packed as 4 equally sized single bit turbo packed bitplanes.
+fn bitplane_join4(split: &[u8], dimensions: usize) -> Vec<u8> {
+    use crate::lvq::packing::TurboUnpacker;
+
+    let head_groups = crate::lvq::packing::byte_len(dimensions, 4) / 64;
+    let (head, tail) = split.split_at(head_groups * 64);
+    let mut out = Vec::with_capacity(dimensions);
+    for group in head.as_chunks::<64>().0 {
+        let planes = group.as_chunks::<16>().0;
+        // Each 16 byte bitplane covers 4 turbo blocks of 32 dimensions each. Within a plane byte
+        // the low nibble of input byte `p` of block `i` lands at bit `i * 2` and the high nibble
+        // at bit `i * 2 + 1`.
+        for i in 0..4 {
+            for half in 0..2 {
+                for p in 0..16 {
+                    let mut v = 0u8;
+                    for (k, plane) in planes.iter().enumerate() {
+                        v |= ((plane[p] >> (i * 2 + half)) & 1) << k;
+                    }
+                    out.push(v);
+                }
+            }
+        }
+    }
+
+    if !tail.is_empty() {
+        let mut planes = tail
+            .chunks(tail.len() / 4)
+            .map(|p| TurboUnpacker::<1>::new(p));
+        let mut b0 = planes.next().unwrap();
+        let mut b1 = planes.next().unwrap();
+        let mut b2 = planes.next().unwrap();
+        let mut b3 = planes.next().unwrap();
+        while out.len() < dimensions {
+            let v = b0.next().unwrap()
+                | (b1.next().unwrap() << 1)
+                | (b2.next().unwrap() << 2)
+                | (b3.next().unwrap() << 3);
+            out.push(v);
+        }
+    }
+
+    out.truncate(dimensions);
+    out
+}
+
+#[test]
+fn bitplane_split4_roundtrip() {
+    use crate::lvq::packing::{TurboPacker, bitplane_split4, byte_len};
+
+    let seed = SysRng::default().try_next_u64().unwrap();
+    println!("SEED {seed:#016x}");
+    let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+    // Cover vectors with and without a head, and with block aligned and unaligned tails.
+    for dimensions in [8, 32, 40, 96, 128, 136, 160, 256, 384, 391, 1024, 1536] {
+        let dims = (0..dimensions)
+            .map(|_| rng.random_range(0u8..16))
+            .collect::<Vec<_>>();
+        let mut packed = vec![0u8; byte_len(dimensions, 4)];
+        let mut packer = TurboPacker::<4>::new(&mut packed);
+        for d in dims.iter().copied() {
+            packer.push(d);
+        }
+
+        let split = bitplane_split4(&packed);
+        assert_eq!(split.len(), dimensions.div_ceil(8) * 4);
+        assert_eq!(bitplane_join4(&split, dimensions), dims, "dim {dimensions}");
+    }
+}

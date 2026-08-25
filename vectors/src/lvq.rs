@@ -408,8 +408,6 @@ impl PrimaryVectorHeader {
 struct QuantizationStats {
     /// Sum of all quantized primary components.
     primary_component_sum: u32,
-    /// Sum of all quantized residual components. 0 for primary-only quantization.
-    residual_component_sum: u32, // XXX probably dead
     /// Squared error of the quantization residual.
     residual_error_sq: f32,
     /// The inner product of each vector component and it's primary quantization residual.
@@ -417,10 +415,9 @@ struct QuantizationStats {
 }
 
 impl QuantizationStats {
-    fn add_component(self, cp: u32, cr: u32, v: f32, r: f32) -> Self {
+    fn add_component(self, cp: u32, v: f32, r: f32) -> Self {
         Self {
             primary_component_sum: self.primary_component_sum + cp,
-            residual_component_sum: self.residual_component_sum + cr,
             residual_error_sq: r.mul_add(r, self.residual_error_sq),
             residual_ip: v.mul_add(r, self.residual_ip),
         }
@@ -433,7 +430,6 @@ impl Add<QuantizationStats> for QuantizationStats {
     fn add(self, rhs: QuantizationStats) -> Self::Output {
         Self {
             primary_component_sum: self.primary_component_sum + rhs.primary_component_sum,
-            residual_component_sum: self.residual_component_sum + rhs.residual_component_sum,
             residual_error_sq: self.residual_error_sq + rhs.residual_error_sq,
             residual_ip: self.residual_ip + rhs.residual_ip,
         }

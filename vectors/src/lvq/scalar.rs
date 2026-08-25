@@ -119,7 +119,7 @@ pub fn primary_quantize_and_pack<const B: usize>(
             (q as u32, v, r)
         })
         .fold(QuantizationStats::default(), |stats, (q, v, r)| {
-            stats.add_component(q, 0, v, r)
+            stats.add_component(q, v, r)
         })
 }
 

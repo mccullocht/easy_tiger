@@ -878,7 +878,7 @@ impl TurboPrimaryQueryDistance1 {
         let query = packing::bitplane_split4(&query);
         let terms = VectorDecodeTerms::from_primary::<4>(header);
         let correction_terms = DistanceCorrectionTerms::new(&header, center, similarity);
-        let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
+        let error_terms = ErrorBoundTerms::from_header(&header, query.len() * 2, similarity);
 
         Self {
             k,
@@ -928,16 +928,21 @@ impl TurboPrimaryQueryDistance1 {
                 ];
 
                 for (i, &d) in dtail.iter().enumerate() {
-                    pdot[0] = (q[0][i] & d).count_ones();
-                    pdot[1] = (q[1][i] & d).count_ones();
-                    pdot[2] = (q[2][i] & d).count_ones();
-                    pdot[3] = (q[3][i] & d).count_ones();
+                    pdot[0] += (q[0][i] & d).count_ones();
+                    pdot[1] += (q[1][i] & d).count_ones();
+                    pdot[2] += (q[2][i] & d).count_ones();
+                    pdot[3] += (q[3][i] & d).count_ones();
                 }
             }
 
             pdot[0] + pdot[1] * 2 + pdot[2] * 4 + pdot[3] * 8
         };
-        let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);
+        let dot = correct_dot_uint(
+            uint8_dot,
+            self.query.len() * 2,
+            &self.terms,
+            &vector.rep.terms,
+        );
         self.correction_terms
             .distance_from_dot_unnormalized(dot, vector.l2_norm, vector.center_dot)
             .into()
@@ -1141,10 +1146,10 @@ pub(super) mod packing {
         if !tail.is_empty() {
             assert!(otail.len().is_multiple_of(4));
             let mut oiter = otail.chunks_mut(otail.len() / 4);
-            let mut b0 = TurboPacker::<4>::new(oiter.next().unwrap());
-            let mut b1 = TurboPacker::<4>::new(oiter.next().unwrap());
-            let mut b2 = TurboPacker::<4>::new(oiter.next().unwrap());
-            let mut b3 = TurboPacker::<4>::new(oiter.next().unwrap());
+            let mut b0 = TurboPacker::<1>::new(oiter.next().unwrap());
+            let mut b1 = TurboPacker::<1>::new(oiter.next().unwrap());
+            let mut b2 = TurboPacker::<1>::new(oiter.next().unwrap());
+            let mut b3 = TurboPacker::<1>::new(oiter.next().unwrap());
             for d in TurboUnpacker::<4>::new(tail) {
                 b0.push(d & 1);
                 b1.push((d >> 1) & 1);

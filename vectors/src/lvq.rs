@@ -370,7 +370,7 @@ impl PrimaryVectorHeader {
         h32[1] = self.component_sum.to_le_bytes();
 
         let h16 = header_bytes[8..16].as_chunks_mut::<2>().0;
-        h16[0] = f16::from_f32(self.perpendicular_error_term).to_le_bytes();
+        h16[0] = f16::from_f32(self.perpendicular_error_term / self.l2_norm).to_le_bytes();
         h16[1] = f16::from_f32(self.parallel_error_term).to_le_bytes();
         h16[2] = f16::from_f32(self.lower).to_le_bytes();
         h16[3] = f16::from_f32(self.upper).to_le_bytes();
@@ -381,20 +381,21 @@ impl PrimaryVectorHeader {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
         let h32 = header_bytes[..8].as_chunks::<4>().0;
         let h16 = header_bytes[8..16].as_chunks::<2>().0;
+        let l2_norm = if similarity.angular() {
+            1.0
+        } else {
+            f32::from_le_bytes(h32[0])
+        };
         Some((
             Self {
-                l2_norm: if similarity.angular() {
-                    1.0
-                } else {
-                    f32::from_le_bytes(h32[0])
-                },
+                l2_norm,
                 center_dot: if similarity.angular() {
                     f32::from_le_bytes(h32[0])
                 } else {
                     0.0
                 },
                 component_sum: u32::from_le_bytes(h32[1]),
-                perpendicular_error_term: f16::from_le_bytes(h16[0]).to_f32(),
+                perpendicular_error_term: f16::from_le_bytes(h16[0]).to_f32() * l2_norm,
                 parallel_error_term: f16::from_le_bytes(h16[1]).to_f32(),
                 lower: f16::from_le_bytes(h16[2]).to_f32(),
                 upper: f16::from_le_bytes(h16[3]).to_f32(),
@@ -638,9 +639,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         header.component_sum = quant_stats.primary_component_sum;
         let perp_error_sq =
             quant_stats.residual_error_sq - (quant_stats.residual_ip.powi(2) / stats.l2_norm_sq);
-        // XXX dividing by l2_norm is wrong -- this should happen at serialization time before storage
-        // and be inverted at deserialization time.
-        header.perpendicular_error_term = perp_error_sq.sqrt() / header.l2_norm;
+        header.perpendicular_error_term = perp_error_sq.sqrt();
         header.parallel_error_term = quant_stats.residual_ip / stats.l2_norm_sq;
 
         header

@@ -122,6 +122,7 @@ pub fn try_adapter() -> Option<wgpu::Adapter> {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     }))
     .ok()
 }
@@ -428,7 +429,10 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
             //
             // The shader writes distances row-major as distances[q_local * current_d + d_local].
             {
-                let mapped = staging_buffer.slice(..copy_bytes).get_mapped_range();
+                let mapped = staging_buffer
+                    .slice(..copy_bytes)
+                    .get_mapped_range()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 let distances: &[f32] = bytemuck::cast_slice(&mapped);
                 for q_local in 0..current_q {
                     let row = &distances[q_local * current_d..(q_local + 1) * current_d];

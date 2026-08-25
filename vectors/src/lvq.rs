@@ -850,6 +850,97 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
     }
 }
 
+/// Asymmetric distance for 1-bit document with a 4-bit query.
+///
+/// This trades some of the accuracy gain from asymmetric distance for speed. The query bitplane
+/// is split so that the dot product can be computed entirely with popcount.
+#[derive(Debug, Clone)]
+pub struct TurboPrimaryQueryDistance1 {
+    #[allow(dead_code)]
+    k: Kernel,
+    similarity: VectorSimilarity,
+
+    query: Vec<u8>,
+    terms: VectorDecodeTerms,
+    correction_terms: DistanceCorrectionTerms,
+    error_terms: ErrorBoundTerms,
+}
+
+impl TurboPrimaryQueryDistance1 {
+    pub fn new(
+        similarity: VectorSimilarity,
+        query: Cow<'_, [f32]>,
+        center: Option<&[f32]>,
+    ) -> Self {
+        let k = Kernel::default();
+        let (header, query) =
+            TurboPrimaryCoder::<4>::encode_parts(k, similarity, query.as_ref(), center);
+        let query = packing::bitplane_split4(&query);
+        let terms = VectorDecodeTerms::from_primary::<4>(header);
+        let correction_terms = DistanceCorrectionTerms::new(&header, center, similarity);
+        let error_terms = ErrorBoundTerms::from_header(&header, query.len() * 2, similarity);
+
+        Self {
+            k,
+            similarity,
+            query,
+            terms,
+            correction_terms,
+            error_terms,
+        }
+    }
+
+    #[inline(always)]
+    fn distance_internal_raw(&self, vector: &[u8]) -> f64 {
+        let vector =
+            TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
+        self.distance_internal(&vector)
+    }
+
+    #[inline(always)]
+    fn distance_internal(&self, vector: &TurboPrimaryVector<1>) -> f64 {
+        let uint8_dot = match self.k {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::query4_doc1_bitplane_dot(&self.query, vector.rep.data),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                x86_64::query4_doc1_bitplane_dot_avx512(&self.query, vector.rep.data)
+            },
+            _ => scalar::query4_doc1_bitplane_dot(&self.query, vector.rep.data),
+        };
+        let dot = correct_dot_uint(
+            uint8_dot,
+            self.query.len() * 2,
+            &self.terms,
+            &vector.rep.terms,
+        );
+        self.correction_terms
+            .distance_from_dot_unnormalized(dot, vector.l2_norm, vector.center_dot)
+            .into()
+    }
+}
+
+impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.distance_internal_raw(vector)
+    }
+
+    fn bulk_distance(&self, vectors: &[&[u8]], out: &mut [f64]) {
+        for (vector, out) in vectors.iter().zip(out.iter_mut()) {
+            *out = self.distance_internal_raw(vector);
+        }
+    }
+
+    // TODO: add tests for this. Right now it is not accurate enough to write good tests.
+    fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
+        let vector =
+            TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
+        let distance = self.distance_internal(&vector);
+        let error = self.error_terms.error_bound(&vector).into();
+        EstimatedDistance { distance, error }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct VectorEncodeTerms {
     lower: f32,
@@ -982,6 +1073,67 @@ pub(super) mod packing {
     impl<'a, const B: usize> FusedIterator for TurboUnpacker<'a, B> {}
 
     impl<'a, const B: usize> ExactSizeIterator for TurboUnpacker<'a, B> {}
+
+    /// Take a 4 bit encoded input and split it into 4 bitplanes.
+    ///
+    /// The resulting bitplanes are interleaved at 16 bytes chunks until the tail when they are
+    /// interleaved in the turbo packing format.
+    pub fn bitplane_split4(vector: &[u8]) -> Vec<u8> {
+        // 64 bytes contains 128 dims, which is enough to populate 4 128 bit bitplanes.
+        let head_len = vector.len() & !63;
+        let tail_dim = (vector.len() & 63) * 2;
+        let tail_len = tail_dim.div_ceil(8) * 4;
+        let len = head_len + tail_len;
+        let mut out = vec![0u8; len];
+        let (head, tail) = vector.as_chunks::<64>();
+        let (ohead, otail) = out.split_at_mut(head.len() * 64);
+        let ohead = ohead.as_chunks_mut::<64>().0;
+        let nibble_mask = u128::from_ne_bytes([0xf; 16]);
+        let bit_mask = u128::from_ne_bytes([1; 16]);
+        for (c, o) in head.iter().zip(ohead.iter_mut()) {
+            let mut b0 = 0u128;
+            let mut b1 = 0u128;
+            let mut b2 = 0u128;
+            let mut b3 = 0u128;
+            for (i, b) in c.as_chunks::<16>().0.iter().enumerate() {
+                let b = u128::from_le_bytes(*b);
+                let lo = b & nibble_mask;
+                let hi = (b >> 4) & nibble_mask;
+
+                b0 |= (lo & bit_mask) << (i * 2);
+                b0 |= (hi & bit_mask) << (i * 2 + 1);
+                b1 |= ((lo >> 1) & bit_mask) << (i * 2);
+                b1 |= ((hi >> 1) & bit_mask) << (i * 2 + 1);
+                b2 |= ((lo >> 2) & bit_mask) << (i * 2);
+                b2 |= ((hi >> 2) & bit_mask) << (i * 2 + 1);
+                b3 |= ((lo >> 3) & bit_mask) << (i * 2);
+                b3 |= ((hi >> 3) & bit_mask) << (i * 2 + 1);
+            }
+
+            let planes = o.as_chunks_mut::<16>().0;
+            planes[0] = b0.to_le_bytes();
+            planes[1] = b1.to_le_bytes();
+            planes[2] = b2.to_le_bytes();
+            planes[3] = b3.to_le_bytes();
+        }
+
+        if !tail.is_empty() {
+            assert!(otail.len().is_multiple_of(4));
+            let mut oiter = otail.chunks_mut(otail.len() / 4);
+            let mut b0 = TurboPacker::<1>::new(oiter.next().unwrap());
+            let mut b1 = TurboPacker::<1>::new(oiter.next().unwrap());
+            let mut b2 = TurboPacker::<1>::new(oiter.next().unwrap());
+            let mut b3 = TurboPacker::<1>::new(oiter.next().unwrap());
+            for d in TurboUnpacker::<4>::new(tail) {
+                b0.push(d & 1);
+                b1.push((d >> 1) & 1);
+                b2.push((d >> 2) & 1);
+                b3.push((d >> 3) & 1);
+            }
+        }
+
+        out
+    }
 
     /// Return the number of dimensions that can be packed into a single block.
     ///

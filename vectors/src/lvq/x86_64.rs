@@ -12,11 +12,11 @@ use std::arch::x86_64::{
     _mm512_dpwssd_epi32, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8,
     _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_loadu_epi8,
     _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
-    _mm512_or_si512, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
-    _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set_epi64,
-    _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_i64x2, _mm512_sll_epi32,
-    _mm512_srli_epi32, _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps,
-    _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm512_mullo_epi32, _mm512_or_si512, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
+    _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
+    _mm512_set_epi32, _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps,
+    _mm512_shuffle_i64x2, _mm512_sll_epi32, _mm512_srli_epi32, _mm512_srli_epi64,
+    _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
 use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorEncodeTerms, packing};
@@ -542,6 +542,43 @@ pub unsafe fn primary_query8_dot_unnormalized_avx512<const B: usize>(
     dot
 }
 
+/// Compute the unnormalized dot product of a bitplane-split 4-bit query with a 1-bit document.
+///
+/// `query` must be the output of `packing::bitplane_split4()`; `doc` is the packed 1-bit document
+/// data covering the same number of dimensions (`query.len() * 2`).
+#[target_feature(enable = "avx512f,avx512bw,avx512vpopcntdq")]
+#[inline]
+pub unsafe fn query4_doc1_bitplane_dot_avx512(query: &[u8], doc: &[u8]) -> u32 {
+    let (qhead, qtail) = query.as_chunks::<64>();
+    let (dhead, dtail) = doc.split_at(qhead.len() * 16);
+
+    // Each 64 byte query chunk holds the four 128-bit query bitplanes for the 128 dimensions
+    // covered by the matching 16 doc bytes, so one 512-bit load covers all four planes and the
+    // doc value can be broadcast to each 128-bit lane.
+    //
+    // Popcounts are accumulated per 32-bit lane and only weighted by the plane significance at
+    // the end: each iteration adds at most 32 to a lane, so this can absorb millions of
+    // iterations before overflow.
+    let mut dot = {
+        let mut acc = _mm512_set1_epi32(0);
+        for (q, d) in qhead.iter().zip(dhead.as_chunks::<16>().0) {
+            let q = _mm512_loadu_epi8(q.as_ptr() as *const i8);
+            let d = _mm512_broadcast_i32x4(_mm_lddqu_si128(d.as_ptr() as *const __m128i));
+            acc = _mm512_add_epi32(acc, _mm512_popcnt_epi32(_mm512_and_si512(q, d)));
+        }
+
+        // Weight each 128-bit lane (one bitplane) by its significance before reducing.
+        let weights = _mm512_set_epi32(8, 8, 8, 8, 4, 4, 4, 4, 2, 2, 2, 2, 1, 1, 1, 1);
+        _mm512_reduce_add_epi32(_mm512_mullo_epi32(acc, weights)) as u32
+    };
+
+    if !qtail.is_empty() {
+        dot += super::scalar::query4_doc1_bitplane_dot(qtail, dtail);
+    }
+
+    dot
+}
+
 struct VectorEncodeTermsAvx512 {
     lower: __m512,
     upper: __m512,
@@ -618,4 +655,32 @@ unsafe fn unpack_u4_avx512(v: __m512i) -> __m512i {
     let shifted = _mm512_srlv_epi64(b, _mm512_set_epi64(4, 4, 0, 0, 4, 4, 0, 0));
     // Mask each dimension down to 4 bits.
     _mm512_and_si512(shifted, _mm512_set1_epi8(0xf))
+}
+
+#[cfg(test)]
+mod test {
+    use crate::lvq::packing;
+
+    #[test]
+    fn query4_doc1_bitplane_dot() {
+        if !std::arch::is_x86_feature_detected!("avx512vpopcntdq") {
+            return;
+        }
+
+        // Cover full 128-dim blocks plus every kind of tail.
+        for dims in [4usize, 17, 128, 129, 200, 256, 384, 999] {
+            let query4 = (0..dims.div_ceil(2))
+                .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
+                .collect::<Vec<_>>();
+            let query = packing::bitplane_split4(&query4);
+            let doc = (0..dims.div_ceil(8))
+                .map(|i| (i as u8).wrapping_mul(101).wrapping_add(7))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                unsafe { super::query4_doc1_bitplane_dot_avx512(&query, &doc) },
+                crate::lvq::scalar::query4_doc1_bitplane_dot(&query, &doc),
+                "dims={dims}"
+            );
+        }
+    }
 }

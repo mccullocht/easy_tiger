@@ -7,10 +7,10 @@ use std::arch::aarch64::{
     vaddq_f64, vaddq_u16, vaddq_u32, vaddvq_f32, vaddvq_u32, vandq_u8, vandq_u32, vcntq_u8,
     vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdotq_u32,
     vdupq_n_f32, vdupq_n_f64, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64,
-    vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vmaxq_f32, vmaxvq_f32,
-    vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8,
-    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8, vshrq_n_u8, vshrq_n_u32,
-    vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
+    vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vld1q_u8_x4,
+    vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8,
+    vqtbl1q_u8, vqtbl4q_u8, vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8,
+    vshrq_n_u8, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorEncodeTerms, scalar};
@@ -402,6 +402,8 @@ unsafe fn quantize4_residual_error(
 }
 
 // Symmetric dot product 2 bit
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u2(a: &[u8], b: &[u8]) -> u32 {
     let len = a.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -440,6 +442,8 @@ unsafe fn lvq_dot_u2(a: &[u8], b: &[u8]) -> u32 {
 }
 
 // Symmetric dot product 4 bit
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u4(a: &[u8], b: &[u8]) -> u32 {
     let len = a.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -480,6 +484,8 @@ unsafe fn lvq_dot_u4(a: &[u8], b: &[u8]) -> u32 {
 }
 
 // Symmetric dot product 8 bit
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u8(a: &[u8], b: &[u8]) -> u32 {
     let len = a.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -521,6 +527,8 @@ unsafe fn lvq_dot_u8(a: &[u8], b: &[u8]) -> u32 {
 }
 
 // Asymmetric dot product 8 bit-1 bit. `q.len()` must be a multiple of 128.
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u8_u1(q: &[u8], d: &[u8]) -> u32 {
     let len = q.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -574,6 +582,8 @@ unsafe fn lvq_dot_u8_u1(q: &[u8], d: &[u8]) -> u32 {
 }
 
 // Asymmetric dot product 8 bit-2 bit. `q.len()` must be a multiple of 64.
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u8_u2(q: &[u8], d: &[u8]) -> u32 {
     let len = q.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -607,6 +617,8 @@ unsafe fn lvq_dot_u8_u2(q: &[u8], d: &[u8]) -> u32 {
 }
 
 // Asymmetric dot product 8 bit-4 bit. `q.len()` must be a multiple of 32.
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u8_u4(q: &[u8], d: &[u8]) -> u32 {
     let len = q.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -796,6 +808,34 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
     dot
 }
 
+/// Compute the unnormalized dot product of a bitplane-split 4-bit query with a 1-bit document.
+///
+/// `query` must be the output of `packing::bitplane_split4()`; `doc` is the packed 1-bit document
+/// data covering the same number of dimensions (`query.len() * 2`).
+#[inline]
+pub fn query4_doc1_bitplane_dot(query: &[u8], doc: &[u8]) -> u32 {
+    let (qhead, qtail) = query.as_chunks::<64>();
+    let (dhead, dtail) = doc.split_at(qhead.len() * 16);
+    let mut dot = unsafe {
+        let mut bdot = [0u32; 4];
+        for (i, q) in qhead.iter().enumerate() {
+            let qv = vld1q_u8_x4(q.as_ptr());
+            let dv = vld1q_u8(dhead.as_ptr().add(i * 16));
+            bdot[0] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.0, dv))) as u32;
+            bdot[1] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.1, dv))) as u32;
+            bdot[2] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.2, dv))) as u32;
+            bdot[3] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.3, dv))) as u32;
+        }
+        bdot[0] + bdot[1] * 2 + bdot[2] * 4 + bdot[3] * 8
+    };
+
+    if !qtail.is_empty() {
+        dot += super::scalar::query4_doc1_bitplane_dot(qtail, dtail);
+    }
+
+    dot
+}
+
 #[inline(always)]
 unsafe fn shr_u32<const N: usize>(v: uint32x4_t) -> uint32x4_t {
     match N {
@@ -810,6 +850,27 @@ unsafe fn shr_u32<const N: usize>(v: uint32x4_t) -> uint32x4_t {
 #[cfg(test)]
 mod test {
     use approx::assert_abs_diff_eq;
+
+    use crate::lvq::packing;
+
+    #[test]
+    fn query4_doc1_bitplane_dot() {
+        // Cover full 128-dim blocks plus every kind of tail.
+        for dims in [4usize, 17, 128, 129, 200, 256, 384, 999] {
+            let query4 = (0..dims.div_ceil(2))
+                .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
+                .collect::<Vec<_>>();
+            let query = packing::bitplane_split4(&query4);
+            let doc = (0..dims.div_ceil(8))
+                .map(|i| (i as u8).wrapping_mul(101).wrapping_add(7))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                super::query4_doc1_bitplane_dot(&query, &doc),
+                crate::lvq::scalar::query4_doc1_bitplane_dot(&query, &doc),
+                "dims={dims}"
+            );
+        }
+    }
 
     #[test]
     fn compute_vector_stats() {

@@ -152,6 +152,49 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
         .sum::<u32>()
 }
 
+/// Compute the unnormalized dot product of a bitplane-split 4-bit query with a 1-bit document.
+///
+/// `query` must be the output of `packing::bitplane_split4()`; `doc` is the packed 1-bit document
+/// data covering the same number of dimensions (`query.len() * 2`).
+#[inline]
+pub fn query4_doc1_bitplane_dot(query: &[u8], doc: &[u8]) -> u32 {
+    let (qhead, qtail) = query.as_chunks::<64>();
+    let (dhead, dtail) = doc.split_at(qhead.len() * 16);
+    let dhead = dhead.as_chunks::<16>().0;
+    let mut pdot = [0u32; 4];
+    for (q, d) in qhead.iter().zip(dhead.iter()) {
+        let qc = q.as_chunks::<16>().0;
+        let q0 = u128::from_le_bytes(qc[0]);
+        let q1 = u128::from_le_bytes(qc[1]);
+        let q2 = u128::from_le_bytes(qc[2]);
+        let q3 = u128::from_le_bytes(qc[3]);
+        let d = u128::from_le_bytes(*d);
+        pdot[0] += (q0 & d).count_ones();
+        pdot[1] += (q1 & d).count_ones();
+        pdot[2] += (q2 & d).count_ones();
+        pdot[3] += (q3 & d).count_ones();
+    }
+
+    if !qtail.is_empty() {
+        let mut qit = qtail.chunks(qtail.len() / 4);
+        let q = [
+            qit.next().unwrap(),
+            qit.next().unwrap(),
+            qit.next().unwrap(),
+            qit.next().unwrap(),
+        ];
+
+        for (i, &d) in dtail.iter().enumerate() {
+            pdot[0] += (q[0][i] & d).count_ones();
+            pdot[1] += (q[1][i] & d).count_ones();
+            pdot[2] += (q[2][i] & d).count_ones();
+            pdot[3] += (q[3][i] & d).count_ones();
+        }
+    }
+
+    pdot[0] + pdot[1] * 2 + pdot[2] * 4 + pdot[3] * 8
+}
+
 #[inline]
 pub fn primary_query8_dot_unnormalized<const B: usize>(
     query: &[u8],

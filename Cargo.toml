@@ -25,6 +25,7 @@ memmap2 = { version = "0.9.5", features = ["stable_deref_trait"] }
 min-max-heap = "1.3.0"
 pollster = "0.4"
 rand = "0.9.1"
+rand_distr = "0.5.1"
 rand_xoshiro = "0.7.0"
 rayon = "1.10.0"
 rustix = "1.0.7"

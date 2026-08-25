@@ -8,21 +8,18 @@ use std::arch::x86_64::{
     _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set1_ps,
     _mm256_sub_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32, _mm512_and_si512,
     _mm512_broadcast_i32x4, _mm512_castps512_ps256, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi8,
-    _mm512_cvtepu8_epi32, _mm512_cvtepu32_ps, _mm512_cvtps_epu32, _mm512_div_ps,
-    _mm512_dpbusd_epi32, _mm512_dpwssd_epi32, _mm512_extractf32x8_ps, _mm512_fmadd_ps,
-    _mm512_loadu_epi8, _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_sub_ps,
-    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps,
-    _mm512_min_ps, _mm512_mul_ps, _mm512_or_si512, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
-    _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
-    _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi16, _mm512_set1_epi32, _mm512_set1_ps,
-    _mm512_shuffle_i64x2, _mm512_sll_epi32, _mm512_sll_epi64, _mm512_srli_epi16, _mm512_srli_epi32,
-    _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8,
-    _mm512_unpacklo_epi8,
+    _mm512_cvtepu32_ps, _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32,
+    _mm512_dpwssd_epi32, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8,
+    _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_loadu_epi8,
+    _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
+    _mm512_or_si512, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
+    _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set_epi64,
+    _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_i64x2, _mm512_sll_epi32,
+    _mm512_srli_epi32, _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps,
+    _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
-use crate::lvq::{
-    TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorDecodeTerms, VectorEncodeTerms, packing,
-};
+use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorEncodeTerms, packing};
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, VectorStats};
 
@@ -579,44 +576,6 @@ impl VectorEncodeTermsAvx512 {
     unsafe fn dequantize(&self, v: __m512i) -> __m512 {
         _mm512_fmadd_ps(_mm512_cvtepu32_ps(v), self.delta, self.lower)
     }
-}
-
-struct VectorDecodeTermsAvx512 {
-    lower: __m512,
-    delta: __m512,
-}
-
-impl VectorDecodeTermsAvx512 {
-    #[inline(always)]
-    unsafe fn from_terms(terms: &VectorDecodeTerms) -> Self {
-        Self {
-            lower: _mm512_set1_ps(terms.lower),
-            delta: _mm512_set1_ps(terms.delta),
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn dequantize(&self, v: __m512i) -> __m512 {
-        _mm512_fmadd_ps(_mm512_cvtepu32_ps(v), self.delta, self.lower)
-    }
-}
-
-#[target_feature(enable = "avx512f,avx512vnni")]
-#[inline]
-unsafe fn mm512_dot_u8(dot: __m512i, a: __m512i, b: __m512i) -> __m512i {
-    // Separate into 16 bit values to perform dot product because avx512vnni doesn't support pure
-    // u8 dot product. This unpack does not produce a linear dimension order but it doesn't matter
-    // here because our unpacks match and dot product is a summation.
-    let (a_lo, a_hi) = (
-        _mm512_and_si512(a, _mm512_set1_epi16(0xff)),
-        _mm512_srli_epi16::<8>(a),
-    );
-    let (b_lo, b_hi) = (
-        _mm512_and_si512(b, _mm512_set1_epi16(0xff)),
-        _mm512_srli_epi16::<8>(b),
-    );
-    let dot = _mm512_dpwssd_epi32(dot, a_lo, b_lo);
-    _mm512_dpwssd_epi32(dot, a_hi, b_hi)
 }
 
 /// Unpack 128 bits of u1 input as 128 bytes with 1 dimension per byte.

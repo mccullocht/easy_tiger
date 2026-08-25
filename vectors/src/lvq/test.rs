@@ -1,5 +1,5 @@
 use approx::{AbsDiffEq, abs_diff_eq, assert_abs_diff_eq};
-use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
+use rand::{RngExt, SeedableRng, TryRng, rngs::SysRng};
 
 use crate::lvq::{Kernel, PrimaryVectorHeader, TurboPrimaryCoder, VectorStats};
 use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity, float32::l2_normalize};
@@ -515,7 +515,7 @@ macro_rules! lvq_coding_simd_test {
         fn $name() {
             use crate::lvq::Kernel;
 
-            let seed = OsRng::default().try_next_u64().unwrap();
+            let seed = SysRng::default().try_next_u64().unwrap();
             println!("SEED {seed:#016x}");
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
             let scoder =

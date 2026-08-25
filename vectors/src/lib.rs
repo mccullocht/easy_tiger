@@ -578,13 +578,13 @@ mod test {
 
     use F32VectorCoding::{F16, TLVQ1, TLVQ2, TLVQ4, TLVQ8};
     use VectorSimilarity::{Cosine, Dot, Euclidean};
-    use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
+    use rand::{RngExt, SeedableRng, TryRng, rngs::SysRng};
 
     macro_rules! distance_test {
         ($name:ident, $sim:path, $coder:path, $epsilon:literal) => {
             #[test]
             fn $name() {
-                let seed = OsRng::default().try_next_u64().unwrap();
+                let seed = SysRng::default().try_next_u64().unwrap();
                 println!("SEED {seed:#016x}");
                 let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
                 for i in 0..1024 {

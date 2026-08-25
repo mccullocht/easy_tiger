@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use approx::assert_abs_diff_eq;
-use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
+use rand::{Rng, RngExt, SeedableRng, TryRng, rngs::SysRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::float32::l2_normalize;
@@ -20,7 +20,7 @@ const TRIALS: usize = 256;
 const BASE_DIMENSIONS: usize = 512;
 
 fn seeded_rng() -> Xoshiro256PlusPlus {
-    let seed = OsRng::default().try_next_u64().unwrap();
+    let seed = SysRng::default().try_next_u64().unwrap();
     println!("SEED {seed:#016x}");
     Xoshiro256PlusPlus::seed_from_u64(seed)
 }

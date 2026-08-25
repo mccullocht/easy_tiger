@@ -7,10 +7,10 @@ use std::arch::aarch64::{
     vaddq_f64, vaddq_u16, vaddq_u32, vaddvq_f32, vaddvq_u32, vandq_u8, vandq_u32, vcntq_u8,
     vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdotq_u32,
     vdupq_n_f32, vdupq_n_f64, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64,
-    vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vmaxq_f32, vmaxvq_f32,
-    vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8,
-    vld1q_u8_x4, vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8, vshrq_n_u8,
-    vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
+    vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vld1q_u8_x4,
+    vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8,
+    vqtbl1q_u8, vqtbl4q_u8, vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8,
+    vshrq_n_u8, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorEncodeTerms, scalar};
@@ -804,39 +804,21 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
 pub fn query4_doc1_bitplane_dot(query: &[u8], doc: &[u8]) -> u32 {
     let (qhead, qtail) = query.as_chunks::<64>();
     let (dhead, dtail) = doc.split_at(qhead.len() * 16);
-    // Each iteration adds at most 8 per byte lane, so at most 16 per u16 lane after the pairwise
-    // widening add. This can absorb 4096 iterations (524288 dimensions) before overflow.
     let mut dot = unsafe {
-        let mut pdot = [vdupq_n_u16(0); 4];
+        let mut bdot = [0u32; 4];
         for (i, q) in qhead.iter().enumerate() {
             let qv = vld1q_u8_x4(q.as_ptr());
             let dv = vld1q_u8(dhead.as_ptr().add(i * 16));
-            pdot[0] = vaddq_u16(pdot[0], vpaddlq_u8(vcntq_u8(vandq_u8(qv.0, dv))));
-            pdot[1] = vaddq_u16(pdot[1], vpaddlq_u8(vcntq_u8(vandq_u8(qv.1, dv))));
-            pdot[2] = vaddq_u16(pdot[2], vpaddlq_u8(vcntq_u8(vandq_u8(qv.2, dv))));
-            pdot[3] = vaddq_u16(pdot[3], vpaddlq_u8(vcntq_u8(vandq_u8(qv.3, dv))));
+            bdot[0] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.0, dv))) as u32;
+            bdot[1] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.0, dv))) as u32;
+            bdot[2] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.0, dv))) as u32;
+            bdot[3] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.0, dv))) as u32;
         }
-        vaddlvq_u16(pdot[0])
-            + vaddlvq_u16(pdot[1]) * 2
-            + vaddlvq_u16(pdot[2]) * 4
-            + vaddlvq_u16(pdot[3]) * 8
+        bdot[0] + bdot[1] * 2 + bdot[2] * 4 + bdot[3] * 8
     };
 
     if !qtail.is_empty() {
-        let mut qit = qtail.chunks(qtail.len() / 4);
-        let q = [
-            qit.next().unwrap(),
-            qit.next().unwrap(),
-            qit.next().unwrap(),
-            qit.next().unwrap(),
-        ];
-
-        for (i, &d) in dtail.iter().enumerate() {
-            dot += (q[0][i] & d).count_ones()
-                + (q[1][i] & d).count_ones() * 2
-                + (q[2][i] & d).count_ones() * 4
-                + (q[3][i] & d).count_ones() * 8;
-        }
+        dot += super::scalar::query4_doc1_bitplane_dot(qtail, dtail);
     }
 
     dot

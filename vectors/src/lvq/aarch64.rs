@@ -817,16 +817,19 @@ pub fn query4_doc1_bitplane_dot(query: &[u8], doc: &[u8]) -> u32 {
     let (qhead, qtail) = query.as_chunks::<64>();
     let (dhead, dtail) = doc.split_at(qhead.len() * 16);
     let mut dot = unsafe {
-        let mut bdot = [0u32; 4];
+        let mut bpdot = [vdupq_n_u16(0); 4];
         for (i, q) in qhead.iter().enumerate() {
             let qv = vld1q_u8_x4(q.as_ptr());
             let dv = vld1q_u8(dhead.as_ptr().add(i * 16));
-            bdot[0] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.0, dv))) as u32;
-            bdot[1] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.1, dv))) as u32;
-            bdot[2] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.2, dv))) as u32;
-            bdot[3] += vaddlvq_u8(vcntq_u8(vandq_u8(qv.3, dv))) as u32;
+            bpdot[0] = vaddq_u16(bpdot[0], vpaddlq_u8(vcntq_u8(vandq_u8(qv.0, dv))));
+            bpdot[1] = vaddq_u16(bpdot[1], vpaddlq_u8(vcntq_u8(vandq_u8(qv.1, dv))));
+            bpdot[2] = vaddq_u16(bpdot[2], vpaddlq_u8(vcntq_u8(vandq_u8(qv.2, dv))));
+            bpdot[3] = vaddq_u16(bpdot[3], vpaddlq_u8(vcntq_u8(vandq_u8(qv.3, dv))));
         }
-        bdot[0] + bdot[1] * 2 + bdot[2] * 4 + bdot[3] * 8
+        vaddlvq_u16(bpdot[0])
+            + vaddlvq_u16(bpdot[1]) * 2
+            + vaddlvq_u16(bpdot[2]) * 4
+            + vaddlvq_u16(bpdot[3]) * 8
     };
 
     if !qtail.is_empty() {

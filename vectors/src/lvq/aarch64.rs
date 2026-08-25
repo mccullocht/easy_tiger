@@ -402,6 +402,8 @@ unsafe fn quantize4_residual_error(
 }
 
 // Symmetric dot product 2 bit
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u2(a: &[u8], b: &[u8]) -> u32 {
     let len = a.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -440,6 +442,8 @@ unsafe fn lvq_dot_u2(a: &[u8], b: &[u8]) -> u32 {
 }
 
 // Symmetric dot product 4 bit
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u4(a: &[u8], b: &[u8]) -> u32 {
     let len = a.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -480,6 +484,8 @@ unsafe fn lvq_dot_u4(a: &[u8], b: &[u8]) -> u32 {
 }
 
 // Symmetric dot product 8 bit
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u8(a: &[u8], b: &[u8]) -> u32 {
     let len = a.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -521,6 +527,8 @@ unsafe fn lvq_dot_u8(a: &[u8], b: &[u8]) -> u32 {
 }
 
 // Asymmetric dot product 8 bit-1 bit. `q.len()` must be a multiple of 128.
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u8_u1(q: &[u8], d: &[u8]) -> u32 {
     let len = q.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -574,6 +582,8 @@ unsafe fn lvq_dot_u8_u1(q: &[u8], d: &[u8]) -> u32 {
 }
 
 // Asymmetric dot product 8 bit-2 bit. `q.len()` must be a multiple of 64.
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u8_u2(q: &[u8], d: &[u8]) -> u32 {
     let len = q.len();
     let mut dot0 = vdupq_n_u32(0);
@@ -607,6 +617,8 @@ unsafe fn lvq_dot_u8_u2(q: &[u8], d: &[u8]) -> u32 {
 }
 
 // Asymmetric dot product 8 bit-4 bit. `q.len()` must be a multiple of 32.
+#[target_feature(enable = "dotprod")]
+#[inline]
 unsafe fn lvq_dot_u8_u4(q: &[u8], d: &[u8]) -> u32 {
     let len = q.len();
     let mut dot0 = vdupq_n_u32(0);

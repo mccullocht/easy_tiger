@@ -304,7 +304,6 @@ pub unsafe fn primary_quantize_and_pack_avx512<const B: usize>(
 
         QuantizationStats {
             primary_component_sum: _mm512_reduce_add_epi32(component_sum) as u32,
-            residual_component_sum: 0,
             residual_error_sq: _mm512_reduce_add_ps(residual_error_sq),
             residual_ip: _mm512_reduce_add_ps(residual_ip),
         }

@@ -1,34 +1,15 @@
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    sync::{LazyLock, RwLock},
-};
+//! Implementation of RaBitQ vector quantizer (XXX insert paper reference)
+//!
+//! One note is that this does not include rotation inline in the quantization transform.
+//! Callers are expected to rotate the vectors if component distribution is not Gaussian, and
+//! they are expected to rotate the center (or compute the mean from rotated vectors).
+use std::borrow::Cow;
 
-use crate::{F32VectorCoder, float32, rotate::Rotator};
-
-const ROTATOR_SEED: u64 = 15628395401334080154;
-static ROTATORS: LazyLock<RwLock<HashMap<usize, Box<Rotator>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-fn get_rotator(dim: usize) -> &'static Rotator {
-    {
-        let m = ROTATORS.read().unwrap();
-        if let Some(r) = m.get(&dim) {
-            // SAFETY: Box provides a consistent address, we never remove anything from the map.
-            return unsafe { std::mem::transmute::<&Rotator, &'static Rotator>(r.as_ref()) };
-        }
-    }
-    let mut m = ROTATORS.write().unwrap();
-    // SAFETY: Box provides a consistent address, insert only happens if not present.
-    let r = m
-        .entry(dim)
-        .or_insert_with(|| Box::new(Rotator::new(dim, ROTATOR_SEED)));
-    unsafe { std::mem::transmute::<&Rotator, &'static Rotator>(r.as_ref()) }
-}
+use crate::{F32VectorCoder, float32};
 
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 struct Header {
-    /// L2 norm of the original centered vector.
+    /// L2 norm of the original vector after centering.
     l2_norm: f32,
     /// Inner product of the quantized vector and normalized original vector.
     correction_term: f32,
@@ -91,13 +72,11 @@ impl F32VectorCoder for Coder {
         let mut header = Header::default();
         header.l2_norm = float32::l2_norm(&centered_vector);
         let unit_vector = float32::l2_normalize(centered_vector);
-        let rotator = get_rotator(unit_vector.len());
-        let rotated = rotator.forward(vector.as_ref());
-        header.correction_term =
-            rotated.iter().copied().map(f32::abs).sum::<f32>() / (rotated.len() as f32).sqrt();
+        header.correction_term = unit_vector.iter().copied().map(f32::abs).sum::<f32>()
+            / (unit_vector.len() as f32).sqrt();
 
         let (hbytes, vbytes) = Header::split_mut(out);
-        header.component_sum = rotated
+        header.component_sum = unit_vector
             .chunks(8)
             .zip(vbytes.iter_mut())
             .map(|(i, o)| {

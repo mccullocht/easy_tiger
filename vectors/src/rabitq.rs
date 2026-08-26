@@ -5,7 +5,12 @@
 //! they are expected to rotate the center (or compute the mean from rotated vectors).
 use std::borrow::Cow;
 
-use crate::{F32VectorCoder, float32};
+use rand::{RngExt, SeedableRng};
+
+use crate::{
+    EstimatedDistance, F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
+    float32, lvq::packing::TurboPacker,
+};
 
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 struct Header {
@@ -76,18 +81,13 @@ impl F32VectorCoder for Coder {
             / (unit_vector.len() as f32).sqrt();
 
         let (hbytes, vbytes) = Header::split_mut(out);
+        let mut packer = super::lvq::packing::TurboPacker::<1>::new(vbytes);
         header.component_sum = unit_vector
-            .chunks(8)
-            .zip(vbytes.iter_mut())
-            .map(|(i, o)| {
-                let b = i
-                    .iter()
-                    .enumerate()
-                    .map(|(i, x)| if x.is_sign_negative() { 1u32 << i } else { 0 })
-                    .reduce(|a, b| a | b)
-                    .unwrap();
-                *o = b as u8;
-                b.count_ones()
+            .iter()
+            .map(|x| {
+                let s = x.to_bits() >> 31;
+                packer.push(s as u8);
+                s
             })
             .sum::<u32>();
 
@@ -100,13 +100,9 @@ impl F32VectorCoder for Coder {
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         let (_, vector) = Header::decode(encoded);
-        let sign_mask = 1u32 << 31;
         let magnitude = 1.0 / (out.len() as f32).sqrt();
-        for (&c, o) in vector.iter().zip(out.chunks_mut(8)) {
-            let c = c as u32;
-            for (i, o) in o.iter_mut().enumerate() {
-                *o = f32::from_bits(magnitude.to_bits() ^ ((c << (31 - i)) & sign_mask));
-            }
+        for (q, o) in super::lvq::packing::TurboUnpacker::<1>::new(vector).zip(out.iter_mut()) {
+            *o = f32::from_bits(magnitude.to_bits() ^ ((q as u32) << 31));
         }
     }
 
@@ -115,12 +111,165 @@ impl F32VectorCoder for Coder {
     }
 }
 
-// XXX this might be able to use the turbo packer after all to speed up bitplane split for ADC.
+/// Symmetric distance is just hamming distance.
+///
+/// This is OK-ish for angular distance and awful for Euclidean, which could use some additional
+/// scaling factors.
+#[derive(Debug, Default)]
+pub struct Distance;
 
-// XXX ADC
-// * Quantize the query and bitplane split.
-// * Use bitplane split hamming trick up to 4 bits, or maybe just use DOT.
-// * Do I have to perform signed quantization of the input vector?
+impl VectorDistance for Distance {
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
+        let (_, query) = Header::decode(query);
+        let (_, doc) = Header::decode(doc);
+
+        let dim = query.len() * 8;
+        let (qhead, qtail) = query.as_chunks::<8>();
+        let (dhead, dtail) = doc.as_chunks::<8>();
+
+        let mut h = qhead
+            .iter()
+            .zip(dhead.iter())
+            .map(|(q, d)| (u64::from_ne_bytes(*q) ^ u64::from_ne_bytes(*d)).count_ones())
+            .sum::<u32>();
+        if !qtail.is_empty() {
+            h += qtail
+                .iter()
+                .zip(dtail.iter())
+                .map(|(&q, &d)| (q ^ d).count_ones())
+                .sum::<u32>();
+        }
+
+        (dim - h as usize) as f64 / dim as f64
+    }
+}
+
+pub struct QueryDistance {
+    similarity: VectorSimilarity,
+    l2_norm: f32,
+    query: Vec<u8>,
+    dim_sqrt: f64,
+}
+
+impl QueryDistance {
+    // XXX I need to handle centering.
+    pub fn new(similarity: VectorSimilarity, query: &[f32], center: Option<&[f32]>) -> Self {
+        let query: Cow<'_, [f32]> = if let Some(center) = center {
+            query
+                .iter()
+                .zip(center.iter())
+                .map(|(&q, &c)| q - c)
+                .collect::<Vec<_>>()
+                .into()
+        } else {
+            query.into()
+        };
+        let dim_sqrt = (query.len() as f64).sqrt();
+        let (min, max, l2_norm_sq) = query
+            .iter()
+            .copied()
+            .fold((f32::MAX, f32::MIN, 0f32), |acc, x| {
+                (acc.0.min(x), acc.1.max(x), x.mul_add(x, acc.2))
+            });
+        let delta_inv = 15.0 / (max - min);
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::from_seed([0xfe; 32]);
+        let mut query4 = vec![0u8; query.len().div_ceil(2)];
+        let mut packer = TurboPacker::<4>::new(&mut query4);
+        for &x in query.iter() {
+            packer.push(
+                delta_inv
+                    .mul_add(x - min, rng.random_range(0.0..1.0))
+                    .floor() as u8,
+            );
+        }
+        Self {
+            similarity,
+            l2_norm: l2_norm_sq.sqrt(),
+            query: super::lvq::packing::bitplane_split4(&query4),
+            dim_sqrt,
+        }
+    }
+
+    // XXX this is all shared with lvq
+    #[inline]
+    fn ip(&self, header: Header, doc: &[u8]) -> f64 {
+        let (qhead, qtail) = self.query.as_chunks::<64>();
+        let (dhead, dtail) = doc.as_chunks::<16>();
+        let mut bdot = [0u32; 4];
+        for (q, d) in qhead.iter().zip(dhead.iter()) {
+            let qp = q.as_chunks::<16>().0;
+            let q = [
+                u128::from_le_bytes(qp[0]),
+                u128::from_le_bytes(qp[1]),
+                u128::from_le_bytes(qp[2]),
+                u128::from_le_bytes(qp[3]),
+            ];
+            let d = u128::from_le_bytes(*d);
+            bdot[0] += (q[0] & d).count_ones();
+            bdot[1] += (q[1] & d).count_ones();
+            bdot[2] += (q[2] & d).count_ones();
+            bdot[3] += (q[3] & d).count_ones();
+        }
+
+        if !qtail.is_empty() {
+            let mut qit = qtail.chunks(qtail.len() / 4);
+            let q = [
+                qit.next().unwrap(),
+                qit.next().unwrap(),
+                qit.next().unwrap(),
+                qit.next().unwrap(),
+            ];
+            for (i, &d) in dtail.iter().enumerate() {
+                bdot[0] += (q[0][i] ^ d).count_ones();
+                bdot[1] += (q[1][i] ^ d).count_ones();
+                bdot[2] += (q[2][i] ^ d).count_ones();
+                bdot[3] += (q[3][i] ^ d).count_ones();
+            }
+        }
+
+        let ip_uint = bdot[0] + bdot[1] * 2 + bdot[2] * 4 + bdot[3] * 8;
+        ip_uint as f64 / header.correction_term as f64
+    }
+
+    fn distance_internal(&self, header: Header, doc: &[u8]) -> f64 {
+        let ip: f64 = self.ip(header, doc);
+        match self.similarity {
+            VectorSimilarity::Cosine | VectorSimilarity::Dot => ip,
+            VectorSimilarity::Euclidean => {
+                let qnorm: f64 = self.l2_norm.into();
+                let dnorm: f64 = header.l2_norm.into();
+                dnorm.powi(2) + qnorm.powi(2) - 2.0 * dnorm * qnorm * ip
+            }
+        }
+        .into()
+    }
+
+    fn error(&self, header: Header) -> f64 {
+        let c = (header.correction_term as f64).powi(2);
+        ((1.0 - c) / c).sqrt() * self.dim_sqrt
+    }
+}
+
+impl QueryVectorDistance for QueryDistance {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        let (header, vector) = Header::decode(vector);
+        self.distance_internal(header, vector)
+    }
+
+    fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
+        let (header, vector) = Header::decode(vector);
+        let e = self.error(header);
+        EstimatedDistance {
+            distance: self.distance_internal(header, vector),
+            error: match self.similarity {
+                VectorSimilarity::Euclidean => {
+                    2.0 * self.l2_norm as f64 * header.l2_norm as f64 * e
+                }
+                VectorSimilarity::Cosine | VectorSimilarity::Dot => e,
+            },
+        }
+    }
+}
 
 // XXX SDC
 // * Just use hamming distance.

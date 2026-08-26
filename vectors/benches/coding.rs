@@ -1,5 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use vectors::rotate::{Kernel, Rotator};
 use vectors::{F32VectorCoding, VectorSimilarity};
 
@@ -59,10 +59,6 @@ fn lvq_benchmarks(c: &mut Criterion) {
         F32VectorCoding::TLVQ2,
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
-        F32VectorCoding::TLVQ1x8,
-        F32VectorCoding::TLVQ2x8,
-        F32VectorCoding::TLVQ4x8,
-        F32VectorCoding::TLVQ8x8,
     ] {
         benchmark_coding(c, format, None);
     }

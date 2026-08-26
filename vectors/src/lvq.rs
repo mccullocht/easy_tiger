@@ -1,8 +1,5 @@
 //! Locally adaptive Vector Quantization (LVQ): https://arxiv.org/pdf/2304.04759
 //!
-//! This supports both primary quantization and two level quantization, which allows splitting the
-//! representation for initial scoring and re-ranking.
-//!
 //! This has been modified in the same way as Optimized Scalar Quantization in Lucene where the
 //! lower and upper bounds are selected by a grid search over the vector taking into account
 //! anisotropic loss instead of simply taking min/max values. This grid search is more important
@@ -26,7 +23,8 @@ use half::f16;
 use thread_local::ThreadLocal;
 
 use crate::{
-    F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity, float32::l2_norm,
+    EstimatedDistance, F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
+    float32::l2_norm,
 };
 
 const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
@@ -45,8 +43,6 @@ const fn is_supported_bits(bits: usize, allowed: &[usize]) -> bool {
 const fn check_primary_bits(bits: usize) {
     assert!(is_supported_bits(bits, &SUPPORTED_PRIMARY_BITS));
 }
-
-const ESTIMATED_DISTANCE_Z_SCORE: f32 = 1.96;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Kernel {
@@ -270,30 +266,30 @@ impl DistanceCorrectionTerms {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
 struct ErrorBoundTerms {
     l2_norm: f32,
-    residual_error_term: f32,
+    perpendicular_error_term: f32,
     mult: f32,
 }
 
 impl ErrorBoundTerms {
     fn from_header(header: &PrimaryVectorHeader, dim: usize, similarity: VectorSimilarity) -> Self {
-        let mult = (ESTIMATED_DISTANCE_Z_SCORE
-            * match similarity {
-                VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
-                VectorSimilarity::Euclidean => 2.0,
-            })
-            / (dim as f32).sqrt();
+        let mult = match similarity {
+            VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
+            VectorSimilarity::Euclidean => 2.0,
+        } / ((dim.max(2) - 1) as f32).sqrt();
         Self {
             l2_norm: header.l2_norm,
-            residual_error_term: header.residual_error_term,
+            perpendicular_error_term: header.perpendicular_error_term,
             mult,
         }
     }
 
     fn error_bound<const B: usize>(&self, vector: &TurboPrimaryVector<B>) -> f32 {
-        (self.residual_error_term * vector.l2_norm + vector.residual_error_term * self.l2_norm)
-            * self.mult
+        let query_error = self.perpendicular_error_term * vector.l2_norm;
+        let doc_error = vector.perpendicular_error_term * self.l2_norm;
+        (query_error.powi(2) + doc_error.powi(2)).sqrt() * self.mult
     }
 }
 
@@ -308,18 +304,23 @@ struct PrimaryVectorHeader {
     /// L2 norm (magnitude) of the vector.
     /// This is used to compute euclidean distance and the statistical bound on estimated distance.
     l2_norm: f32,
+    /// The dot product of the vector and the centroid.
+    /// This is used to compute angular distance when the vector is centered.
+    center_dot: f32,
     /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
     /// This term can be used to compute a statistical bound on the estimated distance.
-    residual_error_term: f32,
+    perpendicular_error_term: f32,
+    /// Parallel error -- the projection of the vector onto the quantized residual divided by the
+    /// squared l2 norm.
+    ///
+    /// Interval optimization minimizes this term so it is typically small.
+    parallel_error_term: f32,
     /// Lower interval bound used for quantization, no smaller than the minimum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     lower: f32,
     /// Upper interval bound used for quantization, no larger than the maximum component value.
     /// This is used to correct the uint dot product to an f32 dot product.
     upper: f32,
-    /// The dot product of the vector and the centroid.
-    /// This is used to compute angular distance when the vector is centered.
-    center_dot: f32,
     /// Sum of all the quantized components of the vector. This is used to correct the uint dot
     /// product to an f32 dot product.
     component_sum: u32,
@@ -328,26 +329,27 @@ struct PrimaryVectorHeader {
 impl PrimaryVectorHeader {
     /// Length of the encoded header in bytes.
     ///
-    /// Stores 5 values -- two 16-bit values and 3 32-bit values.
+    /// Stores 6 values -- 4 16-bit values and 2 32-bit values.
     /// * l2_norm or center_dot (f32)
-    /// * residual_error_term (f32)
+    /// * component_sum (u32)
+    /// * perpendicular_error_term (f16)
+    /// * parallel_error_term (f16)
     /// * lower (f16)
     /// * upper (f16)
-    /// * component_sum (u32)
     ///
-    /// The first two terms are stored as f32 as they have a greater effect on precision.
-    const LEN: usize = std::mem::size_of::<f32>() * 2
-        + std::mem::size_of::<f16>() * 2
-        + std::mem::size_of::<u32>();
+    /// The first term is stored as 32 bits as it is combined directly into the final distance.
+    const LEN: usize =
+        std::mem::size_of::<f32>() + std::mem::size_of::<u32>() + std::mem::size_of::<f16>() * 4;
 
     fn new(stats: VectorStats, center_dot: f32) -> Self {
         Self {
             l2_norm: stats.l2_norm_sq.sqrt(),
-            residual_error_term: 0.0,
             center_dot,
+            component_sum: 0,
+            perpendicular_error_term: 0.0,
+            parallel_error_term: 0.0,
             lower: stats.min,
             upper: stats.max,
-            component_sum: 0,
         }
     }
 
@@ -358,80 +360,86 @@ impl PrimaryVectorHeader {
 
     #[inline]
     fn serialize(&self, header_bytes: &mut [u8], similarity: VectorSimilarity) {
+        let h32 = header_bytes[..8].as_chunks_mut::<4>().0;
         let first = if similarity.angular() {
             self.center_dot
         } else {
             self.l2_norm
         };
-        header_bytes[0..4].copy_from_slice(&first.to_le_bytes());
-        header_bytes[4..8].copy_from_slice(&self.residual_error_term.to_le_bytes());
-        header_bytes[8..10].copy_from_slice(&f16::from_f32(self.lower).to_le_bytes());
-        header_bytes[10..12].copy_from_slice(&f16::from_f32(self.upper).to_le_bytes());
-        header_bytes[12..16].copy_from_slice(&self.component_sum.to_le_bytes());
+        h32[0] = first.to_le_bytes();
+        h32[1] = self.component_sum.to_le_bytes();
+
+        let h16 = header_bytes[8..16].as_chunks_mut::<2>().0;
+        h16[0] = f16::from_f32(self.perpendicular_error_term / self.l2_norm).to_le_bytes();
+        h16[1] = f16::from_f32(self.parallel_error_term).to_le_bytes();
+        h16[2] = f16::from_f32(self.lower).to_le_bytes();
+        h16[3] = f16::from_f32(self.upper).to_le_bytes();
     }
 
     #[inline]
     fn deserialize(raw: &[u8], similarity: VectorSimilarity) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
-        let first = f32::from_le_bytes(header_bytes[0..4].try_into().unwrap());
-        let (l2_norm, center_dot) = if similarity.angular() {
-            (1.0, first)
+        let h32 = header_bytes[..8].as_chunks::<4>().0;
+        let h16 = header_bytes[8..16].as_chunks::<2>().0;
+        let l2_norm = if similarity.angular() {
+            1.0
         } else {
-            (first, 0.0)
+            f32::from_le_bytes(h32[0])
         };
         Some((
             Self {
                 l2_norm,
-                residual_error_term: f32::from_le_bytes(header_bytes[4..8].try_into().unwrap()),
-                lower: f16::from_le_bytes(header_bytes[8..10].try_into().unwrap()).to_f32(),
-                upper: f16::from_le_bytes(header_bytes[10..12].try_into().unwrap()).to_f32(),
-                center_dot,
-                component_sum: u32::from_le_bytes(header_bytes[12..16].try_into().unwrap()),
+                center_dot: if similarity.angular() {
+                    f32::from_le_bytes(h32[0])
+                } else {
+                    0.0
+                },
+                component_sum: u32::from_le_bytes(h32[1]),
+                perpendicular_error_term: f16::from_le_bytes(h16[0]).to_f32() * l2_norm,
+                parallel_error_term: f16::from_le_bytes(h16[1]).to_f32(),
+                lower: f16::from_le_bytes(h16[2]).to_f32(),
+                upper: f16::from_le_bytes(h16[3]).to_f32(),
             },
             vector_bytes,
         ))
     }
 }
 
-/// Header for an LVQ residual vector.
-///
-/// This contains additional information to decode the residual vector, but the primary vector and
-/// header are required to interpret the data.
-/// vector.
-#[derive(Debug, Copy, Clone, PartialEq)]
-#[repr(C)]
-struct ResidualVectorHeader {
-    magnitude: f32,
-    component_sum: u32,
+#[derive(Default, Debug, Copy, Clone, PartialEq)]
+struct QuantizationStats {
+    /// Sum of all quantized primary components.
+    primary_component_sum: u32,
+    /// Squared error of the quantization residual.
+    residual_error_sq: f32,
+    /// The inner product of each vector component and it's primary quantization residual.
+    residual_ip: f32,
 }
 
-impl ResidualVectorHeader {
-    /// Encoded buffer size.
-    const LEN: usize = std::mem::size_of::<Self>();
-
-    #[inline]
-    fn split_output_buf(buf: &mut [u8]) -> Option<(&mut [u8], &mut [u8])> {
-        buf.split_at_mut_checked(Self::LEN)
+impl QuantizationStats {
+    fn add_component(self, cp: u32, v: f32, r: f32) -> Self {
+        Self {
+            primary_component_sum: self.primary_component_sum + cp,
+            residual_error_sq: r.mul_add(r, self.residual_error_sq),
+            residual_ip: v.mul_add(r, self.residual_ip),
+        }
     }
+}
 
-    #[inline]
-    fn serialize(&self, header_bytes: &mut [u8]) {
-        let header = header_bytes.as_chunks_mut::<4>().0;
-        header[0] = self.magnitude.to_le_bytes();
-        header[1] = self.component_sum.to_le_bytes();
+impl Add<QuantizationStats> for QuantizationStats {
+    type Output = Self;
+
+    fn add(self, rhs: QuantizationStats) -> Self::Output {
+        Self {
+            primary_component_sum: self.primary_component_sum + rhs.primary_component_sum,
+            residual_error_sq: self.residual_error_sq + rhs.residual_error_sq,
+            residual_ip: self.residual_ip + rhs.residual_ip,
+        }
     }
+}
 
-    #[inline]
-    fn deserialize(raw: &[u8]) -> Option<(Self, &[u8])> {
-        let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
-        let header_entries = header_bytes.as_chunks::<4>().0;
-        Some((
-            Self {
-                magnitude: f32::from_le_bytes(header_entries[0]),
-                component_sum: u32::from_le_bytes(header_entries[1]),
-            },
-            vector_bytes,
-        ))
+impl AddAssign<QuantizationStats> for QuantizationStats {
+    fn add_assign(&mut self, rhs: QuantizationStats) {
+        *self = *self + rhs;
     }
 }
 
@@ -440,6 +448,7 @@ struct VectorDecodeTerms {
     lower: f32,
     delta: f32,
     component_sum: u32,
+    parallel_error_term: f32,
 }
 
 impl VectorDecodeTerms {
@@ -448,14 +457,7 @@ impl VectorDecodeTerms {
             lower: header.lower,
             delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
             component_sum: header.component_sum,
-        }
-    }
-
-    fn from_residual(header: ResidualVectorHeader) -> Self {
-        Self {
-            lower: -header.magnitude / 2.0,
-            delta: header.magnitude / RESIDUAL_MAX,
-            component_sum: header.component_sum,
+            parallel_error_term: header.parallel_error_term,
         }
     }
 }
@@ -500,52 +502,11 @@ fn correct_dot_uint(dot: u32, dim: usize, a: &VectorDecodeTerms, b: &VectorDecod
     // Note that any dot value larger than (2 << 24) will be rounded when converted to f32 which can
     // cause vector comparisons a <-> b and b <-> a to return slightly different results. To prevent
     // this convert dot to f64 before including it in the correction.
-    (dot as f64 * (a.delta * b.delta) as f64
+    let fdot = (dot as f64 * (a.delta * b.delta) as f64
         + (a.component_sum as f32 * a.delta * b.lower
             + b.component_sum as f32 * b.delta * a.lower
-            + a.lower * b.lower * dim as f32) as f64) as f32
-}
-
-/// The four components of a residual dot product.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-#[repr(C)]
-struct ResidualDotComponents {
-    ap_dot_bp: u32,
-    ap_dot_br: u32,
-    ar_dot_bp: u32,
-    ar_dot_br: u32,
-}
-
-impl ResidualDotComponents {
-    fn compute_dot(
-        &self,
-        dim: usize,
-        a: (&VectorDecodeTerms, &VectorDecodeTerms),
-        b: (&VectorDecodeTerms, &VectorDecodeTerms),
-    ) -> f32 {
-        correct_dot_uint(self.ap_dot_bp, dim, a.0, b.0)
-            + correct_dot_uint(self.ap_dot_br, dim, a.0, b.1)
-            + correct_dot_uint(self.ar_dot_bp, dim, a.1, b.0)
-            + correct_dot_uint(self.ar_dot_br, dim, a.1, b.1)
-    }
-}
-
-impl Add for ResidualDotComponents {
-    type Output = Self;
-
-    fn add(mut self, rhs: Self) -> Self::Output {
-        self += rhs;
-        self
-    }
-}
-
-impl AddAssign for ResidualDotComponents {
-    fn add_assign(&mut self, rhs: Self) {
-        self.ap_dot_bp += rhs.ap_dot_bp;
-        self.ap_dot_br += rhs.ap_dot_br;
-        self.ar_dot_bp += rhs.ar_dot_bp;
-        self.ar_dot_br += rhs.ar_dot_br;
-    }
+            + a.lower * b.lower * dim as f32) as f64) as f32;
+    fdot * (1.0 + a.parallel_error_term + b.parallel_error_term)
 }
 
 /// The turbo coder requires that all vector data be packed into 16-byte blocks.
@@ -554,7 +515,7 @@ const TURBO_BLOCK_SIZE: usize = 16;
 struct TurboPrimaryVector<'a, const B: usize> {
     rep: EncodedVector<'a>,
     l2_norm: f32,
-    residual_error_term: f32,
+    perpendicular_error_term: f32,
     center_dot: f32,
 }
 
@@ -567,7 +528,7 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
                 data: vector_bytes,
             },
             l2_norm: header.l2_norm,
-            residual_error_term: header.residual_error_term,
+            perpendicular_error_term: header.perpendicular_error_term,
             center_dot: header.center_dot,
         })
     }
@@ -584,13 +545,13 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             Self {
                 rep: headv,
                 l2_norm: self.l2_norm,
-                residual_error_term: self.residual_error_term,
+                perpendicular_error_term: self.perpendicular_error_term,
                 center_dot: self.center_dot,
             },
             Self {
                 rep: tailv,
                 l2_norm: self.l2_norm,
-                residual_error_term: self.residual_error_term,
+                perpendicular_error_term: self.perpendicular_error_term,
                 center_dot: self.center_dot,
             },
         )
@@ -666,8 +627,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
-        let residual_error_sq;
-        (header.component_sum, residual_error_sq) = match k {
+        let quant_stats = match k {
             Kernel::Scalar => scalar::primary_quantize_and_pack::<B>(vector, terms, out),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::primary_quantize_and_pack::<B>(vector, terms, out),
@@ -676,7 +636,11 @@ impl<const B: usize> TurboPrimaryCoder<B> {
                 x86_64::primary_quantize_and_pack_avx512::<B>(vector, terms, out)
             },
         };
-        header.residual_error_term = residual_error_sq.sqrt();
+        header.component_sum = quant_stats.primary_component_sum;
+        let perp_error_sq =
+            quant_stats.residual_error_sq - (quant_stats.residual_ip.powi(2) / stats.l2_norm_sq);
+        header.perpendicular_error_term = perp_error_sq.sqrt();
+        header.parallel_error_term = quant_stats.residual_ip / stats.l2_norm_sq;
 
         header
     }
@@ -804,12 +768,13 @@ const PRIMARY_QUERY_BITS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct TurboPrimaryQueryDistance<const B: usize> {
+    k: Kernel,
     similarity: VectorSimilarity,
+
     query: Vec<u8>,
     terms: VectorDecodeTerms,
     correction_terms: DistanceCorrectionTerms,
-
-    inst: Kernel,
+    error_terms: ErrorBoundTerms,
 }
 
 impl<const B: usize> TurboPrimaryQueryDistance<B> {
@@ -818,36 +783,43 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
         query: Cow<'_, [f32]>,
         center: Option<&[f32]>,
     ) -> Self {
-        let inst = Kernel::default();
+        let k = Kernel::default();
         let (header, query) = TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(
-            inst,
+            k,
             similarity,
             query.as_ref(),
             center,
         );
         let terms = VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
         let correction_terms = DistanceCorrectionTerms::new(&header, center, similarity);
+        let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
 
         Self {
+            k,
             similarity,
             query,
             terms,
             correction_terms,
-            inst,
+            error_terms,
         }
     }
 
     #[inline(always)]
-    fn distance_internal(&self, vector: &[u8]) -> f64 {
+    fn distance_internal_raw(&self, vector: &[u8]) -> f64 {
         let vector =
             TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
-        let uint8_dot = match self.inst {
-            Kernel::Scalar => scalar::primary_query8_dot_unnormalized::<B>(&self.query, &vector),
+        self.distance_internal(&vector)
+    }
+
+    #[inline(always)]
+    fn distance_internal(&self, vector: &TurboPrimaryVector<B>) -> f64 {
+        let uint8_dot = match self.k {
+            Kernel::Scalar => scalar::primary_query8_dot_unnormalized::<B>(&self.query, vector),
             #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::primary_query8_dot_unnormalized::<B>(&self.query, &vector),
+            Kernel::Neon => aarch64::primary_query8_dot_unnormalized::<B>(&self.query, vector),
             #[cfg(target_arch = "x86_64")]
             Kernel::Avx512 => unsafe {
-                x86_64::primary_query8_dot_unnormalized_avx512::<B>(&self.query, &vector)
+                x86_64::primary_query8_dot_unnormalized_avx512::<B>(&self.query, vector)
             },
         };
         let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);
@@ -859,32 +831,39 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
 
 impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        self.distance_internal(vector)
+        self.distance_internal_raw(vector)
     }
 
     fn bulk_distance(&self, vectors: &[&[u8]], out: &mut [f64]) {
         for (vector, out) in vectors.iter().zip(out.iter_mut()) {
-            *out = self.distance_internal(vector);
+            *out = self.distance_internal_raw(vector);
         }
+    }
+
+    // TODO: add tests for this. Right now it is not accurate enough to write good tests.
+    fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
+        let vector =
+            TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
+        let distance = self.distance_internal(&vector);
+        let error = self.error_terms.error_bound(&vector).into();
+        EstimatedDistance { distance, error }
     }
 }
 
-/// An implementation of distance against one-bit quantized vectors.
+/// Asymmetric distance for 1-bit document with a 4-bit query.
 ///
-/// This implementation quantizes the query 1x8 bits and provides a bounded distance function that
-/// short circuits residual evaluation if the result would not fall below the maximum distance.
-/// This can provide significant savings, particularly when using memory bound indexes like a flat
-/// index or partitioned index.
+/// This trades some of the accuracy gain from asymmetric distance for speed. The query bitplane
+/// is split so that the dot product can be computed entirely with popcount.
+#[derive(Debug, Clone)]
 pub struct TurboPrimaryQueryDistance1 {
+    #[allow(dead_code)]
+    k: Kernel,
     similarity: VectorSimilarity,
-    primary_query: Vec<u8>,
-    primary_terms: VectorDecodeTerms,
-    residual_query: Vec<u8>,
-    residual_terms: VectorDecodeTerms,
+
+    query: Vec<u8>,
+    terms: VectorDecodeTerms,
     correction_terms: DistanceCorrectionTerms,
     error_terms: ErrorBoundTerms,
-
-    inst: Kernel,
 }
 
 impl TurboPrimaryQueryDistance1 {
@@ -893,164 +872,74 @@ impl TurboPrimaryQueryDistance1 {
         query: Cow<'_, [f32]>,
         center: Option<&[f32]>,
     ) -> Self {
-        let inst = Kernel::default();
-        let (primary_header, primary_query, residual_header, residual_query) =
-            TurboResidualCoder::<1>::encode_parts(inst, similarity, query.as_ref(), center);
-        let correction_terms = DistanceCorrectionTerms::new(&primary_header, center, similarity);
+        let k = Kernel::default();
+        let (header, query) =
+            TurboPrimaryCoder::<4>::encode_parts(k, similarity, query.as_ref(), center);
+        let query = packing::bitplane_split4(&query);
+        let terms = VectorDecodeTerms::from_primary::<4>(header);
+        let correction_terms = DistanceCorrectionTerms::new(&header, center, similarity);
+        let error_terms = ErrorBoundTerms::from_header(&header, query.len() * 2, similarity);
+
         Self {
+            k,
             similarity,
-            primary_query,
-            primary_terms: VectorDecodeTerms::from_primary::<1>(primary_header),
-            residual_query,
-            residual_terms: VectorDecodeTerms::from_residual(residual_header),
+            query,
+            terms,
             correction_terms,
-            error_terms: ErrorBoundTerms::from_header(&primary_header, query.len(), similarity),
-            inst,
+            error_terms,
         }
+    }
+
+    #[inline(always)]
+    fn distance_internal_raw(&self, vector: &[u8]) -> f64 {
+        let vector =
+            TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
+        self.distance_internal(&vector)
+    }
+
+    #[inline(always)]
+    fn distance_internal(&self, vector: &TurboPrimaryVector<1>) -> f64 {
+        let uint8_dot = match self.k {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::query4_doc1_bitplane_dot(&self.query, vector.rep.data),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                x86_64::query4_doc1_bitplane_dot_avx512(&self.query, vector.rep.data)
+            },
+            _ => scalar::query4_doc1_bitplane_dot(&self.query, vector.rep.data),
+        };
+        let dot = correct_dot_uint(
+            uint8_dot,
+            self.query.len() * 2,
+            &self.terms,
+            &vector.rep.terms,
+        );
+        self.correction_terms
+            .distance_from_dot_unnormalized(dot, vector.l2_norm, vector.center_dot)
+            .into()
     }
 }
 
 impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
     fn distance(&self, vector: &[u8]) -> f64 {
-        self.distance_with_bound(vector, f64::INFINITY).unwrap()
+        self.distance_internal_raw(vector)
     }
 
-    fn distance_with_bound(&self, vector: &[u8], max_distance: f64) -> Option<f64> {
+    fn bulk_distance(&self, vectors: &[&[u8]], out: &mut [f64]) {
+        for (vector, out) in vectors.iter().zip(out.iter_mut()) {
+            *out = self.distance_internal_raw(vector);
+        }
+    }
+
+    // TODO: add tests for this. Right now it is not accurate enough to write good tests.
+    fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
         let vector =
             TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
-        let uint8_dot_primary = match self.inst {
-            Kernel::Scalar => scalar::dot_u8::<1>(&self.primary_query, vector.rep.data),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::dot_u8::<1>(&self.primary_query, vector.rep.data),
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe {
-                x86_64::dot_u8_avx512::<1>(&self.primary_query, vector.rep.data)
-            },
-        };
-        let dot_primary = correct_dot_uint(
-            uint8_dot_primary,
-            self.residual_query.len(),
-            &self.primary_terms,
-            &vector.rep.terms,
-        );
-        let distance_primary = self.correction_terms.distance_from_dot_unnormalized(
-            dot_primary,
-            vector.l2_norm,
-            vector.center_dot,
-        );
-        let error = self.error_terms.error_bound(&vector);
-        if distance_primary as f64 - error as f64 > max_distance {
-            return None;
-        }
-
-        let uint8_dot_residual = match self.inst {
-            Kernel::Scalar => {
-                scalar::primary_query8_dot_unnormalized::<1>(&self.residual_query, &vector)
-            }
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => {
-                aarch64::primary_query8_dot_unnormalized::<1>(&self.residual_query, &vector)
-            }
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe {
-                x86_64::primary_query8_dot_unnormalized_avx512::<1>(&self.residual_query, &vector)
-            },
-        };
-        let dot_residual = correct_dot_uint(
-            uint8_dot_residual,
-            self.residual_query.len(),
-            &self.residual_terms,
-            &vector.rep.terms,
-        );
-        Some(
-            self.correction_terms
-                .distance_from_dot_unnormalized(
-                    dot_primary + dot_residual,
-                    vector.l2_norm,
-                    vector.center_dot,
-                )
-                .into(),
-        )
+        let distance = self.distance_internal(&vector);
+        let error = self.error_terms.error_bound(&vector).into();
+        EstimatedDistance { distance, error }
     }
 }
-
-const RESIDUAL_BITS: usize = 8;
-const RESIDUAL_MAX: f32 = ((1 << RESIDUAL_BITS) - 1) as f32;
-
-struct TurboResidualVector<'a, const B: usize> {
-    primary: EncodedVector<'a>,
-    residual: EncodedVector<'a>,
-    l2_norm: f32,
-    center_dot: f32,
-}
-
-impl<'a, const B: usize> TurboResidualVector<'a, B> {
-    const B_CHECK: () = { check_primary_bits(B) };
-
-    fn new(data: &'a [u8], similarity: VectorSimilarity) -> Option<Self> {
-        #[allow(clippy::let_unit_value)]
-        let _ = Self::B_CHECK;
-
-        let (primary_header, vector_bytes) = PrimaryVectorHeader::deserialize(data, similarity)?;
-        let (residual_header, vector_bytes) = ResidualVectorHeader::deserialize(vector_bytes)?;
-        let (primary_vector, residual_vector) = vector_bytes.split_at(packing::two_vector_split(
-            vector_bytes.len(),
-            B,
-            RESIDUAL_BITS,
-        ));
-        Some(Self {
-            primary: EncodedVector {
-                terms: VectorDecodeTerms::from_primary::<B>(primary_header),
-                data: primary_vector,
-            },
-            residual: EncodedVector {
-                terms: VectorDecodeTerms::from_residual(residual_header),
-                data: residual_vector,
-            },
-            l2_norm: primary_header.l2_norm,
-            center_dot: primary_header.center_dot,
-        })
-    }
-
-    fn dim(&self) -> usize {
-        self.residual.data.len()
-    }
-
-    fn split_tail(&self, dim: usize) -> (usize, Self, Self) {
-        let tail_dim = dim & !(packing::block_dim(B) - 1);
-        let (primary_headv, primary_tailv) = self.primary.split_at(packing::byte_len(tail_dim, B));
-        let (residual_headv, residual_tailv) = self.residual.split_at(tail_dim);
-        (
-            tail_dim,
-            Self {
-                primary: primary_headv,
-                residual: residual_headv,
-                l2_norm: self.l2_norm,
-                center_dot: self.center_dot,
-            },
-            Self {
-                primary: primary_tailv,
-                residual: residual_tailv,
-                l2_norm: self.l2_norm,
-                center_dot: self.center_dot,
-            },
-        )
-    }
-
-    /// Splits (primary, residual) vector bytes into head and tail pairs.
-    /// The head contains full 16 byte blocks, while the tail contains the remaining bytes.
-    /// Returns the dimension chosen for the split in addition to the head and tail pairs.
-    fn split_vector_tail<'b>(
-        vector: ResidualVectorBytes<'b>,
-    ) -> (usize, ResidualVectorBytes<'b>, ResidualVectorBytes<'b>) {
-        let tail_split = vector.1.len() & !(packing::block_dim(B) - 1);
-        let primary = vector.0.split_at(packing::byte_len(tail_split, B));
-        let residual = vector.1.split_at(tail_split);
-        (tail_split, (primary.0, residual.0), (primary.1, residual.1))
-    }
-}
-
-type ResidualVectorBytes<'b> = (&'b [u8], &'b [u8]);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct VectorEncodeTerms {
@@ -1071,334 +960,6 @@ impl VectorEncodeTerms {
             delta,
         }
     }
-
-    fn from_residual(magnitude: f32) -> Self {
-        Self {
-            lower: -magnitude / 2.0,
-            upper: magnitude / 2.0,
-            delta_inv: RESIDUAL_MAX / magnitude,
-            delta: 0.0,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct TurboResidualCoder<const B: usize> {
-    similarity: VectorSimilarity,
-    center: Option<Vec<f32>>,
-    scratch: ThreadLocal<RefCell<Vec<f32>>>,
-    k: Kernel,
-}
-
-impl<const B: usize> TurboResidualCoder<B> {
-    const B_CHECK: () = { check_primary_bits(B) };
-
-    pub fn new(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
-        #[allow(clippy::let_unit_value)]
-        let _ = Self::B_CHECK;
-        Self {
-            similarity,
-            center,
-            scratch: ThreadLocal::new(),
-            k: Kernel::default(),
-        }
-    }
-
-    #[cfg(test)]
-    fn with_kernel(k: Kernel, similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
-        #[allow(clippy::let_unit_value)]
-        let _ = Self::B_CHECK;
-        Self {
-            similarity,
-            center,
-            scratch: ThreadLocal::new(),
-            k,
-        }
-    }
-
-    fn encode_parts(
-        k: Kernel,
-        similarity: VectorSimilarity,
-        vector: &[f32],
-        center: Option<&[f32]>,
-    ) -> (PrimaryVectorHeader, Vec<u8>, ResidualVectorHeader, Vec<u8>) {
-        let needs_scratch = similarity.angular() || center.is_some();
-        let mut scratch_storage = if needs_scratch {
-            vec![0.0f32; vector.len()]
-        } else {
-            vec![]
-        };
-        let scratch = if needs_scratch {
-            Some(scratch_storage.as_mut_slice())
-        } else {
-            None
-        };
-        let (prepared, center_dot) = prepare_vector(vector, scratch, center, similarity);
-        let mut primary = vec![0u8; packing::byte_len(vector.len(), B)];
-        let mut residual = vec![0u8; vector.len()];
-        let (primary_header, residual_header) =
-            Self::encode_parts_to(k, prepared, center_dot, &mut primary, &mut residual);
-        (primary_header, primary, residual_header, residual)
-    }
-
-    fn encode_parts_to(
-        k: Kernel,
-        vector: &[f32],
-        center_dot: f32,
-        primary: &mut [u8],
-        residual: &mut [u8],
-    ) -> (PrimaryVectorHeader, ResidualVectorHeader) {
-        let stats = VectorStats::new(k, vector);
-        let mut primary_header = PrimaryVectorHeader::new(stats, center_dot);
-        // NB: this interval optimization reduces loss for the primary vector, but this loss
-        // reduction can make the residual vector more lossy if we derive the delta from the primary
-        // interval as described in the LVQ paper. Compute and store a residual delta that is large
-        // enough to encode both the min and max value in the vector.
-        let interval = optimize_interval(k, vector, &stats, B);
-        // For the residual interval choose the maximum based on primary delta, or the min/max
-        // values we may need to encode based on the gap between the initial and optimized interval.
-        let residual_magnitude = [
-            (interval.1 - interval.0) / ((1 << B) - 1) as f32,
-            (primary_header.lower.abs() - interval.0.abs()) * 2.0,
-            (primary_header.upper.abs() - interval.1.abs()) * 2.0,
-        ]
-        .into_iter()
-        .max_by(f32::total_cmp)
-        .expect("3 values input");
-        (primary_header.lower, primary_header.upper) = interval;
-        let mut residual_header = ResidualVectorHeader {
-            magnitude: residual_magnitude,
-            component_sum: 0,
-        };
-
-        let primary_terms = VectorEncodeTerms::from_primary::<B>(&primary_header);
-        let residual_terms = VectorEncodeTerms::from_residual(residual_magnitude);
-        let residual_error_sq;
-        (
-            primary_header.component_sum,
-            residual_header.component_sum,
-            residual_error_sq,
-        ) = match k {
-            Kernel::Scalar => scalar::residual_quantize_and_pack::<B>(
-                vector,
-                primary_terms,
-                residual_terms,
-                primary,
-                residual,
-            ),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::residual_quantize_and_pack::<B>(
-                vector,
-                primary_terms,
-                residual_terms,
-                primary,
-                residual,
-            ),
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe {
-                x86_64::residual_quantize_and_pack_avx512::<B>(
-                    vector,
-                    primary_terms,
-                    residual_terms,
-                    primary,
-                    residual,
-                )
-            },
-        };
-        primary_header.residual_error_term = residual_error_sq.sqrt();
-
-        (primary_header, residual_header)
-    }
-}
-
-impl<const B: usize> F32VectorCoder for TurboResidualCoder<B> {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let (primary_header_bytes, vector_bytes) =
-            PrimaryVectorHeader::split_output_buf(out).unwrap();
-        let (residual_header_bytes, vector_bytes) =
-            ResidualVectorHeader::split_output_buf(vector_bytes).unwrap();
-        let split = packing::two_vector_split(vector_bytes.len(), B, RESIDUAL_BITS);
-        let (primary, residual) = vector_bytes.split_at_mut(split);
-
-        let needs_scratch = self.similarity.angular() || self.center.is_some();
-        let mut scratch_guard = if needs_scratch {
-            let mut g = self.scratch.get_or_default().borrow_mut();
-            g.resize(vector.len(), 0.0);
-            Some(g)
-        } else {
-            None
-        };
-        let (prepared, center_dot) = prepare_vector(
-            vector,
-            scratch_guard.as_mut().map(|g| g.as_mut_slice()),
-            self.center.as_deref(),
-            self.similarity,
-        );
-        let (primary_header, residual_header) =
-            Self::encode_parts_to(self.k, prepared, center_dot, primary, residual);
-        primary_header.serialize(primary_header_bytes, self.similarity);
-        residual_header.serialize(residual_header_bytes);
-    }
-
-    fn byte_len(&self, dimensions: usize) -> usize {
-        PrimaryVectorHeader::LEN
-            + ResidualVectorHeader::LEN
-            + packing::byte_len(dimensions, B)
-            + dimensions
-    }
-
-    fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
-        let vector = TurboResidualVector::<B>::new(vector, self.similarity).expect("valid vector");
-        match self.k {
-            Kernel::Scalar => scalar::residual_decode::<B>(&vector, out),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::residual_decode::<B>(&vector, out),
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe { x86_64::residual_decode_avx512::<B>(&vector, out) },
-        }
-        if let Some(c) = &self.center {
-            uncenter_vector(c, out);
-        }
-    }
-
-    fn dimensions(&self, byte_len: usize) -> usize {
-        let len_no_corrective_terms =
-            byte_len - PrimaryVectorHeader::LEN - ResidualVectorHeader::LEN;
-        let split = packing::two_vector_split(len_no_corrective_terms, B, RESIDUAL_BITS);
-        // Residual vector always uses a byte per dimension.
-        len_no_corrective_terms - split
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct TurboResidualDistance<const B: usize> {
-    similarity: VectorSimilarity,
-    center_center_dot: f32,
-    inst: Kernel,
-}
-
-impl<const B: usize> TurboResidualDistance<B> {
-    pub fn new(similarity: VectorSimilarity, center: Option<&[f32]>) -> Self {
-        let center_center_dot = if let Some(c) = center
-            && similarity.angular()
-        {
-            c.iter().map(|v| v * v).sum()
-        } else {
-            0.0
-        };
-        Self {
-            similarity,
-            center_center_dot,
-            inst: Kernel::default(),
-        }
-    }
-}
-
-impl<const B: usize> VectorDistance for TurboResidualDistance<B> {
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = TurboResidualVector::<B>::new(query, self.similarity).unwrap();
-        let doc = TurboResidualVector::<B>::new(doc, self.similarity).unwrap();
-
-        let component_dot = match self.inst {
-            Kernel::Scalar => scalar::residual_dot_unnormalized::<B>(
-                (query.primary.data, query.residual.data),
-                (doc.primary.data, doc.residual.data),
-            ),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::residual_dot_unnormalized::<B>(
-                (query.primary.data, query.residual.data),
-                (doc.primary.data, doc.residual.data),
-            ),
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe {
-                x86_64::residual_dot_unnormalized_avx512::<B>(
-                    (query.primary.data, query.residual.data),
-                    (doc.primary.data, doc.residual.data),
-                )
-            },
-        };
-        let dot = component_dot.compute_dot(
-            query.dim(),
-            (&query.primary.terms, &query.residual.terms),
-            (&doc.primary.terms, &doc.residual.terms),
-        );
-        let correction_terms = DistanceCorrectionTerms::from_parts(
-            query.l2_norm,
-            query.center_dot,
-            self.center_center_dot,
-            self.similarity,
-        );
-        correction_terms
-            .distance_from_dot_unnormalized(dot, doc.l2_norm, doc.center_dot)
-            .into()
-    }
-}
-
-pub struct TurboResidualQueryDistance<const B: usize> {
-    similarity: VectorSimilarity,
-    primary_vector: Vec<u8>,
-    primary_terms: VectorDecodeTerms,
-    residual_vector: Vec<u8>,
-    residual_terms: VectorDecodeTerms,
-    correction_terms: DistanceCorrectionTerms,
-
-    inst: Kernel,
-}
-
-impl<const B: usize> TurboResidualQueryDistance<B> {
-    pub fn new(
-        similarity: VectorSimilarity,
-        query: Cow<'_, [f32]>,
-        center: Option<&[f32]>,
-    ) -> Self {
-        let inst = Kernel::default();
-        let (primary_header, primary_vector, residual_header, residual_vector) =
-            TurboResidualCoder::<B>::encode_parts(inst, similarity, query.as_ref(), center);
-        let primary_terms = VectorDecodeTerms::from_primary::<B>(primary_header);
-        let residual_terms = VectorDecodeTerms::from_residual(residual_header);
-        let correction_terms = DistanceCorrectionTerms::new(&primary_header, center, similarity);
-        Self {
-            similarity,
-            primary_vector,
-            primary_terms,
-            residual_vector,
-            residual_terms,
-            correction_terms,
-            inst: Kernel::default(),
-        }
-    }
-}
-
-impl<const B: usize> QueryVectorDistance for TurboResidualQueryDistance<B> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        let vector = TurboResidualVector::<B>::new(vector, self.similarity).expect("valid vector");
-        let component_dot = match self.inst {
-            Kernel::Scalar => scalar::residual_dot_unnormalized::<B>(
-                (&self.primary_vector, &self.residual_vector),
-                (vector.primary.data, vector.residual.data),
-            ),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::residual_dot_unnormalized::<B>(
-                (&self.primary_vector, &self.residual_vector),
-                (vector.primary.data, vector.residual.data),
-            ),
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe {
-                x86_64::residual_dot_unnormalized_avx512::<B>(
-                    (&self.primary_vector, &self.residual_vector),
-                    (vector.primary.data, vector.residual.data),
-                )
-            },
-        };
-        let dot = component_dot.compute_dot(
-            vector.dim(),
-            (&self.primary_terms, &self.residual_terms),
-            (&vector.primary.terms, &vector.residual.terms),
-        );
-        self.correction_terms
-            .distance_from_dot_unnormalized(dot, vector.l2_norm, vector.center_dot)
-            .into()
-    }
 }
 
 pub(super) mod packing {
@@ -1409,18 +970,6 @@ pub(super) mod packing {
     /// The number of bytes required to pack `dimensions` with `bits` per entry.
     pub const fn byte_len(dimensions: usize, bits: usize) -> usize {
         (dimensions * bits).div_ceil(8)
-    }
-
-    /// Pick where to split between primary and residual vector representation based on the number
-    /// of payload bits, and bits per section.
-    pub const fn two_vector_split(vector_bytes: usize, bits1: usize, bits2: usize) -> usize {
-        if bits1 < bits2 {
-            (vector_bytes * bits1).div_ceil(bits1 + bits2)
-        } else if bits1 == bits2 {
-            vector_bytes / 2
-        } else {
-            (vector_bytes * bits2).div_ceil(bits1 + bits2)
-        }
     }
 
     pub struct TurboPacker<'a, const B: usize> {
@@ -1524,6 +1073,67 @@ pub(super) mod packing {
     impl<'a, const B: usize> FusedIterator for TurboUnpacker<'a, B> {}
 
     impl<'a, const B: usize> ExactSizeIterator for TurboUnpacker<'a, B> {}
+
+    /// Take a 4 bit encoded input and split it into 4 bitplanes.
+    ///
+    /// The resulting bitplanes are interleaved at 16 bytes chunks until the tail when they are
+    /// interleaved in the turbo packing format.
+    pub fn bitplane_split4(vector: &[u8]) -> Vec<u8> {
+        // 64 bytes contains 128 dims, which is enough to populate 4 128 bit bitplanes.
+        let head_len = vector.len() & !63;
+        let tail_dim = (vector.len() & 63) * 2;
+        let tail_len = tail_dim.div_ceil(8) * 4;
+        let len = head_len + tail_len;
+        let mut out = vec![0u8; len];
+        let (head, tail) = vector.as_chunks::<64>();
+        let (ohead, otail) = out.split_at_mut(head.len() * 64);
+        let ohead = ohead.as_chunks_mut::<64>().0;
+        let nibble_mask = u128::from_ne_bytes([0xf; 16]);
+        let bit_mask = u128::from_ne_bytes([1; 16]);
+        for (c, o) in head.iter().zip(ohead.iter_mut()) {
+            let mut b0 = 0u128;
+            let mut b1 = 0u128;
+            let mut b2 = 0u128;
+            let mut b3 = 0u128;
+            for (i, b) in c.as_chunks::<16>().0.iter().enumerate() {
+                let b = u128::from_le_bytes(*b);
+                let lo = b & nibble_mask;
+                let hi = (b >> 4) & nibble_mask;
+
+                b0 |= (lo & bit_mask) << (i * 2);
+                b0 |= (hi & bit_mask) << (i * 2 + 1);
+                b1 |= ((lo >> 1) & bit_mask) << (i * 2);
+                b1 |= ((hi >> 1) & bit_mask) << (i * 2 + 1);
+                b2 |= ((lo >> 2) & bit_mask) << (i * 2);
+                b2 |= ((hi >> 2) & bit_mask) << (i * 2 + 1);
+                b3 |= ((lo >> 3) & bit_mask) << (i * 2);
+                b3 |= ((hi >> 3) & bit_mask) << (i * 2 + 1);
+            }
+
+            let planes = o.as_chunks_mut::<16>().0;
+            planes[0] = b0.to_le_bytes();
+            planes[1] = b1.to_le_bytes();
+            planes[2] = b2.to_le_bytes();
+            planes[3] = b3.to_le_bytes();
+        }
+
+        if !tail.is_empty() {
+            assert!(otail.len().is_multiple_of(4));
+            let mut oiter = otail.chunks_mut(otail.len() / 4);
+            let mut b0 = TurboPacker::<1>::new(oiter.next().unwrap());
+            let mut b1 = TurboPacker::<1>::new(oiter.next().unwrap());
+            let mut b2 = TurboPacker::<1>::new(oiter.next().unwrap());
+            let mut b3 = TurboPacker::<1>::new(oiter.next().unwrap());
+            for d in TurboUnpacker::<4>::new(tail) {
+                b0.push(d & 1);
+                b1.push((d >> 1) & 1);
+                b2.push((d >> 2) & 1);
+                b3.push((d >> 3) & 1);
+            }
+        }
+
+        out
+    }
 
     /// Return the number of dimensions that can be packed into a single block.
     ///

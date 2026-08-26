@@ -5,21 +5,14 @@ use std::{
     path::PathBuf,
 };
 
-use clap::{Args, ValueEnum};
-use rand::{Rng, SeedableRng};
+use clap::Args;
+use half::{f16, slice::HalfFloatSliceExt};
+use indicatif::ProgressIterator;
+use rand::SeedableRng;
+use rand_distr::{Distribution, StandardNormal};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::ui::progress_bar;
-
-#[derive(Clone, ValueEnum)]
-pub enum Distribution {
-    /// Generate vectors with each dimension in [-1, 1], then unit normalize.
-    F32Unit,
-    /// Generate vectors where each dimension is a random i8, then convert to f32.
-    I8,
-    /// Generate vectors where each dimension is a random u8, then convert to f32.
-    U8,
-}
 
 #[derive(Args)]
 pub struct GenerateArgs {
@@ -35,48 +28,28 @@ pub struct GenerateArgs {
     /// Random seed for reproducible generation.
     #[arg(short, long)]
     seed: u64,
-    /// Distribution used to generate vector values.
-    #[arg(long, default_value = "f32-unit")]
-    distribution: Distribution,
 }
 
 pub fn generate(args: GenerateArgs) -> io::Result<()> {
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(args.seed);
-    let mut out = BufWriter::new(File::create(&args.output)?);
     let dims = args.dimensions.get();
     let count = args.count.get();
-    let progress = progress_bar(count, "generate");
+
+    let mut out = BufWriter::new(File::create(&args.output)?);
+    out.write_all(&(count as u32).to_le_bytes())?;
+    out.write_all(&(dims as u32).to_le_bytes())?;
 
     let mut v = vec![0.0f32; dims];
-
-    for _ in 0..count {
-        match args.distribution {
-            Distribution::F32Unit => {
-                for x in &mut v {
-                    *x = rng.random_range(-1.0f32..=1.0f32);
-                }
-                let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-                if norm > 0.0 {
-                    for x in &mut v {
-                        *x /= norm;
-                    }
-                }
-            }
-            Distribution::I8 => {
-                for x in &mut v {
-                    *x = rng.random::<i8>() as f32;
-                }
-            }
-            Distribution::U8 => {
-                for x in &mut v {
-                    *x = rng.random::<u8>() as f32;
-                }
-            }
+    let mut v16 = vec![f16::ZERO; dims];
+    for _ in (0..count).progress_with(progress_bar(count, "generate")) {
+        for x in &mut v {
+            *x = StandardNormal.sample(&mut rng);
         }
-        for &x in &v {
+        v = vectors::float32::l2_normalize(v).into_owned();
+        v16.convert_from_f32_slice(&v);
+        for &x in &v16 {
             out.write_all(&x.to_le_bytes())?;
         }
-        progress.inc(1);
     }
 
     Ok(())

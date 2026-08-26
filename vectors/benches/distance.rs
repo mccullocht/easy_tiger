@@ -1,6 +1,6 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use half::f16;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use vectors::{F32VectorCoding, VectorSimilarity};
 
 const DIMENSIONS: usize = 2048;
@@ -143,10 +143,6 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
         F32VectorCoding::TLVQ2,
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
-        F32VectorCoding::TLVQ1x8,
-        F32VectorCoding::TLVQ2x8,
-        F32VectorCoding::TLVQ4x8,
-        F32VectorCoding::TLVQ8x8,
     ];
     let sim = VectorSimilarity::Dot;
     let (a, b) = generate_test_vectors(DIMENSIONS);

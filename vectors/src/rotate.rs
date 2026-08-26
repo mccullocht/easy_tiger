@@ -6,7 +6,7 @@ mod x86_64;
 
 use std::ops::Range;
 
-use rand::{Rng, SeedableRng, seq::SliceRandom};
+use rand::{Rng, RngExt, SeedableRng, seq::SliceRandom};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 /// Implementation of the Walsh-Hadamard transform used to rotate vectors.
@@ -254,7 +254,7 @@ mod tests {
     }
 
     fn make_vec(dims: usize, seed: u64) -> Vec<f32> {
-        use rand::{Rng, SeedableRng};
+        use rand::SeedableRng;
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
         (0..dims).map(|_| rng.random_range(-1.0f32..=1.0)).collect()
     }

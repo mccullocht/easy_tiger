@@ -20,12 +20,36 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: WiredTiger submodule init
-      run: git submodule update --init --recursive
-    - name: Fmt
-      run: cargo fmt --check
+      run: git submodule update --init --recursive --depth 1
     - name: Build
       run: cargo build --workspace
+
+  test:
+    strategy:
+      matrix:
+        target: [ubuntu-24.04, ubuntu-24.04-arm]
+    
+    runs-on: ${{ matrix.target }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: WiredTiger submodule init
+      run: git submodule update --init --recursive --depth 1
     - name: Run tests
       run: cargo test --workspace
+
+  lint:
+    strategy:
+      matrix:
+        target: [ubuntu-24.04, ubuntu-24.04-arm]
+    
+    runs-on: ${{ matrix.target }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: WiredTiger submodule init
+      run: git submodule update --init --recursive --depth 1
+    - name: Fmt
+      run: cargo fmt --check
     - name: Clippy
       run: cargo clippy -- -D warnings

@@ -104,46 +104,6 @@ impl std::fmt::Display for VectorSimilarity {
     }
 }
 
-/// Distance function for coded vectors.
-///
-/// This trait is object-safe; it may be instantiated at runtime based on
-/// data that appears in a file or other backing store.
-pub trait VectorDistance: Send + Sync {
-    /// Score the `query` vector against the `doc` vector. Returns a score
-    /// where larger values are better matches.
-    ///
-    /// This function is not required to be commutative and may panic if
-    /// one of the inputs is misshapen.
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64;
-
-    /// Compute the distance between the `query` vector and each of the `docs` vectors, writing
-    /// the results to `out`.
-    ///
-    /// This function is not required to be commutative and may panic if one of the inputs is
-    /// misshapen. It may also panic if `docs` and `out` are not the same length.
-    fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
-        for (doc, out) in docs.iter().zip(out.iter_mut()) {
-            *out = self.distance(query, doc);
-        }
-    }
-}
-
-/// Distance function for `f32` vectors.
-pub trait F32VectorDistance: VectorDistance {
-    /// Compute the distance between `a` and `b`; smaller values are better.
-    ///
-    /// Input vectors must be the same length or this function may panic.
-    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
-}
-
-/// Distance function for `f16` vectors.
-pub trait F16VectorDistance: VectorDistance {
-    /// Compute the distance between `a` and `b`; smaller values are better.
-    ///
-    /// Input vectors must be the same length or this function may panic.
-    fn distance_f16(&self, a: &[f16], b: &[f16]) -> f64;
-}
-
 /// Supported coding schemes for input f32 vectors.
 ///
 /// Raw vectors are stored little endian but the remaining formats are all lossy in some way with
@@ -179,22 +139,6 @@ pub enum F32VectorCoding {
     ///
     /// This encoding is optimized for cases where dimensionality is a multiple of 16.
     TLVQ8,
-    /// Turbo LVQ; 1 bit primary vector and 8 bit residual vector.
-    ///
-    /// This encoding is optimized for cases where dimensionality is a multiple of 128.
-    TLVQ1x8,
-    /// Turbo LVQ; 2 bits primary vector and 8 bits residual vector.
-    ///
-    /// This encoding is optimized for cases where dimensionality is a multiple of 64.
-    TLVQ2x8,
-    /// Turbo LVQ; 4 bits primary vector and 8 bits residual vector.
-    ///
-    /// This encoding is optimized for cases where dimensionality is a multiple of 32.
-    TLVQ4x8,
-    /// Turbo LVQ; 8 bits primary vector and 8 bits residual vector.
-    ///
-    /// This encoding is optimized for cases where dimensionality is a multiple of 16.
-    TLVQ8x8,
     /// QuIVer; 2 bit binary quantization with sign + magnitude.
     QuIVer,
 }
@@ -219,10 +163,6 @@ impl F32VectorCoding {
             (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryCoder::<2>::new(similarity, center)),
             (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryCoder::<4>::new(similarity, center)),
             (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryCoder::<8>::new(similarity, center)),
-            (Self::TLVQ1x8, _) => Box::new(lvq::TurboResidualCoder::<1>::new(similarity, center)),
-            (Self::TLVQ2x8, _) => Box::new(lvq::TurboResidualCoder::<2>::new(similarity, center)),
-            (Self::TLVQ4x8, _) => Box::new(lvq::TurboResidualCoder::<4>::new(similarity, center)),
-            (Self::TLVQ8x8, _) => Box::new(lvq::TurboResidualCoder::<8>::new(similarity, center)),
             (Self::QuIVer, _) => quiver::new_coder(),
         }
     }
@@ -251,18 +191,6 @@ impl F32VectorCoding {
             (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryDistance::<2>::new(similarity, center)),
             (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryDistance::<4>::new(similarity, center)),
             (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryDistance::<8>::new(similarity, center)),
-            (Self::TLVQ1x8, _) => {
-                Box::new(lvq::TurboResidualDistance::<1>::new(similarity, center))
-            }
-            (Self::TLVQ2x8, _) => {
-                Box::new(lvq::TurboResidualDistance::<2>::new(similarity, center))
-            }
-            (Self::TLVQ4x8, _) => {
-                Box::new(lvq::TurboResidualDistance::<4>::new(similarity, center))
-            }
-            (Self::TLVQ8x8, _) => {
-                Box::new(lvq::TurboResidualDistance::<8>::new(similarity, center))
-            }
             (Self::QuIVer, _) => quiver::new_symmetric_distance(),
         }
     }
@@ -310,26 +238,6 @@ impl F32VectorCoding {
                 center,
             )),
             (F32VectorCoding::TLVQ8, _) => Box::new(lvq::TurboPrimaryQueryDistance::<8>::new(
-                similarity,
-                query.into(),
-                center,
-            )),
-            (F32VectorCoding::TLVQ1x8, _) => Box::new(lvq::TurboResidualQueryDistance::<1>::new(
-                similarity,
-                query.into(),
-                center,
-            )),
-            (F32VectorCoding::TLVQ2x8, _) => Box::new(lvq::TurboResidualQueryDistance::<2>::new(
-                similarity,
-                query.into(),
-                center,
-            )),
-            (F32VectorCoding::TLVQ4x8, _) => Box::new(lvq::TurboResidualQueryDistance::<4>::new(
-                similarity,
-                query.into(),
-                center,
-            )),
-            (F32VectorCoding::TLVQ8x8, _) => Box::new(lvq::TurboResidualQueryDistance::<8>::new(
                 similarity,
                 query.into(),
                 center,
@@ -399,30 +307,6 @@ impl F32VectorCoding {
                     query
                 )
             }
-            (_, F32VectorCoding::TLVQ1x8) => {
-                quantized_qvd!(
-                    lvq::TurboResidualDistance::<1>::new(similarity, center),
-                    query
-                )
-            }
-            (_, F32VectorCoding::TLVQ2x8) => {
-                quantized_qvd!(
-                    lvq::TurboResidualDistance::<2>::new(similarity, center),
-                    query
-                )
-            }
-            (_, F32VectorCoding::TLVQ4x8) => {
-                quantized_qvd!(
-                    lvq::TurboResidualDistance::<4>::new(similarity, center),
-                    query
-                )
-            }
-            (_, F32VectorCoding::TLVQ8x8) => {
-                quantized_qvd!(
-                    lvq::TurboResidualDistance::<8>::new(similarity, center),
-                    query
-                )
-            }
             (_, Self::QuIVer) => quiver::new_symmetric_query_distance(query.into()),
         }
     }
@@ -441,10 +325,6 @@ impl FromStr for F32VectorCoding {
             "tlvq2" => Ok(Self::TLVQ2),
             "tlvq4" => Ok(Self::TLVQ4),
             "tlvq8" => Ok(Self::TLVQ8),
-            "tlvq1x8" => Ok(Self::TLVQ1x8),
-            "tlvq2x8" => Ok(Self::TLVQ2x8),
-            "tlvq4x8" => Ok(Self::TLVQ4x8),
-            "tlvq8x8" => Ok(Self::TLVQ8x8),
             "QuIVer" => Ok(Self::QuIVer),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
@@ -461,10 +341,6 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TLVQ2 => write!(f, "tlvq2"),
             Self::TLVQ4 => write!(f, "tlvq4"),
             Self::TLVQ8 => write!(f, "tlvq8"),
-            Self::TLVQ1x8 => write!(f, "tlvq1x8"),
-            Self::TLVQ2x8 => write!(f, "tlvq2x8"),
-            Self::TLVQ4x8 => write!(f, "tlvq4x8"),
-            Self::TLVQ8x8 => write!(f, "tlvq8x8"),
             Self::QuIVer => write!(f, "QuIVer"),
         }
     }
@@ -506,6 +382,59 @@ pub trait F32VectorCoder: Send + Sync {
     fn dimensions(&self, byte_len: usize) -> usize;
 }
 
+/// Distance function for coded vectors.
+///
+/// This trait is object-safe; it may be instantiated at runtime based on
+/// data that appears in a file or other backing store.
+pub trait VectorDistance: Send + Sync {
+    /// Score the `query` vector against the `doc` vector. Returns a score
+    /// where larger values are better matches.
+    ///
+    /// This function is not required to be commutative and may panic if
+    /// one of the inputs is misshapen.
+    fn distance(&self, query: &[u8], doc: &[u8]) -> f64;
+
+    /// Compute the distance between the `query` vector and each of the `docs` vectors, writing
+    /// the results to `out`.
+    ///
+    /// This function is not required to be commutative and may panic if one of the inputs is
+    /// misshapen. It may also panic if `docs` and `out` are not the same length.
+    fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
+        for (doc, out) in docs.iter().zip(out.iter_mut()) {
+            *out = self.distance(query, doc);
+        }
+    }
+}
+
+/// Distance function for `f32` vectors.
+pub trait F32VectorDistance: VectorDistance {
+    /// Compute the distance between `a` and `b`; smaller values are better.
+    ///
+    /// Input vectors must be the same length or this function may panic.
+    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64;
+}
+
+/// Distance function for `f16` vectors.
+pub trait F16VectorDistance: VectorDistance {
+    /// Compute the distance between `a` and `b`; smaller values are better.
+    ///
+    /// Input vectors must be the same length or this function may panic.
+    fn distance_f16(&self, a: &[f16], b: &[f16]) -> f64;
+}
+
+/// Estimated distance between two vectors including an error bound.
+///
+/// The error bound is expected to be a statistical bound as opposed to an arithmetic bound.
+/// If the input vector components have a Gaussian distribution then the error bounds should
+/// correspond to a Z score of 1.0; callers may adjust the bound depending on their tolerance.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EstimatedDistance {
+    /// Estimated distance.
+    pub distance: f64,
+    /// Error; actual distance is expected to be `distance +/- error`.
+    pub error: f64,
+}
+
 /// Compute the distance between a fixed vector provided at creation time and other vectors.
 /// This is often useful in query flows where everything references a specific point.
 pub trait QueryVectorDistance: Send + Sync {
@@ -525,11 +454,15 @@ pub trait QueryVectorDistance: Send + Sync {
         }
     }
 
-    /// Compute the distance between the bound query vector and `vector`. May return `None` if the
-    /// distance would be greater than max_distance.
-    #[allow(unused_variables)]
-    fn distance_with_bound(&self, vector: &[u8], max_distance: f64) -> Option<f64> {
-        Some(self.distance(vector))
+    /// Estimated distance between the bound query vector and `vector`.
+    ///
+    /// Note that not all distance functions will support this so callers should be prepared for the
+    /// degenerate case where the error bound is 0.0.
+    fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
+        EstimatedDistance {
+            distance: self.distance(vector),
+            error: 0.0,
+        }
     }
 }
 
@@ -644,15 +577,15 @@ mod test {
         assert_float_near!(f32_dist, query_dist, threshold, index);
     }
 
-    use F32VectorCoding::{F16, TLVQ1, TLVQ1x8, TLVQ2, TLVQ2x8, TLVQ4, TLVQ4x8, TLVQ8, TLVQ8x8};
+    use F32VectorCoding::{F16, TLVQ1, TLVQ2, TLVQ4, TLVQ8};
     use VectorSimilarity::{Cosine, Dot, Euclidean};
-    use rand::{Rng, SeedableRng, TryRngCore, rngs::OsRng};
+    use rand::{RngExt, SeedableRng, TryRng, rngs::SysRng};
 
     macro_rules! distance_test {
         ($name:ident, $sim:path, $coder:path, $epsilon:literal) => {
             #[test]
             fn $name() {
-                let seed = OsRng::default().try_next_u64().unwrap();
+                let seed = SysRng::default().try_next_u64().unwrap();
                 println!("SEED {seed:#016x}");
                 let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
                 for i in 0..1024 {
@@ -683,13 +616,4 @@ mod test {
     distance_test!(tlvq4_l2_dist, Euclidean, TLVQ4, 0.1);
     distance_test!(tlvq8_dot_dist, Dot, TLVQ8, 0.01);
     distance_test!(tlvq8_l2_dist, Euclidean, TLVQ8, 0.01);
-
-    distance_test!(tlvq1x8_dot_dist, Dot, TLVQ1x8, 0.01);
-    distance_test!(tlvq1x8_l2_dist, Euclidean, TLVQ1x8, 0.01);
-    distance_test!(tlvq2x8_dot_dist, Dot, TLVQ2x8, 0.01);
-    distance_test!(tlvq2x8_l2_dist, Euclidean, TLVQ2x8, 0.01);
-    distance_test!(tlvq4x8_dot_dist, Dot, TLVQ4x8, 0.001);
-    distance_test!(tlvq4x8_l2_dist, Euclidean, TLVQ4x8, 0.001);
-    distance_test!(tlvq8x8_dot_dist, Dot, TLVQ8x8, 0.001);
-    distance_test!(tlvq8x8_l2_dist, Euclidean, TLVQ8x8, 0.001);
 }

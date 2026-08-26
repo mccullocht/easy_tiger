@@ -15,10 +15,12 @@ histogram = { workspace = true }
 indicatif = { workspace = true, features = ["rayon"] }
 memmap2 = { workspace = true }
 rand = { workspace = true }
+rand_distr = { workspace = true }
 rand_xoshiro = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+smallvec = { workspace = true }
 stable_deref_trait = { workspace = true }
 thread_local = { workspace = true }
 tracing = { workspace = true }

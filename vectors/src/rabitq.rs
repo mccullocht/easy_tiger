@@ -115,6 +115,7 @@ impl F32VectorCoder for Coder {
 ///
 /// This is OK-ish for angular distance and awful for Euclidean, which could use some additional
 /// scaling factors.
+// XXX this is hella wrong when centered.
 #[derive(Debug, Default)]
 pub struct Distance;
 

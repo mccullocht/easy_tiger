@@ -51,13 +51,6 @@ pub fn distance_loss(
     args: DistanceLossArgs,
     vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
-    if args.center && args.rotate {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "centering and rotation are incompatible",
-        ));
-    }
-
     let query_vectors: DerefVectorStore<f16, Mmap> =
         DerefVectorStore::from_file(args.query_vectors)?;
     if query_vectors.elem_stride() != vectors.elem_stride() {
@@ -75,13 +68,17 @@ pub fn distance_loss(
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
 
-    let center = if args.center {
-        Some(super::compute_center(vectors))
+    let rotator = if args.rotate {
+        Some(Rotator::new(vectors.elem_stride(), args.rotate_seed))
     } else {
         None
     };
-    let rotator = if args.rotate {
-        Some(Rotator::new(vectors.elem_stride(), args.rotate_seed))
+    let center = if args.center {
+        let mut center = super::compute_center(vectors);
+        if let Some(r) = rotator.as_ref() {
+            center = r.forward(&center);
+        }
+        Some(center)
     } else {
         None
     };

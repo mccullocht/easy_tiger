@@ -250,7 +250,7 @@ impl QueryDistance {
     fn distance_internal(&self, header: Header, doc: &[u8]) -> f64 {
         let ip: f64 = self.ip(header, doc);
         match self.similarity {
-            VectorSimilarity::Cosine | VectorSimilarity::Dot => ip,
+            VectorSimilarity::Cosine | VectorSimilarity::Dot => ip.mul_add(-0.5, 0.5),
             VectorSimilarity::Euclidean => {
                 let qnorm: f64 = self.l2_norm.into();
                 let dnorm: f64 = header.l2_norm.into();
@@ -281,7 +281,7 @@ impl QueryVectorDistance for QueryDistance {
                 VectorSimilarity::Euclidean => {
                     2.0 * self.l2_norm as f64 * header.l2_norm as f64 * e
                 }
-                VectorSimilarity::Cosine | VectorSimilarity::Dot => e,
+                VectorSimilarity::Cosine | VectorSimilarity::Dot => e * 0.5,
             },
         }
     }

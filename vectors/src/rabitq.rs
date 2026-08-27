@@ -262,7 +262,7 @@ impl QueryDistance {
 
     fn error(&self, header: Header) -> f64 {
         let c = (header.correction_term as f64).powi(2);
-        ((1.0 - c) / c).sqrt() * self.dim_sqrt
+        ((1.0 - c) / c).sqrt() / self.dim_sqrt
     }
 }
 

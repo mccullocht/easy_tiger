@@ -147,8 +147,11 @@ impl VectorDistance for Distance {
 
 pub struct QueryDistance {
     similarity: VectorSimilarity,
-    l2_norm: f32,
     query: Vec<u8>,
+    l2_norm: f32,
+    lower: f32,
+    delta: f32,
+    component_sum: u32,
     dim_sqrt: f64,
 }
 
@@ -165,33 +168,40 @@ impl QueryDistance {
         } else {
             query.into()
         };
+        // XXX we must normalize the centered query before the comparison.
         let dim_sqrt = (query.len() as f64).sqrt();
-        let (min, max, l2_norm_sq) = query
+        let (lower, upper, l2_norm_sq) = query
             .iter()
             .copied()
             .fold((f32::MAX, f32::MIN, 0f32), |acc, x| {
                 (acc.0.min(x), acc.1.max(x), x.mul_add(x, acc.2))
             });
-        let delta_inv = 15.0 / (max - min);
+        let delta_inv = 15.0 / (upper - lower);
+        let delta = (upper - lower) / 15.0;
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::from_seed([0xfe; 32]);
         let mut query4 = vec![0u8; query.len().div_ceil(2)];
+        let mut component_sum = 0u32;
         let mut packer = TurboPacker::<4>::new(&mut query4);
         for &x in query.iter() {
-            packer.push(
-                delta_inv
-                    .mul_add(x - min, rng.random_range(0.0..1.0))
-                    .floor() as u8,
-            );
+            let q = delta_inv
+                .mul_add(x - lower, rng.random_range(0.0..1.0))
+                .floor()
+                .min(15.0) as u32;
+            component_sum += q;
+            packer.push(q as u8);
         }
         Self {
             similarity,
-            l2_norm: l2_norm_sq.sqrt(),
             query: super::lvq::packing::bitplane_split4(&query4),
+            l2_norm: l2_norm_sq.sqrt(),
+            lower,
+            delta,
+            component_sum,
             dim_sqrt,
         }
     }
 
-    // XXX this is all shared with lvq
+    // XXX inner product of uint8 part is shared with lvq.
     #[inline]
     fn ip(&self, header: Header, doc: &[u8]) -> f64 {
         let (qhead, qtail) = self.query.as_chunks::<64>();
@@ -228,8 +238,15 @@ impl QueryDistance {
             }
         }
 
+        // XXX this needs some sort of normalization to be not shit.
+        // XXX strongly resembles (is?) the lvq correction.
+        // 2*delta*dot/sqrt(D) + 2*lower*component_sum/sqrt(D) - delta*query_csum/sqrt(D) - sqrt(D)*lower
         let ip_uint = bdot[0] + bdot[1] * 2 + bdot[2] * 4 + bdot[3] * 8;
-        ip_uint as f64 / header.correction_term as f64
+        let ip = (2.0 * self.delta as f64 * ip_uint as f64) / self.dim_sqrt
+            + 2.0 * self.lower as f64 * header.component_sum as f64 / self.dim_sqrt
+            - self.delta as f64 * self.component_sum as f64 / self.dim_sqrt
+            - self.dim_sqrt * self.lower as f64;
+        ip / header.correction_term as f64
     }
 
     fn distance_internal(&self, header: Header, doc: &[u8]) -> f64 {

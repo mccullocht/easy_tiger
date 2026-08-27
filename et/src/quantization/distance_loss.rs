@@ -88,10 +88,11 @@ pub fn distance_loss(
         .into_par_iter()
         .map(|i| {
             let mut query = query_vectors[i].to_f32_vec();
+            // NB: centering f32 only makes distance comparison less efficient.
             let f32_dist = F32VectorCoding::F32.query_distance_asymmetric(
                 args.similarity,
                 query.clone(),
-                center.as_deref(),
+                None,
             );
             if let Some(r) = rotator.as_ref() {
                 query = r.forward(&query);
@@ -117,15 +118,14 @@ pub fn distance_loss(
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "scoring"))
         .map(|d| {
+            let doc_f32 = vectors[d].to_f32_vec();
+            let doc_q = if let Some(r) = rotator.as_ref() {
+                coder.encode(&r.forward(&doc_f32))
+            } else {
+                coder.encode(&doc_f32)
+            };
             let mut stats = DistanceLossStats::default();
             for (f32_dist, qdist) in query_scorers.iter() {
-                let doc_f32 = vectors[d].to_f32_vec();
-                let doc_q = if let Some(r) = rotator.as_ref() {
-                    coder.encode(&r.forward(&doc_f32))
-                } else {
-                    coder.encode(&doc_f32)
-                };
-
                 let actual = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32));
                 let estimate = qdist.as_ref().estimated_distance(&doc_q);
                 stats.add_sample(actual, estimate);

@@ -154,22 +154,29 @@ pub struct QueryDistance {
     delta: f32,
     component_sum: u32,
     dim_sqrt: f64,
+    /// q•d; used to compensate for centering in angular distance. 0 for euclidean.
+    center_dot: f32,
 }
 
 impl QueryDistance {
-    // XXX I need to handle centering.
     pub fn new(similarity: VectorSimilarity, query: &[f32], center: Option<&[f32]>) -> Self {
-        let query: Cow<'_, [f32]> = if let Some(center) = center {
-            query
+        let center_dot = match (similarity, center) {
+            (VectorSimilarity::Euclidean, _) | (_, None) => 0.0,
+            (_, Some(center)) => query
+                .iter()
+                .zip(center.iter())
+                .map(|(&q, &c)| q * c)
+                .sum::<f32>(),
+        };
+        let query: Cow<'_, [f32]> = match (similarity, center) {
+            (VectorSimilarity::Euclidean, Some(center)) => query
                 .iter()
                 .zip(center.iter())
                 .map(|(&q, &c)| q - c)
                 .collect::<Vec<_>>()
-                .into()
-        } else {
-            query.into()
+                .into(),
+            _ => query.into(),
         };
-        // XXX we must normalize the centered query before the comparison.
         let dim_sqrt = (query.len() as f64).sqrt();
         let (lower, upper, l2_norm_sq) = query
             .iter()
@@ -199,6 +206,7 @@ impl QueryDistance {
             delta,
             component_sum,
             dim_sqrt,
+            center_dot,
         }
     }
 
@@ -248,13 +256,16 @@ impl QueryDistance {
     }
 
     fn distance_internal(&self, header: Header, doc: &[u8]) -> f64 {
-        let ip: f64 = self.ip(header, doc);
+        let dnorm: f64 = header.l2_norm.into();
+        let raw = dnorm * self.ip(header, doc);
         match self.similarity {
-            VectorSimilarity::Cosine | VectorSimilarity::Dot => ip.mul_add(-0.5, 0.5),
             VectorSimilarity::Euclidean => {
                 let qnorm: f64 = self.l2_norm.into();
-                let dnorm: f64 = header.l2_norm.into();
-                dnorm.powi(2) + qnorm.powi(2) - 2.0 * dnorm * qnorm * ip
+                dnorm.powi(2) + qnorm.powi(2) - 2.0 * raw
+            }
+            VectorSimilarity::Cosine | VectorSimilarity::Dot => {
+                let true_dot = raw + self.center_dot as f64;
+                true_dot.mul_add(-0.5, 0.5)
             }
         }
         .into()
@@ -274,14 +285,12 @@ impl QueryVectorDistance for QueryDistance {
 
     fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
         let (header, vector) = Header::decode(vector);
-        let e = self.error(header);
+        let e = self.error(header) * self.l2_norm as f64 * header.l2_norm as f64;
         EstimatedDistance {
             distance: self.distance_internal(header, vector),
             error: match self.similarity {
-                VectorSimilarity::Euclidean => {
-                    2.0 * self.l2_norm as f64 * header.l2_norm as f64 * e
-                }
-                VectorSimilarity::Cosine | VectorSimilarity::Dot => e * 0.5,
+                VectorSimilarity::Euclidean => 2.0 * e,
+                VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5 * e,
             },
         }
     }

@@ -1,4 +1,5 @@
-//! Implementation of RaBitQ vector quantizer (XXX insert paper reference)
+//! Implementation of RaBitQ vector quantizer.
+//!   Base paper: https://arxiv.org/pdf/2405.12497
 //!
 //! One note is that this does not include rotation inline in the quantization transform.
 //! Callers are expected to rotate the vectors if component distribution is not Gaussian, and
@@ -238,14 +239,11 @@ impl QueryDistance {
             }
         }
 
-        // XXX this needs some sort of normalization to be not shit.
-        // XXX strongly resembles (is?) the lvq correction.
-        // 2*delta*dot/sqrt(D) + 2*lower*component_sum/sqrt(D) - delta*query_csum/sqrt(D) - sqrt(D)*lower
         let ip_uint = bdot[0] + bdot[1] * 2 + bdot[2] * 4 + bdot[3] * 8;
-        let ip = (2.0 * self.delta as f64 * ip_uint as f64) / self.dim_sqrt
-            + 2.0 * self.lower as f64 * header.component_sum as f64 / self.dim_sqrt
-            - self.delta as f64 * self.component_sum as f64 / self.dim_sqrt
-            - self.dim_sqrt * self.lower as f64;
+        let ip = self.dim_sqrt * self.lower as f64
+            - 2.0 * self.lower as f64 * header.component_sum as f64 / self.dim_sqrt
+            + self.delta as f64 * self.component_sum as f64 / self.dim_sqrt
+            - 2.0 * self.delta as f64 * ip_uint as f64 / self.dim_sqrt;
         ip / header.correction_term as f64
     }
 

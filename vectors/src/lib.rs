@@ -194,7 +194,7 @@ impl F32VectorCoding {
             (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryDistance::<2>::new(similarity, center)),
             (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryDistance::<4>::new(similarity, center)),
             (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryDistance::<8>::new(similarity, center)),
-            (Self::RaBitQ, _) => Box::new(rabitq::Distance),
+            (Self::RaBitQ, _) => Box::new(rabitq::Distance::new(similarity)),
             (Self::QuIVer, _) => quiver::new_symmetric_distance(),
         }
     }
@@ -316,7 +316,7 @@ impl F32VectorCoding {
                     query
                 )
             }
-            (_, Self::RaBitQ) => quantized_qvd!(rabitq::Distance, query),
+            (_, Self::RaBitQ) => quantized_qvd!(rabitq::Distance::new(similarity), query),
             (_, Self::QuIVer) => quiver::new_symmetric_query_distance(query.into()),
         }
     }

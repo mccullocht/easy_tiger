@@ -154,36 +154,27 @@ pub struct QueryDistance {
     delta: f32,
     component_sum: u32,
     dim_sqrt: f64,
-    /// q•d; used to compensate for centering in angular distance. 0 for euclidean.
-    center_dot: f32,
 }
 
 impl QueryDistance {
     pub fn new(similarity: VectorSimilarity, query: &[f32], center: Option<&[f32]>) -> Self {
-        let center_dot = match (similarity, center) {
-            (VectorSimilarity::Euclidean, _) | (_, None) => 0.0,
-            (_, Some(center)) => query
-                .iter()
-                .zip(center.iter())
-                .map(|(&q, &c)| q * c)
-                .sum::<f32>(),
-        };
-        let query: Cow<'_, [f32]> = match (similarity, center) {
-            (VectorSimilarity::Euclidean, Some(center)) => query
+        let query: Cow<'_, [f32]> = if let Some(center) = center {
+            query
                 .iter()
                 .zip(center.iter())
                 .map(|(&q, &c)| q - c)
                 .collect::<Vec<_>>()
-                .into(),
-            _ => query.into(),
+                .into()
+        } else {
+            query.into()
         };
+        let l2_norm = float32::l2_norm(query.as_ref());
+        let query = float32::l2_normalize(query);
         let dim_sqrt = (query.len() as f64).sqrt();
-        let (lower, upper, l2_norm_sq) = query
+        let (lower, upper) = query
             .iter()
             .copied()
-            .fold((f32::MAX, f32::MIN, 0f32), |acc, x| {
-                (acc.0.min(x), acc.1.max(x), x.mul_add(x, acc.2))
-            });
+            .fold((f32::MAX, f32::MIN), |acc, x| (acc.0.min(x), acc.1.max(x)));
         let delta_inv = 15.0 / (upper - lower);
         let delta = (upper - lower) / 15.0;
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::from_seed([0xfe; 32]);
@@ -201,12 +192,11 @@ impl QueryDistance {
         Self {
             similarity,
             query: super::lvq::packing::bitplane_split4(&query4),
-            l2_norm: l2_norm_sq.sqrt(),
+            l2_norm,
             lower,
             delta,
             component_sum,
             dim_sqrt,
-            center_dot,
         }
     }
 
@@ -256,22 +246,19 @@ impl QueryDistance {
     }
 
     fn distance_internal(&self, header: Header, doc: &[u8]) -> f64 {
+        let qnorm: f64 = self.l2_norm.into();
         let dnorm: f64 = header.l2_norm.into();
-        let raw = dnorm * self.ip(header, doc);
+        // L2 Distance with two centered vectors needs no additional parameters or adjustments and
+        // can be used to produce the cosine similarity.
+        let l2_dist = dnorm.powi(2) + qnorm.powi(2) - 2.0 * qnorm * dnorm * self.ip(header, doc);
         match self.similarity {
-            VectorSimilarity::Euclidean => {
-                let qnorm: f64 = self.l2_norm.into();
-                dnorm.powi(2) + qnorm.powi(2) - 2.0 * raw
-            }
-            VectorSimilarity::Cosine | VectorSimilarity::Dot => {
-                let true_dot = raw + self.center_dot as f64;
-                true_dot.mul_add(-0.5, 0.5)
-            }
+            VectorSimilarity::Euclidean => l2_dist,
+            VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
         }
-        .into()
     }
 
-    fn error(&self, header: Header) -> f64 {
+    fn cos_error(&self, header: Header) -> f64 {
+        // XXX should be sqrt(D - 1)???
         let c = (header.correction_term as f64).powi(2);
         ((1.0 - c) / c).sqrt() / self.dim_sqrt
     }
@@ -285,12 +272,13 @@ impl QueryVectorDistance for QueryDistance {
 
     fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
         let (header, vector) = Header::decode(vector);
-        let e = self.error(header) * self.l2_norm as f64 * header.l2_norm as f64;
+        let l2_error = 2.0 * self.l2_norm as f64 * header.l2_norm as f64 * self.cos_error(header);
         EstimatedDistance {
             distance: self.distance_internal(header, vector),
             error: match self.similarity {
-                VectorSimilarity::Euclidean => 2.0 * e,
-                VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5 * e,
+                VectorSimilarity::Euclidean => l2_error,
+                // angular distance = l2_dist / 4
+                VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.25 * l2_error,
             },
         }
     }

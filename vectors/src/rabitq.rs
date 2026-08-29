@@ -75,8 +75,10 @@ impl F32VectorCoder for Coder {
         } else {
             vector.into()
         };
-        let mut header = Header::default();
-        header.l2_norm = float32::l2_norm(&centered_vector);
+        let mut header = Header {
+            l2_norm: float32::l2_norm(&centered_vector),
+            ..Default::default()
+        };
         let unit_vector = float32::l2_normalize(centered_vector);
         header.correction_term = unit_vector.iter().copied().map(f32::abs).sum::<f32>()
             / (unit_vector.len() as f32).sqrt();
@@ -329,11 +331,7 @@ mod test {
     }
 
     /// Produce a vector whose true cosine with `base` is roughly `rho`.
-    fn correlated(
-        rng: &mut rand_xoshiro::Xoshiro256PlusPlus,
-        base: &[f32],
-        rho: f32,
-    ) -> Vec<f32> {
+    fn correlated(rng: &mut rand_xoshiro::Xoshiro256PlusPlus, base: &[f32], rho: f32) -> Vec<f32> {
         base.iter()
             .map(|x| rho * x + (1.0 - rho * rho).sqrt() * gauss(rng))
             .collect()
@@ -364,10 +362,7 @@ mod test {
         b: &[f32],
         center: Option<&[f32]>,
     ) -> f64 {
-        let l2 = squared_l2(
-            &subtract_center(a, center),
-            &subtract_center(b, center),
-        );
+        let l2 = squared_l2(&subtract_center(a, center), &subtract_center(b, center));
         match similarity {
             VectorSimilarity::Euclidean => l2,
             VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2).clamp(0.0, 1.0),
@@ -462,7 +457,10 @@ mod test {
         }
         bias /= TRIALS as f64;
         mae /= TRIALS as f64;
-        eprintln!("SYM {similarity:?} center={} bias={bias:.4} mae={mae:.4}", center.is_some());
+        eprintln!(
+            "SYM {similarity:?} center={} bias={bias:.4} mae={mae:.4}",
+            center.is_some()
+        );
         assert!(bias.abs() < 0.03, "bias {bias} too large (mae {mae})");
         assert!(mae < 0.15, "mae {mae} too large (bias {bias})");
     }
@@ -522,7 +520,10 @@ mod test {
         bias /= TRIALS as f64;
         mae /= TRIALS as f64;
         let coverage = covered as f64 / TRIALS as f64;
-        eprintln!("ASYM {similarity:?} center={} bias={bias:.4} mae={mae:.4} cov={coverage:.4}", center.is_some());
+        eprintln!(
+            "ASYM {similarity:?} center={} bias={bias:.4} mae={mae:.4} cov={coverage:.4}",
+            center.is_some()
+        );
         assert!(bias.abs() < 0.03, "bias {bias} too large (mae {mae})");
         assert!(mae < 0.15, "mae {mae} too large (bias {bias})");
         assert!(coverage > 0.95, "Z=3 coverage {coverage} too low");

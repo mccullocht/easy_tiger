@@ -193,6 +193,7 @@ fn uncenter_vector(center: &[f32], vector: &mut [f32]) {
     }
 }
 
+// XXX I don't like the way this work anymore, could just be l2_norm_sq and bool angular.
 #[derive(Debug, Clone)]
 enum DistanceCorrectionTerms {
     Euclidean {
@@ -643,6 +644,7 @@ pub struct TurboPrimaryDistance<const B: usize> {
 
 impl<const B: usize> TurboPrimaryDistance<B> {
     pub fn new(similarity: VectorSimilarity, center: Option<&[f32]>) -> Self {
+        // XXX this is just nuts fix the callers.
         // Centering is applied entirely at encode time; the center cancels in every distance this
         // computes, so it is not needed here. The parameter is kept for API compatibility.
         let _ = center;

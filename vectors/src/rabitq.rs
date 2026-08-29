@@ -75,11 +75,11 @@ impl F32VectorCoder for Coder {
         } else {
             vector.into()
         };
+        let (unit_vector, l2_norm) = float32::l2_normalize(centered_vector);
         let mut header = Header {
-            l2_norm: float32::l2_norm(&centered_vector),
+            l2_norm,
             ..Default::default()
         };
-        let unit_vector = float32::l2_normalize(centered_vector);
         header.correction_term = unit_vector.iter().copied().map(f32::abs).sum::<f32>()
             / (unit_vector.len() as f32).sqrt();
 
@@ -198,8 +198,7 @@ impl QueryDistance {
         } else {
             query.into()
         };
-        let l2_norm = float32::l2_norm(query.as_ref());
-        let query = float32::l2_normalize(query);
+        let (query, l2_norm) = float32::l2_normalize(query);
         let dim_sqrt = (query.len() as f64).sqrt();
         let (lower, upper) = query
             .iter()
@@ -381,7 +380,7 @@ mod test {
         if similarity == VectorSimilarity::Euclidean {
             v
         } else {
-            float32::l2_normalize(v).into_owned()
+            float32::l2_normalize(v).0.into_owned()
         }
     }
 

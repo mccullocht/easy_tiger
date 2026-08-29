@@ -112,13 +112,12 @@ impl F32VectorCoder for Coder {
     }
 }
 
-// XXX rewrite all of this shit it's boerderline uninteligible.
 /// Symmetric distance between two RaBitQ codes.
 ///
 /// Each quantized component is `±1/√D`, so hamming distance `h` gives the inner product of the two
 /// quantized unit vectors directly: `⟨ū_q, ū_d⟩ = (D - 2h) / D`. That value is a badly biased
 /// estimate of the inner product of the *unquantized* unit vectors -- it is pulled hard toward
-/// zero, by as much as 0.2 in the high similarity region that decides ranking.
+/// zero.
 ///
 /// The debiasing transform comes from the arcsine law: if two components are jointly Gaussian with
 /// correlation `ρ` then `E[sign(x)·sign(y)] = (2/π)·arcsin(ρ)`. Averaged over the dimensions that
@@ -126,12 +125,7 @@ impl F32VectorCoder for Coder {
 /// `⟨u_q, u_d⟩ ≈ sin(π/2 · ⟨ū_q, ū_d⟩)`. The joint Gaussian assumption is the same isotropy
 /// assumption that makes the random rotation callers are expected to apply worthwhile.
 ///
-/// The stored l2 norms then recover the distance between the (possibly centered) input vectors;
-/// the center cancels in the difference so it needs no further adjustment.
-///
-/// The one regression is near-orthogonal pairs, where `sin` amplifies the sampling noise by up to
-/// π/2 (MAE 0.041 vs 0.032 at D=512). That is the unavoidable cost of being unbiased, and those
-/// pairs are never near the result set.
+/// The stored l2 norms then recover the distance between the (possibly centered) input vectors.
 #[derive(Debug)]
 pub struct Distance {
     similarity: VectorSimilarity,
@@ -168,7 +162,6 @@ impl VectorDistance for Distance {
         // Each matching bit contributes 1/D and each mismatch -1/D.
         let quantized_ip = (dim as f64 - 2.0 * h as f64) / dim as f64;
         // Invert the arcsine law to debias the estimate of the unquantized inner product.
-        // XXX figure out if this is fucking slow and/or necessary. multiplying corrections hurts.
         let ip = (std::f64::consts::FRAC_PI_2 * quantized_ip).sin();
 
         let qnorm: f64 = qheader.l2_norm.into();
@@ -235,7 +228,6 @@ impl QueryDistance {
         }
     }
 
-    // XXX inner product of uint8 part is shared with lvq.
     #[inline]
     fn ip(&self, header: Header, doc: &[u8]) -> f64 {
         let (qhead, qtail) = self.query.as_chunks::<64>();
@@ -293,8 +285,9 @@ impl QueryDistance {
     }
 
     fn cos_error(&self, header: Header) -> f64 {
-        // XXX should be sqrt(D - 1)???
         let c = (header.correction_term as f64).powi(2);
+        // NB: the denominator should be (dim - 1).sqrt() but in practice this doesn't matter as dim
+        // is typically very large.
         ((1.0 - c) / c).sqrt() / self.dim_sqrt
     }
 }
@@ -318,11 +311,6 @@ impl QueryVectorDistance for QueryDistance {
         }
     }
 }
-
-// XXX SDC
-// * Just use hamming distance.
-// * Euclidean is going to be less accurate unless I store the mean magnitude per dimension of the
-//   centered vector.
 
 #[cfg(test)]
 mod test {

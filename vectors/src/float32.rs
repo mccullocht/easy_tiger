@@ -86,8 +86,9 @@ pub fn l2_norm(vector: impl AsRef<[f32]>) -> f32 {
 
 /// Normalize the contents of vector in l2 space.
 ///
-/// May return the input vector if it is already normalized.
-pub fn l2_normalize<'a>(vector: impl Into<Cow<'a, [f32]>>) -> Cow<'a, [f32]> {
+/// Returns the normalized vector and the l2 norm. The returned vector may be the input vector if
+/// the input vector is already unit normalized.
+pub fn l2_normalize<'a>(vector: impl Into<Cow<'a, [f32]>>) -> (Cow<'a, [f32]>, f32) {
     let mut vector: Cow<'a, [f32]> = vector.into();
     let norm = l2_norm(&vector);
     if norm != 1.0 {
@@ -96,7 +97,7 @@ pub fn l2_normalize<'a>(vector: impl Into<Cow<'a, [f32]>>) -> Cow<'a, [f32]> {
             *d *= norm_inv;
         }
     }
-    vector
+    (vector, norm)
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -269,7 +270,7 @@ pub fn new_query_vector_distance<'a>(
     match similarity {
         VectorSimilarity::Cosine => Box::new(QueryVectorDistance::new(
             CosineDistance::default(),
-            l2_normalize(query),
+            l2_normalize(query).0,
         )),
         VectorSimilarity::Dot => Box::new(QueryVectorDistance::new(
             DotProductDistance::default(),

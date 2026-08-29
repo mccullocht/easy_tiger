@@ -200,7 +200,7 @@ pub struct CosineQueryDistance<'a>(Cow<'a, [f32]>, Kernel);
 
 impl<'a> CosineQueryDistance<'a> {
     pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(crate::float32::l2_normalize(query), Kernel::default())
+        Self(crate::float32::l2_normalize(query).0, Kernel::default())
     }
 }
 

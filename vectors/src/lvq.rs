@@ -677,15 +677,13 @@ impl<const B: usize> TurboPrimaryDistance<B> {
 impl<const B: usize> VectorDistance for TurboPrimaryDistance<B> {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = TurboPrimaryVector::<B>::new(query).unwrap();
-        let correction_terms =
-            DistanceCorrectionTerms::from_parts(query.l2_norm, self.similarity);
+        let correction_terms = DistanceCorrectionTerms::from_parts(query.l2_norm, self.similarity);
         self.distance_internal(&correction_terms, &query, doc)
     }
 
     fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
         let query = TurboPrimaryVector::<B>::new(query).unwrap();
-        let correction_terms =
-            DistanceCorrectionTerms::from_parts(query.l2_norm, self.similarity);
+        let correction_terms = DistanceCorrectionTerms::from_parts(query.l2_norm, self.similarity);
         for (doc, out) in docs.iter().zip(out.iter_mut()) {
             *out = self.distance_internal(&correction_terms, &query, doc);
         }

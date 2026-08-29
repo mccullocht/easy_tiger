@@ -414,7 +414,10 @@ fn check_lvq_distance(
 ) {
     // Dot similarity assumes l2-normalized inputs.
     let (a, b) = if sim == VectorSimilarity::Dot {
-        (l2_normalize(a).into_owned(), l2_normalize(b).into_owned())
+        (
+            l2_normalize(a).0.into_owned(),
+            l2_normalize(b).0.into_owned(),
+        )
     } else {
         (a.to_vec(), b.to_vec())
     };
@@ -528,7 +531,7 @@ macro_rules! lvq_coding_simd_test {
                         (0..128)
                             .map(|_| rng.random_range(-1.0f32..=1.0))
                             .collect::<Vec<_>>(),
-                    );
+                    ).0;
                     // SIMD and scalar interval/statistics paths may round slightly
                     // differently, shifting the residual by a level or two. Rather
                     // than requiring bit-identical decodes, compare the mean squared

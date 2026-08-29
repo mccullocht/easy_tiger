@@ -215,7 +215,7 @@ impl F32VectorCoding {
                 float32::new_query_vector_distance(similarity, query.into())
             }
             (F32VectorCoding::F16, VectorSimilarity::Cosine) => Box::new(
-                float16::DotProductQueryDistance::new(float32::l2_normalize(query.into())),
+                float16::DotProductQueryDistance::new(float32::l2_normalize(query.into()).0),
             ),
             (F32VectorCoding::F16, VectorSimilarity::Dot) => {
                 Box::new(float16::DotProductQueryDistance::new(query.into()))
@@ -516,7 +516,7 @@ mod test {
         ) -> Self {
             // Encoders for Dot similarity may assume that any input vector is normalized.
             let vec = if similarity == VectorSimilarity::Dot {
-                l2_normalize(vec)
+                l2_normalize(vec).0
             } else {
                 vec.into()
             };

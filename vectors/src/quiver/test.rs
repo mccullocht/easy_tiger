@@ -29,7 +29,7 @@ fn random_unit_vector(rng: &mut impl Rng, dimensions: usize) -> Vec<f32> {
     let raw = (0..dimensions)
         .map(|_| rng.random_range(-1.0f32..=1.0))
         .collect::<Vec<_>>();
-    l2_normalize(raw).into_owned()
+    l2_normalize(raw).0.into_owned()
 }
 
 /// Encode `vector` once with the scalar coder so distance tests exercise one fixed set of

@@ -322,6 +322,232 @@ mod test {
         (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
     }
 
+    /// A high dimensional vector with iid Gaussian components. RaBitQ assumes callers have applied a
+    /// random rotation, which makes the component distribution look like this.
+    fn gauss_vec(rng: &mut rand_xoshiro::Xoshiro256PlusPlus, dim: usize) -> Vec<f32> {
+        (0..dim).map(|_| gauss(rng)).collect()
+    }
+
+    /// Produce a vector whose true cosine with `base` is roughly `rho`.
+    fn correlated(
+        rng: &mut rand_xoshiro::Xoshiro256PlusPlus,
+        base: &[f32],
+        rho: f32,
+    ) -> Vec<f32> {
+        base.iter()
+            .map(|x| rho * x + (1.0 - rho * rho).sqrt() * gauss(rng))
+            .collect()
+    }
+
+    fn subtract_center(v: &[f32], center: Option<&[f32]>) -> Vec<f32> {
+        match center {
+            Some(c) => v.iter().zip(c).map(|(x, y)| x - y).collect(),
+            None => v.to_vec(),
+        }
+    }
+
+    fn squared_l2(a: &[f32], b: &[f32]) -> f64 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| {
+                let d = *x as f64 - *y as f64;
+                d * d
+            })
+            .sum()
+    }
+
+    /// The distance the codec is trying to estimate, computed with an *exact* inner product. The
+    /// gap between this and [`Distance`] / [`QueryDistance`] output is pure quantization error.
+    fn exact_distance(
+        similarity: VectorSimilarity,
+        a: &[f32],
+        b: &[f32],
+        center: Option<&[f32]>,
+    ) -> f64 {
+        let l2 = squared_l2(
+            &subtract_center(a, center),
+            &subtract_center(b, center),
+        );
+        match similarity {
+            VectorSimilarity::Euclidean => l2,
+            VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2).clamp(0.0, 1.0),
+        }
+    }
+
+    /// A center that is offset from the data distribution so that centering meaningfully changes the
+    /// encoded signs and norms rather than being a no-op.
+    fn test_center(dim: usize) -> Vec<f32> {
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xce17e5);
+        (0..dim).map(|_| 0.35 * gauss(&mut rng) + 0.2).collect()
+    }
+
+    fn maybe_normalize(similarity: VectorSimilarity, v: Vec<f32>) -> Vec<f32> {
+        // Cosine/Dot encoders assume the input vector is already normalized.
+        if similarity == VectorSimilarity::Euclidean {
+            v
+        } else {
+            float32::l2_normalize(v).into_owned()
+        }
+    }
+
+    const DIM: usize = 128;
+    const TRIALS: usize = 4096;
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        for center in [None, Some(test_center(DIM))] {
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x1234abcd);
+            let coder = Coder::new(center.clone());
+
+            assert_eq!(coder.byte_len(DIM), Header::LEN + DIM / 8);
+            assert_eq!(coder.dimensions(coder.byte_len(DIM)), DIM);
+
+            let magnitude = 1.0 / (DIM as f32).sqrt();
+            for _ in 0..64 {
+                let v = gauss_vec(&mut rng, DIM);
+                let encoded = coder.encode(&v);
+                assert_eq!(encoded.len(), coder.byte_len(DIM));
+
+                let decoded = coder.decode(&encoded);
+                assert_eq!(decoded.len(), DIM);
+
+                let centered = subtract_center(&v, center.as_deref());
+                let mut component_sum = 0u32;
+                for (i, (d, c)) in decoded.iter().zip(centered.iter()).enumerate() {
+                    assert_eq!(d.abs(), magnitude, "index {i}");
+                    assert_eq!(
+                        d.is_sign_negative(),
+                        c.is_sign_negative(),
+                        "sign mismatch at index {i}: decoded {d} centered {c}"
+                    );
+                    component_sum += c.is_sign_negative() as u32;
+                }
+
+                // The header records the number of set (negative) sign bits.
+                let (header, _) = Header::decode(&encoded);
+                assert_eq!(header.component_sum, component_sum);
+                let want_norm = float32::l2_norm(&centered) as f64;
+                assert!(
+                    (want_norm - header.l2_norm as f64).abs() <= 1e-4 * want_norm.max(1.0),
+                    "l2_norm mismatch: want {want_norm} got {}",
+                    header.l2_norm
+                );
+            }
+        }
+    }
+
+    fn eval_symmetric(similarity: VectorSimilarity, center: Option<Vec<f32>>) {
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed01);
+        let coder = Coder::new(center.clone());
+        let dist = Distance::new(similarity);
+
+        let mut bias = 0.0f64;
+        let mut mae = 0.0f64;
+        for _ in 0..TRIALS {
+            let rho: f32 = rng.random_range(0.0f32..1.0);
+            let a = maybe_normalize(similarity, gauss_vec(&mut rng, DIM));
+            let b = maybe_normalize(similarity, correlated(&mut rng, &a, rho));
+
+            let ea = coder.encode(&a);
+            let eb = coder.encode(&b);
+            let (ha, _) = Header::decode(&ea);
+            let (hb, _) = Header::decode(&eb);
+            // Normalize errors by the norms so Euclidean and Cosine bins are comparable.
+            let scale = 2.0 * ha.l2_norm as f64 * hb.l2_norm as f64;
+
+            let est = dist.distance(&ea, &eb);
+            let exact = exact_distance(similarity, &a, &b, center.as_deref());
+            bias += (est - exact) / scale;
+            mae += ((est - exact) / scale).abs();
+        }
+        bias /= TRIALS as f64;
+        mae /= TRIALS as f64;
+        eprintln!("SYM {similarity:?} center={} bias={bias:.4} mae={mae:.4}", center.is_some());
+        assert!(bias.abs() < 0.03, "bias {bias} too large (mae {mae})");
+        assert!(mae < 0.15, "mae {mae} too large (bias {bias})");
+    }
+
+    #[test]
+    fn symmetric_euclidean() {
+        eval_symmetric(VectorSimilarity::Euclidean, None);
+    }
+
+    #[test]
+    fn symmetric_euclidean_centered() {
+        eval_symmetric(VectorSimilarity::Euclidean, Some(test_center(DIM)));
+    }
+
+    #[test]
+    fn symmetric_cosine() {
+        eval_symmetric(VectorSimilarity::Cosine, None);
+    }
+
+    #[test]
+    fn symmetric_cosine_centered() {
+        eval_symmetric(VectorSimilarity::Cosine, Some(test_center(DIM)));
+    }
+
+    fn eval_asymmetric(similarity: VectorSimilarity, center: Option<Vec<f32>>) {
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xa57a5717);
+        let coder = Coder::new(center.clone());
+
+        let mut bias = 0.0f64;
+        let mut mae = 0.0f64;
+        let mut covered = 0usize;
+        for _ in 0..TRIALS {
+            let rho: f32 = rng.random_range(0.0f32..1.0);
+            let q = maybe_normalize(similarity, gauss_vec(&mut rng, DIM));
+            let d = maybe_normalize(similarity, correlated(&mut rng, &q, rho));
+
+            let qd = QueryDistance::new(similarity, &q, center.as_deref());
+            let ed = coder.encode(&d);
+            let (hd, _) = Header::decode(&ed);
+            let qnorm = float32::l2_norm(subtract_center(&q, center.as_deref())) as f64;
+            let scale = 2.0 * qnorm * hd.l2_norm as f64;
+
+            let exact = exact_distance(similarity, &q, &d, center.as_deref());
+            let est = qd.distance(&ed);
+            bias += (est - exact) / scale;
+            mae += ((est - exact) / scale).abs();
+
+            // The estimated_distance error is a ~1 sigma statistical bound; Z=3 should almost
+            // always contain the true distance.
+            let ed_est = qd.estimated_distance(&ed);
+            assert!(ed_est.error > 0.0, "error bound not populated");
+            assert!((ed_est.distance - est).abs() < 1e-9);
+            if (exact - ed_est.distance).abs() <= 3.0 * ed_est.error + 1e-9 {
+                covered += 1;
+            }
+        }
+        bias /= TRIALS as f64;
+        mae /= TRIALS as f64;
+        let coverage = covered as f64 / TRIALS as f64;
+        eprintln!("ASYM {similarity:?} center={} bias={bias:.4} mae={mae:.4} cov={coverage:.4}", center.is_some());
+        assert!(bias.abs() < 0.03, "bias {bias} too large (mae {mae})");
+        assert!(mae < 0.15, "mae {mae} too large (bias {bias})");
+        assert!(coverage > 0.95, "Z=3 coverage {coverage} too low");
+    }
+
+    #[test]
+    fn asymmetric_euclidean() {
+        eval_asymmetric(VectorSimilarity::Euclidean, None);
+    }
+
+    #[test]
+    fn asymmetric_euclidean_centered() {
+        eval_asymmetric(VectorSimilarity::Euclidean, Some(test_center(DIM)));
+    }
+
+    #[test]
+    fn asymmetric_cosine() {
+        eval_asymmetric(VectorSimilarity::Cosine, None);
+    }
+
+    #[test]
+    fn asymmetric_cosine_centered() {
+        eval_asymmetric(VectorSimilarity::Cosine, Some(test_center(DIM)));
+    }
+
     /// The symmetric estimator should be near unbiased across the whole similarity range, and
     /// should beat raw hamming badly on the correlated pairs that decide ranking.
     #[test]

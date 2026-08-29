@@ -83,9 +83,7 @@ macro_rules! tlvq_coder_test {
             };
             let encoded = coder.encode(&TEST_VECTOR);
             assert_abs_diff_eq!(
-                PrimaryVectorHeader::deserialize(&encoded, VectorSimilarity::Euclidean)
-                    .unwrap()
-                    .0,
+                PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
                 $primary_header
             );
             let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
@@ -103,7 +101,6 @@ tlvq_coder_test!(
         l2_norm: 2.5226507,
         perpendicular_error_term: 1.1627843,
         parallel_error_term: 0.021774292,
-        center_dot: 0.0,
         lower: -0.49560547,
         upper: 0.7055664,
         component_sum: 11,
@@ -139,7 +136,6 @@ tlvq_coder_test!(
         l2_norm: 1.5514041,
         perpendicular_error_term: 0.81660825,
         parallel_error_term: 0.028503418,
-        center_dot: 0.0,
         lower: -0.60498047,
         upper: 0.23901367,
         component_sum: 13,
@@ -175,7 +171,6 @@ tlvq_coder_test!(
         l2_norm: 2.5226507,
         perpendicular_error_term: 0.67131084,
         parallel_error_term: 0.0073165894,
-        center_dot: 0.0,
         lower: -0.67089844,
         upper: 0.8408203,
         component_sum: 32,
@@ -211,7 +206,6 @@ tlvq_coder_test!(
         l2_norm: 1.5514041,
         perpendicular_error_term: 0.5321589,
         parallel_error_term: 0.011878967,
-        center_dot: 0.0,
         lower: -0.5571289,
         upper: 0.5683594,
         component_sum: 27,
@@ -247,7 +241,6 @@ tlvq_coder_test!(
         l2_norm: 2.5226507,
         perpendicular_error_term: 0.118480206,
         parallel_error_term: 0.00030064583,
-        center_dot: 0.0,
         lower: -0.9345703,
         upper: 0.91308594,
         component_sum: 170,
@@ -283,7 +276,6 @@ tlvq_coder_test!(
         l2_norm: 1.5514041,
         perpendicular_error_term: 0.09596851,
         parallel_error_term: 0.00025558472,
-        center_dot: 0.0,
         lower: -0.69091797,
         upper: 0.56347656,
         component_sum: 152,
@@ -319,7 +311,6 @@ tlvq_coder_test!(
         l2_norm: 2.5226507,
         perpendicular_error_term: 0.0075108674,
         parallel_error_term: -0.00057935715,
-        center_dot: 0.0,
         lower: -0.9199219,
         upper: 0.9116211,
         component_sum: 2875,
@@ -355,7 +346,6 @@ tlvq_coder_test!(
         l2_norm: 1.5514041,
         perpendicular_error_term: 0.005533458,
         parallel_error_term: 8.994341e-5,
-        center_dot: 0.0,
         lower: -0.6953125,
         upper: 0.57470703,
         component_sum: 2569,

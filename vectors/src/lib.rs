@@ -7,6 +7,7 @@ pub mod float16;
 pub mod float32;
 mod lvq;
 mod quiver;
+mod rabitq;
 pub mod rotate;
 
 use serde::{Deserialize, Serialize};
@@ -138,6 +139,8 @@ pub enum F32VectorCoding {
     ///
     /// This encoding is optimized for cases where dimensionality is a multiple of 16.
     TLVQ8,
+    /// RaBitQ; 1 bit binary quantization with distance estimation.
+    RaBitQ,
     /// QuIVer; 2 bit binary quantization with sign + magnitude.
     QuIVer,
 }
@@ -162,6 +165,7 @@ impl F32VectorCoding {
             (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryCoder::<2>::new(similarity, center)),
             (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryCoder::<4>::new(similarity, center)),
             (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryCoder::<8>::new(similarity, center)),
+            (Self::RaBitQ, _) => Box::new(rabitq::Coder::new(center)),
             (Self::QuIVer, _) => quiver::new_coder(),
         }
     }
@@ -190,6 +194,7 @@ impl F32VectorCoding {
             (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryDistance::<2>::new(similarity, center)),
             (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryDistance::<4>::new(similarity, center)),
             (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryDistance::<8>::new(similarity, center)),
+            (Self::RaBitQ, _) => Box::new(rabitq::Distance::new(similarity)),
             (Self::QuIVer, _) => quiver::new_symmetric_distance(),
         }
     }
@@ -239,6 +244,11 @@ impl F32VectorCoding {
             (F32VectorCoding::TLVQ8, _) => Box::new(lvq::TurboPrimaryQueryDistance::<8>::new(
                 similarity,
                 query.into(),
+                center,
+            )),
+            (Self::RaBitQ, _) => Box::new(rabitq::QueryDistance::new(
+                similarity,
+                query.into().as_ref(),
                 center,
             )),
             (Self::QuIVer, _) => quiver::new_asymmetric_distance(query.into().as_ref()),
@@ -306,6 +316,7 @@ impl F32VectorCoding {
                     query
                 )
             }
+            (_, Self::RaBitQ) => quantized_qvd!(rabitq::Distance::new(similarity), query),
             (_, Self::QuIVer) => quiver::new_symmetric_query_distance(query.into()),
         }
     }
@@ -324,6 +335,7 @@ impl FromStr for F32VectorCoding {
             "tlvq2" => Ok(Self::TLVQ2),
             "tlvq4" => Ok(Self::TLVQ4),
             "tlvq8" => Ok(Self::TLVQ8),
+            "RaBitQ" => Ok(Self::RaBitQ),
             "QuIVer" => Ok(Self::QuIVer),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
@@ -340,6 +352,7 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TLVQ2 => write!(f, "tlvq2"),
             Self::TLVQ4 => write!(f, "tlvq4"),
             Self::TLVQ8 => write!(f, "tlvq8"),
+            Self::RaBitQ => write!(f, "RaBitQ"),
             Self::QuIVer => write!(f, "QuIVer"),
         }
     }

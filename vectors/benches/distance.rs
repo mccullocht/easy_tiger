@@ -138,6 +138,7 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
     // product similarity since other types are unlikely to vary all that much.
     let encodings = [
         F32VectorCoding::BinaryQuantized,
+        F32VectorCoding::RaBitQ,
         F32VectorCoding::QuIVer,
         F32VectorCoding::TLVQ1,
         F32VectorCoding::TLVQ2,

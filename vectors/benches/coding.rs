@@ -50,6 +50,7 @@ fn float16_benchmarks(c: &mut Criterion) {
 
 fn binary_benchmarks(c: &mut Criterion) {
     benchmark_coding(c, F32VectorCoding::BinaryQuantized, None);
+    benchmark_coding(c, F32VectorCoding::RaBitQ, None);
     benchmark_coding(c, F32VectorCoding::QuIVer, None);
 }
 

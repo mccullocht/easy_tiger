@@ -3,7 +3,6 @@ use std::{io, path::PathBuf};
 use crate::{neighbor_util::TopNeighbors, recall::RecallComputer, ui::progress_bar};
 use clap::Args;
 use easy_tiger::{
-    Neighbor,
     input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
     kmeans::{Params, kmeans},
 };
@@ -178,13 +177,12 @@ pub fn recall(
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .for_each(|d| {
-            let mut doc_f32 = vec![0.0f32; doc_vectors.elem_stride()];
-            doc_vectors[d].convert_to_f32_slice(&mut doc_f32);
+            let doc_f32 = doc_vectors[d].to_f32_vec();
             let center = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
             let doc = coders[center].encode(&doc_f32);
             for (q, s) in query_scorers.iter().enumerate() {
-                let distance = s[center].distance(&doc);
-                query_k[q].add(Neighbor::new(d as i64, distance));
+                let estimate = s[center].estimated_distance(&doc);
+                query_k[q].add_estimate(d as i64, estimate);
             }
         });
 

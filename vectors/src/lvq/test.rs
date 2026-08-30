@@ -555,9 +555,9 @@ lvq_coding_simd_test!(tlvq8_coding_simd, TurboPrimaryCoder::<8>);
 /// The head of the split is interleaved in 64 byte groups (4 x 16 byte bitplanes covering 128
 /// dimensions); the tail is packed as 4 equally sized single bit turbo packed bitplanes.
 fn bitplane_join4(split: &[u8], dimensions: usize) -> Vec<u8> {
-    use crate::lvq::packing::TurboUnpacker;
+    use crate::packing::TurboUnpacker;
 
-    let head_groups = crate::lvq::packing::byte_len(dimensions, 4) / 64;
+    let head_groups = crate::packing::byte_len(dimensions, 4) / 64;
     let (head, tail) = split.split_at(head_groups * 64);
     let mut out = Vec::with_capacity(dimensions);
     for group in head.as_chunks::<64>().0 {
@@ -601,7 +601,7 @@ fn bitplane_join4(split: &[u8], dimensions: usize) -> Vec<u8> {
 
 #[test]
 fn bitplane_split4_roundtrip() {
-    use crate::lvq::packing::{TurboPacker, bitplane_split4, byte_len};
+    use crate::packing::{TurboPacker, bitplane_split4, byte_len};
 
     let seed = SysRng::default().try_next_u64().unwrap();
     println!("SEED {seed:#016x}");

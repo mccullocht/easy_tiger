@@ -43,7 +43,7 @@ impl Kernel for Scalar {
         let mut strong_sum = 0.0f32;
         let mut strong_count = 0u32;
         out.fill(0);
-        let mut packer = crate::lvq::packing::TurboPacker::<2>::new(out);
+        let mut packer = crate::packing::TurboPacker::<2>::new(out);
         for &d in v.iter() {
             let q = if d.is_sign_positive() { 2u8 } else { 0u8 }
                 | if d.abs() > tau {
@@ -103,7 +103,7 @@ impl Kernel for Scalar {
         let table = [-weak as i32, -strong as i32, weak as i32, strong as i32];
         q.iter()
             .map(|x| *x as i32)
-            .zip(crate::lvq::packing::TurboUnpacker::<2>::new(d).map(|x| table[x as usize]))
+            .zip(crate::packing::TurboUnpacker::<2>::new(d).map(|x| table[x as usize]))
             .map(|(q, d)| q * d)
             .sum::<i32>()
     }

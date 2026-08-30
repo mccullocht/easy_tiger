@@ -156,11 +156,8 @@ pub fn recall(
                 .map(|(ci, coder)| {
                     let center = centers.as_ref().map(|cs| &cs[ci]);
                     if args.quantize_query {
-                        args.format.query_distance_symmetric(
-                            args.similarity,
-                            coder.encode(&query),
-                            center,
-                        )
+                        args.format
+                            .query_distance_symmetric(args.similarity, coder.encode(&query))
                     } else {
                         args.format.query_distance_asymmetric(
                             args.similarity,

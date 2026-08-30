@@ -226,8 +226,7 @@ pub trait GraphVectorStore {
 
     /// Create a new distance function that operates over vectors on this table.
     fn new_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.format()
-            .distance_symmetric(self.similarity(), self.centroid())
+        self.format().distance_symmetric(self.similarity())
     }
 
     /// Create a new coder for vectors of this type.

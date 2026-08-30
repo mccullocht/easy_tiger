@@ -444,11 +444,8 @@ where
         edges: &mut Vec<Neighbor>,
     ) -> Result<()> {
         let vertex_vector = vector_store.get(vertex_id as i64).unwrap()?.to_vec();
-        let vertex_dist_fn = vector_format.query_distance_symmetric(
-            self.index.config().similarity,
-            &vertex_vector,
-            self.index.config().centroid.as_deref(),
-        );
+        let vertex_dist_fn =
+            vector_format.query_distance_symmetric(self.index.config().similarity, &vertex_vector);
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
             // Skip vertices already in edges: the graph search may have found this vertex

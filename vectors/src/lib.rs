@@ -174,11 +174,7 @@ impl F32VectorCoding {
     ///
     /// If `center` is present, it is assumed that all inputs vectors are centered with respect to
     /// this vector before encoding, and `center` may be used as part of distance corrections.
-    pub fn distance_symmetric(
-        &self,
-        similarity: VectorSimilarity,
-        center: Option<&[f32]>,
-    ) -> Box<dyn VectorDistance> {
+    pub fn distance_symmetric(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
 
         match (self, similarity) {
@@ -264,7 +260,6 @@ impl F32VectorCoding {
         &self,
         similarity: VectorSimilarity,
         query: impl Into<Cow<'a, [u8]>>,
-        center: Option<&[f32]>,
     ) -> Box<dyn QueryVectorDistance + 'a> {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
         macro_rules! quantized_qvd {
@@ -551,7 +546,7 @@ mod test {
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
         assert_float_near!(rf32_dist, ru8_dist, 0.0001, index);
 
-        let dist_fn = format.distance_symmetric(similarity, None);
+        let dist_fn = format.distance_symmetric(similarity);
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);
         assert_float_near!(rf32_dist, qdist, threshold, index);
     }

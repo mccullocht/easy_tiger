@@ -211,11 +211,10 @@ impl GraphSearcher {
             .get(vertex_id)
             .unwrap_or_else(|| Err(Error::not_found_error()))?
             .to_vec();
-        let nav_query = reader.config().nav_format.query_distance_symmetric(
-            reader.config().similarity,
-            &nav_query_rep,
-            reader.config().centroid.as_deref(),
-        );
+        let nav_query = reader
+            .config()
+            .nav_format
+            .query_distance_symmetric(reader.config().similarity, &nav_query_rep);
 
         let rerank_query = if self.params.num_rerank > 0 {
             if let Some(vectors) = reader.rerank_vectors() {
@@ -224,11 +223,11 @@ impl GraphSearcher {
                     .get(vertex_id)
                     .unwrap_or_else(|| Err(Error::not_found_error()))?
                     .to_vec();
-                Some(vectors.format().query_distance_symmetric(
-                    vectors.similarity(),
-                    query,
-                    vectors.centroid(),
-                ))
+                Some(
+                    vectors
+                        .format()
+                        .query_distance_symmetric(vectors.similarity(), query),
+                )
             } else {
                 None
             }

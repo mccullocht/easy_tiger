@@ -431,14 +431,12 @@ fn check_lvq_distance(
     let abs_epsilon = (ea + eb) * (ea + eb + 2.0 * f32_dist.abs().sqrt());
 
     // doc-doc symmetric distance
-    let sym = format
-        .distance_symmetric(sim, center)
-        .distance(&enc_a, &enc_b);
+    let sym = format.distance_symmetric(sim).distance(&enc_a, &enc_b);
     assert_abs_diff_eq!(f32_dist, sym, epsilon = abs_epsilon);
 
     // encoded-query vs doc distance
     let qd = format
-        .query_distance_symmetric(sim, enc_a.as_slice(), center)
+        .query_distance_symmetric(sim, enc_a.as_slice())
         .distance(&enc_b);
     assert_abs_diff_eq!(f32_dist, qd, epsilon = abs_epsilon);
 }

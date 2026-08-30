@@ -351,7 +351,7 @@ mod parallel {
             } else {
                 Ok(self
                     .posting_format
-                    .query_distance_symmetric(similarity, query.to_vec(), None))
+                    .query_distance_symmetric(similarity, query.to_vec()))
             }
         }
     }

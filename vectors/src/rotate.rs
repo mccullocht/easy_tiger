@@ -192,20 +192,24 @@ impl Rotator {
         }
     }
 
-    /// Rotate forward for quantization.
+    /// Rotate `v` in place for quantization.
     ///
     /// This applies sign flips, then permutation, then block diagonal Hadamard transforms.
-    pub fn forward(&self, v: &[f32]) -> Vec<f32> {
-        let mut rotated = v.to_vec();
+    pub fn rotate(&self, v: &mut [f32]) {
         if let Some(p) = self.shuffle.as_ref() {
-            p.apply(&mut rotated);
+            p.apply(v);
         }
 
         for block in self.blocks.iter() {
             self.kernel
-                .walsh_hadamard_transform(&mut rotated[block.dims.clone()], &block.sign);
+                .walsh_hadamard_transform(&mut v[block.dims.clone()], &block.sign);
         }
+    }
 
+    /// Copy `v` and [`rotate`](Self::rotate) the copy for quantization.
+    pub fn rotate_copy(&self, v: impl AsRef<[f32]>) -> Vec<f32> {
+        let mut rotated = v.as_ref().to_vec();
+        self.rotate(&mut rotated);
         rotated
     }
 }
@@ -234,7 +238,7 @@ mod tests {
     fn preserves_l2_norm() {
         let rotator = Rotator::new(256, 7);
         let v = make_vec(256, 4);
-        let rotated = rotator.forward(&v);
+        let rotated = rotator.rotate_copy(&v);
         assert!(abs_diff_eq!(l2_norm(&v), l2_norm(&rotated), epsilon = 1e-4));
     }
 
@@ -243,8 +247,8 @@ mod tests {
         let rotator = Rotator::new(128, 13);
         let a = make_vec(128, 5);
         let b = make_vec(128, 6);
-        let ra = rotator.forward(&a);
-        let rb = rotator.forward(&b);
+        let ra = rotator.rotate_copy(&a);
+        let rb = rotator.rotate_copy(&b);
         assert!(abs_diff_eq!(dot(&a, &b), dot(&ra, &rb), epsilon = 1e-4));
     }
 
@@ -253,7 +257,7 @@ mod tests {
         // 100 = 64 + 32 + 4, so the dimensions are shuffled before the block transforms.
         let rotator = Rotator::new(100, 7);
         let v = make_vec(100, 4);
-        let rotated = rotator.forward(&v);
+        let rotated = rotator.rotate_copy(&v);
         assert!(abs_diff_eq!(l2_norm(&v), l2_norm(&rotated), epsilon = 1e-4));
     }
 
@@ -279,16 +283,16 @@ mod tests {
     #[test]
     fn deterministic_same_seed() {
         let v = make_vec(64, 10);
-        let r1 = Rotator::new(64, 123).forward(&v);
-        let r2 = Rotator::new(64, 123).forward(&v);
+        let r1 = Rotator::new(64, 123).rotate_copy(&v);
+        let r2 = Rotator::new(64, 123).rotate_copy(&v);
         assert_eq!(r1, r2, "same seed must produce identical results");
     }
 
     #[test]
     fn different_seeds_differ() {
         let v = make_vec(64, 11);
-        let r1 = Rotator::new(64, 1).forward(&v);
-        let r2 = Rotator::new(64, 2).forward(&v);
+        let r1 = Rotator::new(64, 1).rotate_copy(&v);
+        let r2 = Rotator::new(64, 2).rotate_copy(&v);
         assert_ne!(r1, r2, "different seeds should produce different rotations");
     }
 

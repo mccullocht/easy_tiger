@@ -10,9 +10,92 @@ mod quiver;
 mod rabitq;
 pub mod rotate;
 
+use half::slice::HalfFloatSliceExt;
 use serde::{Deserialize, Serialize};
 
 pub use half::f16;
+
+use crate::{float32::l2_norm, rotate::Rotator};
+
+/// Prepare `vector` in place for further processing, typically either encoding or as input to an
+/// asymmetric distance function.
+///
+/// There are three optional operations that may be performed in order:
+/// 1. Rotate the vector. Requires that the dimensionality of the rotator and vector are the same.
+/// 2. L2 normalize the vector. This is recommended for angular distance.
+/// 3. Compute the residual of `vector` against `center`. Requires that the dimensionality of
+///    `vector` and `center` are the same.
+///
+/// This method mutates the vector in place.
+pub fn prepare_vector_in_place(
+    vector: &mut [f32],
+    rotator: Option<&Rotator>,
+    l2_normalize: bool,
+    center: Option<&[f32]>,
+) {
+    if let Some(rotator) = rotator {
+        // XXX rotator needs to operate in place.
+        vector.copy_from_slice(&rotator.forward(vector));
+    }
+
+    if l2_normalize {
+        // XXX l2_normalize() needs to operate in place.
+        let norm = l2_norm(&*vector);
+        if norm != 0.0 && norm != 1.0 {
+            let norm_inv = norm.recip();
+            for d in vector.iter_mut() {
+                *d *= norm_inv;
+            }
+        }
+    }
+
+    if let Some(center) = center {
+        for (d, c) in vector.iter_mut().zip(center.iter()) {
+            *d -= *c;
+        }
+    }
+}
+
+/// Prepare `vector` in place for further processing, typically either encoding or as input to an
+/// asymmetric distance function.
+///
+/// There are three optional operations that may be performed in order:
+/// 1. Rotate the vector. Requires that the dimensionality of the rotator and vector are the same.
+/// 2. L2 normalize the vector. This is recommended for angular distance.
+/// 3. Compute the residual of `vector` against `center`. Requires that the dimensionality of
+///    `vector` and `center` are the same.
+///
+/// This method returns a copy of the vector after mutation.
+pub fn prepare_vector(
+    vector: impl AsRef<[f32]>,
+    rotator: Option<&Rotator>,
+    l2_normalize: bool,
+    center: Option<&[f32]>,
+) -> Vec<f32> {
+    let mut out = vector.as_ref().to_vec();
+    prepare_vector_in_place(&mut out, rotator, l2_normalize, center);
+    out
+}
+
+/// Prepare `vector` in place for further processing, typically either encoding or as input to an
+/// asymmetric distance function.
+///
+/// This method begins by widening the vector to single precision float, then there are three
+/// optional operations that may be performed in order:
+/// 1. Rotate the vector. Requires that the dimensionality of the rotator and vector are the same.
+/// 2. L2 normalize the vector. This is recommended for angular distance.
+/// 3. Compute the residual of `vector` against `center`. Requires that the dimensionality of
+///    `vector` and `center` are the same.
+pub fn prepare_vector_from_f16(
+    vector: impl AsRef<[f16]>,
+    rotator: Option<&Rotator>,
+    l2_normalize: bool,
+    center: Option<&[f32]>,
+) -> Vec<f32> {
+    let mut out = vector.as_ref().to_f32_vec();
+    prepare_vector_in_place(&mut out, rotator, l2_normalize, center);
+    out
+}
 
 /// Functions used for to compute the distance between two vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -611,4 +694,87 @@ mod test {
     distance_test!(tlvq4_l2_dist, Euclidean, TLVQ4, 0.1);
     distance_test!(tlvq8_dot_dist, Dot, TLVQ8, 0.01);
     distance_test!(tlvq8_l2_dist, Euclidean, TLVQ8, 0.01);
+}
+
+#[cfg(test)]
+mod prepare_test {
+    use approx::assert_abs_diff_eq;
+
+    use crate::{
+        f16, float32::l2_norm, prepare_vector, prepare_vector_from_f16, prepare_vector_in_place,
+        rotate::Rotator,
+    };
+
+    fn manual(
+        vector: &[f32],
+        rotator: Option<&Rotator>,
+        l2_normalize: bool,
+        center: Option<&[f32]>,
+    ) -> Vec<f32> {
+        let mut v = rotator
+            .map(|r| r.forward(vector))
+            .unwrap_or_else(|| vector.to_vec());
+        if l2_normalize {
+            let norm = l2_norm(&v);
+            for d in v.iter_mut() {
+                *d /= norm;
+            }
+        }
+        if let Some(center) = center {
+            for (d, c) in v.iter_mut().zip(center) {
+                *d -= *c;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn no_ops_is_identity() {
+        let v = vec![1.0f32, -2.0, 3.0, 0.5];
+        assert_eq!(prepare_vector(&v, None, false, None), v);
+    }
+
+    #[test]
+    fn all_ops_match_manual_and_apply_in_order() {
+        let rotator = Rotator::new(6, 0xabcd);
+        let v = vec![0.3f32, -1.2, 4.0, 2.5, -0.75, 1.1];
+        let center = vec![0.1f32, 0.2, -0.3, 0.4, -0.5, 0.6];
+
+        for &rotate in &[false, true] {
+            for &norm in &[false, true] {
+                for center in [None, Some(center.as_slice())] {
+                    let rotator = rotate.then_some(&rotator);
+                    let want = manual(&v, rotator, norm, center);
+
+                    let got = prepare_vector(&v, rotator, norm, center);
+                    for (a, b) in got.iter().zip(&want) {
+                        assert_abs_diff_eq!(a, b, epsilon = 1e-5);
+                    }
+
+                    let mut in_place = v.clone();
+                    prepare_vector_in_place(&mut in_place, rotator, norm, center);
+                    assert_eq!(in_place, got);
+
+                    let f16_in: Vec<f16> = v.iter().map(|d| f16::from_f32(*d)).collect();
+                    let from_f16 = prepare_vector_from_f16(&f16_in, rotator, norm, center);
+                    let want_f16 = manual(
+                        &f16_in.iter().map(|d| d.to_f32()).collect::<Vec<_>>(),
+                        rotator,
+                        norm,
+                        center,
+                    );
+                    for (a, b) in from_f16.iter().zip(&want_f16) {
+                        assert_abs_diff_eq!(a, b, epsilon = 1e-5);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_produces_unit_norm() {
+        let v = vec![3.0f32, 4.0, 0.0, 0.0];
+        let prepared = prepare_vector(&v, None, true, None);
+        assert_abs_diff_eq!(l2_norm(&prepared), 1.0, epsilon = 1e-6);
+    }
 }

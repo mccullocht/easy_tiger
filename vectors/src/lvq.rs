@@ -187,52 +187,18 @@ fn prepare_vector<'a>(
     scratch
 }
 
-fn uncenter_vector(center: &[f32], vector: &mut [f32]) {
-    for (c, v) in center.iter().zip(vector.iter_mut()) {
-        *v += *c;
-    }
-}
-
-// XXX I don't like the way this work anymore, could just be l2_norm_sq and bool angular.
-#[derive(Debug, Clone)]
-enum DistanceCorrectionTerms {
-    Euclidean {
-        l2_norm_sq: f32,
-    },
-    /// Angular distance is the squared-Euclidean distance between the centered unit vectors,
-    /// rescaled to `(1 - cos) / 2`. The center cancels in that difference so no cross terms are
-    /// carried here -- the only per-vector term is the same centered l2 norm Euclidean uses.
-    Angular {
-        l2_norm_sq: f32,
-    },
-}
-
-impl DistanceCorrectionTerms {
-    fn new(header: &PrimaryVectorHeader, similarity: VectorSimilarity) -> Self {
-        Self::from_parts(header.l2_norm, similarity)
-    }
-
-    fn from_parts(l2_norm: f32, similarity: VectorSimilarity) -> Self {
-        match similarity {
-            VectorSimilarity::Euclidean => Self::Euclidean {
-                l2_norm_sq: l2_norm.powi(2),
-            },
-            VectorSimilarity::Dot | VectorSimilarity::Cosine => Self::Angular {
-                l2_norm_sq: l2_norm.powi(2),
-            },
-        }
-    }
-
-    fn distance_from_dot_unnormalized(&self, dot_unnormalized: f32, vector_l2_norm: f32) -> f32 {
-        match self {
-            Self::Euclidean { l2_norm_sq } => {
-                l2_norm_sq + vector_l2_norm.powi(2) - (2.0 * dot_unnormalized)
-            }
-            Self::Angular { l2_norm_sq } => {
-                let l2 = l2_norm_sq + vector_l2_norm.powi(2) - (2.0 * dot_unnormalized);
-                (0.25 * l2).clamp(0.0, 1.0)
-            }
-        }
+/// Transform the unnormalized dot product of two vectors into an appropriate distance for the
+/// similarity function.
+fn distance_from_dot_unnormalized(
+    similarity: VectorSimilarity,
+    dot_unnormalized: f32,
+    l2_norms_sq: (f32, f32),
+) -> f32 {
+    let l2_dist = l2_norms_sq.0 + l2_norms_sq.1 - (2.0 * dot_unnormalized);
+    match similarity {
+        VectorSimilarity::Euclidean => l2_dist,
+        // Normalize angular distance into a value in [0,1] where lower is closer.
+        VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
     }
 }
 
@@ -625,8 +591,10 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             #[cfg(target_arch = "x86_64")]
             Kernel::Avx512 => unsafe { x86_64::primary_decode_avx512::<B>(vector, out) },
         };
-        if let Some(c) = &self.center {
-            uncenter_vector(c, out);
+        if let Some(center) = &self.center {
+            for (c, v) in center.iter().zip(out.iter_mut()) {
+                *v += *c;
+            }
         }
     }
 
@@ -651,12 +619,7 @@ impl<const B: usize> TurboPrimaryDistance<B> {
     }
 
     #[inline(always)]
-    fn distance_internal(
-        &self,
-        correction_terms: &DistanceCorrectionTerms,
-        query: &TurboPrimaryVector<B>,
-        doc: &[u8],
-    ) -> f64 {
+    fn distance_internal(&self, query: &TurboPrimaryVector<B>, doc: &[u8]) -> f64 {
         let doc = TurboPrimaryVector::<B>::new(doc).unwrap();
         let uint_dot = match self.inst {
             Kernel::Scalar => scalar::dot_u8::<B>(query.rep.data, doc.rep.data),
@@ -666,24 +629,25 @@ impl<const B: usize> TurboPrimaryDistance<B> {
             Kernel::Avx512 => unsafe { x86_64::dot_u8_avx512::<B>(query.rep.data, doc.rep.data) },
         };
         let dot = correct_dot_uint(uint_dot, query.dim(), &query.rep.terms, &doc.rep.terms);
-        correction_terms
-            .distance_from_dot_unnormalized(dot, doc.l2_norm)
-            .into()
+        distance_from_dot_unnormalized(
+            self.similarity,
+            dot,
+            (query.l2_norm.powi(2), doc.l2_norm.powi(2)),
+        )
+        .into()
     }
 }
 
 impl<const B: usize> VectorDistance for TurboPrimaryDistance<B> {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let query = TurboPrimaryVector::<B>::new(query).unwrap();
-        let correction_terms = DistanceCorrectionTerms::from_parts(query.l2_norm, self.similarity);
-        self.distance_internal(&correction_terms, &query, doc)
+        self.distance_internal(&query, doc)
     }
 
     fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
         let query = TurboPrimaryVector::<B>::new(query).unwrap();
-        let correction_terms = DistanceCorrectionTerms::from_parts(query.l2_norm, self.similarity);
         for (doc, out) in docs.iter().zip(out.iter_mut()) {
-            *out = self.distance_internal(&correction_terms, &query, doc);
+            *out = self.distance_internal(&query, doc);
         }
     }
 }
@@ -693,10 +657,11 @@ const PRIMARY_QUERY_BITS: usize = 8;
 #[derive(Debug, Clone)]
 pub struct TurboPrimaryQueryDistance<const B: usize> {
     k: Kernel,
+    similarity: VectorSimilarity,
 
     query: Vec<u8>,
+    l2_norm_sq: f32,
     terms: VectorDecodeTerms,
-    correction_terms: DistanceCorrectionTerms,
     error_terms: ErrorBoundTerms,
 }
 
@@ -714,14 +679,14 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
             center,
         );
         let terms = VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
-        let correction_terms = DistanceCorrectionTerms::new(&header, similarity);
         let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
 
         Self {
             k,
+            similarity,
             query,
+            l2_norm_sq: header.l2_norm.powi(2),
             terms,
-            correction_terms,
             error_terms,
         }
     }
@@ -744,9 +709,12 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
             },
         };
         let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);
-        self.correction_terms
-            .distance_from_dot_unnormalized(dot, vector.l2_norm)
-            .into()
+        distance_from_dot_unnormalized(
+            self.similarity,
+            dot,
+            (self.l2_norm_sq, vector.l2_norm.powi(2)),
+        )
+        .into()
     }
 }
 
@@ -776,12 +744,12 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
 /// is split so that the dot product can be computed entirely with popcount.
 #[derive(Debug, Clone)]
 pub struct TurboPrimaryQueryDistance1 {
-    #[allow(dead_code)]
     k: Kernel,
+    similarity: VectorSimilarity,
 
     query: Vec<u8>,
+    l2_norm_sq: f32,
     terms: VectorDecodeTerms,
-    correction_terms: DistanceCorrectionTerms,
     error_terms: ErrorBoundTerms,
 }
 
@@ -796,14 +764,14 @@ impl TurboPrimaryQueryDistance1 {
             TurboPrimaryCoder::<4>::encode_parts(k, similarity, query.as_ref(), center);
         let query = packing::bitplane_split4(&query);
         let terms = VectorDecodeTerms::from_primary::<4>(header);
-        let correction_terms = DistanceCorrectionTerms::new(&header, similarity);
         let error_terms = ErrorBoundTerms::from_header(&header, query.len() * 2, similarity);
 
         Self {
             k,
+            similarity,
             query,
+            l2_norm_sq: header.l2_norm.powi(2),
             terms,
-            correction_terms,
             error_terms,
         }
     }
@@ -831,9 +799,12 @@ impl TurboPrimaryQueryDistance1 {
             &self.terms,
             &vector.rep.terms,
         );
-        self.correction_terms
-            .distance_from_dot_unnormalized(dot, vector.l2_norm)
-            .into()
+        distance_from_dot_unnormalized(
+            self.similarity,
+            dot,
+            (self.l2_norm_sq, vector.l2_norm.powi(2)),
+        )
+        .into()
     }
 }
 

@@ -11,6 +11,7 @@ use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rand::SeedableRng;
 use rayon::prelude::*;
+use tdigests::TDigest;
 use vectors::{F32VectorCoding, VectorSimilarity, f16};
 
 #[derive(Args)]
@@ -186,12 +187,27 @@ pub fn recall(
             }
         });
 
+    let mut depth = Vec::with_capacity(query_k.len());
     let recall_values = query_k
         .into_iter()
         .enumerate()
-        .map(|(i, r)| recall_computer.compute_recall(i, &r.into_neighbors()))
+        .map(|(i, r)| {
+            let results = r.into_neighbors();
+            depth.push(results.len() as f64);
+            recall_computer.compute_recall(i, &results)
+        })
         .collect::<Vec<_>>();
     println!("{}", recall_computer.summarize(&recall_values));
+    let digest = TDigest::from_values(depth);
+    println!(
+        "Queue depth p50 {:<6.1} p75 {:<6.1} p90 {:<6.1} p95 {:<6.1} p99 {:<6.1} p99.9 {:<6.1}",
+        digest.estimate_quantile(0.5),
+        digest.estimate_quantile(0.75),
+        digest.estimate_quantile(0.9),
+        digest.estimate_quantile(0.95),
+        digest.estimate_quantile(0.99),
+        digest.estimate_quantile(0.999)
+    );
 
     Ok(())
 }

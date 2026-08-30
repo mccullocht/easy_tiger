@@ -32,7 +32,7 @@ pub fn float32_benchmarks(c: &mut Criterion) {
         let coder = F32VectorCoding::F32.coder(sim, None);
         let x = coder.encode(&a);
         let y = coder.encode(&b);
-        let dist = F32VectorCoding::F32.distance_symmetric(sim, None);
+        let dist = F32VectorCoding::F32.distance_symmetric(sim);
         group.bench_function(sim.to_string(), |b| {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
         });
@@ -55,7 +55,7 @@ pub fn float32_benchmarks(c: &mut Criterion) {
             .map(|x| x.as_slice())
             .collect::<Vec<_>>();
         let mut bulk_out = vec![0.0; BULK_VECTORS];
-        let dist = F32VectorCoding::F32.distance_symmetric(sim, None);
+        let dist = F32VectorCoding::F32.distance_symmetric(sim);
         group.bench_function(sim.to_string(), |b| {
             b.iter(|| {
                 std::hint::black_box({
@@ -80,7 +80,7 @@ pub fn float16_benchmarks(c: &mut Criterion) {
         let coder = F32VectorCoding::F16.coder(sim, None);
         let x = coder.encode(&a);
         let y = coder.encode(&b);
-        let dist = F32VectorCoding::F16.distance_symmetric(sim, None);
+        let dist = F32VectorCoding::F16.distance_symmetric(sim);
         group.bench_function(&format!("doc/{sim}"), |b| {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
         });
@@ -110,7 +110,7 @@ pub fn float16_benchmarks(c: &mut Criterion) {
             .collect::<Vec<_>>();
         let mut bulk_out = vec![0.0; BULK_VECTORS];
 
-        let dist = F32VectorCoding::F16.distance_symmetric(sim, None);
+        let dist = F32VectorCoding::F16.distance_symmetric(sim);
         group.bench_function(&format!("doc/{sim}"), |b| {
             b.iter(|| {
                 std::hint::black_box({
@@ -158,7 +158,7 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
             elements: 1,
             bytes: x.len() as u64,
         });
-        let dist = encoding.distance_symmetric(sim, None);
+        let dist = encoding.distance_symmetric(sim);
         group.bench_function(&format!("doc/{sim}"), |b| {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
         });

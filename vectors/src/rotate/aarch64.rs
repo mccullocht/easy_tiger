@@ -5,36 +5,30 @@ use std::arch::aarch64::{
 };
 
 #[inline]
-pub fn neon_walsh_hadamard_transform<const F: bool>(v: &mut [f32], signs: &[u32]) {
+pub fn neon_walsh_hadamard_transform(v: &mut [f32], signs: &[u32]) {
     assert!(
         v.len().is_power_of_two(),
         "Hadamard transform requires power of 2 length"
     );
     assert_eq!(v.len(), signs.len());
     if v.len() < 64 {
-        super::scalar::walsh_hadamard_transform::<F>(v, signs)
+        super::scalar::walsh_hadamard_transform(v, signs)
     } else {
         // Perform the early strides of the block transformation together in 64 dimension chunks
         // in an effort to improve locality. v.len() is a power of 2 and there are at least 64
         // entries, so there will be no tail entries.
         let blocks = v.as_chunks_mut::<64>().0;
         let sblocks = signs.as_chunks::<64>().0;
-        if F {
-            for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
-                wht_fixed_block64::<true>(b, s);
-            }
-        } else {
-            for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
-                wht_fixed_block64::<false>(b, s);
-            }
+        for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
+            wht_fixed_block64(b, s);
         }
         // Continue butterfly transformation at block size and beyond.
-        wht_block_from64::<F>(v, signs);
+        wht_block_from64(v);
     }
 }
 
 #[inline]
-fn wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) {
+fn wht_block_from64(block: &mut [f32]) {
     let n = block.len();
     assert!(
         n.is_power_of_two(),
@@ -44,18 +38,11 @@ fn wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) {
 
     if n == 64 {
         // The base 64-wide transform already completed every stride; there is no further
-        // butterfly stage to fuse the normalization into, so just scale (and sign-flip for
-        // backward) in place.
+        // butterfly stage to fuse the normalization into, so just scale in place.
         for i in (0..n).step_by(4) {
             unsafe {
                 let x = vld1q_f32(block.as_ptr().add(i));
-                let mut v = vmulq_n_f32(x, scale);
-                if !F {
-                    v = vreinterpretq_f32_u32(veorq_u32(
-                        vreinterpretq_u32_f32(v),
-                        vld1q_u32(signs.as_ptr().add(i)),
-                    ));
-                }
+                let v = vmulq_n_f32(x, scale);
                 vst1q_f32(block.as_mut_ptr().add(i), v);
             }
         }
@@ -87,19 +74,8 @@ fn wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) {
                 let x = vld1q_f32(block.as_ptr().add(x_off));
                 let y = vld1q_f32(block.as_ptr().add(y_off));
 
-                let mut a = vmulq_n_f32(vaddq_f32(x, y), scale);
-                let mut b = vmulq_n_f32(vsubq_f32(x, y), scale);
-
-                if !F {
-                    a = vreinterpretq_f32_u32(veorq_u32(
-                        vreinterpretq_u32_f32(a),
-                        vld1q_u32(signs.as_ptr().add(x_off)),
-                    ));
-                    b = vreinterpretq_f32_u32(veorq_u32(
-                        vreinterpretq_u32_f32(b),
-                        vld1q_u32(signs.as_ptr().add(y_off)),
-                    ));
-                }
+                let a = vmulq_n_f32(vaddq_f32(x, y), scale);
+                let b = vmulq_n_f32(vsubq_f32(x, y), scale);
 
                 vst1q_f32(block.as_mut_ptr().add(x_off), a);
                 vst1q_f32(block.as_mut_ptr().add(y_off), b);
@@ -110,37 +86,33 @@ fn wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) {
 
 /// Initial base Walsh-Hadamard Transform over a fixed size block.
 ///
-/// This includes the sign flips that are needed before the operation begins if `F` is true.
+/// This includes the sign flips that are applied before the operation begins.
 #[inline]
-fn wht_fixed_block64<const F: bool>(block: &mut [f32; 64], signs: &[u32; 64]) {
-    // Load 4 entries at a time, optionally flipping signs if F is true.
-    fn load4<const F: bool>(b: *const f32, s: *const u32, off: usize) -> float32x4_t {
+fn wht_fixed_block64(block: &mut [f32; 64], signs: &[u32; 64]) {
+    // Load 4 entries at a time, flipping signs.
+    fn load4(b: *const f32, s: *const u32, off: usize) -> float32x4_t {
         unsafe {
             let r = vld1q_f32(b.add(off));
-            if F {
-                vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(r), vld1q_u32(s.add(off))))
-            } else {
-                r
-            }
+            vreinterpretq_f32_u32(veorq_u32(vreinterpretq_u32_f32(r), vld1q_u32(s.add(off))))
         }
     }
     let mut r = [
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 0),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 4),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 8),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 12),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 16),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 20),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 24),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 28),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 32),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 36),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 40),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 44),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 48),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 52),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 56),
-        load4::<F>(block.as_ptr(), signs.as_ptr(), 60),
+        load4(block.as_ptr(), signs.as_ptr(), 0),
+        load4(block.as_ptr(), signs.as_ptr(), 4),
+        load4(block.as_ptr(), signs.as_ptr(), 8),
+        load4(block.as_ptr(), signs.as_ptr(), 12),
+        load4(block.as_ptr(), signs.as_ptr(), 16),
+        load4(block.as_ptr(), signs.as_ptr(), 20),
+        load4(block.as_ptr(), signs.as_ptr(), 24),
+        load4(block.as_ptr(), signs.as_ptr(), 28),
+        load4(block.as_ptr(), signs.as_ptr(), 32),
+        load4(block.as_ptr(), signs.as_ptr(), 36),
+        load4(block.as_ptr(), signs.as_ptr(), 40),
+        load4(block.as_ptr(), signs.as_ptr(), 44),
+        load4(block.as_ptr(), signs.as_ptr(), 48),
+        load4(block.as_ptr(), signs.as_ptr(), 52),
+        load4(block.as_ptr(), signs.as_ptr(), 56),
+        load4(block.as_ptr(), signs.as_ptr(), 60),
     ];
 
     // Perform butterfly rotation steps across 2 registers (8 values) for strides 1 and 2.

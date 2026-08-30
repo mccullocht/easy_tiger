@@ -198,9 +198,10 @@ pub fn recall(
         })
         .collect::<Vec<_>>();
     println!("{}", recall_computer.summarize(&recall_values));
+    let mean_depth = depth.iter().copied().sum::<f64>() / depth.len() as f64;
     let digest = TDigest::from_values(depth);
     println!(
-        "Queue depth p50 {:<6.1} p75 {:<6.1} p90 {:<6.1} p95 {:<6.1} p99 {:<6.1} p99.9 {:<6.1}",
+        "Queue depth mean {mean_depth:<6.1} p50 {:<6.1} p75 {:<6.1} p90 {:<6.1} p95 {:<6.1} p99 {:<6.1} p99.9 {:<6.1}",
         digest.estimate_quantile(0.5),
         digest.estimate_quantile(0.75),
         digest.estimate_quantile(0.9),

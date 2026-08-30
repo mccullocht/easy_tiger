@@ -98,11 +98,8 @@ pub fn distance_loss(
                 query = r.forward(&query);
             }
             let qdist = if args.quantize_query {
-                args.format.query_distance_symmetric(
-                    args.similarity,
-                    coder.encode(&query),
-                    center.as_deref(),
-                )
+                args.format
+                    .query_distance_symmetric(args.similarity, coder.encode(&query))
             } else {
                 args.format.query_distance_asymmetric(
                     args.similarity,

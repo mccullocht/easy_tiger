@@ -149,7 +149,12 @@ fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize
 }
 
 /// Prepare a vector for quantization: optionally l2-normalize (for angular similarity) and/or
-/// subtract the center. Returns the prepared vector slice and the center_dot correction term.
+/// subtract the center. Returns the prepared vector slice.
+///
+/// For angular similarity the vector is normalized to the unit sphere *before* the center is
+/// subtracted. The center then cancels in any distance that reduces to a difference of vectors, so
+/// angular distance can be recovered from the squared-Euclidean distance of the centered vectors
+/// without storing any cross terms.
 ///
 /// `scratch` must be `Some` (and sized to `vector.len()`) when `similarity.angular()` or `center`
 /// is `Some`; it is unused and may be `None` otherwise.
@@ -158,9 +163,9 @@ fn prepare_vector<'a>(
     scratch: Option<&'a mut [f32]>,
     center: Option<&[f32]>,
     similarity: VectorSimilarity,
-) -> (&'a [f32], f32) {
+) -> &'a [f32] {
     let Some(scratch) = scratch else {
-        return (vector, 0.0);
+        return vector;
     };
 
     if similarity.angular() {
@@ -173,96 +178,27 @@ fn prepare_vector<'a>(
         scratch.copy_from_slice(vector);
     }
 
-    let center_dot = if let Some(center) = center {
-        let cd = if similarity.angular() {
-            scratch
-                .iter()
-                .zip(center.iter())
-                .map(|(&s, &c)| s * c)
-                .sum()
-        } else {
-            0.0
-        };
+    if let Some(center) = center {
         for (s, c) in scratch.iter_mut().zip(center.iter()) {
             *s -= c;
         }
-        cd
-    } else {
-        0.0
-    };
-
-    (scratch, center_dot)
-}
-
-fn uncenter_vector(center: &[f32], vector: &mut [f32]) {
-    for (c, v) in center.iter().zip(vector.iter_mut()) {
-        *v += *c;
-    }
-}
-
-#[derive(Debug, Clone)]
-enum DistanceCorrectionTerms {
-    Euclidean {
-        l2_norm_sq: f32,
-    },
-    Angular {
-        center_dot: f32,
-        center_center_dot: f32,
-    },
-}
-
-impl DistanceCorrectionTerms {
-    fn new(
-        header: &PrimaryVectorHeader,
-        center: Option<&[f32]>,
-        similarity: VectorSimilarity,
-    ) -> Self {
-        match similarity {
-            VectorSimilarity::Euclidean => Self::Euclidean {
-                l2_norm_sq: header.l2_norm.powi(2),
-            },
-            VectorSimilarity::Dot | VectorSimilarity::Cosine => Self::Angular {
-                center_dot: header.center_dot,
-                center_center_dot: center
-                    .map(|c| c.iter().map(|&v| v * v).sum())
-                    .unwrap_or(0.0),
-            },
-        }
     }
 
-    fn from_parts(
-        l2_norm: f32,
-        center_dot: f32,
-        center_center_dot: f32,
-        similarity: VectorSimilarity,
-    ) -> Self {
-        match similarity {
-            VectorSimilarity::Euclidean => Self::Euclidean {
-                l2_norm_sq: l2_norm.powi(2),
-            },
-            VectorSimilarity::Dot | VectorSimilarity::Cosine => Self::Angular {
-                center_dot,
-                center_center_dot,
-            },
-        }
-    }
+    scratch
+}
 
-    fn distance_from_dot_unnormalized(
-        &self,
-        dot_unnormalized: f32,
-        vector_l2_norm: f32,
-        vector_center_dot: f32,
-    ) -> f32 {
-        match self {
-            Self::Euclidean { l2_norm_sq } => {
-                l2_norm_sq + vector_l2_norm.powi(2) - (2.0 * dot_unnormalized)
-            }
-            Self::Angular {
-                center_dot,
-                center_center_dot,
-            } => (dot_unnormalized + center_dot + vector_center_dot - center_center_dot)
-                .mul_add(-0.5, 0.5),
-        }
+/// Transform the unnormalized dot product of two vectors into an appropriate distance for the
+/// similarity function.
+fn distance_from_dot_unnormalized(
+    similarity: VectorSimilarity,
+    dot_unnormalized: f32,
+    l2_norms_sq: (f32, f32),
+) -> f32 {
+    let l2_dist = l2_norms_sq.0 + l2_norms_sq.1 - (2.0 * dot_unnormalized);
+    match similarity {
+        VectorSimilarity::Euclidean => l2_dist,
+        // Normalize angular distance into a value in [0,1] where lower is closer.
+        VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
     }
 }
 
@@ -301,12 +237,10 @@ impl ErrorBoundTerms {
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 struct PrimaryVectorHeader {
-    /// L2 norm (magnitude) of the vector.
-    /// This is used to compute euclidean distance and the statistical bound on estimated distance.
+    /// L2 norm (magnitude) of the (possibly centered) vector.
+    /// This is used to compute euclidean and angular distance and the statistical bound on
+    /// estimated distance. For angular similarity this is the norm of the centered unit vector.
     l2_norm: f32,
-    /// The dot product of the vector and the centroid.
-    /// This is used to compute angular distance when the vector is centered.
-    center_dot: f32,
     /// The L2 norm of the residual vector (v - dequantize(quantize(v))).
     /// This term can be used to compute a statistical bound on the estimated distance.
     perpendicular_error_term: f32,
@@ -330,7 +264,7 @@ impl PrimaryVectorHeader {
     /// Length of the encoded header in bytes.
     ///
     /// Stores 6 values -- 4 16-bit values and 2 32-bit values.
-    /// * l2_norm or center_dot (f32)
+    /// * l2_norm (f32)
     /// * component_sum (u32)
     /// * perpendicular_error_term (f16)
     /// * parallel_error_term (f16)
@@ -341,10 +275,9 @@ impl PrimaryVectorHeader {
     const LEN: usize =
         std::mem::size_of::<f32>() + std::mem::size_of::<u32>() + std::mem::size_of::<f16>() * 4;
 
-    fn new(stats: VectorStats, center_dot: f32) -> Self {
+    fn new(stats: VectorStats) -> Self {
         Self {
             l2_norm: stats.l2_norm_sq.sqrt(),
-            center_dot,
             component_sum: 0,
             perpendicular_error_term: 0.0,
             parallel_error_term: 0.0,
@@ -359,14 +292,9 @@ impl PrimaryVectorHeader {
     }
 
     #[inline]
-    fn serialize(&self, header_bytes: &mut [u8], similarity: VectorSimilarity) {
+    fn serialize(&self, header_bytes: &mut [u8]) {
         let h32 = header_bytes[..8].as_chunks_mut::<4>().0;
-        let first = if similarity.angular() {
-            self.center_dot
-        } else {
-            self.l2_norm
-        };
-        h32[0] = first.to_le_bytes();
+        h32[0] = self.l2_norm.to_le_bytes();
         h32[1] = self.component_sum.to_le_bytes();
 
         let h16 = header_bytes[8..16].as_chunks_mut::<2>().0;
@@ -377,23 +305,14 @@ impl PrimaryVectorHeader {
     }
 
     #[inline]
-    fn deserialize(raw: &[u8], similarity: VectorSimilarity) -> Option<(Self, &[u8])> {
+    fn deserialize(raw: &[u8]) -> Option<(Self, &[u8])> {
         let (header_bytes, vector_bytes) = raw.split_at_checked(Self::LEN)?;
         let h32 = header_bytes[..8].as_chunks::<4>().0;
         let h16 = header_bytes[8..16].as_chunks::<2>().0;
-        let l2_norm = if similarity.angular() {
-            1.0
-        } else {
-            f32::from_le_bytes(h32[0])
-        };
+        let l2_norm = f32::from_le_bytes(h32[0]);
         Some((
             Self {
                 l2_norm,
-                center_dot: if similarity.angular() {
-                    f32::from_le_bytes(h32[0])
-                } else {
-                    0.0
-                },
                 component_sum: u32::from_le_bytes(h32[1]),
                 perpendicular_error_term: f16::from_le_bytes(h16[0]).to_f32() * l2_norm,
                 parallel_error_term: f16::from_le_bytes(h16[1]).to_f32(),
@@ -516,12 +435,11 @@ struct TurboPrimaryVector<'a, const B: usize> {
     rep: EncodedVector<'a>,
     l2_norm: f32,
     perpendicular_error_term: f32,
-    center_dot: f32,
 }
 
 impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
-    fn new(data: &'a [u8], similarity: VectorSimilarity) -> Option<Self> {
-        let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data, similarity)?;
+    fn new(data: &'a [u8]) -> Option<Self> {
+        let (header, vector_bytes) = PrimaryVectorHeader::deserialize(data)?;
         Some(Self {
             rep: EncodedVector {
                 terms: VectorDecodeTerms::from_primary::<B>(header),
@@ -529,7 +447,6 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
             },
             l2_norm: header.l2_norm,
             perpendicular_error_term: header.perpendicular_error_term,
-            center_dot: header.center_dot,
         })
     }
 
@@ -546,13 +463,11 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
                 rep: headv,
                 l2_norm: self.l2_norm,
                 perpendicular_error_term: self.perpendicular_error_term,
-                center_dot: self.center_dot,
             },
             Self {
                 rep: tailv,
                 l2_norm: self.l2_norm,
                 perpendicular_error_term: self.perpendicular_error_term,
-                center_dot: self.center_dot,
             },
         )
     }
@@ -610,20 +525,15 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         } else {
             None
         };
-        let (prepared, center_dot) = prepare_vector(vector, scratch, center, similarity);
+        let prepared = prepare_vector(vector, scratch, center, similarity);
         let mut out = vec![0u8; packing::byte_len(vector.len(), B)];
-        let header = Self::encode_parts_to(k, prepared, center_dot, &mut out);
+        let header = Self::encode_parts_to(k, prepared, &mut out);
         (header, out)
     }
 
-    fn encode_parts_to(
-        k: Kernel,
-        vector: &[f32],
-        center_dot: f32,
-        out: &mut [u8],
-    ) -> PrimaryVectorHeader {
+    fn encode_parts_to(k: Kernel, vector: &[f32], out: &mut [u8]) -> PrimaryVectorHeader {
         let stats = VectorStats::new(k, vector);
-        let mut header = PrimaryVectorHeader::new(stats, center_dot);
+        let mut header = PrimaryVectorHeader::new(stats);
         (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
@@ -658,14 +568,14 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
         } else {
             None
         };
-        let (prepared, center_dot) = prepare_vector(
+        let prepared = prepare_vector(
             vector,
             scratch_guard.as_mut().map(|g| g.as_mut_slice()),
             self.center.as_deref(),
             self.similarity,
         );
-        let header = Self::encode_parts_to(self.k, prepared, center_dot, vector_bytes);
-        header.serialize(header_bytes, self.similarity);
+        let header = Self::encode_parts_to(self.k, prepared, vector_bytes);
+        header.serialize(header_bytes);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -673,8 +583,7 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     }
 
     fn decode_to(&self, vector: &[u8], out: &mut [f32]) {
-        let vector =
-            TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
+        let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
         match self.k {
             Kernel::Scalar => scalar::primary_decode::<B>(vector, out),
             #[cfg(target_arch = "aarch64")]
@@ -682,8 +591,10 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             #[cfg(target_arch = "x86_64")]
             Kernel::Avx512 => unsafe { x86_64::primary_decode_avx512::<B>(vector, out) },
         };
-        if let Some(c) = &self.center {
-            uncenter_vector(c, out);
+        if let Some(center) = &self.center {
+            for (c, v) in center.iter().zip(out.iter_mut()) {
+                *v += *c;
+            }
         }
     }
 
@@ -696,34 +607,20 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
 #[derive(Debug, Clone, Copy)]
 pub struct TurboPrimaryDistance<const B: usize> {
     similarity: VectorSimilarity,
-    center_center_dot: f32,
     inst: Kernel,
 }
 
 impl<const B: usize> TurboPrimaryDistance<B> {
-    pub fn new(similarity: VectorSimilarity, center: Option<&[f32]>) -> Self {
-        let center_center_dot = if let Some(c) = center
-            && similarity.angular()
-        {
-            c.iter().map(|v| v * v).sum()
-        } else {
-            0.0
-        };
+    pub fn new(similarity: VectorSimilarity) -> Self {
         Self {
             similarity,
-            center_center_dot,
             inst: Kernel::default(),
         }
     }
 
     #[inline(always)]
-    fn distance_internal(
-        &self,
-        correction_terms: &DistanceCorrectionTerms,
-        query: &TurboPrimaryVector<B>,
-        doc: &[u8],
-    ) -> f64 {
-        let doc = TurboPrimaryVector::<B>::new(doc, self.similarity).unwrap();
+    fn distance_internal(&self, query: &TurboPrimaryVector<B>, doc: &[u8]) -> f64 {
+        let doc = TurboPrimaryVector::<B>::new(doc).unwrap();
         let uint_dot = match self.inst {
             Kernel::Scalar => scalar::dot_u8::<B>(query.rep.data, doc.rep.data),
             #[cfg(target_arch = "aarch64")]
@@ -732,34 +629,25 @@ impl<const B: usize> TurboPrimaryDistance<B> {
             Kernel::Avx512 => unsafe { x86_64::dot_u8_avx512::<B>(query.rep.data, doc.rep.data) },
         };
         let dot = correct_dot_uint(uint_dot, query.dim(), &query.rep.terms, &doc.rep.terms);
-        correction_terms
-            .distance_from_dot_unnormalized(dot, doc.l2_norm, doc.center_dot)
-            .into()
+        distance_from_dot_unnormalized(
+            self.similarity,
+            dot,
+            (query.l2_norm.powi(2), doc.l2_norm.powi(2)),
+        )
+        .into()
     }
 }
 
 impl<const B: usize> VectorDistance for TurboPrimaryDistance<B> {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let query = TurboPrimaryVector::<B>::new(query, self.similarity).unwrap();
-        let correction_terms = DistanceCorrectionTerms::from_parts(
-            query.l2_norm,
-            query.center_dot,
-            self.center_center_dot,
-            self.similarity,
-        );
-        self.distance_internal(&correction_terms, &query, doc)
+        let query = TurboPrimaryVector::<B>::new(query).unwrap();
+        self.distance_internal(&query, doc)
     }
 
     fn bulk_distance(&self, query: &[u8], docs: &[&[u8]], out: &mut [f64]) {
-        let query = TurboPrimaryVector::<B>::new(query, self.similarity).unwrap();
-        let correction_terms = DistanceCorrectionTerms::from_parts(
-            query.l2_norm,
-            query.center_dot,
-            self.center_center_dot,
-            self.similarity,
-        );
+        let query = TurboPrimaryVector::<B>::new(query).unwrap();
         for (doc, out) in docs.iter().zip(out.iter_mut()) {
-            *out = self.distance_internal(&correction_terms, &query, doc);
+            *out = self.distance_internal(&query, doc);
         }
     }
 }
@@ -772,8 +660,8 @@ pub struct TurboPrimaryQueryDistance<const B: usize> {
     similarity: VectorSimilarity,
 
     query: Vec<u8>,
+    l2_norm_sq: f32,
     terms: VectorDecodeTerms,
-    correction_terms: DistanceCorrectionTerms,
     error_terms: ErrorBoundTerms,
 }
 
@@ -791,23 +679,21 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
             center,
         );
         let terms = VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
-        let correction_terms = DistanceCorrectionTerms::new(&header, center, similarity);
         let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
 
         Self {
             k,
             similarity,
             query,
+            l2_norm_sq: header.l2_norm.powi(2),
             terms,
-            correction_terms,
             error_terms,
         }
     }
 
     #[inline(always)]
     fn distance_internal_raw(&self, vector: &[u8]) -> f64 {
-        let vector =
-            TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
+        let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
         self.distance_internal(&vector)
     }
 
@@ -823,9 +709,12 @@ impl<const B: usize> TurboPrimaryQueryDistance<B> {
             },
         };
         let dot = correct_dot_uint(uint8_dot, self.query.len(), &self.terms, &vector.rep.terms);
-        self.correction_terms
-            .distance_from_dot_unnormalized(dot, vector.l2_norm, vector.center_dot)
-            .into()
+        distance_from_dot_unnormalized(
+            self.similarity,
+            dot,
+            (self.l2_norm_sq, vector.l2_norm.powi(2)),
+        )
+        .into()
     }
 }
 
@@ -842,8 +731,7 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
 
     // TODO: add tests for this. Right now it is not accurate enough to write good tests.
     fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
-        let vector =
-            TurboPrimaryVector::<B>::new(vector, self.similarity).expect("valid primary vector");
+        let vector = TurboPrimaryVector::<B>::new(vector).expect("valid primary vector");
         let distance = self.distance_internal(&vector);
         let error = self.error_terms.error_bound(&vector).into();
         EstimatedDistance { distance, error }
@@ -856,13 +744,12 @@ impl<const B: usize> QueryVectorDistance for TurboPrimaryQueryDistance<B> {
 /// is split so that the dot product can be computed entirely with popcount.
 #[derive(Debug, Clone)]
 pub struct TurboPrimaryQueryDistance1 {
-    #[allow(dead_code)]
     k: Kernel,
     similarity: VectorSimilarity,
 
     query: Vec<u8>,
+    l2_norm_sq: f32,
     terms: VectorDecodeTerms,
-    correction_terms: DistanceCorrectionTerms,
     error_terms: ErrorBoundTerms,
 }
 
@@ -877,23 +764,21 @@ impl TurboPrimaryQueryDistance1 {
             TurboPrimaryCoder::<4>::encode_parts(k, similarity, query.as_ref(), center);
         let query = packing::bitplane_split4(&query);
         let terms = VectorDecodeTerms::from_primary::<4>(header);
-        let correction_terms = DistanceCorrectionTerms::new(&header, center, similarity);
         let error_terms = ErrorBoundTerms::from_header(&header, query.len() * 2, similarity);
 
         Self {
             k,
             similarity,
             query,
+            l2_norm_sq: header.l2_norm.powi(2),
             terms,
-            correction_terms,
             error_terms,
         }
     }
 
     #[inline(always)]
     fn distance_internal_raw(&self, vector: &[u8]) -> f64 {
-        let vector =
-            TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
+        let vector = TurboPrimaryVector::<1>::new(vector).expect("valid primary vector");
         self.distance_internal(&vector)
     }
 
@@ -914,9 +799,12 @@ impl TurboPrimaryQueryDistance1 {
             &self.terms,
             &vector.rep.terms,
         );
-        self.correction_terms
-            .distance_from_dot_unnormalized(dot, vector.l2_norm, vector.center_dot)
-            .into()
+        distance_from_dot_unnormalized(
+            self.similarity,
+            dot,
+            (self.l2_norm_sq, vector.l2_norm.powi(2)),
+        )
+        .into()
     }
 }
 
@@ -933,8 +821,7 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
 
     // TODO: add tests for this. Right now it is not accurate enough to write good tests.
     fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
-        let vector =
-            TurboPrimaryVector::<1>::new(vector, self.similarity).expect("valid primary vector");
+        let vector = TurboPrimaryVector::<1>::new(vector).expect("valid primary vector");
         let distance = self.distance_internal(&vector);
         let error = self.error_terms.error_bound(&vector).into();
         EstimatedDistance { distance, error }

@@ -13,6 +13,39 @@ use crate::{
     float32, packing::TurboPacker,
 };
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum Kernel {
+    Scalar,
+    #[cfg(target_arch = "aarch64")]
+    Neon,
+}
+
+impl Kernel {
+    const CANDIDATES: &'static [Self] = &[
+        #[cfg(target_arch = "aarch64")]
+        Self::Neon,
+        Self::Scalar,
+    ];
+
+    fn is_available(&self) -> bool {
+        match self {
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => true,
+            Self::Scalar => true,
+        }
+    }
+}
+
+impl Default for Kernel {
+    fn default() -> Self {
+        Self::CANDIDATES
+            .iter()
+            .copied()
+            .find(Self::is_available)
+            .expect("scalar is always available")
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 struct Header {
     /// L2 norm of the original vector after centering.
@@ -130,12 +163,16 @@ impl F32VectorCoder for Coder {
 /// The stored l2 norms then recover the distance between the (possibly centered) input vectors.
 #[derive(Debug)]
 pub struct Distance {
+    k: Kernel,
     similarity: VectorSimilarity,
 }
 
 impl Distance {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self { similarity }
+        Self {
+            k: Kernel::default(),
+            similarity,
+        }
     }
 }
 
@@ -145,21 +182,13 @@ impl VectorDistance for Distance {
         let (dheader, doc) = Header::decode(doc);
 
         let dim = query.len() * 8;
-        let (qhead, qtail) = query.as_chunks::<8>();
-        let (dhead, dtail) = doc.as_chunks::<8>();
-
-        let mut h = qhead
-            .iter()
-            .zip(dhead.iter())
-            .map(|(q, d)| (u64::from_ne_bytes(*q) ^ u64::from_ne_bytes(*d)).count_ones())
-            .sum::<u32>();
-        if !qtail.is_empty() {
-            h += qtail
-                .iter()
-                .zip(dtail.iter())
-                .map(|(&q, &d)| (q ^ d).count_ones())
-                .sum::<u32>();
-        }
+        let h = match self.k {
+            Kernel::Scalar => crate::kernels::scalar::bitstring_inner_product::<true>(query, doc),
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => {
+                crate::kernels::aarch64::neon::bitstring_inner_product::<true>(query, doc)
+            }
+        };
 
         // Each matching bit contributes 1/D and each mismatch -1/D.
         let quantized_ip = (dim as f64 - 2.0 * h as f64) / dim as f64;

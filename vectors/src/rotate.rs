@@ -6,7 +6,7 @@ mod x86_64;
 
 use std::ops::Range;
 
-use rand::{Rng, RngExt, SeedableRng, seq::SliceRandom};
+use rand::{Rng, RngExt, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 /// Implementation of the Walsh-Hadamard transform used to rotate vectors.
@@ -100,24 +100,31 @@ impl std::fmt::Display for Kernel {
     }
 }
 
-/// Random shuffle of the vector: forward (encode) and backward (decode).
+/// Random in-place shuffle of the vector.
 ///
 /// This is necessary when vector size is not a power of two since we will only shuffle within
 /// power of two sized blocks.
+///
+/// The permutation is stored as the swap log of a Fisher-Yates pass over `0..dims`: `swaps[i]`
+/// is the partner index that position `i` was exchanged with. Replaying `v.swap(i, swaps[i])`
+/// for `i` in `0..dims` reproduces the permutation in place with no scratch buffer; replaying
+/// the swaps in reverse would invert it.
 struct Shuffle {
-    forward: Vec<u32>,
+    swaps: Vec<u32>,
 }
 
 impl Shuffle {
     fn new(dims: usize, rng: &mut impl Rng) -> Self {
-        let mut forward = (0..dims as u32).collect::<Vec<u32>>();
-        forward.shuffle(rng);
-        Self { forward }
+        // Fisher-Yates from low to high, recording each position's swap partner. Drawing from
+        // `i..dims` (rather than the textbook `0..=i` high-to-low) keeps `apply` a simple
+        // forward loop while remaining uniform over all permutations.
+        let swaps = (0..dims).map(|i| rng.random_range(i..dims) as u32).collect();
+        Self { swaps }
     }
 
-    fn forward(&self, unpermuted: &[f32], permuted: &mut [f32]) {
-        for (&i, o) in self.forward.iter().zip(permuted.iter_mut()) {
-            *o = unpermuted[i as usize];
+    fn apply(&self, v: &mut [f32]) {
+        for (i, &j) in self.swaps.iter().enumerate() {
+            v.swap(i, j as usize);
         }
     }
 }
@@ -189,13 +196,10 @@ impl Rotator {
     ///
     /// This applies sign flips, then permutation, then block diagonal Hadamard transforms.
     pub fn forward(&self, v: &[f32]) -> Vec<f32> {
-        let mut rotated = if let Some(p) = self.shuffle.as_ref() {
-            let mut r = vec![0.0f32; v.len()];
-            p.forward(v, &mut r);
-            r
-        } else {
-            v.to_vec()
-        };
+        let mut rotated = v.to_vec();
+        if let Some(p) = self.shuffle.as_ref() {
+            p.apply(&mut rotated);
+        }
 
         for block in self.blocks.iter() {
             self.kernel
@@ -242,6 +246,34 @@ mod tests {
         let ra = rotator.forward(&a);
         let rb = rotator.forward(&b);
         assert!(abs_diff_eq!(dot(&a, &b), dot(&ra, &rb), epsilon = 1e-4));
+    }
+
+    #[test]
+    fn preserves_l2_norm_non_power_of_two() {
+        // 100 = 64 + 32 + 4, so the dimensions are shuffled before the block transforms.
+        let rotator = Rotator::new(100, 7);
+        let v = make_vec(100, 4);
+        let rotated = rotator.forward(&v);
+        assert!(abs_diff_eq!(l2_norm(&v), l2_norm(&rotated), epsilon = 1e-4));
+    }
+
+    #[test]
+    fn shuffle_apply_is_a_permutation() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        let shuffle = Shuffle::new(100, &mut rng);
+
+        let mut v: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        shuffle.apply(&mut v);
+
+        assert_ne!(v, (0..100).map(|i| i as f32).collect::<Vec<_>>(), "not identity");
+
+        let mut sorted = v.clone();
+        sorted.sort_by(f32::total_cmp);
+        assert_eq!(
+            sorted,
+            (0..100).map(|i| i as f32).collect::<Vec<_>>(),
+            "every element appears exactly once"
+        );
     }
 
     #[test]

@@ -19,7 +19,8 @@ use std::arch::x86_64::{
     _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
-use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorEncodeTerms, packing};
+use crate::lvq::{TurboPrimaryVector, VectorEncodeTerms};
+use crate::packing::{self, TURBO_BLOCK_SIZE};
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats};
 
@@ -659,7 +660,7 @@ unsafe fn unpack_u4_avx512(v: __m512i) -> __m512i {
 
 #[cfg(test)]
 mod test {
-    use crate::lvq::packing;
+    use crate::packing;
 
     #[test]
     fn query4_doc1_bitplane_dot() {

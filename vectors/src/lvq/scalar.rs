@@ -3,10 +3,9 @@
 #![allow(dead_code)]
 
 use super::{
-    LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, TurboPrimaryVector, VectorEncodeTerms,
-    VectorStats,
-    packing::{TurboPacker, TurboUnpacker},
+    LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, TurboPrimaryVector, VectorEncodeTerms, VectorStats,
 };
+use crate::packing::{TurboPacker, TurboUnpacker};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let (min, max, mean, variance, dot) = vector.iter().copied().enumerate().fold(

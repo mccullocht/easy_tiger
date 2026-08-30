@@ -10,7 +10,7 @@ use rand::{RngExt, SeedableRng};
 
 use crate::{
     EstimatedDistance, F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
-    float32, lvq::packing::TurboPacker,
+    float32, packing::TurboPacker,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
@@ -84,7 +84,7 @@ impl F32VectorCoder for Coder {
             / (unit_vector.len() as f32).sqrt();
 
         let (hbytes, vbytes) = Header::split_mut(out);
-        let mut packer = super::lvq::packing::TurboPacker::<1>::new(vbytes);
+        let mut packer = crate::packing::TurboPacker::<1>::new(vbytes);
         header.component_sum = unit_vector
             .iter()
             .map(|x| {
@@ -104,7 +104,7 @@ impl F32VectorCoder for Coder {
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         let (_, vector) = Header::decode(encoded);
         let magnitude = 1.0 / (out.len() as f32).sqrt();
-        for (q, o) in super::lvq::packing::TurboUnpacker::<1>::new(vector).zip(out.iter_mut()) {
+        for (q, o) in crate::packing::TurboUnpacker::<1>::new(vector).zip(out.iter_mut()) {
             *o = f32::from_bits(magnitude.to_bits() ^ ((q as u32) << 31));
         }
     }
@@ -220,7 +220,7 @@ impl QueryDistance {
         }
         Self {
             similarity,
-            query: super::lvq::packing::bitplane_split4(&query4),
+            query: crate::packing::bitplane_split4(&query4),
             l2_norm,
             lower,
             delta,

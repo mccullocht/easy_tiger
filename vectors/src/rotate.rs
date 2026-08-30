@@ -118,7 +118,9 @@ impl Shuffle {
         // Fisher-Yates from low to high, recording each position's swap partner. Drawing from
         // `i..dims` (rather than the textbook `0..=i` high-to-low) keeps `apply` a simple
         // forward loop while remaining uniform over all permutations.
-        let swaps = (0..dims).map(|i| rng.random_range(i..dims) as u32).collect();
+        let swaps = (0..dims)
+            .map(|i| rng.random_range(i..dims) as u32)
+            .collect();
         Self { swaps }
     }
 
@@ -269,7 +271,11 @@ mod tests {
         let mut v: Vec<f32> = (0..100).map(|i| i as f32).collect();
         shuffle.apply(&mut v);
 
-        assert_ne!(v, (0..100).map(|i| i as f32).collect::<Vec<_>>(), "not identity");
+        assert_ne!(
+            v,
+            (0..100).map(|i| i as f32).collect::<Vec<_>>(),
+            "not identity"
+        );
 
         let mut sorted = v.clone();
         sorted.sort_by(f32::total_cmp);

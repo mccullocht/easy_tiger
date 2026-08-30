@@ -46,6 +46,13 @@ pub struct QuantizationRecallArgs {
     #[arg(long, default_value_t = 1.0)]
     k_mult: f64,
 
+    /// Z-Score applied to error bounds.
+    ///
+    /// Higher values increase confidence that recall will be accurate at the cost of higher rerank
+    /// depth.
+    #[arg(long, default_value_t = 1.0)]
+    z_score: f64,
+
     /// Number of centers to compute and use.
     ///
     /// If 0, the data set will be uncentered.
@@ -182,7 +189,8 @@ pub fn recall(
             let center = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
             let doc = coders[center].encode(&doc_f32);
             for (q, s) in query_scorers.iter().enumerate() {
-                let estimate = s[center].estimated_distance(&doc);
+                let mut estimate = s[center].estimated_distance(&doc);
+                estimate.error *= args.z_score;
                 query_k[q].add_estimate(d as i64, estimate);
             }
         });

@@ -73,10 +73,6 @@ fn rotator_benchmarks(c: &mut Criterion) {
             c.bench_function(&format!("rotate/{kernel}/forward/{dim}"), |b| {
                 b.iter(|| rotator.forward(std::hint::black_box(&vector)))
             });
-            let rotated = rotator.forward(&vector);
-            c.bench_function(&format!("rotate/{kernel}/backward/{dim}"), |b| {
-                b.iter(|| rotator.backward(std::hint::black_box(&rotated)))
-            });
         }
     }
 }

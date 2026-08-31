@@ -4,6 +4,11 @@
 //! One note is that this does not include rotation inline in the quantization transform.
 //! Callers are expected to rotate the vectors if component distribution is not Gaussian, and
 //! they are expected to rotate the center (or compute the mean from rotated vectors).
+
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+mod scalar;
+
 use std::borrow::Cow;
 
 use rand::{RngExt, SeedableRng};
@@ -98,12 +103,16 @@ impl Header {
 
 #[derive(Debug, Clone, Default)]
 pub struct Coder {
+    k: Kernel,
     center: Option<Vec<f32>>,
 }
 
 impl Coder {
     pub fn new(center: Option<Vec<f32>>) -> Self {
-        Self { center }
+        Self {
+            k: Kernel::default(),
+            center,
+        }
     }
 }
 
@@ -119,25 +128,23 @@ impl F32VectorCoder for Coder {
         } else {
             vector.into()
         };
-        let (unit_vector, l2_norm) = float32::l2_normalize(centered_vector);
+        let l2_norm = float32::l2_norm(&centered_vector);
         let mut header = Header {
             l2_norm,
             ..Default::default()
         };
-        header.correction_term = unit_vector.iter().copied().map(f32::abs).sum::<f32>()
-            / (unit_vector.len() as f32).sqrt();
+        header.correction_term = centered_vector
+            .iter()
+            .map(|&x| x.abs() * l2_norm.recip())
+            .sum::<f32>()
+            / (centered_vector.len() as f32).sqrt();
 
         let (hbytes, vbytes) = Header::split_mut(out);
-        let mut packer = crate::packing::TurboPacker::<1>::new(vbytes);
-        header.component_sum = unit_vector
-            .iter()
-            .map(|x| {
-                let s = x.to_bits() >> 31;
-                packer.push(s as u8);
-                s
-            })
-            .sum::<u32>();
-
+        header.component_sum = match self.k {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::neon::quantize_and_pack(&centered_vector, vbytes),
+            _ => scalar::quantize_and_pack(&centered_vector, vbytes),
+        };
         header.encode(hbytes);
     }
 

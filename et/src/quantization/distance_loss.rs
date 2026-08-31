@@ -76,7 +76,7 @@ pub fn distance_loss(
     let center = if args.center {
         let mut center = super::compute_center(vectors);
         if let Some(r) = rotator.as_ref() {
-            center = r.forward(&center);
+            r.rotate(&mut center);
         }
         Some(center)
     } else {
@@ -95,7 +95,7 @@ pub fn distance_loss(
                 None,
             );
             if let Some(r) = rotator.as_ref() {
-                query = r.forward(&query);
+                r.rotate(&mut query);
             }
             let qdist = if args.quantize_query {
                 args.format
@@ -117,7 +117,7 @@ pub fn distance_loss(
         .map(|d| {
             let doc_f32 = vectors[d].to_f32_vec();
             let doc_q = if let Some(r) = rotator.as_ref() {
-                coder.encode(&r.forward(&doc_f32))
+                coder.encode(&r.rotate_copy(&doc_f32))
             } else {
                 coder.encode(&doc_f32)
             };

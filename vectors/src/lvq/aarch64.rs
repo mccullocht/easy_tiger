@@ -13,9 +13,10 @@ use std::arch::aarch64::{
     vshrq_n_u8, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
-use crate::lvq::{TURBO_BLOCK_SIZE, TurboPrimaryVector, VectorEncodeTerms, scalar};
+use crate::lvq::{TurboPrimaryVector, VectorEncodeTerms, scalar};
+use crate::packing::{self, TURBO_BLOCK_SIZE};
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats, packing};
+use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let tail_split = vector.len() & !3;
@@ -854,7 +855,7 @@ unsafe fn shr_u32<const N: usize>(v: uint32x4_t) -> uint32x4_t {
 mod test {
     use approx::assert_abs_diff_eq;
 
-    use crate::lvq::packing;
+    use crate::packing;
 
     #[test]
     fn query4_doc1_bitplane_dot() {

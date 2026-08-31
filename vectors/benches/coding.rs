@@ -71,11 +71,7 @@ fn rotator_benchmarks(c: &mut Criterion) {
             let vector = generate_test_vector(dim);
             let rotator = Rotator::with_kernel(dim, 0x455A_5469676572, kernel);
             c.bench_function(&format!("rotate/{kernel}/forward/{dim}"), |b| {
-                b.iter(|| rotator.forward(std::hint::black_box(&vector)))
-            });
-            let rotated = rotator.forward(&vector);
-            c.bench_function(&format!("rotate/{kernel}/backward/{dim}"), |b| {
-                b.iter(|| rotator.backward(std::hint::black_box(&rotated)))
+                b.iter(|| rotator.rotate_copy(std::hint::black_box(&vector)))
             });
         }
     }

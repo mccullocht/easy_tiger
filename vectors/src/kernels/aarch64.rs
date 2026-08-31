@@ -40,7 +40,7 @@ pub mod neon {
     }
 
     #[inline]
-    pub fn turbo_4x1_inner_product<const S: bool>(a: &[u8], b: &[u8]) -> u32 {
+    pub fn turbo_4x1_inner_product(a: &[u8], b: &[u8]) -> u32 {
         let (ahead, atail) = a.as_chunks::<64>();
         let (bhead, btail) = b.split_at(ahead.len() * 16);
         let mut dot = unsafe {
@@ -60,7 +60,7 @@ pub mod neon {
         };
 
         if !atail.is_empty() {
-            dot += crate::kernels::scalar::turbo_4x1_inner_product_tail::<S>(atail, btail);
+            dot += crate::kernels::scalar::turbo_4x1_inner_product_tail(atail, btail);
         }
 
         dot

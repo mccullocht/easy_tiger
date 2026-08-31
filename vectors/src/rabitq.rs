@@ -263,12 +263,10 @@ impl QueryDistance {
     #[inline]
     fn ip(&self, header: Header, doc: &[u8]) -> f64 {
         let ip_uint = match self.k {
-            Kernel::Scalar => {
-                crate::kernels::scalar::turbo_4x1_inner_product::<false>(&self.query, doc)
-            }
+            Kernel::Scalar => crate::kernels::scalar::turbo_4x1_inner_product(&self.query, doc),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => {
-                crate::kernels::aarch64::neon::turbo_4x1_inner_product::<false>(&self.query, doc)
+                crate::kernels::aarch64::neon::turbo_4x1_inner_product(&self.query, doc)
             }
         };
         let ip = self.dim_sqrt * self.lower as f64

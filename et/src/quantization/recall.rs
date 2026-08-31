@@ -12,7 +12,7 @@ use memmap2::Mmap;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use tdigests::TDigest;
-use vectors::{F32VectorCoding, VectorSimilarity, f16};
+use vectors::{F32VectorCoding, VectorSimilarity, f16, rotate::Rotator};
 
 #[derive(Args)]
 pub struct QuantizationRecallArgs {
@@ -72,6 +72,14 @@ pub struct QuantizationRecallArgs {
     /// Use a fixed value for repeatability.
     #[arg(long, default_value_t = 0x7774_7370414E4E)]
     seed: u64,
+
+    /// If set, rotate vectors before quantization.
+    #[arg(long, default_value_t = false)]
+    rotate: bool,
+
+    /// Seed for rotation.
+    #[arg(long, default_value_t = 11500348935374314158)]
+    rotate_seed: u64,
 }
 
 pub fn recall(
@@ -100,11 +108,20 @@ pub fn recall(
         "must provide recall args",
     ))?;
 
+    let rotator = if args.rotate {
+        Some(Rotator::new(doc_vectors.elem_stride(), args.rotate_seed))
+    } else {
+        None
+    };
+
     let centers = match args.centers {
         0 => None,
         1 => {
             let vectors = SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect());
-            let mean = super::compute_center(&vectors);
+            let mut mean = super::compute_center(&vectors);
+            if let Some(r) = rotator.as_ref() {
+                r.rotate(&mut mean);
+            }
             let mut centers = VecVectorStore::with_capacity(doc_vectors.elem_stride(), 1);
             centers.push(&mean);
             Some(centers)
@@ -140,7 +157,13 @@ pub fn recall(
                 },
                 &mut rng,
             );
-            Some(centers.unwrap_or_else(|e| e))
+            let mut centers = centers.unwrap_or_else(|e| e);
+            if let Some(r) = rotator.as_ref() {
+                for i in 0..centers.len() {
+                    r.rotate(&mut centers[i]);
+                }
+            }
+            Some(centers)
         }
     };
 
@@ -157,6 +180,9 @@ pub fn recall(
         .map(|i| {
             let mut query = vec![0.0f32; query_vectors.elem_stride()];
             query_vectors[i].convert_to_f32_slice(&mut query);
+            if let Some(r) = rotator.as_ref() {
+                r.rotate(&mut query);
+            }
             coders
                 .iter()
                 .enumerate()
@@ -185,7 +211,10 @@ pub fn recall(
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .for_each(|d| {
-            let doc_f32 = doc_vectors[d].to_f32_vec();
+            let mut doc_f32 = doc_vectors[d].to_f32_vec();
+            if let Some(r) = rotator.as_ref() {
+                r.rotate(&mut doc_f32);
+            }
             let center = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
             let doc = coders[center].encode(&doc_f32);
             for (q, s) in query_scorers.iter().enumerate() {

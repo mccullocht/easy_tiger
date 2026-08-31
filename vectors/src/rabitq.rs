@@ -206,6 +206,7 @@ impl VectorDistance for Distance {
 }
 
 pub struct QueryDistance {
+    k: Kernel,
     similarity: VectorSimilarity,
     query: Vec<u8>,
     l2_norm: f32,
@@ -248,6 +249,7 @@ impl QueryDistance {
             packer.push(q as u8);
         }
         Self {
+            k: Kernel::default(),
             similarity,
             query: crate::packing::bitplane_split4(&query4),
             l2_norm,
@@ -260,41 +262,15 @@ impl QueryDistance {
 
     #[inline]
     fn ip(&self, header: Header, doc: &[u8]) -> f64 {
-        let (qhead, qtail) = self.query.as_chunks::<64>();
-        let (dhead, dtail) = doc.as_chunks::<16>();
-        let mut bdot = [0u32; 4];
-        for (q, d) in qhead.iter().zip(dhead.iter()) {
-            let qp = q.as_chunks::<16>().0;
-            let q = [
-                u128::from_le_bytes(qp[0]),
-                u128::from_le_bytes(qp[1]),
-                u128::from_le_bytes(qp[2]),
-                u128::from_le_bytes(qp[3]),
-            ];
-            let d = u128::from_le_bytes(*d);
-            bdot[0] += (q[0] & d).count_ones();
-            bdot[1] += (q[1] & d).count_ones();
-            bdot[2] += (q[2] & d).count_ones();
-            bdot[3] += (q[3] & d).count_ones();
-        }
-
-        if !qtail.is_empty() {
-            let mut qit = qtail.chunks(qtail.len() / 4);
-            let q = [
-                qit.next().unwrap(),
-                qit.next().unwrap(),
-                qit.next().unwrap(),
-                qit.next().unwrap(),
-            ];
-            for (i, &d) in dtail.iter().enumerate() {
-                bdot[0] += (q[0][i] ^ d).count_ones();
-                bdot[1] += (q[1][i] ^ d).count_ones();
-                bdot[2] += (q[2][i] ^ d).count_ones();
-                bdot[3] += (q[3][i] ^ d).count_ones();
+        let ip_uint = match self.k {
+            Kernel::Scalar => {
+                crate::kernels::scalar::turbo_4x1_inner_product::<false>(&self.query, doc)
             }
-        }
-
-        let ip_uint = bdot[0] + bdot[1] * 2 + bdot[2] * 4 + bdot[3] * 8;
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => {
+                crate::kernels::aarch64::neon::turbo_4x1_inner_product::<false>(&self.query, doc)
+            }
+        };
         let ip = self.dim_sqrt * self.lower as f64
             - 2.0 * self.lower as f64 * header.component_sum as f64 / self.dim_sqrt
             + self.delta as f64 * self.component_sum as f64 / self.dim_sqrt

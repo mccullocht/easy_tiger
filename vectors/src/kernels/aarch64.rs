@@ -3,7 +3,8 @@
 /// Neon-specific implementations of kernel functions.
 pub mod neon {
     use std::arch::aarch64::{
-        vaddlvq_u16, vaddq_u16, vandq_u8, vcntq_u8, vdupq_n_u16, veorq_u8, vld1q_u8_x2, vpaddlq_u8,
+        vaddlvq_u16, vaddq_u16, vandq_u8, vcntq_u8, vdupq_n_u16, veorq_u8, vld1q_u8, vld1q_u8_x2,
+        vld1q_u8_x4, vpaddlq_u8,
     };
 
     // XXX this should be adopted by the lvq implementation.
@@ -36,5 +37,32 @@ pub mod neon {
         } else {
             ip + crate::kernels::scalar::bitstring_inner_product_tail::<S>(atail, btail)
         }
+    }
+
+    #[inline]
+    pub fn turbo_4x1_inner_product<const S: bool>(a: &[u8], b: &[u8]) -> u32 {
+        let (ahead, atail) = a.as_chunks::<64>();
+        let (bhead, btail) = b.split_at(ahead.len() * 16);
+        let mut dot = unsafe {
+            let mut bpdot = [vdupq_n_u16(0); 4];
+            for (i, a) in ahead.iter().enumerate() {
+                let av = vld1q_u8_x4(a.as_ptr());
+                let bv = vld1q_u8(bhead.as_ptr().add(i * 16));
+                bpdot[0] = vaddq_u16(bpdot[0], vpaddlq_u8(vcntq_u8(vandq_u8(av.0, bv))));
+                bpdot[1] = vaddq_u16(bpdot[1], vpaddlq_u8(vcntq_u8(vandq_u8(av.1, bv))));
+                bpdot[2] = vaddq_u16(bpdot[2], vpaddlq_u8(vcntq_u8(vandq_u8(av.2, bv))));
+                bpdot[3] = vaddq_u16(bpdot[3], vpaddlq_u8(vcntq_u8(vandq_u8(av.3, bv))));
+            }
+            vaddlvq_u16(bpdot[0])
+                + vaddlvq_u16(bpdot[1]) * 2
+                + vaddlvq_u16(bpdot[2]) * 4
+                + vaddlvq_u16(bpdot[3]) * 8
+        };
+
+        if !atail.is_empty() {
+            dot += crate::kernels::scalar::turbo_4x1_inner_product_tail::<S>(atail, btail);
+        }
+
+        dot
     }
 }

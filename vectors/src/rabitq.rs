@@ -133,11 +133,17 @@ impl F32VectorCoder for Coder {
             l2_norm,
             ..Default::default()
         };
-        header.correction_term = centered_vector
-            .iter()
-            .map(|&x| x.abs() * l2_norm.recip())
-            .sum::<f32>()
-            / (centered_vector.len() as f32).sqrt();
+        header.correction_term = match self.k {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::neon::l1_norm_scaled(&centered_vector, l2_norm.recip()),
+            _ => {
+                centered_vector
+                    .iter()
+                    .map(|&x| x.abs() * l2_norm.recip())
+                    .sum::<f32>()
+                    / (centered_vector.len() as f32).sqrt()
+            }
+        };
 
         let (hbytes, vbytes) = Header::split_mut(out);
         header.component_sum = match self.k {
@@ -158,6 +164,7 @@ impl F32VectorCoder for Coder {
         for (q, o) in crate::packing::TurboUnpacker::<1>::new(vector).zip(out.iter_mut()) {
             *o = f32::from_bits(magnitude.to_bits() ^ ((q as u32) << 31));
         }
+        // XXX this doesn't add the centering vector back.
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {

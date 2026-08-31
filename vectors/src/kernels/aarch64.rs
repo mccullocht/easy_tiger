@@ -25,6 +25,7 @@ pub mod neon {
                     [vandq_u8(a.0, b.0), vandq_u8(a.1, b.1)]
                 };
 
+                // XXX single accumulator, sum the counts as u8, then widen and sum.
                 ip[0] = vaddq_u16(ip[0], vpaddlq_u8(vcntq_u8(d[0])));
                 ip[1] = vaddq_u16(ip[1], vpaddlq_u8(vcntq_u8(d[1])));
             }

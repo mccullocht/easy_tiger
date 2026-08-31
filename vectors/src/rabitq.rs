@@ -18,12 +18,16 @@ enum Kernel {
     Scalar,
     #[cfg(target_arch = "aarch64")]
     Neon,
+    #[cfg(target_arch = "x86_64")]
+    Avx512,
 }
 
 impl Kernel {
     const CANDIDATES: &'static [Self] = &[
         #[cfg(target_arch = "aarch64")]
         Self::Neon,
+        #[cfg(target_arch = "x86_64")]
+        Self::Avx512,
         Self::Scalar,
     ];
 
@@ -31,6 +35,13 @@ impl Kernel {
         match self {
             #[cfg(target_arch = "aarch64")]
             Self::Neon => true,
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 => {
+                use std::arch::is_x86_feature_detected as cpu_feature;
+                cpu_feature!("avx512f")
+                    && cpu_feature!("avx512bw")
+                    && cpu_feature!("avx512vpopcntdq")
+            }
             Self::Scalar => true,
         }
     }
@@ -188,6 +199,10 @@ impl VectorDistance for Distance {
             Kernel::Neon => {
                 crate::kernels::aarch64::neon::bitstring_inner_product::<true>(query, doc)
             }
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                crate::kernels::x86_64::avx512::bitstring_inner_product::<true>(query, doc)
+            },
         };
 
         // Each matching bit contributes 1/D and each mismatch -1/D.
@@ -268,6 +283,10 @@ impl QueryDistance {
             Kernel::Neon => {
                 crate::kernels::aarch64::neon::turbo_4x1_inner_product(&self.query, doc)
             }
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                crate::kernels::x86_64::avx512::turbo_4x1_inner_product(&self.query, doc)
+            },
         };
         let ip = self.dim_sqrt * self.lower as f64
             - 2.0 * self.lower as f64 * header.component_sum as f64 / self.dim_sqrt

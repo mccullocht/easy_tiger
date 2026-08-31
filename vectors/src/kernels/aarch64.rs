@@ -7,7 +7,6 @@ pub mod neon {
         vld1q_u8_x2, vld1q_u8_x4, vpaddlq_u8,
     };
 
-    // XXX this should be adopted by the lvq implementation.
     #[inline]
     pub fn bitstring_inner_product<const S: bool>(a: &[u8], b: &[u8]) -> u32 {
         assert_eq!(a.len(), b.len());

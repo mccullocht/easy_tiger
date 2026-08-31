@@ -6,17 +6,17 @@ use std::arch::x86_64::{
     _mm_lddqu_si128, _mm_movehl_ps, _mm_mul_pd, _mm_mul_ps, _mm_set1_epi64x, _mm_set1_pd,
     _mm_set1_ps, _mm_storeu_si128, _mm_sub_pd, _mm_sub_ps, _mm256_add_ps, _mm256_castps256_ps128,
     _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set1_ps,
-    _mm256_sub_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_epi32, _mm512_and_si512,
-    _mm512_broadcast_i32x4, _mm512_castps512_ps256, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi8,
-    _mm512_cvtepu32_ps, _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32,
-    _mm512_dpwssd_epi32, _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8,
-    _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_loadu_epi8,
-    _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps,
-    _mm512_mullo_epi32, _mm512_or_si512, _mm512_popcnt_epi32, _mm512_reduce_add_epi32,
-    _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps,
-    _mm512_set_epi32, _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps,
-    _mm512_shuffle_i64x2, _mm512_sll_epi32, _mm512_srli_epi32, _mm512_srli_epi64,
-    _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm256_sub_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_si512, _mm512_broadcast_i32x4,
+    _mm512_castps512_ps256, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi8, _mm512_cvtepu32_ps,
+    _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32,
+    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8, _mm512_loadu_ps,
+    _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_epi64,
+    _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps, _mm512_mullo_epi32,
+    _mm512_or_si512, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
+    _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set_epi32,
+    _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_i64x2,
+    _mm512_sll_epi32, _mm512_srli_epi32, _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps,
+    _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
 use crate::lvq::{TurboPrimaryVector, VectorEncodeTerms};
@@ -371,17 +371,7 @@ pub unsafe fn primary_decode_avx512<const B: usize>(
 #[inline]
 pub unsafe fn dot_u8_avx512<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     match B {
-        1 => {
-            let mut sum = _mm512_set1_epi32(0);
-            for (ac, bc) in a.chunks(64).zip(b.chunks(64)) {
-                let mask = u64::MAX >> (64 - ac.len());
-                let av = _mm512_maskz_loadu_epi8(mask, ac.as_ptr() as *const i8);
-                let bv = _mm512_maskz_loadu_epi8(mask, bc.as_ptr() as *const i8);
-                let dot = _mm512_and_epi32(av, bv);
-                sum = _mm512_add_epi32(sum, _mm512_popcnt_epi32(dot));
-            }
-            _mm512_reduce_add_epi32(sum) as u32
-        }
+        1 => crate::kernels::x86_64::avx512::bitstring_inner_product::<false>(a, b),
         2 => {
             let mut dot0 = _mm512_set1_epi32(0);
             let mut dot1 = _mm512_set1_epi32(0);

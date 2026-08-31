@@ -13,14 +13,14 @@ use std::arch::x86_64::{
 /// The `avx512f` CPU feature must be available, e.g. verified with
 /// `is_x86_feature_detected!("avx512f")` before calling this function.
 #[target_feature(enable = "avx512f")]
-pub unsafe fn avx512_walsh_hadamard_transform<const F: bool>(v: &mut [f32], signs: &[u32]) {
+pub unsafe fn avx512_walsh_hadamard_transform(v: &mut [f32], signs: &[u32]) {
     assert!(
         v.len().is_power_of_two(),
         "Hadamard transform requires power of 2 length"
     );
     assert_eq!(v.len(), signs.len());
     if v.len() < 64 {
-        return super::scalar::walsh_hadamard_transform::<F>(v, signs);
+        return super::scalar::walsh_hadamard_transform(v, signs);
     }
 
     // Perform the early strides of the block transformation together in 64 dimension chunks
@@ -28,24 +28,17 @@ pub unsafe fn avx512_walsh_hadamard_transform<const F: bool>(v: &mut [f32], sign
     // entries, so there will be no tail entries.
     let blocks = v.as_chunks_mut::<64>().0;
     let sblocks = signs.as_chunks::<64>().0;
-    if F {
-        for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
-            unsafe { wht_fixed_block64::<true>(b, s) };
-        }
-    } else {
-        for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
-            unsafe { wht_fixed_block64::<false>(b, s) };
-        }
+    for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
+        unsafe { wht_fixed_block64(b, s) };
     }
     // Continue butterfly transformation at block size and beyond.
-    unsafe { wht_block_from64::<F>(v, signs) };
+    unsafe { wht_block_from64(v) };
 }
 
 /// Continue the butterfly transformation for strides 64 and beyond, fusing the final stride
-/// with normalization (and the backward sign flip) so the whole block is only touched once
-/// more after `wht_fixed_block64`.
+/// with normalization so the whole block is only touched once more after `wht_fixed_block64`.
 #[target_feature(enable = "avx512f")]
-unsafe fn wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) {
+unsafe fn wht_block_from64(block: &mut [f32]) {
     unsafe {
         let n = block.len();
         assert!(
@@ -57,15 +50,10 @@ unsafe fn wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) {
 
         if n == 64 {
             // The base 64-wide transform already completed every stride; there is no further
-            // butterfly stage to fuse the normalization into, so just scale (and sign-flip for
-            // backward) in place.
+            // butterfly stage to fuse the normalization into, so just scale in place.
             for i in (0..n).step_by(16) {
                 let x = _mm512_loadu_ps(block.as_ptr().add(i));
-                let mut v = _mm512_mul_ps(x, scalev);
-                if !F {
-                    let s = _mm512_loadu_si512(signs.as_ptr().add(i) as *const __m512i);
-                    v = _mm512_castsi512_ps(_mm512_xor_si512(_mm512_castps_si512(v), s));
-                }
+                let v = _mm512_mul_ps(x, scalev);
                 _mm512_storeu_ps(block.as_mut_ptr().add(i), v);
             }
             return;
@@ -93,15 +81,8 @@ unsafe fn wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) {
                 let x = _mm512_loadu_ps(block.as_ptr().add(x_off));
                 let y = _mm512_loadu_ps(block.as_ptr().add(y_off));
 
-                let mut a = _mm512_mul_ps(_mm512_add_ps(x, y), scalev);
-                let mut b = _mm512_mul_ps(_mm512_sub_ps(x, y), scalev);
-
-                if !F {
-                    let sx = _mm512_loadu_si512(signs.as_ptr().add(x_off) as *const __m512i);
-                    let sy = _mm512_loadu_si512(signs.as_ptr().add(y_off) as *const __m512i);
-                    a = _mm512_castsi512_ps(_mm512_xor_si512(_mm512_castps_si512(a), sx));
-                    b = _mm512_castsi512_ps(_mm512_xor_si512(_mm512_castps_si512(b), sy));
-                }
+                let a = _mm512_mul_ps(_mm512_add_ps(x, y), scalev);
+                let b = _mm512_mul_ps(_mm512_sub_ps(x, y), scalev);
 
                 _mm512_storeu_ps(block.as_mut_ptr().add(x_off), a);
                 _mm512_storeu_ps(block.as_mut_ptr().add(y_off), b);
@@ -112,9 +93,9 @@ unsafe fn wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) {
 
 /// Initial base Walsh-Hadamard Transform over a fixed size block.
 ///
-/// This includes the sign flips that are needed before the operation begins if `F` is true.
+/// This includes the sign flips that are applied before the operation begins.
 #[target_feature(enable = "avx512f")]
-unsafe fn wht_fixed_block64<const F: bool>(block: &mut [f32; 64], signs: &[u32; 64]) {
+unsafe fn wht_fixed_block64(block: &mut [f32; 64], signs: &[u32; 64]) {
     unsafe {
         // Lane-swap index vectors for the intra-register butterfly stages (h = 1, 2, 4, 8):
         // idx_h reads lane `i ^ h` of the register.
@@ -123,10 +104,10 @@ unsafe fn wht_fixed_block64<const F: bool>(block: &mut [f32; 64], signs: &[u32; 
         let idx4 = _mm512_set_epi32(11, 10, 9, 8, 15, 14, 13, 12, 3, 2, 1, 0, 7, 6, 5, 4);
         let idx8 = _mm512_set_epi32(7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8);
 
-        let mut r0 = load16::<F>(block.as_ptr(), signs.as_ptr(), 0);
-        let mut r1 = load16::<F>(block.as_ptr(), signs.as_ptr(), 16);
-        let mut r2 = load16::<F>(block.as_ptr(), signs.as_ptr(), 32);
-        let mut r3 = load16::<F>(block.as_ptr(), signs.as_ptr(), 48);
+        let mut r0 = load16(block.as_ptr(), signs.as_ptr(), 0);
+        let mut r1 = load16(block.as_ptr(), signs.as_ptr(), 16);
+        let mut r2 = load16(block.as_ptr(), signs.as_ptr(), 32);
+        let mut r3 = load16(block.as_ptr(), signs.as_ptr(), 48);
 
         // Perform butterfly rotation steps within each register for strides 1, 2, 4, and 8.
         r0 = butterfly16(r0, idx1, idx2, idx4, idx8);
@@ -149,17 +130,13 @@ unsafe fn wht_fixed_block64<const F: bool>(block: &mut [f32; 64], signs: &[u32; 
     }
 }
 
-/// Load 16 entries at a time, optionally flipping signs if F is true.
+/// Load 16 entries at a time, flipping signs.
 #[target_feature(enable = "avx512f")]
-unsafe fn load16<const F: bool>(b: *const f32, s: *const u32, off: usize) -> __m512 {
+unsafe fn load16(b: *const f32, s: *const u32, off: usize) -> __m512 {
     unsafe {
         let r = _mm512_loadu_ps(b.add(off));
-        if F {
-            let sv = _mm512_loadu_si512(s.add(off) as *const __m512i);
-            _mm512_castsi512_ps(_mm512_xor_si512(_mm512_castps_si512(r), sv))
-        } else {
-            r
-        }
+        let sv = _mm512_loadu_si512(s.add(off) as *const __m512i);
+        _mm512_castsi512_ps(_mm512_xor_si512(_mm512_castps_si512(r), sv))
     }
 }
 
@@ -199,14 +176,14 @@ unsafe fn butterfly_lanes(x: __m512, idx: __m512i, mask: __mmask16) -> __m512 {
 /// The `avx` CPU feature must be available, e.g. verified with `is_x86_feature_detected!("avx")`
 /// before calling this function.
 #[target_feature(enable = "avx")]
-pub unsafe fn avx_walsh_hadamard_transform<const F: bool>(v: &mut [f32], signs: &[u32]) {
+pub unsafe fn avx_walsh_hadamard_transform(v: &mut [f32], signs: &[u32]) {
     assert!(
         v.len().is_power_of_two(),
         "Hadamard transform requires power of 2 length"
     );
     assert_eq!(v.len(), signs.len());
     if v.len() < 64 {
-        return super::scalar::walsh_hadamard_transform::<F>(v, signs);
+        return super::scalar::walsh_hadamard_transform(v, signs);
     }
 
     // Perform the early strides of the block transformation together in 64 dimension chunks
@@ -214,24 +191,18 @@ pub unsafe fn avx_walsh_hadamard_transform<const F: bool>(v: &mut [f32], signs: 
     // entries, so there will be no tail entries.
     let blocks = v.as_chunks_mut::<64>().0;
     let sblocks = signs.as_chunks::<64>().0;
-    if F {
-        for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
-            unsafe { avx_wht_fixed_block64::<true>(b, s) };
-        }
-    } else {
-        for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
-            unsafe { avx_wht_fixed_block64::<false>(b, s) };
-        }
+    for (b, s) in blocks.iter_mut().zip(sblocks.iter()) {
+        unsafe { avx_wht_fixed_block64(b, s) };
     }
     // Continue butterfly transformation at block size and beyond.
-    unsafe { avx_wht_block_from64::<F>(v, signs) };
+    unsafe { avx_wht_block_from64(v) };
 }
 
 /// Continue the butterfly transformation for strides 64 and beyond, fusing the final stride
-/// with normalization (and the backward sign flip) so the whole block is only touched once
-/// more after `avx_wht_fixed_block64`.
+/// with normalization so the whole block is only touched once more after
+/// `avx_wht_fixed_block64`.
 #[target_feature(enable = "avx")]
-unsafe fn avx_wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) {
+unsafe fn avx_wht_block_from64(block: &mut [f32]) {
     unsafe {
         let n = block.len();
         assert!(
@@ -243,14 +214,10 @@ unsafe fn avx_wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) 
 
         if n == 64 {
             // The base 64-wide transform already completed every stride; there is no further
-            // butterfly stage to fuse the normalization into, so just scale (and sign-flip for
-            // backward) in place.
+            // butterfly stage to fuse the normalization into, so just scale in place.
             for i in (0..n).step_by(8) {
                 let x = _mm256_loadu_ps(block.as_ptr().add(i));
-                let mut v = _mm256_mul_ps(x, scalev);
-                if !F {
-                    v = _mm256_xor_ps(v, _mm256_loadu_ps(signs.as_ptr().add(i) as *const f32));
-                }
+                let v = _mm256_mul_ps(x, scalev);
                 _mm256_storeu_ps(block.as_mut_ptr().add(i), v);
             }
             return;
@@ -278,13 +245,8 @@ unsafe fn avx_wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) 
                 let x = _mm256_loadu_ps(block.as_ptr().add(x_off));
                 let y = _mm256_loadu_ps(block.as_ptr().add(y_off));
 
-                let mut a = _mm256_mul_ps(_mm256_add_ps(x, y), scalev);
-                let mut b = _mm256_mul_ps(_mm256_sub_ps(x, y), scalev);
-
-                if !F {
-                    a = _mm256_xor_ps(a, _mm256_loadu_ps(signs.as_ptr().add(x_off) as *const f32));
-                    b = _mm256_xor_ps(b, _mm256_loadu_ps(signs.as_ptr().add(y_off) as *const f32));
-                }
+                let a = _mm256_mul_ps(_mm256_add_ps(x, y), scalev);
+                let b = _mm256_mul_ps(_mm256_sub_ps(x, y), scalev);
 
                 _mm256_storeu_ps(block.as_mut_ptr().add(x_off), a);
                 _mm256_storeu_ps(block.as_mut_ptr().add(y_off), b);
@@ -296,19 +258,19 @@ unsafe fn avx_wht_block_from64<const F: bool>(block: &mut [f32], signs: &[u32]) 
 /// Initial base Walsh-Hadamard Transform over a fixed size block of 64 dimensions, held in 8
 /// AVX registers.
 ///
-/// This includes the sign flips that are needed before the operation begins if `F` is true.
+/// This includes the sign flips that are applied before the operation begins.
 #[target_feature(enable = "avx")]
-unsafe fn avx_wht_fixed_block64<const F: bool>(block: &mut [f32; 64], signs: &[u32; 64]) {
+unsafe fn avx_wht_fixed_block64(block: &mut [f32; 64], signs: &[u32; 64]) {
     unsafe {
         let mut r = [
-            avx_load8::<F>(block.as_ptr(), signs.as_ptr(), 0),
-            avx_load8::<F>(block.as_ptr(), signs.as_ptr(), 8),
-            avx_load8::<F>(block.as_ptr(), signs.as_ptr(), 16),
-            avx_load8::<F>(block.as_ptr(), signs.as_ptr(), 24),
-            avx_load8::<F>(block.as_ptr(), signs.as_ptr(), 32),
-            avx_load8::<F>(block.as_ptr(), signs.as_ptr(), 40),
-            avx_load8::<F>(block.as_ptr(), signs.as_ptr(), 48),
-            avx_load8::<F>(block.as_ptr(), signs.as_ptr(), 56),
+            avx_load8(block.as_ptr(), signs.as_ptr(), 0),
+            avx_load8(block.as_ptr(), signs.as_ptr(), 8),
+            avx_load8(block.as_ptr(), signs.as_ptr(), 16),
+            avx_load8(block.as_ptr(), signs.as_ptr(), 24),
+            avx_load8(block.as_ptr(), signs.as_ptr(), 32),
+            avx_load8(block.as_ptr(), signs.as_ptr(), 40),
+            avx_load8(block.as_ptr(), signs.as_ptr(), 48),
+            avx_load8(block.as_ptr(), signs.as_ptr(), 56),
         ];
 
         // Strides 1, 2, and 4 are butterflies within each register's 8 lanes.
@@ -336,16 +298,12 @@ unsafe fn avx_wht_fixed_block64<const F: bool>(block: &mut [f32; 64], signs: &[u
     }
 }
 
-/// Load 8 entries at a time, optionally flipping signs if F is true.
+/// Load 8 entries at a time, flipping signs.
 #[target_feature(enable = "avx")]
-unsafe fn avx_load8<const F: bool>(b: *const f32, s: *const u32, off: usize) -> __m256 {
+unsafe fn avx_load8(b: *const f32, s: *const u32, off: usize) -> __m256 {
     unsafe {
         let r = _mm256_loadu_ps(b.add(off));
-        if F {
-            _mm256_xor_ps(r, _mm256_loadu_ps(s.add(off) as *const f32))
-        } else {
-            r
-        }
+        _mm256_xor_ps(r, _mm256_loadu_ps(s.add(off) as *const f32))
     }
 }
 

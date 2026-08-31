@@ -35,8 +35,8 @@ pub fn rotate(
     let mut narrowed = vec![f16::ZERO; vectors.elem_stride()];
     for i in 0..vectors.len() {
         vectors[i].convert_to_f32_slice(&mut widened);
-        let rotated = rotator.forward(&widened);
-        narrowed.convert_from_f32_slice(&rotated);
+        rotator.rotate(&mut widened);
+        narrowed.convert_from_f32_slice(&widened);
         for &x in narrowed.iter() {
             out.write_all(&x.to_le_bytes())?;
         }

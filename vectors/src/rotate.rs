@@ -6,7 +6,7 @@ mod x86_64;
 
 use std::ops::Range;
 
-use rand::{Rng, RngExt, SeedableRng, seq::SliceRandom};
+use rand::{Rng, RngExt, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 /// Implementation of the Walsh-Hadamard transform used to rotate vectors.
@@ -64,23 +64,20 @@ impl Kernel {
     /// Walsh-Hadamard Transform vector `v` with `signs` random sign flips.
     ///
     /// `signs` are expected to contain 0 or 1 << 31 and will be XORed against floating point values to
-    /// flip the sign.
-    ///
-    /// `F` is true if this is a forward transform and false if this is a backward transform.
-    /// This determines whether the signs are applied before or after the butterfly transforms.
+    /// flip the sign. Sign flips are applied before the butterfly transforms.
     ///
     /// *Panics* if `v.len()` is not a power of two, or if `v.len() != signs.len()`
-    pub fn walsh_hadamard_transform<const F: bool>(&self, v: &mut [f32], signs: &[u32]) {
+    pub fn walsh_hadamard_transform(&self, v: &mut [f32], signs: &[u32]) {
         match self {
-            Self::Scalar => scalar::walsh_hadamard_transform::<F>(v, signs),
+            Self::Scalar => scalar::walsh_hadamard_transform(v, signs),
             #[cfg(target_arch = "aarch64")]
-            Self::Neon => aarch64::neon_walsh_hadamard_transform::<F>(v, signs),
+            Self::Neon => aarch64::neon_walsh_hadamard_transform(v, signs),
             // Safety: these are only constructed after the matching `is_x86_feature_detected!`
             // check succeeded, see `Kernel::all` above.
             #[cfg(target_arch = "x86_64")]
-            Self::Avx512 => unsafe { x86_64::avx512_walsh_hadamard_transform::<F>(v, signs) },
+            Self::Avx512 => unsafe { x86_64::avx512_walsh_hadamard_transform(v, signs) },
             #[cfg(target_arch = "x86_64")]
-            Self::Avx => unsafe { x86_64::avx_walsh_hadamard_transform::<F>(v, signs) },
+            Self::Avx => unsafe { x86_64::avx_walsh_hadamard_transform(v, signs) },
         }
     }
 }
@@ -103,35 +100,33 @@ impl std::fmt::Display for Kernel {
     }
 }
 
-/// Random shuffle of the vector: forward (encode) and backward (decode).
+/// Random in-place shuffle of the vector.
 ///
 /// This is necessary when vector size is not a power of two since we will only shuffle within
 /// power of two sized blocks.
+///
+/// The permutation is stored as the swap log of a Fisher-Yates pass over `0..dims`: `swaps[i]`
+/// is the partner index that position `i` was exchanged with. Replaying `v.swap(i, swaps[i])`
+/// for `i` in `0..dims` reproduces the permutation in place with no scratch buffer; replaying
+/// the swaps in reverse would invert it.
 struct Shuffle {
-    forward: Vec<u32>,
-    backward: Vec<u32>,
+    swaps: Vec<u32>,
 }
 
 impl Shuffle {
     fn new(dims: usize, rng: &mut impl Rng) -> Self {
-        let mut forward = (0..dims as u32).collect::<Vec<u32>>();
-        forward.shuffle(rng);
-        let mut backward = vec![0; dims];
-        for (i, &j) in forward.iter().enumerate() {
-            backward[j as usize] = i as u32;
-        }
-        Self { forward, backward }
+        // Fisher-Yates from low to high, recording each position's swap partner. Drawing from
+        // `i..dims` (rather than the textbook `0..=i` high-to-low) keeps `apply` a simple
+        // forward loop while remaining uniform over all permutations.
+        let swaps = (0..dims)
+            .map(|i| rng.random_range(i..dims) as u32)
+            .collect();
+        Self { swaps }
     }
 
-    fn forward(&self, unpermuted: &[f32], permuted: &mut [f32]) {
-        for (&i, o) in self.forward.iter().zip(permuted.iter_mut()) {
-            *o = unpermuted[i as usize];
-        }
-    }
-
-    fn backward(&self, permuted: &[f32], unpermuted: &mut [f32]) {
-        for (&i, o) in self.backward.iter().zip(unpermuted.iter_mut()) {
-            *o = permuted[i as usize];
+    fn apply(&self, v: &mut [f32]) {
+        for (i, &j) in self.swaps.iter().enumerate() {
+            v.swap(i, j as usize);
         }
     }
 }
@@ -199,43 +194,25 @@ impl Rotator {
         }
     }
 
-    /// Rotate forward for quantization.
+    /// Rotate `v` in place for quantization.
     ///
     /// This applies sign flips, then permutation, then block diagonal Hadamard transforms.
-    pub fn forward(&self, v: &[f32]) -> Vec<f32> {
-        let mut rotated = if let Some(p) = self.shuffle.as_ref() {
-            let mut r = vec![0.0f32; v.len()];
-            p.forward(v, &mut r);
-            r
-        } else {
-            v.to_vec()
-        };
+    pub fn rotate(&self, v: &mut [f32]) {
+        if let Some(p) = self.shuffle.as_ref() {
+            p.apply(v);
+        }
 
         for block in self.blocks.iter() {
             self.kernel
-                .walsh_hadamard_transform::<true>(&mut rotated[block.dims.clone()], &block.sign);
+                .walsh_hadamard_transform(&mut v[block.dims.clone()], &block.sign);
         }
-
-        rotated
     }
 
-    /// Rotate backward for dequantization.
-    ///
-    /// Thie applies block diagonal Hadamard transforms, then inverse permutation, then sign flips.
-    pub fn backward(&self, v: &[f32]) -> Vec<f32> {
-        let mut tmp = v.to_vec();
-        for block in self.blocks.iter() {
-            self.kernel
-                .walsh_hadamard_transform::<false>(&mut tmp[block.dims.clone()], &block.sign);
-        }
-
-        if let Some(p) = self.shuffle.as_ref() {
-            let mut r = tmp.clone();
-            p.backward(&tmp, &mut r);
-            r
-        } else {
-            tmp
-        }
+    /// Copy `v` and [`rotate`](Self::rotate) the copy for quantization.
+    pub fn rotate_copy(&self, v: impl AsRef<[f32]>) -> Vec<f32> {
+        let mut rotated = v.as_ref().to_vec();
+        self.rotate(&mut rotated);
+        rotated
     }
 }
 
@@ -260,51 +237,10 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_power_of_two() {
-        let rotator = Rotator::new(128, 42);
-        let v = make_vec(128, 1);
-        let rotated = rotator.forward(&v);
-        let recovered = rotator.backward(&rotated);
-        assert!(
-            v.iter()
-                .zip(&recovered)
-                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5))
-        );
-    }
-
-    #[test]
-    fn round_trip_non_power_of_two() {
-        // 192 = 128 + 64, so two blocks
-        let rotator = Rotator::new(192, 42);
-        let v = make_vec(192, 2);
-        let rotated = rotator.forward(&v);
-        let recovered = rotator.backward(&rotated);
-        assert!(
-            v.iter()
-                .zip(&recovered)
-                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5))
-        );
-    }
-
-    #[test]
-    fn round_trip_arbitrary_dims() {
-        // 100 = 64 + 32 + 4, so three blocks
-        let rotator = Rotator::new(100, 99);
-        let v = make_vec(100, 3);
-        let rotated = rotator.forward(&v);
-        let recovered = rotator.backward(&rotated);
-        assert!(
-            v.iter()
-                .zip(&recovered)
-                .all(|(a, b)| abs_diff_eq!(a, b, epsilon = 1e-5))
-        );
-    }
-
-    #[test]
     fn preserves_l2_norm() {
         let rotator = Rotator::new(256, 7);
         let v = make_vec(256, 4);
-        let rotated = rotator.forward(&v);
+        let rotated = rotator.rotate_copy(&v);
         assert!(abs_diff_eq!(l2_norm(&v), l2_norm(&rotated), epsilon = 1e-4));
     }
 
@@ -313,24 +249,56 @@ mod tests {
         let rotator = Rotator::new(128, 13);
         let a = make_vec(128, 5);
         let b = make_vec(128, 6);
-        let ra = rotator.forward(&a);
-        let rb = rotator.forward(&b);
+        let ra = rotator.rotate_copy(&a);
+        let rb = rotator.rotate_copy(&b);
         assert!(abs_diff_eq!(dot(&a, &b), dot(&ra, &rb), epsilon = 1e-4));
+    }
+
+    #[test]
+    fn preserves_l2_norm_non_power_of_two() {
+        // 100 = 64 + 32 + 4, so the dimensions are shuffled before the block transforms.
+        let rotator = Rotator::new(100, 7);
+        let v = make_vec(100, 4);
+        let rotated = rotator.rotate_copy(&v);
+        assert!(abs_diff_eq!(l2_norm(&v), l2_norm(&rotated), epsilon = 1e-4));
+    }
+
+    #[test]
+    fn shuffle_apply_is_a_permutation() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        let shuffle = Shuffle::new(100, &mut rng);
+
+        let mut v: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        shuffle.apply(&mut v);
+
+        assert_ne!(
+            v,
+            (0..100).map(|i| i as f32).collect::<Vec<_>>(),
+            "not identity"
+        );
+
+        let mut sorted = v.clone();
+        sorted.sort_by(f32::total_cmp);
+        assert_eq!(
+            sorted,
+            (0..100).map(|i| i as f32).collect::<Vec<_>>(),
+            "every element appears exactly once"
+        );
     }
 
     #[test]
     fn deterministic_same_seed() {
         let v = make_vec(64, 10);
-        let r1 = Rotator::new(64, 123).forward(&v);
-        let r2 = Rotator::new(64, 123).forward(&v);
+        let r1 = Rotator::new(64, 123).rotate_copy(&v);
+        let r2 = Rotator::new(64, 123).rotate_copy(&v);
         assert_eq!(r1, r2, "same seed must produce identical results");
     }
 
     #[test]
     fn different_seeds_differ() {
         let v = make_vec(64, 11);
-        let r1 = Rotator::new(64, 1).forward(&v);
-        let r2 = Rotator::new(64, 2).forward(&v);
+        let r1 = Rotator::new(64, 1).rotate_copy(&v);
+        let r2 = Rotator::new(64, 2).rotate_copy(&v);
         assert_ne!(r1, r2, "different seeds should produce different rotations");
     }
 
@@ -362,8 +330,8 @@ mod tests {
         let mut v = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let signs = vec![0u32; v.len()];
         let original = v.clone();
-        Kernel::Scalar.walsh_hadamard_transform::<true>(&mut v, &signs);
-        Kernel::Scalar.walsh_hadamard_transform::<true>(&mut v, &signs);
+        Kernel::Scalar.walsh_hadamard_transform(&mut v, &signs);
+        Kernel::Scalar.walsh_hadamard_transform(&mut v, &signs);
         assert!(
             original
                 .iter()
@@ -391,8 +359,7 @@ mod tests {
 
     /// Change-detector test: any accelerated kernel (Neon, Avx512, ...) must produce bit-for-bit
     /// equivalent (within float epsilon) results to the scalar reference implementation, across
-    /// every block-size code path (below 64, exactly 64, and multiple 64-blocks) and both
-    /// transform directions.
+    /// every block-size code path (below 64, exactly 64, and multiple 64-blocks).
     #[test]
     fn accelerated_matches_scalar() {
         // If no accelerated kernel is available on this hardware there is nothing to compare.
@@ -402,25 +369,14 @@ mod tests {
                     let v = make_vec(dims, seed);
                     let signs = make_signs(dims, seed ^ 0xdead_beef);
 
-                    let mut forward_scalar = v.clone();
-                    let mut forward_accel = v.clone();
-                    Kernel::Scalar.walsh_hadamard_transform::<true>(&mut forward_scalar, &signs);
-                    accelerated.walsh_hadamard_transform::<true>(&mut forward_accel, &signs);
-                    for (i, (a, b)) in forward_scalar.iter().zip(&forward_accel).enumerate() {
+                    let mut scalar = v.clone();
+                    let mut accel = v.clone();
+                    Kernel::Scalar.walsh_hadamard_transform(&mut scalar, &signs);
+                    accelerated.walsh_hadamard_transform(&mut accel, &signs);
+                    for (i, (a, b)) in scalar.iter().zip(&accel).enumerate() {
                         assert!(
                             abs_diff_eq!(a, b, epsilon = 1e-4),
-                            "{accelerated} dims={dims} seed={seed} forward mismatch at {i}: scalar={a} accel={b}"
-                        );
-                    }
-
-                    let mut backward_scalar = forward_scalar.clone();
-                    let mut backward_accel = forward_accel.clone();
-                    Kernel::Scalar.walsh_hadamard_transform::<false>(&mut backward_scalar, &signs);
-                    accelerated.walsh_hadamard_transform::<false>(&mut backward_accel, &signs);
-                    for (i, (a, b)) in backward_scalar.iter().zip(&backward_accel).enumerate() {
-                        assert!(
-                            abs_diff_eq!(a, b, epsilon = 1e-4),
-                            "{accelerated} dims={dims} seed={seed} backward mismatch at {i}: scalar={a} accel={b}"
+                            "{accelerated} dims={dims} seed={seed} mismatch at {i}: scalar={a} accel={b}"
                         );
                     }
                 }

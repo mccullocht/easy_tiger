@@ -35,12 +35,10 @@ pub fn prepare_vector_in_place(
     center: Option<&[f32]>,
 ) {
     if let Some(rotator) = rotator {
-        // XXX rotator needs to operate in place.
-        vector.copy_from_slice(&rotator.forward(vector));
+        rotator.rotate(vector);
     }
 
     if l2_normalize {
-        // XXX l2_normalize() needs to operate in place.
         let norm = l2_norm(&*vector);
         if norm != 0.0 && norm != 1.0 {
             let norm_inv = norm.recip();
@@ -712,9 +710,10 @@ mod prepare_test {
         l2_normalize: bool,
         center: Option<&[f32]>,
     ) -> Vec<f32> {
-        let mut v = rotator
-            .map(|r| r.forward(vector))
-            .unwrap_or_else(|| vector.to_vec());
+        let mut v = vector.to_vec();
+        if let Some(r) = rotator {
+            r.rotate(&mut v);
+        }
         if l2_normalize {
             let norm = l2_norm(&v);
             for d in v.iter_mut() {

@@ -179,12 +179,7 @@ pub fn recall(
             let doc_f32 = doc_vectors[d].to_f32_vec();
             let center_idx = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
             let center = centers.as_ref().map(|cs| cs[center_idx].as_ref());
-            let doc = coder.encode(&vectors::prepare_vector(
-                &doc_f32,
-                None,
-                false,
-                center,
-            ));
+            let doc = coder.encode(&vectors::prepare_vector(&doc_f32, None, false, center));
             for (q, s) in query_scorers.iter().enumerate() {
                 let mut estimate = s[center_idx].estimated_distance(&doc);
                 estimate.error *= args.z_score;

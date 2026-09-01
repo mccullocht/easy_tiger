@@ -476,9 +476,7 @@ mod test {
         bias /= TRIALS as f64;
         mae /= TRIALS as f64;
         let coverage = covered as f64 / TRIALS as f64;
-        eprintln!(
-            "ASYM {similarity:?} centered bias={bias:.4} mae={mae:.4} cov={coverage:.4}"
-        );
+        eprintln!("ASYM {similarity:?} centered bias={bias:.4} mae={mae:.4} cov={coverage:.4}");
         assert!(bias.abs() < 0.03, "bias {bias} too large (mae {mae})");
         assert!(mae < 0.15, "mae {mae} too large (bias {bias})");
         assert!(coverage > 0.95, "Z=3 coverage {coverage} too low");

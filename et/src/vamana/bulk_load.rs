@@ -101,6 +101,9 @@ pub fn bulk_load(
     let limit = args.limit.unwrap_or(num_vectors);
 
     let centroid = if args.center {
+        // Mean of the input vectors, subtracted from each vector at ingest as the quantization
+        // center. Callers that want normalized vectors are expected to provide them already
+        // normalized, in which case this is the mean of the normalized vectors.
         let mut sum = vec![0.0f64; dimensions.get()];
         for v in vectors.iter().take(limit) {
             for (s, x) in sum.iter_mut().zip(v.iter()) {

@@ -20,6 +20,7 @@ use std::{
 };
 
 use crossbeam_skiplist::SkipSet;
+use half::slice::HalfFloatSliceExt;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use rustix::io::Errno;
@@ -176,6 +177,7 @@ where
     /// Load nav and rerank vectors into tables.
     fn load_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let dim = self.index.config().dimensions.get();
+        let centroid = self.index.config().centroid.clone();
         let nav_coder = self.index.nav_table().new_coder();
         let mut nav_vector = vec![0u8; nav_coder.byte_len(dim)];
         let mut sum = vec![0.0; dim];
@@ -201,9 +203,10 @@ where
         };
 
         for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
-            for (&i, (o, s)) in v.iter().zip(vector_f32.iter_mut().zip(sum.iter_mut())) {
-                *o = i.to_f32();
-                *s += i.to_f64();
+            v.convert_to_f32_slice(&mut vector_f32);
+            vectors::prepare_vector_in_place(&mut vector_f32, None, false, centroid.as_deref());
+            for (d, s) in vector_f32.iter().zip(sum.iter_mut()) {
+                *s += *d as f64;
             }
             nav_coder.encode_to(&vector_f32, &mut nav_vector);
             if let Some(q) = quantized_vectors.as_mut() {
@@ -226,7 +229,9 @@ where
             )
             .unwrap()
         });
-        let centroid = sum
+        // `sum` accumulated the already-prepared vectors, so this mean is the entry-point
+        // reference in the same (prepared) space as every stored vector.
+        let mean = sum
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect::<Vec<_>>();
@@ -235,7 +240,7 @@ where
             .rerank_table()
             .unwrap_or(self.index.nav_table())
             .new_coder()
-            .encode(&centroid);
+            .encode(&mean);
         Ok(())
     }
 

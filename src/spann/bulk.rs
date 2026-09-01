@@ -105,10 +105,7 @@ pub fn load_postings(
         .collect();
     posting_keys.par_sort_unstable();
 
-    let coder = index
-        .config()
-        .posting_coder
-        .coder(index.head_config().config().similarity, None);
+    let coder = index.config().posting_coder.coder();
     // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
     // this will also allow us to parallelize IO.
     let mut encoded_buffer =
@@ -138,11 +135,7 @@ pub fn load_raw_vectors(
 ) -> Result<()> {
     let mut bulk_cursor =
         connection.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
-    let coder = index
-        .config()
-        .rerank_format
-        .unwrap()
-        .coder(index.head_config().config().similarity, None);
+    let coder = index.config().rerank_format.unwrap().coder();
     let mut encoded = vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())];
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {
         coder.encode_to(vector, &mut encoded);

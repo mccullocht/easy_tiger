@@ -221,7 +221,9 @@ pub trait GraphVectorStore {
     /// Return the format that vectors in the store are encoded in.
     fn format(&self) -> F32VectorCoding;
 
-    /// Return the centering vector used for quantization, if any.
+    /// Return the center vector that stored vectors were made residual against before encoding, if
+    /// any. Callers preparing a vector for this store (or a query against it) must apply the same
+    /// centering via [`vectors::prepare_vector`].
     fn centroid(&self) -> Option<&[f32]>;
 
     /// Create a new distance function that operates over vectors on this table.
@@ -231,8 +233,7 @@ pub trait GraphVectorStore {
 
     /// Create a new coder for vectors of this type.
     fn new_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.format()
-            .coder(self.similarity(), self.centroid().map(|c| c.to_vec()))
+        self.format().coder()
     }
 
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.

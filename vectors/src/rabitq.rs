@@ -312,13 +312,6 @@ mod test {
             .collect()
     }
 
-    fn subtract_center(v: &[f32], center: Option<&[f32]>) -> Vec<f32> {
-        match center {
-            Some(c) => v.iter().zip(c).map(|(x, y)| x - y).collect(),
-            None => v.to_vec(),
-        }
-    }
-
     fn squared_l2(a: &[f32], b: &[f32]) -> f64 {
         a.iter()
             .zip(b)
@@ -329,15 +322,11 @@ mod test {
             .sum()
     }
 
-    /// The distance the codec is trying to estimate, computed with an *exact* inner product. The
-    /// gap between this and [`Distance`] / [`QueryDistance`] output is pure quantization error.
-    fn exact_distance(
-        similarity: VectorSimilarity,
-        a: &[f32],
-        b: &[f32],
-        center: Option<&[f32]>,
-    ) -> f64 {
-        let l2 = squared_l2(&subtract_center(a, center), &subtract_center(b, center));
+    /// The distance the codec is trying to estimate between two already-prepared vectors, computed
+    /// with an *exact* inner product. The gap between this and [`Distance`] / [`QueryDistance`]
+    /// output is pure quantization error.
+    fn exact_distance(similarity: VectorSimilarity, a: &[f32], b: &[f32]) -> f64 {
+        let l2 = squared_l2(a, b);
         match similarity {
             VectorSimilarity::Euclidean => l2,
             VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2).clamp(0.0, 1.0),
@@ -349,21 +338,6 @@ mod test {
     fn test_center(dim: usize) -> Vec<f32> {
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xce17e5);
         (0..dim).map(|_| 0.35 * gauss(&mut rng) + 0.2).collect()
-    }
-
-    fn maybe_normalize(similarity: VectorSimilarity, v: Vec<f32>) -> Vec<f32> {
-        // Cosine/Dot encoders assume the input vector is already normalized.
-        if similarity == VectorSimilarity::Euclidean {
-            v
-        } else {
-            float32::l2_normalize(v).0.into_owned()
-        }
-    }
-
-    /// Mirror [`crate::prepare_vector`]: normalize (for angular) then subtract the center. The coder
-    /// and query distance no longer center, so callers hand them already-prepared vectors.
-    fn prepare(similarity: VectorSimilarity, v: Vec<f32>, center: Option<&[f32]>) -> Vec<f32> {
-        subtract_center(&maybe_normalize(similarity, v), center)
     }
 
     const DIM: usize = 128;
@@ -381,7 +355,8 @@ mod test {
             let magnitude = 1.0 / (DIM as f32).sqrt();
             for _ in 0..64 {
                 let v = gauss_vec(&mut rng, DIM);
-                let centered = subtract_center(&v, center.as_deref());
+                // gauss vectors stand in for a Euclidean dataset: prepare = subtract the center.
+                let centered = crate::prepare_vector(&v, None, false, center.as_deref());
                 let encoded = coder.encode(&centered);
                 assert_eq!(encoded.len(), coder.byte_len(DIM));
 
@@ -419,12 +394,15 @@ mod test {
 
         let mut bias = 0.0f64;
         let mut mae = 0.0f64;
+        let l2_normalize = similarity.l2_normalize();
         for _ in 0..TRIALS {
             let rho: f32 = rng.random_range(0.0f32..1.0);
             let raw_a = gauss_vec(&mut rng, DIM);
-            let raw_b = correlated(&mut rng, &maybe_normalize(similarity, raw_a.clone()), rho);
-            let a = prepare(similarity, raw_a, center.as_deref());
-            let b = prepare(similarity, raw_b, center.as_deref());
+            // `correlated` needs a unit-length base for its rho-cosine to hold.
+            let base_a = crate::prepare_vector(&raw_a, None, l2_normalize, None);
+            let raw_b = correlated(&mut rng, &base_a, rho);
+            let a = crate::prepare_vector(&raw_a, None, l2_normalize, center.as_deref());
+            let b = crate::prepare_vector(&raw_b, None, l2_normalize, center.as_deref());
 
             let ea = coder.encode(&a);
             let eb = coder.encode(&b);
@@ -434,7 +412,7 @@ mod test {
             let scale = 2.0 * ha.l2_norm as f64 * hb.l2_norm as f64;
 
             let est = dist.distance(&ea, &eb);
-            let exact = exact_distance(similarity, &a, &b, None);
+            let exact = exact_distance(similarity, &a, &b);
             bias += (est - exact) / scale;
             mae += ((est - exact) / scale).abs();
         }
@@ -475,12 +453,15 @@ mod test {
         let mut bias = 0.0f64;
         let mut mae = 0.0f64;
         let mut covered = 0usize;
+        let l2_normalize = similarity.l2_normalize();
         for _ in 0..TRIALS {
             let rho: f32 = rng.random_range(0.0f32..1.0);
-            let raw_q = maybe_normalize(similarity, gauss_vec(&mut rng, DIM));
-            let raw_d = maybe_normalize(similarity, correlated(&mut rng, &raw_q, rho));
-            let q = subtract_center(&raw_q, center.as_deref());
-            let d = subtract_center(&raw_d, center.as_deref());
+            let raw_q = gauss_vec(&mut rng, DIM);
+            // `correlated` needs a unit-length base for its rho-cosine to hold.
+            let base_q = crate::prepare_vector(&raw_q, None, l2_normalize, None);
+            let raw_d = correlated(&mut rng, &base_q, rho);
+            let q = crate::prepare_vector(&raw_q, None, l2_normalize, center.as_deref());
+            let d = crate::prepare_vector(&raw_d, None, l2_normalize, center.as_deref());
 
             let qd = QueryDistance::new(similarity, &q);
             let ed = coder.encode(&d);
@@ -488,7 +469,7 @@ mod test {
             let qnorm = float32::l2_norm(&q) as f64;
             let scale = 2.0 * qnorm * hd.l2_norm as f64;
 
-            let exact = exact_distance(similarity, &q, &d, None);
+            let exact = exact_distance(similarity, &q, &d);
             let est = qd.distance(&ed);
             bias += (est - exact) / scale;
             mae += ((est - exact) / scale).abs();

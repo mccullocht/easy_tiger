@@ -80,10 +80,7 @@ macro_rules! tlvq_coder_test {
                 Centering::Uncentered => None,
                 Centering::Centered => Some(TEST_CENTER.as_ref()),
             };
-            let input: Vec<f32> = match center {
-                None => TEST_VECTOR.to_vec(),
-                Some(c) => TEST_VECTOR.iter().zip(c).map(|(v, c)| v - c).collect(),
-            };
+            let input = crate::prepare_vector(&TEST_VECTOR, None, false, center);
             let coder = <$coder>::new();
             let encoded = coder.encode(&input);
             assert_abs_diff_eq!(
@@ -426,15 +423,10 @@ fn check_lvq_distance(
     // translation that cancels in the squared-Euclidean term the codec estimates.
     let f32_dist = sim.distance_f32().distance_f32(&a, &b);
 
-    // The coder no longer centers; hand it the residual against `center`, if any.
-    let subtract_center = |v: &[f32]| -> Vec<f32> {
-        match center {
-            Some(c) => v.iter().zip(c).map(|(x, y)| x - y).collect(),
-            None => v.to_vec(),
-        }
-    };
-    let a = subtract_center(&a);
-    let b = subtract_center(&b);
+    // The coder no longer centers; hand it the residual against `center`, if any. Normalization
+    // already happened above (Dot), so this prepare only subtracts the center.
+    let a = crate::prepare_vector(&a, None, false, center);
+    let b = crate::prepare_vector(&b, None, false, center);
 
     let coder = format.coder();
     let enc_a = coder.encode(&a);

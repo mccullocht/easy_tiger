@@ -191,6 +191,14 @@ impl Searcher {
     ) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 
+        // Normalize the query once for the head search, posting scoring, and reranking.
+        let query: &[f32] = &vectors::prepare_vector(
+            query,
+            None,
+            reader.index().head_config().config().similarity.l2_normalize(),
+            None,
+        );
+
         let mut centroids = self.head_searcher.search(query, reader.head())?;
         self.stats.head = self.head_searcher.stats();
         if centroids.is_empty() {

@@ -592,21 +592,16 @@ mod tests {
     }
 
     #[test]
-    fn encode_f32_cosine_normalizes_stored_vector() {
+    fn encode_f32_stores_vector_verbatim() {
+        // The coder no longer normalizes on encode; callers are responsible for preparing the
+        // vector (see `vectors::prepare_vector`). The stored vector must match the input exactly.
         let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Cosine, None);
-        // l2 norm = 5.0 → after normalization: [0.6, 0.8, 0.0, 0.0]
         let input = vec![(1i64, vec![3.0f32, 4.0, 0.0, 0.0])];
         let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
         let block = PostingBlock::new(&result, coder.byte_len(4)).unwrap();
         let (_, vec_bytes) = block.iter().next().unwrap();
         let decoded = decode_f32_vec(vec_bytes);
-        let norm_sq: f32 = decoded.iter().map(|x| x * x).sum();
-        assert!(
-            (norm_sq - 1.0).abs() < 1e-6,
-            "expected unit norm, got norm_sq={norm_sq}"
-        );
-        assert!((decoded[0] - 0.6).abs() < 1e-6, "decoded[0]={}", decoded[0]);
-        assert!((decoded[1] - 0.8).abs() < 1e-6, "decoded[1]={}", decoded[1]);
+        assert_eq!(decoded, vec![3.0f32, 4.0, 0.0, 0.0]);
     }
 
     #[test]

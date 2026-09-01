@@ -240,8 +240,8 @@ impl F32VectorCoding {
         center: Option<Vec<f32>>,
     ) -> Box<dyn F32VectorCoder> {
         match (self, similarity) {
-            (Self::F32, _) => Box::new(float32::VectorCoder::new(similarity)),
-            (Self::F16, _) => Box::new(float16::VectorCoder::new(similarity)),
+            (Self::F32, _) => Box::new(float32::VectorCoder::new()),
+            (Self::F16, _) => Box::new(float16::VectorCoder::new()),
             (Self::BinaryQuantized, _) => Box::new(binary::BinaryQuantizedVectorCoder),
             (Self::TLVQ1, _) => Box::new(lvq::TurboPrimaryCoder::<1>::new(similarity, center)),
             (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryCoder::<2>::new(similarity, center)),
@@ -292,10 +292,8 @@ impl F32VectorCoding {
             (F32VectorCoding::F32, _) => {
                 float32::new_query_vector_distance(similarity, query.into())
             }
-            (F32VectorCoding::F16, VectorSimilarity::Cosine) => Box::new(
-                float16::DotProductQueryDistance::new(float32::l2_normalize(query.into()).0),
-            ),
-            (F32VectorCoding::F16, VectorSimilarity::Dot) => {
+            (F32VectorCoding::F16, VectorSimilarity::Cosine)
+            | (F32VectorCoding::F16, VectorSimilarity::Dot) => {
                 Box::new(float16::DotProductQueryDistance::new(query.into()))
             }
             (F32VectorCoding::F16, VectorSimilarity::Euclidean) => {
@@ -579,8 +577,9 @@ mod test {
             similarity: VectorSimilarity,
             coder: &(impl F32VectorCoder + ?Sized),
         ) -> Self {
-            // Encoders for Dot similarity may assume that any input vector is normalized.
-            let vec = if similarity == VectorSimilarity::Dot {
+            // Coders and distance functions assume angular-similarity vectors are already l2
+            // normalized by the caller (see `prepare_vector`).
+            let vec = if similarity.angular() {
                 l2_normalize(vec).0
             } else {
                 vec.into()

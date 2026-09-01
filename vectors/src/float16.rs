@@ -8,9 +8,7 @@ use std::{borrow::Cow, sync::OnceLock};
 
 use half::f16;
 
-use crate::{
-    F16VectorDistance, F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
-};
+use crate::{F16VectorDistance, F32VectorCoder, QueryVectorDistance, VectorDistance};
 
 #[derive(Debug, Copy, Clone)]
 enum Kernel {
@@ -47,16 +45,16 @@ impl Default for Kernel {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct VectorCoder(VectorSimilarity, Kernel);
+#[derive(Debug, Copy, Clone, Default)]
+pub struct VectorCoder(Kernel);
 
 impl VectorCoder {
-    pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity, Kernel::default())
+    pub fn new() -> Self {
+        Self(Kernel::default())
     }
 
     fn convert_and_encode(&self, vector: &[f32], scale: Option<f32>, out: &mut [u8]) {
-        match self.1 {
+        match self.0 {
             Kernel::Scalar => scalar::serialize_f16(vector, scale, out),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => unsafe { aarch64::serialize_f16(vector, scale, out) },
@@ -68,12 +66,7 @@ impl VectorCoder {
 
 impl F32VectorCoder for VectorCoder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let scale = if self.0.l2_normalize() {
-            Some(1.0 / crate::float32::l2_norm(vector))
-        } else {
-            None
-        };
-        self.convert_and_encode(vector, scale, out);
+        self.convert_and_encode(vector, None, out);
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -81,7 +74,7 @@ impl F32VectorCoder for VectorCoder {
     }
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
-        match self.1 {
+        match self.0 {
             Kernel::Scalar => scalar::deserialize_f16(encoded, out),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => unsafe { aarch64::deserialize_f16(encoded, out) },
@@ -192,36 +185,6 @@ impl VectorDistance for CosineDistance {
 impl F16VectorDistance for CosineDistance {
     fn distance_f16(&self, a: &[f16], b: &[f16]) -> f64 {
         self.distance(bytemuck::cast_slice(a), bytemuck::cast_slice(b))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct CosineQueryDistance<'a>(Cow<'a, [f32]>, Kernel);
-
-impl<'a> CosineQueryDistance<'a> {
-    pub fn new(query: Cow<'a, [f32]>) -> Self {
-        Self(crate::float32::l2_normalize(query).0, Kernel::default())
-    }
-}
-
-impl QueryVectorDistance for CosineQueryDistance<'_> {
-    fn distance(&self, vector: &[u8]) -> f64 {
-        let ab = match self.1 {
-            Kernel::Scalar => scalar::dot_f32_f16(&self.0, vector),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => unsafe { aarch64::dot_f32_f16(&self.0, vector) },
-            #[cfg(target_arch = "x86_64")]
-            Kernel::AvxF16c => unsafe { x86_64::dot_f32_f16(&self.0, vector) },
-        } as f64;
-        let bb = match self.1 {
-            Kernel::Scalar => scalar::dot_f16_f16(vector, vector),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => unsafe { aarch64::dot_f16_f16(vector, vector) },
-            #[cfg(target_arch = "x86_64")]
-            Kernel::AvxF16c => unsafe { x86_64::dot_f16_f16(vector, vector) },
-        } as f64;
-        let cos = ab / bb.sqrt();
-        (-cos + 1.0) / 2.0
     }
 }
 

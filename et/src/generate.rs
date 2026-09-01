@@ -45,7 +45,7 @@ pub fn generate(args: GenerateArgs) -> io::Result<()> {
         for x in &mut v {
             *x = StandardNormal.sample(&mut rng);
         }
-        v = vectors::float32::l2_normalize(v).0.into_owned();
+        vectors::prepare_vector_in_place(&mut v, None, true, None);
         v16.convert_from_f32_slice(&v);
         for &x in &v16 {
             out.write_all(&x.to_le_bytes())?;

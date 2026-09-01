@@ -176,6 +176,7 @@ where
     /// Load nav and rerank vectors into tables.
     fn load_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let dim = self.index.config().dimensions.get();
+        let l2_normalize = self.index.config().similarity.l2_normalize();
         let nav_coder = self.index.nav_table().new_coder();
         let mut nav_vector = vec![0u8; nav_coder.byte_len(dim)];
         let mut sum = vec![0.0; dim];
@@ -201,9 +202,12 @@ where
         };
 
         for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
-            for (&i, (o, s)) in v.iter().zip(vector_f32.iter_mut().zip(sum.iter_mut())) {
-                *o = i.to_f32();
-                *s += i.to_f64();
+            for (&d, o) in v.iter().zip(vector_f32.iter_mut()) {
+                *o = d.to_f32();
+            }
+            vectors::prepare_vector_in_place(&mut vector_f32, None, l2_normalize, None);
+            for (d, s) in vector_f32.iter().zip(sum.iter_mut()) {
+                *s += *d as f64;
             }
             nav_coder.encode_to(&vector_f32, &mut nav_vector);
             if let Some(q) = quantized_vectors.as_mut() {
@@ -226,10 +230,11 @@ where
             )
             .unwrap()
         });
-        let centroid = sum
+        let mut centroid = sum
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect::<Vec<_>>();
+        vectors::prepare_vector_in_place(&mut centroid, None, l2_normalize, None);
         self.centroid = self
             .index
             .rerank_table()

@@ -9,6 +9,7 @@ use easy_tiger::{
         wt::TableGraphVectorIndex,
     },
 };
+use half::slice::HalfFloatSliceExt;
 use vectors::{F32VectorCoding, VectorSimilarity, f16};
 use wt_mdb::Connection;
 
@@ -107,9 +108,7 @@ pub fn bulk_load(
         let mut sum = vec![0.0f64; dimensions.get()];
         let mut buf = vec![0.0f32; dimensions.get()];
         for v in vectors.iter().take(limit) {
-            for (o, x) in buf.iter_mut().zip(v.iter()) {
-                *o = x.to_f32();
-            }
+            v.convert_to_f32_slice(&mut buf);
             vectors::prepare_vector_in_place(&mut buf, None, l2_normalize, None);
             for (s, x) in sum.iter_mut().zip(buf.iter()) {
                 *s += *x as f64;

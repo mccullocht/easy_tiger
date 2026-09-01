@@ -2,7 +2,6 @@ use std::io;
 
 use clap::Args;
 use easy_tiger::input::VectorStore;
-use half::slice::HalfFloatSliceExt;
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 use vectors::{F32VectorCoding, f16};
@@ -34,10 +33,7 @@ pub fn loss(
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "loss"))
         .map(|i| {
-            let mut v = vec![0.0f32; vectors.elem_stride()];
-            vectors[i].convert_to_f32_slice(&mut v);
-            // The coder no longer centers or normalizes; measure loss on the prepared vector.
-            let v = vectors::prepare_vector(&v, None, false, mean.as_deref());
+            let v = vectors::prepare_vector_from_f16(&vectors[i], None, false, mean.as_deref());
             let encoded = coder.encode(&v);
             let q = coder.decode(&encoded);
             let (abs_error, sq_error, sq_magnitude) = v

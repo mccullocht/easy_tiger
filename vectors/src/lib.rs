@@ -107,10 +107,12 @@ pub enum VectorSimilarity {
     /// True euclidean distance is the square root of this calculation, but computing the square
     /// root is expensive and would not alter the order of results.
     Euclidean,
-    /// Dot product distance.
+    /// Dot product distance -- cosine similarity over unit normalized vectors.
     ///
-    /// Over l2-normalized vectors this is cosine distance in [0.0, 1.0]. The distance functions
-    /// assume inputs are already normalized when that is what the caller wants.
+    /// Produces a distance in [0,1] where lower values are better from a simple transform of a
+    /// cosine similarity score in [-1,1]. This requires that input vectors to encoding and
+    /// asymmetric distance are unit normalized, call [`prepare_vector()`] or similar with the
+    /// `l2_normalize` flag set.
     Dot,
 }
 
@@ -172,7 +174,7 @@ impl std::fmt::Display for VectorSimilarity {
 /// varying degrees of compression and fidelity in distance computation.
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum F32VectorCoding {
-    /// Little-endian f32 values, stored exactly as provided.
+    /// Little-endian f32 values.
     #[default]
     F32,
     /// Little-endian IEEE f16 encoding.
@@ -253,7 +255,6 @@ impl F32VectorCoding {
     ///
     /// The query must be prepared the same way the stored vectors were (normalization and, if the
     /// stored vectors were centered, the same centering) -- typically via [`prepare_vector`].
-    /// Centering is not applied here.
     pub fn query_distance_asymmetric<'a>(
         &self,
         similarity: VectorSimilarity,

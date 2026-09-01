@@ -249,8 +249,6 @@ impl GraphSearcher {
         options: Options<F>,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
-        // Prepare the query once (normalize for angular, then center): every downstream query
-        // distance consumes vectors that were stored the same way.
         let query: &[f32] = &vectors::prepare_vector(
             query,
             None,

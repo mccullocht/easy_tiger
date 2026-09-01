@@ -150,44 +150,6 @@ impl QueryVectorDistance for DotProductQueryDistance<'_> {
     }
 }
 
-static COS_DIST: OnceLock<CosineDistance> = OnceLock::new();
-
-#[derive(Debug, Copy, Clone, Default)]
-pub struct CosineDistance(Kernel);
-
-impl CosineDistance {
-    /// Returns a static instance of dot product distance.
-    pub fn get() -> &'static CosineDistance {
-        COS_DIST.get_or_init(CosineDistance::default)
-    }
-
-    fn dot(&self, a: &[u8], b: &[u8]) -> f32 {
-        match self.0 {
-            Kernel::Scalar => scalar::dot_f16_f16(a, b),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => unsafe { aarch64::dot_f16_f16(a, b) },
-            #[cfg(target_arch = "x86_64")]
-            Kernel::AvxF16c => unsafe { x86_64::dot_f16_f16(a, b) },
-        }
-    }
-}
-
-impl VectorDistance for CosineDistance {
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        let qd = self.dot(query, doc) as f64;
-        let qq = self.dot(query, query) as f64;
-        let dd = self.dot(doc, doc) as f64;
-        let cos = qd / (qq * dd).sqrt();
-        (-cos + 1.0) / 2.0
-    }
-}
-
-impl F16VectorDistance for CosineDistance {
-    fn distance_f16(&self, a: &[f16], b: &[f16]) -> f64 {
-        self.distance(bytemuck::cast_slice(a), bytemuck::cast_slice(b))
-    }
-}
-
 static L2_DIST: OnceLock<EuclideanDistance> = OnceLock::new();
 
 #[derive(Debug, Copy, Clone, Default)]

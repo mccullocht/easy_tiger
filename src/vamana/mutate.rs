@@ -276,13 +276,9 @@ fn insert_internal<F: FnMut(i64) -> bool>(
     assert_eq!(index.config().dimensions.get(), vector.len());
 
     // The graph search prepares the query itself, so hand it the raw vector. For encoding we need
-    // the prepared (normalized, then centered) form that matches every stored vector.
-    let prepared: &[f32] = &vectors::prepare_vector(
-        vector,
-        None,
-        index.config().similarity.l2_normalize(),
-        index.config().centroid.as_deref(),
-    );
+    // the centered form that matches every stored vector.
+    let prepared: &[f32] =
+        &vectors::prepare_vector(vector, None, false, index.config().centroid.as_deref());
 
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
     let mut candidate_edges = searcher.search_with_options(vector, options, index)?;

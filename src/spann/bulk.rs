@@ -105,7 +105,6 @@ pub fn load_postings(
         .collect();
     posting_keys.par_sort_unstable();
 
-    let similarity = index.head_config().config().similarity;
     let coder = index.config().posting_coder.coder();
     // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
     // this will also allow us to parallelize IO.
@@ -116,13 +115,7 @@ pub fn load_postings(
             .par_iter_mut()
             .zip(batch)
             .for_each(|(buf, &(_, record_id))| {
-                let vector = ::vectors::prepare_vector(
-                    &vectors[record_id as usize],
-                    None,
-                    similarity.l2_normalize(),
-                    None,
-                );
-                coder.encode_to(&vector, buf);
+                coder.encode_to(&vectors[record_id as usize], buf);
             });
         for (&(centroid_id, record_id), buf) in batch.iter().zip(encoded_buffer.iter()) {
             postings.insert(centroid_id, record_id, buf)?;
@@ -142,12 +135,10 @@ pub fn load_raw_vectors(
 ) -> Result<()> {
     let mut bulk_cursor =
         connection.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
-    let similarity = index.head_config().config().similarity;
     let coder = index.config().rerank_format.unwrap().coder();
     let mut encoded = vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())];
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {
-        let vector = ::vectors::prepare_vector(vector, None, similarity.l2_normalize(), None);
-        coder.encode_to(&vector, &mut encoded);
+        coder.encode_to(vector, &mut encoded);
         bulk_cursor.append(record_id as i64, &encoded)?;
         progress(1);
     }

@@ -84,7 +84,6 @@ pub fn distance_loss(
     };
 
     let coder = args.format.coder();
-    let l2_normalize = args.similarity.l2_normalize();
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
@@ -92,9 +91,9 @@ pub fn distance_loss(
             // NB: centering f32 only makes distance comparison less efficient.
             let f32_dist =
                 F32VectorCoding::F32.query_distance_asymmetric(args.similarity, query.clone());
-            // Prepare the query the same way the docs are encoded: rotate, normalize, center.
+            // Prepare the query the same way the docs are encoded: rotate then center.
             let query =
-                vectors::prepare_vector(&query, rotator.as_ref(), l2_normalize, center.as_deref());
+                vectors::prepare_vector(&query, rotator.as_ref(), false, center.as_deref());
             let qdist = if args.quantize_query {
                 args.format
                     .query_distance_symmetric(args.similarity, coder.encode(&query))
@@ -114,7 +113,7 @@ pub fn distance_loss(
             let doc_q = coder.encode(&vectors::prepare_vector(
                 &doc_f32,
                 rotator.as_ref(),
-                l2_normalize,
+                false,
                 center.as_deref(),
             ));
             let mut stats = DistanceLossStats::default();

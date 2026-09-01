@@ -157,7 +157,7 @@ impl VectorDistance for Distance {
         let l2_dist = qnorm.powi(2) + dnorm.powi(2) - 2.0 * qnorm * dnorm * ip;
         match self.similarity {
             VectorSimilarity::Euclidean => l2_dist,
-            VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
+            VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
         }
     }
 }
@@ -257,7 +257,7 @@ impl QueryDistance {
         let l2_dist = dnorm.powi(2) + qnorm.powi(2) - 2.0 * qnorm * dnorm * self.ip(header, doc);
         match self.similarity {
             VectorSimilarity::Euclidean => l2_dist,
-            VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
+            VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
         }
     }
 
@@ -283,7 +283,7 @@ impl QueryVectorDistance for QueryDistance {
             error: match self.similarity {
                 VectorSimilarity::Euclidean => l2_error,
                 // angular distance = l2_dist / 4
-                VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.25 * l2_error,
+                VectorSimilarity::Dot => 0.25 * l2_error,
             },
         }
     }
@@ -329,7 +329,7 @@ mod test {
         let l2 = squared_l2(a, b);
         match similarity {
             VectorSimilarity::Euclidean => l2,
-            VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2).clamp(0.0, 1.0),
+            VectorSimilarity::Dot => (0.25 * l2).clamp(0.0, 1.0),
         }
     }
 
@@ -391,7 +391,7 @@ mod test {
         rho: f32,
     ) -> (Vec<f32>, Vec<f32>) {
         let center = test_center(DIM);
-        let l2n = similarity.l2_normalize();
+        let l2n = similarity.angular();
         let raw_a = gauss_vec(rng, DIM);
         // `correlated` needs a unit-length base for its rho-cosine to hold.
         let base_a = crate::prepare_vector(&raw_a, None, true, None);

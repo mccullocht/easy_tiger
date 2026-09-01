@@ -145,7 +145,6 @@ pub fn recall(
     };
 
     let coder = args.format.coder();
-    let l2_normalize = args.similarity.l2_normalize();
     let num_centers = centers.as_ref().map_or(1, |cs| cs.len());
 
     let query_scorers = (0..query_limit)
@@ -156,7 +155,7 @@ pub fn recall(
             (0..num_centers)
                 .map(|ci| {
                     let center = centers.as_ref().map(|cs| cs[ci].as_ref());
-                    let query = vectors::prepare_vector(&query, None, l2_normalize, center);
+                    let query = vectors::prepare_vector(&query, None, false, center);
                     if args.quantize_query {
                         args.format
                             .query_distance_symmetric(args.similarity, coder.encode(&query))
@@ -183,7 +182,7 @@ pub fn recall(
             let doc = coder.encode(&vectors::prepare_vector(
                 &doc_f32,
                 None,
-                l2_normalize,
+                false,
                 center,
             ));
             for (q, s) in query_scorers.iter().enumerate() {

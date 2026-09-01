@@ -157,7 +157,7 @@ fn distance_from_dot_unnormalized(
     match similarity {
         VectorSimilarity::Euclidean => l2_dist,
         // Normalize angular distance into a value in [0,1] where lower is closer.
-        VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
+        VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
     }
 }
 
@@ -171,7 +171,7 @@ struct ErrorBoundTerms {
 impl ErrorBoundTerms {
     fn from_header(header: &PrimaryVectorHeader, dim: usize, similarity: VectorSimilarity) -> Self {
         let mult = match similarity {
-            VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
+            VectorSimilarity::Dot => 0.5,
             VectorSimilarity::Euclidean => 2.0,
         } / ((dim.max(2) - 1) as f32).sqrt();
         Self {

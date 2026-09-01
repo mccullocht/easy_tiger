@@ -379,13 +379,7 @@ fn insert_batch(
                 (txn_idx, searcher, result_scratch)
             },
             |(txn_idx, searcher, result_scratch), i| {
-                let vector = ::vectors::prepare_vector(
-                    &f32_vectors[i],
-                    None,
-                    index.head_config().config().similarity.l2_normalize(),
-                    None,
-                );
-                let vector = vector.as_slice();
+                let vector: &[f32] = &f32_vectors[i];
 
                 // Search for centroid
                 let mut candidates = searcher.search_with_options(

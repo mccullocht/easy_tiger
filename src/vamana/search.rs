@@ -249,12 +249,10 @@ impl GraphSearcher {
         options: Options<F>,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
-        let query: &[f32] = &vectors::prepare_vector(
-            query,
-            None,
-            reader.config().similarity.l2_normalize(),
-            reader.config().centroid.as_deref(),
-        );
+        // Center the query the same way the stored vectors were; every downstream query distance
+        // consumes it.
+        let query: &[f32] =
+            &vectors::prepare_vector(query, None, false, reader.config().centroid.as_deref());
         let nav_query = reader
             .config()
             .nav_format

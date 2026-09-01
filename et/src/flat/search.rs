@@ -134,15 +134,10 @@ fn search_phase<Q: Send + Sync>(
     let stats = query_indices
         .into_par_iter()
         .map(|qi| {
-            let query = vectors::prepare_vector(
-                &query_vectors[qi],
-                None,
-                config.similarity.l2_normalize(),
-                None,
-            );
+            let query: &[f32] = &query_vectors[qi];
             let distance_fn = config
                 .format
-                .query_distance_asymmetric(config.similarity, &query);
+                .query_distance_asymmetric(config.similarity, query);
             let txn = connection.begin_transaction(None)?;
             let cursor = txn.open_record_cursor(table_name)?;
 

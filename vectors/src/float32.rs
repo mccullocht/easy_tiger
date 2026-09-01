@@ -196,47 +196,6 @@ impl F32VectorDistance for DotProductDistance {
     }
 }
 
-static COS_DIST: OnceLock<CosineDistance> = OnceLock::new();
-
-#[derive(Debug, Default, Copy, Clone)]
-pub struct CosineDistance(DotProductDistance);
-
-impl CosineDistance {
-    /// Returns a static instance of cosine distance.
-    pub fn get() -> &'static CosineDistance {
-        COS_DIST.get_or_init(CosineDistance::default)
-    }
-}
-
-impl VectorDistance for CosineDistance {
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // Vectors are normalized during encoding so we can make this fast.
-        self.0.distance(query, doc)
-    }
-}
-
-impl F32VectorDistance for CosineDistance {
-    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
-        let ab = dot(
-            bytemuck::cast_slice(a),
-            bytemuck::cast_slice(b),
-            Some(self.0.0),
-        );
-        let aa = dot(
-            bytemuck::cast_slice(a),
-            bytemuck::cast_slice(a),
-            Some(self.0.0),
-        );
-        let bb = dot(
-            bytemuck::cast_slice(b),
-            bytemuck::cast_slice(b),
-            Some(self.0.0),
-        );
-        let cos = ab / (aa * bb).sqrt();
-        (-cos as f64 + 1.0) / 2.0
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct QueryVectorDistance<'a, D> {
     distance_fn: D,
@@ -261,9 +220,6 @@ pub fn new_query_vector_distance<'a>(
     query: Cow<'a, [f32]>,
 ) -> Box<dyn QueryVectorDistanceT + 'a> {
     match similarity {
-        VectorSimilarity::Cosine => {
-            Box::new(QueryVectorDistance::new(CosineDistance::default(), query))
-        }
         VectorSimilarity::Dot => Box::new(QueryVectorDistance::new(
             DotProductDistance::default(),
             query,

@@ -68,17 +68,7 @@ pub fn insert_vectors(
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
         let block = posting_block::encode_f32(
-            (batch_start..batch_end).map(|i| {
-                (
-                    i as i64,
-                    vectors::prepare_vector(
-                        &f32_vectors[i],
-                        None,
-                        config.similarity.l2_normalize(),
-                        None,
-                    ),
-                )
-            }),
+            (batch_start..batch_end).map(|i| (i as i64, &f32_vectors[i])),
             coder.as_ref(),
             config.dimensions.get(),
         );

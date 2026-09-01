@@ -97,6 +97,9 @@ pub fn prepare_vector_from_f16(
 }
 
 /// Functions used for to compute the distance between two vectors.
+///
+/// There is no dedicated cosine function: cosine distance is [`Self::Dot`] over l2-normalized
+/// vectors, and normalization is the caller's responsibility (see [`prepare_vector`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VectorSimilarity {
     /// Euclidean (l2) distance, squared.
@@ -106,18 +109,9 @@ pub enum VectorSimilarity {
     Euclidean,
     /// Dot product distance.
     ///
-    /// Assuming all input vectors are normalized this produces the same distance as `Cosine`.
-    /// If your vectors are already l2 normalized this will be _much_ faster than `Cosine`.
+    /// Over l2-normalized vectors this is cosine distance in [0.0, 1.0]. The distance functions
+    /// assume inputs are already normalized when that is what the caller wants.
     Dot,
-    /// Cosine (angular) distance.
-    ///
-    /// Vectors stored in an index will be l2 normalized to speed up distance computation so
-    /// egress vectors may not be identical to ingress vectors.
-    ///
-    /// If your vectors are already l2 normalized `Dot` will be _much_ faster.
-    ///
-    /// This function produces a distance in [0.0, 1.0]
-    Cosine,
 }
 
 impl VectorSimilarity {
@@ -126,7 +120,6 @@ impl VectorSimilarity {
         match self {
             Self::Euclidean => Box::new(float32::EuclideanDistance::default()),
             Self::Dot => Box::new(float32::DotProductDistance::default()),
-            Self::Cosine => Box::new(float32::CosineDistance::default()),
         }
     }
 
@@ -135,28 +128,17 @@ impl VectorSimilarity {
         match self {
             Self::Euclidean => Box::new(float16::EuclideanDistance::default()),
             Self::Dot => Box::new(float16::DotProductDistance::default()),
-            Self::Cosine => Box::new(float16::CosineDistance::default()),
         }
     }
 
-    /// Return true if vectors must be l2 normalized during encoding.
-    pub fn l2_normalize(&self) -> bool {
-        *self == Self::Cosine
-    }
-
-    /// Return true if this is an angular distance measure.
+    /// Return true if this is an angular (dot-product) distance measure.
     pub fn angular(&self) -> bool {
-        *self == Self::Cosine || *self == Self::Dot
+        *self == Self::Dot
     }
 
     /// Return an iterator over all similarity functions.
     pub fn all() -> impl ExactSizeIterator<Item = VectorSimilarity> {
-        [
-            VectorSimilarity::Euclidean,
-            VectorSimilarity::Dot,
-            VectorSimilarity::Cosine,
-        ]
-        .into_iter()
+        [VectorSimilarity::Euclidean, VectorSimilarity::Dot].into_iter()
     }
 }
 
@@ -166,7 +148,6 @@ impl FromStr for VectorSimilarity {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "euclidean" | "l2" => Ok(VectorSimilarity::Euclidean),
-            "cosine" | "cos" => Ok(VectorSimilarity::Cosine),
             "dot" => Ok(VectorSimilarity::Dot),
             x => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -180,7 +161,6 @@ impl std::fmt::Display for VectorSimilarity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Euclidean => write!(f, "l2"),
-            Self::Cosine => write!(f, "cos"),
             Self::Dot => write!(f, "dot"),
         }
     }
@@ -192,10 +172,7 @@ impl std::fmt::Display for VectorSimilarity {
 /// varying degrees of compression and fidelity in distance computation.
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum F32VectorCoding {
-    /// Little-endian f32 values.
-    ///
-    /// Depending on the similarity function this may be normalized or transformed in some other way
-    /// so users should not rely on the value being identical.
+    /// Little-endian f32 values, stored exactly as provided.
     #[default]
     F32,
     /// Little-endian IEEE f16 encoding.
@@ -254,15 +231,12 @@ impl F32VectorCoding {
     /// If the encoded vectors were centered before encoding, distance is unaffected: centering is a
     /// shared translation that cancels in every metric that reduces to a difference of vectors.
     pub fn distance_symmetric(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
-        use VectorSimilarity::{Cosine, Dot, Euclidean};
+        use VectorSimilarity::{Dot, Euclidean};
 
         match (self, similarity) {
-            (Self::F32, Cosine) => Box::new(float32::CosineDistance::default()),
             (Self::F32, Dot) => Box::new(float32::DotProductDistance::default()),
             (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance::default()),
-            (Self::F16, Dot) | (Self::F16, Cosine) => {
-                Box::new(float16::DotProductDistance::default())
-            }
+            (Self::F16, Dot) => Box::new(float16::DotProductDistance::default()),
             (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance::default()),
             (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
             (Self::TLVQ1, _) => Box::new(lvq::TurboPrimaryDistance::<1>::new(similarity)),
@@ -289,8 +263,7 @@ impl F32VectorCoding {
             (F32VectorCoding::F32, _) => {
                 float32::new_query_vector_distance(similarity, query.into())
             }
-            (F32VectorCoding::F16, VectorSimilarity::Cosine)
-            | (F32VectorCoding::F16, VectorSimilarity::Dot) => {
+            (F32VectorCoding::F16, VectorSimilarity::Dot) => {
                 Box::new(float16::DotProductQueryDistance::new(query.into()))
             }
             (F32VectorCoding::F16, VectorSimilarity::Euclidean) => {
@@ -333,16 +306,13 @@ impl F32VectorCoding {
         similarity: VectorSimilarity,
         query: impl Into<Cow<'a, [u8]>>,
     ) -> Box<dyn QueryVectorDistance + 'a> {
-        use VectorSimilarity::{Cosine, Dot, Euclidean};
+        use VectorSimilarity::{Dot, Euclidean};
         macro_rules! quantized_qvd {
             ($dist_fn:expr, $query:ident) => {
                 Box::new(QuantizedQueryVectorDistance::new($dist_fn, $query))
             };
         }
         match (similarity, *self) {
-            (Cosine, F32VectorCoding::F32) => {
-                quantized_qvd!(float32::CosineDistance::default(), query)
-            }
             (Dot, F32VectorCoding::F32) => {
                 quantized_qvd!(float32::DotProductDistance::default(), query)
             }
@@ -350,9 +320,6 @@ impl F32VectorCoding {
                 quantized_qvd!(float32::EuclideanDistance::default(), query)
             }
             (Dot, F32VectorCoding::F16) => {
-                quantized_qvd!(float16::DotProductDistance::default(), query)
-            }
-            (Cosine, F32VectorCoding::F16) => {
                 quantized_qvd!(float16::DotProductDistance::default(), query)
             }
             (Euclidean, F32VectorCoding::F16) => {
@@ -646,7 +613,7 @@ mod test {
     }
 
     use F32VectorCoding::{F16, TLVQ1, TLVQ2, TLVQ4, TLVQ8};
-    use VectorSimilarity::{Cosine, Dot, Euclidean};
+    use VectorSimilarity::{Dot, Euclidean};
     use rand::{RngExt, SeedableRng, TryRng, rngs::SysRng};
 
     macro_rules! distance_test {
@@ -672,7 +639,6 @@ mod test {
         };
     }
 
-    distance_test!(f16_cosine_dist, Cosine, F16, 0.001);
     distance_test!(f16_dot_dist, Dot, F16, 0.001);
     distance_test!(f16_l2_dist, Euclidean, F16, 0.001);
 

@@ -177,7 +177,6 @@ where
     /// Load nav and rerank vectors into tables.
     fn load_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let dim = self.index.config().dimensions.get();
-        let l2_normalize = self.index.config().similarity.l2_normalize();
         let centroid = self.index.config().centroid.clone();
         let nav_coder = self.index.nav_table().new_coder();
         let mut nav_vector = vec![0u8; nav_coder.byte_len(dim)];
@@ -205,12 +204,7 @@ where
 
         for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
             v.convert_to_f32_slice(&mut vector_f32);
-            vectors::prepare_vector_in_place(
-                &mut vector_f32,
-                None,
-                l2_normalize,
-                centroid.as_deref(),
-            );
+            vectors::prepare_vector_in_place(&mut vector_f32, None, false, centroid.as_deref());
             for (d, s) in vector_f32.iter().zip(sum.iter_mut()) {
                 *s += *d as f64;
             }

@@ -144,8 +144,6 @@ pub fn recall(
         }
     };
 
-    // Encoding no longer centers; each doc/query is made residual against its selected center via
-    // prepare_vector before encoding. One coder serves every center.
     let coder = args.format.coder();
     let l2_normalize = args.similarity.l2_normalize();
     let num_centers = centers.as_ref().map_or(1, |cs| cs.len());

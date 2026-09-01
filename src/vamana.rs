@@ -231,8 +231,7 @@ pub trait GraphVectorStore {
 
     /// Create a new coder for vectors of this type.
     fn new_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.format()
-            .coder(self.centroid().map(|c| c.to_vec()))
+        self.format().coder(self.centroid().map(|c| c.to_vec()))
     }
 
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.

@@ -143,15 +143,10 @@ pub fn load_raw_vectors(
     let mut bulk_cursor =
         connection.new_bulk_load_cursor::<i64, Vec<u8>>(&index.table_names.raw_vectors, None)?;
     let similarity = index.head_config().config().similarity;
-    let coder = index
-        .config()
-        .rerank_format
-        .unwrap()
-        .coder(None);
+    let coder = index.config().rerank_format.unwrap().coder(None);
     let mut encoded = vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())];
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {
-        let vector =
-            ::vectors::prepare_vector(vector, None, similarity.l2_normalize(), None);
+        let vector = ::vectors::prepare_vector(vector, None, similarity.l2_normalize(), None);
         coder.encode_to(&vector, &mut encoded);
         bulk_cursor.append(record_id as i64, &encoded)?;
         progress(1);

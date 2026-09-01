@@ -507,11 +507,7 @@ mod parallel {
         rng: &mut impl Rng,
     ) -> VecVectorStore<f32> {
         let len = vectors.len();
-        let posting_coder = txn_idx
-            .index()
-            .config()
-            .posting_coder
-            .coder(None);
+        let posting_coder = txn_idx.index().config().posting_coder.coder(None);
         let mut scratch_vector =
             vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
         let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), len);

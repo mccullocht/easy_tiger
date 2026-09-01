@@ -128,10 +128,7 @@ fn search_phase<Q: Send + Sync>(
 ) -> io::Result<AggregateSearchStats> {
     use rayon::prelude::*;
 
-    let vector_len = config
-        .format
-        .coder(None)
-        .byte_len(config.dimensions.get());
+    let vector_len = config.format.coder(None).byte_len(config.dimensions.get());
     let query_indices = (0..limit).cycle().take(iters * limit).collect::<Vec<_>>();
     let progress = progress_bar(query_indices.len(), name);
     let stats = query_indices

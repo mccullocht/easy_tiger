@@ -77,10 +77,7 @@ pub fn insert_vectors(
 
     let posting_format = index.config().posting_coder;
     let posting_coder = posting_format.coder(None);
-    let rerank_coder = index
-        .config()
-        .rerank_format
-        .map(|f| f.coder(None));
+    let rerank_coder = index.config().rerank_format.map(|f| f.coder(None));
 
     let batch_size = args.batch_size.get();
     let main_progress = progress_bar(args.count.get(), "inserting vectors");

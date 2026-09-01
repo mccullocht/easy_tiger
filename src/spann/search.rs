@@ -195,7 +195,12 @@ impl Searcher {
         let query: &[f32] = &vectors::prepare_vector(
             query,
             None,
-            reader.index().head_config().config().similarity.l2_normalize(),
+            reader
+                .index()
+                .head_config()
+                .config()
+                .similarity
+                .l2_normalize(),
             None,
         );
 

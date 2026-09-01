@@ -261,10 +261,9 @@ pub fn new_query_vector_distance<'a>(
     query: Cow<'a, [f32]>,
 ) -> Box<dyn QueryVectorDistanceT + 'a> {
     match similarity {
-        VectorSimilarity::Cosine => Box::new(QueryVectorDistance::new(
-            CosineDistance::default(),
-            query,
-        )),
+        VectorSimilarity::Cosine => {
+            Box::new(QueryVectorDistance::new(CosineDistance::default(), query))
+        }
         VectorSimilarity::Dot => Box::new(QueryVectorDistance::new(
             DotProductDistance::default(),
             query,

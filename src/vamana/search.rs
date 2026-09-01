@@ -250,12 +250,8 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         // Normalize the query once; every downstream query distance consumes the prepared vector.
-        let query: &[f32] = &vectors::prepare_vector(
-            query,
-            None,
-            reader.config().similarity.l2_normalize(),
-            None,
-        );
+        let query: &[f32] =
+            &vectors::prepare_vector(query, None, reader.config().similarity.l2_normalize(), None);
         let nav_query = reader.config().nav_format.query_distance_asymmetric(
             reader.config().similarity,
             query,
@@ -580,8 +576,7 @@ mod test {
             T: IntoIterator<Item = V>,
             V: Into<Vec<f32>>,
         {
-            let coder = F32VectorCoding::BinaryQuantized
-                .coder(centroid.clone());
+            let coder = F32VectorCoding::BinaryQuantized.coder(centroid.clone());
             let mut rep = iter
                 .into_iter()
                 .map(|x| {

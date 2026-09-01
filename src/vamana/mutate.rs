@@ -277,12 +277,8 @@ fn insert_internal<F: FnMut(i64) -> bool>(
 
     // Normalize the input once up front; the prepared vector is used both to search for candidate
     // edges and to encode into the nav/rerank stores.
-    let vector: &[f32] = &vectors::prepare_vector(
-        vector,
-        None,
-        index.config().similarity.l2_normalize(),
-        None,
-    );
+    let vector: &[f32] =
+        &vectors::prepare_vector(vector, None, index.config().similarity.l2_normalize(), None);
 
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
     let mut candidate_edges = searcher.search_with_options(vector, options, index)?;

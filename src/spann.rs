@@ -116,9 +116,7 @@ impl TableIndex {
     }
 
     pub fn new_posting_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.config
-            .posting_coder
-            .coder(None)
+        self.config.posting_coder.coder(None)
     }
 
     pub fn posting_vector_len(&self) -> usize {

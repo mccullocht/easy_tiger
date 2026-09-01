@@ -325,7 +325,7 @@ mod parallel {
             let head_coder = if posting_format == head_format {
                 None
             } else {
-                Some(head_format.coder(centroid_store.similarity(), None))
+                Some(head_format.coder(None))
             };
             Ok(Self {
                 centroid_store,
@@ -511,7 +511,7 @@ mod parallel {
             .index()
             .config()
             .posting_coder
-            .coder(txn_idx.index().head_config().config().similarity, None);
+            .coder(None);
         let mut scratch_vector =
             vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
         let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), len);

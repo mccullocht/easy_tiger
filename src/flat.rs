@@ -45,7 +45,7 @@ pub fn init_index(
         config.block_size.get(),
         config
             .format
-            .coder(config.similarity, None)
+            .coder(None)
             .byte_len(config.dimensions.get()),
         4096,
     ) as u32;

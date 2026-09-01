@@ -5,7 +5,7 @@ use easy_tiger::input::VectorStore;
 use half::slice::HalfFloatSliceExt;
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
-use vectors::{F32VectorCoding, VectorSimilarity, f16};
+use vectors::{F32VectorCoding, f16};
 
 use crate::ui::progress_bar;
 
@@ -29,9 +29,7 @@ pub fn loss(
         None
     };
 
-    // Assume Euclidean. It might be best to make this configurable as some encodings might perform
-    // better when the inputs are l2 normalized.
-    let coder = args.format.coder(VectorSimilarity::Euclidean, mean);
+    let coder = args.format.coder(mean);
     let (abs_error, sq_error, magnitude) = (0..vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "loss"))

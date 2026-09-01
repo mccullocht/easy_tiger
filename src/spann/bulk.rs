@@ -106,7 +106,7 @@ pub fn load_postings(
     posting_keys.par_sort_unstable();
 
     let similarity = index.head_config().config().similarity;
-    let coder = index.config().posting_coder.coder(similarity, None);
+    let coder = index.config().posting_coder.coder(None);
     // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
     // this will also allow us to parallelize IO.
     let mut encoded_buffer =
@@ -147,7 +147,7 @@ pub fn load_raw_vectors(
         .config()
         .rerank_format
         .unwrap()
-        .coder(similarity, None);
+        .coder(None);
     let mut encoded = vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())];
     for (record_id, vector) in vectors.iter().enumerate().take(limit) {
         let vector =

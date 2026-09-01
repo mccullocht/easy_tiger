@@ -145,10 +145,10 @@ pub fn recall(
     };
 
     let coders: Vec<Box<dyn vectors::F32VectorCoder>> = match centers.as_ref() {
-        None => vec![args.format.coder(args.similarity, None)],
+        None => vec![args.format.coder(None)],
         Some(cs) => cs
             .iter()
-            .map(|c| args.format.coder(args.similarity, Some(c.to_vec())))
+            .map(|c| args.format.coder(Some(c.to_vec())))
             .collect(),
     };
 

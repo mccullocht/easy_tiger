@@ -76,10 +76,8 @@ macro_rules! tlvq_coder_test {
         #[test]
         fn $name() {
             let coder = match $center {
-                Centering::Uncentered => <$coder>::new(VectorSimilarity::Euclidean, None),
-                Centering::Centered => {
-                    <$coder>::new(VectorSimilarity::Euclidean, Some(TEST_CENTER.to_vec()))
-                }
+                Centering::Uncentered => <$coder>::new(None),
+                Centering::Centered => <$coder>::new(Some(TEST_CENTER.to_vec())),
             };
             let encoded = coder.encode(&TEST_VECTOR);
             assert_abs_diff_eq!(
@@ -414,7 +412,7 @@ fn check_lvq_distance(
 
     let f32_dist = sim.distance_f32().distance_f32(&a, &b);
 
-    let coder = format.coder(sim, center.map(|c| c.to_vec()));
+    let coder = format.coder(center.map(|c| c.to_vec()));
     let enc_a = coder.encode(&a);
     let enc_b = coder.encode(&b);
 
@@ -477,7 +475,7 @@ fn null_vector_decode() {
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
     ] {
-        let coder = coding.coder(VectorSimilarity::Euclidean, None);
+        let coder = coding.coder(None);
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
@@ -493,7 +491,7 @@ fn fill_vector_decode() {
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
     ] {
-        let coder = coding.coder(VectorSimilarity::Euclidean, None);
+        let coder = coding.coder(None);
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
@@ -509,10 +507,9 @@ macro_rules! lvq_coding_simd_test {
             let seed = SysRng::default().try_next_u64().unwrap();
             println!("SEED {seed:#016x}");
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
-            let scoder =
-                <$coder>::with_kernel(Kernel::Scalar, VectorSimilarity::Euclidean, None);
+            let scoder = <$coder>::with_kernel(Kernel::Scalar, None);
             for k in Kernel::accelerated() {
-                let ocoder = <$coder>::new(VectorSimilarity::Euclidean, None);
+                let ocoder = <$coder>::new(None);
                 // TODO: use randomly sized vectors like we do for distance tests.
                 for i in 0..1024 {
                     let vec = l2_normalize(

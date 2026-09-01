@@ -83,7 +83,7 @@ pub fn distance_loss(
         None
     };
 
-    let coder = args.format.coder(args.similarity, center.clone());
+    let coder = args.format.coder(center.clone());
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {

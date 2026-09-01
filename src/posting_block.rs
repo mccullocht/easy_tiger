@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn encode_f32_empty_produces_empty_bytes() {
-        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Euclidean, None);
+        let coder = vectors::F32VectorCoding::F32.coder(None);
         let input: Vec<(i64, Vec<f32>)> = vec![];
         let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
         assert!(result.is_empty());
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn encode_f32_single_entry_roundtrip() {
-        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Euclidean, None);
+        let coder = vectors::F32VectorCoding::F32.coder(None);
         let input = vec![(1i64, vec![1.0f32, 2.0, 3.0, 4.0])];
         let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
         let block = PostingBlock::new(&result, coder.byte_len(4)).unwrap();
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn encode_f32_multiple_entries_roundtrip() {
-        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Euclidean, None);
+        let coder = vectors::F32VectorCoding::F32.coder(None);
         let input = vec![
             (1i64, vec![1.0f32, 0.0, 0.0, 0.0]),
             (5i64, vec![0.0, 2.0, 0.0, 0.0]),
@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn encode_f32_output_length_matches_entry_count() {
-        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Euclidean, None);
+        let coder = vectors::F32VectorCoding::F32.coder(None);
         let n = 5usize;
         let input: Vec<(i64, Vec<f32>)> = (0..n as i64).map(|i| (i, vec![i as f32; 4])).collect();
         let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
@@ -595,7 +595,7 @@ mod tests {
     fn encode_f32_stores_vector_verbatim() {
         // The coder no longer normalizes on encode; callers are responsible for preparing the
         // vector (see `vectors::prepare_vector`). The stored vector must match the input exactly.
-        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Cosine, None);
+        let coder = vectors::F32VectorCoding::F32.coder(None);
         let input = vec![(1i64, vec![3.0f32, 4.0, 0.0, 0.0])];
         let result = encode_f32(input.into_iter(), coder.as_ref(), 4);
         let block = PostingBlock::new(&result, coder.byte_len(4)).unwrap();
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn encode_f32_lookup_on_result() {
-        let coder = vectors::F32VectorCoding::F32.coder(vectors::VectorSimilarity::Euclidean, None);
+        let coder = vectors::F32VectorCoding::F32.coder(None);
         let input = vec![
             (1i64, vec![1.0f32, 0.0, 0.0, 0.0]),
             (3i64, vec![0.0, 1.0, 0.0, 0.0]),

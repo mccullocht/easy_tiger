@@ -228,27 +228,24 @@ pub enum F32VectorCoding {
 }
 
 impl F32VectorCoding {
-    /// Create a new coder for this format and similarity function.
+    /// Create a new coder for this format.
     ///
-    /// If `center`` is present, the center vector will be subtracted from each vector before
-    /// quantization occurs.  Centering reduces the dynamic range of the vectors and can reduce
-    /// quantization loss substantially, particularly when using lower bit rates formats. This holds
-    /// true even if the center is the mean vector over a large data set.
-    pub fn coder(
-        &self,
-        similarity: VectorSimilarity,
-        center: Option<Vec<f32>>,
-    ) -> Box<dyn F32VectorCoder> {
-        match (self, similarity) {
-            (Self::F32, _) => Box::new(float32::VectorCoder::new()),
-            (Self::F16, _) => Box::new(float16::VectorCoder::new()),
-            (Self::BinaryQuantized, _) => Box::new(binary::BinaryQuantizedVectorCoder),
-            (Self::TLVQ1, _) => Box::new(lvq::TurboPrimaryCoder::<1>::new(similarity, center)),
-            (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryCoder::<2>::new(similarity, center)),
-            (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryCoder::<4>::new(similarity, center)),
-            (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryCoder::<8>::new(similarity, center)),
-            (Self::RaBitQ, _) => Box::new(rabitq::Coder::new(center)),
-            (Self::QuIVer, _) => quiver::new_coder(),
+    /// Encoding is similarity-agnostic; callers are responsible for any normalization (see
+    /// [`prepare_vector`]). If `center` is present, the center vector will be subtracted from each
+    /// vector before quantization occurs. Centering reduces the dynamic range of the vectors and
+    /// can reduce quantization loss substantially, particularly when using lower bit rate formats.
+    /// This holds true even if the center is the mean vector over a large data set.
+    pub fn coder(&self, center: Option<Vec<f32>>) -> Box<dyn F32VectorCoder> {
+        match self {
+            Self::F32 => Box::new(float32::VectorCoder::new()),
+            Self::F16 => Box::new(float16::VectorCoder::new()),
+            Self::BinaryQuantized => Box::new(binary::BinaryQuantizedVectorCoder),
+            Self::TLVQ1 => Box::new(lvq::TurboPrimaryCoder::<1>::new(center)),
+            Self::TLVQ2 => Box::new(lvq::TurboPrimaryCoder::<2>::new(center)),
+            Self::TLVQ4 => Box::new(lvq::TurboPrimaryCoder::<4>::new(center)),
+            Self::TLVQ8 => Box::new(lvq::TurboPrimaryCoder::<8>::new(center)),
+            Self::RaBitQ => Box::new(rabitq::Coder::new(center)),
+            Self::QuIVer => quiver::new_coder(),
         }
     }
 
@@ -584,7 +581,7 @@ mod test {
             } else {
                 vec.into()
             };
-            let f32_coder = F32VectorCoding::F32.coder(similarity, None);
+            let f32_coder = F32VectorCoding::F32.coder(None);
             let rvec = f32_coder
                 .encode(&vec)
                 .chunks(4)
@@ -617,7 +614,7 @@ mod test {
         b: &[f32],
         threshold: f64,
     ) {
-        let coder = format.coder(similarity, None);
+        let coder = format.coder(None);
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 
@@ -640,7 +637,7 @@ mod test {
         b: &[f32],
         threshold: f64,
     ) {
-        let coder = format.coder(similarity, None);
+        let coder = format.coder(None);
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 

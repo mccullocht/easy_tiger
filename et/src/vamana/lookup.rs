@@ -64,7 +64,7 @@ pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -
                     let coder = index
                         .nav_table()
                         .format()
-                        .coder(index.config().similarity, None);
+                        .coder(None);
                     let vector = coder.decode(v);
                     println!("vector: {vector:?}");
                 } else {

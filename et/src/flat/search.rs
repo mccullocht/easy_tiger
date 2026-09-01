@@ -130,7 +130,7 @@ fn search_phase<Q: Send + Sync>(
 
     let vector_len = config
         .format
-        .coder(config.similarity, None)
+        .coder(None)
         .byte_len(config.dimensions.get());
     let query_indices = (0..limit).cycle().take(iters * limit).collect::<Vec<_>>();
     let progress = progress_bar(query_indices.len(), name);

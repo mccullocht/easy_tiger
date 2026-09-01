@@ -171,7 +171,7 @@ impl Worker {
             .config()
             .rerank_format
             .expect("rerank format is set")
-            .coder(self.index.head_config().config().similarity, None);
+            .coder(None);
         let query: Vec<f32> = {
             let mut raw_cursor = reader
                 .transaction()

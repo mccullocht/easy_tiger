@@ -581,7 +581,7 @@ mod test {
             V: Into<Vec<f32>>,
         {
             let coder = F32VectorCoding::BinaryQuantized
-                .coder(VectorSimilarity::Euclidean, centroid.clone());
+                .coder(centroid.clone());
             let mut rep = iter
                 .into_iter()
                 .map(|x| {

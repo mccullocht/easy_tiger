@@ -467,9 +467,8 @@ pub struct TurboPrimaryCoder<const B: usize> {
 impl<const B: usize> TurboPrimaryCoder<B> {
     const B_CHECK: () = { check_primary_bits(B) };
 
-    /// Quantization is similarity-agnostic; `similarity` is accepted for call-site symmetry with
-    /// the other coders and is not retained.
-    pub fn new(_similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+    /// Quantization is similarity-agnostic; only the optional center affects encoding.
+    pub fn new(center: Option<Vec<f32>>) -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
         Self {
@@ -480,7 +479,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
     }
 
     #[cfg(test)]
-    fn with_kernel(k: Kernel, _similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+    fn with_kernel(k: Kernel, center: Option<Vec<f32>>) -> Self {
         assert!(k.is_available(), "{k:?}");
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;

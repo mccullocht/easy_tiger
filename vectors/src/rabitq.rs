@@ -4,8 +4,6 @@
 //! One note is that this does not include rotation inline in the quantization transform.
 //! Callers are expected to rotate the vectors if component distribution is not Gaussian, and
 //! they are expected to rotate the center (or compute the mean from rotated vectors).
-use std::borrow::Cow;
-
 use rand::{RngExt, SeedableRng};
 
 use crate::{
@@ -53,29 +51,17 @@ impl Header {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Coder {
-    center: Option<Vec<f32>>,
-}
+pub struct Coder;
 
 impl Coder {
-    pub fn new(center: Option<Vec<f32>>) -> Self {
-        Self { center }
+    pub fn new() -> Self {
+        Self
     }
 }
 
 impl F32VectorCoder for Coder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let centered_vector: Cow<'_, [f32]> = if let Some(center) = self.center.as_ref() {
-            vector
-                .iter()
-                .zip(center.iter())
-                .map(|(v, c)| *v - *c)
-                .collect::<Vec<_>>()
-                .into()
-        } else {
-            vector.into()
-        };
-        let (unit_vector, l2_norm) = float32::l2_normalize(centered_vector);
+        let (unit_vector, l2_norm) = float32::l2_normalize(vector);
         let mut header = Header {
             l2_norm,
             ..Default::default()
@@ -187,17 +173,7 @@ pub struct QueryDistance {
 }
 
 impl QueryDistance {
-    pub fn new(similarity: VectorSimilarity, query: &[f32], center: Option<&[f32]>) -> Self {
-        let query: Cow<'_, [f32]> = if let Some(center) = center {
-            query
-                .iter()
-                .zip(center.iter())
-                .map(|(&q, &c)| q - c)
-                .collect::<Vec<_>>()
-                .into()
-        } else {
-            query.into()
-        };
+    pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
         let (query, l2_norm) = float32::l2_normalize(query);
         let dim_sqrt = (query.len() as f64).sqrt();
         let (lower, upper) = query
@@ -384,6 +360,12 @@ mod test {
         }
     }
 
+    /// Mirror [`crate::prepare_vector`]: normalize (for angular) then subtract the center. The coder
+    /// and query distance no longer center, so callers hand them already-prepared vectors.
+    fn prepare(similarity: VectorSimilarity, v: Vec<f32>, center: Option<&[f32]>) -> Vec<f32> {
+        subtract_center(&maybe_normalize(similarity, v), center)
+    }
+
     const DIM: usize = 128;
     const TRIALS: usize = 4096;
 
@@ -391,7 +373,7 @@ mod test {
     fn encode_decode_roundtrip() {
         for center in [None, Some(test_center(DIM))] {
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x1234abcd);
-            let coder = Coder::new(center.clone());
+            let coder = Coder::new();
 
             assert_eq!(coder.byte_len(DIM), Header::LEN + DIM / 8);
             assert_eq!(coder.dimensions(coder.byte_len(DIM)), DIM);
@@ -399,13 +381,13 @@ mod test {
             let magnitude = 1.0 / (DIM as f32).sqrt();
             for _ in 0..64 {
                 let v = gauss_vec(&mut rng, DIM);
-                let encoded = coder.encode(&v);
+                let centered = subtract_center(&v, center.as_deref());
+                let encoded = coder.encode(&centered);
                 assert_eq!(encoded.len(), coder.byte_len(DIM));
 
                 let decoded = coder.decode(&encoded);
                 assert_eq!(decoded.len(), DIM);
 
-                let centered = subtract_center(&v, center.as_deref());
                 let mut component_sum = 0u32;
                 for (i, (d, c)) in decoded.iter().zip(centered.iter()).enumerate() {
                     assert_eq!(d.abs(), magnitude, "index {i}");
@@ -432,15 +414,17 @@ mod test {
 
     fn eval_symmetric(similarity: VectorSimilarity, center: Option<Vec<f32>>) {
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed01);
-        let coder = Coder::new(center.clone());
+        let coder = Coder::new();
         let dist = Distance::new(similarity);
 
         let mut bias = 0.0f64;
         let mut mae = 0.0f64;
         for _ in 0..TRIALS {
             let rho: f32 = rng.random_range(0.0f32..1.0);
-            let a = maybe_normalize(similarity, gauss_vec(&mut rng, DIM));
-            let b = maybe_normalize(similarity, correlated(&mut rng, &a, rho));
+            let raw_a = gauss_vec(&mut rng, DIM);
+            let raw_b = correlated(&mut rng, &maybe_normalize(similarity, raw_a.clone()), rho);
+            let a = prepare(similarity, raw_a, center.as_deref());
+            let b = prepare(similarity, raw_b, center.as_deref());
 
             let ea = coder.encode(&a);
             let eb = coder.encode(&b);
@@ -450,7 +434,7 @@ mod test {
             let scale = 2.0 * ha.l2_norm as f64 * hb.l2_norm as f64;
 
             let est = dist.distance(&ea, &eb);
-            let exact = exact_distance(similarity, &a, &b, center.as_deref());
+            let exact = exact_distance(similarity, &a, &b, None);
             bias += (est - exact) / scale;
             mae += ((est - exact) / scale).abs();
         }
@@ -486,23 +470,25 @@ mod test {
 
     fn eval_asymmetric(similarity: VectorSimilarity, center: Option<Vec<f32>>) {
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xa57a5717);
-        let coder = Coder::new(center.clone());
+        let coder = Coder::new();
 
         let mut bias = 0.0f64;
         let mut mae = 0.0f64;
         let mut covered = 0usize;
         for _ in 0..TRIALS {
             let rho: f32 = rng.random_range(0.0f32..1.0);
-            let q = maybe_normalize(similarity, gauss_vec(&mut rng, DIM));
-            let d = maybe_normalize(similarity, correlated(&mut rng, &q, rho));
+            let raw_q = maybe_normalize(similarity, gauss_vec(&mut rng, DIM));
+            let raw_d = maybe_normalize(similarity, correlated(&mut rng, &raw_q, rho));
+            let q = subtract_center(&raw_q, center.as_deref());
+            let d = subtract_center(&raw_d, center.as_deref());
 
-            let qd = QueryDistance::new(similarity, &q, center.as_deref());
+            let qd = QueryDistance::new(similarity, &q);
             let ed = coder.encode(&d);
             let (hd, _) = Header::decode(&ed);
-            let qnorm = float32::l2_norm(subtract_center(&q, center.as_deref())) as f64;
+            let qnorm = float32::l2_norm(&q) as f64;
             let scale = 2.0 * qnorm * hd.l2_norm as f64;
 
-            let exact = exact_distance(similarity, &q, &d, center.as_deref());
+            let exact = exact_distance(similarity, &q, &d, None);
             let est = qd.distance(&ed);
             bias += (est - exact) / scale;
             mae += ((est - exact) / scale).abs();
@@ -554,7 +540,7 @@ mod test {
     fn symmetric_debias() {
         const DIM: usize = 512;
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x9e3779b9);
-        let coder = Coder::new(None);
+        let coder = Coder::new();
         let dist = Distance::new(VectorSimilarity::Euclidean);
 
         // Sums of signed error, absolute error, raw hamming absolute error, and count, for pairs

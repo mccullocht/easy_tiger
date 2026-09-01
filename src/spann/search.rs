@@ -220,11 +220,7 @@ impl Searcher {
                 .index
                 .config()
                 .posting_coder
-                .query_distance_asymmetric(
-                    reader.index().head_config().config().similarity,
-                    query,
-                    None,
-                ),
+                .query_distance_asymmetric(reader.index().head_config().config().similarity, query),
         );
         let vector_len = reader.index().posting_vector_len();
         for c in centroids {
@@ -271,7 +267,7 @@ impl Searcher {
             .config()
             .rerank_format
             .expect("rerank format is set");
-        let query = format.query_distance_asymmetric(reader.head.config().similarity, query, None);
+        let query = format.query_distance_asymmetric(reader.head.config().similarity, query);
         let mut raw_cursor = reader
             .transaction()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;

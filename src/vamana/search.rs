@@ -249,22 +249,23 @@ impl GraphSearcher {
         options: Options<F>,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
-        // Normalize the query once; every downstream query distance consumes the prepared vector.
-        let query: &[f32] =
-            &vectors::prepare_vector(query, None, reader.config().similarity.l2_normalize(), None);
-        let nav_query = reader.config().nav_format.query_distance_asymmetric(
-            reader.config().similarity,
+        // Prepare the query once (normalize for angular, then center): every downstream query
+        // distance consumes vectors that were stored the same way.
+        let query: &[f32] = &vectors::prepare_vector(
             query,
+            None,
+            reader.config().similarity.l2_normalize(),
             reader.config().centroid.as_deref(),
         );
+        let nav_query = reader
+            .config()
+            .nav_format
+            .query_distance_asymmetric(reader.config().similarity, query);
         let rerank_query = if self.params.num_rerank > 0 {
-            reader.config().rerank_format.map(|f| {
-                f.query_distance_asymmetric(
-                    reader.config().similarity,
-                    query,
-                    reader.config().centroid.as_deref(),
-                )
-            })
+            reader
+                .config()
+                .rerank_format
+                .map(|f| f.query_distance_asymmetric(reader.config().similarity, query))
         } else {
             None
         };
@@ -542,7 +543,10 @@ mod test {
 
     #[derive(Debug)]
     struct TestVector {
+        /// Raw vector, used to build the graph topology from f32 distances.
         vector: Vec<f32>,
+        /// Vector as prepared for storage (centered against the configured centroid, if any).
+        prepared: Vec<f32>,
         nav_vector: Vec<u8>,
         edges: Vec<i64>,
     }
@@ -576,14 +580,18 @@ mod test {
             T: IntoIterator<Item = V>,
             V: Into<Vec<f32>>,
         {
-            let coder = F32VectorCoding::BinaryQuantized.coder(centroid.clone());
+            let coder = F32VectorCoding::BinaryQuantized.coder();
             let mut rep = iter
                 .into_iter()
                 .map(|x| {
-                    let v = x.into();
-                    let b = coder.encode(&v);
+                    let v: Vec<f32> = x.into();
+                    // Euclidean fixture: prepare = subtract the centroid (no normalization).
+                    let prepared =
+                        vectors::prepare_vector(&v, None, false, centroid.as_deref());
+                    let b = coder.encode(&prepared);
                     TestVector {
                         vector: v,
+                        prepared,
                         nav_vector: b,
                         edges: Vec::new(),
                     }
@@ -767,7 +775,7 @@ mod test {
             self.0.data.get(vertex_id as usize).map(|v| {
                 Ok(match self.1 {
                     TestVectorStoreType::Nav => v.nav_vector.as_ref(),
-                    TestVectorStoreType::Rerank => bytemuck::cast_slice(v.vector.as_ref()),
+                    TestVectorStoreType::Rerank => bytemuck::cast_slice(v.prepared.as_ref()),
                 })
             })
         }

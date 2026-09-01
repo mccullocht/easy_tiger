@@ -75,17 +75,29 @@ macro_rules! tlvq_coder_test {
     ($name:ident, $coder:ty, $center:expr, $primary_header:expr, $decoded:expr) => {
         #[test]
         fn $name() {
-            let coder = match $center {
-                Centering::Uncentered => <$coder>::new(None),
-                Centering::Centered => <$coder>::new(Some(TEST_CENTER.to_vec())),
+            // The coder no longer centers; callers hand it the already-centered residual.
+            let center: Option<&[f32]> = match $center {
+                Centering::Uncentered => None,
+                Centering::Centered => Some(TEST_CENTER.as_ref()),
             };
-            let encoded = coder.encode(&TEST_VECTOR);
+            let input: Vec<f32> = match center {
+                None => TEST_VECTOR.to_vec(),
+                Some(c) => TEST_VECTOR.iter().zip(c).map(|(v, c)| v - c).collect(),
+            };
+            let coder = <$coder>::new();
+            let encoded = coder.encode(&input);
             assert_abs_diff_eq!(
                 PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
                 $primary_header
             );
             let mut decoded = vec![0.0f32; TEST_VECTOR.len()];
             coder.decode_to(&encoded, &mut decoded);
+            // decode returns the centered residual; add the center back to compare in input space.
+            if let Some(c) = center {
+                for (d, c) in decoded.iter_mut().zip(c) {
+                    *d += c;
+                }
+            }
             assert_abs_diff_eq!(decoded.as_ref(), $decoded.as_ref(), epsilon = 0.00001);
         }
     };
@@ -410,9 +422,21 @@ fn check_lvq_distance(
         (a.to_vec(), b.to_vec())
     };
 
+    // The reference distance is between the uncentered (normalized) vectors: centering is a shared
+    // translation that cancels in the squared-Euclidean term the codec estimates.
     let f32_dist = sim.distance_f32().distance_f32(&a, &b);
 
-    let coder = format.coder(center.map(|c| c.to_vec()));
+    // The coder no longer centers; hand it the residual against `center`, if any.
+    let subtract_center = |v: &[f32]| -> Vec<f32> {
+        match center {
+            Some(c) => v.iter().zip(c).map(|(x, y)| x - y).collect(),
+            None => v.to_vec(),
+        }
+    };
+    let a = subtract_center(&a);
+    let b = subtract_center(&b);
+
+    let coder = format.coder();
     let enc_a = coder.encode(&a);
     let enc_b = coder.encode(&b);
 
@@ -475,7 +499,7 @@ fn null_vector_decode() {
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
     ] {
-        let coder = coding.coder(None);
+        let coder = coding.coder();
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
@@ -491,7 +515,7 @@ fn fill_vector_decode() {
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
     ] {
-        let coder = coding.coder(None);
+        let coder = coding.coder();
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
@@ -507,9 +531,9 @@ macro_rules! lvq_coding_simd_test {
             let seed = SysRng::default().try_next_u64().unwrap();
             println!("SEED {seed:#016x}");
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
-            let scoder = <$coder>::with_kernel(Kernel::Scalar, None);
+            let scoder = <$coder>::with_kernel(Kernel::Scalar);
             for k in Kernel::accelerated() {
-                let ocoder = <$coder>::new(None);
+                let ocoder = <$coder>::new();
                 // TODO: use randomly sized vectors like we do for distance tests.
                 for i in 0..1024 {
                     let vec = l2_normalize(

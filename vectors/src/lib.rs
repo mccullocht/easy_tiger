@@ -230,29 +230,29 @@ pub enum F32VectorCoding {
 impl F32VectorCoding {
     /// Create a new coder for this format.
     ///
-    /// Encoding is similarity-agnostic; callers are responsible for any normalization (see
-    /// [`prepare_vector`]). If `center` is present, the center vector will be subtracted from each
-    /// vector before quantization occurs. Centering reduces the dynamic range of the vectors and
-    /// can reduce quantization loss substantially, particularly when using lower bit rate formats.
-    /// This holds true even if the center is the mean vector over a large data set.
-    pub fn coder(&self, center: Option<Vec<f32>>) -> Box<dyn F32VectorCoder> {
+    /// Encoding is similarity-agnostic and does not center: callers are responsible for any
+    /// normalization and centering, typically via [`prepare_vector`]. Centering (computing the
+    /// residual of each vector against a shared center, e.g. the dataset mean) reduces the dynamic
+    /// range of the vectors and can reduce quantization loss substantially, particularly for lower
+    /// bit rate formats.
+    pub fn coder(&self) -> Box<dyn F32VectorCoder> {
         match self {
             Self::F32 => Box::new(float32::VectorCoder::new()),
             Self::F16 => Box::new(float16::VectorCoder::new()),
             Self::BinaryQuantized => Box::new(binary::BinaryQuantizedVectorCoder),
-            Self::TLVQ1 => Box::new(lvq::TurboPrimaryCoder::<1>::new(center)),
-            Self::TLVQ2 => Box::new(lvq::TurboPrimaryCoder::<2>::new(center)),
-            Self::TLVQ4 => Box::new(lvq::TurboPrimaryCoder::<4>::new(center)),
-            Self::TLVQ8 => Box::new(lvq::TurboPrimaryCoder::<8>::new(center)),
-            Self::RaBitQ => Box::new(rabitq::Coder::new(center)),
+            Self::TLVQ1 => Box::new(lvq::TurboPrimaryCoder::<1>::new()),
+            Self::TLVQ2 => Box::new(lvq::TurboPrimaryCoder::<2>::new()),
+            Self::TLVQ4 => Box::new(lvq::TurboPrimaryCoder::<4>::new()),
+            Self::TLVQ8 => Box::new(lvq::TurboPrimaryCoder::<8>::new()),
+            Self::RaBitQ => Box::new(rabitq::Coder::new()),
             Self::QuIVer => quiver::new_coder(),
         }
     }
 
     /// Returns a [`VectorDistance`] between vectors encoded using this scheme.
     ///
-    /// If `center` is present, it is assumed that all inputs vectors are centered with respect to
-    /// this vector before encoding, and `center` may be used as part of distance corrections.
+    /// If the encoded vectors were centered before encoding, distance is unaffected: centering is a
+    /// shared translation that cancels in every metric that reduces to a difference of vectors.
     pub fn distance_symmetric(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
         use VectorSimilarity::{Cosine, Dot, Euclidean};
 
@@ -277,13 +277,13 @@ impl F32VectorCoding {
     /// Create a new [`QueryVectorDistance`] that computes distance between a fixed float query and
     /// an arbitrary vector using this vector coding.
     ///
-    /// If `center` is present then it will be accounted for in the distance calculation assuming
-    /// all input vectors _also_ use the same center value.
+    /// The query must be prepared the same way the stored vectors were (normalization and, if the
+    /// stored vectors were centered, the same centering) -- typically via [`prepare_vector`].
+    /// Centering is not applied here.
     pub fn query_distance_asymmetric<'a>(
         &self,
         similarity: VectorSimilarity,
         query: impl Into<Cow<'a, [f32]>>,
-        center: Option<&[f32]>,
     ) -> Box<dyn QueryVectorDistance + 'a> {
         match (*self, similarity) {
             (F32VectorCoding::F32, _) => {
@@ -299,30 +299,24 @@ impl F32VectorCoding {
             (F32VectorCoding::BinaryQuantized, _) => Box::new(
                 binary::I1DotProductQueryDistance::new(query.into().as_ref()),
             ),
-            (F32VectorCoding::TLVQ1, _) => Box::new(lvq::TurboPrimaryQueryDistance1::new(
-                similarity,
-                query.into(),
-                center,
-            )),
+            (F32VectorCoding::TLVQ1, _) => {
+                Box::new(lvq::TurboPrimaryQueryDistance1::new(similarity, query.into()))
+            }
             (F32VectorCoding::TLVQ2, _) => Box::new(lvq::TurboPrimaryQueryDistance::<2>::new(
                 similarity,
                 query.into(),
-                center,
             )),
             (F32VectorCoding::TLVQ4, _) => Box::new(lvq::TurboPrimaryQueryDistance::<4>::new(
                 similarity,
                 query.into(),
-                center,
             )),
             (F32VectorCoding::TLVQ8, _) => Box::new(lvq::TurboPrimaryQueryDistance::<8>::new(
                 similarity,
                 query.into(),
-                center,
             )),
             (Self::RaBitQ, _) => Box::new(rabitq::QueryDistance::new(
                 similarity,
                 query.into().as_ref(),
-                center,
             )),
             (Self::QuIVer, _) => quiver::new_asymmetric_distance(query.into().as_ref()),
         }
@@ -581,7 +575,7 @@ mod test {
             } else {
                 vec.into()
             };
-            let f32_coder = F32VectorCoding::F32.coder(None);
+            let f32_coder = F32VectorCoding::F32.coder();
             let rvec = f32_coder
                 .encode(&vec)
                 .chunks(4)
@@ -614,7 +608,7 @@ mod test {
         b: &[f32],
         threshold: f64,
     ) {
-        let coder = format.coder(None);
+        let coder = format.coder();
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 
@@ -637,14 +631,14 @@ mod test {
         b: &[f32],
         threshold: f64,
     ) {
-        let coder = format.coder(None);
+        let coder = format.coder();
         let a = TestVector::new(a, similarity, coder.as_ref());
         let b = TestVector::new(b, similarity, coder.as_ref());
 
         let f32_dist_fn = similarity.distance_f32();
         let f32_dist = f32_dist_fn.distance_f32(&a.rvec, &b.rvec);
 
-        let query_dist_fn = format.query_distance_asymmetric(similarity, &a.rvec, None);
+        let query_dist_fn = format.query_distance_asymmetric(similarity, &a.rvec);
         let query_dist = query_dist_fn.distance(&b.qvec);
 
         assert_float_near!(f32_dist, query_dist, threshold, index);

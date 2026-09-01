@@ -101,10 +101,18 @@ pub fn bulk_load(
     let limit = args.limit.unwrap_or(num_vectors);
 
     let centroid = if args.center {
+        // The center is subtracted after normalization (see `vectors::prepare_vector`), so build
+        // it from the normalized vectors when the index uses an angular similarity.
+        let l2_normalize = args.similarity.l2_normalize();
         let mut sum = vec![0.0f64; dimensions.get()];
+        let mut buf = vec![0.0f32; dimensions.get()];
         for v in vectors.iter().take(limit) {
-            for (s, x) in sum.iter_mut().zip(v.iter()) {
-                *s += x.to_f64();
+            for (o, x) in buf.iter_mut().zip(v.iter()) {
+                *o = x.to_f32();
+            }
+            vectors::prepare_vector_in_place(&mut buf, None, l2_normalize, None);
+            for (s, x) in sum.iter_mut().zip(buf.iter()) {
+                *s += *x as f64;
             }
         }
         let n = limit as f64;

@@ -15,12 +15,10 @@ mod x86_64;
 
 use std::{
     borrow::Cow,
-    cell::RefCell,
     ops::{Add, AddAssign},
 };
 
 use half::f16;
-use thread_local::ThreadLocal;
 
 use crate::{
     EstimatedDistance, F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
@@ -146,32 +144,6 @@ fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize
     // The interval bounds are stored as f16, so round them here to keep the values used to
     // quantize the vector consistent with the values a caller sees when decoding it.
     (f16::from_f32(lower).to_f32(), f16::from_f32(upper).to_f32())
-}
-
-/// Prepare a vector for quantization by subtracting the center, if any. Returns the prepared
-/// vector slice.
-///
-/// Callers are responsible for any l2 normalization (see [`crate::prepare_vector`]); for angular
-/// similarity the input is expected to already be unit length. The center cancels in any distance
-/// that reduces to a difference of vectors, so angular distance can be recovered from the
-/// squared-Euclidean distance of the centered vectors without storing any cross terms.
-///
-/// `scratch` must be `Some` (and sized to `vector.len()`) when `center` is `Some`; it is unused
-/// and may be `None` otherwise.
-fn prepare_vector<'a>(
-    vector: &'a [f32],
-    scratch: Option<&'a mut [f32]>,
-    center: Option<&[f32]>,
-) -> &'a [f32] {
-    let (Some(scratch), Some(center)) = (scratch, center) else {
-        return vector;
-    };
-
-    for ((v, s), c) in vector.iter().zip(scratch.iter_mut()).zip(center.iter()) {
-        *s = v - c;
-    }
-
-    scratch
 }
 
 /// Transform the unnormalized dot product of two vectors into an appropriate distance for the
@@ -457,53 +429,35 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TurboPrimaryCoder<const B: usize> {
-    center: Option<Vec<f32>>,
-    scratch: ThreadLocal<RefCell<Vec<f32>>>,
     k: Kernel,
 }
 
 impl<const B: usize> TurboPrimaryCoder<B> {
     const B_CHECK: () = { check_primary_bits(B) };
 
-    /// Quantization is similarity-agnostic; only the optional center affects encoding.
-    pub fn new(center: Option<Vec<f32>>) -> Self {
+    /// Quantization is similarity-agnostic and does not center; callers apply any normalization or
+    /// centering up front (see [`crate::prepare_vector`]).
+    pub fn new() -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
         Self {
-            center,
-            scratch: ThreadLocal::new(),
             k: Kernel::default(),
         }
     }
 
     #[cfg(test)]
-    fn with_kernel(k: Kernel, center: Option<Vec<f32>>) -> Self {
+    fn with_kernel(k: Kernel) -> Self {
         assert!(k.is_available(), "{k:?}");
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
-        Self {
-            center,
-            scratch: ThreadLocal::new(),
-            k,
-        }
+        Self { k }
     }
 
-    fn encode_parts(
-        k: Kernel,
-        vector: &[f32],
-        center: Option<&[f32]>,
-    ) -> (PrimaryVectorHeader, Vec<u8>) {
-        let mut scratch_storage = if center.is_some() {
-            vec![0.0f32; vector.len()]
-        } else {
-            vec![]
-        };
-        let scratch = center.is_some().then_some(scratch_storage.as_mut_slice());
-        let prepared = prepare_vector(vector, scratch, center);
+    fn encode_parts(k: Kernel, vector: &[f32]) -> (PrimaryVectorHeader, Vec<u8>) {
         let mut out = vec![0u8; packing::byte_len(vector.len(), B)];
-        let header = Self::encode_parts_to(k, prepared, &mut out);
+        let header = Self::encode_parts_to(k, vector, &mut out);
         (header, out)
     }
 
@@ -535,20 +489,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
 impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
-
-        let mut scratch_guard = if self.center.is_some() {
-            let mut g = self.scratch.get_or_default().borrow_mut();
-            g.resize(vector.len(), 0.0);
-            Some(g)
-        } else {
-            None
-        };
-        let prepared = prepare_vector(
-            vector,
-            scratch_guard.as_mut().map(|g| g.as_mut_slice()),
-            self.center.as_deref(),
-        );
-        let header = Self::encode_parts_to(self.k, prepared, vector_bytes);
+        let header = Self::encode_parts_to(self.k, vector, vector_bytes);
         header.serialize(header_bytes);
     }
 
@@ -565,11 +506,6 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             #[cfg(target_arch = "x86_64")]
             Kernel::Avx512 => unsafe { x86_64::primary_decode_avx512::<B>(vector, out) },
         };
-        if let Some(center) = &self.center {
-            for (c, v) in center.iter().zip(out.iter_mut()) {
-                *v += *c;
-            }
-        }
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
@@ -640,14 +576,10 @@ pub struct TurboPrimaryQueryDistance<const B: usize> {
 }
 
 impl<const B: usize> TurboPrimaryQueryDistance<B> {
-    pub fn new(
-        similarity: VectorSimilarity,
-        query: Cow<'_, [f32]>,
-        center: Option<&[f32]>,
-    ) -> Self {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
         let k = Kernel::default();
         let (header, query) =
-            TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(k, query.as_ref(), center);
+            TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(k, query.as_ref());
         let terms = VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
         let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
 
@@ -724,13 +656,9 @@ pub struct TurboPrimaryQueryDistance1 {
 }
 
 impl TurboPrimaryQueryDistance1 {
-    pub fn new(
-        similarity: VectorSimilarity,
-        query: Cow<'_, [f32]>,
-        center: Option<&[f32]>,
-    ) -> Self {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
         let k = Kernel::default();
-        let (header, query) = TurboPrimaryCoder::<4>::encode_parts(k, query.as_ref(), center);
+        let (header, query) = TurboPrimaryCoder::<4>::encode_parts(k, query.as_ref());
         let query = packing::bitplane_split4(&query);
         let terms = VectorDecodeTerms::from_primary::<4>(header);
         let error_terms = ErrorBoundTerms::from_header(&header, query.len() * 2, similarity);

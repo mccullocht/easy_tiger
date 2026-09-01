@@ -61,7 +61,7 @@ pub fn insert_vectors(
         ));
     }
 
-    let coder = config.format.coder(None);
+    let coder = config.format.coder();
     let batch_size = config.block_size.get();
     let progress = progress_bar(count, "inserting vectors");
 

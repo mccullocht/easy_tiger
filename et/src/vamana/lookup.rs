@@ -61,7 +61,7 @@ pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -
             }
             Some(Ok(v)) => {
                 if args.print_full_vector {
-                    let coder = index.nav_table().format().coder(None);
+                    let coder = index.nav_table().format().coder();
                     let vector = coder.decode(v);
                     println!("vector: {vector:?}");
                 } else {

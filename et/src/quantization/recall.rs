@@ -144,33 +144,26 @@ pub fn recall(
         }
     };
 
-    let coders: Vec<Box<dyn vectors::F32VectorCoder>> = match centers.as_ref() {
-        None => vec![args.format.coder(None)],
-        Some(cs) => cs
-            .iter()
-            .map(|c| args.format.coder(Some(c.to_vec())))
-            .collect(),
-    };
+    // Encoding no longer centers; each doc/query is made residual against its selected center via
+    // prepare_vector before encoding. One coder serves every center.
+    let coder = args.format.coder();
+    let l2_normalize = args.similarity.l2_normalize();
+    let num_centers = centers.as_ref().map_or(1, |cs| cs.len());
 
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
             let mut query = vec![0.0f32; query_vectors.elem_stride()];
             query_vectors[i].convert_to_f32_slice(&mut query);
-            coders
-                .iter()
-                .enumerate()
-                .map(|(ci, coder)| {
-                    let center = centers.as_ref().map(|cs| &cs[ci]);
+            (0..num_centers)
+                .map(|ci| {
+                    let center = centers.as_ref().map(|cs| cs[ci].as_ref());
+                    let query = vectors::prepare_vector(&query, None, l2_normalize, center);
                     if args.quantize_query {
                         args.format
                             .query_distance_symmetric(args.similarity, coder.encode(&query))
                     } else {
-                        args.format.query_distance_asymmetric(
-                            args.similarity,
-                            query.clone(),
-                            center,
-                        )
+                        args.format.query_distance_asymmetric(args.similarity, query)
                     }
                 })
                 .collect::<Vec<_>>()
@@ -186,10 +179,16 @@ pub fn recall(
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .for_each(|d| {
             let doc_f32 = doc_vectors[d].to_f32_vec();
-            let center = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
-            let doc = coders[center].encode(&doc_f32);
+            let center_idx = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
+            let center = centers.as_ref().map(|cs| cs[center_idx].as_ref());
+            let doc = coder.encode(&vectors::prepare_vector(
+                &doc_f32,
+                None,
+                l2_normalize,
+                center,
+            ));
             for (q, s) in query_scorers.iter().enumerate() {
-                let mut estimate = s[center].estimated_distance(&doc);
+                let mut estimate = s[center_idx].estimated_distance(&doc);
                 estimate.error *= args.z_score;
                 query_k[q].add_estimate(d as i64, estimate);
             }

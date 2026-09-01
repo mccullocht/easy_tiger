@@ -325,7 +325,7 @@ mod parallel {
             let head_coder = if posting_format == head_format {
                 None
             } else {
-                Some(head_format.coder(None))
+                Some(head_format.coder())
             };
             Ok(Self {
                 centroid_store,
@@ -347,7 +347,7 @@ mod parallel {
                 let query = head_coder.decode(query);
                 Ok(self
                     .posting_format
-                    .query_distance_asymmetric(similarity, query, None))
+                    .query_distance_asymmetric(similarity, query))
             } else {
                 Ok(self
                     .posting_format
@@ -507,7 +507,7 @@ mod parallel {
         rng: &mut impl Rng,
     ) -> VecVectorStore<f32> {
         let len = vectors.len();
-        let posting_coder = txn_idx.index().config().posting_coder.coder(None);
+        let posting_coder = txn_idx.index().config().posting_coder.coder();
         let mut scratch_vector =
             vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
         let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), len);

@@ -24,7 +24,7 @@ pub mod neon {
                     [vandq_u8(a.0, b.0), vandq_u8(a.1, b.1)]
                 };
 
-                ip = vaddq_u16(ip, vpaddlq_u8(vaddq_u8(d[0], d[1])));
+                ip = vaddq_u16(ip, vpaddlq_u8(vaddq_u8(vcntq_u8(d[0]), vcntq_u8(d[1]))));
             }
 
             vaddlvq_u16(ip)

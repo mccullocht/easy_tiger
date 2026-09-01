@@ -20,6 +20,7 @@ use std::{
 };
 
 use crossbeam_skiplist::SkipSet;
+use half::slice::HalfFloatSliceExt;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use rustix::io::Errno;
@@ -203,9 +204,7 @@ where
         };
 
         for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
-            for (&d, o) in v.iter().zip(vector_f32.iter_mut()) {
-                *o = d.to_f32();
-            }
+            v.convert_to_f32_slice(&mut vector_f32);
             vectors::prepare_vector_in_place(
                 &mut vector_f32,
                 None,

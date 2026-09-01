@@ -586,8 +586,7 @@ mod test {
                 .map(|x| {
                     let v: Vec<f32> = x.into();
                     // Euclidean fixture: prepare = subtract the centroid (no normalization).
-                    let prepared =
-                        vectors::prepare_vector(&v, None, false, centroid.as_deref());
+                    let prepared = vectors::prepare_vector(&v, None, false, centroid.as_deref());
                     let b = coder.encode(&prepared);
                     TestVector {
                         vector: v,

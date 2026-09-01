@@ -93,12 +93,8 @@ pub fn distance_loss(
             let f32_dist =
                 F32VectorCoding::F32.query_distance_asymmetric(args.similarity, query.clone());
             // Prepare the query the same way the docs are encoded: rotate, normalize, center.
-            let query = vectors::prepare_vector(
-                &query,
-                rotator.as_ref(),
-                l2_normalize,
-                center.as_deref(),
-            );
+            let query =
+                vectors::prepare_vector(&query, rotator.as_ref(), l2_normalize, center.as_deref());
             let qdist = if args.quantize_query {
                 args.format
                     .query_distance_symmetric(args.similarity, coder.encode(&query))

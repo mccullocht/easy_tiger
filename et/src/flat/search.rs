@@ -140,10 +140,9 @@ fn search_phase<Q: Send + Sync>(
                 config.similarity.l2_normalize(),
                 None,
             );
-            let distance_fn =
-                config
-                    .format
-                    .query_distance_asymmetric(config.similarity, &query);
+            let distance_fn = config
+                .format
+                .query_distance_asymmetric(config.similarity, &query);
             let txn = connection.begin_transaction(None)?;
             let cursor = txn.open_record_cursor(table_name)?;
 

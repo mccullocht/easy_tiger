@@ -163,7 +163,8 @@ pub fn recall(
                         args.format
                             .query_distance_symmetric(args.similarity, coder.encode(&query))
                     } else {
-                        args.format.query_distance_asymmetric(args.similarity, query)
+                        args.format
+                            .query_distance_asymmetric(args.similarity, query)
                     }
                 })
                 .collect::<Vec<_>>()

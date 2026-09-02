@@ -142,6 +142,8 @@ pub struct SearchStats {
     pub posting_vectors_read: usize,
     /// Number of posting entries scored.
     pub posting_vectors_scored: usize,
+    /// Number of results reranked using raw vectors.
+    pub posting_vectors_reranked: usize,
 }
 
 impl Add for SearchStats {
@@ -153,6 +155,7 @@ impl Add for SearchStats {
             postings_read: self.postings_read + rhs.postings_read,
             posting_vectors_read: self.posting_vectors_read + rhs.posting_vectors_read,
             posting_vectors_scored: self.posting_vectors_scored + rhs.posting_vectors_scored,
+            posting_vectors_reranked: self.posting_vectors_reranked + rhs.posting_vectors_reranked,
         }
     }
 }
@@ -259,8 +262,9 @@ impl Searcher {
         let mut raw_cursor = reader
             .transaction()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;
-        let mut reranked = result_queue
-            .into_results()
+        let results = result_queue.into_results();
+        self.stats.posting_vectors_reranked = results.len().min(self.params.num_rerank);
+        let mut reranked = results
             .into_iter()
             .take(self.params.num_rerank)
             .map(|n| {

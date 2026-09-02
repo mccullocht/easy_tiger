@@ -213,9 +213,7 @@ fn search_phase<Q: Send + Sync>(
         query_indices
             .into_iter()
             .progress_with(progress.clone())
-            .map(|index| {
-                searcher.query(index, &query_vectors[index].to_f32_vec(), recall_computer)
-            })
+            .map(|index| searcher.query(index, &query_vectors[index].to_f32_vec(), recall_computer))
             .reduce(|a, b| match (a, b) {
                 (Ok(a), Ok(b)) => Ok(a + b),
                 (Ok(_), Err(b)) => Err(b),
@@ -231,11 +229,8 @@ fn search_phase<Q: Send + Sync>(
             .map_init(
                 || SearcherState::new(index, connection, search_params.clone()).unwrap(),
                 |searcher, index| {
-                    let stats = searcher.query(
-                        index,
-                        &query_vectors[index].to_f32_vec(),
-                        recall_computer,
-                    );
+                    let stats =
+                        searcher.query(index, &query_vectors[index].to_f32_vec(), recall_computer);
                     progress.inc(1);
                     stats
                 },

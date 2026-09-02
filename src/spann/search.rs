@@ -1,6 +1,7 @@
 //! SPANN search implementation.
 
 use std::{
+    cmp::Ordering,
     collections::HashSet,
     io,
     num::NonZero,
@@ -10,7 +11,7 @@ use std::{
 
 use min_max_heap::MinMaxHeap;
 use tracing::warn;
-use vectors::QueryVectorDistance;
+use vectors::{EstimatedDistance, QueryVectorDistance};
 use wt_mdb::{Result, TypedCursorGuard};
 
 use crate::{
@@ -141,6 +142,8 @@ pub struct SearchStats {
     pub posting_vectors_read: usize,
     /// Number of posting entries scored.
     pub posting_vectors_scored: usize,
+    /// Number of results reranked using raw vectors.
+    pub posting_vectors_reranked: usize,
 }
 
 impl Add for SearchStats {
@@ -152,6 +155,7 @@ impl Add for SearchStats {
             postings_read: self.postings_read + rhs.postings_read,
             posting_vectors_read: self.posting_vectors_read + rhs.posting_vectors_read,
             posting_vectors_scored: self.posting_vectors_scored + rhs.posting_vectors_scored,
+            posting_vectors_reranked: self.posting_vectors_reranked + rhs.posting_vectors_reranked,
         }
     }
 }
@@ -258,8 +262,9 @@ impl Searcher {
         let mut raw_cursor = reader
             .transaction()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;
-        let mut reranked = result_queue
-            .into_results()
+        let results = result_queue.into_results();
+        self.stats.posting_vectors_reranked = results.len().min(self.params.num_rerank);
+        let mut reranked = results
             .into_iter()
             .take(self.params.num_rerank)
             .map(|n| {
@@ -279,11 +284,53 @@ impl Searcher {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+struct ErrorBoundNeighbor {
+    n: Neighbor,
+    e: EstimatedDistance,
+}
+
+impl ErrorBoundNeighbor {
+    fn from_lower(vector_id: i64, e: EstimatedDistance) -> Self {
+        Self {
+            n: Neighbor::new(vector_id, e.distance - e.error),
+            e,
+        }
+    }
+
+    fn from_upper(vector_id: i64, e: EstimatedDistance) -> Self {
+        Self {
+            n: Neighbor::new(vector_id, e.distance + e.error),
+            e,
+        }
+    }
+}
+
+impl PartialEq for ErrorBoundNeighbor {
+    fn eq(&self, other: &Self) -> bool {
+        self.n == other.n
+    }
+}
+
+impl Eq for ErrorBoundNeighbor {}
+
+impl PartialOrd for ErrorBoundNeighbor {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ErrorBoundNeighbor {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.n.cmp(&other.n)
+    }
+}
+
 struct ResultQueue<'a> {
     dist_fn: Box<dyn QueryVectorDistance + 'a>,
-    results: MinMaxHeap<Neighbor>,
+    results: MinMaxHeap<ErrorBoundNeighbor>,
+    overflow: MinMaxHeap<ErrorBoundNeighbor>,
     max_len: usize,
-
     scored: usize,
 }
 
@@ -292,23 +339,44 @@ impl<'a> ResultQueue<'a> {
         Self {
             dist_fn,
             results: MinMaxHeap::with_capacity(max_len),
+            overflow: MinMaxHeap::new(),
             max_len,
             scored: 0,
         }
     }
 
-    fn push(&mut self, vertex: i64, vector: &[u8]) {
+    fn push(&mut self, vector_id: i64, vector: &[u8]) {
         self.scored += 1;
-        let dist = self.dist_fn.distance(vector);
-        let neighbor = Neighbor::new(vertex, dist);
+        let e = self.dist_fn.estimated_distance(vector);
+        let n = ErrorBoundNeighbor::from_upper(vector_id, e);
         if self.results.len() < self.max_len {
-            self.results.push(neighbor);
-        } else {
-            self.results.push_pop_max(neighbor);
+            self.results.push(n);
+            return;
+        }
+
+        let ub = *self.results.peek_max().unwrap();
+        if n < ub {
+            let evicted = self.results.push_pop_max(n);
+            // Put the evicted result in overflow if it is still competitive.
+            let ub = *self.results.peek_max().unwrap();
+            if ErrorBoundNeighbor::from_lower(evicted.n.vertex(), evicted.e) < ub {
+                self.overflow
+                    .push(ErrorBoundNeighbor::from_lower(evicted.n.vertex, evicted.e));
+            }
+            while self.overflow.peek_max().is_some_and(|x| ub < *x) {
+                self.overflow.pop_max();
+            }
+        } else if ErrorBoundNeighbor::from_lower(vector_id, e) < ub {
+            self.overflow
+                .push(ErrorBoundNeighbor::from_lower(vector_id, e));
         }
     }
 
     fn into_results(self) -> Vec<Neighbor> {
-        self.results.into_vec_asc()
+        let mut results = std::iter::chain(self.results, self.overflow)
+            .map(|en| Neighbor::new(en.n.vertex(), en.e.distance))
+            .collect::<Vec<_>>();
+        results.sort_unstable();
+        results
     }
 }

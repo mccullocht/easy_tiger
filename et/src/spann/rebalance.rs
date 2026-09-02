@@ -6,7 +6,7 @@ use easy_tiger::spann::{
     centroid_stats::CentroidStats,
     rebalance::{BalanceSummary, RebalanceStats, parallel_rebalance},
 };
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, SeedableRng};
 use wt_mdb::Connection;
 
 use crate::ui::progress_spinner;

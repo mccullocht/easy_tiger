@@ -1,10 +1,6 @@
 use std::io;
 
-use crate::{
-    neighbor_util::{BoundedNeighbor, BoundedNeighbors},
-    recall::RecallComputer,
-    ui::progress_bar,
-};
+use crate::{neighbor_util::TopNeighbors, recall::RecallComputer, ui::progress_bar};
 use clap::Args;
 use easy_tiger::input::VectorStore;
 use half::slice::HalfFloatSliceExt;
@@ -91,15 +87,18 @@ pub(crate) fn measure(
 ) -> BoundDepthReport {
     let k = recall_computer.k();
     let mut query_candidates = Vec::with_capacity(exhaustive.num_queries());
-    query_candidates.resize_with(exhaustive.num_queries(), || BoundedNeighbors::new(k));
+    query_candidates.resize_with(exhaustive.num_queries(), || TopNeighbors::new(k));
     (0..doc_vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .for_each(|d| {
             let (center, doc) = exhaustive.encode_doc(&doc_vectors[d].to_f32_vec());
             for (q, candidates) in query_candidates.iter().enumerate() {
-                let bounds = exhaustive.scorer(q, center).distance_bounds(&doc);
-                candidates.add(BoundedNeighbor::new(d as i64, bounds));
+                // `TopNeighbors` retains, alongside the top k by upper bound, every candidate whose
+                // lower bound leaves it able to still enter the top k. That retained set is exactly
+                // the bound-driven candidate set this tool measures.
+                let estimate = exhaustive.scorer(q, center).estimated_distance(&doc);
+                candidates.add_estimate(d as i64, estimate);
             }
         });
 

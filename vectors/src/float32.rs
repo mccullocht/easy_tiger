@@ -1,9 +1,8 @@
 //! Raw float 32 vector coding and distance computation.
 //!
-//! Vectors are stored as a sequence of raw little-endian coded f32 values.
-//!
-//! For Cosine similarity the vector will be normalized during encoding. When scoring float vectors
-//! we will assume the vectors are unnormalized.
+//! Vectors are stored as a sequence of raw little-endian coded f32 values exactly as provided;
+//! callers are responsible for any normalization (see [`crate::prepare_vector`]). Angular distance
+//! functions assume the stored and query vectors are already l2 normalized.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -86,8 +85,9 @@ pub fn l2_norm(vector: impl AsRef<[f32]>) -> f32 {
 
 /// Normalize the contents of vector in l2 space.
 ///
-/// May return the input vector if it is already normalized.
-pub fn l2_normalize<'a>(vector: impl Into<Cow<'a, [f32]>>) -> Cow<'a, [f32]> {
+/// Returns the normalized vector and the l2 norm. The returned vector may be the input vector if
+/// the input vector is already unit normalized.
+pub fn l2_normalize<'a>(vector: impl Into<Cow<'a, [f32]>>) -> (Cow<'a, [f32]>, f32) {
     let mut vector: Cow<'a, [f32]> = vector.into();
     let norm = l2_norm(&vector);
     if norm != 1.0 {
@@ -96,15 +96,15 @@ pub fn l2_normalize<'a>(vector: impl Into<Cow<'a, [f32]>>) -> Cow<'a, [f32]> {
             *d *= norm_inv;
         }
     }
-    vector
+    (vector, norm)
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct VectorCoder(VectorSimilarity);
+#[derive(Debug, Copy, Clone, Default)]
+pub struct VectorCoder;
 
 impl VectorCoder {
-    pub fn new(similarity: VectorSimilarity) -> Self {
-        Self(similarity)
+    pub fn new() -> Self {
+        Self
     }
 
     fn encode_it(vector: impl ExactSizeIterator<Item = f32>, out: &mut [u8]) {
@@ -121,13 +121,7 @@ impl F32VectorCoder for VectorCoder {
 
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         assert!(out.len() >= std::mem::size_of_val(vector));
-        let vector_it = vector.iter().copied();
-        if self.0.l2_normalize() {
-            let scale = 1.0 / l2_norm(vector);
-            Self::encode_it(vector_it.map(|d| d * scale), out);
-        } else {
-            Self::encode_it(vector_it, out);
-        }
+        Self::encode_it(vector.iter().copied(), out);
     }
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
@@ -202,47 +196,6 @@ impl F32VectorDistance for DotProductDistance {
     }
 }
 
-static COS_DIST: OnceLock<CosineDistance> = OnceLock::new();
-
-#[derive(Debug, Default, Copy, Clone)]
-pub struct CosineDistance(DotProductDistance);
-
-impl CosineDistance {
-    /// Returns a static instance of cosine distance.
-    pub fn get() -> &'static CosineDistance {
-        COS_DIST.get_or_init(CosineDistance::default)
-    }
-}
-
-impl VectorDistance for CosineDistance {
-    fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        // Vectors are normalized during encoding so we can make this fast.
-        self.0.distance(query, doc)
-    }
-}
-
-impl F32VectorDistance for CosineDistance {
-    fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
-        let ab = dot(
-            bytemuck::cast_slice(a),
-            bytemuck::cast_slice(b),
-            Some(self.0.0),
-        );
-        let aa = dot(
-            bytemuck::cast_slice(a),
-            bytemuck::cast_slice(a),
-            Some(self.0.0),
-        );
-        let bb = dot(
-            bytemuck::cast_slice(b),
-            bytemuck::cast_slice(b),
-            Some(self.0.0),
-        );
-        let cos = ab / (aa * bb).sqrt();
-        (-cos as f64 + 1.0) / 2.0
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct QueryVectorDistance<'a, D> {
     distance_fn: D,
@@ -267,10 +220,6 @@ pub fn new_query_vector_distance<'a>(
     query: Cow<'a, [f32]>,
 ) -> Box<dyn QueryVectorDistanceT + 'a> {
     match similarity {
-        VectorSimilarity::Cosine => Box::new(QueryVectorDistance::new(
-            CosineDistance::default(),
-            l2_normalize(query),
-        )),
         VectorSimilarity::Dot => Box::new(QueryVectorDistance::new(
             DotProductDistance::default(),
             query,

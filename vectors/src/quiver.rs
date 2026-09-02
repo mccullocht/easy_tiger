@@ -98,8 +98,7 @@ impl<K: Kernel> F32VectorCoder for Coder<K> {
         let (header_bytes, vector_bytes) = Header::split(encoded);
         let header = Header::decode(header_bytes);
         let decode_table = [-header.weak, -header.strong, header.weak, header.strong];
-        for (i, o) in super::lvq::packing::TurboUnpacker::<2>::new(vector_bytes).zip(out.iter_mut())
-        {
+        for (i, o) in crate::packing::TurboUnpacker::<2>::new(vector_bytes).zip(out.iter_mut()) {
             *o = decode_table[i as usize];
         }
     }

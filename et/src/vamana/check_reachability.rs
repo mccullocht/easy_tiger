@@ -9,7 +9,7 @@ use easy_tiger::vamana::{
     Graph,
     wt::{CursorGraph, ENTRY_POINT_KEY, TableGraphVectorIndex},
 };
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_xoshiro::Xoshiro128PlusPlus;
 use wt_mdb::Connection;
 

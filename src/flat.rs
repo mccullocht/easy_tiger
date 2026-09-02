@@ -43,10 +43,7 @@ pub fn init_index(
 ) -> io::Result<()> {
     let leaf_page_size = crate::posting_block::leaf_page_max(
         config.block_size.get(),
-        config
-            .format
-            .coder(config.similarity, None)
-            .byte_len(config.dimensions.get()),
+        config.format.coder().byte_len(config.dimensions.get()),
         4096,
     ) as u32;
     connection

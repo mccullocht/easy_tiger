@@ -171,7 +171,7 @@ impl Worker {
             .config()
             .rerank_format
             .expect("rerank format is set")
-            .coder(self.index.head_config().config().similarity, None);
+            .coder();
         let query: Vec<f32> = {
             let mut raw_cursor = reader
                 .transaction()
@@ -433,7 +433,6 @@ fn diagnose_missing(
     let similarity = index.head_config().config().similarity;
     let hf_table = reader.head().index().high_fidelity_table();
     let hf_format = hf_table.format();
-    let hf_center = hf_table.centroid().map(|c| c.to_vec());
     let hf_name = hf_table.name().to_owned();
     let mut hf_cursor = reader.transaction().open_record_cursor(&hf_name)?;
 
@@ -453,8 +452,7 @@ fn diagnose_missing(
 
         // Distance from this record's query to each candidate centroid, using an asymmetric
         // quantized distance against the centroid's stored (encoded) vector.
-        let query_distance =
-            hf_format.query_distance_asymmetric(similarity, &m.query, hf_center.as_deref());
+        let query_distance = hf_format.query_distance_asymmetric(similarity, &m.query);
         let mut best: Option<(u32, f64)> = None;
         if let Some(centroids) = centroids {
             for &centroid_id in centroids {

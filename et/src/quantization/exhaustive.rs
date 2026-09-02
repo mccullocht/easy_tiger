@@ -62,7 +62,7 @@ pub struct ExhaustiveArgs {
 pub struct Exhaustive {
     similarity: VectorSimilarity,
     centers: Option<VecVectorStore<f32>>,
-    coders: Vec<Box<dyn F32VectorCoder>>,
+    coder: Box<dyn F32VectorCoder>,
     /// One entry per query, each with one distance function per center.
     query_scorers: Vec<Vec<Box<dyn QueryVectorDistance + 'static>>>,
 }
@@ -168,36 +168,25 @@ impl Exhaustive {
         centers: Option<VecVectorStore<f32>>,
         query_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
     ) -> Self {
-        let coders: Vec<Box<dyn F32VectorCoder>> = match centers.as_ref() {
-            None => vec![format.coder(similarity, None)],
-            Some(cs) => cs
-                .iter()
-                .map(|c| format.coder(similarity, Some(c.to_vec())))
-                .collect(),
-        };
+        // Centering is applied to each vector via `prepare_vector` at encode time rather than baked
+        // into the coder, so a single coder serves every center.
+        let coder = format.coder();
+        let num_centers = centers.as_ref().map_or(1, |cs| cs.len());
 
         let query_scorers = (0..query_vectors.len())
             .into_par_iter()
             .map(|i| {
-                coders
-                    .iter()
-                    .enumerate()
-                    .map(|(ci, coder)| {
-                        let center = centers.as_ref().map(|cs| &cs[ci]);
+                let query = query_vectors[i].to_f32_vec();
+                (0..num_centers)
+                    .map(|ci| {
+                        let center = centers.as_ref().map(|cs| cs[ci].as_ref());
                         // Queries are passed as owned values so the scorers do not borrow the
                         // mapped query vector file.
+                        let query = vectors::prepare_vector(&query, None, false, center);
                         if quantize_query {
-                            format.query_distance_symmetric(
-                                similarity,
-                                coder.encode(&query_vectors[i].to_f32_vec()),
-                                center,
-                            )
+                            format.query_distance_symmetric(similarity, coder.encode(&query))
                         } else {
-                            format.query_distance_asymmetric(
-                                similarity,
-                                query_vectors[i].to_f32_vec(),
-                                center,
-                            )
+                            format.query_distance_asymmetric(similarity, query)
                         }
                     })
                     .collect::<Vec<_>>()
@@ -207,7 +196,7 @@ impl Exhaustive {
         Self {
             similarity,
             centers,
-            coders,
+            coder,
             query_scorers,
         }
     }
@@ -218,8 +207,13 @@ impl Exhaustive {
 
     /// Encode `doc`, returning the index of the center it was encoded against along with the bytes.
     pub fn encode_doc(&self, doc: &[f32]) -> (usize, Vec<u8>) {
-        let center = self.select_center_for_doc(doc);
-        (center, self.coders[center].encode(doc))
+        let center_idx = self.select_center_for_doc(doc);
+        let center = self.centers.as_ref().map(|cs| cs[center_idx].as_ref());
+        (
+            center_idx,
+            self.coder
+                .encode(&vectors::prepare_vector(doc, None, false, center)),
+        )
     }
 
     /// Return the distance function for `query` against docs encoded with `center`.

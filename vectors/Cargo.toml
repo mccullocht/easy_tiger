@@ -11,9 +11,6 @@ rand_xoshiro = { workspace = true }
 serde = { workspace = true }
 thread_local = { workspace = true }
 
-[build-dependencies]
-cc = { workspace = true }
-
 [dev-dependencies]
 approx = { workspace = true }
 criterion = { workspace = true }

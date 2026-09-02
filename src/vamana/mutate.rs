@@ -275,6 +275,11 @@ fn insert_internal<F: FnMut(i64) -> bool>(
     // TODO: make this an error instead of panicking.
     assert_eq!(index.config().dimensions.get(), vector.len());
 
+    // The graph search prepares the query itself, so hand it the raw vector. For encoding we need
+    // the centered form that matches every stored vector.
+    let prepared: &[f32] =
+        &vectors::prepare_vector(vector, None, false, index.config().centroid.as_deref());
+
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
     let mut candidate_edges = searcher.search_with_options(vector, options, index)?;
     let mut graph = index.graph()?;
@@ -298,10 +303,10 @@ fn insert_internal<F: FnMut(i64) -> bool>(
             .collect::<Vec<_>>(),
     )?;
     let mut nav_vectors = index.nav_vectors()?;
-    nav_vectors.set(vertex_id, nav_vectors.new_coder().encode(vector))?;
+    nav_vectors.set(vertex_id, nav_vectors.new_coder().encode(prepared))?;
     if let Some(vectors) = index.rerank_vectors() {
         let mut vectors = vectors?;
-        vectors.set(vertex_id, vectors.new_coder().encode(vector))?;
+        vectors.set(vertex_id, vectors.new_coder().encode(prepared))?;
     }
 
     let mut vectors = index.high_fidelity_vectors()?;

@@ -182,9 +182,7 @@ pub fn sweep(
             &queries,
         );
         let report = bound_depth::measure(&exhaustive, &docs, &recall_computer);
-        let format_byte_len = format
-            .coder(args.similarity, None)
-            .byte_len(docs.elem_stride());
+        let format_byte_len = format.coder().byte_len(docs.elem_stride());
         let cost_mib = cost_params.map(|(doc_count, rerank_byte_len)| {
             let cost_bytes = format_byte_len as f64 * doc_count as f64
                 + rerank_byte_len as f64 * report.queue_depth.mean();

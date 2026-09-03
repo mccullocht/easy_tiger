@@ -3,7 +3,6 @@ use std::{io, path::PathBuf};
 use crate::{neighbor_util::TopNeighbors, recall::RecallComputer, ui::progress_bar};
 use clap::Args;
 use easy_tiger::{
-    Neighbor,
     input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
     kmeans::{Params, kmeans},
 };
@@ -12,6 +11,7 @@ use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rand::SeedableRng;
 use rayon::prelude::*;
+use tdigests::TDigest;
 use vectors::{F32VectorCoding, VectorSimilarity, f16};
 
 #[derive(Args)]
@@ -45,6 +45,13 @@ pub struct QuantizationRecallArgs {
     /// simulates recall with full-fidelity reranking where we over retrieve to get the final set.
     #[arg(long, default_value_t = 1.0)]
     k_mult: f64,
+
+    /// Z-Score applied to error bounds.
+    ///
+    /// Higher values increase confidence that recall will be accurate at the cost of higher rerank
+    /// depth.
+    #[arg(long, default_value_t = 1.0)]
+    z_score: f64,
 
     /// Number of centers to compute and use.
     ///
@@ -137,36 +144,24 @@ pub fn recall(
         }
     };
 
-    let coders: Vec<Box<dyn vectors::F32VectorCoder>> = match centers.as_ref() {
-        None => vec![args.format.coder(args.similarity, None)],
-        Some(cs) => cs
-            .iter()
-            .map(|c| args.format.coder(args.similarity, Some(c.to_vec())))
-            .collect(),
-    };
+    let coder = args.format.coder();
+    let num_centers = centers.as_ref().map_or(1, |cs| cs.len());
 
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
             let mut query = vec![0.0f32; query_vectors.elem_stride()];
             query_vectors[i].convert_to_f32_slice(&mut query);
-            coders
-                .iter()
-                .enumerate()
-                .map(|(ci, coder)| {
-                    let center = centers.as_ref().map(|cs| &cs[ci]);
+            (0..num_centers)
+                .map(|ci| {
+                    let center = centers.as_ref().map(|cs| cs[ci].as_ref());
+                    let query = vectors::prepare_vector(&query, None, false, center);
                     if args.quantize_query {
-                        args.format.query_distance_symmetric(
-                            args.similarity,
-                            coder.encode(&query),
-                            center,
-                        )
+                        args.format
+                            .query_distance_symmetric(args.similarity, coder.encode(&query))
                     } else {
-                        args.format.query_distance_asymmetric(
-                            args.similarity,
-                            query.clone(),
-                            center,
-                        )
+                        args.format
+                            .query_distance_asymmetric(args.similarity, query)
                     }
                 })
                 .collect::<Vec<_>>()
@@ -177,42 +172,43 @@ pub fn recall(
     let result_len = (k as f64 * args.k_mult) as usize;
     let mut query_k = Vec::with_capacity(query_limit);
     query_k.resize_with(query_limit, || TopNeighbors::new(result_len));
-    let (total_scored, total_competitive) = (0..doc_vectors.len())
+    (0..doc_vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
-        .map(|d| {
-            let mut doc_f32 = vec![0.0f32; doc_vectors.elem_stride()];
-            doc_vectors[d].convert_to_f32_slice(&mut doc_f32);
-            let center = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
-            let doc = coders[center].encode(&doc_f32);
-            let mut total_scored = 0;
-            let mut total_competitive = 0;
+        .for_each(|d| {
+            let doc_f32 = doc_vectors[d].to_f32_vec();
+            let center_idx = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
+            let center = centers.as_ref().map(|cs| cs[center_idx].as_ref());
+            let doc = coder.encode(&vectors::prepare_vector(&doc_f32, None, false, center));
             for (q, s) in query_scorers.iter().enumerate() {
-                let max_distance = query_k[q].max_distance();
-                if let Some(distance) = s[center].distance_with_bound(&doc, max_distance) {
-                    query_k[q].add(Neighbor::new(d as i64, distance));
-                    total_competitive += 1;
-                }
-                total_scored += 1;
+                let mut estimate = s[center_idx].estimated_distance(&doc);
+                estimate.error *= args.z_score;
+                query_k[q].add_estimate(d as i64, estimate);
             }
-            (total_scored, total_competitive)
-        })
-        .reduce(|| (0usize, 0usize), |a, b| (a.0 + b.0, a.1 + b.1));
+        });
 
+    let mut depth = Vec::with_capacity(query_k.len());
     let recall_values = query_k
         .into_iter()
         .enumerate()
-        .map(|(i, r)| recall_computer.compute_recall(i, &r.into_neighbors()))
+        .map(|(i, r)| {
+            let results = r.into_neighbors();
+            depth.push(results.len() as f64);
+            recall_computer.compute_recall(i, &results)
+        })
         .collect::<Vec<_>>();
     println!("{}", recall_computer.summarize(&recall_values));
-    if total_competitive != total_scored {
-        println!(
-            "scored: {} competitive: {} ratio: {:.6}",
-            total_scored,
-            total_competitive,
-            total_competitive as f64 / total_scored as f64
-        );
-    }
+    let mean_depth = depth.iter().copied().sum::<f64>() / depth.len() as f64;
+    let digest = TDigest::from_values(depth);
+    println!(
+        "Queue depth mean {mean_depth:<6.1} p50 {:<6.1} p75 {:<6.1} p90 {:<6.1} p95 {:<6.1} p99 {:<6.1} p99.9 {:<6.1}",
+        digest.estimate_quantile(0.5),
+        digest.estimate_quantile(0.75),
+        digest.estimate_quantile(0.9),
+        digest.estimate_quantile(0.95),
+        digest.estimate_quantile(0.99),
+        digest.estimate_quantile(0.999)
+    );
 
     Ok(())
 }

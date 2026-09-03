@@ -1,5 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use vectors::rotate::{Kernel, Rotator};
 use vectors::{F32VectorCoding, VectorSimilarity};
 
@@ -17,7 +17,7 @@ fn benchmark_coding(
     similarity: Option<VectorSimilarity>,
 ) {
     let vector = generate_test_vector(1024);
-    let coder = format.coder(similarity.unwrap_or(VectorSimilarity::Dot), None);
+    let coder = format.coder();
     let mut out = vec![0u8; coder.byte_len(vector.len())];
     let id = if let Some(s) = similarity {
         format!("{format}/coding/{s}")
@@ -50,6 +50,7 @@ fn float16_benchmarks(c: &mut Criterion) {
 
 fn binary_benchmarks(c: &mut Criterion) {
     benchmark_coding(c, F32VectorCoding::BinaryQuantized, None);
+    benchmark_coding(c, F32VectorCoding::RaBitQ, None);
     benchmark_coding(c, F32VectorCoding::QuIVer, None);
 }
 
@@ -59,10 +60,6 @@ fn lvq_benchmarks(c: &mut Criterion) {
         F32VectorCoding::TLVQ2,
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
-        F32VectorCoding::TLVQ1x8,
-        F32VectorCoding::TLVQ2x8,
-        F32VectorCoding::TLVQ4x8,
-        F32VectorCoding::TLVQ8x8,
     ] {
         benchmark_coding(c, format, None);
     }
@@ -74,11 +71,7 @@ fn rotator_benchmarks(c: &mut Criterion) {
             let vector = generate_test_vector(dim);
             let rotator = Rotator::with_kernel(dim, 0x455A_5469676572, kernel);
             c.bench_function(&format!("rotate/{kernel}/forward/{dim}"), |b| {
-                b.iter(|| rotator.forward(std::hint::black_box(&vector)))
-            });
-            let rotated = rotator.forward(&vector);
-            c.bench_function(&format!("rotate/{kernel}/backward/{dim}"), |b| {
-                b.iter(|| rotator.backward(std::hint::black_box(&rotated)))
+                b.iter(|| rotator.rotate_copy(std::hint::black_box(&vector)))
             });
         }
     }

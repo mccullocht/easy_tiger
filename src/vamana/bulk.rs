@@ -6,7 +6,7 @@
 //! around vector access and graph edge state.
 //!
 //! Caveats:
-//! * Only `numpy` little-endian formatted `f32` vectors are accepted.
+//! * Only `f16` vectors are accepted as input.
 //! * Row keys are assigned densely beginning at zero.
 use core::f64;
 use std::{
@@ -20,12 +20,13 @@ use std::{
 };
 
 use crossbeam_skiplist::SkipSet;
+use half::slice::HalfFloatSliceExt;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use rustix::io::Errno;
 use thread_local::ThreadLocal;
 use tracing::warn;
-use vectors::{F32VectorCoding, VectorSimilarity};
+use vectors::{F32VectorCoding, VectorSimilarity, f16};
 use wt_mdb::{Connection, Error, Result, Transaction, connection::CreateOptionsBuilder};
 
 use crate::{
@@ -104,7 +105,7 @@ pub struct BulkLoadBuilder<D> {
 
 impl<D> BulkLoadBuilder<D>
 where
-    D: VectorStore<Elem = f32> + Send + Sync,
+    D: VectorStore<Elem = f16> + Send + Sync,
 {
     /// Create a new bulk graph builder with the passed vector set and configuration.
     /// `limit` limits the number of vectors processed to less than the full set.
@@ -176,9 +177,11 @@ where
     /// Load nav and rerank vectors into tables.
     fn load_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let dim = self.index.config().dimensions.get();
+        let centroid = self.index.config().centroid.clone();
         let nav_coder = self.index.nav_table().new_coder();
         let mut nav_vector = vec![0u8; nav_coder.byte_len(dim)];
         let mut sum = vec![0.0; dim];
+        let mut vector_f32 = vec![0.0f32; dim];
         let mut quantized_vectors = if self.options.memory_quantized_vectors {
             Some(MmapMut::map_anon(nav_coder.byte_len(dim) * self.vectors.len()).unwrap())
         } else {
@@ -200,10 +203,12 @@ where
         };
 
         for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
-            for (i, o) in v.iter().zip(sum.iter_mut()) {
-                *o += *i as f64;
+            v.convert_to_f32_slice(&mut vector_f32);
+            vectors::prepare_vector_in_place(&mut vector_f32, None, false, centroid.as_deref());
+            for (d, s) in vector_f32.iter().zip(sum.iter_mut()) {
+                *s += *d as f64;
             }
-            nav_coder.encode_to(v, &mut nav_vector);
+            nav_coder.encode_to(&vector_f32, &mut nav_vector);
             if let Some(q) = quantized_vectors.as_mut() {
                 let start = i * nav_vector.len();
                 q[start..(start + nav_vector.len())].copy_from_slice(&nav_vector);
@@ -211,7 +216,7 @@ where
             nav_cursor.append(i as i64, &nav_vector)?;
 
             if let Some((coder, vector, cursor)) = rerank.as_mut() {
-                coder.encode_to(v, vector);
+                coder.encode_to(&vector_f32, vector);
                 cursor.append(i as i64, vector)?;
             }
             progress(1);
@@ -224,7 +229,9 @@ where
             )
             .unwrap()
         });
-        let centroid = sum
+        // `sum` accumulated the already-prepared vectors, so this mean is the entry-point
+        // reference in the same (prepared) space as every stored vector.
+        let mean = sum
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect::<Vec<_>>();
@@ -233,7 +240,7 @@ where
             .rerank_table()
             .unwrap_or(self.index.nav_table())
             .new_coder()
-            .encode(&centroid);
+            .encode(&mean);
         Ok(())
     }
 
@@ -442,11 +449,8 @@ where
         edges: &mut Vec<Neighbor>,
     ) -> Result<()> {
         let vertex_vector = vector_store.get(vertex_id as i64).unwrap()?.to_vec();
-        let vertex_dist_fn = vector_format.query_distance_symmetric(
-            self.index.config().similarity,
-            &vertex_vector,
-            self.index.config().centroid.as_deref(),
-        );
+        let vertex_dist_fn =
+            vector_format.query_distance_symmetric(self.index.config().similarity, &vertex_vector);
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
             // Skip vertices already in edges: the graph search may have found this vertex
@@ -671,7 +675,7 @@ where
 
 struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Transaction);
 
-impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
+impl<D: VectorStore<Elem = f16> + Send + Sync> GraphVectorIndex
     for BulkLoadGraphVectorIndexReader<'_, '_, D>
 {
     type Graph<'b>

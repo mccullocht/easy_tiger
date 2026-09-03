@@ -20,6 +20,8 @@ use easy_tiger::{
     },
     vamana::{GraphSearchParams, PatienceParams},
 };
+use half::slice::HalfFloatSliceExt;
+use vectors::f16;
 use wt_mdb::Connection;
 
 use crate::{
@@ -30,7 +32,8 @@ use crate::{
 
 #[derive(Args)]
 pub struct SearchArgs {
-    /// Path to numpy formatted little-endian float vectors.
+    /// Path to the query vectors, in BigANN format: an 8 byte `<len,dim>` header
+    /// followed by little-endian f16 vector data.
     #[arg(short, long)]
     query_vectors: PathBuf,
     /// Number head (centroid) candidates in the search list.
@@ -82,10 +85,19 @@ pub struct SearchArgs {
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    let query_vectors = easy_tiger::input::DerefVectorStore::from_file_with_stride(
-        args.query_vectors,
-        index.head_config().config().dimensions,
-    )?;
+    let query_vectors: DerefVectorStore<f16, _> =
+        easy_tiger::input::DerefVectorStore::from_file(args.query_vectors)?;
+    let index_dimensions = index.head_config().config().dimensions.get();
+    if query_vectors.elem_stride() != index_dimensions {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "query vectors have dimensionality {} but index expects {}",
+                query_vectors.elem_stride(),
+                index_dimensions
+            ),
+        ));
+    }
     let limit = std::cmp::min(
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
@@ -160,11 +172,11 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             stats.total_stats.head.visited as f64 / stats.count as f64
         );
         println!(
-            "tail search avg postings {:.2} avg read {:.2} avg fast scored {:.2} avg slow scored {:.2}",
+            "tail search avg postings {:.2} avg read {:.2} avg scored {:.2} avg reranked {:.2}",
             stats.total_stats.postings_read as f64 / stats.count as f64,
             stats.total_stats.posting_vectors_read as f64 / stats.count as f64,
-            stats.total_stats.posting_vectors_fast_scored as f64 / stats.count as f64,
-            stats.total_stats.posting_vectors_slow_scored as f64 / stats.count as f64,
+            stats.total_stats.posting_vectors_scored as f64 / stats.count as f64,
+            stats.total_stats.posting_vectors_reranked as f64 / stats.count as f64,
         );
 
         let wt_stats = WiredTigerConnectionStats::try_from(&connection)?;
@@ -186,7 +198,7 @@ fn search_phase<Q: Send + Sync>(
     name: &'static str,
     iters: usize,
     limit: usize,
-    query_vectors: &DerefVectorStore<f32, Q>,
+    query_vectors: &DerefVectorStore<f16, Q>,
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
     search_params: SearchParams,
@@ -201,7 +213,7 @@ fn search_phase<Q: Send + Sync>(
         query_indices
             .into_iter()
             .progress_with(progress.clone())
-            .map(|index| searcher.query(index, &query_vectors[index], recall_computer))
+            .map(|index| searcher.query(index, &query_vectors[index].to_f32_vec(), recall_computer))
             .reduce(|a, b| match (a, b) {
                 (Ok(a), Ok(b)) => Ok(a + b),
                 (Ok(_), Err(b)) => Err(b),
@@ -217,7 +229,8 @@ fn search_phase<Q: Send + Sync>(
             .map_init(
                 || SearcherState::new(index, connection, search_params.clone()).unwrap(),
                 |searcher, index| {
-                    let stats = searcher.query(index, &query_vectors[index], recall_computer);
+                    let stats =
+                        searcher.query(index, &query_vectors[index].to_f32_vec(), recall_computer);
                     progress.inc(1);
                     stats
                 },

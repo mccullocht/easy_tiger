@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf, sync::Arc};
+use std::{io, ops::Add, path::PathBuf};
 
 use clap::Args;
 use easy_tiger::input::{DerefVectorStore, VectorStore};
@@ -6,9 +6,12 @@ use half::slice::HalfFloatSliceExt;
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
-use vectors::{F32VectorCoding, VectorSimilarity, f16};
+use smallvec::smallvec;
+use vectors::{EstimatedDistance, F32VectorCoding, VectorSimilarity, f16, rotate::Rotator};
 
 use crate::ui::progress_bar;
+
+const Z_SCORES: &[f64] = &[1.00, 1.96, 3.00];
 
 #[derive(Args)]
 pub struct DistanceLossArgs {
@@ -34,6 +37,14 @@ pub struct DistanceLossArgs {
     /// If set, compute the center of the dataset and apply before computing distances.
     #[arg(long, default_value_t = false)]
     center: bool,
+
+    /// If set, rotate vectors before quantization.
+    #[arg(long, default_value_t = false)]
+    rotate: bool,
+
+    /// Seed for rotation.
+    #[arg(long, default_value_t = 11500348935374314158)]
+    rotate_seed: u64,
 }
 
 pub fn distance_loss(
@@ -57,85 +68,165 @@ pub fn distance_loss(
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
 
+    let rotator = if args.rotate {
+        Some(Rotator::new(vectors.elem_stride(), args.rotate_seed))
+    } else {
+        None
+    };
     let center = if args.center {
-        Some(super::compute_center(vectors))
+        let mut center = super::compute_center(vectors);
+        if let Some(r) = rotator.as_ref() {
+            r.rotate(&mut center);
+        }
+        Some(center)
     } else {
         None
     };
 
-    let coder = args.format.coder(args.similarity, center.clone());
+    let coder = args.format.coder();
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
-            let mut query = vec![0.0f32; query_vectors.elem_stride()];
-            query_vectors[i].convert_to_f32_slice(&mut query);
+            let query = query_vectors[i].to_f32_vec();
+            // NB: centering f32 only makes distance comparison less efficient.
+            let f32_dist =
+                F32VectorCoding::F32.query_distance_asymmetric(args.similarity, query.clone());
+            // Prepare the query the same way the docs are encoded: rotate then center.
+            let query = vectors::prepare_vector(&query, rotator.as_ref(), false, center.as_deref());
             let qdist = if args.quantize_query {
                 args.format
-                    .query_distance_symmetric(args.similarity, coder.encode(&query), None)
+                    .query_distance_symmetric(args.similarity, coder.encode(&query))
             } else {
-                args.format.query_distance_asymmetric(
-                    args.similarity,
-                    query.clone(),
-                    center.as_deref(),
-                )
+                args.format
+                    .query_distance_asymmetric(args.similarity, query)
             };
-            let f32_dist =
-                F32VectorCoding::F32.query_distance_asymmetric(args.similarity, query, None);
             (f32_dist, qdist)
         })
         .collect::<Vec<_>>();
 
-    let (count, error_sum, error_sq_sum, in_range_count) = (0..vectors.len())
+    let stats = (0..vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "scoring"))
-        .flat_map(|d| {
-            let mut doc_f32 = vec![0.0f32; vectors.elem_stride()];
-            vectors[d].convert_to_f32_slice(&mut doc_f32);
-            let doc_f32 = Arc::new(doc_f32);
-            let doc = Arc::new(coder.encode(&doc_f32));
-            let doc_decoded = coder.decode(&doc);
-            let error_term = (doc_f32
-                .iter()
-                .zip(doc_decoded.iter())
-                .map(|(a, b)| {
-                    let diff = a - b;
-                    diff * diff
-                })
-                .sum::<f32>()
-                / doc_f32.len() as f32)
-                .sqrt();
-            (0..query_limit)
-                .into_par_iter()
-                .map(move |q| (q, Arc::clone(&doc), Arc::clone(&doc_f32), error_term))
+        .map(|d| {
+            let doc_f32 = vectors[d].to_f32_vec();
+            let doc_q = coder.encode(&vectors::prepare_vector(
+                &doc_f32,
+                rotator.as_ref(),
+                false,
+                center.as_deref(),
+            ));
+            let mut stats = DistanceLossStats::default();
+            for (f32_dist, qdist) in query_scorers.iter() {
+                let actual = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32));
+                let estimate = qdist.as_ref().estimated_distance(&doc_q);
+                stats.add_sample(actual, estimate);
+            }
+            stats
         })
-        .map(|(q, doc, doc_f32, error_term)| {
-            let (f32_dist, qdist) = &query_scorers[q];
-            let expected = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32));
-            let actual = qdist.as_ref().distance(doc.as_ref());
-            let actual_est_error = 1.96 * error_term as f64 * 2.0;
-            let actual_range = (actual - actual_est_error)..=(actual + actual_est_error);
-            let diff = expected - actual;
-            (
-                1,
-                diff.abs(),
-                diff * diff,
-                if actual_range.contains(&expected) {
-                    1
-                } else {
-                    0
-                },
-            )
-        })
-        .reduce(
-            || (0, 0.0f64, 0.0f64, 0),
-            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
-        );
+        .reduce(|| DistanceLossStats::default(), |a, b| a + b);
 
     println!(
-        "Vectors: {count} mean abs error: {:.6} mean square error: {:.6} in range: {in_range_count} ({:.2}%)",
-        error_sum / count as f64,
-        error_sq_sum / count as f64,
-        in_range_count as f64 / count as f64 * 100.0
+        "Vectors: {} mean abs error: {:.6} mean square error: {:.6} mean Z score {:.6}",
+        stats.count,
+        stats.error_sum / stats.count as f64,
+        stats.error_sq_sum / stats.count as f64,
+        stats.error_z_sum / stats.count as f64,
     );
+    for (&z, s) in Z_SCORES.iter().zip(stats.zstats.iter()) {
+        println!(
+            "Z={z:.2} in range {:5.2}% over estimate {:5.2}% under estimate {:5.2}%",
+            (s.in_range as f64 / stats.count as f64) * 100.0,
+            (s.over as f64 / stats.count as f64) * 100.0,
+            (s.under as f64 / stats.count as f64) * 100.0,
+        );
+    }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct DistanceLossStats {
+    count: usize,
+    error_sum: f64,
+    error_sq_sum: f64,
+    error_z_sum: f64,
+    zstats: smallvec::SmallVec<[ZScoreStats; 4]>,
+}
+
+impl DistanceLossStats {
+    fn add_sample(&mut self, actual: f64, estimate: EstimatedDistance) {
+        let diff = actual - estimate.distance;
+        self.count += 1;
+        self.error_sum += diff.abs();
+        self.error_sq_sum += diff.powi(2);
+        self.error_z_sum += diff.abs() / estimate.error;
+        for (s, &z) in self.zstats.iter_mut().zip(Z_SCORES.iter()) {
+            s.add_sample(actual, estimate, z);
+        }
+    }
+}
+
+impl Default for DistanceLossStats {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            error_sum: 0.0,
+            error_sq_sum: 0.0,
+            error_z_sum: 0.0,
+            zstats: smallvec![ZScoreStats::default(); Z_SCORES.len()],
+        }
+    }
+}
+
+impl Add<DistanceLossStats> for DistanceLossStats {
+    type Output = Self;
+
+    fn add(self, rhs: DistanceLossStats) -> Self::Output {
+        Self {
+            count: self.count + rhs.count,
+            error_sum: self.error_sum + rhs.error_sum,
+            error_sq_sum: self.error_sq_sum + rhs.error_sq_sum,
+            error_z_sum: self.error_z_sum + rhs.error_z_sum,
+            zstats: self
+                .zstats
+                .into_iter()
+                .zip(rhs.zstats.into_iter())
+                .map(|(a, b)| a + b)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Default)]
+struct ZScoreStats {
+    /// Number of samples within the error bound (expanded by Z score).
+    in_range: usize,
+    /// Number of samples where distance was an over estimate of actual distance.
+    over: usize,
+    /// Number of samples where distance was an under estimate of actual distance.
+    under: usize,
+}
+
+impl ZScoreStats {
+    fn add_sample(&mut self, actual: f64, estimate: EstimatedDistance, z: f64) {
+        let e = estimate.error * z;
+        if actual < estimate.distance - e {
+            self.over += 1;
+        } else if actual > estimate.distance + e {
+            self.under += 1;
+        } else {
+            self.in_range += 1;
+        }
+    }
+}
+
+impl Add<ZScoreStats> for ZScoreStats {
+    type Output = Self;
+
+    fn add(self, rhs: ZScoreStats) -> Self::Output {
+        Self {
+            in_range: self.in_range + rhs.in_range,
+            over: self.over + rhs.over,
+            under: self.under + rhs.under,
+        }
+    }
 }

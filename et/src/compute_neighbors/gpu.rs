@@ -16,11 +16,12 @@ use super::{ComputeNeighborsArgs, write_neighbors};
 ///
 /// Each thread computes the distance between one (query, doc) pair. Query and doc vectors are
 /// stored as f16 to match the input format, but every accumulation is carried out in f32 for
-/// precision. Three distance functions are supported, selected at runtime via the `similarity`
+/// precision. Two distance functions are supported, selected at runtime via the `similarity`
 /// uniform:
 ///   0 = Euclidean (squared L2)
 ///   1 = Dot product distance – assumes pre-normalized vectors: (-dot + 1) / 2
-///   2 = Cosine distance – full cosine with per-pair normalization
+///
+/// (Cosine is Dot over normalized vectors; normalize the inputs first.)
 ///
 /// Output distances are written row-major as `distances[q * doc_count + d]`.
 const SHADER: &str = r#"
@@ -63,27 +64,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             result = acc;
         }
-        case 1u: {
+        default: {
             // Dot product distance (vectors assumed to be normalized): (-dot + 1) / 2
             var acc: f32 = 0.0;
             for (var i: u32 = 0u; i < params.dimensions; i++) {
                 acc = fma(f32(query_vectors[q_base + i]), f32(doc_vectors[d_base + i]), acc);
             }
             result = (-acc + 1.0) / 2.0;
-        }
-        default: {
-            // Cosine distance: full computation without assuming normalization
-            var dot_qd: f32 = 0.0;
-            var norm_q: f32 = 0.0;
-            var norm_d: f32 = 0.0;
-            for (var i: u32 = 0u; i < params.dimensions; i++) {
-                let qv = f32(query_vectors[q_base + i]);
-                let dv = f32(doc_vectors[d_base + i]);
-                dot_qd = fma(qv, dv, dot_qd);
-                norm_q = fma(qv, qv, norm_q);
-                norm_d = fma(dv, dv, norm_d);
-            }
-            result = (-dot_qd / sqrt(norm_q * norm_d) + 1.0) / 2.0;
         }
     }
 
@@ -122,6 +109,7 @@ pub fn try_adapter() -> Option<wgpu::Adapter> {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     }))
     .ok()
 }
@@ -162,7 +150,6 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     let similarity_code: u32 = match args.similarity {
         VectorSimilarity::Euclidean => 0,
         VectorSimilarity::Dot => 1,
-        VectorSimilarity::Cosine => 2,
     };
 
     let info = adapter.get_info();
@@ -428,7 +415,10 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
             //
             // The shader writes distances row-major as distances[q_local * current_d + d_local].
             {
-                let mapped = staging_buffer.slice(..copy_bytes).get_mapped_range();
+                let mapped = staging_buffer
+                    .slice(..copy_bytes)
+                    .get_mapped_range()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                 let distances: &[f32] = bytemuck::cast_slice(&mapped);
                 for q_local in 0..current_q {
                     let row = &distances[q_local * current_d..(q_local + 1) * current_d];

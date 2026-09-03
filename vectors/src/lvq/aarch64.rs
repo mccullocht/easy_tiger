@@ -4,21 +4,19 @@
 
 use std::arch::aarch64::{
     float32x4_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32,
-    vaddq_f64, vaddq_u16, vaddvq_f32, vandq_u8, vandq_u32, vcntq_u8, vcvt_f64_f32,
-    vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdupq_n_f32, vdupq_n_f64,
-    vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64, vfmaq_f32, vfmaq_f64,
-    vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vmaxq_f32, vmaxvq_f32, vminq_f32,
-    vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8,
-    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8, vshrq_n_u32, vst1q_f32,
-    vst1q_u8, vsubq_f32, vsubq_f64,
+    vaddq_f64, vaddq_u16, vaddq_u32, vaddvq_f32, vaddvq_u32, vandq_u8, vandq_u32, vcntq_u8,
+    vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdotq_u32,
+    vdupq_n_f32, vdupq_n_f64, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64,
+    vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vld1q_u8_x4,
+    vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8,
+    vqtbl1q_u8, vqtbl4q_u8, vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8,
+    vshrq_n_u8, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
-use crate::lvq::{
-    RESIDUAL_BITS, ResidualDotComponents, TURBO_BLOCK_SIZE, TurboPrimaryVector,
-    TurboResidualVector, VectorDecodeTerms, VectorEncodeTerms, scalar,
-};
+use crate::lvq::{TurboPrimaryVector, VectorEncodeTerms, scalar};
+use crate::packing::{self, TURBO_BLOCK_SIZE};
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, VectorStats, packing};
+use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let tail_split = vector.len() & !3;
@@ -227,20 +225,57 @@ fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize)
     (1.0 - LAMBDA as f64) * xe as f64 * xe as f64 / norm_sq + LAMBDA as f64 * e as f64
 }
 
+struct PrimaryStatsAccumulator {
+    terms: NeonVectorEncodeTerms,
+    residual_error_sq: float32x4_t,
+    residual_ip: float32x4_t,
+}
+
+impl PrimaryStatsAccumulator {
+    fn new(terms: NeonVectorEncodeTerms) -> Self {
+        unsafe {
+            Self {
+                terms,
+                residual_error_sq: vdupq_n_f32(0.0),
+                residual_ip: vdupq_n_f32(0.0),
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn quantize(&mut self, v: float32x4_t) -> uint32x4_t {
+        unsafe {
+            let (q, r) = quantize4_residual_error(v, &self.terms);
+            self.residual_error_sq = vfmaq_f32(self.residual_error_sq, r, r);
+            self.residual_ip = vfmaq_f32(self.residual_ip, v, r);
+            q
+        }
+    }
+
+    #[inline]
+    fn residual_error_sq(&self) -> f32 {
+        unsafe { vaddvq_f32(self.residual_error_sq) }
+    }
+
+    #[inline]
+    fn residual_ip(&self) -> f32 {
+        unsafe { vaddvq_f32(self.residual_ip) }
+    }
+}
+
 pub fn primary_quantize_and_pack<const B: usize>(
     vector: &[f32],
     terms: VectorEncodeTerms,
     out: &mut [u8],
-) -> (u32, f32) {
+) -> QuantizationStats {
     let tail_split = vector.len() & !(packing::block_dim(B) - 1);
     assert!(tail_split.is_multiple_of(16));
     let (vector_head, vector_tail) = vector.split_at(tail_split);
     let (out_head, out_tail) = out.split_at_mut(packing::byte_len(tail_split, B));
-    let mut component_sum = 0u32;
-    let mut residual_error_sq = 0.0f32;
+    let mut stats = QuantizationStats::default();
     if !vector_head.is_empty() {
         unsafe {
-            let terms = NeonVectorEncodeTerms::from_terms(&terms);
+            let mut acc = PrimaryStatsAccumulator::new(NeonVectorEncodeTerms::from_terms(&terms));
             let shuffle_mask = vld1q_u8(
                 [
                     0u8, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
@@ -250,26 +285,11 @@ pub fn primary_quantize_and_pack<const B: usize>(
             let mut block = 0usize;
             let mut shift = 0i8;
             let mut d = vdupq_n_u8(0);
-            let mut residual_errorv = [
-                vdupq_n_f32(0.0),
-                vdupq_n_f32(0.0),
-                vdupq_n_f32(0.0),
-                vdupq_n_f32(0.0),
-            ];
             for i in (0..tail_split).step_by(16) {
-                let (qa, qa_error) =
-                    quantize4_residual_error(vld1q_f32(vector_head.as_ptr().add(i)), &terms);
-                let (qb, qb_error) =
-                    quantize4_residual_error(vld1q_f32(vector_head.as_ptr().add(i + 4)), &terms);
-                let (qc, qc_error) =
-                    quantize4_residual_error(vld1q_f32(vector_head.as_ptr().add(i + 8)), &terms);
-                let (qd, qd_error) =
-                    quantize4_residual_error(vld1q_f32(vector_head.as_ptr().add(i + 12)), &terms);
-
-                residual_errorv[0] = vfmaq_f32(residual_errorv[0], qa_error, qa_error);
-                residual_errorv[1] = vfmaq_f32(residual_errorv[1], qb_error, qb_error);
-                residual_errorv[2] = vfmaq_f32(residual_errorv[2], qc_error, qc_error);
-                residual_errorv[3] = vfmaq_f32(residual_errorv[3], qd_error, qd_error);
+                let qa = acc.quantize(vld1q_f32(vector_head.as_ptr().add(i)));
+                let qb = acc.quantize(vld1q_f32(vector_head.as_ptr().add(i + 4)));
+                let qc = acc.quantize(vld1q_f32(vector_head.as_ptr().add(i + 8)));
+                let qd = acc.quantize(vld1q_f32(vector_head.as_ptr().add(i + 12)));
 
                 let qabcd = vqtbl4q_u8(
                     uint8x16x4_t(
@@ -280,7 +300,7 @@ pub fn primary_quantize_and_pack<const B: usize>(
                     ),
                     shuffle_mask,
                 );
-                component_sum += u32::from(vaddlvq_u8(qabcd));
+                stats.primary_component_sum += u32::from(vaddlvq_u8(qabcd));
 
                 d = vorrq_u8(d, vshlq_u8(qabcd, vdupq_n_s8(shift)));
                 shift += B as i8;
@@ -292,19 +312,15 @@ pub fn primary_quantize_and_pack<const B: usize>(
                 }
             }
 
-            residual_error_sq = vaddvq_f32(vaddq_f32(
-                vaddq_f32(residual_errorv[0], residual_errorv[1]),
-                vaddq_f32(residual_errorv[2], residual_errorv[3]),
-            ));
+            stats.residual_error_sq = acc.residual_error_sq();
+            stats.residual_ip = acc.residual_ip();
         }
     }
 
     if !vector_tail.is_empty() {
-        let (cs, re) = scalar::primary_quantize_and_pack::<B>(vector_tail, terms, out_tail);
-        residual_error_sq += re;
-        component_sum += cs;
+        stats += scalar::primary_quantize_and_pack::<B>(vector_tail, terms, out_tail);
     }
-    (component_sum, residual_error_sq)
+    stats
 }
 
 pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &mut [f32]) {
@@ -340,180 +356,6 @@ pub fn primary_decode<const B: usize>(vector: TurboPrimaryVector<'_, B>, out: &m
     }
 }
 
-pub fn residual_quantize_and_pack<const B: usize>(
-    vector: &[f32],
-    primary_terms: VectorEncodeTerms,
-    residual_terms: VectorEncodeTerms,
-    primary_out: &mut [u8],
-    residual_out: &mut [u8],
-) -> (u32, u32, f32) {
-    let tail_split = vector.len() & !(packing::block_dim(B) - 1);
-    assert!(tail_split.is_multiple_of(16));
-    let (vector_head, vector_tail) = vector.split_at(tail_split);
-    let (primary_out_head, primary_out_tail) =
-        primary_out.split_at_mut(packing::byte_len(tail_split, B));
-    let (residual_out_head, residual_out_tail) = residual_out.split_at_mut(tail_split);
-    let mut primary_component_sum = 0u32;
-    let mut residual_component_sum = 0u32;
-    let mut residual_error_sq = 0.0f32;
-    if !vector_head.is_empty() {
-        unsafe {
-            let primary_terms = NeonVectorEncodeTerms::from_terms(&primary_terms);
-            let residual_terms = NeonVectorEncodeTerms::from_terms(&residual_terms);
-
-            let shuffle_mask = vld1q_u8(
-                [
-                    0u8, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
-                ]
-                .as_ptr(),
-            );
-            let mut block = 0usize;
-            let mut shift = 0i8;
-            let mut d = vdupq_n_u8(0);
-            let mut residual_errorv = [
-                vdupq_n_f32(0.0),
-                vdupq_n_f32(0.0),
-                vdupq_n_f32(0.0),
-                vdupq_n_f32(0.0),
-            ];
-            for i in (0..tail_split).step_by(16) {
-                let (pa, ra, ea) = quantize4_residual(
-                    vld1q_f32(vector_head.as_ptr().add(i)),
-                    &primary_terms,
-                    &residual_terms,
-                );
-                let (pb, rb, eb) = quantize4_residual(
-                    vld1q_f32(vector_head.as_ptr().add(i + 4)),
-                    &primary_terms,
-                    &residual_terms,
-                );
-                let (pc, rc, ec) = quantize4_residual(
-                    vld1q_f32(vector_head.as_ptr().add(i + 8)),
-                    &primary_terms,
-                    &residual_terms,
-                );
-                let (pd, rd, ed) = quantize4_residual(
-                    vld1q_f32(vector_head.as_ptr().add(i + 12)),
-                    &primary_terms,
-                    &residual_terms,
-                );
-
-                residual_errorv[0] = vfmaq_f32(residual_errorv[0], ea, ea);
-                residual_errorv[1] = vfmaq_f32(residual_errorv[1], eb, eb);
-                residual_errorv[2] = vfmaq_f32(residual_errorv[2], ec, ec);
-                residual_errorv[3] = vfmaq_f32(residual_errorv[3], ed, ed);
-
-                let pabcd = vqtbl4q_u8(
-                    uint8x16x4_t(
-                        vreinterpretq_u8_u32(pa),
-                        vreinterpretq_u8_u32(pb),
-                        vreinterpretq_u8_u32(pc),
-                        vreinterpretq_u8_u32(pd),
-                    ),
-                    shuffle_mask,
-                );
-                primary_component_sum += u32::from(vaddlvq_u8(pabcd));
-
-                d = vorrq_u8(d, vshlq_u8(pabcd, vdupq_n_s8(shift)));
-                shift += B as i8;
-                if shift == 8 {
-                    vst1q_u8(primary_out_head.as_mut_ptr().add(block * 16), d);
-                    d = vdupq_n_u8(0);
-                    shift = 0;
-                    block += 1;
-                }
-
-                let rabcd = vqtbl4q_u8(
-                    uint8x16x4_t(
-                        vreinterpretq_u8_u32(ra),
-                        vreinterpretq_u8_u32(rb),
-                        vreinterpretq_u8_u32(rc),
-                        vreinterpretq_u8_u32(rd),
-                    ),
-                    shuffle_mask,
-                );
-                residual_component_sum += u32::from(vaddlvq_u8(rabcd));
-                vst1q_u8(residual_out_head.as_mut_ptr().add(i), rabcd);
-            }
-
-            residual_error_sq = vaddvq_f32(vaddq_f32(
-                vaddq_f32(residual_errorv[0], residual_errorv[1]),
-                vaddq_f32(residual_errorv[2], residual_errorv[3]),
-            ));
-        }
-    }
-
-    if !vector_tail.is_empty() {
-        let (ps, rs, re) = scalar::residual_quantize_and_pack::<B>(
-            vector_tail,
-            primary_terms,
-            residual_terms,
-            primary_out_tail,
-            residual_out_tail,
-        );
-        primary_component_sum += ps;
-        residual_component_sum += rs;
-        residual_error_sq += re;
-    }
-    (
-        primary_component_sum,
-        residual_component_sum,
-        residual_error_sq,
-    )
-}
-
-pub fn residual_decode<const B: usize>(vector: &TurboResidualVector<'_, B>, out: &mut [f32]) {
-    let (tail_split, in_head, in_tail) = vector.split_tail(out.len());
-    let (out_head, out_tail) = out.split_at_mut(tail_split);
-
-    if !in_head.primary.data.is_empty() {
-        unsafe {
-            let primary_terms = NeonVectorDecodeTerms::from_terms(&in_head.primary.terms);
-            let residual_terms = NeonVectorDecodeTerms::from_terms(&in_head.residual.terms);
-            let mut primary_expander = TLVQExpander32::<B>::new(in_head.primary.data.as_ptr());
-            let mut residual_expander =
-                TLVQExpander32::<RESIDUAL_BITS>::new(in_head.residual.data.as_ptr());
-            for i in (0..tail_split).step_by(16) {
-                let [pa, pb, pc, pd] = primary_expander.next();
-                let [ra, rb, rc, rd] = residual_expander.next();
-                vst1q_f32(
-                    out_head.as_mut_ptr().add(i),
-                    dequantize4_residual(pa, ra, &primary_terms, &residual_terms),
-                );
-                vst1q_f32(
-                    out_head.as_mut_ptr().add(i + 4),
-                    dequantize4_residual(pb, rb, &primary_terms, &residual_terms),
-                );
-                vst1q_f32(
-                    out_head.as_mut_ptr().add(i + 8),
-                    dequantize4_residual(pc, rc, &primary_terms, &residual_terms),
-                );
-                vst1q_f32(
-                    out_head.as_mut_ptr().add(i + 12),
-                    dequantize4_residual(pd, rd, &primary_terms, &residual_terms),
-                );
-            }
-        }
-    }
-
-    if !in_tail.primary.data.is_empty() {
-        scalar::residual_decode::<B>(&in_tail, out_tail);
-    }
-}
-
-#[inline(always)]
-unsafe fn dequantize4_residual(
-    primary: float32x4_t,
-    residual: float32x4_t,
-    primary_terms: &NeonVectorDecodeTerms,
-    residual_terms: &NeonVectorDecodeTerms,
-) -> float32x4_t {
-    vaddq_f32(
-        vfmaq_f32(primary_terms.lower, primary, primary_terms.delta),
-        vfmaq_f32(residual_terms.lower, residual, residual_terms.delta),
-    )
-}
-
 struct NeonVectorEncodeTerms {
     lower: float32x4_t,
     upper: float32x4_t,
@@ -535,21 +377,6 @@ impl NeonVectorEncodeTerms {
     #[inline(always)]
     unsafe fn from_terms(terms: &VectorEncodeTerms) -> Self {
         Self::new(terms.lower, terms.upper, terms.delta_inv, terms.delta)
-    }
-}
-
-struct NeonVectorDecodeTerms {
-    lower: float32x4_t,
-    delta: float32x4_t,
-}
-
-impl NeonVectorDecodeTerms {
-    #[inline(always)]
-    unsafe fn from_terms(terms: &VectorDecodeTerms) -> Self {
-        Self {
-            lower: vdupq_n_f32(terms.lower),
-            delta: vdupq_n_f32(terms.delta),
-        }
     }
 }
 
@@ -575,71 +402,255 @@ unsafe fn quantize4_residual_error(
     (quantized, vsubq_f32(v, dq))
 }
 
-#[inline(always)]
-unsafe fn quantize4_residual(
-    v: float32x4_t,
-    primary_terms: &NeonVectorEncodeTerms,
-    residual_terms: &NeonVectorEncodeTerms,
-) -> (uint32x4_t, uint32x4_t, float32x4_t) {
-    let primary = quantize4(v, primary_terms);
-    let dq = vfmaq_f32(
-        primary_terms.lower,
-        vcvtq_f32_u32(primary),
-        primary_terms.delta,
-    );
-    let residual = vsubq_f32(v, dq);
-    (primary, quantize4(residual, residual_terms), residual)
+// Symmetric dot product 2 bit
+#[target_feature(enable = "dotprod")]
+#[inline]
+unsafe fn lvq_dot_u2(a: &[u8], b: &[u8]) -> u32 {
+    let len = a.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let dibit_mask = vdupq_n_u8(0x3);
+    let len16 = len & !15;
+    for i in (0..len16).step_by(16) {
+        let av = vld1q_u8(a.as_ptr().add(i));
+        let bv = vld1q_u8(b.as_ptr().add(i));
+        dot0 = vdotq_u32(dot0, vandq_u8(av, dibit_mask), vandq_u8(bv, dibit_mask));
+        dot1 = vdotq_u32(
+            dot1,
+            vandq_u8(vshrq_n_u8::<2>(av), dibit_mask),
+            vandq_u8(vshrq_n_u8::<2>(bv), dibit_mask),
+        );
+        dot2 = vdotq_u32(
+            dot2,
+            vandq_u8(vshrq_n_u8::<4>(av), dibit_mask),
+            vandq_u8(vshrq_n_u8::<4>(bv), dibit_mask),
+        );
+        dot3 = vdotq_u32(dot3, vshrq_n_u8::<6>(av), vshrq_n_u8::<6>(bv));
+    }
+
+    let mut dot = vaddvq_u32(vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3)));
+    for i in len16..len {
+        let av = a[i] as u32;
+        let bv = b[i] as u32;
+        dot += (av & 0x3) * (bv & 0x3)
+            + ((av >> 2) & 0x3) * ((bv >> 2) & 0x3)
+            + ((av >> 4) & 0x3) * ((bv >> 4) & 0x3)
+            + ((av >> 6) & 0x3) * ((bv >> 6) & 0x3);
+    }
+    dot
 }
 
-unsafe extern "C" {
-    // Symmetric dot product 2 bit
-    unsafe fn et_lvq_dot_u2(a: *const u8, b: *const u8, len: usize) -> u32;
-    // Symmetric dot product 4 bit
-    unsafe fn et_lvq_dot_u4(a: *const u8, b: *const u8, len: usize) -> u32;
-    // Symmetric dot product 8 bit
-    unsafe fn et_lvq_dot_u8(a: *const u8, b: *const u8, len: usize) -> u32;
-    // Asymmetric dot product 8 bit-1 bit. len must be a multiple of 128.
-    unsafe fn et_lvq_dot_u8_u1(q: *const u8, d: *const u8, len: usize) -> u32;
-    // Asymmetric dot product 8 bit-2 bit. len must be a multiple of 64.
-    unsafe fn et_lvq_dot_u8_u2(q: *const u8, d: *const u8, len: usize) -> u32;
-    // Asymmetric dot product 8 bit-4 bit. len must be a multiple of 32.
-    unsafe fn et_lvq_dot_u8_u4(q: *const u8, d: *const u8, len: usize) -> u32;
+// Symmetric dot product 4 bit
+#[target_feature(enable = "dotprod")]
+#[inline]
+unsafe fn lvq_dot_u4(a: &[u8], b: &[u8]) -> u32 {
+    let len = a.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let nibble_mask = vdupq_n_u8(0xf);
+    let len32 = len & !31;
+    for i in (0..len32).step_by(32) {
+        let mut av = vld1q_u8(a.as_ptr().add(i));
+        let mut bv = vld1q_u8(b.as_ptr().add(i));
+        dot0 = vdotq_u32(dot0, vandq_u8(av, nibble_mask), vandq_u8(bv, nibble_mask));
+        dot1 = vdotq_u32(dot1, vshrq_n_u8::<4>(av), vshrq_n_u8::<4>(bv));
 
-    // This function requires that len is a multiple of 128.
-    unsafe fn et_residual_dot_u1_u8(
-        ap: *const u8,
-        ar: *const u8,
-        bp: *const u8,
-        br: *const u8,
-        len: usize,
-    ) -> ResidualDotComponents;
+        av = vld1q_u8(a.as_ptr().add(i + 16));
+        bv = vld1q_u8(b.as_ptr().add(i + 16));
+        dot2 = vdotq_u32(dot2, vandq_u8(av, nibble_mask), vandq_u8(bv, nibble_mask));
+        dot3 = vdotq_u32(dot3, vshrq_n_u8::<4>(av), vshrq_n_u8::<4>(bv));
+    }
 
-    // This function requires that len is a multiple of 64.
-    unsafe fn et_residual_dot_u2_u8(
-        ap: *const u8,
-        ar: *const u8,
-        bp: *const u8,
-        br: *const u8,
-        len: usize,
-    ) -> ResidualDotComponents;
+    dot0 = vaddq_u32(dot0, dot2);
+    dot1 = vaddq_u32(dot1, dot3);
+    let len16 = len & !15;
+    if len32 < len16 {
+        let av = vld1q_u8(a.as_ptr().add(len32));
+        let bv = vld1q_u8(b.as_ptr().add(len32));
+        dot0 = vdotq_u32(dot0, vandq_u8(av, nibble_mask), vandq_u8(bv, nibble_mask));
+        dot1 = vdotq_u32(dot1, vshrq_n_u8::<4>(av), vshrq_n_u8::<4>(bv));
+    }
 
-    // This function requires that len is a multiple of 32.
-    unsafe fn et_residual_dot_u4_u8(
-        ap: *const u8,
-        ar: *const u8,
-        bp: *const u8,
-        br: *const u8,
-        len: usize,
-    ) -> ResidualDotComponents;
+    let mut dot = vaddvq_u32(vaddq_u32(dot0, dot1));
+    for i in len16..len {
+        let av = a[i] as u32;
+        let bv = b[i] as u32;
+        dot += (av & 0xf) * (bv & 0xf) + (av >> 4) * (bv >> 4);
+    }
+    dot
+}
 
-    // This function requires that len is a multiple of 16.
-    unsafe fn et_residual_dot_u8_u8(
-        ap: *const u8,
-        ar: *const u8,
-        bp: *const u8,
-        br: *const u8,
-        len: usize,
-    ) -> ResidualDotComponents;
+// Symmetric dot product 8 bit
+#[target_feature(enable = "dotprod")]
+#[inline]
+unsafe fn lvq_dot_u8(a: &[u8], b: &[u8]) -> u32 {
+    let len = a.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let len64 = len & !63;
+    for i in (0..len64).step_by(64) {
+        let mut av = vld1q_u8(a.as_ptr().add(i));
+        let mut bv = vld1q_u8(b.as_ptr().add(i));
+        dot0 = vdotq_u32(dot0, av, bv);
+
+        av = vld1q_u8(a.as_ptr().add(i + 16));
+        bv = vld1q_u8(b.as_ptr().add(i + 16));
+        dot1 = vdotq_u32(dot1, av, bv);
+
+        av = vld1q_u8(a.as_ptr().add(i + 32));
+        bv = vld1q_u8(b.as_ptr().add(i + 32));
+        dot2 = vdotq_u32(dot2, av, bv);
+
+        av = vld1q_u8(a.as_ptr().add(i + 48));
+        bv = vld1q_u8(b.as_ptr().add(i + 48));
+        dot3 = vdotq_u32(dot3, av, bv);
+    }
+
+    dot0 = vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3));
+    let len16 = len & !15;
+    for i in (len64..len16).step_by(16) {
+        let av = vld1q_u8(a.as_ptr().add(i));
+        let bv = vld1q_u8(b.as_ptr().add(i));
+        dot0 = vdotq_u32(dot0, av, bv);
+    }
+
+    let mut dot = vaddvq_u32(dot0);
+    for i in len16..len {
+        dot += a[i] as u32 * b[i] as u32;
+    }
+    dot
+}
+
+// Asymmetric dot product 8 bit-1 bit. `q.len()` must be a multiple of 128.
+#[target_feature(enable = "dotprod")]
+#[inline]
+unsafe fn lvq_dot_u8_u1(q: &[u8], d: &[u8]) -> u32 {
+    let len = q.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let mask = vdupq_n_u8(0x1);
+    let len128 = len & !127;
+    for i in (0..len128).step_by(128) {
+        let dv = vld1q_u8(d.as_ptr().add(i / 128 * 16));
+
+        dot0 = vdotq_u32(dot0, vld1q_u8(q.as_ptr().add(i)), vandq_u8(dv, mask));
+        dot1 = vdotq_u32(
+            dot1,
+            vld1q_u8(q.as_ptr().add(i + 16)),
+            vandq_u8(vshrq_n_u8::<1>(dv), mask),
+        );
+        dot2 = vdotq_u32(
+            dot2,
+            vld1q_u8(q.as_ptr().add(i + 32)),
+            vandq_u8(vshrq_n_u8::<2>(dv), mask),
+        );
+        dot3 = vdotq_u32(
+            dot3,
+            vld1q_u8(q.as_ptr().add(i + 48)),
+            vandq_u8(vshrq_n_u8::<3>(dv), mask),
+        );
+        dot0 = vdotq_u32(
+            dot0,
+            vld1q_u8(q.as_ptr().add(i + 64)),
+            vandq_u8(vshrq_n_u8::<4>(dv), mask),
+        );
+        dot1 = vdotq_u32(
+            dot1,
+            vld1q_u8(q.as_ptr().add(i + 80)),
+            vandq_u8(vshrq_n_u8::<5>(dv), mask),
+        );
+        dot2 = vdotq_u32(
+            dot2,
+            vld1q_u8(q.as_ptr().add(i + 96)),
+            vandq_u8(vshrq_n_u8::<6>(dv), mask),
+        );
+        dot3 = vdotq_u32(
+            dot3,
+            vld1q_u8(q.as_ptr().add(i + 112)),
+            vandq_u8(vshrq_n_u8::<7>(dv), mask),
+        );
+    }
+
+    vaddvq_u32(vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3)))
+}
+
+// Asymmetric dot product 8 bit-2 bit. `q.len()` must be a multiple of 64.
+#[target_feature(enable = "dotprod")]
+#[inline]
+unsafe fn lvq_dot_u8_u2(q: &[u8], d: &[u8]) -> u32 {
+    let len = q.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let mask = vdupq_n_u8(0x3);
+    let len64 = len & !63;
+    for i in (0..len64).step_by(64) {
+        let dv = vld1q_u8(d.as_ptr().add(i / 64 * 16));
+
+        dot0 = vdotq_u32(dot0, vld1q_u8(q.as_ptr().add(i)), vandq_u8(dv, mask));
+        dot1 = vdotq_u32(
+            dot1,
+            vld1q_u8(q.as_ptr().add(i + 16)),
+            vandq_u8(vshrq_n_u8::<2>(dv), mask),
+        );
+        dot2 = vdotq_u32(
+            dot2,
+            vld1q_u8(q.as_ptr().add(i + 32)),
+            vandq_u8(vshrq_n_u8::<4>(dv), mask),
+        );
+        dot3 = vdotq_u32(
+            dot3,
+            vld1q_u8(q.as_ptr().add(i + 48)),
+            vandq_u8(vshrq_n_u8::<6>(dv), mask),
+        );
+    }
+
+    vaddvq_u32(vaddq_u32(vaddq_u32(dot0, dot1), vaddq_u32(dot2, dot3)))
+}
+
+// Asymmetric dot product 8 bit-4 bit. `q.len()` must be a multiple of 32.
+#[target_feature(enable = "dotprod")]
+#[inline]
+unsafe fn lvq_dot_u8_u4(q: &[u8], d: &[u8]) -> u32 {
+    let len = q.len();
+    let mut dot0 = vdupq_n_u32(0);
+    let mut dot1 = vdupq_n_u32(0);
+    let mut dot2 = vdupq_n_u32(0);
+    let mut dot3 = vdupq_n_u32(0);
+    let mask = vdupq_n_u8(0xf);
+    let len64 = len & !63;
+    for i in (0..len64).step_by(64) {
+        let dv0 = vld1q_u8(d.as_ptr().add(i / 64 * 32));
+        let dv1 = vld1q_u8(d.as_ptr().add(i / 64 * 32 + 16));
+
+        dot0 = vdotq_u32(dot0, vld1q_u8(q.as_ptr().add(i)), vandq_u8(dv0, mask));
+        dot1 = vdotq_u32(dot1, vld1q_u8(q.as_ptr().add(i + 16)), vshrq_n_u8::<4>(dv0));
+        dot2 = vdotq_u32(dot2, vld1q_u8(q.as_ptr().add(i + 32)), vandq_u8(dv1, mask));
+        dot3 = vdotq_u32(dot3, vld1q_u8(q.as_ptr().add(i + 48)), vshrq_n_u8::<4>(dv1));
+    }
+
+    dot0 = vaddq_u32(dot0, dot1);
+    dot2 = vaddq_u32(dot2, dot3);
+    if len64 < len {
+        let dv = vld1q_u8(d.as_ptr().add(len64 / 64 * 32));
+        dot0 = vdotq_u32(dot0, vld1q_u8(q.as_ptr().add(len64)), vandq_u8(dv, mask));
+        dot2 = vdotq_u32(
+            dot2,
+            vld1q_u8(q.as_ptr().add(len64 + 16)),
+            vshrq_n_u8::<4>(dv),
+        );
+    }
+
+    vaddvq_u32(vaddq_u32(dot0, dot2))
 }
 
 #[inline]
@@ -673,9 +684,9 @@ pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
             }
             dot
         },
-        2 => unsafe { et_lvq_dot_u2(a.as_ptr(), b.as_ptr(), a.len()) },
-        4 => unsafe { et_lvq_dot_u4(a.as_ptr(), b.as_ptr(), a.len()) },
-        8 => unsafe { et_lvq_dot_u8(a.as_ptr(), b.as_ptr(), a.len()) },
+        2 => unsafe { lvq_dot_u2(a, b) },
+        4 => unsafe { lvq_dot_u4(a, b) },
+        8 => unsafe { lvq_dot_u8(a, b) },
         _ => unimplemented!(),
     }
 }
@@ -776,34 +787,16 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
     doc: &TurboPrimaryVector<'_, B>,
 ) -> u32 {
     if B == 8 {
-        return unsafe { et_lvq_dot_u8(query.as_ptr(), doc.rep.data.as_ptr(), query.len()) };
+        return unsafe { lvq_dot_u8(query, doc.rep.data) };
     }
 
     let (tail_split, doc_head, doc_tail) = doc.split_tail(query.len());
     let (query_head, query_tail) = query.split_at(tail_split);
     let mut dot = if !query_head.is_empty() {
         match B {
-            1 => unsafe {
-                et_lvq_dot_u8_u1(
-                    query_head.as_ptr(),
-                    doc_head.rep.data.as_ptr(),
-                    query_head.len(),
-                )
-            },
-            2 => unsafe {
-                et_lvq_dot_u8_u2(
-                    query_head.as_ptr(),
-                    doc_head.rep.data.as_ptr(),
-                    query_head.len(),
-                )
-            },
-            4 => unsafe {
-                et_lvq_dot_u8_u4(
-                    query_head.as_ptr(),
-                    doc_head.rep.data.as_ptr(),
-                    query_head.len(),
-                )
-            },
+            1 => unsafe { lvq_dot_u8_u1(query_head, doc_head.rep.data) },
+            2 => unsafe { lvq_dot_u8_u2(query_head, doc_head.rep.data) },
+            4 => unsafe { lvq_dot_u8_u4(query_head, doc_head.rep.data) },
             _ => unimplemented!(),
         }
     } else {
@@ -816,60 +809,32 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
     dot
 }
 
+/// Compute the unnormalized dot product of a bitplane-split 4-bit query with a 1-bit document.
+///
+/// `query` must be the output of `packing::bitplane_split4()`; `doc` is the packed 1-bit document
+/// data covering the same number of dimensions (`query.len() * 2`).
 #[inline]
-pub fn residual_dot_unnormalized<const B: usize>(
-    query: (&[u8], &[u8]),
-    doc: (&[u8], &[u8]),
-) -> ResidualDotComponents {
-    let (_, query_head, query_tail) = TurboResidualVector::<B>::split_vector_tail(query);
-    let (_, doc_head, doc_tail) = TurboResidualVector::<B>::split_vector_tail(doc);
-
-    let mut dot = if !query_head.0.is_empty() {
-        match B {
-            1 => unsafe {
-                et_residual_dot_u1_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
-            2 => unsafe {
-                et_residual_dot_u2_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
-            4 => unsafe {
-                et_residual_dot_u4_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
-            8 => unsafe {
-                et_residual_dot_u8_u8(
-                    query_head.0.as_ptr(),
-                    query_head.1.as_ptr(),
-                    doc_head.0.as_ptr(),
-                    doc_head.1.as_ptr(),
-                    query_head.1.len(),
-                )
-            },
-            _ => scalar::residual_dot_unnormalized::<B>(query_head, doc_head),
+pub fn query4_doc1_bitplane_dot(query: &[u8], doc: &[u8]) -> u32 {
+    let (qhead, qtail) = query.as_chunks::<64>();
+    let (dhead, dtail) = doc.split_at(qhead.len() * 16);
+    let mut dot = unsafe {
+        let mut bpdot = [vdupq_n_u16(0); 4];
+        for (i, q) in qhead.iter().enumerate() {
+            let qv = vld1q_u8_x4(q.as_ptr());
+            let dv = vld1q_u8(dhead.as_ptr().add(i * 16));
+            bpdot[0] = vaddq_u16(bpdot[0], vpaddlq_u8(vcntq_u8(vandq_u8(qv.0, dv))));
+            bpdot[1] = vaddq_u16(bpdot[1], vpaddlq_u8(vcntq_u8(vandq_u8(qv.1, dv))));
+            bpdot[2] = vaddq_u16(bpdot[2], vpaddlq_u8(vcntq_u8(vandq_u8(qv.2, dv))));
+            bpdot[3] = vaddq_u16(bpdot[3], vpaddlq_u8(vcntq_u8(vandq_u8(qv.3, dv))));
         }
-    } else {
-        ResidualDotComponents::default()
+        vaddlvq_u16(bpdot[0])
+            + vaddlvq_u16(bpdot[1]) * 2
+            + vaddlvq_u16(bpdot[2]) * 4
+            + vaddlvq_u16(bpdot[3]) * 8
     };
 
-    if !query_tail.0.is_empty() {
-        dot += scalar::residual_dot_unnormalized::<B>(query_tail, doc_tail);
+    if !qtail.is_empty() {
+        dot += super::scalar::query4_doc1_bitplane_dot(qtail, dtail);
     }
 
     dot
@@ -889,6 +854,27 @@ unsafe fn shr_u32<const N: usize>(v: uint32x4_t) -> uint32x4_t {
 #[cfg(test)]
 mod test {
     use approx::assert_abs_diff_eq;
+
+    use crate::packing;
+
+    #[test]
+    fn query4_doc1_bitplane_dot() {
+        // Cover full 128-dim blocks plus every kind of tail.
+        for dims in [4usize, 17, 128, 129, 200, 256, 384, 999] {
+            let query4 = (0..dims.div_ceil(2))
+                .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
+                .collect::<Vec<_>>();
+            let query = packing::bitplane_split4(&query4);
+            let doc = (0..dims.div_ceil(8))
+                .map(|i| (i as u8).wrapping_mul(101).wrapping_add(7))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                super::query4_doc1_bitplane_dot(&query, &doc),
+                crate::lvq::scalar::query4_doc1_bitplane_dot(&query, &doc),
+                "dims={dims}"
+            );
+        }
+    }
 
     #[test]
     fn compute_vector_stats() {

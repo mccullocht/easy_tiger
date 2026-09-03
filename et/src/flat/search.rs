@@ -128,20 +128,16 @@ fn search_phase<Q: Send + Sync>(
 ) -> io::Result<AggregateSearchStats> {
     use rayon::prelude::*;
 
-    let vector_len = config
-        .format
-        .coder(config.similarity, None)
-        .byte_len(config.dimensions.get());
+    let vector_len = config.format.coder().byte_len(config.dimensions.get());
     let query_indices = (0..limit).cycle().take(iters * limit).collect::<Vec<_>>();
     let progress = progress_bar(query_indices.len(), name);
     let stats = query_indices
         .into_par_iter()
         .map(|qi| {
             let query: &[f32] = &query_vectors[qi];
-            let distance_fn =
-                config
-                    .format
-                    .query_distance_asymmetric(config.similarity, query, None);
+            let distance_fn = config
+                .format
+                .query_distance_asymmetric(config.similarity, query);
             let txn = connection.begin_transaction(None)?;
             let cursor = txn.open_record_cursor(table_name)?;
 

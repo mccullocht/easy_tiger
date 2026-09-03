@@ -17,7 +17,7 @@ use wt_mdb::{Result, TypedCursorGuard};
 use crate::{
     Neighbor,
     posting_block::PostingBlock,
-    spann::{TransactionIndex, centroid_stats::CentroidStats},
+    spann::{TransactionIndex, centroid_stats::CentroidStats, centroids::CentroidVectorSource},
     vamana::{
         GraphSearchParams, GraphVectorIndex,
         search::{GraphSearchStats, GraphSearcher},
@@ -205,17 +205,46 @@ impl Searcher {
         self.stats.postings_read = centroids.len();
 
         self.seen.clear();
-        let mut result_queue = ResultQueue::new(
-            self.params.limit.get(),
-            reader
-                .index
-                .config()
-                .posting_coder
-                .query_distance_asymmetric(reader.index().head_config().config().similarity, query),
-        );
+        let mut result_queue = ResultQueue::new(self.params.limit.get());
+        let config = reader.index().config();
+        let similarity = reader.index().head_config().config().similarity;
         let vector_len = reader.index().posting_vector_len();
+        // When postings are not centered a single distance function scores every posting vector
+        // against the query. When postings are centered each centroid's postings are stored as
+        // residuals (v - c), so the query must be adjusted per centroid (q - c) to score
+        // |(q - c) - r| = |q - v|.
+        let shared_dist_fn = (!config.center_postings)
+            .then(|| config.posting_coder.query_distance_asymmetric(similarity, query));
+        let mut centroid_source = config
+            .center_postings
+            .then(|| CentroidVectorSource::new(reader.head()))
+            .transpose()?;
+        let mut centroid_dist_fn: Option<Box<dyn QueryVectorDistance>>;
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
+            let dist_fn: &dyn QueryVectorDistance = match shared_dist_fn.as_ref() {
+                Some(dist_fn) => dist_fn.as_ref(),
+                None => {
+                    let Some(source) = centroid_source.as_mut() else {
+                        unreachable!("centroid source present when postings are centered");
+                    };
+                    // Read the centroid vector before seeking the posting cursor: reading it
+                    // performs WT operations that would invalidate data borrowed from the
+                    // posting cursor below.
+                    let centroid_vector = match source.centroid_vector(centroid_id) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("failed to read centroid {centroid_id}: {e}");
+                            continue;
+                        }
+                    };
+                    let adjusted_query =
+                        vectors::prepare_vector(query, None, false, Some(&centroid_vector));
+                    centroid_dist_fn =
+                        Some(config.posting_coder.query_distance_asymmetric(similarity, adjusted_query));
+                    centroid_dist_fn.as_ref().unwrap().as_ref()
+                }
+            };
             // SAFETY: we are not performing any WT operations in between seeks.
             let data = match unsafe { posting_cursor.seek_exact_unsafe(centroid_id) } {
                 Some(Ok(data)) => data,
@@ -234,7 +263,7 @@ impl Searcher {
                 if !self.seen.insert(record_id) {
                     continue; // already seen
                 }
-                result_queue.push(record_id, vector);
+                result_queue.push(dist_fn, record_id, vector);
             }
         }
 
@@ -246,7 +275,7 @@ impl Searcher {
     fn maybe_rerank_results(
         &mut self,
         query: &[f32],
-        result_queue: ResultQueue<'_>,
+        result_queue: ResultQueue,
         reader: &TransactionIndex,
     ) -> Result<Vec<Neighbor>> {
         if self.params.num_rerank == 0 {
@@ -322,18 +351,16 @@ impl Ord for ErrorBoundNeighbor {
     }
 }
 
-struct ResultQueue<'a> {
-    dist_fn: Box<dyn QueryVectorDistance + 'a>,
+struct ResultQueue {
     results: MinMaxHeap<ErrorBoundNeighbor>,
     overflow: MinMaxHeap<ErrorBoundNeighbor>,
     max_len: usize,
     scored: usize,
 }
 
-impl<'a> ResultQueue<'a> {
-    fn new(max_len: usize, dist_fn: Box<dyn QueryVectorDistance + 'a>) -> Self {
+impl ResultQueue {
+    fn new(max_len: usize) -> Self {
         Self {
-            dist_fn,
             results: MinMaxHeap::with_capacity(max_len),
             overflow: MinMaxHeap::new(),
             max_len,
@@ -341,9 +368,9 @@ impl<'a> ResultQueue<'a> {
         }
     }
 
-    fn push(&mut self, vector_id: i64, vector: &[u8]) {
+    fn push(&mut self, dist_fn: &dyn QueryVectorDistance, vector_id: i64, vector: &[u8]) {
         self.scored += 1;
-        let e = self.dist_fn.estimated_distance(vector);
+        let e = dist_fn.estimated_distance(vector);
         let n = ErrorBoundNeighbor::from_upper(vector_id, e);
         if self.results.len() < self.max_len {
             self.results.push(n);
@@ -374,5 +401,323 @@ impl<'a> ResultQueue<'a> {
             .collect::<Vec<_>>();
         results.sort_unstable();
         results
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::{
+        input::{VecVectorStore, VectorStore},
+        spann::{
+            CentroidAssignment, IndexConfig, TableIndex,
+            bulk::{
+                assign_to_centroids, load_centroid_stats, load_centroids, load_postings,
+                load_raw_vectors,
+            },
+            centroids::CentroidVectorSource,
+            postings::BlockPostingsMut,
+            rebalance::parallel_rebalance,
+        },
+        vamana::{EdgePruningConfig, EdgeType, GraphConfig, mutate::insert_vector},
+    };
+    use vectors::{F32VectorCoding, VectorSimilarity};
+    use wt_mdb::{Connection, connection::OptionsBuilder};
+
+    use rand_xoshiro::rand_core::SeedableRng;
+
+    const DIMENSIONS: usize = 4;
+
+    /// Push vectors from two "centroids" scored with per-centroid adjusted distance functions
+    /// and verify the merged top-k matches brute-force `|(q - c_k) - r|` scoring.
+    #[test]
+    fn result_queue_per_centroid_distance_functions() {
+        let c0 = [0.0f32, 0.0];
+        let c1 = [10.0f32, 10.0];
+        let query = [1.0f32, 1.0];
+        // Residuals of 4 vectors, the first two assigned to c0 and the rest to c1.
+        let residuals = [[0.5, 0.5], [3.0, -3.0], [0.25, 0.25], [-2.0, 2.0]];
+        let ids = [0i64, 1, 2, 3];
+
+        let coder = F32VectorCoding::F32.coder();
+        let adjusted = |c: &[f32; 2]| -> Vec<f32> {
+            query.iter().zip(c.iter()).map(|(q, c)| q - c).collect()
+        };
+        let dfn0 = F32VectorCoding::F32
+            .query_distance_asymmetric(VectorSimilarity::Euclidean, adjusted(&c0));
+        let dfn1 = F32VectorCoding::F32
+            .query_distance_asymmetric(VectorSimilarity::Euclidean, adjusted(&c1));
+
+        let mut queue = ResultQueue::new(2);
+        queue.push(dfn0.as_ref(), 0, &coder.encode(&residuals[0]));
+        queue.push(dfn0.as_ref(), 1, &coder.encode(&residuals[1]));
+        queue.push(dfn1.as_ref(), 2, &coder.encode(&residuals[2]));
+        queue.push(dfn1.as_ref(), 3, &coder.encode(&residuals[3]));
+        let results = queue.into_results();
+
+        let mut expected = ids
+            .iter()
+            .zip(residuals.iter().zip([c0, c0, c1, c1]))
+            .map(|(id, (r, c))| {
+                let distance: f64 = query
+                    .iter()
+                    .zip(r.iter().zip(c.iter()))
+                    .map(|(q, (r, c))| {
+                        let d = *q as f64 - (*c + *r) as f64;
+                        d * d
+                    })
+                    .sum();
+                Neighbor::new(*id, distance)
+            })
+            .collect::<Vec<_>>();
+        expected.sort_unstable_by(|a, b| {
+            a.distance()
+                .partial_cmp(&b.distance())
+                .unwrap()
+                .then(a.vertex().cmp(&b.vertex()))
+        });
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].vertex(), expected[0].vertex());
+        assert!((results[0].distance() - expected[0].distance()).abs() < 1e-9);
+        assert_eq!(results[1].vertex(), expected[1].vertex());
+        assert!((results[1].distance() - expected[1].distance()).abs() < 1e-9);
+    }
+
+    /// A SPANN index built in a temporary WiredTiger home.
+    ///
+    /// NB: `_dir` must drop after `conn` so the directory outlives WiredTiger's close-time
+    /// checkpoint.
+    struct Fixture {
+        conn: Arc<Connection>,
+        index: Arc<TableIndex>,
+        vectors: VecVectorStore<f32>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Fixture {
+        /// Build an index with 4 head centroids: a dummy zero vector (id 0, as `et spann
+        /// init-index` inserts) plus one centroid per data cluster below.
+        fn new(center_postings: bool) -> std::io::Result<Self> {
+            let dir = tempfile::TempDir::new().unwrap();
+            let conn = Connection::open(
+                dir.path().to_str().unwrap(),
+                Some(OptionsBuilder::default().create().into()),
+            )?;
+            let search_params = GraphSearchParams {
+                beam_width: NonZero::new(8).unwrap(),
+                num_rerank: 0,
+                patience: None,
+            };
+            let head_config = GraphConfig {
+                dimensions: NonZero::new(DIMENSIONS).unwrap(),
+                similarity: VectorSimilarity::Euclidean,
+                nav_format: F32VectorCoding::F32,
+                rerank_format: None,
+                pruning: EdgePruningConfig::new(NonZero::new(4).unwrap()),
+                index_search_params: search_params,
+                centroid: None,
+                edge_type: EdgeType::Undirected,
+            };
+            let spann_config = IndexConfig {
+                head_search_params: search_params,
+                posting_coder: F32VectorCoding::F32,
+                // Bounds chosen so that loading the test data triggers both splits (A, B, O
+                // exceed 12) and a merge (C has a single posting, below 4).
+                min_centroid_len: 4,
+                max_centroid_len: 12,
+                rerank_format: F32VectorCoding::F32,
+                center_postings,
+            };
+            let index = Arc::new(TableIndex::init_index(
+                &conn,
+                "test",
+                head_config,
+                spann_config,
+            )?);
+
+            let vectors = test_vectors();
+            {
+                // Insert centroid vectors: id 0 is the dummy zero vector, then one per cluster.
+                let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+                insert_vector(&[0.0f32; DIMENSIONS], txn_idx.head())?;
+                for c in [
+                    [10.0f32, 10.0, 10.0, 10.0],
+                    [-10.0f32, -10.0, -10.0, -10.0],
+                    [10.0f32, -10.0, 10.0, -10.0],
+                ] {
+                    insert_vector(&c, txn_idx.head())?;
+                }
+                txn_idx.commit(None)?;
+            }
+            {
+                let limit = vectors.len();
+                let assignments =
+                    assign_to_centroids(index.as_ref(), &conn, &vectors, limit, |_| {})?;
+                load_centroids(index.as_ref(), &conn, &assignments, |_| {})?;
+                load_centroid_stats(index.as_ref(), &conn, &assignments, |_| {})?;
+                load_raw_vectors(index.as_ref(), &conn, &vectors, limit, |_| {})?;
+                let txn = conn.begin_transaction(None)?;
+                {
+                    let cursor = txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+                    let mut postings = BlockPostingsMut::new(cursor, index.posting_vector_len());
+                    load_postings(
+                        index.as_ref(),
+                        &conn,
+                        &mut postings,
+                        &assignments,
+                        &vectors,
+                        |_| {},
+                    )?;
+                }
+                txn.commit(None)?;
+            }
+            Ok(Self {
+                _dir: dir,
+                conn,
+                index,
+                vectors,
+            })
+        }
+
+        /// Search for `query`, returning the ids of the top `limit` results.
+        fn search(&self, query: &[f32]) -> Result<Vec<i64>> {
+            let txn_idx = TransactionIndex::new(&self.index, self.conn.begin_transaction(None)?);
+            let mut searcher = Searcher::new(SearchParams {
+                head_params: GraphSearchParams {
+                    beam_width: NonZero::new(8).unwrap(),
+                    num_rerank: 0,
+                    patience: None,
+                },
+                centroid_selector: CentroidSelector::TopN(3),
+                num_rerank: 10,
+                limit: NonZero::new(10).unwrap(),
+            });
+            let mut posting_cursor =
+                txn_idx.transaction().open_cursor::<u32, Vec<u8>>(self.index.postings_table_name())?;
+            Ok(searcher
+                .search(query, &txn_idx, &mut posting_cursor)?
+                .into_iter()
+                .map(|n| n.vertex())
+                .collect())
+        }
+
+        /// Verify the index invariant: every posting decodes to a residual that, combined with
+        /// its centroid's vector, reproduces the original vector.
+        fn assert_postings_are_residuals(&self) -> Result<()> {
+            let txn_idx = TransactionIndex::new(&self.index, self.conn.begin_transaction(None)?);
+            let mut centroid_source = CentroidVectorSource::new(txn_idx.head())?;
+            let mut assignment_cursor = txn_idx.transaction().open_cursor::<i64, CentroidAssignment>(
+                self.index.centroid_assignments_table_name(),
+            )?;
+            let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
+            let posting_coder = self.index.new_posting_coder();
+            let mut scratch = vec![0.0f32; DIMENSIONS];
+            for record_id in 0..self.vectors.len() as i64 {
+                let assignment = assignment_cursor
+                    .seek_exact(record_id)
+                    .unwrap_or_else(|| Err(wt_mdb::Error::not_found_error()))?;
+                let centroid = centroid_source.centroid_vector(assignment.primary_id)?;
+                let encoded = postings.get(assignment.primary_id, record_id)?;
+                posting_coder.decode_to(&encoded, &mut scratch);
+                let original = &self.vectors[record_id as usize];
+                for ((r, o), c) in scratch.iter().zip(original.iter()).zip(centroid.iter()) {
+                    assert!(
+                        (r + c - o).abs() < 1e-4,
+                        "posting {record_id} of centroid {} does not reconstruct the original \
+                         vector: r={r}, c={c}, o={o}",
+                        assignment.primary_id
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn test_vectors() -> VecVectorStore<f32> {
+        let mut store = VecVectorStore::with_capacity(DIMENSIONS, 64);
+        // Cluster A around (10, 10, 10, 10): 25 vectors.
+        for i in 0..25 {
+            let d = i as f32 * 0.01;
+            store.push(&[10.0 + d, 10.0 - d, 10.0 + 2.0 * d, 10.0 - 2.0 * d]);
+        }
+        // Cluster B around (-10, -10, -10, -10): 20 vectors.
+        for i in 0..20 {
+            let d = i as f32 * 0.01;
+            store.push(&[-10.0 - d, -10.0 + d, -10.0 - 2.0 * d, -10.0 + 2.0 * d]);
+        }
+        // Cluster C around (10, -10, 10, -10): a single vector, below min_centroid_len.
+        store.push(&[10.0, -10.0, 10.0, -10.0]);
+        // Cluster O around the dummy zero centroid: 18 vectors.
+        for i in 0..18 {
+            let d = i as f32 * 0.001;
+            store.push(&[d, -d, 2.0 * d, -2.0 * d]);
+        }
+        store
+    }
+
+    /// Brute-force top-k ids by squared Euclidean distance.
+    fn brute_force_top(vectors: &VecVectorStore<f32>, query: &[f32], k: usize) -> Vec<i64> {
+        let mut scored: Vec<(i64, f64)> = (0..vectors.len())
+            .map(|i| {
+                let distance: f64 = query
+                    .iter()
+                    .zip(vectors[i].iter())
+                    .map(|(q, v)| (*q as f64 - *v as f64).powi(2))
+                    .sum();
+                (i as i64, distance)
+            })
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        scored.into_iter().take(k).map(|(i, _)| i).collect()
+    }
+
+    #[test]
+    fn centered_postings_search_recall() -> std::io::Result<()> {
+        let fixture = Fixture::new(true)?;
+        fixture.assert_postings_are_residuals()?;
+
+        let query = [10.05f32, 9.95, 10.1, 9.9];
+        let expected = brute_force_top(&fixture.vectors, &query, 10);
+        let results = fixture.search(&query)?;
+        // The query sits at the heart of cluster A so the top 10 are all A vectors; the
+        // per-centroid adjusted scoring must find exactly the brute-force set.
+        assert_eq!(results, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn centered_postings_match_uncentered_results() -> std::io::Result<()> {
+        let centered = Fixture::new(true)?;
+        let uncentered = Fixture::new(false)?;
+        for query in [
+            [10.05f32, 9.95, 10.1, 9.9],
+            [-9.9f32, -10.1, -9.95, -10.05],
+            [0.01f32, -0.01, 0.02, -0.02],
+        ] {
+            assert_eq!(centered.search(&query)?, uncentered.search(&query)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rebalance_preserves_centered_postings() -> std::io::Result<()> {
+        let fixture = Fixture::new(true)?;
+        // Loading the fixture data leaves centroids out of policy; rebalancing splits the
+        // oversized clusters and merges the singleton, re-centering every moved posting from
+        // its rerank vector.
+        parallel_rebalance(
+            &fixture.conn,
+            &fixture.index,
+            &|| rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5EED),
+        )?;
+        fixture.assert_postings_are_residuals()?;
+
+        let query = [10.05f32, 9.95, 10.1, 9.9];
+        let expected = brute_force_top(&fixture.vectors, &query, 10);
+        assert_eq!(fixture.search(&query)?, expected);
+        Ok(())
     }
 }

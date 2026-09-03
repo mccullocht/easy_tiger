@@ -5,6 +5,7 @@
 
 pub mod bulk;
 pub mod centroid_stats;
+pub mod centroids;
 pub mod postings;
 pub mod rebalance;
 pub mod search;
@@ -47,6 +48,11 @@ pub struct IndexConfig {
     pub max_centroid_len: usize,
     /// Vector coding used to build a vector id keyed vector table for re-ranking results.
     pub rerank_format: F32VectorCoding,
+    /// If true, posting vectors are stored as residuals `v - c` against their assigned centroid
+    /// instead of absolute vectors. Queries are adjusted per centroid (`q - c`). The
+    /// raw_vectors rerank table always stores uncentered vectors.
+    #[serde(default)]
+    pub center_postings: bool,
 }
 
 impl IndexConfig {
@@ -331,5 +337,38 @@ impl TransactionIndex {
     /// Rollback the underlying [`Transaction`] with the provided options.
     pub fn rollback(self, options: Option<RollbackTransactionOptions>) -> Result<()> {
         self.head.rollback(options)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_config_deserializes_without_center_postings() {
+        // Indexes created before `center_postings` existed lack the key entirely; the
+        // serde default must keep them loadable.
+        let json = r#"{"head_search_params":{"beam_width":16,"num_rerank":0},"posting_coder":"F32","min_centroid_len":4,"max_centroid_len":8,"rerank_format":"F32"}"#;
+        let config: IndexConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.center_postings);
+    }
+
+    #[test]
+    fn index_config_roundtrips_center_postings() {
+        let config = IndexConfig {
+            head_search_params: GraphSearchParams {
+                beam_width: std::num::NonZero::new(16).unwrap(),
+                num_rerank: 0,
+                patience: None,
+            },
+            posting_coder: F32VectorCoding::F32,
+            min_centroid_len: 4,
+            max_centroid_len: 8,
+            rerank_format: F32VectorCoding::F32,
+            center_postings: true,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let roundtripped: IndexConfig = serde_json::from_str(&json).unwrap();
+        assert!(roundtripped.center_postings);
     }
 }

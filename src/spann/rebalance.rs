@@ -273,8 +273,8 @@ mod parallel {
         sync::Arc,
     };
     use tracing::warn;
-    use vectors::{F32VectorCoder, F32VectorCoding, QueryVectorDistance};
-    use wt_mdb::{Connection, Error, Result};
+    use vectors::{F32VectorCoder, F32VectorCoding, QueryVectorDistance, prepare_vector};
+    use wt_mdb::{Connection, Error, Result, TypedCursorGuard};
 
     use crate::{
         input::VecVectorStore,
@@ -282,6 +282,7 @@ mod parallel {
         spann::{
             CentroidAssignment, TableIndex, TransactionIndex,
             centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
+            centroids::CentroidVectorSource,
             postings::BlockPostingsMut,
             rebalance::{MergeStats, RebalanceStats, SplitStats},
         },
@@ -314,58 +315,107 @@ mod parallel {
     pub struct CentroidDistanceFactory<'a> {
         centroid_store: CursorVectorStore<'a>,
         posting_format: F32VectorCoding,
-        head_coder: Option<Box<dyn F32VectorCoder>>,
+        head_coder: Box<dyn F32VectorCoder>,
+        center_postings: bool,
     }
 
     impl<'a> CentroidDistanceFactory<'a> {
         pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
             let centroid_store = txn_idx.head().high_fidelity_vectors()?;
-            let posting_format = txn_idx.index().config().posting_coder;
-            let head_format = centroid_store.format();
-            let head_coder = if posting_format == head_format {
-                None
-            } else {
-                Some(head_format.coder())
-            };
+            let head_coder = centroid_store.new_coder();
             Ok(Self {
+                posting_format: txn_idx.index().config().posting_coder,
+                center_postings: txn_idx.index().config().center_postings,
                 centroid_store,
-                posting_format,
                 head_coder,
             })
         }
 
-        pub fn distance_to_centroid(
+        /// Distance function for scoring the postings of `source` against `target`'s centroid
+        /// vector.
+        ///
+        /// When postings are centered they are stored as residuals (`v - c_source`), so the
+        /// query scoring them against `c_target` is `c_target - c_source`:
+        /// `|r - (c_target - c_source)| = |v - c_target|`. When `target == source` the query is
+        /// the zero vector and the distance is the residual norm, i.e. the posting's distance to
+        /// its own centroid. When postings are not centered this is a query of `c_target` against
+        /// absolute postings.
+        pub fn distance_from_source_to_centroid(
             &mut self,
-            centroid_id: u32,
+            source: u32,
+            target: u32,
         ) -> Result<Box<dyn QueryVectorDistance>> {
             let similarity = self.centroid_store.similarity();
-            let query = self
-                .centroid_store
-                .get(centroid_id as i64)
-                .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            if let Some(head_coder) = self.head_coder.as_ref() {
-                let query = head_coder.decode(query);
-                Ok(self
+            if !self.center_postings {
+                let head_format = self.centroid_store.format();
+                let query = self
+                    .centroid_store
+                    .get(target as i64)
+                    .unwrap_or_else(|| Err(Error::not_found_error()))?;
+                if self.posting_format == head_format {
+                    return Ok(self
+                        .posting_format
+                        .query_distance_symmetric(similarity, query.to_vec()));
+                }
+                let query = self.head_coder.decode(query);
+                return Ok(self
                     .posting_format
-                    .query_distance_asymmetric(similarity, query))
-            } else {
-                Ok(self
-                    .posting_format
-                    .query_distance_symmetric(similarity, query.to_vec()))
+                    .query_distance_asymmetric(similarity, query));
             }
+            // Centered: the query is c_target - c_source. The head store's own shared centroid
+            // (if any) cancels in the difference.
+            let target = self.head_coder.decode(
+                self.centroid_store
+                    .get(target as i64)
+                    .unwrap_or_else(|| Err(Error::not_found_error()))?,
+            );
+            let source = self.head_coder.decode(
+                self.centroid_store
+                    .get(source as i64)
+                    .unwrap_or_else(|| Err(Error::not_found_error()))?,
+            );
+            let query: Vec<f32> = target
+                .iter()
+                .zip(source.iter())
+                .map(|(t, s)| t - s)
+                .collect();
+            Ok(self
+                .posting_format
+                .query_distance_asymmetric(similarity, query))
         }
     }
 
     struct PostingUpdater<'a> {
         postings: BlockPostingsMut<'a>,
         assignments: CentroidAssignmentUpdater<'a>,
+        // Present when the index centers postings: moves re-encode residuals from the rerank
+        // table instead of transplanting source posting bytes.
+        raw_vectors: Option<TypedCursorGuard<'a, i64, Vec<u8>>>,
+        rerank_coder: Option<Box<dyn F32VectorCoder>>,
+        posting_coder: Option<Box<dyn F32VectorCoder>>,
+        centroids: Option<CentroidVectorSource<'a>>,
     }
 
     impl<'a> PostingUpdater<'a> {
         pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
+            let center_postings = txn_idx.index().config().center_postings;
             Ok(Self {
                 postings: BlockPostingsMut::from_txn(txn_idx)?,
                 assignments: CentroidAssignmentUpdater::new(txn_idx)?,
+                raw_vectors: center_postings
+                    .then(|| {
+                        txn_idx
+                            .transaction()
+                            .open_cursor::<i64, Vec<u8>>(txn_idx.index().raw_vectors_table_name())
+                    })
+                    .transpose()?,
+                rerank_coder: center_postings
+                    .then(|| txn_idx.index().config().rerank_format.coder()),
+                posting_coder: center_postings
+                    .then(|| txn_idx.index().config().posting_coder.coder()),
+                centroids: center_postings
+                    .then(|| CentroidVectorSource::new(txn_idx.head()))
+                    .transpose()?,
             })
         }
 
@@ -373,19 +423,61 @@ mod parallel {
             self.postings.read_centroid(centroid_id)
         }
 
+        /// Re-encode `record_id`'s posting as a residual against `target`'s centroid.
+        ///
+        /// Returns `None` when the index does not center postings. The record's rerank vector is
+        /// used as the source of truth to avoid compounding posting quantization error across
+        /// moves.
+        fn reencode_posting(&mut self, record_id: i64, target: u32) -> Result<Option<Vec<u8>>> {
+            let Some(raw_vectors) = self.raw_vectors.as_mut() else {
+                return Ok(None);
+            };
+            let raw = raw_vectors
+                .seek_exact(record_id)
+                .unwrap_or_else(|| Err(Error::not_found_error()))?;
+            let vector = self
+                .rerank_coder
+                .as_ref()
+                .expect("rerank coder present when postings are centered")
+                .decode(&raw);
+            let centroid = self
+                .centroids
+                .as_mut()
+                .expect("centroid source present when postings are centered")
+                .centroid_vector(target)?;
+            let residual = prepare_vector(&vector, None, false, Some(&centroid));
+            Ok(Some(
+                self.posting_coder
+                    .as_ref()
+                    .expect("posting coder present when postings are centered")
+                    .encode(&residual),
+            ))
+        }
+
         pub fn move_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
+            let reencoded = self.reencode_posting(record_id, target)?;
             let old = self
                 .assignments
                 .update(record_id, CentroidAssignment::new(target))?;
             assert_eq!(old.primary_id, source);
-            let v = self.postings.remove(source, record_id)?.unwrap().to_vec();
+            let v = match reencoded {
+                Some(v) => v,
+                None => self
+                    .postings
+                    .remove(source, record_id)?
+                    .expect("posting present in source")
+                    .to_vec(),
+            };
             self.postings.insert(target, record_id, &v)
         }
 
         pub fn copy_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
             self.assignments
                 .overwrite(record_id, CentroidAssignment::new(target))?;
-            let v = self.postings.get(source, record_id)?;
+            let v = match self.reencode_posting(record_id, target)? {
+                Some(v) => v,
+                None => self.postings.get(source, record_id)?,
+            };
             self.postings.insert(target, record_id, &v)
         }
 
@@ -442,6 +534,17 @@ mod parallel {
                     )
                 },
                 |txn_idx, (s, t0, t1)| {
+                    // Fetch the source centroid vector before seeking the posting cursor:
+                    // reading it performs WT operations that would invalidate data borrowed
+                    // from the posting cursor below.
+                    let source_centroid = txn_idx
+                        .index()
+                        .config()
+                        .center_postings
+                        .then(|| CentroidVectorSource::new(txn_idx.head()))
+                        .transpose()?
+                        .map(|mut source| source.centroid_vector(s))
+                        .transpose()?;
                     let mut posting_cursor = txn_idx
                         .transaction()
                         .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
@@ -454,8 +557,13 @@ mod parallel {
                         PostingBlock::new(raw_posting, txn_idx.index().posting_vector_len())
                             .expect("valid posting block");
                     let mut rng = rng_supplier();
-                    let centroids =
-                        partition_postings(txn_idx, s, block.iter().map(|(_, v)| v), &mut rng);
+                    let centroids = partition_postings(
+                        txn_idx,
+                        s,
+                        source_centroid.as_deref(),
+                        block.iter().map(|(_, v)| v),
+                        &mut rng,
+                    );
                     Ok(Some((t0, t1, centroids)))
                 },
             )
@@ -503,6 +611,7 @@ mod parallel {
     fn partition_postings<'a>(
         txn_idx: &TransactionIndex,
         centroid_id: u32,
+        source_centroid: Option<&[f32]>,
         vectors: impl ExactSizeIterator<Item = &'a [u8]>,
         rng: &mut impl Rng,
     ) -> VecVectorStore<f32> {
@@ -513,6 +622,13 @@ mod parallel {
         let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), len);
         for v in vectors {
             posting_coder.decode_to(v, &mut scratch_vector);
+            // Centered postings decode to residuals (v - c); re-add the source centroid so
+            // clustering runs on absolute vectors and the new centroids land in absolute space.
+            if let Some(source_centroid) = source_centroid {
+                for (d, c) in scratch_vector.iter_mut().zip(source_centroid.iter()) {
+                    *d += c;
+                }
+            }
             clustering_vectors.push(&scratch_vector);
         }
 
@@ -582,9 +698,9 @@ mod parallel {
                     match op {
                         RebalanceOp::Split(s, t0, t1) => {
                             let mut f = CentroidDistanceFactory::new(txn)?;
-                            let s_distfn = f.distance_to_centroid(*s)?;
-                            let t0_distfn = f.distance_to_centroid(*t0)?;
-                            let t1_distfn = f.distance_to_centroid(*t1)?;
+                            let s_distfn = f.distance_from_source_to_centroid(*s, *s)?;
+                            let t0_distfn = f.distance_from_source_to_centroid(*s, *t0)?;
+                            let t1_distfn = f.distance_from_source_to_centroid(*s, *t1)?;
                             let postings = block
                                 .iter()
                                 .map(|(id, v)| {
@@ -658,12 +774,27 @@ mod parallel {
                 |(txn, searcher, result_scratch), (source, postings, _)| {
                     let mut m = HashMap::<u32, Vec<(u32, i64)>>::new();
                     let mut s = GraphSearchStats::default();
+                    // When postings are centered, Target::Query carries residual bytes; re-add
+                    // the source centroid to produce an absolute head-search query.
+                    let source_centroid = index
+                        .config()
+                        .center_postings
+                        .then(|| CentroidVectorSource::new(txn.head()))
+                        .transpose()?
+                        .map(|mut src| src.centroid_vector(source))
+                        .transpose()?;
                     for (vector_id, target) in postings {
                         let centroid = match target {
                             Target::Centroid(c) => c,
                             Target::Query(q) => {
+                                let mut query = coder.decode(&q);
+                                if let Some(source_centroid) = source_centroid.as_ref() {
+                                    for (d, c) in query.iter_mut().zip(source_centroid.iter()) {
+                                        *d += c;
+                                    }
+                                }
                                 let mut candidates = searcher.search_with_options(
-                                    &coder.decode(&q),
+                                    &query,
                                     GraphSearchOptions::with_filter(|i| {
                                         !filter.contains(&(i as u32))
                                     })
@@ -851,10 +982,10 @@ mod parallel {
                     let mut updater = PostingUpdater::new(txn)?;
                     let mut f = CentroidDistanceFactory::new(txn)?;
                     let postings = updater.read_centroid(*nearby)?;
-                    let nearby_distfn = f.distance_to_centroid(*nearby)?;
+                    let nearby_distfn = f.distance_from_source_to_centroid(*nearby, *nearby)?;
                     let targets_distfn = targets
                         .iter()
-                        .map(|c| f.distance_to_centroid(*c))
+                        .map(|c| f.distance_from_source_to_centroid(*nearby, *c))
                         .collect::<Result<Vec<_>>>()?;
                     let moves = postings
                         .iter()

@@ -114,6 +114,11 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     rerank_format: F32VectorCoding,
 
+    /// Store posting vectors as residuals against their assigned centroid (v - c).
+    /// Queries are adjusted per centroid; the rerank table is unaffected.
+    #[arg(long, default_value_t = false)]
+    center_postings: bool,
+
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
     limit: Option<usize>,
@@ -183,6 +188,7 @@ pub fn bulk_load(
         },
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,
+        center_postings: args.center_postings,
     };
     let index = Arc::new(TableIndex::init_index(
         &connection,
@@ -276,6 +282,7 @@ pub fn bulk_load(
             let mut postings = BlockPostingsMut::new(cursor, index.posting_vector_len());
             load_postings(
                 index.as_ref(),
+                &connection,
                 &mut postings,
                 &centroid_assignments,
                 &f32_vectors,

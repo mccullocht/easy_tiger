@@ -1,9 +1,12 @@
-use std::{cell::RefCell, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use crate::{
     input::VectorStore,
     spann::{
-        CentroidAssignment, TableIndex, centroid_stats::CentroidCounts, postings::BlockPostingsMut,
+        CentroidAssignment, TableIndex,
+        centroid_stats::CentroidCounts,
+        centroids::CentroidVectorSource,
+        postings::BlockPostingsMut,
     },
     vamana::{search::GraphSearcher, wt::TransactionGraphVectorIndex},
 };
@@ -65,8 +68,6 @@ pub fn load_centroid_stats(
     centroid_assignments: &[CentroidAssignment],
     progress: impl Fn(u64) + Send + Sync,
 ) -> Result<()> {
-    use std::collections::HashMap;
-
     let mut stats: HashMap<u32, CentroidCounts> = HashMap::new();
     for assignment in centroid_assignments {
         stats.entry(assignment.primary_id).or_default().primary += 1;
@@ -89,10 +90,13 @@ pub fn load_centroid_stats(
 ///
 /// Vectors are encoded in parallel batches and inserted in (centroid_id, record_id) order, which
 /// allows implementations backed by sorted storage to place each centroid's entries contiguously.
-/// Callers must call [`PostingsMut::flush`] (or ensure `postings` does so on drop) to commit
-/// changes, though `load_postings` calls it internally before returning.
+/// When `index` is configured with `center_postings` each vector is encoded as a residual
+/// (`v - c`) against its assigned centroid. Callers must call [`PostingsMut::flush`] (or ensure
+/// `postings` does so on drop) to commit changes, though `load_postings` calls it internally
+/// before returning.
 pub fn load_postings(
     index: &TableIndex,
+    connection: &Arc<Connection>,
     postings: &mut BlockPostingsMut<'_>,
     centroid_assignments: &[CentroidAssignment],
     vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
@@ -106,16 +110,60 @@ pub fn load_postings(
     posting_keys.par_sort_unstable();
 
     let coder = index.config().posting_coder.coder();
+    // Centroid vectors for residual encoding, read from the head index's high-fidelity store.
+    let head_reader = index
+        .config()
+        .center_postings
+        .then(|| -> Result<TransactionGraphVectorIndex> {
+            Ok(TransactionGraphVectorIndex::new(
+                Arc::clone(index.head_config()),
+                connection.begin_transaction(None)?,
+            ))
+        })
+        .transpose()?;
+    let mut centroid_source = head_reader
+        .as_ref()
+        .map(CentroidVectorSource::new)
+        .transpose()?;
     // Encode in batches to avoid single-threading encoding work. If the vectors are backed by mmap
     // this will also allow us to parallelize IO.
     let mut encoded_buffer =
         vec![vec![0u8; coder.byte_len(index.head_config().config().dimensions.get())]; 1024];
     for batch in posting_keys.chunks(1024) {
+        // Keys are sorted by (centroid_id, record_id) so each batch touches only a handful of
+        // distinct centroids; fetch each of their vectors once.
+        let centroid_vectors = centroid_source
+            .as_mut()
+            .map(|source| {
+                let mut centroid_vectors = HashMap::new();
+                for &(centroid_id, _) in batch {
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        centroid_vectors.entry(centroid_id)
+                    {
+                        e.insert(source.centroid_vector(centroid_id)?);
+                    }
+                }
+                Ok::<_, wt_mdb::Error>(centroid_vectors)
+            })
+            .transpose()?;
         encoded_buffer
             .par_iter_mut()
             .zip(batch)
-            .for_each(|(buf, &(_, record_id))| {
-                coder.encode_to(&vectors[record_id as usize], buf);
+            .for_each(|(buf, &(centroid_id, record_id))| {
+                if let Some(centroid_vector) =
+                    centroid_vectors.as_ref().and_then(|m| m.get(&centroid_id))
+                {
+                    // Centered: encode the residual v - c.
+                    let residual = vectors::prepare_vector(
+                        &vectors[record_id as usize],
+                        None,
+                        false,
+                        Some(centroid_vector),
+                    );
+                    coder.encode_to(&residual, buf);
+                } else {
+                    coder.encode_to(&vectors[record_id as usize], buf);
+                }
             });
         for (&(centroid_id, record_id), buf) in batch.iter().zip(encoded_buffer.iter()) {
             postings.insert(centroid_id, record_id, buf)?;

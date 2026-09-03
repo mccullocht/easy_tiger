@@ -110,9 +110,9 @@ pub struct BulkLoadArgs {
     #[arg(long)]
     posting_coder: F32VectorCoding,
 
-    /// Format to use for a rerank table. May be omitted.
+    /// Format to use for a rerank table.
     #[arg(long)]
-    rerank_format: Option<F32VectorCoding>,
+    rerank_format: F32VectorCoding,
 
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
@@ -240,7 +240,7 @@ pub fn bulk_load(
         }
     }
 
-    if index.config().rerank_format.is_some() {
+    {
         let progress = progress_bar(limit, "tail load raw vectors");
         load_raw_vectors(index.as_ref(), &connection, &f32_vectors, limit, |i| {
             progress.inc(i)

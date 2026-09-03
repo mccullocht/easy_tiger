@@ -837,7 +837,7 @@ mod test {
         });
         assert_eq!(
             searcher
-                .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+                .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
                 .unwrap(),
             vec![
                 Neighbor::new(0, 0.47999999940395355),
@@ -859,7 +859,7 @@ mod test {
         assert_eq!(
             normalize_scores(
                 searcher
-                    .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+                    .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
                     .unwrap()
             ),
             vec![
@@ -883,7 +883,7 @@ mod test {
         });
         assert_eq!(
             searcher
-                .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+                .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
                 .unwrap(),
             vec![
                 Neighbor::new(0, 0.47999999940395355),
@@ -908,7 +908,7 @@ mod test {
             .search_with_options(
                 &[-0.1, -0.1, -0.1, -0.1],
                 Options::with_filter(|v| v != 1),
-                &mut index.reader(),
+                &index.reader(),
             )
             .unwrap();
 
@@ -938,7 +938,7 @@ mod test {
             patience: None,
         });
         let results = searcher
-            .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+            .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
             .unwrap();
         // Results must be non-empty and sorted by increasing BQ distance.
         assert!(!results.is_empty());
@@ -966,7 +966,7 @@ mod test {
             patience: None,
         });
         let results = searcher
-            .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+            .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
             .unwrap();
         assert!(!results.is_empty());
         // Results must be sorted by increasing F32 squared-Euclidean distance.

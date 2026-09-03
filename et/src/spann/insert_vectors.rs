@@ -93,7 +93,7 @@ pub fn insert_vectors(
 
     let posting_format = index.config().posting_coder;
     let posting_coder = posting_format.coder();
-    let rerank_coder = index.config().rerank_format.map(|f| f.coder());
+    let rerank_coder = index.config().rerank_format.coder();
 
     let batch_size = args.batch_size.get();
     let main_progress = progress_bar(count, "inserting vectors");
@@ -120,7 +120,7 @@ pub fn insert_vectors(
             &vectors,
             batch_start..batch_end,
             posting_coder.as_ref(),
-            rerank_coder.as_ref().map(|c| c.as_ref()),
+            rerank_coder.as_ref(),
             &main_progress,
         )?;
         insert_time += insert_start.elapsed();
@@ -327,7 +327,7 @@ struct InsertRecord {
     record_id: i64,
     assignment: CentroidAssignment,
     posting_vector: Vec<u8>,
-    rerank_vector: Option<Vec<u8>>,
+    rerank_vector: Vec<u8>,
     stats: GraphSearchStats,
 }
 
@@ -371,7 +371,7 @@ fn insert_batch(
     vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
     batch: Range<usize>,
     posting_coder: &dyn F32VectorCoder,
-    rerank_coder: Option<&dyn F32VectorCoder>,
+    rerank_coder: &dyn F32VectorCoder,
     progress: &ProgressBar,
 ) -> Result<InsertBatchResult> {
     progress.set_message("inserting vectors");
@@ -413,7 +413,7 @@ fn insert_batch(
                     record_id: i as i64,
                     assignment: CentroidAssignment::new(centroid_id),
                     posting_vector: posting_coder.encode(vector),
-                    rerank_vector: rerank_coder.map(|c| c.encode(vector)),
+                    rerank_vector: rerank_coder.encode(vector),
                     stats: searcher.stats(),
                 })
             },
@@ -450,23 +450,14 @@ fn insert_batch(
                     .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?,
                 index.posting_vector_len(),
             );
-            let mut rerank_cursor = if rerank_coder.is_some() {
-                Some(
-                    txn_idx
-                        .transaction()
-                        .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?,
-                )
-            } else {
-                None
-            };
+            let mut rerank_cursor = txn_idx
+                .transaction()
+                .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?;
 
             for r in postings {
                 assignment_updater.insert(r.record_id, centroid)?;
                 postings_mut.insert(centroid.primary_id, r.record_id, &r.posting_vector)?;
-
-                if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(r.rerank_vector) {
-                    cursor.set(r.record_id, &vector)?;
-                }
+                rerank_cursor.set(r.record_id, &r.rerank_vector)?;
             }
 
             postings_mut.flush()?;

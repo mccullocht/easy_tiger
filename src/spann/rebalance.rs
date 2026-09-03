@@ -460,13 +460,10 @@ mod parallel {
                 .assignments
                 .update(record_id, CentroidAssignment::new(target))?;
             assert_eq!(old.primary_id, source);
+            let removed = self.postings.remove(source, record_id)?;
             let v = match reencoded {
                 Some(v) => v,
-                None => self
-                    .postings
-                    .remove(source, record_id)?
-                    .expect("posting present in source")
-                    .to_vec(),
+                None => removed.expect("posting present in source").to_vec(),
             };
             self.postings.insert(target, record_id, &v)
         }

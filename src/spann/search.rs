@@ -604,57 +604,89 @@ mod tests {
                 .collect())
         }
 
-        /// Verify the index invariant: every posting decodes to a residual that, combined with
-        /// its centroid's vector, reproduces the original vector.
+        /// Verify the index invariants: every record has exactly one posting, in the block of
+        /// its assigned centroid, and that posting decodes to a residual which, combined with
+        /// the centroid's vector, reproduces the original vector.
         fn assert_postings_are_residuals(&self) -> Result<()> {
             let txn_idx = TransactionIndex::new(&self.index, self.conn.begin_transaction(None)?);
             let mut centroid_source = CentroidVectorSource::new(txn_idx.head())?;
             let mut assignment_cursor = txn_idx.transaction().open_cursor::<i64, CentroidAssignment>(
                 self.index.centroid_assignments_table_name(),
             )?;
-            let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
             let posting_coder = self.index.new_posting_coder();
+            // Collect the posting blocks before the per-record checks: those seek other
+            // cursors, which we avoid mixing with iteration over the postings cursor.
+            let blocks: Vec<(u32, Vec<u8>)> = txn_idx
+                .transaction()
+                .open_cursor::<u32, Vec<u8>>(self.index.postings_table_name())?
+                .collect::<Result<Vec<_>>>()?;
+            let mut seen = HashSet::new();
             let mut scratch = vec![0.0f32; DIMENSIONS];
-            for record_id in 0..self.vectors.len() as i64 {
-                let assignment = assignment_cursor
-                    .seek_exact(record_id)
-                    .unwrap_or_else(|| Err(wt_mdb::Error::not_found_error()))?;
-                let centroid = centroid_source.centroid_vector(assignment.primary_id)?;
-                let encoded = postings.get(assignment.primary_id, record_id)?;
-                posting_coder.decode_to(&encoded, &mut scratch);
-                let original = &self.vectors[record_id as usize];
-                for ((r, o), c) in scratch.iter().zip(original.iter()).zip(centroid.iter()) {
+            for (centroid_id, data) in blocks {
+                let block =
+                    PostingBlock::new(&data, self.index.posting_vector_len()).expect("valid block");
+                let centroid = centroid_source.centroid_vector(centroid_id)?;
+                for (record_id, encoded) in block.iter() {
                     assert!(
-                        (r + c - o).abs() < 1e-4,
-                        "posting {record_id} of centroid {} does not reconstruct the original \
-                         vector: r={r}, c={c}, o={o}",
+                        seen.insert(record_id),
+                        "record {record_id} appears in more than one posting block"
+                    );
+                    let assignment = assignment_cursor
+                        .seek_exact(record_id)
+                        .unwrap_or_else(|| Err(wt_mdb::Error::not_found_error()))?;
+                    assert_eq!(
+                        assignment.primary_id, centroid_id,
+                        "record {record_id} is posted in centroid {centroid_id} but assigned to {}",
                         assignment.primary_id
                     );
+                    posting_coder.decode_to(encoded, &mut scratch);
+                    let original = &self.vectors[record_id as usize];
+                    for ((r, o), c) in scratch.iter().zip(original.iter()).zip(centroid.iter()) {
+                        assert!(
+                            (r + c - o).abs() < 1e-4,
+                            "posting {record_id} of centroid {centroid_id} does not reconstruct \
+                             the original vector: r={r}, c={c}, o={o}"
+                        );
+                    }
                 }
             }
+            assert_eq!(
+                seen.len(),
+                self.vectors.len(),
+                "every record must have exactly one posting"
+            );
             Ok(())
         }
     }
 
     fn test_vectors() -> VecVectorStore<f32> {
-        let mut store = VecVectorStore::with_capacity(DIMENSIONS, 64);
-        // Cluster A around (10, 10, 10, 10): 25 vectors.
-        for i in 0..25 {
+        let mut store = VecVectorStore::with_capacity(DIMENSIONS, 50);
+        // Cluster A around (10, 10, 10, 10), bi-modal around (12, ...) and (8, ...) so a
+        // split partitions it into sub-clusters near those modes: 25 vectors (> max len).
+        for i in 0..12 {
             let d = i as f32 * 0.01;
-            store.push(&[10.0 + d, 10.0 - d, 10.0 + 2.0 * d, 10.0 - 2.0 * d]);
+            store.push(&[12.0 + d, 12.0 - d, 12.0 + 2.0 * d, 12.0 - 2.0 * d]);
         }
-        // Cluster B around (-10, -10, -10, -10): 20 vectors.
-        for i in 0..20 {
+        for i in 0..13 {
+            let d = i as f32 * 0.01;
+            store.push(&[8.0 + d, 8.0 - d, 8.0 + 2.0 * d, 8.0 - 2.0 * d]);
+        }
+        // Cluster B around (-10, -10, -10, -10): 12 vectors (within policy, no split).
+        for i in 0..12 {
             let d = i as f32 * 0.01;
             store.push(&[-10.0 - d, -10.0 + d, -10.0 - 2.0 * d, -10.0 + 2.0 * d]);
         }
         // Cluster C around (10, -10, 10, -10): a single vector, below min_centroid_len.
         store.push(&[10.0, -10.0, 10.0, -10.0]);
-        // Cluster O around the dummy zero centroid: 18 vectors.
-        for i in 0..18 {
+        // Cluster O around the dummy zero centroid: 11 tight vectors (within policy)...
+        for i in 0..11 {
             let d = i as f32 * 0.001;
             store.push(&[d, -d, 2.0 * d, -2.0 * d]);
         }
+        // ...plus one boundary vector that is assigned to O (the origin is its nearest
+        // centroid at load time) but is closer to A's (8, ...) split target, forcing a
+        // nearby reassignment move during rebalance.
+        store.push(&[4.5, 4.5, 4.5, 4.5]);
         store
     }
 
@@ -679,7 +711,7 @@ mod tests {
         let fixture = Fixture::new(true)?;
         fixture.assert_postings_are_residuals()?;
 
-        let query = [10.05f32, 9.95, 10.1, 9.9];
+        let query = [12.05f32, 11.95, 12.1, 11.9];
         let expected = brute_force_top(&fixture.vectors, &query, 10);
         let results = fixture.search(&query)?;
         // The query sits at the heart of cluster A so the top 10 are all A vectors; the
@@ -693,7 +725,7 @@ mod tests {
         let centered = Fixture::new(true)?;
         let uncentered = Fixture::new(false)?;
         for query in [
-            [10.05f32, 9.95, 10.1, 9.9],
+            [12.05f32, 11.95, 12.1, 11.9],
             [-9.9f32, -10.1, -9.95, -10.05],
             [0.01f32, -0.01, 0.02, -0.02],
         ] {
@@ -708,14 +740,21 @@ mod tests {
         // Loading the fixture data leaves centroids out of policy; rebalancing splits the
         // oversized clusters and merges the singleton, re-centering every moved posting from
         // its rerank vector.
-        parallel_rebalance(
+        let stats = parallel_rebalance(
             &fixture.conn,
             &fixture.index,
             &|| rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5EED),
         )?;
+        // The fixture data must exercise both rebalance op kinds.
+        assert!(stats.split >= 1, "fixture should trigger at least one split");
+        assert!(stats.merged >= 1, "fixture should trigger at least one merge");
+        assert!(
+            stats.split_stats.nearby_moved >= 1,
+            "fixture should trigger at least one nearby move"
+        );
         fixture.assert_postings_are_residuals()?;
 
-        let query = [10.05f32, 9.95, 10.1, 9.9];
+        let query = [12.05f32, 11.95, 12.1, 11.9];
         let expected = brute_force_top(&fixture.vectors, &query, 10);
         assert_eq!(fixture.search(&query)?, expected);
         Ok(())

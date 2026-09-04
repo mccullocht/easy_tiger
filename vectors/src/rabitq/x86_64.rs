@@ -1,7 +1,7 @@
 pub mod avx512 {
     use std::arch::x86_64::{
         __m512i, _mm_storeu_epi8, _mm512_abs_ps, _mm512_add_epi32, _mm512_castps_si512,
-        _mm512_cvtepi32_epi8, _mm512_fnmadd_ps, _mm512_loadu_ps, _mm512_maskz_loadu_ps,
+        _mm512_cvtepi32_epi8, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_maskz_loadu_ps,
         _mm512_or_epi32, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
         _mm512_set1_epi32, _mm512_set1_ps, _mm512_setzero_si512, _mm512_slli_epi32,
         _mm512_srli_epi32,
@@ -58,7 +58,7 @@ pub mod avx512 {
             for c in v.chunks(16) {
                 let m = u16::MAX >> (16 - c.len());
                 let c = _mm512_abs_ps(_mm512_maskz_loadu_ps(m, c.as_ptr()));
-                sum = _mm512_fnmadd_ps(c, scale, sum);
+                sum = _mm512_fmadd_ps(c, scale, sum);
             }
             _mm512_reduce_add_ps(sum) / (v.len() as f32).sqrt()
         }

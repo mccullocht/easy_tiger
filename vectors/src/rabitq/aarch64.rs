@@ -73,7 +73,7 @@ pub mod neon {
     }
 
     #[inline]
-    pub fn decode(v: &[u8], magnitude: f32, center: Option<&[f32]>, out: &mut [f32]) {
+    pub fn decode(v: &[u8], magnitude: f32, out: &mut [f32]) {
         let (vhead, vtail) = v.as_chunks::<16>();
         let (ohead, otail) = out.as_chunks_mut::<128>();
 

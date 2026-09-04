@@ -161,10 +161,11 @@ impl F32VectorCoder for Coder {
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         let (_, vector) = Header::decode(encoded);
         let magnitude = 1.0 / (out.len() as f32).sqrt();
-        for (q, o) in crate::packing::TurboUnpacker::<1>::new(vector).zip(out.iter_mut()) {
-            *o = f32::from_bits(magnitude.to_bits() ^ ((q as u32) << 31));
-        }
-        // XXX this doesn't add the centering vector back.
+        match self.k {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::neon::decode(vector, magnitude, self.center.as_deref(), out),
+            _ => scalar::decode(vector, magnitude, self.center.as_deref(), out),
+        };
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
@@ -443,13 +444,15 @@ mod test {
 
                 let centered = subtract_center(&v, center.as_deref());
                 let mut component_sum = 0u32;
-                for (i, (d, c)) in decoded.iter().zip(centered.iter()).enumerate() {
-                    assert_eq!(d.abs(), magnitude, "index {i}");
-                    assert_eq!(
-                        d.is_sign_negative(),
-                        c.is_sign_negative(),
-                        "sign mismatch at index {i}: decoded {d} centered {c}"
-                    );
+                for (i, (&d, &c)) in decoded.iter().zip(centered.iter()).enumerate() {
+                    // Decode reconstructs the quantized centered unit vector (±1/√D with the sign
+                    // of `v - center`) and adds the center back.
+                    let quantized = if c.is_sign_negative() { -magnitude } else { magnitude };
+                    let want = match center.as_deref() {
+                        Some(center) => quantized + center[i],
+                        None => quantized,
+                    };
+                    assert_eq!(d, want, "index {i}: centered {c}");
                     component_sum += c.is_sign_negative() as u32;
                 }
 

@@ -1,9 +1,10 @@
 pub mod neon {
     use std::arch::aarch64::{
         float32x4x4_t, uint8x16_t, uint8x16x4_t, vabsq_f32, vaddlvq_u16, vaddq_f32, vaddq_u16,
-        vaddvq_f32, vandq_u8, vcntq_u8, vdupq_n_f32, vdupq_n_u8, vdupq_n_u16, vfmaq_f32, vld1q_f32,
-        vld1q_f32_x4, vld1q_u8, vorrq_u8, vpaddlq_u8, vqtbl4q_u8, vreinterpretq_u8_f32, vshrq_n_u8,
-        vst1q_u8,
+        vaddvq_f32, vandq_u8, vbslq_u32, vcntq_u8, vdupq_n_f32, vdupq_n_u8, vdupq_n_u16,
+        vdupq_n_u32, vfmaq_f32, vld1q_f32, vld1q_f32_x4, vld1q_u8, vorrq_u8, vpaddlq_u8,
+        vqtbl1q_u8, vqtbl4q_u8, vreinterpretq_f32_u32, vreinterpretq_u8_f32, vreinterpretq_u32_u8,
+        vshlq_n_u32, vshrq_n_u8, vshrq_n_u32, vst1q_f32, vst1q_u8,
     };
 
     #[inline]
@@ -69,5 +70,114 @@ pub mod neon {
         };
 
         (sum + tail.iter().map(|x| x.abs() * scale).sum::<f32>()) / (v.len() as f32).sqrt()
+    }
+
+    #[inline]
+    pub fn decode(v: &[u8], magnitude: f32, center: Option<&[f32]>, out: &mut [f32]) {
+        let (vhead, vtail) = v.as_chunks::<16>();
+        let (ohead, otail) = out.as_chunks_mut::<128>();
+
+        let mag = unsafe { vdupq_n_u32(magnitude.to_bits()) };
+        let s =
+            unsafe { vld1q_u8([0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15].as_ptr()) };
+        let m32 = unsafe { vdupq_n_u32(0x80000000) };
+
+        macro_rules! unpack_store4 {
+            ($v:expr, $o:expr, $off:expr, $shift:literal) => {
+                vst1q_f32(
+                    $o.add($off),
+                    vreinterpretq_f32_u32(vbslq_u32(m32, vshlq_n_u32::<$shift>($v), mag)),
+                );
+            };
+            ($v:expr, $c:expr, $o:expr, $off:expr, $shift:literal) => {
+                vst1q_f32(
+                    $o.add($off),
+                    vaddq_f32(
+                        vreinterpretq_f32_u32(vbslq_u32(m32, vshlq_n_u32::<$shift>($v), mag)),
+                        vld1q_f32($c.add($off)),
+                    ),
+                );
+            };
+        }
+
+        macro_rules! unpack_store16 {
+            ($v:expr, $o:expr, $g:literal) => {
+                unpack_store4!($v, $o, $g * 16 + 0, 31);
+                unpack_store4!($v, $o, $g * 16 + 4, 23);
+                unpack_store4!($v, $o, $g * 16 + 8, 15);
+                unpack_store4!($v, $o, $g * 16 + 12, 7);
+            };
+            ($v:expr, $c:expr, $o:expr, $g:literal) => {
+                unpack_store4!($v, $c, $o, $g * 16 + 0, 31);
+                unpack_store4!($v, $c, $o, $g * 16 + 4, 23);
+                unpack_store4!($v, $c, $o, $g * 16 + 8, 15);
+                unpack_store4!($v, $c, $o, $g * 16 + 12, 7);
+            };
+        }
+
+        if let Some(center) = center {
+            let (chead, ctail) = center.as_chunks::<128>();
+            for ((v, c), o) in vhead.iter().zip(chead.iter()).zip(ohead.iter_mut()) {
+                unsafe {
+                    let v = vreinterpretq_u32_u8(vqtbl1q_u8(vld1q_u8(v.as_ptr()), s));
+                    unpack_store16!(v, c.as_ptr(), o.as_mut_ptr(), 0);
+                    unpack_store16!(vshrq_n_u32::<1>(v), c.as_ptr(), o.as_mut_ptr(), 1);
+                    unpack_store16!(vshrq_n_u32::<2>(v), c.as_ptr(), o.as_mut_ptr(), 2);
+                    unpack_store16!(vshrq_n_u32::<3>(v), c.as_ptr(), o.as_mut_ptr(), 3);
+                    unpack_store16!(vshrq_n_u32::<4>(v), c.as_ptr(), o.as_mut_ptr(), 4);
+                    unpack_store16!(vshrq_n_u32::<5>(v), c.as_ptr(), o.as_mut_ptr(), 5);
+                    unpack_store16!(vshrq_n_u32::<6>(v), c.as_ptr(), o.as_mut_ptr(), 6);
+                    unpack_store16!(vshrq_n_u32::<7>(v), c.as_ptr(), o.as_mut_ptr(), 7);
+                }
+            }
+            crate::rabitq::scalar::decode(vtail, magnitude, Some(ctail), otail);
+        } else {
+            for (v, o) in vhead.iter().zip(ohead.iter_mut()) {
+                unsafe {
+                    let v = vreinterpretq_u32_u8(vqtbl1q_u8(vld1q_u8(v.as_ptr()), s));
+                    unpack_store16!(v, o.as_mut_ptr(), 0);
+                    unpack_store16!(vshrq_n_u32::<1>(v), o.as_mut_ptr(), 1);
+                    unpack_store16!(vshrq_n_u32::<2>(v), o.as_mut_ptr(), 2);
+                    unpack_store16!(vshrq_n_u32::<3>(v), o.as_mut_ptr(), 3);
+                    unpack_store16!(vshrq_n_u32::<4>(v), o.as_mut_ptr(), 4);
+                    unpack_store16!(vshrq_n_u32::<5>(v), o.as_mut_ptr(), 5);
+                    unpack_store16!(vshrq_n_u32::<6>(v), o.as_mut_ptr(), 6);
+                    unpack_store16!(vshrq_n_u32::<7>(v), o.as_mut_ptr(), 7);
+                }
+            }
+            crate::rabitq::scalar::decode(vtail, magnitude, None, otail);
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    /// The NEON decoder must be bit-identical to the scalar reference for a full block, a ragged
+    /// tail, and both the centered and uncentered paths.
+    #[test]
+    fn decode_matches_scalar() {
+        for dim in [128usize, 384, 200, 37] {
+            let bytes: Vec<u8> = (0..dim.div_ceil(8))
+                .map(|i| (i as u8).wrapping_mul(37) ^ 0x5a)
+                .collect();
+            let center: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.013 - 0.7).sin()).collect();
+            let magnitude = 1.0 / (dim as f32).sqrt();
+
+            for center in [None, Some(center.as_slice())] {
+                let mut neon = vec![0f32; dim];
+                let mut scalar = vec![0f32; dim];
+                super::neon::decode(&bytes, magnitude, center, &mut neon);
+                crate::rabitq::scalar::decode(&bytes, magnitude, center, &mut scalar);
+
+                for (i, (n, s)) in neon.iter().zip(scalar.iter()).enumerate() {
+                    assert_eq!(
+                        n.to_bits(),
+                        s.to_bits(),
+                        "dim {dim} centered {} index {i}: neon {n} scalar {s}",
+                        center.is_some()
+                    );
+                }
+            }
+        }
     }
 }

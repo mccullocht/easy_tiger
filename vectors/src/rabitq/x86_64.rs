@@ -2,8 +2,9 @@ pub mod avx512 {
     use std::arch::x86_64::{
         __m512i, _mm_storeu_epi8, _mm512_abs_ps, _mm512_add_epi32, _mm512_castps_si512,
         _mm512_cvtepi32_epi8, _mm512_fnmadd_ps, _mm512_loadu_ps, _mm512_maskz_loadu_ps,
-        _mm512_or_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_set1_epi32,
-        _mm512_set1_ps, _mm512_setzero_si512, _mm512_slli_epi32, _mm512_srli_epi32,
+        _mm512_or_epi32, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
+        _mm512_set1_epi32, _mm512_set1_ps, _mm512_setzero_si512, _mm512_slli_epi32,
+        _mm512_srli_epi32,
     };
 
     #[target_feature(enable = "avx512f")]
@@ -17,14 +18,15 @@ pub mod avx512 {
             let mut csum = _mm512_set1_epi32(0);
             for (v, o) in vhead.iter().zip(ohead.iter_mut()) {
                 let mut p = _mm512_setzero_si512();
-                (csum, p) = pack_group::<0>(v.as_ptr(), csum, p);
-                (csum, p) = pack_group::<1>(v.as_ptr(), csum, p);
-                (csum, p) = pack_group::<2>(v.as_ptr(), csum, p);
-                (csum, p) = pack_group::<3>(v.as_ptr(), csum, p);
-                (csum, p) = pack_group::<4>(v.as_ptr(), csum, p);
-                (csum, p) = pack_group::<5>(v.as_ptr(), csum, p);
-                (csum, p) = pack_group::<6>(v.as_ptr(), csum, p);
-                (csum, p) = pack_group::<7>(v.as_ptr(), csum, p);
+                p = pack_group::<0>(v.as_ptr(), p);
+                p = pack_group::<1>(v.as_ptr(), p);
+                p = pack_group::<2>(v.as_ptr(), p);
+                p = pack_group::<3>(v.as_ptr(), p);
+                p = pack_group::<4>(v.as_ptr(), p);
+                p = pack_group::<5>(v.as_ptr(), p);
+                p = pack_group::<6>(v.as_ptr(), p);
+                p = pack_group::<7>(v.as_ptr(), p);
+                csum = _mm512_add_epi32(csum, _mm512_popcnt_epi32(p));
                 _mm_storeu_epi8(o.as_mut_ptr() as *mut i8, _mm512_cvtepi32_epi8(p));
             }
             _mm512_reduce_add_epi32(csum) as u32
@@ -39,18 +41,11 @@ pub mod avx512 {
 
     #[target_feature(enable = "avx512f")]
     #[inline]
-    unsafe fn pack_group<const N: u32>(
-        v: *const f32,
-        csum: __m512i,
-        p: __m512i,
-    ) -> (__m512i, __m512i) {
+    unsafe fn pack_group<const N: u32>(v: *const f32, p: __m512i) -> __m512i {
         unsafe {
             let v = _mm512_castps_si512(_mm512_loadu_ps(v.add(N as usize * 16)));
             let b = _mm512_srli_epi32::<31>(v);
-            (
-                _mm512_add_epi32(csum, b),
-                _mm512_or_epi32(p, _mm512_slli_epi32::<N>(b)),
-            )
+            _mm512_or_epi32(p, _mm512_slli_epi32::<N>(b))
         }
     }
 

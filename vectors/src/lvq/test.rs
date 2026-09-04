@@ -430,9 +430,7 @@ fn bitplane_join4(split: &[u8], dimensions: usize) -> Vec<u8> {
     }
 
     if !tail.is_empty() {
-        let mut planes = tail
-            .chunks(tail.len() / 4)
-            .map(TurboUnpacker::<1>::new);
+        let mut planes = tail.chunks(tail.len() / 4).map(TurboUnpacker::<1>::new);
         let mut b0 = planes.next().unwrap();
         let mut b1 = planes.next().unwrap();
         let mut b2 = planes.next().unwrap();

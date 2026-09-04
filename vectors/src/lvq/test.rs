@@ -430,9 +430,7 @@ fn bitplane_join4(split: &[u8], dimensions: usize) -> Vec<u8> {
     }
 
     if !tail.is_empty() {
-        let mut planes = tail
-            .chunks(tail.len() / 4)
-            .map(|p| TurboUnpacker::<1>::new(p));
+        let mut planes = tail.chunks(tail.len() / 4).map(TurboUnpacker::<1>::new);
         let mut b0 = planes.next().unwrap();
         let mut b1 = planes.next().unwrap();
         let mut b2 = planes.next().unwrap();
@@ -454,7 +452,7 @@ fn bitplane_join4(split: &[u8], dimensions: usize) -> Vec<u8> {
 fn bitplane_split4_roundtrip() {
     use crate::packing::{TurboPacker, bitplane_split4, byte_len};
 
-    let seed = SysRng::default().try_next_u64().unwrap();
+    let seed = SysRng.try_next_u64().unwrap();
     println!("SEED {seed:#016x}");
     let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
     // Cover vectors with and without a head, and with block aligned and unaligned tails.

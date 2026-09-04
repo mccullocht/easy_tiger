@@ -136,13 +136,7 @@ impl F32VectorCoder for Coder {
         header.correction_term = match self.k {
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::neon::l1_norm_scaled(&centered_vector, l2_norm.recip()),
-            _ => {
-                centered_vector
-                    .iter()
-                    .map(|&x| x.abs() * l2_norm.recip())
-                    .sum::<f32>()
-                    / (centered_vector.len() as f32).sqrt()
-            }
+            _ => scalar::l1_norm_scaled(&centered_vector, l2_norm.recip()),
         };
 
         let (hbytes, vbytes) = Header::split_mut(out);
@@ -447,7 +441,11 @@ mod test {
                 for (i, (&d, &c)) in decoded.iter().zip(centered.iter()).enumerate() {
                     // Decode reconstructs the quantized centered unit vector (±1/√D with the sign
                     // of `v - center`) and adds the center back.
-                    let quantized = if c.is_sign_negative() { -magnitude } else { magnitude };
+                    let quantized = if c.is_sign_negative() {
+                        -magnitude
+                    } else {
+                        magnitude
+                    };
                     let want = match center.as_deref() {
                         Some(center) => quantized + center[i],
                         None => quantized,

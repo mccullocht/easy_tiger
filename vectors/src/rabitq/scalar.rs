@@ -9,6 +9,11 @@ pub fn quantize_and_pack(v: &[f32], out: &mut [u8]) -> u32 {
         .sum::<u32>()
 }
 
+#[inline]
+pub fn l1_norm_scaled(v: &[f32], scale: f32) -> f32 {
+    v.iter().map(|&x| x.abs() * scale).sum::<f32>() / (v.len() as f32).sqrt()
+}
+
 pub fn decode(v: &[u8], magnitude: f32, center: Option<&[f32]>, out: &mut [f32]) {
     let it = crate::packing::TurboUnpacker::<1>::new(v);
     let decode = |x: u8| -> f32 { f32::from_bits(magnitude.to_bits() | (u32::from(x) << 31)) };

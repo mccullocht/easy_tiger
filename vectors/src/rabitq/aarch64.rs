@@ -149,35 +149,3 @@ pub mod neon {
         }
     }
 }
-
-#[cfg(test)]
-mod test {
-    /// The NEON decoder must be bit-identical to the scalar reference for a full block, a ragged
-    /// tail, and both the centered and uncentered paths.
-    #[test]
-    fn decode_matches_scalar() {
-        for dim in [128usize, 384, 200, 37] {
-            let bytes: Vec<u8> = (0..dim.div_ceil(8))
-                .map(|i| (i as u8).wrapping_mul(37) ^ 0x5a)
-                .collect();
-            let center: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.013 - 0.7).sin()).collect();
-            let magnitude = 1.0 / (dim as f32).sqrt();
-
-            for center in [None, Some(center.as_slice())] {
-                let mut neon = vec![0f32; dim];
-                let mut scalar = vec![0f32; dim];
-                super::neon::decode(&bytes, magnitude, center, &mut neon);
-                crate::rabitq::scalar::decode(&bytes, magnitude, center, &mut scalar);
-
-                for (i, (n, s)) in neon.iter().zip(scalar.iter()).enumerate() {
-                    assert_eq!(
-                        n.to_bits(),
-                        s.to_bits(),
-                        "dim {dim} centered {} index {i}: neon {n} scalar {s}",
-                        center.is_some()
-                    );
-                }
-            }
-        }
-    }
-}

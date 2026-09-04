@@ -20,7 +20,7 @@ const TRIALS: usize = 256;
 const BASE_DIMENSIONS: usize = 512;
 
 fn seeded_rng() -> Xoshiro256PlusPlus {
-    let seed = SysRng::default().try_next_u64().unwrap();
+    let seed = SysRng.try_next_u64().unwrap();
     println!("SEED {seed:#016x}");
     Xoshiro256PlusPlus::seed_from_u64(seed)
 }

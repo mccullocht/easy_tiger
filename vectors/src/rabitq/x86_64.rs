@@ -1,11 +1,11 @@
 pub mod avx512 {
     use std::arch::x86_64::{
         __m512, __m512i, _mm_loadu_epi8, _mm_storeu_epi8, _mm512_abs_ps, _mm512_add_epi32,
-        _mm512_add_ps, _mm512_and_si512, _mm512_castps_si512, _mm512_castsi512_ps,
-        _mm512_cvtepi8_epi32, _mm512_cvtepi32_epi8, _mm512_fmadd_ps, _mm512_loadu_ps,
-        _mm512_maskz_loadu_ps, _mm512_or_epi32, _mm512_or_ps, _mm512_popcnt_epi32,
-        _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_set1_epi32, _mm512_set1_ps,
-        _mm512_setzero_si512, _mm512_slli_epi32, _mm512_srli_epi32, _mm512_storeu_ps,
+        _mm512_add_ps, _mm512_castps_si512, _mm512_castsi512_ps, _mm512_cvtepi8_epi32,
+        _mm512_cvtepi32_epi8, _mm512_fmadd_ps, _mm512_loadu_ps, _mm512_maskz_loadu_ps,
+        _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
+        _mm512_set1_epi32, _mm512_set1_ps, _mm512_setzero_si512, _mm512_slli_epi32,
+        _mm512_srli_epi32, _mm512_storeu_ps, _mm512_ternarylogic_epi32,
     };
 
     #[target_feature(enable = "avx512f")]
@@ -19,14 +19,14 @@ pub mod avx512 {
             let mut csum = _mm512_set1_epi32(0);
             for (v, o) in vhead.iter().zip(ohead.iter_mut()) {
                 let mut p = _mm512_setzero_si512();
-                p = pack_group::<0>(v.as_ptr(), p);
-                p = pack_group::<1>(v.as_ptr(), p);
-                p = pack_group::<2>(v.as_ptr(), p);
-                p = pack_group::<3>(v.as_ptr(), p);
-                p = pack_group::<4>(v.as_ptr(), p);
-                p = pack_group::<5>(v.as_ptr(), p);
-                p = pack_group::<6>(v.as_ptr(), p);
-                p = pack_group::<7>(v.as_ptr(), p);
+                p = pack_group::<0, 31>(v.as_ptr(), p);
+                p = pack_group::<1, 30>(v.as_ptr(), p);
+                p = pack_group::<2, 29>(v.as_ptr(), p);
+                p = pack_group::<3, 28>(v.as_ptr(), p);
+                p = pack_group::<4, 27>(v.as_ptr(), p);
+                p = pack_group::<5, 26>(v.as_ptr(), p);
+                p = pack_group::<6, 25>(v.as_ptr(), p);
+                p = pack_group::<7, 24>(v.as_ptr(), p);
                 csum = _mm512_add_epi32(csum, _mm512_popcnt_epi32(p));
                 _mm_storeu_epi8(o.as_mut_ptr() as *mut i8, _mm512_cvtepi32_epi8(p));
             }
@@ -42,11 +42,13 @@ pub mod avx512 {
 
     #[target_feature(enable = "avx512f")]
     #[inline]
-    unsafe fn pack_group<const N: u32>(v: *const f32, p: __m512i) -> __m512i {
+    unsafe fn pack_group<const N: u32, const SHIFT: u32>(v: *const f32, p: __m512i) -> __m512i {
         unsafe {
             let v = _mm512_castps_si512(_mm512_loadu_ps(v.add(N as usize * 16)));
-            let b = _mm512_srli_epi32::<31>(v);
-            _mm512_or_epi32(p, _mm512_slli_epi32::<N>(b))
+            let shifted = _mm512_srli_epi32::<SHIFT>(v);
+            let mask = _mm512_set1_epi32(1i32 << N);
+            // (shifted & mask) | p: keep bit N of the sign-shifted lane, OR it into the accumulator.
+            _mm512_ternarylogic_epi32::<0xEC>(shifted, p, mask)
         }
     }
 
@@ -77,27 +79,27 @@ pub mod avx512 {
                 let (chead, ctail) = center.as_chunks::<128>();
                 for ((v, c), o) in vhead.iter().zip(chead.iter()).zip(ohead.iter_mut()) {
                     let v = _mm512_cvtepi8_epi32(_mm_loadu_epi8(v.as_ptr() as *const i8));
-                    unpack_group_centered::<0>(v, mag, c.as_ptr(), o.as_mut_ptr());
-                    unpack_group_centered::<1>(v, mag, c.as_ptr(), o.as_mut_ptr());
-                    unpack_group_centered::<2>(v, mag, c.as_ptr(), o.as_mut_ptr());
-                    unpack_group_centered::<3>(v, mag, c.as_ptr(), o.as_mut_ptr());
-                    unpack_group_centered::<4>(v, mag, c.as_ptr(), o.as_mut_ptr());
-                    unpack_group_centered::<5>(v, mag, c.as_ptr(), o.as_mut_ptr());
-                    unpack_group_centered::<6>(v, mag, c.as_ptr(), o.as_mut_ptr());
-                    unpack_group_centered::<7>(v, mag, c.as_ptr(), o.as_mut_ptr());
+                    unpack_group_centered::<0, 31>(v, mag, c.as_ptr(), o.as_mut_ptr());
+                    unpack_group_centered::<1, 30>(v, mag, c.as_ptr(), o.as_mut_ptr());
+                    unpack_group_centered::<2, 29>(v, mag, c.as_ptr(), o.as_mut_ptr());
+                    unpack_group_centered::<3, 28>(v, mag, c.as_ptr(), o.as_mut_ptr());
+                    unpack_group_centered::<4, 27>(v, mag, c.as_ptr(), o.as_mut_ptr());
+                    unpack_group_centered::<5, 26>(v, mag, c.as_ptr(), o.as_mut_ptr());
+                    unpack_group_centered::<6, 25>(v, mag, c.as_ptr(), o.as_mut_ptr());
+                    unpack_group_centered::<7, 24>(v, mag, c.as_ptr(), o.as_mut_ptr());
                 }
                 crate::rabitq::scalar::decode(vtail, magnitude, Some(ctail), otail);
             } else {
                 for (v, o) in vhead.iter().zip(ohead.iter_mut()) {
                     let v = _mm512_cvtepi8_epi32(_mm_loadu_epi8(v.as_ptr() as *const i8));
-                    unpack_group::<0>(v, mag, o.as_mut_ptr());
-                    unpack_group::<1>(v, mag, o.as_mut_ptr());
-                    unpack_group::<2>(v, mag, o.as_mut_ptr());
-                    unpack_group::<3>(v, mag, o.as_mut_ptr());
-                    unpack_group::<4>(v, mag, o.as_mut_ptr());
-                    unpack_group::<5>(v, mag, o.as_mut_ptr());
-                    unpack_group::<6>(v, mag, o.as_mut_ptr());
-                    unpack_group::<7>(v, mag, o.as_mut_ptr());
+                    unpack_group::<0, 31>(v, mag, o.as_mut_ptr());
+                    unpack_group::<1, 30>(v, mag, o.as_mut_ptr());
+                    unpack_group::<2, 29>(v, mag, o.as_mut_ptr());
+                    unpack_group::<3, 28>(v, mag, o.as_mut_ptr());
+                    unpack_group::<4, 27>(v, mag, o.as_mut_ptr());
+                    unpack_group::<5, 26>(v, mag, o.as_mut_ptr());
+                    unpack_group::<6, 25>(v, mag, o.as_mut_ptr());
+                    unpack_group::<7, 24>(v, mag, o.as_mut_ptr());
                 }
                 crate::rabitq::scalar::decode(vtail, magnitude, None, otail);
             }
@@ -106,24 +108,25 @@ pub mod avx512 {
 
     #[target_feature(enable = "avx512f")]
     #[inline]
-    unsafe fn unpack_group_ps<const N: u32>(v: __m512i, m: __m512) -> __m512 {
+    unsafe fn unpack_group_ps<const SHIFT: u32>(v: __m512i, m: __m512) -> __m512 {
+        let t = _mm512_slli_epi32::<SHIFT>(v);
+        let signmask = _mm512_set1_epi32(i32::MIN);
+        // select(c=signmask): take the sign bit from t, everything else from m.
+        let r = _mm512_ternarylogic_epi32::<0xE4>(t, _mm512_castps_si512(m), signmask);
+        _mm512_castsi512_ps(r)
+    }
+
+    #[target_feature(enable = "avx512f")]
+    #[inline]
+    unsafe fn unpack_group<const N: u32, const SHIFT: u32>(v: __m512i, m: __m512, o: *mut f32) {
         unsafe {
-            let uepi32 = _mm512_and_si512(_mm512_srli_epi32::<N>(v), _mm512_set1_epi32(1));
-            _mm512_or_ps(m, _mm512_castsi512_ps(_mm512_slli_epi32::<31>(uepi32)))
+            _mm512_storeu_ps(o.add(N as usize * 16), unpack_group_ps::<SHIFT>(v, m));
         }
     }
 
     #[target_feature(enable = "avx512f")]
     #[inline]
-    unsafe fn unpack_group<const N: u32>(v: __m512i, m: __m512, o: *mut f32) {
-        unsafe {
-            _mm512_storeu_ps(o.add(N as usize * 16), unpack_group_ps::<N>(v, m));
-        }
-    }
-
-    #[target_feature(enable = "avx512f")]
-    #[inline]
-    unsafe fn unpack_group_centered<const N: u32>(
+    unsafe fn unpack_group_centered<const N: u32, const SHIFT: u32>(
         v: __m512i,
         m: __m512,
         c: *const f32,
@@ -134,7 +137,7 @@ pub mod avx512 {
                 o.add(N as usize * 16),
                 _mm512_add_ps(
                     _mm512_loadu_ps(c.add(N as usize * 16)),
-                    unpack_group_ps::<N>(v, m),
+                    unpack_group_ps::<SHIFT>(v, m),
                 ),
             );
         }

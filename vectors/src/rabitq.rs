@@ -142,14 +142,18 @@ impl F32VectorCoder for Coder {
             Kernel::Avx512 => unsafe {
                 x86_64::avx512::l1_norm_scaled(&centered_vector, l2_norm.recip())
             },
-            _ => scalar::l1_norm_scaled(&centered_vector, l2_norm.recip()),
+            Kernel::Scalar => scalar::l1_norm_scaled(&centered_vector, l2_norm.recip()),
         };
 
         let (hbytes, vbytes) = Header::split_mut(out);
         header.component_sum = match self.k {
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::neon::quantize_and_pack(&centered_vector, vbytes),
-            _ => scalar::quantize_and_pack(&centered_vector, vbytes),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                x86_64::avx512::quantize_and_pack(&centered_vector, vbytes)
+            },
+            Kernel::Scalar => scalar::quantize_and_pack(&centered_vector, vbytes),
         };
         header.encode(hbytes);
     }

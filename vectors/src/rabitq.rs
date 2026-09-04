@@ -8,6 +8,8 @@
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 mod scalar;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 use std::borrow::Cow;
 
@@ -136,6 +138,10 @@ impl F32VectorCoder for Coder {
         header.correction_term = match self.k {
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::neon::l1_norm_scaled(&centered_vector, l2_norm.recip()),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                x86_64::avx512::l1_norm_scaled(&centered_vector, l2_norm.recip())
+            },
             _ => scalar::l1_norm_scaled(&centered_vector, l2_norm.recip()),
         };
 

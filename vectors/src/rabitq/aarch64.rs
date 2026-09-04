@@ -1,8 +1,9 @@
 pub mod neon {
     use std::arch::aarch64::{
         float32x4x4_t, uint8x16_t, uint8x16x4_t, vabsq_f32, vaddlvq_u16, vaddq_f32, vaddq_u16,
-        vaddvq_f32, vcntq_u8, vdupq_n_f32, vdupq_n_u16, vfmaq_f32, vld1q_f32, vld1q_f32_x4,
-        vld1q_u8, vorrq_u8, vpaddlq_u8, vqtbl4q_u8, vreinterpretq_u8_f32, vshrq_n_u8, vst1q_u8,
+        vaddvq_f32, vandq_u8, vcntq_u8, vdupq_n_f32, vdupq_n_u8, vdupq_n_u16, vfmaq_f32, vld1q_f32,
+        vld1q_f32_x4, vld1q_u8, vorrq_u8, vpaddlq_u8, vqtbl4q_u8, vreinterpretq_u8_f32, vshrq_n_u8,
+        vst1q_u8,
     };
 
     #[inline]
@@ -43,8 +44,9 @@ pub mod neon {
                 vreinterpretq_u8_f32(g.3),
             );
             let shuf_mask =
-                vld1q_u8([0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60].as_ptr());
-            vqtbl4q_u8(g, shuf_mask)
+                vld1q_u8([3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63].as_ptr());
+            // Keep only the sign bit of each component; the caller shifts it into place.
+            vandq_u8(vqtbl4q_u8(g, shuf_mask), vdupq_n_u8(0x80))
         }
     }
 

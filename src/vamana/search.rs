@@ -249,19 +249,19 @@ impl GraphSearcher {
         options: Options<F>,
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
-        let nav_query = reader.config().nav_format.query_distance_asymmetric(
-            reader.config().similarity,
-            query,
-            reader.config().centroid.as_deref(),
-        );
+        // Center the query the same way the stored vectors were; every downstream query distance
+        // consumes it.
+        let query: &[f32] =
+            &vectors::prepare_vector(query, None, false, reader.config().centroid.as_deref());
+        let nav_query = reader
+            .config()
+            .nav_format
+            .query_distance_asymmetric(reader.config().similarity, query);
         let rerank_query = if self.params.num_rerank > 0 {
-            reader.config().rerank_format.map(|f| {
-                f.query_distance_asymmetric(
-                    reader.config().similarity,
-                    query,
-                    reader.config().centroid.as_deref(),
-                )
-            })
+            reader
+                .config()
+                .rerank_format
+                .map(|f| f.query_distance_asymmetric(reader.config().similarity, query))
         } else {
             None
         };
@@ -539,7 +539,10 @@ mod test {
 
     #[derive(Debug)]
     struct TestVector {
+        /// Raw vector, used to build the graph topology from f32 distances.
         vector: Vec<f32>,
+        /// Vector as prepared for storage (centered against the configured centroid, if any).
+        prepared: Vec<f32>,
         nav_vector: Vec<u8>,
         edges: Vec<i64>,
     }
@@ -573,15 +576,17 @@ mod test {
             T: IntoIterator<Item = V>,
             V: Into<Vec<f32>>,
         {
-            let coder = F32VectorCoding::BinaryQuantized
-                .coder(VectorSimilarity::Euclidean, centroid.clone());
+            let coder = F32VectorCoding::BinaryQuantized.coder();
             let mut rep = iter
                 .into_iter()
                 .map(|x| {
-                    let v = x.into();
-                    let b = coder.encode(&v);
+                    let v: Vec<f32> = x.into();
+                    // Euclidean fixture: prepare = subtract the centroid (no normalization).
+                    let prepared = vectors::prepare_vector(&v, None, false, centroid.as_deref());
+                    let b = coder.encode(&prepared);
                     TestVector {
                         vector: v,
+                        prepared,
                         nav_vector: b,
                         edges: Vec::new(),
                     }
@@ -765,7 +770,7 @@ mod test {
             self.0.data.get(vertex_id as usize).map(|v| {
                 Ok(match self.1 {
                     TestVectorStoreType::Nav => v.nav_vector.as_ref(),
-                    TestVectorStoreType::Rerank => bytemuck::cast_slice(v.vector.as_ref()),
+                    TestVectorStoreType::Rerank => bytemuck::cast_slice(v.prepared.as_ref()),
                 })
             })
         }
@@ -832,7 +837,7 @@ mod test {
         });
         assert_eq!(
             searcher
-                .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+                .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
                 .unwrap(),
             vec![
                 Neighbor::new(0, 0.47999999940395355),
@@ -854,7 +859,7 @@ mod test {
         assert_eq!(
             normalize_scores(
                 searcher
-                    .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+                    .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
                     .unwrap()
             ),
             vec![
@@ -878,7 +883,7 @@ mod test {
         });
         assert_eq!(
             searcher
-                .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+                .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
                 .unwrap(),
             vec![
                 Neighbor::new(0, 0.47999999940395355),
@@ -903,7 +908,7 @@ mod test {
             .search_with_options(
                 &[-0.1, -0.1, -0.1, -0.1],
                 Options::with_filter(|v| v != 1),
-                &mut index.reader(),
+                &index.reader(),
             )
             .unwrap();
 
@@ -933,7 +938,7 @@ mod test {
             patience: None,
         });
         let results = searcher
-            .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+            .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
             .unwrap();
         // Results must be non-empty and sorted by increasing BQ distance.
         assert!(!results.is_empty());
@@ -961,7 +966,7 @@ mod test {
             patience: None,
         });
         let results = searcher
-            .search(&[-0.1, -0.1, -0.1, -0.1], &mut index.reader())
+            .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
             .unwrap();
         assert!(!results.is_empty());
         // Results must be sorted by increasing F32 squared-Euclidean distance.

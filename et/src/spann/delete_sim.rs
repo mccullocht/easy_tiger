@@ -63,12 +63,6 @@ pub fn delete_sim(
     args: DeleteSimArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    if index.config().rerank_format.is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "index has no rerank format; there are no rerank vectors to simulate deletes over",
-        ));
-    }
 
     let head_params = GraphSearchParams {
         beam_width: args.head_candidates,
@@ -166,12 +160,7 @@ impl Worker {
         let reader = TransactionIndex::new(&self.index, self.connection.begin_transaction(None)?);
 
         // Read and decode this record's rerank vector to use as the query.
-        let rerank_coder = self
-            .index
-            .config()
-            .rerank_format
-            .expect("rerank format is set")
-            .coder(self.index.head_config().config().similarity, None);
+        let rerank_coder = self.index.config().rerank_format.coder();
         let query: Vec<f32> = {
             let mut raw_cursor = reader
                 .transaction()
@@ -433,7 +422,6 @@ fn diagnose_missing(
     let similarity = index.head_config().config().similarity;
     let hf_table = reader.head().index().high_fidelity_table();
     let hf_format = hf_table.format();
-    let hf_center = hf_table.centroid().map(|c| c.to_vec());
     let hf_name = hf_table.name().to_owned();
     let mut hf_cursor = reader.transaction().open_record_cursor(&hf_name)?;
 
@@ -453,8 +441,7 @@ fn diagnose_missing(
 
         // Distance from this record's query to each candidate centroid, using an asymmetric
         // quantized distance against the centroid's stored (encoded) vector.
-        let query_distance =
-            hf_format.query_distance_asymmetric(similarity, &m.query, hf_center.as_deref());
+        let query_distance = hf_format.query_distance_asymmetric(similarity, &m.query);
         let mut best: Option<(u32, f64)> = None;
         if let Some(centroids) = centroids {
             for &centroid_id in centroids {

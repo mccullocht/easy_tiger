@@ -15,16 +15,14 @@ mod x86_64;
 
 use std::{
     borrow::Cow,
-    cell::RefCell,
     ops::{Add, AddAssign},
 };
 
 use half::f16;
-use thread_local::ThreadLocal;
 
 use crate::{
     EstimatedDistance, F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
-    float32::l2_norm, packing,
+    packing,
 };
 
 const SUPPORTED_PRIMARY_BITS: [usize; 4] = [1, 2, 4, 8];
@@ -148,45 +146,6 @@ fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize
     (f16::from_f32(lower).to_f32(), f16::from_f32(upper).to_f32())
 }
 
-/// Prepare a vector for quantization: optionally l2-normalize (for angular similarity) and/or
-/// subtract the center. Returns the prepared vector slice.
-///
-/// For angular similarity the vector is normalized to the unit sphere *before* the center is
-/// subtracted. The center then cancels in any distance that reduces to a difference of vectors, so
-/// angular distance can be recovered from the squared-Euclidean distance of the centered vectors
-/// without storing any cross terms.
-///
-/// `scratch` must be `Some` (and sized to `vector.len()`) when `similarity.angular()` or `center`
-/// is `Some`; it is unused and may be `None` otherwise.
-fn prepare_vector<'a>(
-    vector: &'a [f32],
-    scratch: Option<&'a mut [f32]>,
-    center: Option<&[f32]>,
-    similarity: VectorSimilarity,
-) -> &'a [f32] {
-    let Some(scratch) = scratch else {
-        return vector;
-    };
-
-    if similarity.angular() {
-        let norm = l2_norm(vector);
-        let scale = if norm > 0.0 { 1.0 / norm } else { 1.0 };
-        for (v, s) in vector.iter().zip(scratch.iter_mut()) {
-            *s = v * scale;
-        }
-    } else {
-        scratch.copy_from_slice(vector);
-    }
-
-    if let Some(center) = center {
-        for (s, c) in scratch.iter_mut().zip(center.iter()) {
-            *s -= c;
-        }
-    }
-
-    scratch
-}
-
 /// Transform the unnormalized dot product of two vectors into an appropriate distance for the
 /// similarity function.
 fn distance_from_dot_unnormalized(
@@ -198,7 +157,7 @@ fn distance_from_dot_unnormalized(
     match similarity {
         VectorSimilarity::Euclidean => l2_dist,
         // Normalize angular distance into a value in [0,1] where lower is closer.
-        VectorSimilarity::Cosine | VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
+        VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
     }
 }
 
@@ -212,7 +171,7 @@ struct ErrorBoundTerms {
 impl ErrorBoundTerms {
     fn from_header(header: &PrimaryVectorHeader, dim: usize, similarity: VectorSimilarity) -> Self {
         let mult = match similarity {
-            VectorSimilarity::Cosine | VectorSimilarity::Dot => 0.5,
+            VectorSimilarity::Dot => 0.5,
             VectorSimilarity::Euclidean => 2.0,
         } / ((dim.max(2) - 1) as f32).sqrt();
         Self {
@@ -470,61 +429,35 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TurboPrimaryCoder<const B: usize> {
-    similarity: VectorSimilarity,
-    center: Option<Vec<f32>>,
-    scratch: ThreadLocal<RefCell<Vec<f32>>>,
     k: Kernel,
 }
 
 impl<const B: usize> TurboPrimaryCoder<B> {
     const B_CHECK: () = { check_primary_bits(B) };
 
-    pub fn new(similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+    /// Quantization is similarity-agnostic and does not center; callers apply any normalization or
+    /// centering up front (see [`crate::prepare_vector`]).
+    pub fn new() -> Self {
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
         Self {
-            similarity,
-            center,
-            scratch: ThreadLocal::new(),
             k: Kernel::default(),
         }
     }
 
     #[cfg(test)]
-    fn with_kernel(k: Kernel, similarity: VectorSimilarity, center: Option<Vec<f32>>) -> Self {
+    fn with_kernel(k: Kernel) -> Self {
         assert!(k.is_available(), "{k:?}");
         #[allow(clippy::let_unit_value)]
         let _ = Self::B_CHECK;
-        Self {
-            similarity,
-            center,
-            scratch: ThreadLocal::new(),
-            k,
-        }
+        Self { k }
     }
 
-    fn encode_parts(
-        k: Kernel,
-        similarity: VectorSimilarity,
-        vector: &[f32],
-        center: Option<&[f32]>,
-    ) -> (PrimaryVectorHeader, Vec<u8>) {
-        let needs_scratch = similarity.angular() || center.is_some();
-        let mut scratch_storage = if needs_scratch {
-            vec![0.0f32; vector.len()]
-        } else {
-            vec![]
-        };
-        let scratch = if needs_scratch {
-            Some(scratch_storage.as_mut_slice())
-        } else {
-            None
-        };
-        let prepared = prepare_vector(vector, scratch, center, similarity);
+    fn encode_parts(k: Kernel, vector: &[f32]) -> (PrimaryVectorHeader, Vec<u8>) {
         let mut out = vec![0u8; packing::byte_len(vector.len(), B)];
-        let header = Self::encode_parts_to(k, prepared, &mut out);
+        let header = Self::encode_parts_to(k, vector, &mut out);
         (header, out)
     }
 
@@ -556,22 +489,7 @@ impl<const B: usize> TurboPrimaryCoder<B> {
 impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
-
-        let needs_scratch = self.similarity.angular() || self.center.is_some();
-        let mut scratch_guard = if needs_scratch {
-            let mut g = self.scratch.get_or_default().borrow_mut();
-            g.resize(vector.len(), 0.0);
-            Some(g)
-        } else {
-            None
-        };
-        let prepared = prepare_vector(
-            vector,
-            scratch_guard.as_mut().map(|g| g.as_mut_slice()),
-            self.center.as_deref(),
-            self.similarity,
-        );
-        let header = Self::encode_parts_to(self.k, prepared, vector_bytes);
+        let header = Self::encode_parts_to(self.k, vector, vector_bytes);
         header.serialize(header_bytes);
     }
 
@@ -588,11 +506,6 @@ impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
             #[cfg(target_arch = "x86_64")]
             Kernel::Avx512 => unsafe { x86_64::primary_decode_avx512::<B>(vector, out) },
         };
-        if let Some(center) = &self.center {
-            for (c, v) in center.iter().zip(out.iter_mut()) {
-                *v += *c;
-            }
-        }
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
@@ -663,18 +576,10 @@ pub struct TurboPrimaryQueryDistance<const B: usize> {
 }
 
 impl<const B: usize> TurboPrimaryQueryDistance<B> {
-    pub fn new(
-        similarity: VectorSimilarity,
-        query: Cow<'_, [f32]>,
-        center: Option<&[f32]>,
-    ) -> Self {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
         let k = Kernel::default();
-        let (header, query) = TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(
-            k,
-            similarity,
-            query.as_ref(),
-            center,
-        );
+        let (header, query) =
+            TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(k, query.as_ref());
         let terms = VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
         let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
 
@@ -751,14 +656,9 @@ pub struct TurboPrimaryQueryDistance1 {
 }
 
 impl TurboPrimaryQueryDistance1 {
-    pub fn new(
-        similarity: VectorSimilarity,
-        query: Cow<'_, [f32]>,
-        center: Option<&[f32]>,
-    ) -> Self {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
         let k = Kernel::default();
-        let (header, query) =
-            TurboPrimaryCoder::<4>::encode_parts(k, similarity, query.as_ref(), center);
+        let (header, query) = TurboPrimaryCoder::<4>::encode_parts(k, query.as_ref());
         let query = packing::bitplane_split4(&query);
         let terms = VectorDecodeTerms::from_primary::<4>(header);
         let error_terms = ErrorBoundTerms::from_header(&header, query.len() * 2, similarity);

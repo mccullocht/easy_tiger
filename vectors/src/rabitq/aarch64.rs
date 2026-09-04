@@ -89,15 +89,6 @@ pub mod neon {
                     vreinterpretq_f32_u32(vbslq_u32(m32, vshlq_n_u32::<$shift>($v), mag)),
                 );
             };
-            ($v:expr, $c:expr, $o:expr, $off:expr, $shift:literal) => {
-                vst1q_f32(
-                    $o.add($off),
-                    vaddq_f32(
-                        vreinterpretq_f32_u32(vbslq_u32(m32, vshlq_n_u32::<$shift>($v), mag)),
-                        vld1q_f32($c.add($off)),
-                    ),
-                );
-            };
         }
 
         macro_rules! unpack_store16 {
@@ -107,45 +98,21 @@ pub mod neon {
                 unpack_store4!($v, $o, $g * 16 + 8, 15);
                 unpack_store4!($v, $o, $g * 16 + 12, 7);
             };
-            ($v:expr, $c:expr, $o:expr, $g:literal) => {
-                unpack_store4!($v, $c, $o, $g * 16 + 0, 31);
-                unpack_store4!($v, $c, $o, $g * 16 + 4, 23);
-                unpack_store4!($v, $c, $o, $g * 16 + 8, 15);
-                unpack_store4!($v, $c, $o, $g * 16 + 12, 7);
-            };
         }
 
-        if let Some(center) = center {
-            let (chead, ctail) = center.as_chunks::<128>();
-            for ((v, c), o) in vhead.iter().zip(chead.iter()).zip(ohead.iter_mut()) {
-                unsafe {
-                    let v = vreinterpretq_u32_u8(vqtbl1q_u8(vld1q_u8(v.as_ptr()), s));
-                    unpack_store16!(v, c.as_ptr(), o.as_mut_ptr(), 0);
-                    unpack_store16!(vshrq_n_u32::<1>(v), c.as_ptr(), o.as_mut_ptr(), 1);
-                    unpack_store16!(vshrq_n_u32::<2>(v), c.as_ptr(), o.as_mut_ptr(), 2);
-                    unpack_store16!(vshrq_n_u32::<3>(v), c.as_ptr(), o.as_mut_ptr(), 3);
-                    unpack_store16!(vshrq_n_u32::<4>(v), c.as_ptr(), o.as_mut_ptr(), 4);
-                    unpack_store16!(vshrq_n_u32::<5>(v), c.as_ptr(), o.as_mut_ptr(), 5);
-                    unpack_store16!(vshrq_n_u32::<6>(v), c.as_ptr(), o.as_mut_ptr(), 6);
-                    unpack_store16!(vshrq_n_u32::<7>(v), c.as_ptr(), o.as_mut_ptr(), 7);
-                }
+        for (v, o) in vhead.iter().zip(ohead.iter_mut()) {
+            unsafe {
+                let v = vreinterpretq_u32_u8(vqtbl1q_u8(vld1q_u8(v.as_ptr()), s));
+                unpack_store16!(v, o.as_mut_ptr(), 0);
+                unpack_store16!(vshrq_n_u32::<1>(v), o.as_mut_ptr(), 1);
+                unpack_store16!(vshrq_n_u32::<2>(v), o.as_mut_ptr(), 2);
+                unpack_store16!(vshrq_n_u32::<3>(v), o.as_mut_ptr(), 3);
+                unpack_store16!(vshrq_n_u32::<4>(v), o.as_mut_ptr(), 4);
+                unpack_store16!(vshrq_n_u32::<5>(v), o.as_mut_ptr(), 5);
+                unpack_store16!(vshrq_n_u32::<6>(v), o.as_mut_ptr(), 6);
+                unpack_store16!(vshrq_n_u32::<7>(v), o.as_mut_ptr(), 7);
             }
-            crate::rabitq::scalar::decode(vtail, magnitude, Some(ctail), otail);
-        } else {
-            for (v, o) in vhead.iter().zip(ohead.iter_mut()) {
-                unsafe {
-                    let v = vreinterpretq_u32_u8(vqtbl1q_u8(vld1q_u8(v.as_ptr()), s));
-                    unpack_store16!(v, o.as_mut_ptr(), 0);
-                    unpack_store16!(vshrq_n_u32::<1>(v), o.as_mut_ptr(), 1);
-                    unpack_store16!(vshrq_n_u32::<2>(v), o.as_mut_ptr(), 2);
-                    unpack_store16!(vshrq_n_u32::<3>(v), o.as_mut_ptr(), 3);
-                    unpack_store16!(vshrq_n_u32::<4>(v), o.as_mut_ptr(), 4);
-                    unpack_store16!(vshrq_n_u32::<5>(v), o.as_mut_ptr(), 5);
-                    unpack_store16!(vshrq_n_u32::<6>(v), o.as_mut_ptr(), 6);
-                    unpack_store16!(vshrq_n_u32::<7>(v), o.as_mut_ptr(), 7);
-                }
-            }
-            crate::rabitq::scalar::decode(vtail, magnitude, None, otail);
         }
+        crate::rabitq::scalar::decode(vtail, magnitude, otail);
     }
 }

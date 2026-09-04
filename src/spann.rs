@@ -45,8 +45,8 @@ pub struct IndexConfig {
     /// Centroids with more vectors than this will be split into 2 centroids and their vectors will
     /// be reassigned to other centroids. Vectors in nearby centroids may also be reassigned.
     pub max_centroid_len: usize,
-    /// If set, build a vector id keyed vector table in this format for re-ranking results.
-    pub rerank_format: Option<F32VectorCoding>,
+    /// Vector coding used to build a vector id keyed vector table for re-ranking results.
+    pub rerank_format: F32VectorCoding,
 }
 
 impl IndexConfig {
@@ -116,9 +116,7 @@ impl TableIndex {
     }
 
     pub fn new_posting_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.config
-            .posting_coder
-            .coder(self.head_config().config().similarity, None)
+        self.config.posting_coder.coder()
     }
 
     pub fn posting_vector_len(&self) -> usize {
@@ -165,7 +163,6 @@ impl TableIndex {
         head_config: GraphConfig,
         spann_config: IndexConfig,
     ) -> std::io::Result<Self> {
-        let head_similarity = head_config.similarity;
         let head_dimensions = head_config.dimensions;
         let head = Arc::new(TableGraphVectorIndex::init_index(
             connection,
@@ -195,7 +192,7 @@ impl TableIndex {
         )?;
         let posting_vector_len = spann_config
             .posting_coder
-            .coder(head_similarity, None)
+            .coder()
             .byte_len(head_dimensions.get());
         let leaf_page_size = crate::posting_block::leaf_page_max(
             spann_config.max_centroid_len,

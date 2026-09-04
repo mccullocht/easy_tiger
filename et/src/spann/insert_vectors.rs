@@ -12,27 +12,31 @@ use easy_tiger::{
     },
     vamana::search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
 };
+use half::slice::HalfFloatSliceExt;
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::SeedableRng;
 use rayon::prelude::*;
-use vectors::F32VectorCoder;
+use vectors::{F32VectorCoder, f16};
 use wt_mdb::{Connection, Error, Result};
 
 use crate::{ui::progress_bar, wt_stats::WiredTigerWriteStats};
 
 #[derive(Args)]
 pub struct InsertVectorsArgs {
-    /// Path to the input vectors to insert.
+    /// Path to the input vectors to insert, in BigANN format: an 8 byte `<len,dim>` header
+    /// followed by little-endian f16 vector data.
     #[arg(short, long)]
-    f32_vectors: PathBuf,
+    vectors: PathBuf,
 
     /// Index of the first vector to insert.
     #[arg(long, default_value_t = 0)]
     start: usize,
 
     /// Number of vectors to insert.
+    ///
+    /// If unspecified, all vectors in the input file (from `start`) are inserted.
     #[arg(short, long)]
-    count: NonZero<usize>,
+    count: Option<NonZero<usize>>,
 
     /// Number of vectors to insert in each transaction batch.
     #[arg(long, default_value_t = NonZero::new(256).unwrap())]
@@ -52,39 +56,47 @@ pub fn insert_vectors(
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
 
     // Map the input vectors.
-    let f32_vectors = DerefVectorStore::from_file_with_stride(
-        args.f32_vectors,
-        index.head_config().config().dimensions,
-    )?;
+    let vectors: DerefVectorStore<f16, _> = DerefVectorStore::from_file(args.vectors)?;
+    let index_dimensions = index.head_config().config().dimensions.get();
+    if vectors.elem_stride() != index_dimensions {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "input vectors have dimensionality {} but index expects {}",
+                vectors.elem_stride(),
+                index_dimensions
+            ),
+        ));
+    }
     // Advise random access since we might be jumping around (though sequentially in patches).
     // Actually, we are iterating sequentially, so Sequential is probably better for the main loop,
     // but the `SubsetView` might complicate things if we use it.
     // For now, let's stick with simple iteration.
-    f32_vectors.data().advise(memmap2::Advice::Sequential)?;
+    vectors.data().advise(memmap2::Advice::Sequential)?;
 
-    let end = args.start + args.count.get();
-    if end > f32_vectors.len() {
+    let count = args
+        .count
+        .map(NonZero::get)
+        .unwrap_or_else(|| vectors.len().saturating_sub(args.start));
+    let end = args.start + count;
+    if end > vectors.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "requested range {}..{} exceeds vector file length {}",
                 args.start,
                 end,
-                f32_vectors.len()
+                vectors.len()
             ),
         ));
     }
 
     let posting_format = index.config().posting_coder;
-    let similarity = index.head_config().config().similarity;
-    let posting_coder = posting_format.coder(similarity, None);
-    let rerank_coder = index
-        .config()
-        .rerank_format
-        .map(|f| f.coder(similarity, None));
+    let posting_coder = posting_format.coder();
+    let rerank_coder = index.config().rerank_format.coder();
 
     let batch_size = args.batch_size.get();
-    let main_progress = progress_bar(args.count.get(), "inserting vectors");
+    let main_progress = progress_bar(count, "inserting vectors");
 
     let wt_stats_before = WiredTigerWriteStats::try_from(&connection)?;
 
@@ -105,10 +117,10 @@ pub fn insert_vectors(
         let batch_result = insert_batch(
             &index,
             &connection,
-            &f32_vectors,
+            &vectors,
             batch_start..batch_end,
             posting_coder.as_ref(),
-            rerank_coder.as_ref().map(|c| c.as_ref()),
+            rerank_coder.as_ref(),
             &main_progress,
         )?;
         insert_time += insert_start.elapsed();
@@ -128,7 +140,7 @@ pub fn insert_vectors(
     }
 
     main_progress.finish();
-    let queries = args.count.get() as f64;
+    let queries = count as f64;
     let total_time = insert_time + rebalance_time;
     println!("Wall time:");
     println!(
@@ -315,7 +327,7 @@ struct InsertRecord {
     record_id: i64,
     assignment: CentroidAssignment,
     posting_vector: Vec<u8>,
-    rerank_vector: Option<Vec<u8>>,
+    rerank_vector: Vec<u8>,
     stats: GraphSearchStats,
 }
 
@@ -356,10 +368,10 @@ struct InsertBatchResult {
 fn insert_batch(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
-    f32_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
     batch: Range<usize>,
     posting_coder: &dyn F32VectorCoder,
-    rerank_coder: Option<&dyn F32VectorCoder>,
+    rerank_coder: &dyn F32VectorCoder,
     progress: &ProgressBar,
 ) -> Result<InsertBatchResult> {
     progress.set_message("inserting vectors");
@@ -383,7 +395,8 @@ fn insert_batch(
                 (txn_idx, searcher, result_scratch)
             },
             |(txn_idx, searcher, result_scratch), i| {
-                let vector = &f32_vectors[i];
+                let vector: Vec<f32> = vectors[i].to_f32_vec();
+                let vector: &[f32] = &vector;
 
                 // Search for centroid
                 let mut candidates = searcher.search_with_options(
@@ -400,7 +413,7 @@ fn insert_batch(
                     record_id: i as i64,
                     assignment: CentroidAssignment::new(centroid_id),
                     posting_vector: posting_coder.encode(vector),
-                    rerank_vector: rerank_coder.map(|c| c.encode(vector)),
+                    rerank_vector: rerank_coder.encode(vector),
                     stats: searcher.stats(),
                 })
             },
@@ -437,23 +450,14 @@ fn insert_batch(
                     .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?,
                 index.posting_vector_len(),
             );
-            let mut rerank_cursor = if rerank_coder.is_some() {
-                Some(
-                    txn_idx
-                        .transaction()
-                        .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?,
-                )
-            } else {
-                None
-            };
+            let mut rerank_cursor = txn_idx
+                .transaction()
+                .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?;
 
             for r in postings {
                 assignment_updater.insert(r.record_id, centroid)?;
                 postings_mut.insert(centroid.primary_id, r.record_id, &r.posting_vector)?;
-
-                if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(r.rerank_vector) {
-                    cursor.set(r.record_id, &vector)?;
-                }
+                rerank_cursor.set(r.record_id, &r.rerank_vector)?;
             }
 
             postings_mut.flush()?;

@@ -53,11 +53,6 @@ const TEST_VECTOR: [f32; 19] = [
     0.539, -0.731, 0.436, 0.913, 0.694, 0.202,
 ];
 
-const TEST_CENTER: [f32; 19] = [
-    -0.98, -0.028, 0.456, 0.587, 0.975, 0.837, 0.325, 0.636, -0.448, -0.046, 0.693, -0.64, -0.5,
-    -0.036, -0.036, 0.376, 0.629, 0.221, 0.57,
-];
-
 #[test]
 fn vector_stats_simd() {
     let scalar_stats = VectorStats::new(super::Kernel::Scalar, TEST_VECTOR.as_ref());
@@ -66,21 +61,11 @@ fn vector_stats_simd() {
     }
 }
 
-enum Centering {
-    Uncentered,
-    Centered,
-}
-
 macro_rules! tlvq_coder_test {
-    ($name:ident, $coder:ty, $center:expr, $primary_header:expr, $decoded:expr) => {
+    ($name:ident, $coder:ty, $primary_header:expr, $decoded:expr) => {
         #[test]
         fn $name() {
-            let coder = match $center {
-                Centering::Uncentered => <$coder>::new(VectorSimilarity::Euclidean, None),
-                Centering::Centered => {
-                    <$coder>::new(VectorSimilarity::Euclidean, Some(TEST_CENTER.to_vec()))
-                }
-            };
+            let coder = <$coder>::new();
             let encoded = coder.encode(&TEST_VECTOR);
             assert_abs_diff_eq!(
                 PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
@@ -94,9 +79,8 @@ macro_rules! tlvq_coder_test {
 }
 
 tlvq_coder_test!(
-    tlvq1_uncentered,
+    tlvq1_coder,
     TurboPrimaryCoder::<1>,
-    Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
         perpendicular_error_term: 1.1627843,
@@ -129,44 +113,8 @@ tlvq_coder_test!(
 );
 
 tlvq_coder_test!(
-    tlvq1_centered,
-    TurboPrimaryCoder::<1>,
-    Centering::Centered,
-    PrimaryVectorHeader {
-        l2_norm: 1.5514041,
-        perpendicular_error_term: 0.81660825,
-        parallel_error_term: 0.028503418,
-        lower: -0.60498047,
-        upper: 0.23901367,
-        component_sum: 13,
-    },
-    [
-        -0.74098635,
-        0.21101367,
-        0.69501364,
-        0.8260137,
-        0.37001956,
-        0.23201954,
-        0.56401366,
-        0.031019509,
-        -0.20898634,
-        -0.6509805,
-        0.9320137,
-        -0.4009863,
-        -0.26098633,
-        0.20301367,
-        -0.6409805,
-        0.61501366,
-        0.8680137,
-        0.4600137,
-        -0.034980476
-    ]
-);
-
-tlvq_coder_test!(
-    tlvq2_uncentered,
+    tlvq2_coder,
     TurboPrimaryCoder::<2>,
-    Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
         perpendicular_error_term: 0.67131084,
@@ -199,44 +147,8 @@ tlvq_coder_test!(
 );
 
 tlvq_coder_test!(
-    tlvq2_centered,
-    TurboPrimaryCoder::<2>,
-    Centering::Centered,
-    PrimaryVectorHeader {
-        l2_norm: 1.5514041,
-        perpendicular_error_term: 0.5321589,
-        parallel_error_term: 0.011878967,
-        lower: -0.5571289,
-        upper: 0.5683594,
-        component_sum: 27,
-    },
-    [
-        -0.7868034,
-        -0.20996615,
-        0.6491966,
-        0.7801966,
-        0.41787112,
-        0.2798711,
-        0.5181966,
-        0.07887107,
-        -0.25480342,
-        -0.6031289,
-        0.8861966,
-        -0.8219662,
-        -0.3068034,
-        0.53235936,
-        -0.5931289,
-        0.5691966,
-        0.8221966,
-        0.7893594,
-        0.38803384
-    ]
-);
-
-tlvq_coder_test!(
-    tlvq4_uncentered,
+    tlvq4_coder,
     TurboPrimaryCoder::<4>,
-    Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
         perpendicular_error_term: 0.118480206,
@@ -269,44 +181,8 @@ tlvq_coder_test!(
 );
 
 tlvq_coder_test!(
-    tlvq4_centered,
-    TurboPrimaryCoder::<4>,
-    Centering::Centered,
-    PrimaryVectorHeader {
-        l2_norm: 1.5514041,
-        perpendicular_error_term: 0.09596851,
-        parallel_error_term: 0.00025558472,
-        lower: -0.69091797,
-        upper: 0.56347656,
-        component_sum: 152,
-    },
-    [
-        -0.9182813,
-        -0.04990757,
-        0.68497133,
-        0.6487187,
-        0.534961,
-        0.39696094,
-        0.6375976,
-        0.02870828,
-        -0.21902868,
-        -0.40241277,
-        0.7547188,
-        -0.7455338,
-        -0.27102867,
-        0.52747655,
-        -0.726918,
-        0.43771872,
-        0.94159764,
-        0.70085025,
-        0.21358722
-    ]
-);
-
-tlvq_coder_test!(
-    tlvq8_uncentered,
+    tlvq8_coder,
     TurboPrimaryCoder::<8>,
-    Centering::Uncentered,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
         perpendicular_error_term: 0.0075108674,
@@ -338,41 +214,6 @@ tlvq_coder_test!(
     ]
 );
 
-tlvq_coder_test!(
-    tlvq8_centered,
-    TurboPrimaryCoder::<8>,
-    Centering::Centered,
-    PrimaryVectorHeader {
-        l2_norm: 1.5514041,
-        perpendicular_error_term: 0.005533458,
-        parallel_error_term: 8.994341e-5,
-        lower: -0.6953125,
-        upper: 0.57470703,
-        component_sum: 2569,
-    },
-    [
-        -0.92326176,
-        -0.06091017,
-        0.65717185,
-        0.6686406,
-        0.5735352,
-        0.4305547,
-        0.6457031,
-        0.0004531145,
-        -0.20200394,
-        -0.42754298,
-        0.72981644,
-        -0.70279294,
-        -0.27392578,
-        0.538707,
-        -0.7313125,
-        0.43771872,
-        0.91483986,
-        0.6960976,
-        0.20339844
-    ]
-);
-
 // Deterministic 135-element test vectors (using a simple LCG).
 // 135 is deliberately chosen: it is not a multiple of 8, 16, 32, 64, or 128, so it exercises
 // the scalar tail paths of every SIMD kernel.
@@ -388,19 +229,20 @@ fn lvq_test_vecs_135() -> ([Vec<f32>; 3], Vec<f32>) {
     (vecs, center)
 }
 
-// Encode `a` and `b` with `format`, then verify that both `distance_symmetric` (doc-doc)
-// and `query_distance_symmetric` (encoded-query vs doc) agree with the f32 reference.
+// With `a` and `b` centered against `center` and encoded with `format`, verify that the symmetric
+// (doc-doc), symmetric-query (encoded-query vs doc) and asymmetric-query (f32-query vs doc)
+// distances all agree with the f32 reference -- i.e. that centering stays transparent to distance.
 //
 // The tolerance is derived from the per-vector residual norms e_a = ‖a − decode(encode(a))‖₂
 // and e_b = ‖b − decode(encode(b))‖₂. For squared-Euclidean the bound is tight:
 //   |d(a,b) − d(qa,qb)| ≤ (e_a + e_b) · (e_a + e_b + 2‖a−b‖₂)
 // For Dot (distance ∈ [0,1]) the same formula is conservative since √f32_dist ≤ 1.
-fn check_lvq_distance(
+fn check_lvq_centered_distance(
     format: F32VectorCoding,
     sim: VectorSimilarity,
     a: &[f32],
     b: &[f32],
-    center: Option<&[f32]>,
+    center: &[f32],
 ) {
     // Dot similarity assumes l2-normalized inputs.
     let (a, b) = if sim == VectorSimilarity::Dot {
@@ -412,9 +254,16 @@ fn check_lvq_distance(
         (a.to_vec(), b.to_vec())
     };
 
+    // The reference distance is between the uncentered (normalized) vectors: centering is a shared
+    // translation that cancels in the squared-Euclidean term the codec estimates.
     let f32_dist = sim.distance_f32().distance_f32(&a, &b);
 
-    let coder = format.coder(sim, center.map(|c| c.to_vec()));
+    // The coder no longer centers; normalization already happened above (Dot), so this prepare
+    // only subtracts the center.
+    let a = crate::prepare_vector(&a, None, false, Some(center));
+    let b = crate::prepare_vector(&b, None, false, Some(center));
+
+    let coder = format.coder();
     let enc_a = coder.encode(&a);
     let enc_b = coder.encode(&b);
 
@@ -439,9 +288,15 @@ fn check_lvq_distance(
         .query_distance_symmetric(sim, enc_a.as_slice())
         .distance(&enc_b);
     assert_abs_diff_eq!(f32_dist, qd, epsilon = abs_epsilon);
+
+    // f32-query vs doc distance
+    let qda = format
+        .query_distance_asymmetric(sim, a.as_slice())
+        .distance(&enc_b);
+    assert_abs_diff_eq!(f32_dist, qda, epsilon = abs_epsilon);
 }
 
-macro_rules! lvq_distance_135_test {
+macro_rules! lvq_centered_distance_135_test {
     ($name:ident, $format:expr) => {
         #[test]
         fn $name() {
@@ -453,20 +308,17 @@ macro_rules! lvq_distance_135_test {
             ];
             for (a, b) in pairs {
                 for sim in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
-                    // uncentered
-                    check_lvq_distance($format, sim, a, b, None);
-                    // centered
-                    check_lvq_distance($format, sim, a, b, Some(center.as_slice()));
+                    check_lvq_centered_distance($format, sim, a, b, &center);
                 }
             }
         }
     };
 }
 
-lvq_distance_135_test!(distance_135_tlvq1, F32VectorCoding::TLVQ1);
-lvq_distance_135_test!(distance_135_tlvq2, F32VectorCoding::TLVQ2);
-lvq_distance_135_test!(distance_135_tlvq4, F32VectorCoding::TLVQ4);
-lvq_distance_135_test!(distance_135_tlvq8, F32VectorCoding::TLVQ8);
+lvq_centered_distance_135_test!(centered_distance_135_tlvq1, F32VectorCoding::TLVQ1);
+lvq_centered_distance_135_test!(centered_distance_135_tlvq2, F32VectorCoding::TLVQ2);
+lvq_centered_distance_135_test!(centered_distance_135_tlvq4, F32VectorCoding::TLVQ4);
+lvq_centered_distance_135_test!(centered_distance_135_tlvq8, F32VectorCoding::TLVQ8);
 
 #[test]
 fn null_vector_decode() {
@@ -477,7 +329,7 @@ fn null_vector_decode() {
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
     ] {
-        let coder = coding.coder(VectorSimilarity::Euclidean, None);
+        let coder = coding.coder();
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
@@ -493,7 +345,7 @@ fn fill_vector_decode() {
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
     ] {
-        let coder = coding.coder(VectorSimilarity::Euclidean, None);
+        let coder = coding.coder();
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
@@ -509,10 +361,9 @@ macro_rules! lvq_coding_simd_test {
             let seed = SysRng::default().try_next_u64().unwrap();
             println!("SEED {seed:#016x}");
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
-            let scoder =
-                <$coder>::with_kernel(Kernel::Scalar, VectorSimilarity::Euclidean, None);
+            let scoder = <$coder>::with_kernel(Kernel::Scalar);
             for k in Kernel::accelerated() {
-                let ocoder = <$coder>::new(VectorSimilarity::Euclidean, None);
+                let ocoder = <$coder>::new();
                 // TODO: use randomly sized vectors like we do for distance tests.
                 for i in 0..1024 {
                     let vec = l2_normalize(

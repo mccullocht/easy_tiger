@@ -168,7 +168,11 @@ impl F32VectorCoder for Coder {
         match self.k {
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::neon::decode(vector, magnitude, self.center.as_deref(), out),
-            _ => scalar::decode(vector, magnitude, self.center.as_deref(), out),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                x86_64::avx512::decode(vector, magnitude, self.center.as_deref(), out);
+            },
+            Kernel::Scalar => scalar::decode(vector, magnitude, self.center.as_deref(), out),
         };
     }
 

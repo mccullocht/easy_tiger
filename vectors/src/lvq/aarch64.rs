@@ -656,34 +656,7 @@ unsafe fn lvq_dot_u8_u4(q: &[u8], d: &[u8]) -> u32 {
 #[inline]
 pub fn dot_u8<const B: usize>(a: &[u8], b: &[u8]) -> u32 {
     match B {
-        1 => unsafe {
-            let mut dot0 = vdupq_n_u16(0);
-            let mut dot1 = vdupq_n_u16(0);
-            let len32 = a.len() & !31;
-            for i in (0..len32).step_by(32) {
-                let mut av = vld1q_u8(a.as_ptr().add(i));
-                let mut bv = vld1q_u8(b.as_ptr().add(i));
-                dot0 = vaddq_u16(dot0, vpaddlq_u8(vcntq_u8(vandq_u8(av, bv))));
-
-                av = vld1q_u8(a.as_ptr().add(i + 16));
-                bv = vld1q_u8(b.as_ptr().add(i + 16));
-                dot1 = vaddq_u16(dot1, vpaddlq_u8(vcntq_u8(vandq_u8(av, bv))));
-            }
-
-            dot0 = vaddq_u16(dot0, dot1);
-            let len16 = a.len() & !15;
-            if len32 < len16 {
-                let av = vld1q_u8(a.as_ptr().add(len32));
-                let bv = vld1q_u8(b.as_ptr().add(len32));
-                dot0 = vaddq_u16(dot0, vpaddlq_u8(vcntq_u8(vandq_u8(av, bv))));
-            }
-
-            let mut dot = vaddlvq_u16(dot0);
-            for i in len16..a.len() {
-                dot += (a[i] & b[i]).count_ones();
-            }
-            dot
-        },
+        1 => crate::kernels::aarch64::neon::bitstring_inner_product::<false>(a, b),
         2 => unsafe { lvq_dot_u2(a, b) },
         4 => unsafe { lvq_dot_u4(a, b) },
         8 => unsafe { lvq_dot_u8(a, b) },

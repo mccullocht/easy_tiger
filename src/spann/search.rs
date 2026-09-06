@@ -213,8 +213,11 @@ impl Searcher {
         // against the query. When postings are centered each centroid's postings are stored as
         // residuals (v - c), so the query must be adjusted per centroid (q - c) to score
         // |(q - c) - r| = |q - v|.
-        let shared_dist_fn = (!config.center_postings)
-            .then(|| config.posting_coder.query_distance_asymmetric(similarity, query));
+        let shared_dist_fn = (!config.center_postings).then(|| {
+            config
+                .posting_coder
+                .query_distance_asymmetric(similarity, query)
+        });
         let mut centroid_source = config
             .center_postings
             .then(|| CentroidVectorSource::new(reader.head()))
@@ -240,8 +243,11 @@ impl Searcher {
                     };
                     let adjusted_query =
                         vectors::prepare_vector(query, None, false, Some(&centroid_vector));
-                    centroid_dist_fn =
-                        Some(config.posting_coder.query_distance_asymmetric(similarity, adjusted_query));
+                    centroid_dist_fn = Some(
+                        config
+                            .posting_coder
+                            .query_distance_asymmetric(similarity, adjusted_query),
+                    );
                     centroid_dist_fn.as_ref().unwrap().as_ref()
                 }
             };
@@ -442,9 +448,8 @@ mod tests {
         let ids = [0i64, 1, 2, 3];
 
         let coder = F32VectorCoding::F32.coder();
-        let adjusted = |c: &[f32; 2]| -> Vec<f32> {
-            query.iter().zip(c.iter()).map(|(q, c)| q - c).collect()
-        };
+        let adjusted =
+            |c: &[f32; 2]| -> Vec<f32> { query.iter().zip(c.iter()).map(|(q, c)| q - c).collect() };
         let dfn0 = F32VectorCoding::F32
             .query_distance_asymmetric(VectorSimilarity::Euclidean, adjusted(&c0));
         let dfn1 = F32VectorCoding::F32
@@ -595,8 +600,9 @@ mod tests {
                 num_rerank: 10,
                 limit: NonZero::new(10).unwrap(),
             });
-            let mut posting_cursor =
-                txn_idx.transaction().open_cursor::<u32, Vec<u8>>(self.index.postings_table_name())?;
+            let mut posting_cursor = txn_idx
+                .transaction()
+                .open_cursor::<u32, Vec<u8>>(self.index.postings_table_name())?;
             Ok(searcher
                 .search(query, &txn_idx, &mut posting_cursor)?
                 .into_iter()
@@ -610,9 +616,11 @@ mod tests {
         fn assert_postings_are_residuals(&self) -> Result<()> {
             let txn_idx = TransactionIndex::new(&self.index, self.conn.begin_transaction(None)?);
             let mut centroid_source = CentroidVectorSource::new(txn_idx.head())?;
-            let mut assignment_cursor = txn_idx.transaction().open_cursor::<i64, CentroidAssignment>(
-                self.index.centroid_assignments_table_name(),
-            )?;
+            let mut assignment_cursor = txn_idx
+                .transaction()
+                .open_cursor::<i64, CentroidAssignment>(
+                    self.index.centroid_assignments_table_name(),
+                )?;
             let posting_coder = self.index.new_posting_coder();
             // Collect the posting blocks before the per-record checks: those seek other
             // cursors, which we avoid mixing with iteration over the postings cursor.
@@ -740,14 +748,18 @@ mod tests {
         // Loading the fixture data leaves centroids out of policy; rebalancing splits the
         // oversized clusters and merges the singleton, re-centering every moved posting from
         // its rerank vector.
-        let stats = parallel_rebalance(
-            &fixture.conn,
-            &fixture.index,
-            &|| rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5EED),
-        )?;
+        let stats = parallel_rebalance(&fixture.conn, &fixture.index, &|| {
+            rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5EED)
+        })?;
         // The fixture data must exercise both rebalance op kinds.
-        assert!(stats.split >= 1, "fixture should trigger at least one split");
-        assert!(stats.merged >= 1, "fixture should trigger at least one merge");
+        assert!(
+            stats.split >= 1,
+            "fixture should trigger at least one split"
+        );
+        assert!(
+            stats.merged >= 1,
+            "fixture should trigger at least one merge"
+        );
         assert!(
             stats.split_stats.nearby_moved >= 1,
             "fixture should trigger at least one nearby move"

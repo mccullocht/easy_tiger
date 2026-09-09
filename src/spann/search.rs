@@ -233,7 +233,7 @@ impl Searcher {
                 if !self.seen.insert(record_id) {
                     continue; // already seen
                 }
-                result_queue.push(dist_fn, record_id, vector);
+                result_queue.push(record_id, dist_fn.estimated_distance(vector));
             }
         }
 
@@ -375,9 +375,8 @@ impl ResultQueue {
         }
     }
 
-    fn push(&mut self, dist_fn: &dyn QueryVectorDistance, vector_id: i64, vector: &[u8]) {
+    fn push(&mut self, vector_id: i64, e: EstimatedDistance) {
         self.scored += 1;
-        let e = dist_fn.estimated_distance(vector);
         let n = ErrorBoundNeighbor::from_upper(vector_id, e);
         if self.results.len() < self.max_len {
             self.results.push(n);
@@ -456,10 +455,10 @@ mod tests {
             .query_distance_asymmetric(VectorSimilarity::Euclidean, adjusted(&c1));
 
         let mut queue = ResultQueue::new(2);
-        queue.push(dfn0.as_ref(), 0, &coder.encode(&residuals[0]));
-        queue.push(dfn0.as_ref(), 1, &coder.encode(&residuals[1]));
-        queue.push(dfn1.as_ref(), 2, &coder.encode(&residuals[2]));
-        queue.push(dfn1.as_ref(), 3, &coder.encode(&residuals[3]));
+        queue.push(0, dfn0.estimated_distance(&coder.encode(&residuals[0])));
+        queue.push(1, dfn0.estimated_distance(&coder.encode(&residuals[1])));
+        queue.push(2, dfn1.estimated_distance(&coder.encode(&residuals[2])));
+        queue.push(3, dfn1.estimated_distance(&coder.encode(&residuals[3])));
         let results = queue.into_results();
 
         let mut expected = ids

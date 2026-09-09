@@ -1028,6 +1028,355 @@ mod parallel {
         updater.flush()?;
         txn_idx.commit(None)
     }
+
+    #[cfg(test)]
+    mod tests {
+        use std::{num::NonZero, sync::Arc};
+
+        use super::*;
+        use crate::{
+            input::VectorStore,
+            spann::IndexConfig,
+            vamana::{
+                EdgePruningConfig, EdgeType, GraphConfig, GraphSearchParams, mutate::insert_vector,
+                search::GraphSearcher,
+            },
+        };
+        use rand_xoshiro::rand_core::SeedableRng;
+        use vectors::{F32VectorCoding, VectorSimilarity};
+        use wt_mdb::connection::OptionsBuilder;
+
+        /// Check `distance_from_source_to_centroid` against brute-force distance computed from
+        /// the rerank vector and absolute centroid vectors, on a tiny centered index
+        /// mid-rebalance (split centroids present, source posting intact).
+        ///
+        /// The centered residual identity `|c_target - c_source - (v - c_source)| = |v - c_target|`
+        /// must hold in every configuration. For TLVQ codings the Dot distance is a scaled L2
+        /// (`0.25 * |q - v|^2`), which is translation-invariant, so Dot + centering works; the
+        /// F32 float32 Dot distance (`(-q.v + 1)/2`) is not and is deliberately not asserted here.
+        #[test]
+        fn factory_distance_matches_ground_truth() -> std::io::Result<()> {
+            for (dot, shared_centroid, head_rerank, posting_coder, dim) in [
+                (false, false, None, F32VectorCoding::F32, 2),
+                (false, true, None, F32VectorCoding::F32, 2),
+                (
+                    false,
+                    false,
+                    Some(F32VectorCoding::TLVQ4),
+                    F32VectorCoding::F32,
+                    8,
+                ),
+                // Dot + TLVQ is the supported Dot configuration for centered postings.
+                (true, true, None, F32VectorCoding::TLVQ8, 8),
+                (true, false, None, F32VectorCoding::TLVQ4, 8),
+                (
+                    true,
+                    true,
+                    Some(F32VectorCoding::TLVQ4),
+                    F32VectorCoding::TLVQ4,
+                    8,
+                ),
+                (true, false, None, F32VectorCoding::TLVQ1, 8),
+                // The zero-vector self query is emitted for TLVQ postings regardless of
+                // similarity; check whether Euclidean + TLVQ is affected too.
+                (false, false, None, F32VectorCoding::TLVQ4, 8),
+            ] {
+                let mismatches =
+                    check_factory(dot, shared_centroid, head_rerank, posting_coder, dim)?;
+                assert_eq!(
+                    mismatches, 0,
+                    "{mismatches} postings had mismatched factory distances \
+                     (dot={dot}, shared_centroid={shared_centroid}, head_rerank={head_rerank:?}, \
+                     posting_coder={posting_coder:?})"
+                );
+            }
+            Ok(())
+        }
+
+        fn check_factory(
+            dot: bool,
+            shared_centroid: bool,
+            head_rerank: Option<F32VectorCoding>,
+            posting_coder: F32VectorCoding,
+            dim: usize,
+        ) -> std::io::Result<usize> {
+            // Embed the 2D bimodal pattern into `dim` by alternating the components; geometry is
+            // preserved and TLVQ gets a dimension it is happy with.
+            let expand = |pair: [f32; 2]| -> Vec<f32> { (0..dim).map(|i| pair[i % 2]).collect() };
+            let dir = tempfile::TempDir::new().unwrap();
+            let conn = Connection::open(
+                dir.path().to_str().unwrap(),
+                Some(OptionsBuilder::default().create().into()),
+            )?;
+            let search_params = GraphSearchParams {
+                beam_width: NonZero::new(4).unwrap(),
+                num_rerank: 0,
+                patience: None,
+            };
+            let head_config = GraphConfig {
+                dimensions: NonZero::new(dim).unwrap(),
+                similarity: if dot {
+                    VectorSimilarity::Dot
+                } else {
+                    VectorSimilarity::Euclidean
+                },
+                nav_format: F32VectorCoding::F32,
+                rerank_format: head_rerank,
+                pruning: EdgePruningConfig::new(NonZero::new(2).unwrap()),
+                index_search_params: search_params,
+                centroid: shared_centroid.then(|| expand([0.3, -0.1])),
+                edge_type: EdgeType::Undirected,
+            };
+            let spann_config = IndexConfig {
+                head_search_params: search_params,
+                posting_coder,
+                min_centroid_len: 4,
+                max_centroid_len: 12,
+                rerank_format: F32VectorCoding::F32,
+                center_postings: true,
+            };
+            let index = Arc::new(TableIndex::init_index(
+                &conn,
+                "diag",
+                head_config,
+                spann_config,
+            )?);
+
+            // Single seed centroid at the mean of a bimodal cluster, so every data vector
+            // assigns to it and the centre-of-mass postings are genuinely nearer to it than to
+            // either split mode (they should require a head search at move time). For Dot the
+            // centroid lives in unit space, so normalize it like the data vectors.
+            let mut seed = expand([1.0, 0.0]);
+            if dot {
+                let norm = seed.iter().map(|x| (x * x) as f64).sum::<f64>().sqrt() as f32;
+                for d in seed.iter_mut() {
+                    *d /= norm;
+                }
+            }
+            {
+                let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+                insert_vector(&seed, txn_idx.head())?;
+                txn_idx.commit(None)?;
+            }
+            // 20 vectors: 8 near each mode (0,0) / (2,0) and 4 straddling the mean (1,0).
+            let mut pairs: Vec<[f32; 2]> = Vec::with_capacity(20);
+            for i in 0..8 {
+                let d = i as f32 * 0.01;
+                pairs.push([0.0 + d, 0.0 - d]);
+                pairs.push([2.0 - d, 2.0 * d]);
+            }
+            pairs.push([1.0, 0.0]);
+            pairs.push([1.0, 0.05]);
+            pairs.push([0.98, -0.02]);
+            pairs.push([1.03, 0.01]);
+            let mut vectors = VecVectorStore::with_capacity(dim, pairs.len());
+            for pair in pairs {
+                let mut v = expand(pair);
+                if dot {
+                    let norm = v.iter().map(|x| (x * x) as f64).sum::<f64>().sqrt() as f32;
+                    if norm > 0.0 {
+                        for d in v.iter_mut() {
+                            *d /= norm;
+                        }
+                    }
+                }
+                vectors.push(&v);
+            }
+            {
+                let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+                let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
+                let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
+                let mut rerank_cursor = txn_idx
+                    .transaction()
+                    .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?;
+                let mut centroid_source = CentroidVectorSource::new(txn_idx.head())?;
+                let posting_coder = index.new_posting_coder();
+                let rerank_coder = index.config().rerank_format.coder();
+                let mut searcher = GraphSearcher::new(search_params);
+                for (record_id, vector) in vectors.iter().enumerate() {
+                    let candidates = searcher.search(vector, txn_idx.head())?;
+                    let centroid_id = candidates[0].vertex() as u32;
+                    assignment_updater
+                        .insert(record_id as i64, CentroidAssignment::new(centroid_id))?;
+                    let centroid = centroid_source.centroid_vector(centroid_id)?;
+                    let posting = prepare_vector(vector, None, false, Some(&centroid));
+                    postings.insert(
+                        centroid_id,
+                        record_id as i64,
+                        &posting_coder.encode(&posting),
+                    )?;
+                    rerank_cursor.set(record_id as i64, &rerank_coder.encode(vector))?;
+                }
+                postings.flush()?;
+                assignment_updater.flush()?;
+                drop(centroid_source);
+                drop(rerank_cursor);
+                drop(postings);
+                drop(assignment_updater);
+                txn_idx.commit(None)?;
+            }
+
+            // One split op: 16 > max(12).
+            let ops = {
+                let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+                let stats = CentroidStats::from_index_stats(&txn_idx)?;
+                let ops = get_rebalance_ops(&stats, index.config().centroid_len_range());
+                txn_idx.commit(None)?;
+                ops
+            };
+            assert_eq!(ops.len(), 1, "expected exactly one split op, got {ops:?}");
+            let RebalanceOp::Split(s, t0, t1) = ops[0] else {
+                panic!("expected a split op");
+            };
+            let split_centroids = generate_split_centroids(&conn, &index, &ops, &|| {
+                rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(1)
+            })?;
+            insert_split_centroids(&conn, &index, &ops, &split_centroids)?;
+
+            // What the actual rebalance split assignment produces: source postings grouped by
+            // target centroid id.
+            let (by_target, rebalance_stats) = posting_reassignments(&conn, &index, &ops)?;
+            let in_target = |t: u32| {
+                by_target
+                    .get(&t)
+                    .map(|v| v.iter().filter(|(src, _)| *src == s).count())
+                    .unwrap_or(0)
+            };
+
+            // Direct factory distance vs. ground truth.
+            let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+            let mut f = CentroidDistanceFactory::new(&txn_idx)?;
+            let sdf = f.distance_from_source_to_centroid(s, s)?;
+            let t0df = f.distance_from_source_to_centroid(s, t0)?;
+            let t1df = f.distance_from_source_to_centroid(s, t1)?;
+            let mut centroid_source = CentroidVectorSource::new(txn_idx.head())?;
+            let (c_s, c_t0, c_t1) = (
+                centroid_source.centroid_vector(s)?,
+                centroid_source.centroid_vector(t0)?,
+                centroid_source.centroid_vector(t1)?,
+            );
+            let mut rerank_cursor = txn_idx
+                .transaction()
+                .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?;
+            let rerank_coder = index.config().rerank_format.coder();
+            let raw_block = {
+                let mut pc = txn_idx
+                    .transaction()
+                    .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+                pc.seek_exact(s).unwrap().expect("source posting block")
+            };
+            let block = PostingBlock::new(&raw_block, index.posting_vector_len()).expect("block");
+            let squared = |a: &[f32], b: &[f32]| -> f64 {
+                a.iter()
+                    .zip(b)
+                    .map(|(x, y)| (*x as f64 - *y as f64).powi(2))
+                    .sum()
+            };
+            let mut mismatches = 0;
+            // record -> target centroid for source records, from the real rebalance assignment.
+            let mut assigned: HashMap<i64, u32> = HashMap::new();
+            for (target, list) in &by_target {
+                for (src, record_id) in list {
+                    if *src == s {
+                        assigned.insert(*record_id, *target);
+                    }
+                }
+            }
+            let mut assignment_mismatches = 0;
+            // TLVQ's Dot distance is 0.25 * |q - v|^2 (translation-invariant); the F32 float32
+            // cosine distance is not, so Dot + centering is only asserted for the TLVQ codings.
+            let factor = if dot { 0.25 } else { 1.0 };
+            for (record_id, encoded) in block.iter() {
+                let rr =
+                    rerank_coder.decode(&rerank_cursor.seek_exact(record_id).unwrap().unwrap());
+                let (g_s, g_t0, g_t1) = (
+                    factor * squared(&rr, &c_s),
+                    factor * squared(&rr, &c_t0),
+                    factor * squared(&rr, &c_t1),
+                );
+                let (m_s, m_t0, m_t1) = (
+                    sdf.distance(encoded),
+                    t0df.distance(encoded),
+                    t1df.distance(encoded),
+                );
+                // F32 postings reproduce the identity exactly; TLVQ postings within quantization
+                // tolerance. The absolute floor matters for near-zero distances (a posting sitting
+                // on a centroid) where TLVQ's relative noise can be large.
+                let (rel, floor) = if posting_coder == F32VectorCoding::F32 {
+                    (1e-6, 1e-3)
+                } else {
+                    (0.15, 1e-2)
+                };
+                let close = |a: f64, b: f64| (a - b).abs() <= rel * a.abs().max(b.abs()) + floor;
+                if !(close(m_s, g_s) && close(m_t0, g_t0) && close(m_t1, g_t1)) {
+                    mismatches += 1;
+                    let mut scratch = vec![0f32; dim];
+                    index.new_posting_coder().decode_to(encoded, &mut scratch);
+                    println!(
+                        "record {record_id}: factory=({m_s:.4},{m_t0:.4},{m_t1:.4}) \
+                         ground=({g_s:.4},{g_t0:.4},{g_t1:.4}) decoded_posting={scratch:?}"
+                    );
+                }
+                // A posting should be reassigned to whichever of t0/t1 it is truly nearer to.
+                if squared(&rr, &c_t0) <= squared(&rr, &c_t1) {
+                    if assigned.get(&record_id) != Some(&t0) {
+                        assignment_mismatches += 1;
+                        println!(
+                            "record {record_id}: nearer to t0 but assigned to {:?}",
+                            assigned.get(&record_id)
+                        );
+                    }
+                } else if assigned.get(&record_id) != Some(&t1) {
+                    assignment_mismatches += 1;
+                    println!(
+                        "record {record_id}: nearer to t1 but assigned to {:?}",
+                        assigned.get(&record_id)
+                    );
+                }
+            }
+            // A split target receiving all postings (with the other empty) is exactly the
+            // degenerate assignment the user observed; flag it loudly.
+            let (t0_count, t1_count) = (in_target(t0), in_target(t1));
+            let searches = rebalance_stats.split_stats.searches;
+            println!(
+                "  split distribution (dot={dot}, shared_centroid={shared_centroid}, \
+                 posting={posting_coder:?}): t0={t0_count} t1={t1_count} searched={searches}"
+            );
+            assert!(
+                t0_count > 0 && t1_count > 0,
+                "split assigned all postings to one of the two targets: t0={t0_count} t1={t1_count}"
+            );
+            // The centre-of-mass postings are genuinely nearer the source centroid than to either
+            // split target, so the rebalance must head-search them (not assign them blindly). For
+            // F32 the count is exact; TLVQ quantization just needs at least one search to show the
+            // self-distance is discriminating rather than a constant.
+            if posting_coder == F32VectorCoding::F32 {
+                assert!(
+                    (4..=6).contains(&searches),
+                    "expected the straddling postings to require a head search, got {searches}"
+                );
+            } else {
+                assert!(
+                    searches >= 1,
+                    "expected the straddling postings to require a head search, got {searches}"
+                );
+            }
+            assert!(
+                mismatches == 0,
+                "{mismatches} postings had mismatched factory distances"
+            );
+            // Lossy TLVQ postings can flip the split-target decision for borderline postings
+            // relative to exact brute-force; the distribution and search assertions above still
+            // guard against degenerate behavior for them.
+            if posting_coder == F32VectorCoding::F32 {
+                assert!(
+                    assignment_mismatches == 0,
+                    "{assignment_mismatches} postings assigned to the wrong split target"
+                );
+            }
+            Ok(mismatches)
+        }
+    }
 }
 
 /// Rebalance all centroids that do not match size policy in parallel.

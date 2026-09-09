@@ -143,7 +143,17 @@ fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize
     };
     // The interval bounds are stored as f16, so round them here to keep the values used to
     // quantize the vector consistent with the values a caller sees when decoding it.
-    (f16::from_f32(lower).to_f32(), f16::from_f32(upper).to_f32())
+    let (lower, upper) = (f16::from_f32(lower).to_f32(), f16::from_f32(upper).to_f32());
+    // If the range collapsed to zero (a constant or near-constant vector whose bounds round to
+    // the same f16) the quantization scale delta is 0 and both the quantized bytes and the
+    // header's norm-normalized error terms come out as NaN. Give any collapsed width a minimum
+    // that stays visible in f16 and scales with the magnitude of the vector.
+    if upper <= lower {
+        let width = stats.min.abs() * 1e-3 + 1e-3;
+        (lower, f16::from_f32(lower + width).to_f32())
+    } else {
+        (lower, upper)
+    }
 }
 
 /// Transform the unnormalized dot product of two vectors into an appropriate distance for the
@@ -257,7 +267,14 @@ impl PrimaryVectorHeader {
         h32[1] = self.component_sum.to_le_bytes();
 
         let h16 = header_bytes[8..16].as_chunks_mut::<2>().0;
-        h16[0] = f16::from_f32(self.perpendicular_error_term / self.l2_norm).to_le_bytes();
+        // The zero vector has l2_norm 0; avoid the division by zero that would turn the stored
+        // perpendicular error term into NaN.
+        let perpendicular_error = if self.l2_norm == 0.0 {
+            0.0
+        } else {
+            self.perpendicular_error_term / self.l2_norm
+        };
+        h16[0] = f16::from_f32(perpendicular_error).to_le_bytes();
         h16[1] = f16::from_f32(self.parallel_error_term).to_le_bytes();
         h16[2] = f16::from_f32(self.lower).to_le_bytes();
         h16[3] = f16::from_f32(self.upper).to_le_bytes();
@@ -463,6 +480,23 @@ impl<const B: usize> TurboPrimaryCoder<B> {
 
     fn encode_parts_to(k: Kernel, vector: &[f32], out: &mut [u8]) -> PrimaryVectorHeader {
         let stats = VectorStats::new(k, vector);
+        // The zero vector cannot be turbo-quantized. The interval optimizer guards `min == max`
+        // by nudging `upper` to `f32::MIN_POSITIVE`, but that f16-rounds back to 0, so the
+        // quantization scale delta is 0 and both the quantized bytes and the header's
+        // norm-normalized error terms come out as NaN. Encode it canonically as an all-zero
+        // vector instead: its dot product with any other vector is 0, so a zero query against a
+        // document yields the document's own squared norm and a zero document yields distance 0.
+        if stats.l2_norm_sq == 0.0 {
+            out.fill(0);
+            return PrimaryVectorHeader {
+                l2_norm: 0.0,
+                component_sum: 0,
+                perpendicular_error_term: 0.0,
+                parallel_error_term: 0.0,
+                lower: 0.0,
+                upper: 0.0,
+            };
+        }
         let mut header = PrimaryVectorHeader::new(stats);
         (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
 
@@ -477,10 +511,16 @@ impl<const B: usize> TurboPrimaryCoder<B> {
             },
         };
         header.component_sum = quant_stats.primary_component_sum;
-        let perp_error_sq =
-            quant_stats.residual_error_sq - (quant_stats.residual_ip.powi(2) / stats.l2_norm_sq);
+        let perp_error_sq = (quant_stats.residual_error_sq
+            - (quant_stats.residual_ip.powi(2) / stats.l2_norm_sq))
+            .max(0.0);
         header.perpendicular_error_term = perp_error_sq.sqrt();
-        header.parallel_error_term = quant_stats.residual_ip / stats.l2_norm_sq;
+        // Guard against 0/0 and NaN from near-constant or zero vectors.
+        header.parallel_error_term = if stats.l2_norm_sq == 0.0 {
+            0.0
+        } else {
+            quant_stats.residual_ip / stats.l2_norm_sq
+        };
 
         header
     }
@@ -742,6 +782,66 @@ impl VectorEncodeTerms {
             upper: primary.upper,
             delta_inv,
             delta,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn constant_vector_no_nan() {
+        // Regression: constant, near-constant (components differing at the ulp), and zero vectors
+        // must encode/decode and produce finite distances. These have a degenerate quantization
+        // interval (min == max, or a range that f16 collapses to zero) which used to yield a zero
+        // delta and NaN header terms -- reachable in SPANN rebalance via a zero residual/self-query.
+        let v0 = [-0.02f32; 8];
+        let v1 = [
+            -0.0200001f32,
+            -0.02,
+            -0.0200001,
+            -0.02,
+            -0.0200001,
+            -0.02,
+            -0.0200001,
+            -0.02,
+        ];
+        let zero = [0.0f32; 8];
+        for v in [&v0[..], &v1[..], &zero[..]] {
+            for bits in [1usize, 2, 4, 8] {
+                let coding = match bits {
+                    1 => crate::F32VectorCoding::TLVQ1,
+                    2 => crate::F32VectorCoding::TLVQ2,
+                    4 => crate::F32VectorCoding::TLVQ4,
+                    _ => crate::F32VectorCoding::TLVQ8,
+                };
+                let coder = coding.coder();
+                let mut bytes = vec![0u8; coder.byte_len(8)];
+                coder.encode_to(v, &mut bytes);
+                let mut out = vec![0f32; 8];
+                coder.decode_to(&bytes, &mut out);
+                for (i, x) in out.iter().enumerate() {
+                    assert!(
+                        x.is_finite(),
+                        "TLVQ{bits} decode of {v:?} produced non-finite [{i}] = {x}"
+                    );
+                }
+                let queries = [
+                    vec![0.0f32; 8],
+                    vec![
+                        -0.965f32, -0.035, -0.965, -0.035, -0.965, -0.035, -0.965, -0.035,
+                    ],
+                ];
+                for query in queries {
+                    let label = format!("{query:?}");
+                    let q =
+                        coding.query_distance_asymmetric(crate::VectorSimilarity::Euclidean, query);
+                    let d = q.distance(&bytes);
+                    assert!(
+                        d.is_finite(),
+                        "TLVQ{bits}: distance from {label} to {v:?} is non-finite: {d}"
+                    );
+                }
+            }
         }
     }
 }

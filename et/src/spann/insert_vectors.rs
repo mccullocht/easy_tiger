@@ -7,6 +7,7 @@ use easy_tiger::{
     spann::{
         CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
+        centroids::CentroidVectorSource,
         postings::BlockPostingsMut,
         rebalance::{BalanceSummary, RebalanceStats},
     },
@@ -326,12 +327,11 @@ pub fn insert_vectors(
 struct InsertRecord {
     record_id: i64,
     assignment: CentroidAssignment,
-    posting_vector: Vec<u8>,
     rerank_vector: Vec<u8>,
     stats: GraphSearchStats,
 }
 
-/// Batch of vectors for insertion complete with encoded vectors and assignments.
+/// Batch of vectors for insertion complete with rerank vectors and centroid assignments.
 #[derive(Debug, Default, Clone)]
 struct PreparedInsertBatch {
     postings: HashMap<CentroidAssignment, Vec<InsertRecord>>,
@@ -412,7 +412,6 @@ fn insert_batch(
                 Ok::<_, Error>(InsertRecord {
                     record_id: i as i64,
                     assignment: CentroidAssignment::new(centroid_id),
-                    posting_vector: posting_coder.encode(vector),
                     rerank_vector: rerank_coder.encode(vector),
                     stats: searcher.stats(),
                 })
@@ -454,9 +453,28 @@ fn insert_batch(
                 .transaction()
                 .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?;
 
+            // When postings are centered, each posting is encoded as a residual against this
+            // centroid's vector, fetched once for the whole group. Otherwise the centroid vector
+            // is absent and the posting is encoded as-is.
+            let mut centroid_source = index
+                .config()
+                .center_postings
+                .then(|| CentroidVectorSource::new(txn_idx.head()))
+                .transpose()?;
+            let centroid_vector = match centroid_source.as_mut() {
+                Some(source) => Some(source.centroid_vector(centroid.primary_id)?),
+                None => None,
+            };
+
             for r in postings {
                 assignment_updater.insert(r.record_id, centroid)?;
-                postings_mut.insert(centroid.primary_id, r.record_id, &r.posting_vector)?;
+                // Recover the f32 vector from the rerank encoding, optionally center it against
+                // the assigned centroid, then encode it into the posting format.
+                let vector = rerank_coder.decode(&r.rerank_vector);
+                let posting =
+                    vectors::prepare_vector(&vector, None, false, centroid_vector.as_deref());
+                let encoded = posting_coder.encode(&posting);
+                postings_mut.insert(centroid.primary_id, r.record_id, &encoded)?;
                 rerank_cursor.set(r.record_id, &r.rerank_vector)?;
             }
 
@@ -465,6 +483,7 @@ fn insert_batch(
             drop(assignment_updater);
             drop(postings_mut);
             drop(rerank_cursor);
+            drop(centroid_source);
 
             txn_idx.commit(None)
         })?;

@@ -130,6 +130,16 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
     };
     let recall_computer = RecallComputer::from_args(args.recall)?;
     if let Some(computer) = recall_computer.as_ref() {
+        if computer.k() > args.posting_candidates.get() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "--posting-candidates ({}) must be >= recall k ({})",
+                    args.posting_candidates.get(),
+                    computer.k(),
+                ),
+            ));
+        }
         if computer.neighbors_len() < limit {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

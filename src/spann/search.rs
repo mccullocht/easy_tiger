@@ -7,6 +7,7 @@ use std::{
     num::NonZero,
     ops::{Add, AddAssign},
     str::FromStr,
+    sync::OnceLock,
 };
 
 use min_max_heap::MinMaxHeap;
@@ -219,6 +220,9 @@ impl Searcher {
                 .query_distance_asymmetric(reader.index().head_config().config().similarity, query),
         );
         let vector_len = reader.index().posting_vector_len();
+        // Trace every selected centroid, even when its posting is missing or malformed, so that
+        // trace entries stay aligned with centroid distance order.
+        let mut postings = Vec::with_capacity(centroids.len());
         for (rank, c) in centroids.into_iter().enumerate() {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
             // SAFETY: we are not performing any WT operations in between seeks.
@@ -226,14 +230,24 @@ impl Searcher {
                 Some(Ok(data)) => data,
                 Some(Err(e)) => {
                     warn!("failed to read posting for centroid {centroid_id}: {e}");
+                    postings.push(PostingTrace::new(c.distance()));
                     continue;
                 }
-                None => continue,
+                None => {
+                    postings.push(PostingTrace::new(c.distance()));
+                    continue;
+                }
             };
             let Some(block) = PostingBlock::new(data, vector_len) else {
                 warn!("malformed posting block for centroid {centroid_id}");
+                postings.push(PostingTrace::new(c.distance()));
                 continue;
             };
+            postings.push(PostingTrace {
+                distance: c.distance(),
+                vectors: block.len(),
+                contributing: 0,
+            });
             for (record_id, vector) in block.iter() {
                 self.stats.posting_vectors_read += 1;
                 if !self.seen.insert(record_id) {
@@ -245,7 +259,36 @@ impl Searcher {
 
         self.stats.posting_vectors_scored = result_queue.scored;
 
-        self.maybe_rerank_results(query, result_queue, reader)
+        let (r, contributions) = self.maybe_rerank_results(query, result_queue, reader)?;
+        for (p, c) in postings.iter_mut().zip(contributions) {
+            p.contributing = c;
+        }
+        self.trace_search(&postings);
+        Ok(r)
+    }
+
+    /// Emit one JSON document describing this query's posting search when tracing is enabled via
+    /// the `ET_SEARCH_TRACE` environment variable. Each `centroids` entry is `[centroid distance,
+    /// posting vector count, contributing vector count]` in distance-from-query order.
+    fn trace_search(&self, postings: &[PostingTrace]) {
+        if !trace_enabled() {
+            return;
+        }
+        let centroids = postings
+            .iter()
+            .map(|p| serde_json::json!([p.distance, p.vectors, p.contributing]))
+            .collect::<Vec<_>>();
+        let doc = serde_json::json!({
+            "limit": self.params.limit.get() as u64,
+            "num_rerank": self.params.num_rerank as u64,
+            "postings_read": self.stats.postings_read as u64,
+            "posting_vectors_read": self.stats.posting_vectors_read as u64,
+            "posting_vectors_scored": self.stats.posting_vectors_scored as u64,
+            "posting_vectors_reranked": self.stats.posting_vectors_reranked as u64,
+            "last_contribution_posting_rank": self.stats.last_contribution_posting_rank as u64,
+            "centroids": centroids,
+        });
+        println!("{doc}");
     }
 
     fn maybe_rerank_results(
@@ -253,11 +296,11 @@ impl Searcher {
         query: &[f32],
         result_queue: ResultQueue<'_>,
         reader: &TransactionIndex,
-    ) -> Result<Vec<Neighbor>> {
+    ) -> Result<(Vec<Neighbor>, Vec<usize>)> {
         if self.params.num_rerank == 0 {
-            let (results, last_centroid_rank) = result_queue.into_results();
-            self.stats.last_contribution_posting_rank = last_centroid_rank;
-            return Ok(results);
+            let (results, contributions) = result_queue.into_results();
+            self.stats.last_contribution_posting_rank = last_contributing_rank(&contributions);
+            return Ok((results, contributions));
         }
 
         let format = reader.index().config().rerank_format;
@@ -265,8 +308,8 @@ impl Searcher {
         let mut raw_cursor = reader
             .transaction()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;
-        let (results, last_centroid_rank) = result_queue.into_results();
-        self.stats.last_contribution_posting_rank = last_centroid_rank;
+        let (results, contributions) = result_queue.into_results();
+        self.stats.last_contribution_posting_rank = last_contributing_rank(&contributions);
         self.stats.posting_vectors_reranked = results.len().min(self.params.num_rerank);
         let mut reranked = results
             .into_iter()
@@ -284,7 +327,7 @@ impl Searcher {
             .collect::<Result<Vec<_>>>()?;
         reranked.sort_unstable();
 
-        Ok(reranked)
+        Ok((reranked, contributions))
     }
 }
 
@@ -385,16 +428,120 @@ impl<'a> ResultQueue<'a> {
         }
     }
 
-    /// Returns the final results, along with the 1-based rank of the last centroid that
-    /// contributed a result, or 0 if there are no results.
-    fn into_results(self) -> (Vec<Neighbor>, usize) {
+    /// Returns the final results, along with the number of vectors contributed to the rerank
+    /// candidate set from each centroid's posting, indexed by 1-based centroid rank.
+    fn into_results(self) -> (Vec<Neighbor>, Vec<usize>) {
         let mut results = Vec::with_capacity(self.results.len() + self.overflow.len());
-        let mut last_centroid_rank = 0;
+        let mut contributions = Vec::new();
         for en in std::iter::chain(self.results, self.overflow) {
-            last_centroid_rank = last_centroid_rank.max(en.centroid_rank);
+            if contributions.len() < en.centroid_rank {
+                contributions.resize(en.centroid_rank, 0);
+            }
+            contributions[en.centroid_rank - 1] += 1;
             results.push(Neighbor::new(en.n.vertex(), en.e.distance));
         }
         results.sort_unstable();
-        (results, last_centroid_rank)
+        (results, contributions)
+    }
+}
+
+/// Per-centroid record for query tracing: distance from the query, the total number of vectors in
+/// the centroid's posting, and the number of those that contributed to the rerank candidate set.
+#[derive(Debug, Copy, Clone)]
+struct PostingTrace {
+    distance: f64,
+    vectors: usize,
+    contributing: usize,
+}
+
+impl PostingTrace {
+    /// Trace a centroid whose posting is missing, malformed, or not yet read.
+    fn new(distance: f64) -> Self {
+        Self {
+            distance,
+            vectors: 0,
+            contributing: 0,
+        }
+    }
+}
+
+/// Whether search tracing is enabled via the `ET_SEARCH_TRACE` environment variable.
+fn trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ET_SEARCH_TRACE").is_some())
+}
+
+/// 1-based rank, in distance-from-query order, of the last centroid posting that contributed a
+/// vector to the rerank candidate set. 0 when no results were produced.
+fn last_contributing_rank(contributions: &[usize]) -> usize {
+    contributions.iter().rposition(|&c| c > 0).map_or(0, |i| i + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Distance function for tests: the input vector is a little-endian (distance, error) f64
+    /// pair.
+    struct FixedEstimatedDistance;
+
+    fn vector(distance: f64, error: f64) -> Vec<u8> {
+        let mut v = distance.to_le_bytes().to_vec();
+        v.extend_from_slice(&error.to_le_bytes());
+        v
+    }
+
+    impl QueryVectorDistance for FixedEstimatedDistance {
+        fn distance(&self, vector: &[u8]) -> f64 {
+            f64::from_le_bytes(vector[..8].try_into().expect("distance bytes"))
+        }
+
+        fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
+            EstimatedDistance {
+                distance: self.distance(vector),
+                error: f64::from_le_bytes(vector[8..].try_into().expect("error bytes")),
+            }
+        }
+    }
+
+    fn queue(max_len: usize) -> ResultQueue<'static> {
+        ResultQueue::new(max_len, Box::new(FixedEstimatedDistance))
+    }
+
+    fn vertices(results: &[Neighbor]) -> Vec<i64> {
+        results.iter().map(Neighbor::vertex).collect()
+    }
+
+    #[test]
+    fn contributions_tallied_per_centroid_rank() {
+        let mut q = queue(2);
+        q.push(1, &vector(2.0, 5.0), 1);
+        q.push(2, &vector(1.0, 0.0), 1);
+        // The wide error bound keeps the evicted vector alive in overflow.
+        q.push(3, &vector(0.5, 0.0), 2);
+        let (results, contributions) = q.into_results();
+        assert_eq!(contributions, vec![2, 1]);
+        assert_eq!(last_contributing_rank(&contributions), 2);
+        assert_eq!(vertices(&results), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn non_competitive_evictions_do_not_contribute() {
+        let mut q = queue(2);
+        q.push(1, &vector(2.0, 0.0), 1);
+        q.push(2, &vector(1.0, 0.0), 1);
+        // The evicted vector's lower bound is not competitive so it is dropped entirely.
+        q.push(3, &vector(0.5, 0.0), 2);
+        let (results, contributions) = q.into_results();
+        assert_eq!(contributions, vec![1, 1]);
+        assert_eq!(last_contributing_rank(&contributions), 2);
+        assert_eq!(vertices(&results), vec![3, 2]);
+    }
+
+    #[test]
+    fn last_contributing_rank_handles_empty_and_trailing_zeros() {
+        assert_eq!(last_contributing_rank(&[]), 0);
+        assert_eq!(last_contributing_rank(&[0, 0]), 0);
+        assert_eq!(last_contributing_rank(&[1, 0, 2]), 3);
     }
 }

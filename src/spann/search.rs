@@ -9,6 +9,7 @@ use std::{
     str::FromStr,
 };
 
+use ahash::HashMap;
 use min_max_heap::MinMaxHeap;
 use tracing::warn;
 use vectors::{EstimatedDistance, QueryVectorDistance};
@@ -206,51 +207,14 @@ impl Searcher {
 
         self.seen.clear();
         let mut result_queue = ResultQueue::new(self.params.limit.get());
-        let config = reader.index().config();
-        let similarity = reader.index().head_config().config().similarity;
         let vector_len = reader.index().posting_vector_len();
-        // When postings are not centered a single distance function scores every posting vector
-        // against the query. When postings are centered each centroid's postings are stored as
-        // residuals (v - c), so the query must be adjusted per centroid (q - c) to score
-        // |(q - c) - r| = |q - v|.
-        let shared_dist_fn = (!config.center_postings).then(|| {
-            config
-                .posting_coder
-                .query_distance_asymmetric(similarity, query)
-        });
-        let mut centroid_source = config
-            .center_postings
-            .then(|| CentroidVectorSource::new(reader.head()))
-            .transpose()?;
-        let mut centroid_dist_fn: Option<Box<dyn QueryVectorDistance>>;
+        let dist_pool =
+            QueryDistancePool::try_new(reader, query, centroids.iter().map(|n| n.vertex() as u32))?;
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
-            let dist_fn: &dyn QueryVectorDistance = match shared_dist_fn.as_ref() {
-                Some(dist_fn) => dist_fn.as_ref(),
-                None => {
-                    let Some(source) = centroid_source.as_mut() else {
-                        unreachable!("centroid source present when postings are centered");
-                    };
-                    // Read the centroid vector before seeking the posting cursor: reading it
-                    // performs WT operations that would invalidate data borrowed from the
-                    // posting cursor below.
-                    let centroid_vector = match source.centroid_vector(centroid_id) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            warn!("failed to read centroid {centroid_id}: {e}");
-                            continue;
-                        }
-                    };
-                    let adjusted_query =
-                        vectors::prepare_vector(query, None, false, Some(&centroid_vector));
-                    centroid_dist_fn = Some(
-                        config
-                            .posting_coder
-                            .query_distance_asymmetric(similarity, adjusted_query),
-                    );
-                    centroid_dist_fn.as_ref().unwrap().as_ref()
-                }
-            };
+            let dist_fn = dist_pool
+                .get(centroid_id)
+                .expect("dist_fn exists for centroid_id");
             // SAFETY: we are not performing any WT operations in between seeks.
             let data = match unsafe { posting_cursor.seek_exact_unsafe(centroid_id) } {
                 Some(Ok(data)) => data,
@@ -312,6 +276,43 @@ impl Searcher {
         reranked.sort_unstable();
 
         Ok(reranked)
+    }
+}
+
+enum QueryDistancePool<'a> {
+    Centered(HashMap<u32, Box<dyn QueryVectorDistance + 'a>>),
+    Uncentered(Box<dyn QueryVectorDistance + 'a>),
+}
+
+impl<'a> QueryDistancePool<'a> {
+    fn try_new(
+        reader: &TransactionIndex,
+        query: &'a [f32],
+        centroids: impl ExactSizeIterator<Item = u32>,
+    ) -> Result<Self> {
+        let similarity = reader.index().head_config().config().similarity;
+        let posting_coder = reader.index().config().posting_coder;
+        if !reader.index().config.center_postings {
+            return Ok(Self::Uncentered(
+                posting_coder.query_distance_asymmetric(similarity, query),
+            ));
+        }
+        let mut source = CentroidVectorSource::new(reader.head())?;
+        let m = centroids
+            .map(|c| {
+                let center = source.centroid_vector(c)?;
+                let cq = vectors::prepare_vector(query, None, false, Some(center.as_ref()));
+                Ok((c, posting_coder.query_distance_asymmetric(similarity, cq)))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(Self::Centered(m))
+    }
+
+    fn get(&self, centroid_id: u32) -> Option<&dyn QueryVectorDistance> {
+        match self {
+            Self::Uncentered(d) => Some(d.as_ref()),
+            Self::Centered(m) => m.get(&centroid_id).map(|d| d.as_ref()),
+        }
     }
 }
 

@@ -386,13 +386,28 @@ mod parallel {
     }
 
     /// State for re-encoding postings as residuals against a target centroid. Present when the
-    /// index centers postings: moves re-encode residuals from the rerank table instead of
-    /// transplanting source posting bytes.
+    /// index centers postings: moves recompute residuals from the rerank table and reencode
+    /// postings rather than copying source posting bytes.
     struct PostingUpdaterCenteringState<'a> {
         raw_vectors: TypedCursorGuard<'a, i64, Vec<u8>>,
         rerank_coder: Box<dyn F32VectorCoder>,
         posting_coder: Box<dyn F32VectorCoder>,
         centroids: CentroidVectorSource<'a>,
+    }
+
+    impl PostingUpdaterCenteringState<'_> {
+        /// Fetch the raw posting for `record_id` and reencode it centered against `centroid_id`.
+        /// Returns a NotFound error if either of `record_id` or `centroid_id` cannot be found.
+        fn encode(&mut self, centroid_id: u32, record_id: i64) -> Result<Vec<u8>> {
+            let raw = self
+                .raw_vectors
+                .seek_exact(record_id)
+                .unwrap_or_else(|| Err(Error::not_found_error()))?;
+            let vector = self.rerank_coder.decode(&raw);
+            let centroid = self.centroids.centroid_vector(centroid_id)?;
+            let residual = prepare_vector(&vector, None, false, Some(&centroid));
+            Ok(self.posting_coder.encode(&residual))
+        }
     }
 
     struct PostingUpdater<'a> {
@@ -426,35 +441,16 @@ mod parallel {
             self.postings.read_centroid(centroid_id)
         }
 
-        /// Re-encode `record_id`'s posting as a residual against `target`'s centroid.
-        ///
-        /// Returns `None` when the index does not center postings. The record's rerank vector is
-        /// used as the source of truth to avoid compounding posting quantization error across
-        /// moves.
-        fn reencode_posting(&mut self, record_id: i64, target: u32) -> Result<Option<Vec<u8>>> {
-            let Some(centering) = self.centering.as_mut() else {
-                return Ok(None);
-            };
-            let raw = centering
-                .raw_vectors
-                .seek_exact(record_id)
-                .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            let vector = centering.rerank_coder.decode(&raw);
-            let centroid = centering.centroids.centroid_vector(target)?;
-            let residual = prepare_vector(&vector, None, false, Some(&centroid));
-            Ok(Some(centering.posting_coder.encode(&residual)))
-        }
-
         pub fn move_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
-            let reencoded = self.reencode_posting(record_id, target)?;
             let old = self
                 .assignments
                 .update(record_id, CentroidAssignment::new(target))?;
             assert_eq!(old.primary_id, source);
             let removed = self.postings.remove(source, record_id)?;
-            let v = match reencoded {
-                Some(v) => v,
-                None => removed.expect("posting present in source").to_vec(),
+            let v = if let Some(c) = self.centering.as_mut() {
+                c.encode(target, record_id)?
+            } else {
+                removed.expect("posting present in source").to_vec()
             };
             self.postings.insert(target, record_id, &v)
         }
@@ -462,9 +458,10 @@ mod parallel {
         pub fn copy_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
             self.assignments
                 .overwrite(record_id, CentroidAssignment::new(target))?;
-            let v = match self.reencode_posting(record_id, target)? {
-                Some(v) => v,
-                None => self.postings.get(source, record_id)?,
+            let v = if let Some(c) = self.centering.as_mut() {
+                c.encode(target, record_id)?
+            } else {
+                self.postings.get(source, record_id)?
             };
             self.postings.insert(target, record_id, &v)
         }

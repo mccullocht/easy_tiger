@@ -197,6 +197,17 @@ impl Searcher {
     ) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 
+        // Apply the ingress rotation (if configured) once, up front: every downstream distance
+        // computation (head search, posting scoring, rerank) then operates in rotated space,
+        // matching the rotated vectors written during ingestion.
+        let prepared_query = vectors::prepare_vector(
+            query,
+            reader.index().rotator(),
+            reader.head().config().similarity.angular(),
+            None,
+        );
+        let query: &[f32] = &prepared_query;
+
         let mut centroids = self.head_searcher.search(query, reader.head())?;
         self.stats.head = self.head_searcher.stats();
         if centroids.is_empty() {

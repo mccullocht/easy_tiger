@@ -70,6 +70,12 @@ pub struct SearchArgs {
     /// If the index does not have a rerank format, this is ignored.
     #[arg(long)]
     posting_rerank_budget: Option<usize>,
+    /// Z-score to apply to distance estimate bounds in re-ranking queue.
+    ///
+    /// Larger Z-scores increase confidence that each distance estimate is in range, increasing
+    /// recall at the cost of needing to rerank more vectors.
+    #[arg(long, default_value_t = 1.0)]
+    posting_rerank_z_score: f64,
     /// Maximum number of queries to run. If unset, run all queries in the vector file.
     #[arg(short, long)]
     limit: Option<usize>,
@@ -120,6 +126,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         num_rerank: args
             .posting_rerank_budget
             .unwrap_or(args.posting_candidates.get()),
+        z_score: args.posting_rerank_z_score,
     };
     let recall_computer = RecallComputer::from_args(args.recall)?;
     if let Some(computer) = recall_computer.as_ref() {

@@ -385,15 +385,20 @@ mod parallel {
         }
     }
 
+    /// State for re-encoding postings as residuals against a target centroid. Present when the
+    /// index centers postings: moves re-encode residuals from the rerank table instead of
+    /// transplanting source posting bytes.
+    struct PostingUpdaterCenteringState<'a> {
+        raw_vectors: TypedCursorGuard<'a, i64, Vec<u8>>,
+        rerank_coder: Box<dyn F32VectorCoder>,
+        posting_coder: Box<dyn F32VectorCoder>,
+        centroids: CentroidVectorSource<'a>,
+    }
+
     struct PostingUpdater<'a> {
         postings: BlockPostingsMut<'a>,
         assignments: CentroidAssignmentUpdater<'a>,
-        // Present when the index centers postings: moves re-encode residuals from the rerank
-        // table instead of transplanting source posting bytes.
-        raw_vectors: Option<TypedCursorGuard<'a, i64, Vec<u8>>>,
-        rerank_coder: Option<Box<dyn F32VectorCoder>>,
-        posting_coder: Option<Box<dyn F32VectorCoder>>,
-        centroids: Option<CentroidVectorSource<'a>>,
+        centering: Option<PostingUpdaterCenteringState<'a>>,
     }
 
     impl<'a> PostingUpdater<'a> {
@@ -402,20 +407,18 @@ mod parallel {
             Ok(Self {
                 postings: BlockPostingsMut::from_txn(txn_idx)?,
                 assignments: CentroidAssignmentUpdater::new(txn_idx)?,
-                raw_vectors: center_postings
-                    .then(|| {
-                        txn_idx
-                            .transaction()
-                            .open_cursor::<i64, Vec<u8>>(txn_idx.index().raw_vectors_table_name())
+                centering: if center_postings {
+                    Some(PostingUpdaterCenteringState {
+                        raw_vectors: txn_idx.transaction().open_cursor::<i64, Vec<u8>>(
+                            txn_idx.index().raw_vectors_table_name(),
+                        )?,
+                        rerank_coder: txn_idx.index().config().rerank_format.coder(),
+                        posting_coder: txn_idx.index().config().posting_coder.coder(),
+                        centroids: CentroidVectorSource::new(txn_idx.head())?,
                     })
-                    .transpose()?,
-                rerank_coder: center_postings
-                    .then(|| txn_idx.index().config().rerank_format.coder()),
-                posting_coder: center_postings
-                    .then(|| txn_idx.index().config().posting_coder.coder()),
-                centroids: center_postings
-                    .then(|| CentroidVectorSource::new(txn_idx.head()))
-                    .transpose()?,
+                } else {
+                    None
+                },
             })
         }
 
@@ -429,29 +432,17 @@ mod parallel {
         /// used as the source of truth to avoid compounding posting quantization error across
         /// moves.
         fn reencode_posting(&mut self, record_id: i64, target: u32) -> Result<Option<Vec<u8>>> {
-            let Some(raw_vectors) = self.raw_vectors.as_mut() else {
+            let Some(centering) = self.centering.as_mut() else {
                 return Ok(None);
             };
-            let raw = raw_vectors
+            let raw = centering
+                .raw_vectors
                 .seek_exact(record_id)
                 .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            let vector = self
-                .rerank_coder
-                .as_ref()
-                .expect("rerank coder present when postings are centered")
-                .decode(&raw);
-            let centroid = self
-                .centroids
-                .as_mut()
-                .expect("centroid source present when postings are centered")
-                .centroid_vector(target)?;
+            let vector = centering.rerank_coder.decode(&raw);
+            let centroid = centering.centroids.centroid_vector(target)?;
             let residual = prepare_vector(&vector, None, false, Some(&centroid));
-            Ok(Some(
-                self.posting_coder
-                    .as_ref()
-                    .expect("posting coder present when postings are centered")
-                    .encode(&residual),
-            ))
+            Ok(Some(centering.posting_coder.encode(&residual)))
         }
 
         pub fn move_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {

@@ -11,7 +11,7 @@ use std::{
 
 use min_max_heap::MinMaxHeap;
 use tracing::warn;
-use vectors::{EstimatedDistance, QueryVectorDistance};
+use vectors::EstimatedDistance;
 use wt_mdb::{Result, TypedCursorGuard};
 
 use crate::{
@@ -129,6 +129,8 @@ pub struct SearchParams {
     pub num_rerank: usize,
     /// The number of results to return.
     pub limit: NonZero<usize>,
+    /// Z-score to use for estimated distance bound fed to rerank queue.
+    pub z_score: f64,
 }
 
 /// Statistics for SPANN searches.
@@ -195,6 +197,17 @@ impl Searcher {
     ) -> Result<Vec<Neighbor>> {
         self.stats = SearchStats::default();
 
+        // Apply the ingress rotation (if configured) once, up front: every downstream distance
+        // computation (head search, posting scoring, rerank) then operates in rotated space,
+        // matching the rotated vectors written during ingestion.
+        let prepared_query = vectors::prepare_vector(
+            query,
+            reader.index().rotator(),
+            reader.head().config().similarity.angular(),
+            None,
+        );
+        let query: &[f32] = &prepared_query;
+
         let mut centroids = self.head_searcher.search(query, reader.head())?;
         self.stats.head = self.head_searcher.stats();
         if centroids.is_empty() {
@@ -205,14 +218,12 @@ impl Searcher {
         self.stats.postings_read = centroids.len();
 
         self.seen.clear();
-        let mut result_queue = ResultQueue::new(
-            self.params.limit.get(),
-            reader
-                .index
-                .config()
-                .posting_coder
-                .query_distance_asymmetric(reader.index().head_config().config().similarity, query),
-        );
+        let dist_fn = reader
+            .index
+            .config()
+            .posting_coder
+            .query_distance_asymmetric(reader.index().head_config().config().similarity, query);
+        let mut result_queue = ResultQueue::new(self.params.limit.get(), self.params.z_score);
         let vector_len = reader.index().posting_vector_len();
         for c in centroids {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
@@ -234,7 +245,7 @@ impl Searcher {
                 if !self.seen.insert(record_id) {
                     continue; // already seen
                 }
-                result_queue.push(record_id, vector);
+                result_queue.push(record_id, dist_fn.estimated_distance(vector));
             }
         }
 
@@ -246,7 +257,7 @@ impl Searcher {
     fn maybe_rerank_results(
         &mut self,
         query: &[f32],
-        result_queue: ResultQueue<'_>,
+        result_queue: ResultQueue,
         reader: &TransactionIndex,
     ) -> Result<Vec<Neighbor>> {
         if self.params.num_rerank == 0 {
@@ -322,28 +333,29 @@ impl Ord for ErrorBoundNeighbor {
     }
 }
 
-struct ResultQueue<'a> {
-    dist_fn: Box<dyn QueryVectorDistance + 'a>,
+struct ResultQueue {
+    max_len: usize,
+    z_score: f64,
+
     results: MinMaxHeap<ErrorBoundNeighbor>,
     overflow: MinMaxHeap<ErrorBoundNeighbor>,
-    max_len: usize,
     scored: usize,
 }
 
-impl<'a> ResultQueue<'a> {
-    fn new(max_len: usize, dist_fn: Box<dyn QueryVectorDistance + 'a>) -> Self {
+impl ResultQueue {
+    fn new(max_len: usize, z_score: f64) -> Self {
         Self {
-            dist_fn,
+            max_len,
+            z_score,
             results: MinMaxHeap::with_capacity(max_len),
             overflow: MinMaxHeap::new(),
-            max_len,
             scored: 0,
         }
     }
 
-    fn push(&mut self, vector_id: i64, vector: &[u8]) {
+    fn push(&mut self, vector_id: i64, mut e: EstimatedDistance) {
+        e.error *= self.z_score;
         self.scored += 1;
-        let e = self.dist_fn.estimated_distance(vector);
         let n = ErrorBoundNeighbor::from_upper(vector_id, e);
         if self.results.len() < self.max_len {
             self.results.push(n);

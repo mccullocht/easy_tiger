@@ -144,6 +144,9 @@ pub struct SearchStats {
     pub posting_vectors_scored: usize,
     /// Number of results reranked using raw vectors.
     pub posting_vectors_reranked: usize,
+    /// 1-based rank, in distance-from-query order, of the last centroid posting that contributed a
+    /// vector to the set of results to rerank. 0 when no results were produced.
+    pub last_contribution_posting_rank: usize,
 }
 
 impl Add for SearchStats {
@@ -156,6 +159,8 @@ impl Add for SearchStats {
             posting_vectors_read: self.posting_vectors_read + rhs.posting_vectors_read,
             posting_vectors_scored: self.posting_vectors_scored + rhs.posting_vectors_scored,
             posting_vectors_reranked: self.posting_vectors_reranked + rhs.posting_vectors_reranked,
+            last_contribution_posting_rank: self.last_contribution_posting_rank
+                + rhs.last_contribution_posting_rank,
         }
     }
 }
@@ -214,7 +219,7 @@ impl Searcher {
                 .query_distance_asymmetric(reader.index().head_config().config().similarity, query),
         );
         let vector_len = reader.index().posting_vector_len();
-        for c in centroids {
+        for (rank, c) in centroids.into_iter().enumerate() {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
             // SAFETY: we are not performing any WT operations in between seeks.
             let data = match unsafe { posting_cursor.seek_exact_unsafe(centroid_id) } {
@@ -234,7 +239,7 @@ impl Searcher {
                 if !self.seen.insert(record_id) {
                     continue; // already seen
                 }
-                result_queue.push(record_id, vector);
+                result_queue.push(record_id, vector, rank + 1);
             }
         }
 
@@ -250,7 +255,9 @@ impl Searcher {
         reader: &TransactionIndex,
     ) -> Result<Vec<Neighbor>> {
         if self.params.num_rerank == 0 {
-            return Ok(result_queue.into_results());
+            let (results, last_centroid_rank) = result_queue.into_results();
+            self.stats.last_contribution_posting_rank = last_centroid_rank;
+            return Ok(results);
         }
 
         let format = reader.index().config().rerank_format;
@@ -258,7 +265,8 @@ impl Searcher {
         let mut raw_cursor = reader
             .transaction()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;
-        let results = result_queue.into_results();
+        let (results, last_centroid_rank) = result_queue.into_results();
+        self.stats.last_contribution_posting_rank = last_centroid_rank;
         self.stats.posting_vectors_reranked = results.len().min(self.params.num_rerank);
         let mut reranked = results
             .into_iter()
@@ -284,20 +292,25 @@ impl Searcher {
 struct ErrorBoundNeighbor {
     n: Neighbor,
     e: EstimatedDistance,
+    /// 1-based rank, in distance-from-query order, of the centroid whose posting this neighbor
+    /// was read from.
+    centroid_rank: usize,
 }
 
 impl ErrorBoundNeighbor {
-    fn from_lower(vector_id: i64, e: EstimatedDistance) -> Self {
+    fn from_lower(vector_id: i64, e: EstimatedDistance, centroid_rank: usize) -> Self {
         Self {
             n: Neighbor::new(vector_id, e.distance - e.error),
             e,
+            centroid_rank,
         }
     }
 
-    fn from_upper(vector_id: i64, e: EstimatedDistance) -> Self {
+    fn from_upper(vector_id: i64, e: EstimatedDistance, centroid_rank: usize) -> Self {
         Self {
             n: Neighbor::new(vector_id, e.distance + e.error),
             e,
+            centroid_rank,
         }
     }
 }
@@ -341,10 +354,10 @@ impl<'a> ResultQueue<'a> {
         }
     }
 
-    fn push(&mut self, vector_id: i64, vector: &[u8]) {
+    fn push(&mut self, vector_id: i64, vector: &[u8], centroid_rank: usize) {
         self.scored += 1;
         let e = self.dist_fn.estimated_distance(vector);
-        let n = ErrorBoundNeighbor::from_upper(vector_id, e);
+        let n = ErrorBoundNeighbor::from_upper(vector_id, e, centroid_rank);
         if self.results.len() < self.max_len {
             self.results.push(n);
             return;
@@ -355,24 +368,33 @@ impl<'a> ResultQueue<'a> {
             let evicted = self.results.push_pop_max(n);
             // Put the evicted result in overflow if it is still competitive.
             let ub = *self.results.peek_max().unwrap();
-            if ErrorBoundNeighbor::from_lower(evicted.n.vertex(), evicted.e) < ub {
-                self.overflow
-                    .push(ErrorBoundNeighbor::from_lower(evicted.n.vertex, evicted.e));
+            let lower = ErrorBoundNeighbor::from_lower(
+                evicted.n.vertex(),
+                evicted.e,
+                evicted.centroid_rank,
+            );
+            if lower < ub {
+                self.overflow.push(lower);
             }
             while self.overflow.peek_max().is_some_and(|x| ub < *x) {
                 self.overflow.pop_max();
             }
-        } else if ErrorBoundNeighbor::from_lower(vector_id, e) < ub {
+        } else if ErrorBoundNeighbor::from_lower(vector_id, e, centroid_rank) < ub {
             self.overflow
-                .push(ErrorBoundNeighbor::from_lower(vector_id, e));
+                .push(ErrorBoundNeighbor::from_lower(vector_id, e, centroid_rank));
         }
     }
 
-    fn into_results(self) -> Vec<Neighbor> {
-        let mut results = std::iter::chain(self.results, self.overflow)
-            .map(|en| Neighbor::new(en.n.vertex(), en.e.distance))
-            .collect::<Vec<_>>();
+    /// Returns the final results, along with the 1-based rank of the last centroid that
+    /// contributed a result, or 0 if there are no results.
+    fn into_results(self) -> (Vec<Neighbor>, usize) {
+        let mut results = Vec::with_capacity(self.results.len() + self.overflow.len());
+        let mut last_centroid_rank = 0;
+        for en in std::iter::chain(self.results, self.overflow) {
+            last_centroid_rank = last_centroid_rank.max(en.centroid_rank);
+            results.push(Neighbor::new(en.n.vertex(), en.e.distance));
+        }
         results.sort_unstable();
-        results
+        (results, last_centroid_rank)
     }
 }

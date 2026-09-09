@@ -418,16 +418,15 @@ mod tests {
     use crate::{
         input::{VecVectorStore, VectorStore},
         spann::{
-            CentroidAssignment, IndexConfig, TableIndex,
-            bulk::{
-                assign_to_centroids, load_centroid_stats, load_centroids, load_postings,
-                load_raw_vectors,
-            },
+            CentroidAssignment, IndexConfig, TableIndex, TransactionIndex,
+            centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
             centroids::CentroidVectorSource,
             postings::BlockPostingsMut,
-            rebalance::parallel_rebalance,
+            rebalance::{BalanceSummary, RebalanceStats, parallel_rebalance},
         },
-        vamana::{EdgePruningConfig, EdgeType, GraphConfig, mutate::insert_vector},
+        vamana::{
+            EdgePruningConfig, EdgeType, GraphConfig, mutate::insert_vector, search::GraphSearcher,
+        },
     };
     use vectors::{F32VectorCoding, VectorSimilarity};
     use wt_mdb::{Connection, connection::OptionsBuilder};
@@ -499,12 +498,16 @@ mod tests {
         conn: Arc<Connection>,
         index: Arc<TableIndex>,
         vectors: VecVectorStore<f32>,
+        // Rebalance stats collected while building the fixture (online insert + rebalance).
+        rebalance: RebalanceStats,
         _dir: tempfile::TempDir,
     }
 
     impl Fixture {
         /// Build an index with 4 head centroids: a dummy zero vector (id 0, as `et spann
-        /// init-index` inserts) plus one centroid per data cluster below.
+        /// init-index` inserts) plus one centroid per data cluster below. The data vectors are
+        /// inserted through the online insert path (nearest-centroid assignment + posting write)
+        /// and the index is then rebalanced into policy, mirroring `et spann insert-vectors`.
         fn new(center_postings: bool) -> std::io::Result<Self> {
             let dir = tempfile::TempDir::new().unwrap();
             let conn = Connection::open(
@@ -557,33 +560,88 @@ mod tests {
                 }
                 txn_idx.commit(None)?;
             }
+            // Insert the data vectors through the online insert path (the search-assign +
+            // posting-write flow `et spann insert-vectors` uses): search the head for each
+            // vector's nearest centroid, then record the assignment, centroid stats, posting and
+            // rerank vector.
             {
-                let limit = vectors.len();
-                let assignments =
-                    assign_to_centroids(index.as_ref(), &conn, &vectors, limit, |_| {})?;
-                load_centroids(index.as_ref(), &conn, &assignments, |_| {})?;
-                load_centroid_stats(index.as_ref(), &conn, &assignments, |_| {})?;
-                load_raw_vectors(index.as_ref(), &conn, &vectors, limit, |_| {})?;
-                let txn = conn.begin_transaction(None)?;
-                {
-                    let cursor = txn.open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
-                    let mut postings = BlockPostingsMut::new(cursor, index.posting_vector_len());
-                    load_postings(
-                        index.as_ref(),
-                        &conn,
-                        &mut postings,
-                        &assignments,
-                        &vectors,
-                        |_| {},
+                let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+                let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
+                let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
+                let mut rerank_cursor = txn_idx
+                    .transaction()
+                    .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?;
+                // When postings are centered, each posting is stored as a residual against its
+                // assigned centroid's vector.
+                let mut centroid_source = index
+                    .config()
+                    .center_postings
+                    .then(|| CentroidVectorSource::new(txn_idx.head()))
+                    .transpose()?;
+                let mut searcher = GraphSearcher::new(search_params);
+                let posting_coder = index.new_posting_coder();
+                let rerank_coder = index.config().rerank_format.coder();
+                for (record_id, vector) in vectors.iter().enumerate() {
+                    let candidates = searcher.search(vector, txn_idx.head())?;
+                    assert!(
+                        !candidates.is_empty(),
+                        "no centroid selected for vector {record_id}"
+                    );
+                    let centroid_id = candidates[0].vertex() as u32;
+                    let assignment = CentroidAssignment::new(centroid_id);
+                    assignment_updater.insert(record_id as i64, assignment)?;
+                    // Optionally center the vector against its centroid, then encode the posting.
+                    let centroid = match centroid_source.as_mut() {
+                        Some(source) => Some(source.centroid_vector(centroid_id)?),
+                        None => None,
+                    };
+                    let posting = vectors::prepare_vector(vector, None, false, centroid.as_deref());
+                    postings.insert(
+                        centroid_id,
+                        record_id as i64,
+                        &posting_coder.encode(&posting),
                     )?;
+                    rerank_cursor.set(record_id as i64, &rerank_coder.encode(vector))?;
                 }
-                txn.commit(None)?;
+                postings.flush()?;
+                assignment_updater.flush()?;
+                drop(centroid_source);
+                drop(rerank_cursor);
+                drop(postings);
+                drop(assignment_updater);
+                txn_idx.commit(None)?;
             }
+            // Rebalance until the centroids are within policy, as `et spann insert-vectors` does
+            // after each batch. The fixture data is designed to require a split (cluster A
+            // exceeds max_centroid_len), a merge (cluster C is below min_centroid_len), and a
+            // nearby reassignment of the boundary vector.
+            let rebalance = {
+                let mut stats = RebalanceStats::default();
+                loop {
+                    let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+                    let centroid_stats = CentroidStats::from_index_stats(&txn_idx)?;
+                    let summary =
+                        BalanceSummary::new(&centroid_stats, index.config().centroid_len_range());
+                    if summary
+                        .below_exemplar()
+                        .or(summary.above_exemplar())
+                        .is_some()
+                    {
+                        stats += parallel_rebalance(&conn, &index, &|| {
+                            rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5EED)
+                        })?;
+                    } else {
+                        break;
+                    }
+                }
+                stats
+            };
             Ok(Self {
                 _dir: dir,
                 conn,
                 index,
                 vectors,
+                rebalance,
             })
         }
 
@@ -745,23 +803,19 @@ mod tests {
     #[test]
     fn rebalance_preserves_centered_postings() -> std::io::Result<()> {
         let fixture = Fixture::new(true)?;
-        // Loading the fixture data leaves centroids out of policy; rebalancing splits the
-        // oversized clusters and merges the singleton, re-centering every moved posting from
-        // its rerank vector.
-        let stats = parallel_rebalance(&fixture.conn, &fixture.index, &|| {
-            rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5EED)
-        })?;
+        // Building the fixture inserts incrementally and then rebalances the out-of-policy
+        // centroids to in-policy, re-centering every moved posting from its rerank vector.
         // The fixture data must exercise both rebalance op kinds.
         assert!(
-            stats.split >= 1,
+            fixture.rebalance.split >= 1,
             "fixture should trigger at least one split"
         );
         assert!(
-            stats.merged >= 1,
+            fixture.rebalance.merged >= 1,
             "fixture should trigger at least one merge"
         );
         assert!(
-            stats.split_stats.nearby_moved >= 1,
+            fixture.rebalance.split_stats.nearby_moved >= 1,
             "fixture should trigger at least one nearby move"
         );
         fixture.assert_postings_are_residuals()?;

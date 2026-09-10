@@ -119,7 +119,7 @@ def pct(sorted_vals, p):
     return sorted_vals[idx]
 
 
-def evaluate(queries, rules):
+def evaluate(queries, rules, dump_trace_ratio):
     """Returns per-rule aggregates plus per-query details for dumping."""
     results = {}
     for name, fn in rules.items():
@@ -129,7 +129,7 @@ def evaluate(queries, rules):
         total_pool = 0
         total_dropped = 0
         per_query = []
-        for q in queries:
+        for (qi, q) in enumerate(queries):
             centroids = q["centroids"]
             pool = sum(c for _, _, _, c in centroids)
             depth = fn(q)
@@ -137,14 +137,14 @@ def evaluate(queries, rules):
             dropped = pool - kept
             vectors = sum(v for _, _, v, _ in centroids)
             vectors_read = sum(v for _, _, v, _ in centroids[:depth])
-            #if dropped / pool > 0.5:
-            #    print(f"depth: {depth} pool: {pool} kept: {kept} read: {vectors_read}")
-            #    for (i, c) in enumerate(q["centroids"]):
-            #        if i == depth:
-            #            print("-----")
-            #        if i < depth or c[2] > 0:
-            #            print(i, json.dumps(c))
-            #    print()
+            if dropped / pool > dump_trace_ratio:
+                print(f"{qi} depth: {depth} pool: {pool} kept: {kept} dropped: {dropped / pool} read: {vectors_read}")
+                for (i, c) in enumerate(q["centroids"]):
+                    if i == depth:
+                        print("-----")
+                    if i < depth or c[3] > 0:
+                        print(i, json.dumps(c))
+                print()
             last = last_contributing_rank(q)
             if pool > 0:
                 dropped_ratios.append(dropped / pool)
@@ -198,7 +198,9 @@ def main():
                     help="number of front centroids used for the adaptive ratio spread")
     ap.add_argument("--spread-beta", type=float, default=0.0,
                     help="adaptive ratio exponent: alpha_eff = alpha * (d_k/d_1)^beta (default 0, off)")
-    ap.add_argument("--rules", default="none,topn,floor,ratio,hybrid,patience,combined",
+    ap.add_argument("--dump-trace-ratio", type=float, default=1.0,
+                    help="If any query drops more than this fraction of results, dump trace info")
+    ap.add_argument("--rules", default="floor,ratio,hybrid,patience,combined",
                     help="comma-separated rules to evaluate")
     ap.add_argument("--dump", metavar="PREFIX", default=None,
                     help="write per-query simulation records to PREFIX.jsonl")
@@ -257,7 +259,7 @@ def main():
             sys.exit(f"unknown rule '{name}'; available: {', '.join(all_rules)}")
         selected[matches[0]] = all_rules[matches[0]]
 
-    results = evaluate(queries, selected)
+    results = evaluate(queries, selected, args.dump_trace_ratio)
 
     header = (f"{'rule':<16} {'depth':>7} {'vec scored':>11} {'drop mean':>10} {'drop p95':>9} "
               f"{'drop max':>9} {'drop wtd':>9} {'undercov':>9} {'vec saved':>10}")

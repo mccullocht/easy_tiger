@@ -131,6 +131,14 @@ def evaluate(queries, rules):
             dropped = pool - kept
             vectors = sum(v for _, v, _ in centroids)
             vectors_read = sum(v for _, v, _ in centroids[:depth])
+            #if dropped / pool > 0.5:
+            #    print(f"depth: {depth} pool: {pool} kept: {kept} read: {vectors_read}")
+            #    for (i, c) in enumerate(q["centroids"]):
+            #        if i == depth:
+            #            print("-----")
+            #        if i < depth or c[2] > 0:
+            #            print(i, json.dumps(c))
+            #    print()
             last = last_contributing_rank(q)
             if pool > 0:
                 dropped_ratios.append(dropped / pool)

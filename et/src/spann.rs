@@ -4,6 +4,7 @@ mod drop_index;
 mod export_head;
 mod init_index;
 mod insert_vectors;
+mod reassign;
 mod rebalance;
 mod search;
 
@@ -18,6 +19,7 @@ use drop_index::drop_index;
 use export_head::{ExportHeadArgs, export_head};
 use init_index::{InitIndexArgs, init_index};
 use insert_vectors::{InsertVectorsArgs, insert_vectors};
+use reassign::{ReassignArgs, reassign};
 use rebalance::{RebalanceArgs, rebalance};
 use search::{SearchArgs, search};
 
@@ -44,6 +46,10 @@ pub enum Command {
     ExportHead(ExportHeadArgs),
     /// Rebalance the SPANN index.
     Rebalance(RebalanceArgs),
+    /// Recompute assignments for a single centroid's posting vectors by searching the head index
+    /// with each vector's rerank vector; report where they would be assigned, or with --commit
+    /// move them there.
+    Reassign(ReassignArgs),
     /// Simulate deletes: for every rerank vector, search the head and read postings until the
     /// record is located, reporting the depth and how many records could not be found.
     DeleteSim(DeleteSimArgs),
@@ -62,6 +68,7 @@ pub fn spann_command(args: SpannArgs) -> io::Result<()> {
         Command::CentroidStats => centroid_stats(connection, index_name),
         Command::ExportHead(args) => export_head(connection, index_name, args),
         Command::Rebalance(args) => rebalance(connection, index_name, args),
+        Command::Reassign(args) => reassign(connection, index_name, args),
         Command::DeleteSim(args) => delete_sim(connection, index_name, args),
         Command::DropIndex => drop_index(connection, index_name),
     }?;

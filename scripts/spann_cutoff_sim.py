@@ -13,11 +13,12 @@ many rerank candidates the cutoff drops, relative to the full pool.
 
 Caveats when interpreting results:
 - `contributing` is final-pool membership: a vector that transiently entered the pool but was
-  later outcompeted counts as 0. A runtime barren-run rule that counts pushes would stop later
-  than simulated here, so these savings/recall numbers are pessimistic for barren-run rules.
+  later outcompeted counts as 0. The runtime patience rule counts the push, so it resets its
+  run more often and stops no earlier than simulated here; these savings/recall numbers are
+  pessimistic for the patience rule.
 - Dedup: a posting whose vectors were all already seen reads as contributing=0 even though it was
-  scanned. Fine for a stop rule (nothing new contributed), but barren stretches caused by dedup
-  look identical to genuinely unproductive stretches.
+  scanned. Fine for a stop rule (nothing new contributed), but non-contributing stretches caused
+  by dedup look identical to genuinely unproductive stretches.
 - The trace only covers the postings the selector actually searched; savings are measured
   against that set, not against the whole index.
 """
@@ -84,10 +85,25 @@ def ratio_depth(centroids, alpha, spread_k=0, spread_beta=0.0):
     return len(centroids)
 
 
-def barren_depth(centroids, m):
-    """Depth of a barren-run rule: stop m postings past the last contributing posting."""
-    last = max((i + 1 for i, (_, _, c) in enumerate(centroids) if c > 0), default=0)
-    return min(len(centroids), last + m)
+def patience_depth(centroids, m):
+    """Simulate the runtime patience cutoff: scan postings in distance order, tracking a run of
+    consecutive postings that put nothing into the rerank pool. Reset the run on any contribution;
+    stop once the run reaches `m`. Unlike a hindsight barren-run rule this uses only information
+    available when each posting is scored -- there is no way to know at query time which posting
+    will be the last to contribute.
+
+    Caveat: the trace's `contributing` count is final-pool membership, so a posting that pushed a
+    candidate that was later outcompeted reads as non-contributing here. The real implementation
+    counts the push, so it resets the run more often and stops no earlier than this simulation."""
+    run = 0
+    for i, (_, _, c) in enumerate(centroids):
+        if c > 0:
+            run = 0
+        else:
+            run += 1
+            if run >= m:
+                return i + 1
+    return len(centroids)
 
 
 def pct(sorted_vals, p):
@@ -159,14 +175,14 @@ def main():
     ap.add_argument("--floor-vectors", type=int, default=None,
                     help="cumulative posting vectors to always search before any cutoff applies "
                          "(default: 4 * num_rerank per query)")
-    ap.add_argument("--barren-m", type=int, default=2,
+    ap.add_argument("--patience-m", type=int, default=2,
                     help="stop after this many consecutive postings contributing nothing (default 2)")
     ap.add_argument("--topn", type=int, default=50, help="fixed-depth baseline (default 50)")
     ap.add_argument("--spread-k", type=int, default=16,
                     help="number of front centroids used for the adaptive ratio spread")
     ap.add_argument("--spread-beta", type=float, default=0.0,
                     help="adaptive ratio exponent: alpha_eff = alpha * (d_k/d_1)^beta (default 0, off)")
-    ap.add_argument("--rules", default="none,topn,floor,ratio,hybrid,barren,combined",
+    ap.add_argument("--rules", default="none,topn,floor,ratio,hybrid,patience,combined",
                     help="comma-separated rules to evaluate")
     ap.add_argument("--dump", metavar="PREFIX", default=None,
                     help="write per-query simulation records to PREFIX.jsonl")
@@ -204,16 +220,16 @@ def main():
         "hybrid": lambda q: max(
             floor_depth(q["centroids"], floor_for(q)),
             ratio_depth(q["centroids"], args.alpha, args.spread_k, args.spread_beta)),
-        f"barren:m={args.barren_m}": lambda q: max(
+        f"patience:m={args.patience_m}": lambda q: max(
             floor_depth(q["centroids"], floor_for(q)),
-            barren_depth(q["centroids"], args.barren_m)),
+            patience_depth(q["centroids"], args.patience_m)),
         # Recommended: stop only when the vector floor is satisfied AND the ratio cutoff AND the
-        # barren-run cutoff have all triggered. Each signal fails on a different class of query;
+        # patience cutoff have all triggered. Each signal fails on a different class of query;
         # the max fails only where all of them fail at once.
         "combined": lambda q: max(
             floor_depth(q["centroids"], floor_for(q)),
             ratio_depth(q["centroids"], args.alpha, args.spread_k, args.spread_beta),
-            barren_depth(q["centroids"], args.barren_m)),
+            patience_depth(q["centroids"], args.patience_m)),
     }
 
     selected = {}

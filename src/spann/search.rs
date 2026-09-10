@@ -132,6 +132,8 @@ pub struct SearchParams {
     pub limit: NonZero<usize>,
     /// Z-score to use for estimated distance bound fed to rerank queue.
     pub z_score: f64,
+    /// If set, terminate early if this many postings lists fail to improve the result queue.
+    pub patience: Option<NonZero<usize>>,
 }
 
 /// Statistics for SPANN searches.
@@ -221,7 +223,6 @@ impl Searcher {
         }
 
         centroids = self.params.centroid_selector.select(centroids);
-        self.stats.postings_read = centroids.len();
 
         self.seen.clear();
         let dist_fn = reader
@@ -230,12 +231,19 @@ impl Searcher {
             .posting_coder
             .query_distance_asymmetric(reader.index().head_config().config().similarity, query);
         let mut result_queue = ResultQueue::new(self.params.limit.get(), self.params.z_score);
+        let patience_limit = self
+            .params
+            .patience
+            .unwrap_or(NonZero::new(centroids.len()).unwrap())
+            .get();
+        let mut patience = 0usize;
         let vector_len = reader.index().posting_vector_len();
         // Trace every selected centroid, even when its posting is missing or malformed, so that
         // trace entries stay aligned with centroid distance order.
         let mut postings = Vec::with_capacity(centroids.len());
         for (rank, c) in centroids.into_iter().enumerate() {
             let centroid_id: u32 = c.vertex().try_into().expect("centroid_id is a u32");
+            let mut any_contributions = false;
             // SAFETY: we are not performing any WT operations in between seeks.
             let data = match unsafe { posting_cursor.seek_exact_unsafe(centroid_id) } {
                 Some(Ok(data)) => data,
@@ -264,7 +272,18 @@ impl Searcher {
                 if !self.seen.insert(record_id) {
                     continue; // already seen
                 }
-                result_queue.push(record_id, dist_fn.estimated_distance(vector), rank + 1);
+                any_contributions |=
+                    result_queue.push(record_id, dist_fn.estimated_distance(vector), rank + 1);
+            }
+
+            self.stats.postings_read += 1;
+            if any_contributions {
+                patience = 0;
+            } else {
+                patience += 1;
+                if patience > patience_limit {
+                    break;
+                }
             }
         }
 
@@ -409,13 +428,13 @@ impl ResultQueue {
         }
     }
 
-    fn push(&mut self, vector_id: i64, mut e: EstimatedDistance, centroid_rank: usize) {
+    fn push(&mut self, vector_id: i64, mut e: EstimatedDistance, centroid_rank: usize) -> bool {
         e.error *= self.z_score;
         self.scored += 1;
         let n = ErrorBoundNeighbor::from_upper(vector_id, e, centroid_rank);
         if self.results.len() < self.max_len {
             self.results.push(n);
-            return;
+            return true;
         }
 
         let ub = *self.results.peek_max().unwrap();
@@ -434,9 +453,13 @@ impl ResultQueue {
             while self.overflow.peek_max().is_some_and(|x| ub < *x) {
                 self.overflow.pop_max();
             }
+            true
         } else if ErrorBoundNeighbor::from_lower(vector_id, e, centroid_rank) < ub {
             self.overflow
                 .push(ErrorBoundNeighbor::from_lower(vector_id, e, centroid_rank));
+            true
+        } else {
+            false
         }
     }
 

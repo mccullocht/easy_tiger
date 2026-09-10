@@ -36,6 +36,10 @@ pub struct SearchArgs {
     /// followed by little-endian f16 vector data.
     #[arg(short, long)]
     query_vectors: PathBuf,
+    /// Maximum number of queries to run. If unset, run all queries in the vector file.
+    #[arg(short, long)]
+    limit: Option<usize>,
+
     /// Number head (centroid) candidates in the search list.
     #[arg(long)]
     head_candidates: NonZero<usize>,
@@ -76,9 +80,9 @@ pub struct SearchArgs {
     /// recall at the cost of needing to rerank more vectors.
     #[arg(long, default_value_t = 1.0)]
     posting_rerank_z_score: f64,
-    /// Maximum number of queries to run. If unset, run all queries in the vector file.
-    #[arg(short, long)]
-    limit: Option<usize>,
+    /// If set exit the posting search after this many postings fail to impact the result queue.
+    #[arg(long)]
+    posting_patience: Option<NonZero<usize>>,
 
     #[command(flatten)]
     recall: RecallArgs,
@@ -127,6 +131,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             .posting_rerank_budget
             .unwrap_or(args.posting_candidates.get()),
         z_score: args.posting_rerank_z_score,
+        patience: args.posting_patience,
     };
     let recall_computer = RecallComputer::from_args(args.recall)?;
     if let Some(computer) = recall_computer.as_ref() {

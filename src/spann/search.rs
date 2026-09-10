@@ -249,20 +249,21 @@ impl Searcher {
                 Some(Ok(data)) => data,
                 Some(Err(e)) => {
                     warn!("failed to read posting for centroid {centroid_id}: {e}");
-                    postings.push(PostingTrace::new(c.distance()));
+                    postings.push(PostingTrace::new(centroid_id, c.distance()));
                     continue;
                 }
                 None => {
-                    postings.push(PostingTrace::new(c.distance()));
+                    postings.push(PostingTrace::new(centroid_id, c.distance()));
                     continue;
                 }
             };
             let Some(block) = PostingBlock::new(data, vector_len) else {
                 warn!("malformed posting block for centroid {centroid_id}");
-                postings.push(PostingTrace::new(c.distance()));
+                postings.push(PostingTrace::new(centroid_id, c.distance()));
                 continue;
             };
             postings.push(PostingTrace {
+                centroid_id,
                 distance: c.distance(),
                 vectors: block.len(),
                 contributing: 0,
@@ -298,15 +299,16 @@ impl Searcher {
     }
 
     /// Emit one JSON document describing this query's posting search when tracing is enabled via
-    /// the `ET_SEARCH_TRACE` environment variable. Each `centroids` entry is `[centroid distance,
-    /// posting vector count, contributing vector count]` in distance-from-query order.
+    /// the `ET_SEARCH_TRACE` environment variable. Each `centroids` entry is `[centroid id,
+    /// centroid distance, posting vector count, contributing vector count]` in distance-from-query
+    /// order.
     fn trace_search(&self, postings: &[PostingTrace]) {
         if !trace_enabled() {
             return;
         }
         let centroids = postings
             .iter()
-            .map(|p| serde_json::json!([p.distance, p.vectors, p.contributing]))
+            .map(|p| serde_json::json!([p.centroid_id, p.distance, p.vectors, p.contributing]))
             .collect::<Vec<_>>();
         let doc = serde_json::json!({
             "limit": self.params.limit.get() as u64,
@@ -480,10 +482,12 @@ impl ResultQueue {
     }
 }
 
-/// Per-centroid record for query tracing: distance from the query, the total number of vectors in
-/// the centroid's posting, and the number of those that contributed to the rerank candidate set.
+/// Per-centroid record for query tracing: the centroid id, its distance from the query, the total
+/// number of vectors in the centroid's posting, and the number of those that contributed to the
+/// rerank candidate set.
 #[derive(Debug, Copy, Clone)]
 struct PostingTrace {
+    centroid_id: u32,
     distance: f64,
     vectors: usize,
     contributing: usize,
@@ -491,8 +495,9 @@ struct PostingTrace {
 
 impl PostingTrace {
     /// Trace a centroid whose posting is missing, malformed, or not yet read.
-    fn new(distance: f64) -> Self {
+    fn new(centroid_id: u32, distance: f64) -> Self {
         Self {
+            centroid_id,
             distance,
             vectors: 0,
             contributing: 0,

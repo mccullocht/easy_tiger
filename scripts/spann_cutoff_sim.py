@@ -3,10 +3,11 @@
 
 Each trace line is one query:
     {"limit":10, "num_rerank":50, ..., "last_contribution_posting_rank":72,
-     "centroids":[[distance, posting vector count, contributing vector count], ...]}
+     "centroids":[[centroid id, distance, posting vector count, contributing vector count], ...]}
 
 with centroids in distance-from-query order. `contributing` is the number of vectors from that
-posting that are in the final rerank candidate pool (results + overflow).
+posting that are in the final rerank candidate pool (results + overflow). The leading centroid id
+is carried for debugging only; older traces omit it and both layouts are accepted.
 
 For each rule we compute the simulated search depth (number of postings opened) and report how
 many rerank candidates the cutoff drops, relative to the full pool.
@@ -44,6 +45,11 @@ def load_queries(path):
                 skipped += 1
                 continue
             if isinstance(q, dict) and "centroids" in q:
+                # Trace tuples are [centroid id, distance, vector count, contributing]. Older
+                # traces omit the id; backfill it with -1 so every tuple has a uniform 4 fields.
+                q["centroids"] = [
+                    list(c) if len(c) == 4 else [-1, *c] for c in q["centroids"]
+                ]
                 queries.append(q)
             else:
                 skipped += 1
@@ -55,14 +61,14 @@ def last_contributing_rank(q):
     if "last_contribution_posting_rank" in q:
         return q["last_contribution_posting_rank"]
     centroids = q["centroids"]
-    return max((i + 1 for i, (_, _, c) in enumerate(centroids) if c > 0), default=0)
+    return max((i + 1 for i, (_, _, _, c) in enumerate(centroids) if c > 0), default=0)
 
 
 def floor_depth(centroids, floor_vectors):
     """Depth needed to reach the cumulative posting-vector floor (always the full set if the
     floor is never reached)."""
     cumulative = 0
-    for i, (_, v, _) in enumerate(centroids):
+    for i, (_, _, v, _) in enumerate(centroids):
         cumulative += v
         if cumulative >= floor_vectors:
             return i + 1
@@ -75,11 +81,11 @@ def ratio_depth(centroids, alpha, spread_k=0, spread_beta=0.0):
     a per-query adaptive ratio (beta=0 disables)."""
     if not centroids:
         return 0
-    d1 = centroids[0][0]
+    d1 = centroids[0][1]
     if spread_beta and spread_k > 1 and len(centroids) >= 2:
-        dk = centroids[min(spread_k, len(centroids)) - 1][0]
+        dk = centroids[min(spread_k, len(centroids)) - 1][1]
         alpha = alpha * (dk / d1) ** spread_beta
-    for i, (d, _, _) in enumerate(centroids):
+    for i, (_, d, _, _) in enumerate(centroids):
         if d > alpha * d1:
             return i
     return len(centroids)
@@ -96,7 +102,7 @@ def patience_depth(centroids, m):
     candidate that was later outcompeted reads as non-contributing here. The real implementation
     counts the push, so it resets the run more often and stops no earlier than this simulation."""
     run = 0
-    for i, (_, _, c) in enumerate(centroids):
+    for i, (_, _, _, c) in enumerate(centroids):
         if c > 0:
             run = 0
         else:
@@ -125,12 +131,12 @@ def evaluate(queries, rules):
         per_query = []
         for q in queries:
             centroids = q["centroids"]
-            pool = sum(c for _, _, c in centroids)
+            pool = sum(c for _, _, _, c in centroids)
             depth = fn(q)
-            kept = sum(c for _, _, c in centroids[:depth])
+            kept = sum(c for _, _, _, c in centroids[:depth])
             dropped = pool - kept
-            vectors = sum(v for _, v, _ in centroids)
-            vectors_read = sum(v for _, v, _ in centroids[:depth])
+            vectors = sum(v for _, _, v, _ in centroids)
+            vectors_read = sum(v for _, _, v, _ in centroids[:depth])
             #if dropped / pool > 0.5:
             #    print(f"depth: {depth} pool: {pool} kept: {kept} read: {vectors_read}")
             #    for (i, c) in enumerate(q["centroids"]):
@@ -152,6 +158,7 @@ def evaluate(queries, rules):
                 "depth": depth,
                 "pool": pool,
                 "dropped": dropped,
+                "vectors_scored": vectors_read,
                 "last_contribution_posting_rank": last,
                 "undercovered": last > depth,
             })
@@ -159,6 +166,7 @@ def evaluate(queries, rules):
         saved = sorted(vec_saved_fracs)
         results[name] = {
             "mean_depth": mean_or(per_query, lambda r: r["depth"], 0),
+            "mean_vectors_scored": mean_or(per_query, lambda r: r["vectors_scored"], 0),
             "dropped_mean": mean_or(per_query, lambda r: r["dropped"] / r["pool"] if r["pool"] else 0.0, 0),
             "dropped_p95": pct(ratios, 95),
             "dropped_max": ratios[-1] if ratios else 0.0,
@@ -203,8 +211,8 @@ def main():
         sys.exit("no queries in trace")
     queries = [q for q in queries if q["centroids"]]
     n = len(queries)
-    total_pool = sum(sum(c for _, _, c in q["centroids"]) for q in queries)
-    total_vectors = sum(sum(v for _, v, _ in q["centroids"]) for q in queries)
+    total_pool = sum(sum(c for _, _, _, c in q["centroids"]) for q in queries)
+    total_vectors = sum(sum(v for _, _, v, _ in q["centroids"]) for q in queries)
     print(f"trace: {n} queries, {total_pool} pool vectors total, "
           f"{total_vectors} posting vectors total\n")
 
@@ -251,24 +259,26 @@ def main():
 
     results = evaluate(queries, selected)
 
-    header = (f"{'rule':<16} {'depth':>7} {'drop mean':>10} {'drop p95':>9} "
+    header = (f"{'rule':<16} {'depth':>7} {'vec scored':>11} {'drop mean':>10} {'drop p95':>9} "
               f"{'drop max':>9} {'drop wtd':>9} {'undercov':>9} {'vec saved':>10}")
     print(header)
     print("-" * len(header))
     for name, r in results.items():
-        print(f"{name:<16} {r['mean_depth']:>7.1f} {r['dropped_mean']:>10.1%} "
+        print(f"{name:<16} {r['mean_depth']:>7.1f} {r['mean_vectors_scored']:>11.1f} "
+              f"{r['dropped_mean']:>10.1%} "
               f"{r['dropped_p95']:>9.1%} {r['dropped_max']:>9.1%} {r['dropped_weighted']:>9.1%} "
               f"{r['undercovered_pct']:>8.1f}% {r['vectors_saved_mean_pct']:>9.1f}%")
 
-    print("\ncolumns: dropped ratio = rerank candidates cut / pool size; undercov = queries where "
-          "the cutoff is shallower than the last contributing posting; vec saved = posting "
-          "vectors not scanned, vs the full trace.")
+    print("\ncolumns: vec scored = mean posting vectors scanned per query; dropped ratio = rerank "
+          "candidates cut / pool size; undercov = queries where the cutoff is shallower than the "
+          "last contributing posting; vec saved = posting vectors not scanned, vs the full trace.")
 
     if args.dump:
         with open(f"{args.dump}.jsonl", "w") as f:
             for q, per_rule in zip(queries, zip(*(r["per_query"] for r in results.values()))):
                 record = {
                     "last_contribution_posting_rank": last_contributing_rank(q),
+                    "centroid_ids": [cid for cid, *_ in q["centroids"]],
                     "rules": {name: pr for name, pr in zip(results, per_rule)},
                 }
                 f.write(json.dumps(record) + "\n")

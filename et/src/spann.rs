@@ -13,7 +13,7 @@ use std::{io, sync::Arc};
 use clap::{Args, Subcommand};
 
 use crate::wt_args::WiredTigerArgs;
-use centroid_stats::centroid_stats;
+use centroid_stats::{CentroidStatsArgs, centroid_stats};
 use delete_sim::{DeleteSimArgs, delete_sim};
 use drop_index::drop_index;
 use export_head::{ExportHeadArgs, export_head};
@@ -41,7 +41,7 @@ pub enum Command {
     /// Search a SPANN-ish index.
     Search(SearchArgs),
     /// Print centroid assignment statistics.
-    CentroidStats,
+    CentroidStats(CentroidStatsArgs),
     /// Export centroid vectors from the head index as little-endian f32 values.
     ExportHead(ExportHeadArgs),
     /// Rebalance the SPANN index.
@@ -65,7 +65,7 @@ pub fn spann_command(args: SpannArgs) -> io::Result<()> {
         Command::InitIndex(args) => init_index(connection, index_name, args),
         Command::InsertVectors(args) => insert_vectors(connection, index_name, args),
         Command::Search(args) => search(connection, index_name, args),
-        Command::CentroidStats => centroid_stats(connection, index_name),
+        Command::CentroidStats(args) => centroid_stats(connection, index_name, args),
         Command::ExportHead(args) => export_head(connection, index_name, args),
         Command::Rebalance(args) => rebalance(connection, index_name, args),
         Command::Reassign(args) => reassign(connection, index_name, args),

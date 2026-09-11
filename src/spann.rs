@@ -3,7 +3,6 @@
 //! This implemented by clustering the input dataset and building a graph-based index over the
 //! select centroids. This index is used to build and navigate a posting index.
 
-pub mod bulk;
 pub mod centroid_stats;
 pub mod postings;
 pub mod rebalance;
@@ -13,7 +12,7 @@ use std::{ops::RangeInclusive, sync::Arc};
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
-use vectors::{F32VectorCoder, F32VectorCoding};
+use vectors::{F32VectorCoder, F32VectorCoding, rotate::Rotator};
 use wt_mdb::{
     Connection, Error, Result, Transaction,
     connection::{CreateOptionsBuilder, DropOptions},
@@ -45,8 +44,17 @@ pub struct IndexConfig {
     /// Centroids with more vectors than this will be split into 2 centroids and their vectors will
     /// be reassigned to other centroids. Vectors in nearby centroids may also be reassigned.
     pub max_centroid_len: usize,
-    /// If set, build a vector id keyed vector table in this format for re-ranking results.
-    pub rerank_format: Option<F32VectorCoding>,
+    /// Vector coding used to build a vector id keyed vector table for re-ranking results.
+    pub rerank_format: F32VectorCoding,
+    /// Seed for an orthogonal rotation applied to all vectors on ingress (both ingestion and
+    /// search).
+    ///
+    /// When set the index builds a [`Rotator`] sized to the head dimensions and applies it to
+    /// every f32 vector as it enters the index. The rotation preserves distances and inner
+    /// products but reshapes the component distribution to reduce quantization error. The seed
+    /// must remain fixed for the life of the index. `None` disables rotation.
+    #[serde(default)]
+    pub rotation_seed: Option<u64>,
 }
 
 impl IndexConfig {
@@ -98,21 +106,35 @@ impl TableNames {
     }
 }
 
-#[derive(Clone)]
 pub struct TableIndex {
     // Head vector index containing the centroids.
     head: Arc<TableGraphVectorIndex>,
     table_names: TableNames,
     config: IndexConfig,
+    // Orthogonal rotation applied to vectors on ingress, present iff `config.rotation_seed` is set.
+    rotator: Option<Rotator>,
 }
 
 impl TableIndex {
+    /// Build the ingress rotator described by `config`, sized to `dimensions`.
+    fn build_rotator(config: &IndexConfig, dimensions: usize) -> Option<Rotator> {
+        config
+            .rotation_seed
+            .map(|seed| Rotator::new(dimensions, seed))
+    }
+
     pub fn head_config(&self) -> &Arc<TableGraphVectorIndex> {
         &self.head
     }
 
     pub fn config(&self) -> &IndexConfig {
         &self.config
+    }
+
+    /// Orthogonal rotation applied to every f32 vector entering the index (ingestion and search),
+    /// or `None` when [`IndexConfig::rotation_seed`] is unset.
+    pub fn rotator(&self) -> Option<&Rotator> {
+        self.rotator.as_ref()
     }
 
     pub fn new_posting_coder(&self) -> Box<dyn F32VectorCoder> {
@@ -135,10 +157,12 @@ impl TableIndex {
         let config: IndexConfig = serde_json::from_str(
             &read_app_metadata(&txn, &table_names.postings).ok_or(Error::not_found_error())??,
         )?;
+        let rotator = Self::build_rotator(&config, head.config().dimensions.get());
         Ok(Self {
             head,
             table_names,
             config,
+            rotator,
         })
     }
 
@@ -150,10 +174,12 @@ impl TableIndex {
         let head = Arc::new(
             TableGraphVectorIndex::from_init(head_config, &Self::head_name(index_name)).unwrap(),
         );
+        let rotator = Self::build_rotator(&spann_config, head.config().dimensions.get());
         Self {
             head,
             table_names: TableNames::from_index_name(index_name),
             config: spann_config,
+            rotator,
         }
     }
 
@@ -211,10 +237,12 @@ impl TableIndex {
                     .into(),
             ),
         )?;
+        let rotator = Self::build_rotator(&spann_config, head_dimensions.get());
         Ok(Self {
             head,
             table_names,
             config: spann_config,
+            rotator,
         })
     }
 

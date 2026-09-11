@@ -4,12 +4,63 @@
 //! One note is that this does not include rotation inline in the quantization transform.
 //! Callers are expected to rotate the vectors if component distribution is not Gaussian, and
 //! they are expected to rotate the center (or compute the mean from rotated vectors).
+
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+mod scalar;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
 use rand::{RngExt, SeedableRng};
 
 use crate::{
     EstimatedDistance, F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity,
     float32, packing::TurboPacker,
 };
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum Kernel {
+    Scalar,
+    #[cfg(target_arch = "aarch64")]
+    Neon,
+    #[cfg(target_arch = "x86_64")]
+    Avx512,
+}
+
+impl Kernel {
+    const CANDIDATES: &'static [Self] = &[
+        #[cfg(target_arch = "aarch64")]
+        Self::Neon,
+        #[cfg(target_arch = "x86_64")]
+        Self::Avx512,
+        Self::Scalar,
+    ];
+
+    fn is_available(&self) -> bool {
+        match self {
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => true,
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 => {
+                use std::arch::is_x86_feature_detected as cpu_feature;
+                cpu_feature!("avx512f")
+                    && cpu_feature!("avx512bw")
+                    && cpu_feature!("avx512vpopcntdq")
+            }
+            Self::Scalar => true,
+        }
+    }
+}
+
+impl Default for Kernel {
+    fn default() -> Self {
+        Self::CANDIDATES
+            .iter()
+            .copied()
+            .find(Self::is_available)
+            .expect("scalar is always available")
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Default)]
 struct Header {
@@ -51,35 +102,37 @@ impl Header {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Coder;
+pub struct Coder(Kernel);
 
 impl Coder {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
 impl F32VectorCoder for Coder {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        let (unit_vector, l2_norm) = float32::l2_normalize(vector);
+        let l2_norm = float32::l2_norm(vector);
         let mut header = Header {
             l2_norm,
             ..Default::default()
         };
-        header.correction_term = unit_vector.iter().copied().map(f32::abs).sum::<f32>()
-            / (unit_vector.len() as f32).sqrt();
+        header.correction_term = match self.0 {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::neon::l1_norm_scaled(vector, l2_norm.recip()),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe { x86_64::avx512::l1_norm_scaled(vector, l2_norm.recip()) },
+            Kernel::Scalar => scalar::l1_norm_scaled(vector, l2_norm.recip()),
+        };
 
         let (hbytes, vbytes) = Header::split_mut(out);
-        let mut packer = crate::packing::TurboPacker::<1>::new(vbytes);
-        header.component_sum = unit_vector
-            .iter()
-            .map(|x| {
-                let s = x.to_bits() >> 31;
-                packer.push(s as u8);
-                s
-            })
-            .sum::<u32>();
-
+        header.component_sum = match self.0 {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::neon::quantize_and_pack(vector, vbytes),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe { x86_64::avx512::quantize_and_pack(vector, vbytes) },
+            Kernel::Scalar => scalar::quantize_and_pack(vector, vbytes),
+        };
         header.encode(hbytes);
     }
 
@@ -90,9 +143,15 @@ impl F32VectorCoder for Coder {
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         let (_, vector) = Header::decode(encoded);
         let magnitude = 1.0 / (out.len() as f32).sqrt();
-        for (q, o) in crate::packing::TurboUnpacker::<1>::new(vector).zip(out.iter_mut()) {
-            *o = f32::from_bits(magnitude.to_bits() ^ ((q as u32) << 31));
-        }
+        match self.0 {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::neon::decode(vector, magnitude, out),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                x86_64::avx512::decode(vector, magnitude, out);
+            },
+            Kernel::Scalar => scalar::decode(vector, magnitude, out),
+        };
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
@@ -116,12 +175,16 @@ impl F32VectorCoder for Coder {
 /// The stored l2 norms then recover the distance between the (possibly centered) input vectors.
 #[derive(Debug)]
 pub struct Distance {
+    k: Kernel,
     similarity: VectorSimilarity,
 }
 
 impl Distance {
     pub fn new(similarity: VectorSimilarity) -> Self {
-        Self { similarity }
+        Self {
+            k: Kernel::default(),
+            similarity,
+        }
     }
 }
 
@@ -131,21 +194,17 @@ impl VectorDistance for Distance {
         let (dheader, doc) = Header::decode(doc);
 
         let dim = query.len() * 8;
-        let (qhead, qtail) = query.as_chunks::<8>();
-        let (dhead, dtail) = doc.as_chunks::<8>();
-
-        let mut h = qhead
-            .iter()
-            .zip(dhead.iter())
-            .map(|(q, d)| (u64::from_ne_bytes(*q) ^ u64::from_ne_bytes(*d)).count_ones())
-            .sum::<u32>();
-        if !qtail.is_empty() {
-            h += qtail
-                .iter()
-                .zip(dtail.iter())
-                .map(|(&q, &d)| (q ^ d).count_ones())
-                .sum::<u32>();
-        }
+        let h = match self.k {
+            Kernel::Scalar => crate::kernels::scalar::bitstring_inner_product::<true>(query, doc),
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => {
+                crate::kernels::aarch64::neon::bitstring_inner_product::<true>(query, doc)
+            }
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                crate::kernels::x86_64::avx512::bitstring_inner_product::<true>(query, doc)
+            },
+        };
 
         // Each matching bit contributes 1/D and each mismatch -1/D.
         let quantized_ip = (dim as f64 - 2.0 * h as f64) / dim as f64;
@@ -163,6 +222,7 @@ impl VectorDistance for Distance {
 }
 
 pub struct QueryDistance {
+    k: Kernel,
     similarity: VectorSimilarity,
     query: Vec<u8>,
     l2_norm: f32,
@@ -195,6 +255,7 @@ impl QueryDistance {
             packer.push(q as u8);
         }
         Self {
+            k: Kernel::default(),
             similarity,
             query: crate::packing::bitplane_split4(&query4),
             l2_norm,
@@ -207,41 +268,17 @@ impl QueryDistance {
 
     #[inline]
     fn ip(&self, header: Header, doc: &[u8]) -> f64 {
-        let (qhead, qtail) = self.query.as_chunks::<64>();
-        let (dhead, dtail) = doc.as_chunks::<16>();
-        let mut bdot = [0u32; 4];
-        for (q, d) in qhead.iter().zip(dhead.iter()) {
-            let qp = q.as_chunks::<16>().0;
-            let q = [
-                u128::from_le_bytes(qp[0]),
-                u128::from_le_bytes(qp[1]),
-                u128::from_le_bytes(qp[2]),
-                u128::from_le_bytes(qp[3]),
-            ];
-            let d = u128::from_le_bytes(*d);
-            bdot[0] += (q[0] & d).count_ones();
-            bdot[1] += (q[1] & d).count_ones();
-            bdot[2] += (q[2] & d).count_ones();
-            bdot[3] += (q[3] & d).count_ones();
-        }
-
-        if !qtail.is_empty() {
-            let mut qit = qtail.chunks(qtail.len() / 4);
-            let q = [
-                qit.next().unwrap(),
-                qit.next().unwrap(),
-                qit.next().unwrap(),
-                qit.next().unwrap(),
-            ];
-            for (i, &d) in dtail.iter().enumerate() {
-                bdot[0] += (q[0][i] ^ d).count_ones();
-                bdot[1] += (q[1][i] ^ d).count_ones();
-                bdot[2] += (q[2][i] ^ d).count_ones();
-                bdot[3] += (q[3][i] ^ d).count_ones();
+        let ip_uint = match self.k {
+            Kernel::Scalar => crate::kernels::scalar::turbo_4x1_inner_product(&self.query, doc),
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => {
+                crate::kernels::aarch64::neon::turbo_4x1_inner_product(&self.query, doc)
             }
-        }
-
-        let ip_uint = bdot[0] + bdot[1] * 2 + bdot[2] * 4 + bdot[3] * 8;
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                crate::kernels::x86_64::avx512::turbo_4x1_inner_product(&self.query, doc)
+            },
+        };
         let ip = self.dim_sqrt * self.lower as f64
             - 2.0 * self.lower as f64 * header.component_sum as f64 / self.dim_sqrt
             + self.delta as f64 * self.component_sum as f64 / self.dim_sqrt

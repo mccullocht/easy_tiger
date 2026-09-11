@@ -125,64 +125,80 @@ fn print_posting_stats(
         .collect::<Result<Vec<_>>>()?;
     progress.finish_using_style();
 
-    let count = posting_stats.len() as f64;
-    let min = posting_stats
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, |acc, x| acc.min(x.1));
-    let max = posting_stats
-        .iter()
-        .copied()
-        .fold(f64::NEG_INFINITY, |acc, x| acc.max(x.1));
-    let mean = posting_stats.iter().map(|x| x.1).sum::<f64>() / count;
-    let stddev = (posting_stats
-        .iter()
-        .map(|x| (x.1 - mean).powi(2))
-        .sum::<f64>()
-        / count)
-        .sqrt();
-    let above_one_stddev = posting_stats
-        .iter()
-        .filter(|&&x| x.1 > mean + stddev)
-        .count();
-    let above_two_stddev = posting_stats
-        .iter()
-        .filter(|&&x| x.1 > mean + 2.0 * stddev)
-        .count();
+    let max_value_power = max_value_power(stats);
+    println!("Posting Sum");
+    print_distribution(posting_stats.iter().map(|x| (x.1, x.2)), max_value_power)?;
 
+    println!("Posting Length Normalized");
+    print_distribution(
+        posting_stats.iter().map(|x| (x.1 / x.2 as f64, x.2)),
+        max_value_power,
+    )?;
+
+    Ok(())
+}
+
+fn print_distribution(
+    it: impl ExactSizeIterator<Item = (f64, usize)> + Clone,
+    max_value_power: u8,
+) -> io::Result<()> {
+    let count = it.len() as f64;
+    let min = it.clone().fold(f64::INFINITY, |acc, x| acc.min(x.0));
+    let max = it.clone().fold(f64::NEG_INFINITY, |acc, x| acc.max(x.0));
+    let mean = it.clone().map(|x| x.0).sum::<f64>() / count;
+    let stddev = (it.clone().map(|x| (x.0 - mean).powi(2)).sum::<f64>() / count).sqrt();
+    let below_one_stddev = it.clone().filter(|&x| x.0 < mean - stddev).count();
+    let below_two_stddev = it.clone().filter(|&x| x.0 < mean - 2.0 * stddev).count();
+    let above_one_stddev = it.clone().filter(|&x| x.0 > mean + stddev).count();
+    let above_two_stddev = it.clone().filter(|&x| x.0 > mean + 2.0 * stddev).count();
     println!("  min:    {min:.4}");
     println!("  max:    {max:.4}");
     println!("  mean:   {mean:.4}");
     println!("  stddev: {stddev:.4}");
     println!(
-        "  centroids 1 stddev above mean: {above_one_stddev} ({:.1}%)",
-        100.0 * above_one_stddev as f64 / count
+        "    below σ {below_one_stddev:.4} ({:.1}%) 2σ {below_two_stddev:.4} ({:.1}%)",
+        100.0 * below_one_stddev as f64 / count,
+        100.0 * below_two_stddev as f64 / count
     );
     println!(
-        "  centroids 2 stddevs above mean: {above_two_stddev} ({:.1}%)",
+        "    above σ {above_one_stddev:.4} ({:.1}%) 2σ {above_two_stddev:.4} ({:.1}%)",
+        100.0 * above_one_stddev as f64 / count,
         100.0 * above_two_stddev as f64 / count
     );
-
+    if below_one_stddev > 0 {
+        println!("below one stddev histogram");
+        print_histogram(
+            max_value_power,
+            it.clone()
+                .filter(|&x| x.0 > mean + stddev)
+                .map(|x| x.1 as u32),
+        )?;
+    }
+    if below_two_stddev > 0 {
+        println!("below two stddev histogram");
+        print_histogram(
+            max_value_power,
+            it.clone()
+                .filter(|&x| x.0 > mean + stddev * 2.0)
+                .map(|x| x.1 as u32),
+        )?;
+    }
     if above_one_stddev > 0 {
-        println!();
         println!("above one stddev histogram");
         print_histogram(
-            max_value_power(stats),
-            posting_stats
-                .iter()
-                .filter(|&&x| x.1 > mean + stddev)
-                .map(|x| x.2 as u32),
+            max_value_power,
+            it.clone()
+                .filter(|&x| x.0 > mean + stddev)
+                .map(|x| x.1 as u32),
         )?;
     }
     if above_two_stddev > 0 {
-        println!();
         println!("above two stddev histogram");
         print_histogram(
-            max_value_power(stats),
-            posting_stats
-                .iter()
-                .filter(|&&x| x.1 > mean + stddev * 2.0)
-                .map(|x| x.2 as u32),
+            max_value_power,
+            it.clone()
+                .filter(|&x| x.0 > mean + stddev * 2.0)
+                .map(|x| x.1 as u32),
         )?;
     }
 

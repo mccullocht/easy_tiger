@@ -136,7 +136,7 @@ pub struct SearchParams {
 }
 
 /// Statistics for SPANN searches.
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, Serialize)]
 pub struct SearchStats {
     /// Stats from the search of the head graph.
     pub head: GraphSearchStats,

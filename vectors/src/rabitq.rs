@@ -81,6 +81,10 @@ impl Header {
     }
 
     fn encode(&self, out: &mut [u8; Self::LEN]) {
+        assert!(
+            self.l2_norm.is_finite() && self.correction_term.is_finite(),
+            "non-finite RaBitQ header: {self:?}"
+        );
         let parts = out.as_chunks_mut::<4>().0;
         parts[0] = self.l2_norm.to_le_bytes();
         parts[1] = self.correction_term.to_le_bytes();
@@ -111,18 +115,29 @@ impl Coder {
 }
 
 impl F32VectorCoder for Coder {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) -> crate::Result<()> {
+        crate::check_finite_vector(vector)?;
         let l2_norm = float32::l2_norm(vector);
+        if !l2_norm.is_finite() {
+            return Err(crate::Error::NonFiniteMagnitude);
+        }
         let mut header = Header {
             l2_norm,
             ..Default::default()
         };
+        // A zero (or norm-overflowing) vector has no meaningful direction; a zero scale yields a
+        // zero correction term rather than `sum(0 * inf) = NaN`.
+        let inv_norm = if l2_norm > 0.0 && l2_norm.is_finite() {
+            l2_norm.recip()
+        } else {
+            0.0
+        };
         header.correction_term = match self.0 {
             #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::neon::l1_norm_scaled(vector, l2_norm.recip()),
+            Kernel::Neon => aarch64::neon::l1_norm_scaled(vector, inv_norm),
             #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe { x86_64::avx512::l1_norm_scaled(vector, l2_norm.recip()) },
-            Kernel::Scalar => scalar::l1_norm_scaled(vector, l2_norm.recip()),
+            Kernel::Avx512 => unsafe { x86_64::avx512::l1_norm_scaled(vector, inv_norm) },
+            Kernel::Scalar => scalar::l1_norm_scaled(vector, inv_norm),
         };
 
         let (hbytes, vbytes) = Header::split_mut(out);
@@ -134,6 +149,7 @@ impl F32VectorCoder for Coder {
             Kernel::Scalar => scalar::quantize_and_pack(vector, vbytes),
         };
         header.encode(hbytes);
+        Ok(())
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -214,10 +230,12 @@ impl VectorDistance for Distance {
         let qnorm: f64 = qheader.l2_norm.into();
         let dnorm: f64 = dheader.l2_norm.into();
         let l2_dist = qnorm.powi(2) + dnorm.powi(2) - 2.0 * qnorm * dnorm * ip;
-        match self.similarity {
+        let d = match self.similarity {
             VectorSimilarity::Euclidean => l2_dist,
             VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
-        }
+        };
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, self.similarity.angular())
     }
 }
 
@@ -233,15 +251,25 @@ pub struct QueryDistance {
 }
 
 impl QueryDistance {
-    pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
+    pub fn new(similarity: VectorSimilarity, query: &[f32]) -> crate::Result<Self> {
+        if query.is_empty() {
+            return Err(crate::Error::EmptyVector);
+        }
+        crate::check_finite_vector(query)?;
         let (query, l2_norm) = float32::l2_normalize(query);
         let dim_sqrt = (query.len() as f64).sqrt();
         let (lower, upper) = query
             .iter()
             .copied()
             .fold((f32::MAX, f32::MIN), |acc, x| (acc.0.min(x), acc.1.max(x)));
-        let delta_inv = 15.0 / (upper - lower);
-        let delta = (upper - lower) / 15.0;
+        // A constant (or zero) normalized query has a zero range; collapse the scale so every
+        // component quantizes to 0 rather than dividing by zero.
+        let range = upper - lower;
+        let (delta, delta_inv) = if range > 0.0 {
+            (range / 15.0, 15.0 / range)
+        } else {
+            (0.0, 0.0)
+        };
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::from_seed([0xfe; 32]);
         let mut query4 = vec![0u8; query.len().div_ceil(2)];
         let mut component_sum = 0u32;
@@ -254,7 +282,7 @@ impl QueryDistance {
             component_sum += q;
             packer.push(q as u8);
         }
-        Self {
+        Ok(Self {
             k: Kernel::default(),
             similarity,
             query: crate::packing::bitplane_split4(&query4),
@@ -263,7 +291,7 @@ impl QueryDistance {
             delta,
             component_sum,
             dim_sqrt,
-        }
+        })
     }
 
     #[inline]
@@ -283,7 +311,9 @@ impl QueryDistance {
             - 2.0 * self.lower as f64 * header.component_sum as f64 / self.dim_sqrt
             + self.delta as f64 * self.component_sum as f64 / self.dim_sqrt
             - 2.0 * self.delta as f64 * ip_uint as f64 / self.dim_sqrt;
-        ip / header.correction_term as f64
+        // A zero correction term (zero doc vector) carries no directional information.
+        let ct = header.correction_term as f64;
+        if ct != 0.0 { ip / ct } else { 0.0 }
     }
 
     fn distance_internal(&self, header: Header, doc: &[u8]) -> f64 {
@@ -292,17 +322,24 @@ impl QueryDistance {
         // L2 Distance with two centered vectors needs no additional parameters or adjustments and
         // can be used to produce the cosine similarity.
         let l2_dist = dnorm.powi(2) + qnorm.powi(2) - 2.0 * qnorm * dnorm * self.ip(header, doc);
-        match self.similarity {
+        let d = match self.similarity {
             VectorSimilarity::Euclidean => l2_dist,
             VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
-        }
+        };
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, self.similarity.angular())
     }
 
     fn cos_error(&self, header: Header) -> f64 {
         let c = (header.correction_term as f64).powi(2);
+        // `c` is an inner product that should land in (0, 1]; quantization noise can push it to 0
+        // (degenerate doc) or slightly above 1. Guard both so the bound stays finite and >= 0.
+        if !c.is_finite() || c <= 0.0 {
+            return 0.0;
+        }
         // NB: the denominator should be (dim - 1).sqrt() but in practice this doesn't matter as dim
         // is typically very large.
-        ((1.0 - c) / c).sqrt() / self.dim_sqrt
+        ((1.0 - c).max(0.0) / c).sqrt() / self.dim_sqrt
     }
 }
 
@@ -315,13 +352,15 @@ impl QueryVectorDistance for QueryDistance {
     fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
         let (header, vector) = Header::decode(vector);
         let l2_error = 2.0 * self.l2_norm as f64 * header.l2_norm as f64 * self.cos_error(header);
+        let error = match self.similarity {
+            VectorSimilarity::Euclidean => l2_error,
+            // angular distance = l2_dist / 4
+            VectorSimilarity::Dot => 0.25 * l2_error,
+        };
+        debug_assert!(error.is_finite() && error >= 0.0);
         EstimatedDistance {
             distance: self.distance_internal(header, vector),
-            error: match self.similarity {
-                VectorSimilarity::Euclidean => l2_error,
-                // angular distance = l2_dist / 4
-                VectorSimilarity::Dot => 0.25 * l2_error,
-            },
+            error: if error.is_finite() { error.max(0.0) } else { 0.0 },
         }
     }
 }
@@ -391,7 +430,7 @@ mod test {
         let magnitude = 1.0 / (DIM as f32).sqrt();
         for _ in 0..64 {
             let v = gauss_vec(&mut rng, DIM);
-            let encoded = coder.encode(&v);
+            let encoded = coder.encode(&v).unwrap();
             assert_eq!(encoded.len(), coder.byte_len(DIM));
 
             let decoded = coder.decode(&encoded);
@@ -420,6 +459,60 @@ mod test {
         }
     }
 
+    /// Zero and constant vectors must encode to a finite header and yield finite distances rather
+    /// than the `l2_norm.recip()` / `0/0` NaNs the naive code produced.
+    #[test]
+    fn degenerate_inputs() {
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xdec0de);
+        let coder = Coder::new();
+
+        let mut one_hot = vec![0.0f32; DIM];
+        one_hot[0] = 1.0;
+        let degens: [(&str, Vec<f32>); 4] = [
+            ("zero", vec![0.0; DIM]),
+            ("const", vec![0.4; DIM]),
+            ("const_neg", vec![-0.4; DIM]),
+            ("one_hot", one_hot),
+        ];
+
+        for (name, v) in &degens {
+            let encoded = coder.encode(v).unwrap();
+            let (header, _) = Header::decode(&encoded);
+            assert!(
+                header.l2_norm.is_finite() && header.correction_term.is_finite(),
+                "{name}: non-finite header {header:?}"
+            );
+            let decoded = coder.decode(&encoded);
+            assert!(
+                decoded.iter().all(|x| x.is_finite()),
+                "{name}: non-finite decode"
+            );
+
+            let normal = crate::prepare_vector(gauss_vec(&mut rng, DIM), None, true, None).unwrap();
+            let en = coder.encode(&normal).unwrap();
+            for sim in VectorSimilarity::all() {
+                let sd = Distance::new(sim).distance(&encoded, &en);
+                assert!(sd.is_finite(), "{name} {sim}: symmetric distance {sd}");
+
+                // Degenerate as the query (exercises QueryDistance::new + cos_error).
+                let qd = QueryDistance::new(sim, v).unwrap();
+                let est = qd.estimated_distance(&en);
+                assert!(
+                    est.distance.is_finite() && est.error.is_finite() && est.error >= 0.0,
+                    "{name} {sim}: bad estimated distance {est:?}"
+                );
+
+                // Degenerate as the doc.
+                let qn = QueryDistance::new(sim, &normal).unwrap();
+                let est = qn.estimated_distance(&encoded);
+                assert!(
+                    est.distance.is_finite() && est.error.is_finite() && est.error >= 0.0,
+                    "{name} {sim}: bad estimated distance (doc) {est:?}"
+                );
+            }
+        }
+    }
+
     /// Prepare a correlated pair of vectors centered against `test_center`, the way callers now
     /// must before handing them to the codec.
     fn centered_pair(
@@ -431,11 +524,11 @@ mod test {
         let l2n = similarity.angular();
         let raw_a = gauss_vec(rng, DIM);
         // `correlated` needs a unit-length base for its rho-cosine to hold.
-        let base_a = crate::prepare_vector(&raw_a, None, true, None);
+        let base_a = crate::prepare_vector(&raw_a, None, true, None).unwrap();
         let raw_b = correlated(rng, &base_a, rho);
         (
-            crate::prepare_vector(&raw_a, None, l2n, Some(&center)),
-            crate::prepare_vector(&raw_b, None, l2n, Some(&center)),
+            crate::prepare_vector(&raw_a, None, l2n, Some(&center)).unwrap(),
+            crate::prepare_vector(&raw_b, None, l2n, Some(&center)).unwrap(),
         )
     }
 
@@ -450,8 +543,8 @@ mod test {
             let rho: f32 = rng.random_range(0.0f32..1.0);
             let (a, b) = centered_pair(&mut rng, similarity, rho);
 
-            let ea = coder.encode(&a);
-            let eb = coder.encode(&b);
+            let ea = coder.encode(&a).unwrap();
+            let eb = coder.encode(&b).unwrap();
             let (ha, _) = Header::decode(&ea);
             let (hb, _) = Header::decode(&eb);
             // Normalize errors by the norms so Euclidean and Dot bins are comparable.
@@ -490,8 +583,8 @@ mod test {
             let rho: f32 = rng.random_range(0.0f32..1.0);
             let (q, d) = centered_pair(&mut rng, similarity, rho);
 
-            let qd = QueryDistance::new(similarity, &q);
-            let ed = coder.encode(&d);
+            let qd = QueryDistance::new(similarity, &q).unwrap();
+            let ed = coder.encode(&d).unwrap();
             let (hd, _) = Header::decode(&ed);
             let qnorm = float32::l2_norm(&q) as f64;
             let scale = 2.0 * qnorm * hd.l2_norm as f64;
@@ -551,8 +644,8 @@ mod test {
 
             let mut ea = vec![0u8; coder.byte_len(DIM)];
             let mut eb = vec![0u8; coder.byte_len(DIM)];
-            coder.encode_to(&a, &mut ea);
-            coder.encode_to(&b, &mut eb);
+            coder.encode_to(&a, &mut ea).unwrap();
+            coder.encode_to(&b, &mut eb).unwrap();
             let (ha, va) = Header::decode(&ea);
             let (hb, vb) = Header::decode(&eb);
             let (anorm, bnorm) = (ha.l2_norm as f64, hb.l2_norm as f64);

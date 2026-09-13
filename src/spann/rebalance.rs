@@ -347,7 +347,8 @@ mod parallel {
                 let query = head_coder.decode(query);
                 Ok(self
                     .posting_format
-                    .query_distance_asymmetric(similarity, query))
+                    .query_distance_asymmetric(similarity, query)
+                    .expect("centroid vector is finite"))
             } else {
                 Ok(self
                     .posting_format

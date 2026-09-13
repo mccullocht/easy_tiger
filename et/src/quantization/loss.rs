@@ -33,8 +33,9 @@ pub fn loss(
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "loss"))
         .map(|i| {
-            let v = vectors::prepare_vector_from_f16(&vectors[i], None, false, mean.as_deref());
-            let encoded = coder.encode(&v);
+            let v = vectors::prepare_vector_from_f16(&vectors[i], None, false, mean.as_deref())
+                .expect("input vector must be finite");
+            let encoded = coder.encode(&v).expect("input vector must be finite");
             let q = coder.decode(&encoded);
             let (abs_error, sq_error, sq_magnitude) = v
                 .iter()

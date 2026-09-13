@@ -137,7 +137,8 @@ fn search_phase<Q: Send + Sync>(
             let query: &[f32] = &query_vectors[qi];
             let distance_fn = config
                 .format
-                .query_distance_asymmetric(config.similarity, query);
+                .query_distance_asymmetric(config.similarity, query)
+                .expect("query vector must be finite");
             let txn = connection.begin_transaction(None)?;
             let cursor = txn.open_record_cursor(table_name)?;
 

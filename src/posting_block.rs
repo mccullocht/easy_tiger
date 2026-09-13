@@ -292,7 +292,7 @@ pub fn encode_f32(
     let vector_len = coder.byte_len(dim);
     PostingBlockMeta::encode_block(
         vector_len,
-        vectors.map(|(id, v)| (id, coder.encode(v.as_ref()))),
+        vectors.map(|(id, v)| (id, coder.encode(v.as_ref()).expect("finite vector"))),
     )
 }
 

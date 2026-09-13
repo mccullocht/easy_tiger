@@ -89,16 +89,21 @@ pub fn distance_loss(
         .map(|i| {
             let query = query_vectors[i].to_f32_vec();
             // NB: centering f32 only makes distance comparison less efficient.
-            let f32_dist =
-                F32VectorCoding::F32.query_distance_asymmetric(args.similarity, query.clone());
+            let f32_dist = F32VectorCoding::F32
+                .query_distance_asymmetric(args.similarity, query.clone())
+                .expect("query vector must be finite");
             // Prepare the query the same way the docs are encoded: rotate then center.
-            let query = vectors::prepare_vector(&query, rotator.as_ref(), false, center.as_deref());
+            let query = vectors::prepare_vector(&query, rotator.as_ref(), false, center.as_deref())
+                .expect("query vector must be finite");
             let qdist = if args.quantize_query {
-                args.format
-                    .query_distance_symmetric(args.similarity, coder.encode(&query))
+                args.format.query_distance_symmetric(
+                    args.similarity,
+                    coder.encode(&query).expect("query vector must be finite"),
+                )
             } else {
                 args.format
                     .query_distance_asymmetric(args.similarity, query)
+                    .expect("query vector must be finite")
             };
             (f32_dist, qdist)
         })
@@ -109,12 +114,17 @@ pub fn distance_loss(
         .progress_with(progress_bar(vectors.len(), "scoring"))
         .map(|d| {
             let doc_f32 = vectors[d].to_f32_vec();
-            let doc_q = coder.encode(&vectors::prepare_vector(
-                &doc_f32,
-                rotator.as_ref(),
-                false,
-                center.as_deref(),
-            ));
+            let doc_q = coder
+                .encode(
+                    &vectors::prepare_vector(
+                        &doc_f32,
+                        rotator.as_ref(),
+                        false,
+                        center.as_deref(),
+                    )
+                    .expect("doc vector must be finite"),
+                )
+                .expect("doc vector must be finite");
             let mut stats = DistanceLossStats::default();
             for (f32_dist, qdist) in query_scorers.iter() {
                 let actual = f32_dist.as_ref().distance(bytemuck::cast_slice(&doc_f32));

@@ -252,16 +252,18 @@ impl GraphSearcher {
         // Center the query the same way the stored vectors were; every downstream query distance
         // consumes it.
         let query: &[f32] =
-            &vectors::prepare_vector(query, None, false, reader.config().centroid.as_deref());
+            &vectors::prepare_vector(query, None, false, reader.config().centroid.as_deref())
+                .expect("query vector must be finite");
         let nav_query = reader
             .config()
             .nav_format
-            .query_distance_asymmetric(reader.config().similarity, query);
+            .query_distance_asymmetric(reader.config().similarity, query)
+            .expect("query vector must be finite");
         let rerank_query = if self.params.num_rerank > 0 {
-            reader
-                .config()
-                .rerank_format
-                .map(|f| f.query_distance_asymmetric(reader.config().similarity, query))
+            reader.config().rerank_format.map(|f| {
+                f.query_distance_asymmetric(reader.config().similarity, query)
+                    .expect("query vector must be finite")
+            })
         } else {
             None
         };
@@ -582,8 +584,9 @@ mod test {
                 .map(|x| {
                     let v: Vec<f32> = x.into();
                     // Euclidean fixture: prepare = subtract the centroid (no normalization).
-                    let prepared = vectors::prepare_vector(&v, None, false, centroid.as_deref());
-                    let b = coder.encode(&prepared);
+                    let prepared =
+                        vectors::prepare_vector(&v, None, false, centroid.as_deref()).unwrap();
+                    let b = coder.encode(&prepared).unwrap();
                     TestVector {
                         vector: v,
                         prepared,

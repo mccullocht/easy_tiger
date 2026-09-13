@@ -6,7 +6,8 @@ use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 pub struct BinaryQuantizedVectorCoder;
 
 impl F32VectorCoder for BinaryQuantizedVectorCoder {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) -> crate::Result<()> {
+        crate::check_finite_vector(vector)?;
         for (c, o) in vector.chunks(8).zip(out.iter_mut()) {
             *o = c
                 .iter()
@@ -14,6 +15,7 @@ impl F32VectorCoder for BinaryQuantizedVectorCoder {
                 .filter_map(|(i, d)| if *d > 0.0 { Some(1u8 << i) } else { None })
                 .fold(0, |a, b| a | b)
         }
+        Ok(())
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -70,17 +72,21 @@ pub struct I1DotProductQueryDistance {
 }
 
 impl I1DotProductQueryDistance {
-    pub fn new(query: &[f32]) -> Self {
+    pub fn new(query: &[f32]) -> crate::Result<Self> {
         // TODO: this heavily overlaps with i8-scaled-uniform quantization. Figure out how to share
         // most of the implementation.
-        let max_abs = query
-            .iter()
-            .copied()
-            .map(f32::abs)
-            .max_by(f32::total_cmp)
-            .unwrap() as f64;
-        let scale = (f64::from(i8::MAX) / max_abs) as f32;
-        let inv_scale = max_abs / f64::from(i8::MAX);
+        crate::check_finite_vector(query)?;
+        if query.is_empty() {
+            return Err(crate::Error::EmptyVector);
+        }
+        // `fold(0.0, f32::max)` replaces a `total_cmp`-based `unwrap()` that panicked on an empty
+        // query and ranked a stray NaN as the maximum. A zero query gives a zero scale.
+        let max_abs = query.iter().copied().map(f32::abs).fold(0.0f32, f32::max) as f64;
+        let (scale, inv_scale) = if max_abs > 0.0 {
+            ((f64::from(i8::MAX) / max_abs) as f32, max_abs / f64::from(i8::MAX))
+        } else {
+            (0.0, 0.0)
+        };
         let quantized = query
             .iter()
             .copied()
@@ -89,11 +95,11 @@ impl I1DotProductQueryDistance {
         // Map values in the i1 vector into i8 space assuming an l2 norm of 1.
         // This also assumes the same quantized_scale for the i1 vector.
         let i1_value = (((1.0 / query.len() as f64).sqrt() as f32) * scale).round() as i8;
-        Self {
+        Ok(Self {
             quantized,
             quantized_scale: inv_scale,
             i1_value,
-        }
+        })
     }
 
     #[allow(dead_code)]
@@ -184,6 +190,8 @@ impl QueryVectorDistance for I1DotProductQueryDistance {
         // NB: we assume both the query and doc vectors have an l2 norm of 1.0
         let dot =
             self.dot_unnormalized_i32(vector) as f64 * self.quantized_scale * self.quantized_scale;
-        (-dot + 1.0) / 2.0
+        let d = (-dot + 1.0) / 2.0;
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, true)
     }
 }

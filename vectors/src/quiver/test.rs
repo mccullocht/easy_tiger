@@ -37,7 +37,7 @@ fn random_unit_vector(rng: &mut impl Rng, dimensions: usize) -> Vec<f32> {
 /// (see `assert_encode_matches_scalar`) are a separate concern from whether the accelerated and
 /// scalar *distance* kernels agree on a given pair of encoded vectors.
 fn encode_vector(vector: &[f32]) -> Vec<u8> {
-    new_scalar_coder().encode(vector)
+    new_scalar_coder().encode(vector).unwrap()
 }
 
 /// Assert that the platform-accelerated coder and the scalar reference coder produce equivalent
@@ -56,8 +56,8 @@ fn assert_encode_matches_scalar(trial: usize, vector: &[f32]) {
     let simd = new_coder();
     let scalar = new_scalar_coder();
 
-    let simd_encoded = simd.encode(vector);
-    let scalar_encoded = scalar.encode(vector);
+    let simd_encoded = simd.encode(vector).unwrap();
+    let scalar_encoded = scalar.encode(vector).unwrap();
 
     let (simd_header, simd_body) = Header::split_and_decode(&simd_encoded);
     let (scalar_header, scalar_body) = Header::split_and_decode(&scalar_encoded);
@@ -129,7 +129,7 @@ fn decode_roundtrip_is_sane() {
         let extra = rng.random_range(0..=128);
         let vector = random_unit_vector(&mut rng, BASE_DIMENSIONS + extra);
 
-        let encoded = coder.encode(&vector);
+        let encoded = coder.encode(&vector).unwrap();
         assert_eq!(encoded.len(), coder.byte_len(vector.len()));
 
         // Decode into a buffer sized from the known dimensionality directly: `dimensions()`
@@ -241,8 +241,8 @@ fn asymmetric_distance_matches_scalar_512() {
     for trial in 0..TRIALS {
         let query = random_unit_vector(&mut rng, BASE_DIMENSIONS);
         let doc = encode_vector(&random_unit_vector(&mut rng, BASE_DIMENSIONS));
-        let accelerated = new_asymmetric_distance(&query);
-        let scalar = new_scalar_asymmetric_distance(&query);
+        let accelerated = new_asymmetric_distance(&query).unwrap();
+        let scalar = new_scalar_asymmetric_distance(&query).unwrap();
         assert_eq!(
             accelerated.distance(&doc),
             scalar.distance(&doc),
@@ -258,8 +258,8 @@ fn asymmetric_distance_matches_scalar_tail_dimensions() {
         let dimensions = BASE_DIMENSIONS + rng.random_range(1..=128);
         let query = random_unit_vector(&mut rng, dimensions);
         let doc = encode_vector(&random_unit_vector(&mut rng, dimensions));
-        let accelerated = new_asymmetric_distance(&query);
-        let scalar = new_scalar_asymmetric_distance(&query);
+        let accelerated = new_asymmetric_distance(&query).unwrap();
+        let scalar = new_scalar_asymmetric_distance(&query).unwrap();
         assert_eq!(
             accelerated.distance(&doc),
             scalar.distance(&doc),
@@ -283,8 +283,8 @@ fn asymmetric_distance_handles_simd_chunk_boundary_tails() {
             let dimensions = chunk_multiple * 64 + remainder;
             let query = random_unit_vector(&mut rng, dimensions);
             let doc = encode_vector(&random_unit_vector(&mut rng, dimensions));
-            let accelerated = new_asymmetric_distance(&query);
-            let scalar = new_scalar_asymmetric_distance(&query);
+            let accelerated = new_asymmetric_distance(&query).unwrap();
+            let scalar = new_scalar_asymmetric_distance(&query).unwrap();
             assert_eq!(
                 accelerated.distance(&doc),
                 scalar.distance(&doc),
@@ -309,5 +309,57 @@ fn encode_handles_simd_chunk_boundary_tails() {
             let vector = random_unit_vector(&mut rng, dimensions);
             assert_encode_matches_scalar(dimensions, &vector);
         }
+    }
+}
+
+/// A constant vector has every `|d| == tau`, so no component is classified `strong` and the naive
+/// `strong_sum / strong_count` is `0.0 / 0.0 = NaN`. The zero vector hits the same path. Both must
+/// encode to a finite header and produce finite distances.
+#[test]
+fn degenerate_inputs_are_finite() {
+    let mut rng = seeded_rng();
+    let coder = new_coder();
+
+    let mut one_hot = vec![0.0f32; BASE_DIMENSIONS];
+    one_hot[0] = 1.0;
+    let degens: [(&str, Vec<f32>); 4] = [
+        ("zero", vec![0.0f32; BASE_DIMENSIONS]),
+        ("const_pos", vec![0.3f32; BASE_DIMENSIONS]),
+        ("const_neg", vec![-0.3f32; BASE_DIMENSIONS]),
+        ("one_hot", one_hot),
+    ];
+
+    for (name, v) in &degens {
+        let encoded = coder.encode(v).unwrap();
+        let (header, _) = Header::split_and_decode(&encoded);
+        assert!(
+            header.weak.is_finite() && header.strong.is_finite(),
+            "{name}: non-finite header weak={} strong={}",
+            header.weak,
+            header.strong
+        );
+
+        let mut decoded = vec![0.0f32; BASE_DIMENSIONS];
+        coder.decode_to(&encoded, &mut decoded);
+        assert!(
+            decoded.iter().all(|d| d.is_finite()),
+            "{name}: non-finite decode"
+        );
+
+        let normal = random_unit_vector(&mut rng, BASE_DIMENSIONS);
+        let en = encode_vector(&normal);
+
+        let sd = new_symmetric_distance().distance(&encoded, &en);
+        assert!(sd.is_finite(), "{name}: symmetric distance {sd}");
+        assert!((-1e-6..=1.0 + 1e-6).contains(&sd), "{name}: symmetric distance out of range {sd}");
+
+        // degenerate as the asymmetric query, and as the doc
+        let ad = new_asymmetric_distance(v).unwrap().distance(&en);
+        assert!(ad.is_finite(), "{name}: asymmetric distance (query) {ad}");
+        let ad = new_asymmetric_distance(&normal).unwrap().distance(&encoded);
+        assert!(ad.is_finite(), "{name}: asymmetric distance (doc) {ad}");
+
+        let qd = new_symmetric_query_distance(Cow::Owned(encoded.clone())).distance(&en);
+        assert!(qd.is_finite(), "{name}: symmetric query distance {qd}");
     }
 }

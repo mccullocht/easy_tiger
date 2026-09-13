@@ -441,7 +441,9 @@ fn diagnose_missing(
 
         // Distance from this record's query to each candidate centroid, using an asymmetric
         // quantized distance against the centroid's stored (encoded) vector.
-        let query_distance = hf_format.query_distance_asymmetric(similarity, &m.query);
+        let query_distance = hf_format
+            .query_distance_asymmetric(similarity, &m.query)
+            .expect("query vector must be finite");
         let mut best: Option<(u32, f64)> = None;
         if let Some(centroids) = centroids {
             for &centroid_id in centroids {

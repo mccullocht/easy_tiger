@@ -30,8 +30,8 @@ pub fn float32_benchmarks(c: &mut Criterion) {
     });
     for sim in VectorSimilarity::all() {
         let coder = F32VectorCoding::F32.coder();
-        let x = coder.encode(&a);
-        let y = coder.encode(&b);
+        let x = coder.encode(&a).unwrap();
+        let y = coder.encode(&b).unwrap();
         let dist = F32VectorCoding::F32.distance_symmetric(sim);
         group.bench_function(sim.to_string(), |b| {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
@@ -46,8 +46,8 @@ pub fn float32_benchmarks(c: &mut Criterion) {
     });
     for sim in VectorSimilarity::all() {
         let coder = F32VectorCoding::F32.coder();
-        let x = coder.encode(&a);
-        let y = coder.encode(&b);
+        let x = coder.encode(&a).unwrap();
+        let y = coder.encode(&b).unwrap();
         let mut bulk_docs_storage = vec![];
         bulk_docs_storage.resize_with(BULK_VECTORS, || y.clone());
         let bulk_docs = bulk_docs_storage
@@ -78,14 +78,14 @@ pub fn float16_benchmarks(c: &mut Criterion) {
 
     for sim in VectorSimilarity::all() {
         let coder = F32VectorCoding::F16.coder();
-        let x = coder.encode(&a);
-        let y = coder.encode(&b);
+        let x = coder.encode(&a).unwrap();
+        let y = coder.encode(&b).unwrap();
         let dist = F32VectorCoding::F16.distance_symmetric(sim);
         group.bench_function(&format!("doc/{sim}"), |b| {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
         });
 
-        let query_dist = F32VectorCoding::F16.query_distance_asymmetric(sim, &a);
+        let query_dist = F32VectorCoding::F16.query_distance_asymmetric(sim, &a).unwrap();
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| std::hint::black_box(query_dist.distance(&y)))
         });
@@ -100,8 +100,8 @@ pub fn float16_benchmarks(c: &mut Criterion) {
 
     for sim in VectorSimilarity::all() {
         let coder = F32VectorCoding::F16.coder();
-        let x = coder.encode(&a);
-        let y = coder.encode(&b);
+        let x = coder.encode(&a).unwrap();
+        let y = coder.encode(&b).unwrap();
         let mut bulk_docs_storage = vec![];
         bulk_docs_storage.resize_with(BULK_VECTORS, || y.clone());
         let bulk_docs = bulk_docs_storage
@@ -120,7 +120,7 @@ pub fn float16_benchmarks(c: &mut Criterion) {
             })
         });
 
-        let query_dist = F32VectorCoding::F16.query_distance_asymmetric(sim, &a);
+        let query_dist = F32VectorCoding::F16.query_distance_asymmetric(sim, &a).unwrap();
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| {
                 std::hint::black_box({
@@ -150,8 +150,8 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
 
     for encoding in encodings {
         let coder = encoding.coder();
-        let x = coder.encode(&a);
-        let y = coder.encode(&b);
+        let x = coder.encode(&a).unwrap();
+        let y = coder.encode(&b).unwrap();
 
         let mut group = c.benchmark_group(format!("{encoding}/distance"));
         group.throughput(Throughput::ElementsAndBytes {
@@ -163,7 +163,7 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
         });
 
-        let query_dist = encoding.query_distance_asymmetric(sim, &a);
+        let query_dist = encoding.query_distance_asymmetric(sim, &a).unwrap();
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| std::hint::black_box(query_dist.distance(&y)))
         });

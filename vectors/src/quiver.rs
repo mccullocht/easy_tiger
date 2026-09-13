@@ -57,6 +57,12 @@ impl Header {
     }
 
     fn encode(&self, raw: &mut [u8; Self::LEN]) {
+        assert!(
+            self.weak.is_finite() && self.strong.is_finite(),
+            "non-finite QuIVer header: weak={} strong={}",
+            self.weak,
+            self.strong
+        );
         let items = raw.as_mut().as_chunks_mut::<4>().0;
         items[0] = self.weak.to_le_bytes();
         items[1] = self.strong.to_le_bytes();
@@ -77,17 +83,36 @@ impl Header {
 struct Coder<K: Kernel>(K);
 
 impl<K: Kernel> F32VectorCoder for Coder<K> {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) -> crate::Result<()> {
+        crate::check_finite_vector(vector)?;
         let tau = self.0.tau(vector);
+        if !tau.is_finite() {
+            return Err(crate::Error::NonFiniteMagnitude);
+        }
 
         let (header_bytes, vector_bytes) = Header::split_mut(out);
         let (weak_sum, strong_sum, strong_count) = self.0.quantize(vector, tau, vector_bytes);
-        Header {
-            weak: weak_sum / (vector.len() - strong_count as usize) as f32,
-            strong: strong_sum / strong_count as f32,
+        // A constant vector has every `|d| == tau`, so no component is strong (or, mirrored, all
+        // are); guard both means against a 0/0 that would persist a NaN in the header.
+        let weak_count = vector.len() - strong_count as usize;
+        let header = Header {
+            weak: if weak_count > 0 {
+                weak_sum / weak_count as f32
+            } else {
+                0.0
+            },
+            strong: if strong_count > 0 {
+                strong_sum / strong_count as f32
+            } else {
+                0.0
+            },
             strong_count,
+        };
+        if !(header.weak.is_finite() && header.strong.is_finite()) {
+            return Err(crate::Error::NonFiniteMagnitude);
         }
-        .encode(header_bytes);
+        header.encode(header_bytes);
+        Ok(())
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -127,8 +152,14 @@ impl<K: Kernel> VectorDistance for Distance<K> {
         let norm_factor = ((q_mag as u64 * d_mag as u64) as f64).sqrt();
 
         // Divide raw distance by norm_factor to get value in [-1,+1], then invert and add to get a
-        // distance in [0,1].
-        (raw_dist as f64 / norm_factor) * -0.5 + 0.5
+        // distance in [0,1]. `norm_factor` is zero only for an empty vector.
+        let d = if norm_factor > 0.0 {
+            (raw_dist as f64 / norm_factor) * -0.5 + 0.5
+        } else {
+            0.5
+        };
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, true)
     }
 }
 
@@ -165,25 +196,26 @@ struct QueryDistance<K: Kernel> {
 }
 
 impl<K: Kernel> QueryDistance<K> {
-    pub fn new(kernel: K, query: &[f32]) -> Self {
-        let max = query
-            .iter()
-            .copied()
-            .map(f32::abs)
-            .max_by(f32::total_cmp)
-            .unwrap();
-        let scale = 127.0 / max;
+    pub fn new(kernel: K, query: &[f32]) -> crate::Result<Self> {
+        if query.is_empty() {
+            return Err(crate::Error::EmptyVector);
+        }
+        crate::check_finite_vector(query)?;
+        // `fold(0.0, f32::max)` both replaces the panic-on-empty `unwrap()` and avoids
+        // `total_cmp` ranking a stray NaN as the maximum. A zero query gives a zero scale.
+        let max = query.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
+        let scale = if max > 0.0 { 127.0 / max } else { 0.0 };
         let query = query
             .iter()
             .map(|&d| quantize_i8(d, scale))
             .collect::<Vec<_>>();
         let magnitude = query.iter().map(|&d| d as i32 * d as i32).sum::<i32>();
-        Self {
+        Ok(Self {
             kernel,
             query,
             scale,
             magnitude,
-        }
+        })
     }
 }
 
@@ -201,7 +233,14 @@ impl<K: Kernel> QueryVectorDistance for QueryDistance<K> {
             + (weak as i32 * weak as i32 * (self.query.len() as i32 - header.strong_count as i32));
         let distance_scale = (self.magnitude as f64 * doc_magnitude as f64).sqrt();
 
-        (raw_dist as f64 / distance_scale) * -0.5 + 0.5
+        // `distance_scale` is zero when the query or doc quantized to all zeros (zero vector).
+        let d = if distance_scale > 0.0 {
+            (raw_dist as f64 / distance_scale) * -0.5 + 0.5
+        } else {
+            0.5
+        };
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, true)
     }
 }
 
@@ -263,19 +302,21 @@ pub(crate) fn new_scalar_symmetric_query_distance<'a>(
     Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
 }
 
-pub fn new_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
+pub fn new_asymmetric_distance(query: &[f32]) -> crate::Result<Box<dyn QueryVectorDistance>> {
     #[cfg(target_arch = "aarch64")]
     if cpu_feature!("neon") && cpu_feature!("dotprod") {
-        return Box::new(QueryDistance::new(aarch64::Neon, query));
+        return Ok(Box::new(QueryDistance::new(aarch64::Neon, query)?));
     }
     #[cfg(target_arch = "x86_64")]
     if cpu_feature!("avx512f") && cpu_feature!("avx512vnni") && cpu_feature!("avx512bw") {
-        return Box::new(QueryDistance::new(x86_64::Avx512, query));
+        return Ok(Box::new(QueryDistance::new(x86_64::Avx512, query)?));
     }
-    Box::new(QueryDistance::new(scalar::Scalar, query))
+    Ok(Box::new(QueryDistance::new(scalar::Scalar, query)?))
 }
 
 #[cfg(test)]
-pub(crate) fn new_scalar_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
-    Box::new(QueryDistance::new(scalar::Scalar, query))
+pub(crate) fn new_scalar_asymmetric_distance(
+    query: &[f32],
+) -> crate::Result<Box<dyn QueryVectorDistance>> {
+    Ok(Box::new(QueryDistance::new(scalar::Scalar, query)?))
 }

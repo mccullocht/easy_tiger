@@ -205,7 +205,8 @@ impl Searcher {
             reader.index().rotator(),
             reader.head().config().similarity.angular(),
             None,
-        );
+        )
+        .expect("query vector must be finite");
         let query: &[f32] = &prepared_query;
 
         let mut centroids = self.head_searcher.search(query, reader.head())?;
@@ -222,7 +223,8 @@ impl Searcher {
             .index
             .config()
             .posting_coder
-            .query_distance_asymmetric(reader.index().head_config().config().similarity, query);
+            .query_distance_asymmetric(reader.index().head_config().config().similarity, query)
+            .expect("query vector must be finite");
         let mut result_queue = ResultQueue::new(self.params.limit.get(), self.params.z_score);
         let vector_len = reader.index().posting_vector_len();
         for c in centroids {
@@ -265,7 +267,9 @@ impl Searcher {
         }
 
         let format = reader.index().config().rerank_format;
-        let query = format.query_distance_asymmetric(reader.head.config().similarity, query);
+        let query = format
+            .query_distance_asymmetric(reader.head.config().similarity, query)
+            .expect("query vector must be finite");
         let mut raw_cursor = reader
             .transaction()
             .open_record_cursor(&reader.index().table_names.raw_vectors)?;

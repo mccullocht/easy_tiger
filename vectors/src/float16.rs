@@ -65,8 +65,10 @@ impl VectorCoder {
 }
 
 impl F32VectorCoder for VectorCoder {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) -> crate::Result<()> {
+        crate::check_finite_vector(vector)?;
         self.convert_and_encode(vector, None, out);
+        Ok(())
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -113,14 +115,18 @@ impl DotProductDistance {
 impl VectorDistance for DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let dot = self.dot(query, doc) as f64;
-        (-dot + 1.0) / 2.0
+        let d = (-dot + 1.0) / 2.0;
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, true)
     }
 }
 
 impl F16VectorDistance for DotProductDistance {
     fn distance_f16(&self, a: &[f16], b: &[f16]) -> f64 {
         let dot = self.dot(bytemuck::cast_slice(a), bytemuck::cast_slice(b)) as f64;
-        (-dot + 1.0) / 2.0
+        let d = (-dot + 1.0) / 2.0;
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, true)
     }
 }
 
@@ -146,7 +152,9 @@ impl<'a> DotProductQueryDistance<'a> {
 impl QueryVectorDistance for DotProductQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
         let dot = self.dot(vector) as f64;
-        (-dot + 1.0) / 2.0
+        let d = (-dot + 1.0) / 2.0;
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, true)
     }
 }
 
@@ -174,13 +182,17 @@ impl EuclideanDistance {
 
 impl VectorDistance for EuclideanDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        self.l2(query, doc) as f64
+        let d = self.l2(query, doc) as f64;
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, false)
     }
 }
 
 impl F16VectorDistance for EuclideanDistance {
     fn distance_f16(&self, a: &[f16], b: &[f16]) -> f64 {
-        self.l2(bytemuck::cast_slice(a), bytemuck::cast_slice(b)) as f64
+        let d = self.l2(bytemuck::cast_slice(a), bytemuck::cast_slice(b)) as f64;
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, false)
     }
 }
 
@@ -205,6 +217,8 @@ impl<'a> EuclideanQueryDistance<'a> {
 
 impl QueryVectorDistance for EuclideanQueryDistance<'_> {
     fn distance(&self, vector: &[u8]) -> f64 {
-        self.l2(vector).into()
+        let d: f64 = self.l2(vector).into();
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, false)
     }
 }

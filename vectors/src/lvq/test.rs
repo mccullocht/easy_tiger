@@ -66,7 +66,7 @@ macro_rules! tlvq_coder_test {
         #[test]
         fn $name() {
             let coder = <$coder>::new();
-            let encoded = coder.encode(&TEST_VECTOR);
+            let encoded = coder.encode(&TEST_VECTOR).unwrap();
             assert_abs_diff_eq!(
                 PrimaryVectorHeader::deserialize(&encoded).unwrap().0,
                 $primary_header
@@ -260,12 +260,12 @@ fn check_lvq_centered_distance(
 
     // The coder no longer centers; normalization already happened above (Dot), so this prepare
     // only subtracts the center.
-    let a = crate::prepare_vector(&a, None, false, Some(center));
-    let b = crate::prepare_vector(&b, None, false, Some(center));
+    let a = crate::prepare_vector(&a, None, false, Some(center)).unwrap();
+    let b = crate::prepare_vector(&b, None, false, Some(center)).unwrap();
 
     let coder = format.coder();
-    let enc_a = coder.encode(&a);
-    let enc_b = coder.encode(&b);
+    let enc_a = coder.encode(&a).unwrap();
+    let enc_b = coder.encode(&b).unwrap();
 
     let residual_norm = |orig: &[f32], enc: &[u8]| -> f64 {
         let decoded = coder.decode(enc);
@@ -292,6 +292,7 @@ fn check_lvq_centered_distance(
     // f32-query vs doc distance
     let qda = format
         .query_distance_asymmetric(sim, a.as_slice())
+        .unwrap()
         .distance(&enc_b);
     assert_abs_diff_eq!(f32_dist, qda, epsilon = abs_epsilon);
 }
@@ -330,7 +331,7 @@ fn null_vector_decode() {
         F32VectorCoding::TLVQ8,
     ] {
         let coder = coding.coder();
-        let encoded = coder.encode(&vector);
+        let encoded = coder.encode(&vector).unwrap();
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
     }
@@ -346,10 +347,68 @@ fn fill_vector_decode() {
         F32VectorCoding::TLVQ8,
     ] {
         let coder = coding.coder();
-        let encoded = coder.encode(&vector);
+        let encoded = coder.encode(&vector).unwrap();
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
+
+        // Distances between degenerate vectors must stay finite, not just decode.
+        for sim in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
+            let sd = coding.distance_symmetric(sim).distance(&encoded, &encoded);
+            assert!(sd.is_finite(), "{coding} {sim} self-distance not finite: {sd}");
+            let qd = coding
+                .query_distance_asymmetric(sim, vector.clone())
+                .unwrap()
+                .distance(&encoded);
+            assert!(qd.is_finite(), "{coding} {sim} query distance not finite: {qd}");
+        }
     }
+}
+
+/// Degenerate inputs (zero / constant / one-hot) must encode identically enough on the scalar and
+/// SIMD paths -- the zero-range guards live in kernel-independent code, so the accelerated kernels
+/// must never diverge into a NaN.
+#[test]
+fn degenerate_simd_parity() {
+    fn check<const B: usize>(coding: F32VectorCoding) {
+        let scalar = TurboPrimaryCoder::<B>::with_kernel(Kernel::Scalar);
+        for k in Kernel::accelerated() {
+            let accel = TurboPrimaryCoder::<B>::with_kernel(k);
+            for dim in [8usize, 32, 65, 128, 129, 256] {
+                let mut one_hot = vec![0.0f32; dim];
+                one_hot[0] = 1.0;
+                let inputs = [
+                    ("zero", vec![0.0f32; dim]),
+                    ("const_pos", vec![0.37f32; dim]),
+                    ("const_neg", vec![-0.37f32; dim]),
+                    ("one_hot", one_hot),
+                ];
+                for (name, v) in inputs {
+                    let se = scalar.encode(&v).unwrap();
+                    let ae = accel.encode(&v).unwrap();
+                    let sd = scalar.decode(&se);
+                    let ad = accel.decode(&ae);
+                    assert!(
+                        sd.iter().chain(ad.iter()).all(|x| x.is_finite()),
+                        "B={B} k={k:?} dim={dim} {name}: non-finite decode"
+                    );
+                    assert_abs_diff_eq!(sd.as_slice(), ad.as_slice(), epsilon = 1e-4);
+
+                    for sim in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
+                        let d = coding.distance_symmetric(sim).distance(&se, &ae);
+                        assert!(
+                            d.is_finite(),
+                            "B={B} k={k:?} dim={dim} {name} {sim}: non-finite distance"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    check::<1>(F32VectorCoding::TLVQ1);
+    check::<2>(F32VectorCoding::TLVQ2);
+    check::<4>(F32VectorCoding::TLVQ4);
+    check::<8>(F32VectorCoding::TLVQ8);
 }
 
 macro_rules! lvq_coding_simd_test {
@@ -384,8 +443,8 @@ macro_rules! lvq_coding_simd_test {
                             .sum::<f32>()
                             / decoded.len() as f32
                     };
-                    let smse = mse(&scoder.decode(&scoder.encode(&vec)));
-                    let omse = mse(&ocoder.decode(&ocoder.encode(&vec)));
+                    let smse = mse(&scoder.decode(&scoder.encode(&vec).unwrap()));
+                    let omse = mse(&ocoder.decode(&ocoder.encode(&vec).unwrap()));
                     assert!(
                         smse.abs_diff_eq(&omse, 1e-5),
                         "index {i} scalar mse {smse:.9} vs optimized mse {omse:.9} kernel {k:?} input vector {vec:?}"

@@ -535,13 +535,7 @@ mod parallel {
         // The partition centroids are arithmetic means of the (unit-length) posting vectors, and
         // the mean of unit vectors has norm < 1. Normalize so the split centroids live in the same
         // space the head index navigates when similarity is angular.
-        if txn_idx
-            .index()
-            .head_config()
-            .config()
-            .similarity
-            .angular()
-        {
+        if txn_idx.index().head_config().config().similarity.angular() {
             for centroid in centroids.iter_mut() {
                 vectors::prepare_vector_in_place(centroid, None, true, None);
             }

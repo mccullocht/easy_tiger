@@ -83,35 +83,20 @@ fn print_posting_stats(
     let posting_coder = index.config().posting_coder;
     let vector_len = index.posting_vector_len();
 
-    /// Per-thread worker that reads posting blocks through a private transaction.
-    struct Worker {
-        reader: TransactionIndex,
-    }
-
-    // XXX this is still bullshit.
-    impl Worker {
-        fn new(connection: &Arc<Connection>, index: &Arc<TableIndex>) -> Self {
-            Self {
-                reader: TransactionIndex::new(
-                    index,
-                    connection
-                        .begin_transaction(None)
-                        .expect("failed to begin a read transaction"),
-                ),
-            }
-        }
-    }
-
     let progress = progress_bar(centroids.len(), "sum posting distances");
     let posting_stats: Vec<(i64, f64, usize)> = centroids
         .into_par_iter()
         .map_init(
-            || Worker::new(connection, index),
-            |worker, (centroid_id, centroid)| {
-                let mut cursor = worker
-                    .reader
+            || {
+                TransactionIndex::new(
+                    index,
+                    connection.begin_transaction(None).expect("create txn"),
+                )
+            },
+            |reader, (centroid_id, centroid)| {
+                let mut cursor = reader
                     .transaction()
-                    .open_cursor::<u32, Vec<u8>>(worker.reader.index().postings_table_name())?;
+                    .open_cursor::<u32, Vec<u8>>(reader.index().postings_table_name())?;
                 let data = unsafe { cursor.seek_exact_unsafe(centroid_id as u32) }
                     .unwrap_or(Err(Error::not_found_error()))
                     .unwrap();

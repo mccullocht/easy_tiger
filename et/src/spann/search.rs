@@ -109,6 +109,7 @@ struct VectorIdTrace {
 #[derive(Serialize)]
 struct QueryTrace {
     query_index: usize,
+    recall: Option<f64>,
     stats: SearchStats,
     traces: Vec<VectorIdTrace>,
 }
@@ -347,10 +348,12 @@ impl SearcherState {
         )?;
         let duration = Instant::now() - start;
         let stats = self.searcher.stats();
+        let recall = recall_computer.map(|r| r.compute_recall(index, &results));
         if let (Some(traced_vectors), Some(trace)) = (traced_vectors, trace) {
             let query_trace = QueryTrace {
                 query_index: index,
                 stats,
+                recall,
                 traces: traced_vectors
                     .into_iter()
                     .zip(trace)
@@ -362,11 +365,7 @@ impl SearcherState {
                 serde_json::to_string(&query_trace).expect("QueryTrace is serializable")
             );
         }
-        Ok(AggregateSearchStats::new(
-            duration,
-            stats,
-            recall_computer.map(|r| r.compute_recall(index, &results)),
-        ))
+        Ok(AggregateSearchStats::new(duration, stats, recall))
     }
 }
 

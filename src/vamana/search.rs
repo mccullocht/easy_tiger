@@ -2,8 +2,8 @@
 
 use std::ops::{Add, AddAssign};
 
-use ahash::AHashSet;
-use serde::Serialize;
+use ahash::{AHashSet, HashMap};
+use serde::{Deserialize, Serialize};
 
 use super::{Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore};
 use crate::{Neighbor, vamana::PatienceParams};
@@ -42,6 +42,108 @@ impl Add for GraphSearchStats {
 impl AddAssign for GraphSearchStats {
     fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs
+    }
+}
+
+/// Maintains information about the status of a single traced vertex during a graph search.
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+pub enum VertexTrace {
+    /// The requested id does not exist in the graph.
+    NotFound,
+    /// The vertex exists in the graph but was never scored during the search: graph traversal
+    /// never reached it.
+    Unseen,
+    /// The vertex was scored during traversal at this distance (in nav/quantized space), but was
+    /// dropped from the candidate list before the end of the search.
+    Seen { distance: f64 },
+    /// The vertex survived in the candidate list to the end of the search but fell beyond the
+    /// `num_rerank` cut, so it was never reranked nor returned. The distance is in nav space.
+    RerankDropped { distance: f64 },
+    /// The vertex was returned at this rank in the result set. The distance is in rerank space if
+    /// reranking was performed, otherwise in nav space.
+    Found { rank: usize, distance: f64 },
+}
+
+/// The trace for a single traced vertex id.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub struct VertexIdTrace {
+    /// The requested vertex id.
+    pub id: i64,
+    /// The trace of the vertex through the search.
+    pub trace: VertexTrace,
+}
+
+/// The trace of a single graph search, with one entry per requested id in request order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphSearchTrace {
+    pub vectors: Vec<VertexIdTrace>,
+}
+
+/// Accumulates the state of in-flight traced vertex ids during a graph search.
+struct TraceState {
+    /// Traced vertex ids mapped to their position in the request and the nav-space distance they
+    /// were scored at, if they were scored at all.
+    ids: HashMap<i64, (usize, Option<f64>)>,
+}
+
+impl TraceState {
+    fn new(traced: &[i64]) -> Self {
+        Self {
+            ids: traced
+                .iter()
+                .enumerate()
+                .map(|(i, &id)| (id, (i, None)))
+                .collect(),
+        }
+    }
+
+    #[inline]
+    fn observe_score(&mut self, vertex: i64, distance: f64) {
+        if let Some((_, scored)) = self.ids.get_mut(&vertex) {
+            *scored = Some(distance);
+        }
+    }
+
+    /// Resolve the final trace for every traced id given the search results, the candidate list at
+    /// the end of traversal, and the nav vector store used to resolve vertex existence.
+    fn finish(
+        mut self,
+        results: &[Neighbor],
+        candidates: &CandidateList,
+        nav: &mut impl GraphVectorStore,
+    ) -> GraphSearchTrace {
+        let mut vectors: Vec<(usize, i64, VertexTrace)> = self
+            .ids
+            .drain()
+            .map(|(id, (rank, scored))| {
+                let trace = match scored {
+                    Some(distance) => match results.iter().position(|n| n.vertex() == id) {
+                        Some(rank) => VertexTrace::Found {
+                            rank,
+                            distance: results[rank].distance(),
+                        },
+                        // Any candidate still in the list was returned unless it fell beyond the
+                        // rerank cut (without rerank the full candidate list is the result).
+                        None if candidates.iter().any(|c| c.neighbor.vertex() == id) => {
+                            VertexTrace::RerankDropped { distance }
+                        }
+                        None => VertexTrace::Seen { distance },
+                    },
+                    None => match nav.get(id) {
+                        Some(_) => VertexTrace::Unseen,
+                        None => VertexTrace::NotFound,
+                    },
+                };
+                (rank, id, trace)
+            })
+            .collect();
+        vectors.sort_unstable_by_key(|(rank, _, _)| *rank);
+        GraphSearchTrace {
+            vectors: vectors
+                .into_iter()
+                .map(|(_, id, trace)| VertexIdTrace { id, trace })
+                .collect(),
+        }
     }
 }
 
@@ -177,7 +279,8 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, Options::default(), reader)
+        self.search_internal(query, Options::default(), None, reader)
+            .map(|(results, _)| results)
     }
 
     /// Search for `query` in graph `reader` with `options`.
@@ -191,7 +294,32 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, options, reader)
+        self.search_internal(query, options, None, reader)
+            .map(|(results, _)| results)
+    }
+
+    /// Search for `query` in the given graph `reader`, tracing the outcome of each id in `traced`
+    /// through the search.
+    ///
+    /// Returns the search results alongside a trace with one entry per requested id, in request
+    /// order. See [`VertexTrace`] for the possible outcomes.
+    pub fn search_with_trace(
+        &mut self,
+        query: &[f32],
+        reader: &impl GraphVectorIndex,
+        traced: &[i64],
+    ) -> Result<(Vec<Neighbor>, GraphSearchTrace)> {
+        self.seen.clear();
+        let trace = (!traced.is_empty()).then(|| TraceState::new(traced));
+        self.search_internal(query, Options::default(), trace, reader)
+            .map(|(results, trace)| {
+                (
+                    results,
+                    trace.unwrap_or(GraphSearchTrace {
+                        vectors: Vec::new(),
+                    }),
+                )
+            })
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -241,15 +369,18 @@ impl GraphSearcher {
             Options::default(),
             rerank_query.as_ref().map(|q| q.as_ref()),
             reader,
+            None,
         )
+        .map(|(results, _)| results)
     }
 
     fn search_internal<F: FnMut(i64) -> bool>(
         &mut self,
         query: &[f32],
         options: Options<F>,
+        trace: Option<TraceState>,
         reader: &impl GraphVectorIndex,
-    ) -> Result<Vec<Neighbor>> {
+    ) -> Result<(Vec<Neighbor>, Option<GraphSearchTrace>)> {
         // Center the query the same way the stored vectors were; every downstream query distance
         // consumes it.
         let query: &[f32] =
@@ -272,6 +403,7 @@ impl GraphSearcher {
             options,
             rerank_query.as_ref().map(|q| q.as_ref()),
             reader,
+            trace,
         )
     }
 
@@ -281,7 +413,8 @@ impl GraphSearcher {
         mut options: Options<F>,
         rerank_query: Option<&dyn QueryVectorDistance>,
         reader: &impl GraphVectorIndex,
-    ) -> Result<Vec<Neighbor>> {
+        mut trace: Option<TraceState>,
+    ) -> Result<(Vec<Neighbor>, Option<GraphSearchTrace>)> {
         // TODO: come up with a better way of managing re-used state.
         self.candidates.clear();
         if let Some(p) = self.patience.as_mut() {
@@ -298,9 +431,13 @@ impl GraphSearcher {
             let entry_vector = nav
                 .get(entry_point)
                 .unwrap_or_else(|| Err(Error::not_found_error()))?;
+            let entry_distance = nav_query.distance(entry_vector);
+            if let Some(t) = trace.as_mut() {
+                t.observe_score(entry_point, entry_distance);
+            }
             if self
                 .candidates
-                .add_unvisited(Neighbor::new(entry_point, nav_query.distance(entry_vector)))
+                .add_unvisited(Neighbor::new(entry_point, entry_distance))
             {
                 self.candidates_added += 1;
             }
@@ -316,9 +453,13 @@ impl GraphSearcher {
                 // Silently skip any seed that cannot be found in the graph.
                 _ => continue,
             };
+            let seed_distance = nav_query.distance(seed_vector);
+            if let Some(t) = trace.as_mut() {
+                t.observe_score(seed, seed_distance);
+            }
             if self
                 .candidates
-                .add_unvisited(Neighbor::new(seed, nav_query.distance(seed_vector)))
+                .add_unvisited(Neighbor::new(seed, seed_distance))
             {
                 self.candidates_added += 1;
             }
@@ -346,9 +487,13 @@ impl GraphSearcher {
                     self.skipped += 1;
                     continue;
                 };
+                let edge_distance = nav_query.distance(vec);
+                if let Some(t) = trace.as_mut() {
+                    t.observe_score(edge, edge_distance);
+                }
                 if self
                     .candidates
-                    .add_unvisited(Neighbor::new(edge, nav_query.distance(vec)))
+                    .add_unvisited(Neighbor::new(edge, edge_distance))
                 {
                     added += 1;
                 }
@@ -391,7 +536,8 @@ impl GraphSearcher {
             results.reserve(self.candidates.len());
             results.extend(self.candidates.iter().map(|c| c.neighbor));
         }
-        Ok(results)
+        let trace = trace.map(|t| t.finish(&results, &self.candidates, &mut nav));
+        Ok((results, trace))
     }
 }
 
@@ -536,7 +682,7 @@ mod test {
         EdgePruningConfig, EdgeType, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
     };
 
-    use super::{GraphSearchParams, GraphSearcher, Options};
+    use super::{GraphSearchParams, GraphSearcher, Options, VertexTrace};
 
     #[derive(Debug)]
     struct TestVector {
@@ -980,5 +1126,96 @@ mod test {
         // Top result distance should match the known nearest reachable vertex (squared dist ≈ 0.0681).
         let top_dist = normalize_scores(results)[0].distance();
         assert_eq!(top_dist, 0.06813, "unexpected top rerank distance");
+    }
+
+    fn traced_ids() -> Vec<i64> {
+        let mut traced: Vec<i64> = (0..256).collect();
+        traced.push(300);
+        traced
+    }
+
+    /// With a candidate list as large as the graph no scored vertex can be dropped from the list
+    /// and (without rerank) the whole list is returned: no vertex can be Seen or RerankDropped.
+    /// Also verifies traces are returned in request order.
+    #[test]
+    fn trace_all_found() {
+        let index = build_test_graph(4);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(256).unwrap(),
+            num_rerank: 0,
+            patience: None,
+        });
+        let traced = traced_ids();
+        let (results, trace) = searcher
+            .search_with_trace(&[-0.1, -0.1, -0.1, -0.1], &index.reader(), &traced)
+            .unwrap();
+
+        assert_eq!(trace.vectors.len(), traced.len());
+        let mut found = 0;
+        for (i, t) in trace.vectors.iter().enumerate() {
+            assert_eq!(t.id, traced[i], "traces not in request order");
+            if t.id == 300 {
+                assert_eq!(t.trace, VertexTrace::NotFound);
+                continue;
+            }
+            match t.trace {
+                VertexTrace::Found { .. } => found += 1,
+                VertexTrace::Unseen => {}
+                other => panic!("unreachable state {other:?}"),
+            }
+        }
+        assert_eq!(found, results.len());
+        // Every result is marked found at its rank with the result distance.
+        for (rank, r) in results.iter().enumerate() {
+            match trace.vectors[r.vertex() as usize].trace {
+                VertexTrace::Found {
+                    rank: found_rank,
+                    distance,
+                } => {
+                    assert_eq!(found_rank, rank);
+                    assert_eq!(distance, r.distance());
+                }
+                other => panic!("result vertex traced as {other:?}"),
+            }
+        }
+    }
+
+    /// With a candidate list of 8 and only the top 2 reranked, the vertices ranked 3-8 in the
+    /// final candidate list are dropped by the rerank stage and the rest are merely seen.
+    #[test]
+    fn trace_rerank_and_seen_states() {
+        let index = build_test_graph(4);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(8).unwrap(),
+            num_rerank: 2,
+            patience: None,
+        });
+        let traced = traced_ids();
+        let (results, trace) = searcher
+            .search_with_trace(&[-0.1, -0.1, -0.1, -0.1], &index.reader(), &traced)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        let mut found = 0;
+        let mut rerank_dropped = 0;
+        for t in &trace.vectors {
+            match t.trace {
+                VertexTrace::Found { rank, distance } => {
+                    assert_eq!(results[rank].vertex(), t.id);
+                    assert_eq!(distance, results[rank].distance());
+                    found += 1;
+                }
+                VertexTrace::RerankDropped { distance } => {
+                    assert!(distance >= 0.0);
+                    rerank_dropped += 1;
+                }
+                VertexTrace::Seen { distance } => assert!(distance >= 0.0),
+                VertexTrace::Unseen | VertexTrace::NotFound => {
+                    assert!(t.id == 300 || t.trace == VertexTrace::Unseen)
+                }
+            }
+        }
+        assert_eq!(found, 2);
+        assert_eq!(rerank_dropped, 6);
     }
 }

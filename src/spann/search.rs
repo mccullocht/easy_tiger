@@ -25,7 +25,7 @@ use crate::{
     },
     vamana::{
         GraphSearchParams, GraphVectorIndex,
-        search::{GraphSearchStats, GraphSearcher},
+        search::{GraphSearchStats, GraphSearchTrace, GraphSearcher, VertexTrace},
     },
 };
 
@@ -178,8 +178,13 @@ impl AddAssign for SearchStats {
 pub enum VectorTrace {
     /// The named vector does not exist in the index.
     NotFound,
-    /// The centroid that this vector is assigned to was not returned by the head query.
-    CentroidMissed { centroid_id: u32 },
+    /// The centroid that this vector is assigned to was not returned by the head query. `trace` is
+    /// the centroid's own trace through the head graph search, if the head search was traced.
+    CentroidMissed {
+        centroid_id: u32,
+        #[serde(default)]
+        trace: Option<VertexTrace>,
+    },
     /// The centroid was returned from the head index but pruned before searching postings.
     CentroidPruned { centroid_id: u32, rank: usize },
     /// The centroid was searched but the vector was not found.
@@ -233,6 +238,7 @@ struct SearchTraceState<'a> {
     centroids: HashMap<u32, Vec<i64>>,
     centroid_traces: HashMap<u32, CentroidTrace>,
     centroid_stats: TypedCursorGuard<'a, u32, CentroidCounts>,
+    head_trace: GraphSearchTrace,
 }
 
 impl<'a> SearchTraceState<'a> {
@@ -248,7 +254,16 @@ impl<'a> SearchTraceState<'a> {
         for (i, &v) in vectors.iter().enumerate() {
             if let Some(a) = cursor.seek_exact(v) {
                 let centroid_id = a?.primary_id;
-                ids.insert(v, (i, VectorTrace::CentroidMissed { centroid_id }));
+                ids.insert(
+                    v,
+                    (
+                        i,
+                        VectorTrace::CentroidMissed {
+                            centroid_id,
+                            trace: None,
+                        },
+                    ),
+                );
                 centroids.entry(centroid_id).or_default().push(v);
             } else {
                 ids.insert(v, (i, VectorTrace::NotFound));
@@ -259,6 +274,9 @@ impl<'a> SearchTraceState<'a> {
             centroids,
             centroid_traces: HashMap::new(),
             centroid_stats,
+            head_trace: GraphSearchTrace {
+                vectors: Vec::new(),
+            },
         })
     }
 
@@ -349,10 +367,28 @@ impl<'a> SearchTraceState<'a> {
     }
 
     fn into_trace(mut self) -> SearchTrace {
+        // Smear the head search trace of each centroid into the traced vectors assigned to it.
+        let head_traces: HashMap<u32, VertexTrace> = self
+            .head_trace
+            .vectors
+            .into_iter()
+            .map(|t| (t.id as u32, t.trace))
+            .collect();
         let mut vectors: Vec<(usize, i64, VectorTrace)> = self
             .ids
             .drain()
-            .map(|(id, (rank, trace))| (rank, id, trace))
+            .map(|(id, (rank, trace))| {
+                let trace = match trace {
+                    VectorTrace::CentroidMissed { centroid_id, .. } => {
+                        VectorTrace::CentroidMissed {
+                            centroid_id,
+                            trace: head_traces.get(&centroid_id).copied(),
+                        }
+                    }
+                    other => other,
+                };
+                (rank, id, trace)
+            })
             .collect();
         vectors.sort_unstable_by_key(|(rank, _, _)| *rank);
         let vectors = vectors
@@ -423,8 +459,20 @@ impl Searcher {
             None
         };
 
-        let mut centroids = self.head_searcher.search(query, reader.head())?;
+        // Trace the centroids of the traced vectors through the head search so the trace shows
+        // what happened to each of them (e.g. why a `CentroidMissed` vector's centroid was not
+        // returned by the head index).
+        let head_traced: Vec<i64> = trace_state
+            .as_ref()
+            .map(|t| t.centroids.keys().map(|&cid| cid as i64).collect())
+            .unwrap_or_default();
+        let (mut centroids, head_trace) =
+            self.head_searcher
+                .search_with_trace(query, reader.head(), &head_traced)?;
         self.stats.head = self.head_searcher.stats();
+        if let Some(t) = trace_state.as_mut() {
+            t.head_trace = head_trace;
+        }
         if centroids.is_empty() {
             return Ok((vec![], trace_state.map(|s| s.into_trace())));
         }

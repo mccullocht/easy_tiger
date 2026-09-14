@@ -25,7 +25,7 @@ use crate::{
     },
     vamana::{
         GraphSearchParams, GraphVectorIndex,
-        search::{GraphSearchStats, GraphSearcher},
+        search::{GraphSearchStats, GraphSearchTrace, GraphSearcher, VertexIdTrace},
     },
 };
 
@@ -226,6 +226,10 @@ pub struct SearchTrace {
     pub vectors: Vec<VectorIdTrace>,
     /// Information about every centroid observed by the head search, farthest to closest.
     pub centroids: Vec<CentroidTrace>,
+    /// The trace of each centroid assigned to at least one traced vector through the head graph
+    /// search, ordered by centroid id. Empty when the request is not traced.
+    #[serde(default)]
+    pub head: Vec<VertexIdTrace>,
 }
 
 struct SearchTraceState<'a> {
@@ -233,6 +237,7 @@ struct SearchTraceState<'a> {
     centroids: HashMap<u32, Vec<i64>>,
     centroid_traces: HashMap<u32, CentroidTrace>,
     centroid_stats: TypedCursorGuard<'a, u32, CentroidCounts>,
+    head_trace: GraphSearchTrace,
 }
 
 impl<'a> SearchTraceState<'a> {
@@ -259,6 +264,9 @@ impl<'a> SearchTraceState<'a> {
             centroids,
             centroid_traces: HashMap::new(),
             centroid_stats,
+            head_trace: GraphSearchTrace {
+                vectors: Vec::new(),
+            },
         })
     }
 
@@ -349,6 +357,9 @@ impl<'a> SearchTraceState<'a> {
     }
 
     fn into_trace(mut self) -> SearchTrace {
+        // The traced centroids are collected from a HashMap, so order by id for determinism.
+        let mut head: Vec<VertexIdTrace> = self.head_trace.vectors.into_iter().collect();
+        head.sort_unstable_by_key(|t| t.id);
         let mut vectors: Vec<(usize, i64, VectorTrace)> = self
             .ids
             .drain()
@@ -362,7 +373,11 @@ impl<'a> SearchTraceState<'a> {
         let mut centroids: Vec<CentroidTrace> =
             self.centroid_traces.drain().map(|(_, t)| t).collect();
         centroids.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
-        SearchTrace { vectors, centroids }
+        SearchTrace {
+            vectors,
+            centroids,
+            head,
+        }
     }
 }
 
@@ -423,8 +438,20 @@ impl Searcher {
             None
         };
 
-        let mut centroids = self.head_searcher.search(query, reader.head())?;
+        // Trace the centroids of the traced vectors through the head search so the trace shows
+        // what happened to each of them (e.g. why a `CentroidMissed` vector's centroid was not
+        // returned by the head index).
+        let head_traced: Vec<i64> = trace_state
+            .as_ref()
+            .map(|t| t.centroids.keys().map(|&cid| cid as i64).collect())
+            .unwrap_or_default();
+        let (mut centroids, head_trace) =
+            self.head_searcher
+                .search_with_trace(query, reader.head(), &head_traced)?;
         self.stats.head = self.head_searcher.stats();
+        if let Some(t) = trace_state.as_mut() {
+            t.head_trace = head_trace;
+        }
         if centroids.is_empty() {
             return Ok((vec![], trace_state.map(|s| s.into_trace())));
         }

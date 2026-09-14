@@ -210,11 +210,20 @@ pub struct CentroidTrace {
     pub num_traced_vectors: usize,
 }
 
+/// The trace for a single traced vector id.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub struct VectorIdTrace {
+    /// The requested vector's id.
+    pub id: i64,
+    /// The trace of the vector through the search.
+    pub trace: VectorTrace,
+}
+
 /// The trace of a single search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchTrace {
-    /// The trace for each requested vector id, ordered by the vector's rank in the request.
-    pub vectors: Vec<(i64, VectorTrace)>,
+    /// The trace for each requested vector, ordered by the vector's rank in the request.
+    pub vectors: Vec<VectorIdTrace>,
     /// Information about every centroid observed by the head search, farthest to closest.
     pub centroids: Vec<CentroidTrace>,
 }
@@ -348,7 +357,7 @@ impl<'a> SearchTraceState<'a> {
         vectors.sort_unstable_by_key(|(rank, _, _)| *rank);
         let vectors = vectors
             .into_iter()
-            .map(|(_, id, trace)| (id, trace))
+            .map(|(_, id, trace)| VectorIdTrace { id, trace })
             .collect();
         let mut centroids: Vec<CentroidTrace> =
             self.centroid_traces.drain().map(|(_, t)| t).collect();

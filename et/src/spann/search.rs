@@ -16,7 +16,7 @@ use easy_tiger::{
         TableIndex, TransactionIndex,
         search::{
             CentroidSelector, CentroidSelectorAlgorithm, CentroidTrace, SearchParams, SearchStats,
-            Searcher, VectorTrace,
+            Searcher, VectorIdTrace,
         },
     },
     vamana::{GraphSearchParams, PatienceParams},
@@ -96,13 +96,6 @@ pub struct SearchArgs {
     warmup_iters: usize,
     #[arg(long, default_value = "2")]
     test_iters: usize,
-}
-
-/// The trace for a single traced vector id.
-#[derive(Serialize)]
-struct VectorIdTrace {
-    id: i64,
-    trace: VectorTrace,
 }
 
 /// A single query's search trace, packaged for output.
@@ -355,11 +348,7 @@ impl SearcherState {
                 query_index: index,
                 stats,
                 recall,
-                traces: trace
-                    .vectors
-                    .into_iter()
-                    .map(|(id, trace)| VectorIdTrace { id, trace })
-                    .collect(),
+                traces: trace.vectors,
                 centroids: trace.centroids,
             };
             println!(

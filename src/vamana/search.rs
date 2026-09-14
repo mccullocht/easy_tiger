@@ -3,6 +3,7 @@
 use std::ops::{Add, AddAssign};
 
 use ahash::AHashSet;
+use serde::Serialize;
 
 use super::{Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore};
 use crate::{Neighbor, vamana::PatienceParams};
@@ -10,7 +11,7 @@ use crate::{Neighbor, vamana::PatienceParams};
 use vectors::QueryVectorDistance;
 use wt_mdb::{Error, Result};
 
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct GraphSearchStats {
     /// Total number of candidates vertices seen and nav scored.
     pub candidates: usize,

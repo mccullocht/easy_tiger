@@ -516,7 +516,7 @@ mod parallel {
             clustering_vectors.push(&scratch_vector);
         }
 
-        match crate::kmeans::balanced_binary_partition(
+        let mut centroids = match crate::kmeans::balanced_binary_partition(
             &clustering_vectors,
             100,
             txn_idx.index().config().min_centroid_len,
@@ -530,7 +530,23 @@ mod parallel {
                 );
                 r
             }
+        };
+
+        // The partition centroids are arithmetic means of the (unit-length) posting vectors, and
+        // the mean of unit vectors has norm < 1. Normalize so the split centroids live in the same
+        // space the head index navigates when similarity is angular.
+        if txn_idx
+            .index()
+            .head_config()
+            .config()
+            .similarity
+            .angular()
+        {
+            for centroid in centroids.iter_mut() {
+                vectors::prepare_vector_in_place(centroid, None, true, None);
+            }
         }
+        centroids
     }
 
     pub type TargetCentroidSourceMap = HashMap<u32, Vec<(u32, i64)>>;

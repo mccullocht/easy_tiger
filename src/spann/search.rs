@@ -25,7 +25,7 @@ use crate::{
     },
     vamana::{
         GraphSearchParams, GraphVectorIndex,
-        search::{GraphSearchStats, GraphSearchTrace, GraphSearcher, VertexIdTrace},
+        search::{GraphSearchStats, GraphSearchTrace, GraphSearcher, VertexTrace},
     },
 };
 
@@ -178,8 +178,13 @@ impl AddAssign for SearchStats {
 pub enum VectorTrace {
     /// The named vector does not exist in the index.
     NotFound,
-    /// The centroid that this vector is assigned to was not returned by the head query.
-    CentroidMissed { centroid_id: u32 },
+    /// The centroid that this vector is assigned to was not returned by the head query. `trace` is
+    /// the centroid's own trace through the head graph search, if the head search was traced.
+    CentroidMissed {
+        centroid_id: u32,
+        #[serde(default)]
+        trace: Option<VertexTrace>,
+    },
     /// The centroid was returned from the head index but pruned before searching postings.
     CentroidPruned { centroid_id: u32, rank: usize },
     /// The centroid was searched but the vector was not found.
@@ -226,10 +231,6 @@ pub struct SearchTrace {
     pub vectors: Vec<VectorIdTrace>,
     /// Information about every centroid observed by the head search, farthest to closest.
     pub centroids: Vec<CentroidTrace>,
-    /// The trace of each centroid assigned to at least one traced vector through the head graph
-    /// search, ordered by centroid id. Empty when the request is not traced.
-    #[serde(default)]
-    pub head: Vec<VertexIdTrace>,
 }
 
 struct SearchTraceState<'a> {
@@ -253,7 +254,16 @@ impl<'a> SearchTraceState<'a> {
         for (i, &v) in vectors.iter().enumerate() {
             if let Some(a) = cursor.seek_exact(v) {
                 let centroid_id = a?.primary_id;
-                ids.insert(v, (i, VectorTrace::CentroidMissed { centroid_id }));
+                ids.insert(
+                    v,
+                    (
+                        i,
+                        VectorTrace::CentroidMissed {
+                            centroid_id,
+                            trace: None,
+                        },
+                    ),
+                );
                 centroids.entry(centroid_id).or_default().push(v);
             } else {
                 ids.insert(v, (i, VectorTrace::NotFound));
@@ -357,13 +367,28 @@ impl<'a> SearchTraceState<'a> {
     }
 
     fn into_trace(mut self) -> SearchTrace {
-        // The traced centroids are collected from a HashMap, so order by id for determinism.
-        let mut head: Vec<VertexIdTrace> = self.head_trace.vectors.into_iter().collect();
-        head.sort_unstable_by_key(|t| t.id);
+        // Smear the head search trace of each centroid into the traced vectors assigned to it.
+        let head_traces: HashMap<u32, VertexTrace> = self
+            .head_trace
+            .vectors
+            .into_iter()
+            .map(|t| (t.id as u32, t.trace))
+            .collect();
         let mut vectors: Vec<(usize, i64, VectorTrace)> = self
             .ids
             .drain()
-            .map(|(id, (rank, trace))| (rank, id, trace))
+            .map(|(id, (rank, trace))| {
+                let trace = match trace {
+                    VectorTrace::CentroidMissed { centroid_id, .. } => {
+                        VectorTrace::CentroidMissed {
+                            centroid_id,
+                            trace: head_traces.get(&centroid_id).copied(),
+                        }
+                    }
+                    other => other,
+                };
+                (rank, id, trace)
+            })
             .collect();
         vectors.sort_unstable_by_key(|(rank, _, _)| *rank);
         let vectors = vectors
@@ -373,11 +398,7 @@ impl<'a> SearchTraceState<'a> {
         let mut centroids: Vec<CentroidTrace> =
             self.centroid_traces.drain().map(|(_, t)| t).collect();
         centroids.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
-        SearchTrace {
-            vectors,
-            centroids,
-            head,
-        }
+        SearchTrace { vectors, centroids }
     }
 }
 

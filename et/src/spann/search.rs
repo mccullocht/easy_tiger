@@ -19,7 +19,7 @@ use easy_tiger::{
             Searcher, VectorIdTrace,
         },
     },
-    vamana::{GraphSearchParams, PatienceParams, search::VertexIdTrace},
+    vamana::{GraphSearchParams, PatienceParams},
 };
 use half::slice::HalfFloatSliceExt;
 use serde::Serialize;
@@ -106,8 +106,6 @@ struct QueryTrace {
     stats: SearchStats,
     traces: Vec<VectorIdTrace>,
     centroids: Vec<CentroidTrace>,
-    /// Head (vamana) graph search traces for the centroids of missed traced vectors.
-    head: Vec<VertexIdTrace>,
 }
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
@@ -352,7 +350,6 @@ impl SearcherState {
                 recall,
                 traces: trace.vectors,
                 centroids: trace.centroids,
-                head: trace.head,
             };
             println!(
                 "{}",

@@ -18,6 +18,10 @@ pub struct CentroidStatsArgs {
     /// distance to its centroid, then distribution stats (min/max/mean/stddev) over those sums.
     #[arg(long, default_value_t = false)]
     posting_stats: bool,
+    /// Also print the ids of outlier centroids, i.e. those with an assignment count more than one
+    /// or two standard deviations above the mean.
+    #[arg(long, default_value_t = false)]
+    outlier_ids: bool,
 }
 
 pub fn centroid_stats(
@@ -40,6 +44,40 @@ pub fn centroid_stats(
 
     if args.posting_stats {
         print_posting_stats(&txn_idx, &connection, &stats)?;
+    }
+    if args.outlier_ids {
+        print_outlier_ids(&stats)?;
+    }
+    Ok(())
+}
+
+/// Print the ids of outlier centroids. Outliers are centroids whose assignment count is more than
+/// one (or two) standard deviations above the mean, matching the stddev split of the other
+/// distributions.
+fn print_outlier_ids(stats: &CentroidStats) -> io::Result<()> {
+    let counts: Vec<(usize, u32)> = stats.assignment_counts_iter().collect();
+    let count = counts.len() as f64;
+    let mean = counts.iter().map(|&(_, c)| c as f64).sum::<f64>() / count;
+    let stddev = (counts
+        .iter()
+        .map(|&(_, c)| (c as f64 - mean).powi(2))
+        .sum::<f64>()
+        / count)
+        .sqrt();
+
+    use std::io::Write;
+    let mut lock = std::io::stdout().lock();
+    for (label, threshold) in [
+        ("above one stddev", mean + stddev),
+        ("above two stddev", mean + 2.0 * stddev),
+    ] {
+        let ids = counts
+            .iter()
+            .filter(|&&(_, c)| c as f64 > threshold)
+            .map(|&(ci, _)| ci.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        writeln!(lock, "{label} outlier centroid ids: {ids}")?;
     }
     Ok(())
 }

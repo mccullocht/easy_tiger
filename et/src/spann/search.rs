@@ -15,8 +15,8 @@ use easy_tiger::{
     spann::{
         TableIndex, TransactionIndex,
         search::{
-            CentroidSelector, CentroidSelectorAlgorithm, SearchParams, SearchStats, Searcher,
-            VectorTrace,
+            CentroidSelector, CentroidSelectorAlgorithm, CentroidTrace, SearchParams, SearchStats,
+            Searcher, VectorTrace,
         },
     },
     vamana::{GraphSearchParams, PatienceParams},
@@ -112,6 +112,7 @@ struct QueryTrace {
     recall: Option<f64>,
     stats: SearchStats,
     traces: Vec<VectorIdTrace>,
+    centroids: Vec<CentroidTrace>,
 }
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
@@ -349,16 +350,17 @@ impl SearcherState {
         let duration = Instant::now() - start;
         let stats = self.searcher.stats();
         let recall = recall_computer.map(|r| r.compute_recall(index, &results));
-        if let (Some(traced_vectors), Some(trace)) = (traced_vectors, trace) {
+        if let (Some(_), Some(trace)) = (traced_vectors, trace) {
             let query_trace = QueryTrace {
                 query_index: index,
                 stats,
                 recall,
-                traces: traced_vectors
+                traces: trace
+                    .vectors
                     .into_iter()
-                    .zip(trace)
                     .map(|(id, trace)| VectorIdTrace { id, trace })
                     .collect(),
+                centroids: trace.centroids,
             };
             println!(
                 "{}",

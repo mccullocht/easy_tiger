@@ -19,7 +19,10 @@ use wt_mdb::{Result, TypedCursorGuard};
 use crate::{
     Neighbor,
     posting_block::PostingBlock,
-    spann::{CentroidAssignment, TransactionIndex, centroid_stats::CentroidStats},
+    spann::{
+        CentroidAssignment, TransactionIndex,
+        centroid_stats::{CentroidCounts, CentroidStats},
+    },
     vamana::{
         GraphSearchParams, GraphVectorIndex,
         search::{GraphSearchStats, GraphSearcher},
@@ -192,16 +195,45 @@ pub enum VectorTrace {
     Found { rank: usize, rank_delta: isize },
 }
 
-struct SearchTraceState {
-    ids: HashMap<i64, (usize, VectorTrace)>,
-    centroids: HashMap<u32, Vec<i64>>,
+/// Information about a single centroid observed during a traced search.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub struct CentroidTrace {
+    /// The centroid's id.
+    pub centroid_id: u32,
+    /// The distance from the query to the centroid.
+    pub distance: f64,
+    /// The number of vectors assigned to this centroid.
+    pub num_vectors: usize,
+    /// Whether this centroid's postings were searched.
+    pub selected: bool,
+    /// The number of traced vectors assigned to this centroid.
+    pub num_traced_vectors: usize,
 }
 
-impl SearchTraceState {
-    fn new(vectors: &[i64], index: &TransactionIndex) -> Result<Self> {
+/// The trace of a single search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchTrace {
+    /// The trace for each requested vector id, ordered by the vector's rank in the request.
+    pub vectors: Vec<(i64, VectorTrace)>,
+    /// Information about every centroid observed by the head search, farthest to closest.
+    pub centroids: Vec<CentroidTrace>,
+}
+
+struct SearchTraceState<'a> {
+    ids: HashMap<i64, (usize, VectorTrace)>,
+    centroids: HashMap<u32, Vec<i64>>,
+    centroid_traces: HashMap<u32, CentroidTrace>,
+    centroid_stats: TypedCursorGuard<'a, u32, CentroidCounts>,
+}
+
+impl<'a> SearchTraceState<'a> {
+    fn new(vectors: &[i64], index: &'a TransactionIndex) -> Result<Self> {
         let mut cursor = index.transaction().open_cursor::<i64, CentroidAssignment>(
             index.index().centroid_assignments_table_name(),
         )?;
+        let centroid_stats = index
+            .transaction()
+            .open_cursor::<u32, CentroidCounts>(index.index().centroid_stats_table_name())?;
         let mut ids = HashMap::<i64, (usize, VectorTrace)>::with_capacity(vectors.len());
         let mut centroids = HashMap::<u32, Vec<i64>>::with_capacity(vectors.len());
         for (i, &v) in vectors.iter().enumerate() {
@@ -213,25 +245,47 @@ impl SearchTraceState {
                 ids.insert(v, (i, VectorTrace::NotFound));
             }
         }
-        Ok(Self { ids, centroids })
+        Ok(Self {
+            ids,
+            centroids,
+            centroid_traces: HashMap::new(),
+            centroid_stats,
+        })
     }
 
-    fn observe_seen_centroids(&mut self, centroids: impl Iterator<Item = u32>) {
-        for (i, cid) in centroids.enumerate() {
-            let Some(ids) = self.centroids.get(&cid) else {
-                continue;
-            };
-            for id in ids {
-                self.ids.get_mut(id).unwrap().1 = VectorTrace::CentroidPruned {
-                    centroid_id: cid,
-                    rank: i,
-                };
+    fn observe_seen_centroids(&mut self, centroids: &[Neighbor]) {
+        for (i, n) in centroids.iter().enumerate() {
+            let cid = n.vertex() as u32;
+            if let Some(ids) = self.centroids.get(&cid) {
+                for id in ids {
+                    self.ids.get_mut(id).unwrap().1 = VectorTrace::CentroidPruned {
+                        centroid_id: cid,
+                        rank: i,
+                    };
+                }
             }
+            let num_vectors = match self.centroid_stats.seek_exact(cid) {
+                Some(Ok(counts)) => counts.total() as usize,
+                _ => 0,
+            };
+            self.centroid_traces.insert(
+                cid,
+                CentroidTrace {
+                    centroid_id: cid,
+                    distance: n.distance(),
+                    num_vectors,
+                    selected: false,
+                    num_traced_vectors: self.centroids.get(&cid).map_or(0, Vec::len),
+                },
+            );
         }
     }
 
     fn observe_selected_centroids(&mut self, centroids: impl Iterator<Item = u32>) {
         for cid in centroids {
+            if let Some(t) = self.centroid_traces.get_mut(&cid) {
+                t.selected = true;
+            }
             let Some(ids) = self.centroids.get(&cid) else {
                 continue;
             };
@@ -285,15 +339,21 @@ impl SearchTraceState {
         }
     }
 
-    fn into_trace(self) -> Vec<VectorTrace> {
-        let mut traces = vec![];
-        for (rank, trace) in self.ids.into_iter().map(|(_, s)| s) {
-            if rank >= traces.len() {
-                traces.resize(rank + 1, VectorTrace::NotFound);
-            }
-            traces[rank] = trace;
-        }
-        traces
+    fn into_trace(mut self) -> SearchTrace {
+        let mut vectors: Vec<(usize, i64, VectorTrace)> = self
+            .ids
+            .drain()
+            .map(|(id, (rank, trace))| (rank, id, trace))
+            .collect();
+        vectors.sort_unstable_by_key(|(rank, _, _)| *rank);
+        let vectors = vectors
+            .into_iter()
+            .map(|(_, id, trace)| (id, trace))
+            .collect();
+        let mut centroids: Vec<CentroidTrace> =
+            self.centroid_traces.drain().map(|(_, t)| t).collect();
+        centroids.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
+        SearchTrace { vectors, centroids }
     }
 }
 
@@ -334,7 +394,7 @@ impl Searcher {
         reader: &TransactionIndex,
         posting_cursor: &mut TypedCursorGuard<'_, u32, Vec<u8>>,
         traced: Option<&[i64]>,
-    ) -> Result<(Vec<Neighbor>, Option<Vec<VectorTrace>>)> {
+    ) -> Result<(Vec<Neighbor>, Option<SearchTrace>)> {
         self.stats = SearchStats::default();
 
         // Apply the ingress rotation (if configured) once, up front: every downstream distance
@@ -360,7 +420,7 @@ impl Searcher {
             return Ok((vec![], trace_state.map(|s| s.into_trace())));
         }
         if let Some(t) = trace_state.as_mut() {
-            t.observe_seen_centroids(centroids.iter().map(|n| n.vertex() as u32));
+            t.observe_seen_centroids(&centroids);
         }
 
         centroids = self.params.centroid_selector.select(centroids);
@@ -416,7 +476,7 @@ impl Searcher {
         result_queue: ResultQueue,
         mut trace_state: Option<SearchTraceState>,
         reader: &TransactionIndex,
-    ) -> Result<(Vec<Neighbor>, Option<Vec<VectorTrace>>)> {
+    ) -> Result<(Vec<Neighbor>, Option<SearchTrace>)> {
         if self.params.num_rerank == 0 {
             let results = result_queue.into_results();
             let traces = trace_state.map(|mut s| {

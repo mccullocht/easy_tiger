@@ -186,8 +186,10 @@ pub enum VectorTrace {
     PostingQueuePruned { distance: f64, error: f64 },
     /// The vector was reranked but ranked beyond the limit at the end.
     RerankPruned { rank: usize, distance: f64 },
-    /// The vector was found and returned.
-    Found,
+    /// The vector was found and returned at `rank` in the final result set. `rank_delta` is the
+    /// actual rank minus the expected rank recorded when the trace entry was created (its position
+    /// in the traced vector list); negative means it ranked better than expected.
+    Found { rank: usize, rank_delta: isize },
 }
 
 struct SearchTraceState {
@@ -251,17 +253,35 @@ impl SearchTraceState {
 
     fn observe_rerank(&mut self, results: &[Neighbor], limit: usize) {
         for (i, r) in results.iter().enumerate() {
-            let Some((_, trace)) = self.ids.get_mut(&r.vertex()) else {
+            let Some((expected_rank, trace)) = self.ids.get_mut(&r.vertex()) else {
                 continue;
             };
+            let rank_delta = i as isize - *expected_rank as isize;
             *trace = if i < limit {
-                VectorTrace::Found
+                VectorTrace::Found {
+                    rank: i,
+                    rank_delta,
+                }
             } else {
                 VectorTrace::RerankPruned {
                     rank: i,
                     distance: r.distance(),
                 }
             }
+        }
+    }
+
+    /// Mark every traced vector present in `results` as found at its rank in the result set. Used
+    /// when rerank is skipped and the posting-scored results are returned directly.
+    fn observe_results(&mut self, results: &[Neighbor]) {
+        for (i, r) in results.iter().enumerate() {
+            let Some((expected_rank, trace)) = self.ids.get_mut(&r.vertex()) else {
+                continue;
+            };
+            *trace = VectorTrace::Found {
+                rank: i,
+                rank_delta: i as isize - *expected_rank as isize,
+            };
         }
     }
 
@@ -398,10 +418,12 @@ impl Searcher {
         reader: &TransactionIndex,
     ) -> Result<(Vec<Neighbor>, Option<Vec<VectorTrace>>)> {
         if self.params.num_rerank == 0 {
-            return Ok((
-                result_queue.into_results(),
-                trace_state.map(|s| s.into_trace()),
-            ));
+            let results = result_queue.into_results();
+            let traces = trace_state.map(|mut s| {
+                s.observe_results(&results);
+                s.into_trace()
+            });
+            return Ok((results, traces));
         }
 
         let format = reader.index().config().rerank_format;

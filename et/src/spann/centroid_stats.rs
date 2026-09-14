@@ -111,9 +111,6 @@ fn print_posting_stats(
     progress.finish_using_style();
 
     let max_value_power = max_value_power(stats);
-    println!("Posting Sum");
-    print_distribution(posting_stats.iter().map(|x| (x.1, x.2)), max_value_power)?;
-
     println!("Posting Length Normalized");
     print_distribution(
         posting_stats.iter().map(|x| (x.1 / x.2 as f64, x.2)),

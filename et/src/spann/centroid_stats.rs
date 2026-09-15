@@ -18,8 +18,9 @@ pub struct CentroidStatsArgs {
     /// distance to its centroid, then distribution stats (min/max/mean/stddev) over those sums.
     #[arg(long, default_value_t = false)]
     posting_stats: bool,
-    /// Also print the ids of outlier centroids, i.e. those with an assignment count more than one
-    /// or two standard deviations above the mean.
+    /// Also print the ids of outlier centroids, i.e. those whose posting list's length normalized
+    /// distance to the centroid is more than one or two standard deviations above the mean. This
+    /// requires computing posting stats even if --posting-stats is not also passed.
     #[arg(long, default_value_t = false)]
     outlier_ids: bool,
 }
@@ -42,42 +43,8 @@ pub fn centroid_stats(
         stats.assignment_counts_iter().map(|(_, c)| c),
     )?;
 
-    if args.posting_stats {
-        print_posting_stats(&txn_idx, &connection, &stats)?;
-    }
-    if args.outlier_ids {
-        print_outlier_ids(&stats)?;
-    }
-    Ok(())
-}
-
-/// Print the ids of outlier centroids. Outliers are centroids whose assignment count is more than
-/// one (or two) standard deviations above the mean, matching the stddev split of the other
-/// distributions.
-fn print_outlier_ids(stats: &CentroidStats) -> io::Result<()> {
-    let counts: Vec<(usize, u32)> = stats.assignment_counts_iter().collect();
-    let count = counts.len() as f64;
-    let mean = counts.iter().map(|&(_, c)| c as f64).sum::<f64>() / count;
-    let stddev = (counts
-        .iter()
-        .map(|&(_, c)| (c as f64 - mean).powi(2))
-        .sum::<f64>()
-        / count)
-        .sqrt();
-
-    use std::io::Write;
-    let mut lock = std::io::stdout().lock();
-    for (label, threshold) in [
-        ("above one stddev", mean + stddev),
-        ("above two stddev", mean + 2.0 * stddev),
-    ] {
-        let ids = counts
-            .iter()
-            .filter(|&&(_, c)| c as f64 > threshold)
-            .map(|&(ci, _)| ci.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        writeln!(lock, "{label} outlier centroid ids: {ids}")?;
+    if args.posting_stats || args.outlier_ids {
+        print_posting_stats(&txn_idx, &connection, &stats, args.outlier_ids)?;
     }
     Ok(())
 }
@@ -92,6 +59,7 @@ fn print_posting_stats(
     txn_idx: &TransactionIndex,
     connection: &Arc<Connection>,
     stats: &CentroidStats,
+    print_outliers: bool,
 ) -> io::Result<()> {
     // Collect all of the non-empty centroid ids and their representative vectors.
     let centroids: Vec<(i64, Vec<f32>)> = {
@@ -151,26 +119,28 @@ fn print_posting_stats(
     let max_value_power = max_value_power(stats);
     println!("Posting Length Normalized");
     print_distribution(
-        posting_stats.iter().map(|x| (x.1 / x.2 as f64, x.2)),
+        posting_stats.iter().map(|x| (x.0, x.1 / x.2 as f64, x.2)),
         max_value_power,
+        print_outliers,
     )?;
 
     Ok(())
 }
 
 fn print_distribution(
-    it: impl ExactSizeIterator<Item = (f64, usize)> + Clone,
+    it: impl ExactSizeIterator<Item = (i64, f64, usize)> + Clone,
     max_value_power: u8,
+    print_outliers: bool,
 ) -> io::Result<()> {
     let count = it.len() as f64;
-    let min = it.clone().fold(f64::INFINITY, |acc, x| acc.min(x.0));
-    let max = it.clone().fold(f64::NEG_INFINITY, |acc, x| acc.max(x.0));
-    let mean = it.clone().map(|x| x.0).sum::<f64>() / count;
-    let stddev = (it.clone().map(|x| (x.0 - mean).powi(2)).sum::<f64>() / count).sqrt();
-    let below_one_stddev = it.clone().filter(|&x| x.0 < mean - stddev).count();
-    let below_two_stddev = it.clone().filter(|&x| x.0 < mean - 2.0 * stddev).count();
-    let above_one_stddev = it.clone().filter(|&x| x.0 > mean + stddev).count();
-    let above_two_stddev = it.clone().filter(|&x| x.0 > mean + 2.0 * stddev).count();
+    let min = it.clone().fold(f64::INFINITY, |acc, x| acc.min(x.1));
+    let max = it.clone().fold(f64::NEG_INFINITY, |acc, x| acc.max(x.1));
+    let mean = it.clone().map(|x| x.1).sum::<f64>() / count;
+    let stddev = (it.clone().map(|x| (x.1 - mean).powi(2)).sum::<f64>() / count).sqrt();
+    let below_one_stddev = it.clone().filter(|&x| x.1 < mean - stddev).count();
+    let below_two_stddev = it.clone().filter(|&x| x.1 < mean - 2.0 * stddev).count();
+    let above_one_stddev = it.clone().filter(|&x| x.1 > mean + stddev).count();
+    let above_two_stddev = it.clone().filter(|&x| x.1 > mean + 2.0 * stddev).count();
     println!("  min:    {min:.4}");
     println!("  max:    {max:.4}");
     println!("  mean:   {mean:.4}");
@@ -190,8 +160,8 @@ fn print_distribution(
         print_histogram(
             max_value_power,
             it.clone()
-                .filter(|&x| x.0 > mean + stddev)
-                .map(|x| x.1 as u32),
+                .filter(|&x| x.1 > mean + stddev)
+                .map(|x| x.2 as u32),
         )?;
     }
     if below_two_stddev > 0 {
@@ -199,8 +169,8 @@ fn print_distribution(
         print_histogram(
             max_value_power,
             it.clone()
-                .filter(|&x| x.0 > mean + stddev * 2.0)
-                .map(|x| x.1 as u32),
+                .filter(|&x| x.1 > mean + stddev * 2.0)
+                .map(|x| x.2 as u32),
         )?;
     }
     if above_one_stddev > 0 {
@@ -208,18 +178,34 @@ fn print_distribution(
         print_histogram(
             max_value_power,
             it.clone()
-                .filter(|&x| x.0 > mean + stddev)
-                .map(|x| x.1 as u32),
+                .filter(|&x| x.1 > mean + stddev)
+                .map(|x| x.2 as u32),
         )?;
+        if print_outliers {
+            let outliers = it
+                .clone()
+                .filter(|x| x.1 > mean + stddev)
+                .map(|x| x.0 as u32)
+                .collect::<Vec<_>>();
+            println!("centroids: {outliers:?}");
+        }
     }
     if above_two_stddev > 0 {
         println!("above two stddev histogram");
         print_histogram(
             max_value_power,
             it.clone()
-                .filter(|&x| x.0 > mean + stddev * 2.0)
-                .map(|x| x.1 as u32),
+                .filter(|&x| x.1 > mean + stddev * 2.0)
+                .map(|x| x.2 as u32),
         )?;
+        if print_outliers {
+            let outliers = it
+                .clone()
+                .filter(|x| x.1 > mean + stddev * 2.0)
+                .map(|x| x.0 as u32)
+                .collect::<Vec<_>>();
+            println!("centroids: {outliers:?}");
+        }
     }
 
     Ok(())

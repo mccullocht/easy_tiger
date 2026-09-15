@@ -207,6 +207,7 @@ pub struct Options<F: FnMut(i64) -> bool> {
     seeds: smallvec::SmallVec<[i64; 4]>,
     result_scratch: Option<Vec<Neighbor>>,
     trace: Vec<i64>,
+    return_seen: bool,
 }
 
 impl Default for Options<fn(i64) -> bool> {
@@ -216,6 +217,7 @@ impl Default for Options<fn(i64) -> bool> {
             seeds: smallvec::SmallVec::new(),
             result_scratch: None,
             trace: Vec::new(),
+            return_seen: false,
         }
     }
 }
@@ -229,6 +231,7 @@ impl<F: FnMut(i64) -> bool> Options<F> {
             seeds: smallvec::SmallVec::new(),
             result_scratch: None,
             trace: Vec::new(),
+            return_seen: false,
         }
     }
 
@@ -251,6 +254,16 @@ impl<F: FnMut(i64) -> bool> Options<F> {
     /// order. See [`VertexTrace`] for the possible outcomes.
     pub fn with_trace(mut self, traced: impl IntoIterator<Item = i64>) -> Self {
         self.trace = traced.into_iter().collect();
+        self
+    }
+
+    /// When set to true, return all vectors seen during the search instead of the top results.
+    ///
+    /// This is useful for insertion paths where it is useful to have a very diverse pool of results
+    /// to input to pruning. Note that if reranking is configured the seen candidates are not
+    /// truncated before reranking which may affect throughput.
+    pub fn return_seen(mut self, return_seen: bool) -> Self {
+        self.return_seen = return_seen;
         self
     }
 
@@ -430,9 +443,9 @@ impl GraphSearcher {
         nav_query: &dyn QueryVectorDistance,
         graph: &mut impl Graph,
         nav: &mut impl GraphVectorStore,
-        options: &Options<F>,
+        options: &mut Options<F>,
         mut trace: Option<&mut TraceState>,
-    ) -> Result<()> {
+    ) -> Result<Option<Vec<Neighbor>>> {
         self.candidates.clear();
         if let Some(p) = self.patience.as_mut() {
             p.clear()
@@ -440,6 +453,12 @@ impl GraphSearcher {
         self.candidates_added = 0;
         self.visited = 0;
         self.filtered = 0;
+
+        let mut seen_candidates = if options.return_seen {
+            Some(options.result_buffer())
+        } else {
+            None
+        };
 
         // Add the entry point and any seeds to the candidate list.
         for vertex in graph
@@ -463,8 +482,11 @@ impl GraphSearcher {
             if self.candidates.add_unvisited(neighbor) {
                 self.candidates_added += 1;
             }
+            if let Some(sc) = seen_candidates.as_mut() {
+                sc.push(neighbor);
+            }
         }
-        Ok(())
+        Ok(seen_candidates)
     }
 
     fn rerank_results(
@@ -495,7 +517,13 @@ impl GraphSearcher {
     ) -> Result<(Vec<Neighbor>, Option<GraphSearchTrace>)> {
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
-        self.initialize_search(nav_query, &mut graph, &mut nav, &options, trace.as_mut())?;
+        let mut seen_candidates = self.initialize_search(
+            nav_query,
+            &mut graph,
+            &mut nav,
+            &mut options,
+            trace.as_mut(),
+        )?;
 
         while let Some(best_candidate) = self.candidates.next_unvisited() {
             self.visited += 1;
@@ -526,6 +554,9 @@ impl GraphSearcher {
                 if self.candidates.add_unvisited(neighbor) {
                     added += 1;
                 }
+                if let Some(sc) = seen_candidates.as_mut() {
+                    sc.push(neighbor);
+                }
             }
             self.candidates_added += added;
 
@@ -539,13 +570,21 @@ impl GraphSearcher {
             }
         }
 
-        // Reuse result_scratch if present to avoid reallocation of the result vec.
-        let mut results = options.result_buffer();
-        let results_len = rerank_query
-            .map(|_| self.params.num_rerank)
-            .unwrap_or(self.candidates.len());
-        results.reserve(results_len);
-        results.extend(self.candidates.iter().take(results_len).map(|c| c.neighbor));
+        // If requested seen_candidates are sorted and pass through to reranking, otherwise we
+        // extract from the candidate list.
+        let mut results = if let Some(mut seen_candidates) = seen_candidates {
+            seen_candidates.sort_unstable();
+            seen_candidates
+        } else {
+            // Reuse result_scratch if present to avoid reallocation of the result vec.
+            let mut results = options.result_buffer();
+            let results_len = rerank_query
+                .map(|_| self.params.num_rerank)
+                .unwrap_or(self.candidates.len());
+            results.reserve(results_len);
+            results.extend(self.candidates.iter().take(results_len).map(|c| c.neighbor));
+            results
+        };
         if let Some(rerank_query) = rerank_query {
             self.rerank_results(rerank_query, reader, &mut results)?;
         }
@@ -1280,5 +1319,87 @@ mod test {
             assert_eq!(scored.distance, r.distance());
         }
         assert!(trace.scored.len() >= results.len());
+    }
+
+    /// With return_seen (no rerank) the results are every vertex scored during the search — the
+    /// entry point, seeds, and the edges of expanded vertices — not just the final candidate list.
+    #[test]
+    fn return_seen_no_rerank() {
+        let index = build_test_graph(4);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(4).unwrap(),
+            num_rerank: 0,
+            patience: None,
+        });
+        let query = [-0.1, -0.1, -0.1, -0.1];
+
+        // Baseline: the standard search returns only the final (beam-limited) candidate list.
+        let baseline = searcher.search(&query, &index.reader()).unwrap();
+        assert_eq!(baseline.len(), 4);
+
+        let (seen, trace) = searcher
+            .search_with_options(
+                &query,
+                Options::default()
+                    .return_seen(true)
+                    .with_trace(traced_ids()),
+                &index.reader(),
+            )
+            .unwrap();
+        let trace = trace.unwrap();
+
+        // The seen results are exactly the scored vertices, each once.
+        assert!(seen.len() > baseline.len(), "seen results not exhaustive");
+        let mut result_ids: Vec<i64> = seen.iter().map(|n| n.vertex()).collect();
+        result_ids.sort_unstable();
+        result_ids.dedup();
+        assert_eq!(result_ids.len(), seen.len(), "duplicate seen result ids");
+        let mut scored_ids: Vec<i64> = trace.scored.iter().map(|s| s.id).collect();
+        scored_ids.sort_unstable();
+        assert_eq!(result_ids, scored_ids);
+        // The entry point (vertex 0 in the fixture) is always among them.
+        assert!(result_ids.contains(&0));
+        // Sorted by nav distance, matching the best baseline result's distance.
+        for w in seen.windows(2) {
+            assert!(
+                w[0].distance() <= w[1].distance(),
+                "seen results not sorted: {w:?}"
+            );
+        }
+        assert_eq!(seen[0].distance(), baseline[0].distance());
+    }
+
+    /// With return_seen and reranking, the whole scored set is reranked in place: distances are in
+    /// rerank space and the list is not truncated to the rerank cut.
+    #[test]
+    fn return_seen_with_rerank() {
+        let index = build_test_graph(4);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(4).unwrap(),
+            num_rerank: 2,
+            patience: None,
+        });
+        let (seen, trace) = searcher
+            .search_with_options(
+                &[-0.1, -0.1, -0.1, -0.1],
+                Options::default().return_seen(true).with_trace([0]),
+                &index.reader(),
+            )
+            .unwrap();
+        let trace = trace.unwrap();
+
+        // Everything scored is reranked: more results than the rerank cut, one per scored vertex.
+        assert!(seen.len() > 2, "seen results truncated to the rerank cut");
+        assert_eq!(seen.len(), trace.scored.len());
+        for w in seen.windows(2) {
+            assert!(
+                w[0].distance() <= w[1].distance(),
+                "reranked seen results not sorted: {w:?}"
+            );
+        }
+        // The nav-closest vertices are one dimension away from the query in f32 space (see
+        // basic_rerank), so they top the reranked seen list.
+        let top = normalize_scores(seen)[0].distance();
+        assert_eq!(top, 0.06813);
     }
 }

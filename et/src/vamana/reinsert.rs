@@ -10,10 +10,10 @@ use wt_mdb::{Connection, Error};
 
 #[derive(Args)]
 pub struct ReinsertArgs {
-    /// Vertex id(s) to reinsert. Each vertex is deleted and re-inserted using its own stored
-    /// (highest fidelity available) vector, re-running edge selection against the graph as it
-    /// exists today. Later ids in the same invocation see the effects of earlier ones.
-    #[arg(short, long = "id", required = true)]
+    /// Comma separated vertex ids to reinsert. Each vertex is deleted and re-inserted using its
+    /// own stored (highest fidelity available) vector, re-running edge selection against the graph
+    /// as it exists today. Later ids in the same invocation see the effects of earlier ones.
+    #[arg(short, long = "id", required = true, value_delimiter = ',')]
     ids: Vec<i64>,
     /// Commit the new edges. Without this flag the whole batch is computed and printed, then
     /// rolled back, so nothing is written.

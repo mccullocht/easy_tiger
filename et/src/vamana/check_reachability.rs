@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     io,
     sync::Arc,
 };
@@ -18,6 +18,9 @@ pub struct CheckReachabilityArgs {
     /// Number of unreachable vertex IDs to include in the sample output.
     #[arg(long, default_value_t = 10)]
     sample_size: usize,
+    /// Comma-separated list of vertex IDs to report the hop distance to.
+    #[arg(long, value_name = "IDS")]
+    hop_ids: Option<String>,
 }
 
 pub fn check_reachability(
@@ -39,10 +42,11 @@ pub fn check_reachability(
         Some(Ok(ep)) => ep,
     };
 
-    // BFS from the entry point to collect all reachable vertex IDs.
-    let mut reachable: HashSet<i64> = HashSet::new();
+    // BFS from the entry point to collect all reachable vertex IDs and the minimum
+    // number of hops required to reach each one.
+    let mut reachable: HashMap<i64, u32> = HashMap::new();
     let mut queue: VecDeque<i64> = VecDeque::new();
-    reachable.insert(entry_point);
+    reachable.insert(entry_point, 0);
     queue.push_back(entry_point);
 
     while let Some(vertex_id) = queue.pop_front() {
@@ -51,8 +55,9 @@ pub fn check_reachability(
             Some(Err(e)) => return Err(e.into()),
             Some(Ok(edges)) => edges,
         };
+        let vertex_hops = reachable[&vertex_id] + 1;
         for neighbor in edges {
-            if reachable.insert(neighbor) {
+            if reachable.insert(neighbor, vertex_hops).is_none() {
                 queue.push_back(neighbor);
             }
         }
@@ -72,7 +77,7 @@ pub fn check_reachability(
             continue;
         }
         total += 1;
-        if !reachable.contains(&key) {
+        if !reachable.contains_key(&key) {
             unreachable_count += 1;
             if sample.len() < args.sample_size {
                 sample.push(key);
@@ -99,6 +104,27 @@ pub fn check_reachability(
                 sample.len(),
                 sample,
             );
+        }
+    }
+
+    if let Some(max_hops) = reachable.values().max() {
+        println!("Maximum hops to reach any vertex: {max_hops}");
+    }
+
+    if let Some(hop_ids) = &args.hop_ids {
+        for id_str in hop_ids.split(',') {
+            let id_str = id_str.trim();
+            let id: i64 = match id_str.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    println!("Invalid vertex ID: {id_str:?}");
+                    continue;
+                }
+            };
+            match reachable.get(&id) {
+                Some(hops) => println!("Vertex {id}: {hops} hops"),
+                None => println!("Vertex {id}: unreachable"),
+            }
         }
     }
 

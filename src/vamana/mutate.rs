@@ -280,6 +280,7 @@ fn insert_internal<F: FnMut(i64) -> bool>(
     let prepared: &[f32] =
         &vectors::prepare_vector(vector, None, false, index.config().centroid.as_deref());
 
+    let options = options.return_seen(true);
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
     let (mut candidate_edges, _) = searcher.search_with_options(vector, options, index)?;
     let mut graph = index.graph()?;

@@ -258,8 +258,8 @@ impl<F: FnMut(i64) -> bool> Options<F> {
     /// When set to true, return all vectors seen during the search instead of the top results.
     ///
     /// This is useful for insertion paths where it is useful to have a very diverse pool of results
-    /// to input to pruning. Note that if reranking is configured this list may be truncated to the
-    /// reranked set.
+    /// to input to pruning. Note that if reranking is configured the seen candidates are not
+    /// truncated before reranking which may affect throughput.
     pub fn return_seen(mut self, return_seen: bool) -> Self {
         self.return_seen = return_seen;
         self

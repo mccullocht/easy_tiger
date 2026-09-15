@@ -6,6 +6,7 @@ mod insert;
 mod lookup;
 mod reinsert;
 mod search;
+mod self_search;
 
 use std::{io, num::NonZero, sync::Arc};
 
@@ -20,6 +21,7 @@ use insert::{InsertArgs, insert};
 use lookup::{LookupArgs, lookup};
 use reinsert::{ReinsertArgs, reinsert};
 use search::{SearchArgs, search};
+use self_search::{SelfSearchArgs, self_search};
 
 use crate::wt_args::WiredTigerArgs;
 
@@ -97,6 +99,10 @@ pub enum Command {
     /// graph as it exists today. Useful for repairing vertices whose edges have gone stale
     /// relative to a neighborhood that has grown denser since they were first inserted.
     Reinsert(ReinsertArgs),
+    /// Probe graph navigability by searching for each vertex with its own stored vector as the
+    /// query. A vertex its own search cannot find is unreachable by greedy descent -- a navigation
+    /// hole -- which no query-time tuning for other queries will repair.
+    SelfSearch(SelfSearchArgs),
 }
 
 pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
@@ -112,6 +118,7 @@ pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
         Command::Insert(args) => insert(connection, index_name, args),
         Command::CheckReachability(args) => check_reachability(connection, index_name, args),
         Command::Reinsert(args) => reinsert(connection, index_name, args),
+        Command::SelfSearch(args) => self_search(connection, index_name, args),
     }?;
     cmd_connection.checkpoint()?;
     Ok(())

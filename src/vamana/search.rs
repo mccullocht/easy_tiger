@@ -73,10 +73,24 @@ pub struct VertexIdTrace {
     pub trace: VertexTrace,
 }
 
+/// A vertex scored during a traced search, with its nav-space query distance.
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScoredVertex {
+    /// The scored vertex id.
+    pub id: i64,
+    /// The nav-space distance from the query to this vertex.
+    pub distance: f64,
+}
+
 /// The trace of a single graph search, with one entry per requested id in request order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphSearchTrace {
     pub vectors: Vec<VertexIdTrace>,
+    /// Every vertex scored during the search (entry point, seeds, and the edges of expanded
+    /// vertices) with its nav-space query distance, in scoring order. Empty when the search was
+    /// not traced.
+    #[serde(default)]
+    pub scored: Vec<ScoredVertex>,
 }
 
 /// Accumulates the state of in-flight traced vertex ids during a graph search.
@@ -84,6 +98,8 @@ struct TraceState {
     /// Traced vertex ids mapped to their position in the request and the nav-space distance they
     /// were scored at, if they were scored at all.
     ids: HashMap<i64, (usize, Option<f64>)>,
+    /// Every scored vertex in scoring order (see [`GraphSearchTrace::scored`]).
+    scored: Vec<ScoredVertex>,
 }
 
 impl TraceState {
@@ -94,11 +110,16 @@ impl TraceState {
                 .enumerate()
                 .map(|(i, &id)| (id, (i, None)))
                 .collect(),
+            scored: Vec::new(),
         }
     }
 
     #[inline]
     fn observe_score(&mut self, vertex: i64, distance: f64) {
+        self.scored.push(ScoredVertex {
+            id: vertex,
+            distance,
+        });
         if let Some((_, scored)) = self.ids.get_mut(&vertex) {
             *scored = Some(distance);
         }
@@ -143,6 +164,7 @@ impl TraceState {
                 .into_iter()
                 .map(|(_, id, trace)| VertexIdTrace { id, trace })
                 .collect(),
+            scored: self.scored,
         }
     }
 }
@@ -317,6 +339,7 @@ impl GraphSearcher {
                     results,
                     trace.unwrap_or(GraphSearchTrace {
                         vectors: Vec::new(),
+                        scored: Vec::new(),
                     }),
                 )
             })
@@ -1217,5 +1240,40 @@ mod test {
         }
         assert_eq!(found, 2);
         assert_eq!(rerank_dropped, 6);
+    }
+
+    /// The scored list captures the entry point and every edge of every expanded vertex, each once,
+    /// with nav-space distances that match the returned (nav-space) results when rerank is off.
+    #[test]
+    fn trace_scored_vertices() {
+        let index = build_test_graph(4);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(4).unwrap(),
+            num_rerank: 0,
+            patience: None,
+        });
+        let (results, trace) = searcher
+            .search_with_trace(&[-0.1, -0.1, -0.1, -0.1], &index.reader(), &[5])
+            .unwrap();
+
+        // The entry point (vertex 0 in the fixture) is always scored first.
+        assert_eq!(trace.scored.first().map(|s| s.id), Some(0));
+        // Each vertex is scored at most once: the seen set prevents rescoring.
+        let mut ids: Vec<i64> = trace.scored.iter().map(|s| s.id).collect();
+        let len = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), len, "duplicate scored vertex ids");
+        // With num_rerank == 0 the result distances are nav-space, so they must match the scored
+        // entry for the same vertex.
+        for r in &results {
+            let scored = trace
+                .scored
+                .iter()
+                .find(|s| s.id == r.vertex())
+                .unwrap_or_else(|| panic!("result vertex {} was not scored", r.vertex()));
+            assert_eq!(scored.distance, r.distance());
+        }
+        assert!(trace.scored.len() >= results.len());
     }
 }

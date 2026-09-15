@@ -73,10 +73,24 @@ pub struct VertexIdTrace {
     pub trace: VertexTrace,
 }
 
+/// A vertex scored during a traced search, with its nav-space query distance.
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScoredVertex {
+    /// The scored vertex id.
+    pub id: i64,
+    /// The nav-space distance from the query to this vertex.
+    pub distance: f64,
+}
+
 /// The trace of a single graph search, with one entry per requested id in request order.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct GraphSearchTrace {
     pub vectors: Vec<VertexIdTrace>,
+    /// Every vertex scored during the search (entry point, seeds, and the edges of expanded
+    /// vertices) with its nav-space query distance, in scoring order. Empty when the search was
+    /// not traced.
+    #[serde(default)]
+    pub scored: Vec<ScoredVertex>,
 }
 
 /// Accumulates the state of in-flight traced vertex ids during a graph search.
@@ -84,6 +98,10 @@ struct TraceState {
     /// Traced vertex ids mapped to their position in the request and the nav-space distance they
     /// were scored at, if they were scored at all.
     ids: HashMap<i64, (usize, Option<f64>)>,
+    // XXX this overlaps heavily with the seen candidates search.
+    /// Every vertex scored during the search (entry point, seeds, and the edges of expanded
+    /// vertices) with its nav-space query distance, in scoring order.
+    pub scored: Vec<ScoredVertex>,
 }
 
 impl TraceState {
@@ -94,13 +112,18 @@ impl TraceState {
                 .enumerate()
                 .map(|(i, &id)| (id, (i, None)))
                 .collect(),
+            scored: vec![],
         }
     }
 
     #[inline]
-    fn observe_score(&mut self, vertex: i64, distance: f64) {
-        if let Some((_, scored)) = self.ids.get_mut(&vertex) {
-            *scored = Some(distance);
+    fn observe_neighbor(&mut self, neighbor: Neighbor) {
+        self.scored.push(ScoredVertex {
+            id: neighbor.vertex(),
+            distance: neighbor.distance(),
+        });
+        if let Some((_, scored)) = self.ids.get_mut(&neighbor.vertex()) {
+            *scored = Some(neighbor.distance());
         }
     }
 
@@ -143,6 +166,7 @@ impl TraceState {
                 .into_iter()
                 .map(|(_, id, trace)| VertexIdTrace { id, trace })
                 .collect(),
+            scored: self.scored,
         }
     }
 }
@@ -182,6 +206,7 @@ pub struct Options<F: FnMut(i64) -> bool> {
     filter: F,
     seeds: smallvec::SmallVec<[i64; 4]>,
     result_scratch: Option<Vec<Neighbor>>,
+    trace: Vec<i64>,
 }
 
 impl Default for Options<fn(i64) -> bool> {
@@ -190,6 +215,7 @@ impl Default for Options<fn(i64) -> bool> {
             filter: (|_| true) as fn(i64) -> bool,
             seeds: smallvec::SmallVec::new(),
             result_scratch: None,
+            trace: Vec::new(),
         }
     }
 }
@@ -202,6 +228,7 @@ impl<F: FnMut(i64) -> bool> Options<F> {
             filter,
             seeds: smallvec::SmallVec::new(),
             result_scratch: None,
+            trace: Vec::new(),
         }
     }
 
@@ -217,6 +244,20 @@ impl<F: FnMut(i64) -> bool> Options<F> {
     pub fn with_result_scratch(mut self, scratch: Vec<Neighbor>) -> Self {
         self.result_scratch = Some(scratch);
         self
+    }
+
+    /// Trace the outcome of each id in `traced` through the search. The trace is returned by
+    /// search_with_options() alongside the results, with one entry per requested id, in request
+    /// order. See [`VertexTrace`] for the possible outcomes.
+    pub fn with_trace(mut self, traced: impl IntoIterator<Item = i64>) -> Self {
+        self.trace = traced.into_iter().collect();
+        self
+    }
+
+    fn result_buffer(&mut self) -> Vec<Neighbor> {
+        let mut buf = self.result_scratch.take().unwrap_or_default();
+        buf.clear();
+        buf
     }
 }
 
@@ -285,41 +326,18 @@ impl GraphSearcher {
 
     /// Search for `query` in graph `reader` with `options`.
     ///
-    /// Returns a an approximate list of the closest neighbors matching any specified filter
-    /// predicate.
+    /// Returns an approximate list of the closest neighbors matching any specified filter
+    /// predicate. If [`Options::with_trace`] was used, also returns a trace with one entry per
+    /// traced id, in request order. See [`VertexTrace`] for the possible outcomes.
     pub fn search_with_options<F: FnMut(i64) -> bool>(
         &mut self,
         query: &[f32],
         options: Options<F>,
         reader: &impl GraphVectorIndex,
-    ) -> Result<Vec<Neighbor>> {
+    ) -> Result<(Vec<Neighbor>, Option<GraphSearchTrace>)> {
         self.seen.clear();
-        self.search_internal(query, options, None, reader)
-            .map(|(results, _)| results)
-    }
-
-    /// Search for `query` in the given graph `reader`, tracing the outcome of each id in `traced`
-    /// through the search.
-    ///
-    /// Returns the search results alongside a trace with one entry per requested id, in request
-    /// order. See [`VertexTrace`] for the possible outcomes.
-    pub fn search_with_trace(
-        &mut self,
-        query: &[f32],
-        reader: &impl GraphVectorIndex,
-        traced: &[i64],
-    ) -> Result<(Vec<Neighbor>, GraphSearchTrace)> {
-        self.seen.clear();
-        let trace = (!traced.is_empty()).then(|| TraceState::new(traced));
-        self.search_internal(query, Options::default(), trace, reader)
-            .map(|(results, trace)| {
-                (
-                    results,
-                    trace.unwrap_or(GraphSearchTrace {
-                        vectors: Vec::new(),
-                    }),
-                )
-            })
+        let trace = (!options.trace.is_empty()).then(|| TraceState::new(&options.trace));
+        self.search_internal(query, options, trace, reader)
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -407,15 +425,14 @@ impl GraphSearcher {
         )
     }
 
-    fn search_graph_and_rerank<F: FnMut(i64) -> bool>(
+    fn initialize_search<F: FnMut(i64) -> bool>(
         &mut self,
         nav_query: &dyn QueryVectorDistance,
-        mut options: Options<F>,
-        rerank_query: Option<&dyn QueryVectorDistance>,
-        reader: &impl GraphVectorIndex,
-        mut trace: Option<TraceState>,
-    ) -> Result<(Vec<Neighbor>, Option<GraphSearchTrace>)> {
-        // TODO: come up with a better way of managing re-used state.
+        graph: &mut impl Graph,
+        nav: &mut impl GraphVectorStore,
+        options: &Options<F>,
+        mut trace: Option<&mut TraceState>,
+    ) -> Result<()> {
         self.candidates.clear();
         if let Some(p) = self.patience.as_mut() {
             p.clear()
@@ -424,46 +441,61 @@ impl GraphSearcher {
         self.visited = 0;
         self.filtered = 0;
 
-        let mut graph = reader.graph()?;
-        let mut nav = reader.nav_vectors()?;
-        if let Some(epr) = graph.entry_point() {
-            let entry_point = epr?;
-            let entry_vector = nav
-                .get(entry_point)
-                .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            let entry_distance = nav_query.distance(entry_vector);
-            if let Some(t) = trace.as_mut() {
-                t.observe_score(entry_point, entry_distance);
-            }
-            if self
-                .candidates
-                .add_unvisited(Neighbor::new(entry_point, entry_distance))
-            {
-                self.candidates_added += 1;
-            }
-            self.seen.insert(entry_point);
-        }
-
-        for seed in options.seeds {
-            if !self.seen.insert(seed) {
+        // Add the entry point and any seeds to the candidate list.
+        for vertex in graph
+            .entry_point()
+            .transpose()?
+            .into_iter()
+            .chain(options.seeds.iter().copied())
+        {
+            if !self.seen.insert(vertex) {
                 continue;
             }
-            let seed_vector = match nav.get(seed) {
+            let vector = match nav.get(vertex) {
                 Some(Ok(v)) => v,
-                // Silently skip any seed that cannot be found in the graph.
+                // Silently skip any initial candidate that cannot be found in the graph.
                 _ => continue,
             };
-            let seed_distance = nav_query.distance(seed_vector);
-            if let Some(t) = trace.as_mut() {
-                t.observe_score(seed, seed_distance);
+            let neighbor = Neighbor::new(vertex, nav_query.distance(vector));
+            if let Some(t) = trace.as_deref_mut() {
+                t.observe_neighbor(neighbor);
             }
-            if self
-                .candidates
-                .add_unvisited(Neighbor::new(seed, seed_distance))
-            {
+            if self.candidates.add_unvisited(neighbor) {
                 self.candidates_added += 1;
             }
         }
+        Ok(())
+    }
+
+    fn rerank_results(
+        &mut self,
+        rerank_query: &dyn QueryVectorDistance,
+        reader: &impl GraphVectorIndex,
+        results: &mut Vec<Neighbor>,
+    ) -> Result<()> {
+        let mut rerank_vectors = reader.rerank_vectors().expect("rerank enabled")?;
+        for r in results.iter_mut() {
+            let vertex = r.vertex();
+            r.distance = rerank_vectors
+                .get(vertex)
+                .expect("row exists")
+                .map(|rv| rerank_query.distance(rv))?;
+        }
+        results.sort_unstable();
+        Ok(())
+    }
+
+    fn search_graph_and_rerank<F: FnMut(i64) -> bool>(
+        &mut self,
+        nav_query: &dyn QueryVectorDistance,
+        mut options: Options<F>,
+        rerank_query: Option<&dyn QueryVectorDistance>,
+        reader: &impl GraphVectorIndex,
+        mut trace: Option<TraceState>,
+    ) -> Result<(Vec<Neighbor>, Option<GraphSearchTrace>)> {
+        let mut graph = reader.graph()?;
+        let mut nav = reader.nav_vectors()?;
+        self.initialize_search(nav_query, &mut graph, &mut nav, &options, trace.as_mut())?;
 
         while let Some(best_candidate) = self.candidates.next_unvisited() {
             self.visited += 1;
@@ -487,14 +519,11 @@ impl GraphSearcher {
                     self.skipped += 1;
                     continue;
                 };
-                let edge_distance = nav_query.distance(vec);
+                let neighbor = Neighbor::new(edge, nav_query.distance(vec));
                 if let Some(t) = trace.as_mut() {
-                    t.observe_score(edge, edge_distance);
+                    t.observe_neighbor(neighbor);
                 }
-                if self
-                    .candidates
-                    .add_unvisited(Neighbor::new(edge, edge_distance))
-                {
+                if self.candidates.add_unvisited(neighbor) {
                     added += 1;
                 }
             }
@@ -511,30 +540,14 @@ impl GraphSearcher {
         }
 
         // Reuse result_scratch if present to avoid reallocation of the result vec.
-        let mut results = options
-            .result_scratch
-            .take()
-            .map(|mut v| {
-                v.clear();
-                v
-            })
-            .unwrap_or_default();
+        let mut results = options.result_buffer();
+        let results_len = rerank_query
+            .map(|_| self.params.num_rerank)
+            .unwrap_or(self.candidates.len());
+        results.reserve(results_len);
+        results.extend(self.candidates.iter().take(results_len).map(|c| c.neighbor));
         if let Some(rerank_query) = rerank_query {
-            let mut rerank_vectors = reader.rerank_vectors().expect("rerank enabled")?;
-            results.reserve(self.params.num_rerank);
-            for c in self.candidates.iter().take(self.params.num_rerank) {
-                let vertex = c.neighbor.vertex();
-                results.push(
-                    rerank_vectors
-                        .get(vertex)
-                        .expect("row exists")
-                        .map(|rv| Neighbor::new(vertex, rerank_query.distance(rv)))?,
-                );
-            }
-            results.sort_unstable();
-        } else {
-            results.reserve(self.candidates.len());
-            results.extend(self.candidates.iter().map(|c| c.neighbor));
+            self.rerank_results(rerank_query, reader, &mut results)?;
         }
         let trace = trace.map(|t| t.finish(&results, &self.candidates, &mut nav));
         Ok((results, trace))
@@ -1147,8 +1160,13 @@ mod test {
         });
         let traced = traced_ids();
         let (results, trace) = searcher
-            .search_with_trace(&[-0.1, -0.1, -0.1, -0.1], &index.reader(), &traced)
+            .search_with_options(
+                &[-0.1, -0.1, -0.1, -0.1],
+                Options::default().with_trace(traced.iter().copied()),
+                &index.reader(),
+            )
             .unwrap();
+        let trace = trace.unwrap();
 
         assert_eq!(trace.vectors.len(), traced.len());
         let mut found = 0;
@@ -1192,8 +1210,13 @@ mod test {
         });
         let traced = traced_ids();
         let (results, trace) = searcher
-            .search_with_trace(&[-0.1, -0.1, -0.1, -0.1], &index.reader(), &traced)
+            .search_with_options(
+                &[-0.1, -0.1, -0.1, -0.1],
+                Options::default().with_trace(traced.iter().copied()),
+                &index.reader(),
+            )
             .unwrap();
+        let trace = trace.unwrap();
 
         assert_eq!(results.len(), 2);
         let mut found = 0;
@@ -1217,5 +1240,45 @@ mod test {
         }
         assert_eq!(found, 2);
         assert_eq!(rerank_dropped, 6);
+    }
+
+    /// The scored list captures the entry point and every edge of every expanded vertex, each once,
+    /// with nav-space distances that match the returned (nav-space) results when rerank is off.
+    #[test]
+    fn trace_scored_vertices() {
+        let index = build_test_graph(4);
+        let mut searcher = GraphSearcher::new(GraphSearchParams {
+            beam_width: NonZero::new(4).unwrap(),
+            num_rerank: 0,
+            patience: None,
+        });
+        let (results, trace) = searcher
+            .search_with_options(
+                &[-0.1, -0.1, -0.1, -0.1],
+                Options::default().with_trace([5]),
+                &index.reader(),
+            )
+            .unwrap();
+        let trace = trace.unwrap();
+
+        // The entry point (vertex 0 in the fixture) is always scored first.
+        assert_eq!(trace.scored.first().map(|s| s.id), Some(0));
+        // Each vertex is scored at most once: the seen set prevents rescoring.
+        let mut ids: Vec<i64> = trace.scored.iter().map(|s| s.id).collect();
+        let len = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), len, "duplicate scored vertex ids");
+        // With num_rerank == 0 the result distances are nav-space, so they must match the scored
+        // entry for the same vertex.
+        for r in &results {
+            let scored = trace
+                .scored
+                .iter()
+                .find(|s| s.id == r.vertex())
+                .unwrap_or_else(|| panic!("result vertex {} was not scored", r.vertex()));
+            assert_eq!(scored.distance, r.distance());
+        }
+        assert!(trace.scored.len() >= results.len());
     }
 }

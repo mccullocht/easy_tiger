@@ -672,7 +672,7 @@ mod parallel {
                         let centroid = match target {
                             Target::Centroid(c) => c,
                             Target::Query(q) => {
-                                let mut candidates = searcher.search_with_options(
+                                let (mut candidates, _) = searcher.search_with_options(
                                     &coder.decode(&q),
                                     GraphSearchOptions::with_filter(|i| {
                                         !filter.contains(&(i as u32))
@@ -796,7 +796,7 @@ mod parallel {
                 |(txn_idx, searcher), centroid| {
                     let mut store = txn_idx.head().high_fidelity_vectors()?;
                     let coder = store.new_coder();
-                    let candidates = searcher.search_with_options(
+                    let (candidates, _) = searcher.search_with_options(
                         &coder.decode(
                             store
                                 .get(centroid as i64)

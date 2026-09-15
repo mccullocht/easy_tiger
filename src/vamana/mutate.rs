@@ -281,7 +281,7 @@ fn insert_internal<F: FnMut(i64) -> bool>(
         &vectors::prepare_vector(vector, None, false, index.config().centroid.as_deref());
 
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
-    let mut candidate_edges = searcher.search_with_options(vector, options, index)?;
+    let (mut candidate_edges, _) = searcher.search_with_options(vector, options, index)?;
     let mut graph = index.graph()?;
     if candidate_edges.is_empty() {
         graph.set_entry_point(vertex_id)?;

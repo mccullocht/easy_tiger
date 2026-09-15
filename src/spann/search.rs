@@ -25,7 +25,10 @@ use crate::{
     },
     vamana::{
         GraphSearchParams, GraphVectorIndex,
-        search::{GraphSearchStats, GraphSearchTrace, GraphSearcher, VertexTrace},
+        search::{
+            GraphSearchStats, GraphSearchTrace, GraphSearcher, Options as GraphSearchOptions,
+            VertexTrace,
+        },
     },
 };
 
@@ -467,12 +470,14 @@ impl Searcher {
             .as_ref()
             .map(|t| t.centroids.keys().map(|&cid| cid as i64).collect())
             .unwrap_or_default();
-        let (mut centroids, head_trace) =
-            self.head_searcher
-                .search_with_trace(query, reader.head(), &head_traced)?;
+        let (mut centroids, head_trace) = self.head_searcher.search_with_options(
+            query,
+            GraphSearchOptions::default().with_trace(head_traced),
+            reader.head(),
+        )?;
         self.stats.head = self.head_searcher.stats();
         if let Some(t) = trace_state.as_mut() {
-            t.head_trace = head_trace;
+            t.head_trace = head_trace.unwrap_or_default();
         }
         if centroids.is_empty() {
             return Ok((vec![], trace_state.map(|s| s.into_trace())));

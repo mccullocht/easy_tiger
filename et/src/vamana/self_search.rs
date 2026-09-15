@@ -15,17 +15,14 @@
 //!   detached region (far approach).
 //! * `Seen`/`RerankDropped`: the vertex was reached but outranked; a search-parameter problem.
 
-use std::{
-    io,
-    num::NonZero,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::vamana::{
     Graph, GraphSearchParams, GraphVectorIndex, GraphVectorStore, PatienceParams,
-    search::{GraphSearcher, GraphSearchStats, ScoredVertex, VertexTrace},
+    search::{
+        GraphSearchStats, GraphSearcher, Options as GraphSearchOptions, ScoredVertex, VertexTrace,
+    },
     wt::{ENTRY_POINT_KEY, TableGraphVectorIndex, TransactionGraphVectorIndex},
 };
 use serde::Serialize;
@@ -134,12 +131,10 @@ pub fn self_search(
         ids.len(),
         params.beam_width.get(),
         params.num_rerank,
-        params
-            .patience
-            .map_or("off".to_owned(), |p| format!(
-                "on (threshold {}, count {})",
-                p.saturation_threshold, p.patience_count
-            )),
+        params.patience.map_or("off".to_owned(), |p| format!(
+            "on (threshold {}, count {})",
+            p.saturation_threshold, p.patience_count
+        )),
     );
 
     let progress = progress_bar(ids.len(), "self-search");
@@ -168,9 +163,8 @@ fn parse_ids(contents: String) -> io::Result<Vec<i64>> {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|line| {
-            line.parse::<i64>().map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("{line:?}: {e}"))
-            })
+            line.parse::<i64>()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{line:?}: {e}")))
         })
         .collect()
 }
@@ -223,7 +217,12 @@ impl Worker {
             }
         }
 
-        let (_results, trace) = self.searcher.search_with_trace(&query, &txn, &[id])?;
+        let (_results, trace) = self.searcher.search_with_options(
+            &query,
+            GraphSearchOptions::default().with_trace([id]),
+            &txn,
+        )?;
+        let trace = trace.expect("trace requested");
         let stats = self.searcher.stats();
         let outcome = trace.vectors[0].trace;
 
@@ -352,7 +351,11 @@ impl ProbeStats {
             ("UNSEEN (never scored)", self.unseen),
             ("not found in nav table", self.not_found),
         ] {
-            println!("{label:<24} {} ({:.4}%)", count, 100.0 * count as f64 / probed as f64);
+            println!(
+                "{label:<24} {} ({:.4}%)",
+                count,
+                100.0 * count as f64 / probed as f64
+            );
         }
         if self.found > 0 {
             println!(

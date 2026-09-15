@@ -252,7 +252,7 @@ impl SearcherState {
             *o = x.to_f32();
         }
         let start = Instant::now();
-        let results = self.searcher.search_with_options(
+        let (results, _) = self.searcher.search_with_options(
             &self.query_buf,
             GraphSearchOptions::with_filter(|i| i < record_limit),
             &reader,

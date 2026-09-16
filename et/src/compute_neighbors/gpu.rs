@@ -15,20 +15,21 @@ use super::{ComputeNeighborsArgs, write_neighbors};
 
 /// WGSL compute shader for pairwise distance computation.
 ///
-/// Each thread computes the distance between one (query, doc) pair. Query and doc vectors are
-/// stored as f16 to match the input format, but every accumulation is carried out in f32 for
-/// precision. The shader is instantiated at runtime from the templates below with `dims` and the
-/// similarity function baked into the source, since both are fixed for the whole run: loop bounds
-/// become compile-time constants the driver compiler can unroll, and the runtime similarity
-/// switch disappears.
+/// The shader is instantiated at runtime from the templates below with `dims` and the similarity
+/// function baked into the source, since both are fixed for the whole run: loop bounds become
+/// compile-time constants the driver compiler can unroll, and the runtime similarity switch
+/// disappears. Every accumulation is carried out in f32 for precision.
 ///
-/// Two load variants are generated:
-///   - `SHADER_SCALAR` (odd dims): scalar `array<f16>` loads, `enable f16`.
-///   - `SHADER_PACKED` (even dims): f16 pairs are read as `u32`s and unpacked with
-///     `unpack2x16float`, so all threads load fully coalesced 4-byte elements instead of
-///     strided 2-byte ones. Requires no f16 shader features.
+/// Two variants are generated:
+///   - `SHADER_SCALAR` (odd dims): one thread per (query, doc) pair, scalar `array<f16>` loads,
+///     `enable f16`. Only used for dimensionality that cannot be read as whole `u32`s.
+///   - `SHADER_TILED` (even dims): GEMM-style workgroup tiling. f16 pairs are read as `u32`s and
+///     unpacked with `unpack2x16float`; each workgroup cooperatively stages tiles of query and
+///     doc rows into workgroup storage with linear, fully-coalesced loads, so every staged byte
+///     feeds 16 pair computations instead of one. Dims are processed in tiles, accumulating
+///     partial sums across tiles.
 ///
-/// Similarity bodies:
+/// Similarity:
 ///   0 = Euclidean (squared L2)
 ///   1 = Dot product distance – assumes pre-normalized vectors: (-dot + 1) / 2
 ///
@@ -70,7 +71,7 @@ __BODY__
 }
 "#;
 
-const SHADER_PACKED: &str = r#"
+const SHADER_TILED: &str = r#"
 struct Params {
     query_count: u32,
     doc_count: u32,
@@ -85,24 +86,103 @@ struct Params {
 @group(0) @binding(2) var<storage, read> doc_vectors: array<u32>;
 @group(0) @binding(3) var<storage, read_write> distances: array<f32>;
 
-// Baked in at runtime. DIMS is always even in this variant, so every row is a whole number of
-// u32s and no scalar tail handling is needed.
+// Baked in at runtime. DIMS is even in this variant, so every row is a whole number of u32s.
+// A tile of TILE u32s (= 2 * TILE dims) is staged in workgroup storage per iteration. Full tiles
+// have compile-time loop bounds so the driver compiler can unroll; only a partial final tile
+// (dims not a multiple of 2 * TILE) is masked.
 const DIMS: u32 = __DIMS__u;
 const HALF_DIMS: u32 = DIMS / 2u;
+const TILE: u32 = __TILE__u;
+const STRIDE: u32 = TILE + 1u; // +1 padding avoids LDS bank conflicts between rows
+const FULL_TILES: u32 = HALF_DIMS / TILE;
+const TAIL: u32 = HALF_DIMS % TILE;
 
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+const QG: u32 = 16u; // query rows staged per workgroup
+const DG: u32 = 16u; // doc rows staged per workgroup
+const WG: u32 = 256u;
+
+var<workgroup> q_tile: array<u32, QG * STRIDE>;
+var<workgroup> d_tile: array<u32, DG * STRIDE>;
+
+@compute @workgroup_size(QG, DG, 1)
+fn main(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_index) lid: u32,
+    @builtin(workgroup_id) wid: vec3<u32>,
+) {
     let q = gid.x + params.q_offset;
     let d = gid.y + params.d_offset;
+    // Rows staged past the end of the batch read their last valid row instead; every thread
+    // still participates in the cooperative load (there are no early returns past this point —
+    // the barriers require uniform control flow), and the clamped rows' outputs are discarded
+    // by the write guard below.
+    let q_last = params.q_offset + params.query_count - 1u;
+    let d_last = params.d_offset + params.doc_count - 1u;
+    let qt0 = wid.x * QG + params.q_offset;
+    let dt0 = wid.y * DG + params.d_offset;
 
-    if q >= params.query_count || d >= params.doc_count {
-        return;
+    let qx = lid % QG;
+    let dy = lid / QG;
+    var acc = vec2<f32>(0.0);
+
+    for (var t: u32 = 0u; t < FULL_TILES; t++) {
+        // Cooperatively stage the query/doc rows for this dims-tile: linear thread ids over
+        // (row, column) tiles give fully coalesced global reads.
+        for (var c = lid; c < QG * TILE; c += WG) {
+            let r = c / TILE;
+            let col = c - r * TILE;
+            let row = min(qt0 + r, q_last);
+            q_tile[r * STRIDE + col] = query_vectors[row * HALF_DIMS + t * TILE + col];
+        }
+        for (var c = lid; c < DG * TILE; c += WG) {
+            let r = c / TILE;
+            let col = c - r * TILE;
+            let row = min(dt0 + r, d_last);
+            d_tile[r * STRIDE + col] = doc_vectors[row * HALF_DIMS + t * TILE + col];
+        }
+        workgroupBarrier();
+
+        for (var i: u32 = 0u; i < TILE; i++) {
+            let pq = unpack2x16float(q_tile[qx * STRIDE + i]);
+            let pd = unpack2x16float(d_tile[dy * STRIDE + i]);
+__ACCUM__
+        }
+        workgroupBarrier();
     }
 
-    let q_base = q * HALF_DIMS;
-    let d_base = d * HALF_DIMS;
-__BODY__
-    distances[q * params.doc_count + d] = result;
+    if TAIL > 0u {
+        for (var c = lid; c < QG * TILE; c += WG) {
+            let r = c / TILE;
+            let col = c - r * TILE;
+            if col < TAIL {
+                let row = min(qt0 + r, q_last);
+                q_tile[r * STRIDE + col] =
+                    query_vectors[row * HALF_DIMS + FULL_TILES * TILE + col];
+            }
+        }
+        for (var c = lid; c < DG * TILE; c += WG) {
+            let r = c / TILE;
+            let col = c - r * TILE;
+            if col < TAIL {
+                let row = min(dt0 + r, d_last);
+                d_tile[r * STRIDE + col] =
+                    doc_vectors[row * HALF_DIMS + FULL_TILES * TILE + col];
+            }
+        }
+        workgroupBarrier();
+
+        for (var i: u32 = 0u; i < TAIL; i++) {
+            let pq = unpack2x16float(q_tile[qx * STRIDE + i]);
+            let pd = unpack2x16float(d_tile[dy * STRIDE + i]);
+__ACCUM__
+        }
+        workgroupBarrier();
+    }
+
+__RESULT__
+    if q < params.query_count && d < params.doc_count {
+        distances[q * params.doc_count + d] = result;
+    }
 }
 "#;
 
@@ -123,40 +203,30 @@ const DOT_SCALAR_BODY: &str = r#"
     let result = (-acc + 1.0) / 2.0;
 "#;
 
-const EUCLID_PACKED_BODY: &str = r#"
-    var acc = vec2<f32>(0.0);
-    for (var i: u32 = 0u; i < HALF_DIMS; i++) {
-        let pq = unpack2x16float(query_vectors[q_base + i]);
-        let pd = unpack2x16float(doc_vectors[d_base + i]);
-        let diff = pq - pd;
-        acc += diff * diff;
-    }
-    let result = acc.x + acc.y;
-"#;
-
-const DOT_PACKED_BODY: &str = r#"
-    var acc = vec2<f32>(0.0);
-    for (var i: u32 = 0u; i < HALF_DIMS; i++) {
-        let pq = unpack2x16float(query_vectors[q_base + i]);
-        let pd = unpack2x16float(doc_vectors[d_base + i]);
-        acc += pq * pd;
-    }
-    let result = (-acc.x - acc.y + 1.0) / 2.0;
-"#;
+const EUCLID_TILED_ACCUM: &str = "            acc += (pq - pd) * (pq - pd);";
+const EUCLID_TILED_RESULT: &str = "    let result = acc.x + acc.y;";
+const DOT_TILED_ACCUM: &str = "            acc += pq * pd;";
+const DOT_TILED_RESULT: &str = "    let result = (-acc.x - acc.y + 1.0) / 2.0;";
 
 /// Instantiate the shader templates for this run's dimensionality and similarity function.
 fn build_shader_source(dims: usize, similarity: VectorSimilarity) -> String {
     let packed = dims.is_multiple_of(2);
-    let template = if packed { SHADER_PACKED } else { SHADER_SCALAR };
-    let body = match (packed, similarity) {
-        (true, VectorSimilarity::Euclidean) => EUCLID_PACKED_BODY,
-        (true, VectorSimilarity::Dot) => DOT_PACKED_BODY,
-        (false, VectorSimilarity::Euclidean) => EUCLID_SCALAR_BODY,
-        (false, VectorSimilarity::Dot) => DOT_SCALAR_BODY,
+    let (template, body) = match (packed, similarity) {
+        (true, VectorSimilarity::Euclidean) => {
+            (SHADER_TILED, (EUCLID_TILED_ACCUM, EUCLID_TILED_RESULT))
+        }
+        (true, VectorSimilarity::Dot) => (SHADER_TILED, (DOT_TILED_ACCUM, DOT_TILED_RESULT)),
+        (false, VectorSimilarity::Euclidean) => (SHADER_SCALAR, (EUCLID_SCALAR_BODY, "")),
+        (false, VectorSimilarity::Dot) => (SHADER_SCALAR, (DOT_SCALAR_BODY, "")),
     };
     template
         .replace("__DIMS__", &dims.to_string())
-        .replace("__BODY__", body)
+        .replace("__TILE__", &LDS_TILE.to_string())
+        // SHADER_SCALAR takes a whole loop body (including the result); SHADER_TILED takes
+        // separate accumulate and result expressions. Each template only contains its own tokens.
+        .replace("__BODY__", body.0)
+        .replace("__ACCUM__", body.0)
+        .replace("__RESULT__", body.1)
 }
 
 /// Uniform buffer layout for the distance shader.
@@ -172,6 +242,11 @@ struct GpuParams {
 
 const WG_Q: usize = 16;
 const WG_D: usize = 16;
+
+/// u32s (f16 pairs) staged per dims-tile in `SHADER_TILED`. With 16 + 16 staged rows and the
+/// +1 row padding this keeps workgroup storage at (16 + 16) * (128 + 1) * 4 = ~16 KiB, leaving
+/// room for four 256-thread workgroups per compute unit.
+const LDS_TILE: usize = 64;
 
 /// Upper bound on scalar multiply-add operations (~query * doc * dims) issued by a single
 /// dispatch. The memory-driven batch sizes below can produce dispatches with hundreds of

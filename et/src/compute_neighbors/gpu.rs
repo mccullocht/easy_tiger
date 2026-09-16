@@ -286,17 +286,59 @@ struct BatchTimings {
     accumulate_us: AtomicU64,
     batches: AtomicU64,
     sub_dispatches: AtomicU64,
+    // Resident set tracking (KiB), sampled once per batch: growth in RssAnon across the run
+    // indicates a leak (e.g. in per-batch upload staging), since all GPU buffers are allocated
+    // up front.
+    rss_anon_first: AtomicU64,
+    rss_anon_last: AtomicU64,
+    rss_anon_max: AtomicU64,
+    rss_file_last: AtomicU64,
+}
+
+/// Sample this process's resident memory split, in KiB. Returns `(anon, file)`; zero when
+/// unavailable (non-Linux).
+#[cfg(target_os = "linux")]
+fn sample_rss_kb() -> (u64, u64) {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |key: &str| {
+        status
+            .lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    (field("RssAnon:"), field("RssFile:"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_rss_kb() -> (u64, u64) {
+    (0, 0)
 }
 
 impl BatchTimings {
+    fn sample_rss(&self) {
+        let (anon, file) = sample_rss_kb();
+        if anon == 0 {
+            return;
+        }
+        self.rss_anon_first
+            .compare_exchange(0, anon, Ordering::Relaxed, Ordering::Relaxed)
+            .ok();
+        self.rss_anon_last.store(anon, Ordering::Relaxed);
+        self.rss_anon_max.fetch_max(anon, Ordering::Relaxed);
+        self.rss_file_last.store(file, Ordering::Relaxed);
+    }
+
     fn report(&self, label: &str) {
         let batches = self.batches.load(Ordering::Relaxed);
         if batches == 0 {
             return;
         }
         let us = |v: &AtomicU64| v.load(Ordering::Relaxed) / batches;
+        let mib = |v: u64| v as f64 / 1024.0;
         tracing::info!(
-            "{}: {} batches, {} sub-dispatches; per batch: upload {} ms, submit {} ms, wait {} ms, accumulate {} ms",
+            "{}: {} batches, {} sub-dispatches; per batch: upload {} ms, submit {} ms, wait {} ms, accumulate {} ms; rss anon {} MiB -> {} MiB (peak {} MiB), file {} MiB",
             label,
             batches,
             self.sub_dispatches.load(Ordering::Relaxed),
@@ -304,6 +346,10 @@ impl BatchTimings {
             us(&self.submit_us) as f64 / 1e3,
             us(&self.wait_us) as f64 / 1e3,
             us(&self.accumulate_us) as f64 / 1e3,
+            mib(self.rss_anon_first.load(Ordering::Relaxed)),
+            mib(self.rss_anon_last.load(Ordering::Relaxed)),
+            mib(self.rss_anon_max.load(Ordering::Relaxed)),
+            mib(self.rss_file_last.load(Ordering::Relaxed)),
         );
     }
 }
@@ -335,9 +381,15 @@ struct BatchRunner<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     pipeline: &'a wgpu::ComputePipeline,
-    bind_group: &'a wgpu::BindGroup,
-    query_buffer: &'a wgpu::Buffer,
-    doc_buffer: &'a wgpu::Buffer,
+    /// Per-slot bind groups binding that slot's query/doc buffers (params + distances shared).
+    bind_groups: &'a [wgpu::BindGroup; 2],
+    /// Per-slot CPU-writable staging (MAP_WRITE | COPY_SRC) for the batch's vectors.
+    query_staging: &'a [wgpu::Buffer; 2],
+    doc_staging: &'a [wgpu::Buffer; 2],
+    /// Per-slot storage buffers the shader reads, filled from the staging by a copy in the
+    /// batch's command buffer.
+    query_buffers: &'a [wgpu::Buffer; 2],
+    doc_buffers: &'a [wgpu::Buffer; 2],
     params_buffer: &'a wgpu::Buffer,
     distances_buffer: &'a wgpu::Buffer,
     staging_buffers: &'a [wgpu::Buffer; 2],
@@ -348,15 +400,45 @@ struct BatchRunner<'a> {
     /// Stride between per-sub-dispatch param blocks: `GpuParams` padded up to
     /// `min_uniform_buffer_offset_alignment` for dynamic-offset binding.
     params_stride: usize,
-    /// Scratch for padding upload payloads when the byte length is not
-    /// COPY_BUFFER_ALIGNMENT-aligned (odd dims only).
-    upload_scratch: Vec<f16>,
     /// Scratch for the batch's per-sub-dispatch params, staged into `params_buffer` in one write.
     params_scratch: Vec<u8>,
     timings: &'a BatchTimings,
 }
 
 impl BatchRunner<'_> {
+    /// Copy `payload` into `buffer` via a map/write/unmap cycle.
+    ///
+    /// Unlike `queue.write_buffer`, which allocates a fresh staging buffer of the payload size on
+    /// every call, this reuses the buffer's own mapping. The buffer must not be in use by the
+    /// GPU, which the two-batch slot discipline guarantees (the slot's previous compute finished
+    /// before the previous-previous batch's consume).
+    fn upload_payload(&self, buffer: &wgpu::Buffer, payload: &[f16]) -> io::Result<()> {
+        let (tx, rx) = mpsc::channel();
+        buffer.map_async(wgpu::MapMode::Write, .., move |result| {
+            tx.send(result).unwrap();
+        });
+        self.device
+            .poll(wgpu::PollType::Poll)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        rx.recv()
+            .unwrap()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        {
+            let mut view = buffer
+                .get_mapped_range_mut(..)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            let payload_bytes = std::mem::size_of_val(payload);
+            view.slice(..payload_bytes)
+                .copy_from_slice(bytemuck::cast_slice(payload));
+            // The buffer is COPY_ALIGNMENT-rounded; zero the tail so its byte length is aligned
+            // (the padding sits past the last index any dispatch reads, bounded by
+            // params.query_count/params.doc_count).
+            view.slice(payload_bytes..).fill(0);
+        }
+        buffer.unmap();
+        Ok(())
+    }
+
     /// Upload the batch's vectors, submit its (watchdog-bounded) compute dispatches and the copy
     /// of the results into staging buffer `slot`, and return the in-flight state. Only submits;
     /// never waits, so the GPU keeps working while the caller consumes the previous batch.
@@ -367,25 +449,21 @@ impl BatchRunner<'_> {
         upload_query: bool,
         query_vectors: &DerefVectorStore<f16, Mmap>,
         doc_vectors: &DerefVectorStore<f16, Mmap>,
-    ) -> InFlight {
+    ) -> io::Result<InFlight> {
         let current_q = batch.q_end - batch.q_start;
         let current_d = batch.d_end - batch.d_start;
 
         let upload_start = Instant::now();
         if upload_query {
-            write_vector_payload(
-                self.queue,
-                self.query_buffer,
+            self.upload_payload(
+                &self.query_staging[slot],
                 query_vectors.flat_slice(batch.q_start * self.dims, batch.q_end * self.dims),
-                &mut self.upload_scratch,
-            );
+            )?;
         }
-        write_vector_payload(
-            self.queue,
-            self.doc_buffer,
+        self.upload_payload(
+            &self.doc_staging[slot],
             doc_vectors.flat_slice(batch.d_start * self.dims, batch.d_end * self.dims),
-            &mut self.upload_scratch,
-        );
+        )?;
         // Streaming the (possibly tens of GB) doc file faults its whole size into this process's
         // page tables; release each consumed range so RSS stays flat over the run.
         doc_vectors.advise_dontneed_rows(batch.d_start, batch.d_end);
@@ -430,6 +508,25 @@ impl BatchRunner<'_> {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("compute_encoder"),
             });
+        // Copy the freshly uploaded vectors from the mapped staging into the shader's storage
+        // buffers. Encoder commands execute in order, so these run before the compute pass below
+        // and after the previous batch's commands.
+        if upload_query {
+            encoder.copy_buffer_to_buffer(
+                &self.query_staging[slot],
+                0,
+                &self.query_buffers[slot],
+                0,
+                round_up_copy_alignment(current_q * self.dims * std::mem::size_of::<f16>()) as u64,
+            );
+        }
+        encoder.copy_buffer_to_buffer(
+            &self.doc_staging[slot],
+            0,
+            &self.doc_buffers[slot],
+            0,
+            round_up_copy_alignment(current_d * self.dims * std::mem::size_of::<f16>()) as u64,
+        );
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("distance_pass"),
@@ -444,7 +541,7 @@ impl BatchRunner<'_> {
                     let sd_end = (sd_start + self.dispatch_d).min(current_d);
                     pass.set_bind_group(
                         0,
-                        self.bind_group,
+                        &self.bind_groups[slot],
                         &[((i * sub_d + j) * self.params_stride) as u32],
                     );
                     pass.dispatch_workgroups(
@@ -474,12 +571,12 @@ impl BatchRunner<'_> {
             .sub_dispatches
             .fetch_add(n_subs as u64, Ordering::Relaxed);
 
-        InFlight {
+        Ok(InFlight {
             slot,
             copy_submission,
             copy_bytes: copy_bytes as usize,
             batch,
-        }
+        })
     }
 
     /// Wait for `inflight`'s result copy, feed the distances into the per-query top-k
@@ -511,6 +608,7 @@ impl BatchRunner<'_> {
         self.timings
             .wait_us
             .fetch_add(wait_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.timings.sample_rss();
         self.timings.batches.fetch_add(1, Ordering::Relaxed);
 
         // Feed GPU distances into the per-query TopNeighbors accumulators.
@@ -693,22 +791,46 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
 
     // --- Buffers ---
 
-    // Query and doc buffers are refilled each batch; both need COPY_DST. Sizes are rounded up to
-    // wgpu::COPY_BUFFER_ALIGNMENT (4 bytes) since f16 elements are only 2 bytes wide and
-    // write_buffer/copy_buffer_to_buffer require 4-byte aligned sizes; uploads from odd-dims
-    // inputs are padded via a scratch buffer to match.
-    let query_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("query_buffer"),
-        size: round_up_copy_alignment(q_batch * dims * std::mem::size_of::<f16>()) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let doc_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("doc_buffer"),
-        size: round_up_copy_alignment(d_batch * dims * std::mem::size_of::<f16>()) as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+    // Query and doc data is uploaded per batch into per-slot mapped staging buffers
+    // (upload_payload — reused, unlike queue.write_buffer which allocates a fresh staging buffer
+    // per call) and copied into the storage buffers the shader reads by the batch's own command
+    // buffer. Two of each, ping-ponged with the result-staging slots: a slot's staging is
+    // re-mapped only after the slot's previous compute is known-complete (see the batch loop
+    // below). Sizes are rounded up to wgpu::COPY_BUFFER_ALIGNMENT (4 bytes) since f16 elements
+    // are only 2 bytes wide; odd-dims uploads zero the padding tail.
+    let make_buffers = |staging_label: &str,
+                        storage_label: &str,
+                        size: usize|
+     -> ([wgpu::Buffer; 2], [wgpu::Buffer; 2]) {
+        let size = round_up_copy_alignment(size) as u64;
+        let staging: [wgpu::Buffer; 2] = std::array::from_fn(|slot| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("{staging_label}_{slot}")),
+                size,
+                usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            })
+        });
+        let storage: [wgpu::Buffer; 2] = std::array::from_fn(|slot| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("{storage_label}_{slot}")),
+                size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        (staging, storage)
+    };
+    let (query_staging, query_buffers) = make_buffers(
+        "query_staging",
+        "query_buffer",
+        q_batch * dims * std::mem::size_of::<f16>(),
+    );
+    let (doc_staging, doc_buffers) = make_buffers(
+        "doc_staging",
+        "doc_buffer",
+        d_batch * dims * std::mem::size_of::<f16>(),
+    );
 
     // Sub-dispatch geometry (bounded by MAX_DISPATCH_OPS) and the params layout for one batch:
     // one aligned block per sub-dispatch, selected in-shader via dynamic uniform offsets. All
@@ -748,33 +870,36 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         })
     });
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("distance_bg"),
-        layout: &bgl,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &params_buffer,
-                    offset: 0,
-                    size: Some(
-                        std::num::NonZero::new(std::mem::size_of::<GpuParams>() as u64).unwrap(),
-                    ),
-                }),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: query_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: doc_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: distances_buffer.as_entire_binding(),
-            },
-        ],
+    let bind_groups: [wgpu::BindGroup; 2] = std::array::from_fn(|slot| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("distance_bg_{slot}")),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &params_buffer,
+                        offset: 0,
+                        size: Some(
+                            std::num::NonZero::new(std::mem::size_of::<GpuParams>() as u64)
+                                .unwrap(),
+                        ),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: query_buffers[slot].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: doc_buffers[slot].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: distances_buffer.as_entire_binding(),
+                },
+            ],
+        })
     });
 
     let timings = BatchTimings::default();
@@ -782,9 +907,11 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         device: &device,
         queue: &queue,
         pipeline: &pipeline,
-        bind_group: &bind_group,
-        query_buffer: &query_buffer,
-        doc_buffer: &doc_buffer,
+        bind_groups: &bind_groups,
+        query_staging: &query_staging,
+        doc_staging: &doc_staging,
+        query_buffers: &query_buffers,
+        doc_buffers: &doc_buffers,
         params_buffer: &params_buffer,
         distances_buffer: &distances_buffer,
         staging_buffers: &staging_buffers,
@@ -792,7 +919,6 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         dispatch_q,
         dispatch_d,
         params_stride,
-        upload_scratch: Vec::new(),
         params_scratch: Vec::new(),
         timings: &timings,
     };
@@ -825,6 +951,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     let Some(mut inflight) = batches
         .next()
         .map(|batch| runner.prepare_batch(batch, 0, true, &query_vectors, &doc_vectors))
+        .transpose()?
     else {
         // Nothing to compute (empty inputs); skip straight to writing results.
         return write_neighbors(args, results);
@@ -837,7 +964,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         let upload_query = batch.q_start != prev_q_start;
         prev_q_start = batch.q_start;
         let slot = 1 - inflight.slot;
-        let next = runner.prepare_batch(batch, slot, upload_query, &query_vectors, &doc_vectors);
+        let next = runner.prepare_batch(batch, slot, upload_query, &query_vectors, &doc_vectors)?;
         runner.consume_batch(inflight, &results, &pb)?;
         inflight = next;
     }
@@ -855,29 +982,6 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
 /// `write_buffer`/`copy_buffer_to_buffer` calls.
 fn round_up_copy_alignment(bytes: usize) -> usize {
     bytes.div_ceil(wgpu::COPY_BUFFER_ALIGNMENT as usize) * wgpu::COPY_BUFFER_ALIGNMENT as usize
-}
-
-/// Upload `payload` (contiguous f16 elements) into `buffer` at offset 0. The payload is written
-/// straight from its backing storage; when its byte length is not a multiple of
-/// `wgpu::COPY_BUFFER_ALIGNMENT` (only possible for odd dims), it is first copied into `scratch`
-/// and padded with zeros. The padding elements sit past the last index any dispatch reads
-/// (bounded by `params.query_count`/`params.doc_count`), so they never affect results.
-fn write_vector_payload(
-    queue: &wgpu::Queue,
-    buffer: &wgpu::Buffer,
-    payload: &[f16],
-    scratch: &mut Vec<f16>,
-) {
-    let byte_len = std::mem::size_of_val(payload);
-    if byte_len.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT as usize) {
-        queue.write_buffer(buffer, 0, bytemuck::cast_slice(payload));
-    } else {
-        scratch.clear();
-        scratch.extend_from_slice(payload);
-        let padded_elems = round_up_copy_alignment(byte_len) / std::mem::size_of::<f16>();
-        scratch.resize(padded_elems, f16::default());
-        queue.write_buffer(buffer, 0, bytemuck::cast_slice(scratch));
-    }
 }
 
 fn bgl_entry(

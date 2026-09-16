@@ -840,6 +840,8 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     }
     runner.consume_batch(inflight, &results, &pb)?;
 
+    pb.finish();
+
     timings.report("batch phase timings");
 
     // --- Write output ---

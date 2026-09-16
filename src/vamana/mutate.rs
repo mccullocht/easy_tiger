@@ -9,6 +9,14 @@ use std::collections::{HashMap, hash_map::Entry};
 use vectors::VectorDistance;
 use wt_mdb::{Error, Result};
 
+// XXX buffer wraps Graph, GraphVectorStore, distance function, edge pruning params, graph direction
+// - Interface: add_edge, remove_edge, edges_len.
+// - Maintain a HashMap vertex -> edges.
+// - Edges buffers up to 2x configured edges
+// - Edge additions might trigger pruning.
+// - Insertion prunes up to an _infinite_ cap, and we add edges until the node is saturated or we
+//   run out of candidates, whichever one comes first.
+
 /// Insert a vertex for `vector` and return the id assigned to the vector.
 pub fn insert_vector(vector: &[f32], index: &impl GraphVectorIndex) -> Result<i64> {
     insert_vector_with_options(vector, index, GraphSearchOptions::default())

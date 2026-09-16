@@ -1,4 +1,11 @@
-use std::{io, sync::mpsc, time::Duration};
+use std::{
+    io,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
+};
 
 use bytemuck::{Pod, Zeroable};
 use easy_tiger::{
@@ -244,8 +251,10 @@ const WG_Q: usize = 16;
 const WG_D: usize = 16;
 
 /// u32s (f16 pairs) staged per dims-tile in `SHADER_TILED`. With 16 + 16 staged rows and the
-/// +1 row padding this keeps workgroup storage at (16 + 16) * (128 + 1) * 4 = ~16 KiB, leaving
-/// room for four 256-thread workgroups per compute unit.
+/// +1 row padding this keeps workgroup storage at (16 + 16) * (64 + 1) * 4 = ~8 KiB. Larger
+/// tiles (measured at 128, ~16 KiB) collapse occupancy on some hardware — on Apple GPUs 32 KiB
+/// of threadgroup memory means a single resident workgroup per core and the barriers fully
+/// serialize — so keep this small enough that several workgroups fit per core.
 const LDS_TILE: usize = 64;
 
 /// Upper bound on scalar multiply-add operations (~query * doc * dims) issued by a single
@@ -256,6 +265,47 @@ const LDS_TILE: usize = 64;
 /// memory-sized batch into several dispatches bounded by this budget keeps each individual
 /// dispatch short, independent of how much buffer memory is available.
 const MAX_DISPATCH_OPS: usize = 1 << 30;
+
+/// Per-phase wall-clock totals across all batches, in microseconds. Phase attribution per batch
+/// cycle:
+///   - `upload`:   main thread copying vector bytes into queue staging (prepare)
+///   - `submit`:   main thread recording/submitting the sub-dispatches and result copy (prepare)
+///   - `wait`:     main thread blocked waiting for the batch's result copy (consume)
+///   - `accumulate`: rayon feeding staging distances into the top-k accumulators (consume)
+///
+/// In steady state the GPU should be busy for roughly max(compute, ...) of each cycle while the
+/// main thread's prepare of batch N+1 overlaps consume of batch N; a run where `submit` or
+/// `accumulate` approaches or exceeds the per-batch GPU time points at the pipeline bubbling on
+/// CPU work instead of GPU saturation.
+#[derive(Default)]
+struct BatchTimings {
+    upload_us: AtomicU64,
+    submit_us: AtomicU64,
+    wait_us: AtomicU64,
+    accumulate_us: AtomicU64,
+    batches: AtomicU64,
+    sub_dispatches: AtomicU64,
+}
+
+impl BatchTimings {
+    fn report(&self, label: &str) {
+        let batches = self.batches.load(Ordering::Relaxed);
+        if batches == 0 {
+            return;
+        }
+        let us = |v: &AtomicU64| v.load(Ordering::Relaxed) / batches;
+        tracing::info!(
+            "{}: {} batches, {} sub-dispatches; per batch: upload {} ms, submit {} ms, wait {} ms, accumulate {} ms",
+            label,
+            batches,
+            self.sub_dispatches.load(Ordering::Relaxed),
+            us(&self.upload_us) as f64 / 1e3,
+            us(&self.submit_us) as f64 / 1e3,
+            us(&self.wait_us) as f64 / 1e3,
+            us(&self.accumulate_us) as f64 / 1e3,
+        );
+    }
+}
 
 /// A (query, doc) range scheduled for computation.
 #[derive(Clone, Copy)]
@@ -294,6 +344,7 @@ struct BatchRunner<'a> {
     /// Scratch for padding upload payloads when the byte length is not
     /// COPY_BUFFER_ALIGNMENT-aligned (odd dims only).
     upload_scratch: Vec<f16>,
+    timings: &'a BatchTimings,
 }
 
 impl BatchRunner<'_> {
@@ -311,6 +362,7 @@ impl BatchRunner<'_> {
         let current_q = batch.q_end - batch.q_start;
         let current_d = batch.d_end - batch.d_start;
 
+        let upload_start = Instant::now();
         if upload_query {
             write_vector_payload(
                 self.queue,
@@ -325,6 +377,9 @@ impl BatchRunner<'_> {
             doc_vectors.flat_slice(batch.d_start * self.dims, batch.d_end * self.dims),
             &mut self.upload_scratch,
         );
+        self.timings
+            .upload_us
+            .fetch_add(upload_start.elapsed().as_micros() as u64, Ordering::Relaxed);
 
         // Split this memory-sized batch into smaller dispatches so no single command buffer
         // runs long enough to trip a driver watchdog. Query/doc buffers already hold the
@@ -335,6 +390,8 @@ impl BatchRunner<'_> {
         let dispatch_q = dispatch_side.min(current_q).max(1);
         let dispatch_d = dispatch_side.min(current_d).max(1);
 
+        let submit_start = Instant::now();
+        let mut sub_dispatches = 0u64;
         let mut sq_start = 0usize;
         while sq_start < current_q {
             let sq_end = (sq_start + dispatch_q).min(current_q);
@@ -373,11 +430,18 @@ impl BatchRunner<'_> {
                     );
                 }
                 self.queue.submit([encoder.finish()]);
+                sub_dispatches += 1;
 
                 sd_start = sd_end;
             }
             sq_start = sq_end;
         }
+        self.timings
+            .submit_us
+            .fetch_add(submit_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.timings
+            .sub_dispatches
+            .fetch_add(sub_dispatches, Ordering::Relaxed);
 
         // Copy the full batch of results to staging once all sub-dispatches have completed.
         let copy_bytes = (current_q * current_d * std::mem::size_of::<f32>()) as u64;
@@ -419,6 +483,7 @@ impl BatchRunner<'_> {
             .map_async(wgpu::MapMode::Read, move |result| {
                 tx.send(result).unwrap();
             });
+        let wait_start = Instant::now();
         self.device
             .poll(wgpu::PollType::Wait {
                 submission_index: Some(inflight.copy_submission.clone()),
@@ -428,12 +493,17 @@ impl BatchRunner<'_> {
         rx.recv()
             .unwrap()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        self.timings
+            .wait_us
+            .fetch_add(wait_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.timings.batches.fetch_add(1, Ordering::Relaxed);
 
         // Feed GPU distances into the per-query TopNeighbors accumulators.
         //
         // The shader writes distances row-major as distances[q_local * current_d + d_local].
         // Parallelize at row granularity: one rayon task per query row, with the inner loop over
         // that row's distances kept serial.
+        let accumulate_start = Instant::now();
         {
             let current_d = inflight.batch.d_end - inflight.batch.d_start;
             let mapped = staging
@@ -454,6 +524,10 @@ impl BatchRunner<'_> {
                 });
         }
         staging.unmap();
+        self.timings.accumulate_us.fetch_add(
+            accumulate_start.elapsed().as_micros() as u64,
+            Ordering::Relaxed,
+        );
 
         pb.inc(
             ((inflight.batch.q_end - inflight.batch.q_start)
@@ -659,6 +733,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         ],
     });
 
+    let timings = BatchTimings::default();
     let mut runner = BatchRunner {
         device: &device,
         queue: &queue,
@@ -671,6 +746,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         staging_buffers: &staging_buffers,
         dims,
         upload_scratch: Vec::new(),
+        timings: &timings,
     };
 
     // --- CPU-side top-k accumulators, one per query ---
@@ -718,6 +794,8 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         inflight = next;
     }
     runner.consume_batch(inflight, &results, &pb)?;
+
+    timings.report("batch phase timings");
 
     // --- Write output ---
     write_neighbors(args, results)

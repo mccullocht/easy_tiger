@@ -482,7 +482,9 @@ impl GraphSearcher {
             if self.candidates.add_unvisited(neighbor) {
                 self.candidates_added += 1;
             }
-            if let Some(sc) = seen_candidates.as_mut() {
+            if let Some(sc) = seen_candidates.as_mut()
+                && (options.filter)(neighbor.vertex())
+            {
                 sc.push(neighbor);
             }
         }
@@ -493,7 +495,7 @@ impl GraphSearcher {
         &mut self,
         rerank_query: &dyn QueryVectorDistance,
         reader: &impl GraphVectorIndex,
-        results: &mut Vec<Neighbor>,
+        results: &mut [Neighbor],
     ) -> Result<()> {
         let mut rerank_vectors = reader.rerank_vectors().expect("rerank enabled")?;
         for r in results.iter_mut() {
@@ -554,7 +556,9 @@ impl GraphSearcher {
                 if self.candidates.add_unvisited(neighbor) {
                     added += 1;
                 }
-                if let Some(sc) = seen_candidates.as_mut() {
+                if let Some(sc) = seen_candidates.as_mut()
+                    && (options.filter)(neighbor.vertex())
+                {
                     sc.push(neighbor);
                 }
             }

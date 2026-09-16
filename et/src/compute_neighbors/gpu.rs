@@ -386,6 +386,9 @@ impl BatchRunner<'_> {
             doc_vectors.flat_slice(batch.d_start * self.dims, batch.d_end * self.dims),
             &mut self.upload_scratch,
         );
+        // Streaming the (possibly tens of GB) doc file faults its whole size into this process's
+        // page tables; release each consumed range so RSS stays flat over the run.
+        doc_vectors.advise_dontneed_rows(batch.d_start, batch.d_end);
         self.timings
             .upload_us
             .fetch_add(upload_start.elapsed().as_micros() as u64, Ordering::Relaxed);

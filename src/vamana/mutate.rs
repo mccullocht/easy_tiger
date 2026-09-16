@@ -5,6 +5,7 @@ use crate::vamana::{
     GraphVectorStore, prune_edges,
     search::{GraphSearcher, Options as GraphSearchOptions},
 };
+use std::collections::hash_map::Entry::Vacant;
 use std::collections::{HashMap, hash_map::Entry};
 use vectors::VectorDistance;
 use wt_mdb::{Error, Result};
@@ -16,6 +17,55 @@ use wt_mdb::{Error, Result};
 // - Edge additions might trigger pruning.
 // - Insertion prunes up to an _infinite_ cap, and we add edges until the node is saturated or we
 //   run out of candidates, whichever one comes first.
+
+struct VertexBuffer<'a, I: GraphVectorIndex> {
+    index: &'a I,
+    graph: I::Graph<'a>,
+    vectors: I::VectorStore<'a>,
+    cache: HashMap<i64, Vec<i64>>,
+}
+
+impl<'a, I: GraphVectorIndex> VertexBuffer<'a, I> {
+    pub fn new(index: &'a I) -> Result<Self> {
+        let graph = index.graph()?;
+        let vectors = index.high_fidelity_vectors()?;
+        Ok(VertexBuffer {
+            index,
+            graph,
+            vectors,
+            cache: HashMap::new(),
+        })
+    }
+
+    pub fn insert_edge(&mut self, src: i64, dst: i64) -> Result<()> {
+        todo!()
+    }
+
+    pub fn remove_edge(&mut self, src: i64, dst: i64) -> Result<()> {
+        todo!()
+    }
+
+    pub fn edges_len(&self, vertex: i64) -> Result<usize> {
+        todo!()
+    }
+
+    pub fn flush(mut self) -> Result<()> {
+        todo!()
+    }
+
+    fn read_edges(&mut self, vertex: i64) -> Result<&mut Vec<i64>> {
+        if let Vacant(e) = self.cache.entry(vertex) {
+            let edges = self
+                .graph
+                .edges(vertex)
+                .transpose()?
+                .map(|it| it.collect::<Vec<_>>())
+                .unwrap_or_default();
+            e.insert(edges);
+        }
+        Ok(self.cache.get_mut(&vertex).expect("entry was just inserted"))
+    }
+}
 
 /// Insert a vertex for `vector` and return the id assigned to the vector.
 pub fn insert_vector(vector: &[f32], index: &impl GraphVectorIndex) -> Result<i64> {

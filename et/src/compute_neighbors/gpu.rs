@@ -614,15 +614,15 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     }))
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-    // Compute batch sizes from the limits actually granted by the device. Three buffers are
-    // constrained:
-    //   query buffer:    q_batch * dims * 2  <= max_buf_bytes
-    //   doc buffer:      d_batch * dims * 2  <= max_buf_bytes
-    //   distances buffer: q_batch * d_batch * 4 <= max_buf_bytes
+    // Compute batch sizes from the limits actually granted by the device. The distance matrix
+    // exists in three copies — the distances buffer plus two ping-pong staging buffers (see
+    // below) — so budget one third of the granted limit per copy; the vector buffers are
+    // additionally bounded by max_vecs. This keeps the total buffer footprint within what the
+    // device granted, which matters on unified-memory hardware (e.g. AMD APUs) where the
+    // "device" memory is system RAM and over-allocating can OOM the process.
     //
-    // To maximise GPU utilisation we size batches symmetrically: q_batch ≈ d_batch ≈
-    // sqrt(max_pairs) so the distances buffer fills the allowed budget. Both vector buffers
-    // are also checked against max_vecs = max_buf_bytes / (dims * 2).
+    // Batches are sized symmetrically: q_batch ≈ d_batch ≈ sqrt(max_pairs).
+    const DISTANCE_COPIES: usize = 3;
     let device_limits = device.limits();
     let max_buf_bytes = (device_limits.max_buffer_size as usize)
         .min(device_limits.max_storage_buffer_binding_size as usize);
@@ -630,7 +630,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         (1, 1) // buffers are created but the processing loop won't execute
     } else {
         let max_vecs = max_buf_bytes / (dims * std::mem::size_of::<f16>());
-        let max_pairs = max_buf_bytes / std::mem::size_of::<f32>();
+        let max_pairs = max_buf_bytes / (DISTANCE_COPIES * std::mem::size_of::<f32>());
         let sq = (max_pairs as f64).sqrt() as usize;
         let q = sq.min(max_vecs).min(query_limit).max(1);
         let d = (max_pairs / q).min(max_vecs).min(doc_limit).max(1);

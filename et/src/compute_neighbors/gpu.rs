@@ -258,12 +258,13 @@ const WG_D: usize = 16;
 const LDS_TILE: usize = 64;
 
 /// Upper bound on scalar multiply-add operations (~query * doc * dims) issued by a single
-/// dispatch. The memory-driven batch sizes below can produce dispatches with hundreds of
-/// millions of threads, each running an O(dims) loop; on a single command buffer that can run
-/// long enough to trip a driver watchdog (e.g. Windows TDR, or Linux GPU hangcheck), which kills
-/// the device ("device lost") well before the GPU is actually short on memory. Splitting a
-/// memory-sized batch into several dispatches bounded by this budget keeps each individual
-/// dispatch short, independent of how much buffer memory is available.
+/// dispatch. The memory-driven batch sizes below can otherwise produce single dispatches with
+/// hundreds of millions of threads, each running an O(dims) loop — long enough to trip a driver
+/// watchdog (e.g. Windows TDR), which kills the device ("device lost") well before the GPU is
+/// actually short on memory. Batching splits each batch into several dispatches bounded by this
+/// budget; the sub-dispatches are independent (disjoint output ranges) and are recorded into one
+/// command buffer per batch (see `prepare_batch`), so this bound applies per dispatch rather
+/// than per command buffer.
 const MAX_DISPATCH_OPS: usize = 1 << 30;
 
 /// Per-phase wall-clock totals across all batches, in microseconds. Phase attribution per batch
@@ -341,9 +342,17 @@ struct BatchRunner<'a> {
     distances_buffer: &'a wgpu::Buffer,
     staging_buffers: &'a [wgpu::Buffer; 2],
     dims: usize,
+    /// Sub-dispatch tile along the query/doc axes; computed once from `MAX_DISPATCH_OPS`.
+    dispatch_q: usize,
+    dispatch_d: usize,
+    /// Stride between per-sub-dispatch param blocks: `GpuParams` padded up to
+    /// `min_uniform_buffer_offset_alignment` for dynamic-offset binding.
+    params_stride: usize,
     /// Scratch for padding upload payloads when the byte length is not
     /// COPY_BUFFER_ALIGNMENT-aligned (odd dims only).
     upload_scratch: Vec<f16>,
+    /// Scratch for the batch's per-sub-dispatch params, staged into `params_buffer` in one write.
+    params_scratch: Vec<u8>,
     timings: &'a BatchTimings,
 }
 
@@ -381,83 +390,86 @@ impl BatchRunner<'_> {
             .upload_us
             .fetch_add(upload_start.elapsed().as_micros() as u64, Ordering::Relaxed);
 
-        // Split this memory-sized batch into smaller dispatches so no single command buffer
-        // runs long enough to trip a driver watchdog. Query/doc buffers already hold the
-        // full batch, so sub-dispatches just cover different (q, d) sub-ranges of it via
-        // q_offset/d_offset; only the distances buffer copy needs to wait for all of them.
-        let dispatch_pairs = (MAX_DISPATCH_OPS / self.dims).max(1);
-        let dispatch_side = (dispatch_pairs as f64).sqrt() as usize;
-        let dispatch_q = dispatch_side.min(current_q).max(1);
-        let dispatch_d = dispatch_side.min(current_d).max(1);
-
+        // Split this memory-sized batch into smaller dispatches so no single dispatch runs long
+        // enough to trip a driver watchdog (see MAX_DISPATCH_OPS). Query/doc buffers already
+        // hold the full batch, so sub-dispatches just cover different (q, d) sub-ranges of it
+        // via q_offset/d_offset; they are independent (disjoint output ranges), so they are all
+        // recorded into a single compute pass. Per-sub-dispatch params are staged in one write
+        // and selected with dynamic uniform offsets, and the whole batch — compute plus result
+        // copy — is submitted as one command buffer: one wgpu submit costs on the order of a
+        // millisecond, enough to starve the GPU when issued per sub-dispatch.
         let submit_start = Instant::now();
-        let mut sub_dispatches = 0u64;
-        let mut sq_start = 0usize;
-        while sq_start < current_q {
-            let sq_end = (sq_start + dispatch_q).min(current_q);
-            let mut sd_start = 0usize;
-            while sd_start < current_d {
-                let sd_end = (sd_start + dispatch_d).min(current_d);
 
-                self.queue.write_buffer(
-                    self.params_buffer,
-                    0,
-                    bytemuck::bytes_of(&GpuParams {
-                        query_count: current_q as u32,
-                        doc_count: current_d as u32,
-                        dimensions: self.dims as u32,
-                        q_offset: sq_start as u32,
-                        d_offset: sd_start as u32,
-                    }),
-                );
+        let sub_q = current_q.div_ceil(self.dispatch_q);
+        let sub_d = current_d.div_ceil(self.dispatch_d);
+        let n_subs = sub_q * sub_d;
+        self.params_scratch.clear();
+        self.params_scratch.resize(n_subs * self.params_stride, 0);
+        for i in 0..sub_q {
+            for j in 0..sub_d {
+                let block = &mut self.params_scratch[(i * sub_d + j) * self.params_stride..]
+                    [..std::mem::size_of::<GpuParams>()];
+                block.copy_from_slice(bytemuck::bytes_of(&GpuParams {
+                    query_count: current_q as u32,
+                    doc_count: current_d as u32,
+                    dimensions: self.dims as u32,
+                    q_offset: (i * self.dispatch_q) as u32,
+                    d_offset: (j * self.dispatch_d) as u32,
+                }));
+            }
+        }
+        self.queue
+            .write_buffer(self.params_buffer, 0, &self.params_scratch);
 
-                let mut encoder =
-                    self.device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("compute_encoder"),
-                        });
-                {
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("distance_pass"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(self.pipeline);
-                    pass.set_bind_group(0, self.bind_group, &[]);
+        let copy_bytes = (current_q * current_d * std::mem::size_of::<f32>()) as u64;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("compute_encoder"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("distance_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(self.pipeline);
+            for i in 0..sub_q {
+                for j in 0..sub_d {
+                    let sq_start = i * self.dispatch_q;
+                    let sd_start = j * self.dispatch_d;
+                    let sq_end = (sq_start + self.dispatch_q).min(current_q);
+                    let sd_end = (sd_start + self.dispatch_d).min(current_d);
+                    pass.set_bind_group(
+                        0,
+                        self.bind_group,
+                        &[((i * sub_d + j) * self.params_stride) as u32],
+                    );
                     pass.dispatch_workgroups(
                         (sq_end - sq_start).div_ceil(WG_Q) as u32,
                         (sd_end - sd_start).div_ceil(WG_D) as u32,
                         1,
                     );
                 }
-                self.queue.submit([encoder.finish()]);
-                sub_dispatches += 1;
-
-                sd_start = sd_end;
             }
-            sq_start = sq_end;
         }
-        self.timings
-            .submit_us
-            .fetch_add(submit_start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        self.timings
-            .sub_dispatches
-            .fetch_add(sub_dispatches, Ordering::Relaxed);
 
-        // Copy the full batch of results to staging once all sub-dispatches have completed.
-        let copy_bytes = (current_q * current_d * std::mem::size_of::<f32>()) as u64;
-        let mut copy_encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("copy_encoder"),
-                });
-        copy_encoder.copy_buffer_to_buffer(
+        // Copy the full batch of results to staging once all sub-dispatches have completed;
+        // commands in an encoder execute in order, so this runs after the pass above.
+        encoder.copy_buffer_to_buffer(
             self.distances_buffer,
             0,
             &self.staging_buffers[slot],
             0,
             copy_bytes,
         );
-        let copy_submission = self.queue.submit([copy_encoder.finish()]);
+        let copy_submission = self.queue.submit([encoder.finish()]);
+
+        self.timings
+            .submit_us
+            .fetch_add(submit_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.timings
+            .sub_dispatches
+            .fetch_add(n_subs as u64, Ordering::Relaxed);
 
         InFlight {
             slot,
@@ -640,10 +652,24 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("distance_bgl"),
         entries: &[
-            bgl_entry(0, wgpu::BufferBindingType::Uniform),
-            bgl_entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
-            bgl_entry(2, wgpu::BufferBindingType::Storage { read_only: true }),
-            bgl_entry(3, wgpu::BufferBindingType::Storage { read_only: false }),
+            // Params are bound with a dynamic offset: one buffer holds the per-sub-dispatch
+            // blocks for the whole batch (see prepare_batch).
+            bgl_entry(0, wgpu::BufferBindingType::Uniform, true),
+            bgl_entry(
+                1,
+                wgpu::BufferBindingType::Storage { read_only: true },
+                false,
+            ),
+            bgl_entry(
+                2,
+                wgpu::BufferBindingType::Storage { read_only: true },
+                false,
+            ),
+            bgl_entry(
+                3,
+                wgpu::BufferBindingType::Storage { read_only: false },
+                false,
+            ),
         ],
     });
 
@@ -681,10 +707,19 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         mapped_at_creation: false,
     });
 
-    // Params are re-written each dispatch.
+    // Sub-dispatch geometry (bounded by MAX_DISPATCH_OPS) and the params layout for one batch:
+    // one aligned block per sub-dispatch, selected in-shader via dynamic uniform offsets. All
+    // blocks for a batch are staged with a single write_buffer in prepare_batch.
+    let dispatch_pairs = (MAX_DISPATCH_OPS / dims).max(1);
+    let dispatch_side = (dispatch_pairs as f64).sqrt() as usize;
+    let dispatch_q = dispatch_side.min(q_batch).max(1);
+    let dispatch_d = dispatch_side.min(d_batch).max(1);
+    let params_align = device_limits.min_uniform_buffer_offset_alignment as usize;
+    let params_stride = std::mem::size_of::<GpuParams>().div_ceil(params_align) * params_align;
+    let max_subs = q_batch.div_ceil(dispatch_q) * d_batch.div_ceil(dispatch_d);
     let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("params_buffer"),
-        size: std::mem::size_of::<GpuParams>() as u64,
+        size: (max_subs * params_stride) as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -716,7 +751,13 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: params_buffer.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &params_buffer,
+                    offset: 0,
+                    size: Some(
+                        std::num::NonZero::new(std::mem::size_of::<GpuParams>() as u64).unwrap(),
+                    ),
+                }),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -745,7 +786,11 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         distances_buffer: &distances_buffer,
         staging_buffers: &staging_buffers,
         dims,
+        dispatch_q,
+        dispatch_d,
+        params_stride,
         upload_scratch: Vec::new(),
+        params_scratch: Vec::new(),
         timings: &timings,
     };
 
@@ -830,13 +875,17 @@ fn write_vector_payload(
     }
 }
 
-fn bgl_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
+fn bgl_entry(
+    binding: u32,
+    ty: wgpu::BufferBindingType,
+    has_dynamic_offset: bool,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer {
             ty,
-            has_dynamic_offset: false,
+            has_dynamic_offset,
             min_binding_size: None,
         },
         count: None,

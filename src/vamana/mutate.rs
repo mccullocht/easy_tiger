@@ -1,5 +1,6 @@
 //! Tools for mutating a vamana graph vector index.
 use crate::Neighbor;
+use crate::vamana::select_pruned_edges;
 use crate::vamana::{
     EdgePruningConfig, EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex,
     GraphVectorStore, prune_edges,
@@ -9,63 +10,6 @@ use std::collections::hash_map::Entry::Vacant;
 use std::collections::{HashMap, hash_map::Entry};
 use vectors::VectorDistance;
 use wt_mdb::{Error, Result};
-
-// XXX buffer wraps Graph, GraphVectorStore, distance function, edge pruning params, graph direction
-// - Interface: add_edge, remove_edge, edges_len.
-// - Maintain a HashMap vertex -> edges.
-// - Edges buffers up to 2x configured edges
-// - Edge additions might trigger pruning.
-// - Insertion prunes up to an _infinite_ cap, and we add edges until the node is saturated or we
-//   run out of candidates, whichever one comes first.
-
-struct VertexBuffer<'a, I: GraphVectorIndex> {
-    index: &'a I,
-    graph: I::Graph<'a>,
-    vectors: I::VectorStore<'a>,
-    cache: HashMap<i64, Vec<i64>>,
-}
-
-impl<'a, I: GraphVectorIndex> VertexBuffer<'a, I> {
-    pub fn new(index: &'a I) -> Result<Self> {
-        let graph = index.graph()?;
-        let vectors = index.high_fidelity_vectors()?;
-        Ok(VertexBuffer {
-            index,
-            graph,
-            vectors,
-            cache: HashMap::new(),
-        })
-    }
-
-    pub fn insert_edge(&mut self, src: i64, dst: i64) -> Result<()> {
-        todo!()
-    }
-
-    pub fn remove_edge(&mut self, src: i64, dst: i64) -> Result<()> {
-        todo!()
-    }
-
-    pub fn edges_len(&self, vertex: i64) -> Result<usize> {
-        todo!()
-    }
-
-    pub fn flush(mut self) -> Result<()> {
-        todo!()
-    }
-
-    fn read_edges(&mut self, vertex: i64) -> Result<&mut Vec<i64>> {
-        if let Vacant(e) = self.cache.entry(vertex) {
-            let edges = self
-                .graph
-                .edges(vertex)
-                .transpose()?
-                .map(|it| it.collect::<Vec<_>>())
-                .unwrap_or_default();
-            e.insert(edges);
-        }
-        Ok(self.cache.get_mut(&vertex).expect("entry was just inserted"))
-    }
-}
 
 /// Insert a vertex for `vector` and return the id assigned to the vector.
 pub fn insert_vector(vector: &[f32], index: &impl GraphVectorIndex) -> Result<i64> {
@@ -315,6 +259,122 @@ pub fn upsert_vector_with_options<F: FnMut(i64) -> bool>(
         delete_vector(vertex_id, index)?;
     }
     insert_internal(vertex_id, vector, index, options)
+}
+
+// XXX buffer wraps Graph, GraphVectorStore, distance function, edge pruning params, graph direction
+// - Interface: add_edge, remove_edge, edges_len.
+// - Maintain a HashMap vertex -> edges.
+// - Edges buffers up to 2x configured edges
+// - Edge additions might trigger pruning.
+// - Insertion prunes up to an _infinite_ cap, and we add edges until the node is saturated or we
+//   run out of candidates, whichever one comes first.
+
+struct VertexBuffer<'a, I: GraphVectorIndex> {
+    index: &'a I,
+    graph: I::Graph<'a>,
+    vectors: I::VectorStore<'a>,
+    cache: HashMap<i64, Vec<i64>>,
+    buffer_limit: usize,
+}
+
+impl<'a, I: GraphVectorIndex> VertexBuffer<'a, I> {
+    pub fn new(index: &'a I) -> Result<Self> {
+        let graph = index.graph()?;
+        let vectors = index.high_fidelity_vectors()?;
+        let buffer_limit = index.config().pruning.max_edges.get() * 2;
+        Ok(VertexBuffer {
+            index,
+            graph,
+            vectors,
+            cache: HashMap::new(),
+            buffer_limit,
+        })
+    }
+
+    pub fn insert_edge_directed(&mut self, src: i64, dst: i64) -> Result<()> {
+        let limit = self.buffer_limit;
+        let edges = self.read_edges(src)?;
+        edges.push(dst);
+        if edges.len() < limit {
+            Ok(())
+        } else {
+            self.prune_edges(src)
+        }
+    }
+
+    pub fn remove_edge_directed(&mut self, src: i64, dst: i64) -> Result<()> {
+        let edges = self.read_edges(src)?;
+        if let Some(i) = edges.iter().position(|&v| v == dst) {
+            edges.swap_remove(i);
+        }
+        Ok(())
+    }
+
+    pub fn edges_len(&self, vertex: i64) -> Result<usize> {
+        todo!("XXX do we need this?")
+    }
+
+    pub fn flush(mut self) -> Result<()> {
+        // Prune any out-of-policy vertexes.
+        let to_prune = self
+            .cache
+            .iter()
+            .filter(|(_, e)| e.len() > self.index.config().pruning.max_edges.get())
+            .map(|(&v, _)| v)
+            .collect::<Vec<_>>();
+        for vertex in to_prune {
+            self.prune_edges(vertex)?;
+        }
+
+        // Flush the edges back into the graph.
+        for (vertex, edges) in self.cache {
+            self.graph.set_edges(vertex, edges)?;
+        }
+        Ok(())
+    }
+
+    fn read_edges(&mut self, vertex: i64) -> Result<&mut Vec<i64>> {
+        if let Vacant(e) = self.cache.entry(vertex) {
+            let edges = self
+                .graph
+                .edges(vertex)
+                .transpose()?
+                .map(|it| it.collect::<Vec<_>>())
+                .unwrap_or_default();
+            e.insert(edges);
+        }
+        Ok(self
+            .cache
+            .get_mut(&vertex)
+            .expect("entry was just inserted"))
+    }
+
+    fn prune_edges(&mut self, vertex: i64) -> Result<()> {
+        let edges = self.read_edges(vertex)?.to_vec();
+        let vertex_vector = self
+            .vectors
+            .get(vertex)
+            .unwrap_or(Err(Error::not_found_error()))?
+            .to_vec();
+        let (neighbors, computer) = EdgeSetDistanceComputer::from_directed_edges(
+            &vertex_vector,
+            &mut self.vectors,
+            edges.as_slice(),
+        )?;
+        let selected = select_pruned_edges(&neighbors, &self.index.config().pruning, computer);
+        if self.index.config().edge_type == EdgeType::Undirected {
+            let mut sit = selected.iter().copied().peekable();
+            for i in (0..neighbors.len()).filter(|i| sit.next_if_eq(i).is_none()) {
+                self.remove_edge_directed(neighbors[i].vertex(), vertex)?;
+            }
+        }
+        let edges = self.read_edges(vertex)?;
+        edges.clear();
+        for v in selected {
+            edges.push(neighbors[v].vertex());
+        }
+        Ok(())
+    }
 }
 
 /// Insert `vector` at `vertex_id` into the index.

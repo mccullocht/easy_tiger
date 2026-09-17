@@ -322,12 +322,29 @@ impl BatchTimings {
         if anon == 0 {
             return;
         }
-        self.rss_anon_first
+        let first = self
+            .rss_anon_first
             .compare_exchange(0, anon, Ordering::Relaxed, Ordering::Relaxed)
-            .ok();
+            .map(|prev| prev)
+            .unwrap_or(anon);
         self.rss_anon_last.store(anon, Ordering::Relaxed);
-        self.rss_anon_max.fetch_max(anon, Ordering::Relaxed);
+        let prev_max = self.rss_anon_max.fetch_max(anon, Ordering::Relaxed);
         self.rss_file_last.store(file, Ordering::Relaxed);
+
+        let batches = self.batches.load(Ordering::Relaxed);
+        // Log periodically so memory growth is visible live — the summary below only prints when
+        // the run completes, and an OOM-killed run never gets there.
+        if batches % 50 == 0 {
+            let mib = |v: u64| v as f64 / 1024.0;
+            tracing::info!(
+                "batch {}: rss anon {} MiB (first {} MiB, peak {} MiB), file {} MiB",
+                batches,
+                mib(anon),
+                mib(first),
+                mib(if anon > prev_max { anon } else { prev_max }),
+                mib(file),
+            );
+        }
     }
 
     fn report(&self, label: &str) {
@@ -608,8 +625,8 @@ impl BatchRunner<'_> {
         self.timings
             .wait_us
             .fetch_add(wait_start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        self.timings.sample_rss();
         self.timings.batches.fetch_add(1, Ordering::Relaxed);
+        self.timings.sample_rss();
 
         // Feed GPU distances into the per-query TopNeighbors accumulators.
         //

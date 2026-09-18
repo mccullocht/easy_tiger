@@ -493,7 +493,7 @@ impl GraphSearcher {
         &mut self,
         rerank_query: &dyn QueryVectorDistance,
         reader: &impl GraphVectorIndex,
-        results: &mut Vec<Neighbor>,
+        results: &mut [Neighbor],
     ) -> Result<()> {
         let mut rerank_vectors = reader.rerank_vectors().expect("rerank enabled")?;
         for r in results.iter_mut() {

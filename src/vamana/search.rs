@@ -480,7 +480,9 @@ impl GraphSearcher {
             if self.candidates.add_unvisited(neighbor) {
                 self.candidates_added += 1;
             }
-            if let Some(sc) = seen_candidates.as_mut() {
+            if let Some(sc) = seen_candidates.as_mut()
+                && (options.filter)(neighbor.vertex())
+            {
                 sc.push(neighbor);
             }
         }
@@ -552,7 +554,9 @@ impl GraphSearcher {
                 if self.candidates.add_unvisited(neighbor) {
                     added += 1;
                 }
-                if let Some(sc) = seen_candidates.as_mut() {
+                if let Some(sc) = seen_candidates.as_mut()
+                    && (options.filter)(neighbor.vertex())
+                {
                     sc.push(neighbor);
                 }
             }

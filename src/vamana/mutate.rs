@@ -8,6 +8,7 @@ use crate::vamana::{
 };
 use std::collections::hash_map::Entry::Vacant;
 use std::collections::{HashMap, hash_map::Entry};
+use std::num::NonZero;
 use vectors::VectorDistance;
 use wt_mdb::{Error, Result};
 
@@ -291,6 +292,9 @@ impl<'a, I: GraphVectorIndex> VertexBuffer<'a, I> {
         })
     }
 
+    /// Insert a new edge from src to dst. Call with arguments reversed to get a back edge.
+    ///
+    /// May fail if there was an error reading `src` edges.
     pub fn insert_edge_directed(&mut self, src: i64, dst: i64) -> Result<()> {
         let limit = self.buffer_limit;
         let edges = self.read_edges(src)?;
@@ -302,6 +306,9 @@ impl<'a, I: GraphVectorIndex> VertexBuffer<'a, I> {
         }
     }
 
+    /// Remove the edge from src to dst, if present.
+    ///
+    /// May fail if there was an error reading `src` edges.
     pub fn remove_edge_directed(&mut self, src: i64, dst: i64) -> Result<()> {
         let edges = self.read_edges(src)?;
         if let Some(i) = edges.iter().position(|&v| v == dst) {
@@ -310,12 +317,15 @@ impl<'a, I: GraphVectorIndex> VertexBuffer<'a, I> {
         Ok(())
     }
 
-    pub fn edges_len(&self, vertex: i64) -> Result<usize> {
-        todo!("XXX do we need this?")
+    /// For a buffered vertex, returns true if the edge count is max_edges or more.
+    pub fn is_saturated(&self, vertex: i64) -> Option<bool> {
+        self.cache
+            .get(&vertex)
+            .map(|e| e.len() >= self.index.config().pruning.max_edges.get())
     }
 
-    pub fn flush(mut self) -> Result<()> {
-        // Prune any out-of-policy vertexes.
+    /// Prune any buffered vertexes that have more edges than policy allows.
+    pub fn prune_buffered(&mut self) -> Result<()> {
         let to_prune = self
             .cache
             .iter()
@@ -325,6 +335,15 @@ impl<'a, I: GraphVectorIndex> VertexBuffer<'a, I> {
         for vertex in to_prune {
             self.prune_edges(vertex)?;
         }
+        Ok(())
+    }
+
+    /// Flush buffered vertexes back into the graph.
+    ///
+    /// Vertexes may buffer more edges than policy allows; such vertexes will be pruned before they
+    /// are written back.
+    pub fn flush(mut self) -> Result<()> {
+        self.prune_buffered()?;
 
         // Flush the edges back into the graph.
         for (vertex, edges) in self.cache {
@@ -406,21 +425,21 @@ fn insert_internal<F: FnMut(i64) -> bool>(
         graph.set_entry_point(vertex_id)?;
     }
 
+    let mut pruning_config = index.config().pruning;
+    if index.config().edge_type == EdgeType::Undirected && !candidate_edges.is_empty() {
+        // For undirected graphs prune for alpha-RNG but otherwise keep everything. Back edges for
+        // anything we insert may result in pruning of `vertex_id` and we would like to saturate
+        // the graph as best we can.
+        pruning_config.max_edges = NonZero::new(candidate_edges.len()).unwrap();
+    }
     let edge_set_distance_computer = EdgeSetDistanceComputer::new(index, &candidate_edges)?;
     let selected_len = prune_edges(
         &mut candidate_edges,
-        &index.config().pruning,
+        &pruning_config,
         edge_set_distance_computer,
     );
     candidate_edges.truncate(selected_len);
 
-    graph.set_edges(
-        vertex_id,
-        candidate_edges
-            .iter()
-            .map(|n| n.vertex())
-            .collect::<Vec<_>>(),
-    )?;
     let mut nav_vectors = index.nav_vectors()?;
     nav_vectors.set(vertex_id, nav_vectors.new_coder().encode(prepared))?;
     if let Some(vectors) = index.rerank_vectors() {
@@ -428,27 +447,25 @@ fn insert_internal<F: FnMut(i64) -> bool>(
         vectors.set(vertex_id, vectors.new_coder().encode(prepared))?;
     }
 
-    let mut vectors = index.high_fidelity_vectors()?;
-    let mut pruned_edges = vec![];
-    for src_vertex_id in candidate_edges.into_iter().map(|n| n.vertex()) {
-        let edges = insert_edge_directed(
-            index,
-            &mut graph,
-            &mut vectors,
-            src_vertex_id,
-            vertex_id,
-            &mut pruned_edges,
-        )?;
-        graph.set_edges(src_vertex_id, edges)?;
-
-        if index.config().edge_type == EdgeType::Undirected {
-            for (src_vertex_id, dst_vertex_id) in pruned_edges.drain(..) {
-                remove_edge_directed(&mut graph, src_vertex_id, dst_vertex_id)?;
+    let mut vertex_buf = VertexBuffer::new(index)?;
+    // Ensure the edge row for vertex_id is written even when there are no candidate edges; callers
+    // rely on the row existing (search treats a missing edge row as not found).
+    vertex_buf.read_edges(vertex_id)?;
+    for e in candidate_edges {
+        vertex_buf.insert_edge_directed(vertex_id, e.vertex())?;
+        vertex_buf.insert_edge_directed(e.vertex(), vertex_id)?;
+        // Undirected graphs may have back edges from existing vertexes pruned. If the inserted
+        // vertex is saturated, prune buffered edges and we may continue inserting if the vertex
+        // is no longer saturated.
+        if vertex_buf.is_saturated(vertex_id).unwrap_or(false) {
+            vertex_buf.prune_buffered()?;
+            if vertex_buf.is_saturated(vertex_id).unwrap_or(false) {
+                break;
             }
         }
     }
 
-    Ok(())
+    vertex_buf.flush()
 }
 
 /// Rehydrates `edges` as neighbors with distances from `vertex_vector`, skipping any dangling

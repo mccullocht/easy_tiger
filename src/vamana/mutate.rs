@@ -357,7 +357,7 @@ fn delete_vector_directed<I: GraphVectorIndex>(
         // Remove the edge to vertex_id and track remaining edges.
         vertex_buf.remove_edge_directed(v, vertex_id)?;
         if !vedges.is_empty() {
-            seen_vertexes.entry(v).or_insert_with(Vec::new);
+            seen_vertexes.entry(v).or_default();
             for vv in vedges.iter() {
                 if let Entry::Vacant(entry) = seen_vertexes.entry(*vv) {
                     let vvedges = graph

@@ -356,20 +356,22 @@ fn delete_vector_directed<I: GraphVectorIndex>(
             .unwrap_or_default();
         // Remove the edge to vertex_id and track remaining edges.
         vertex_buf.remove_edge_directed(v, vertex_id)?;
+        // Always visit 2-hop neighbors (even when v has no remaining edges) so that vertices
+        // reachable only through v are discovered and can get their own vertex_id edge removed.
         if !vedges.is_empty() {
             seen_vertexes.entry(v).or_default();
-            for vv in vedges.iter() {
-                if let Entry::Vacant(entry) = seen_vertexes.entry(*vv) {
-                    let vvedges = graph
-                        .edges(*vv)
-                        .transpose()?
-                        .map(|e| e.collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    // Remove the edge to vertex_id and track remaining edges.
-                    vertex_buf.remove_edge_directed(*vv, vertex_id)?;
-                    if !vvedges.is_empty() {
-                        entry.insert(vvedges);
-                    }
+        }
+        for &vv in vedges.iter() {
+            if let Entry::Vacant(entry) = seen_vertexes.entry(vv) {
+                let vvedges = graph
+                    .edges(vv)
+                    .transpose()?
+                    .map(|e| e.collect::<Vec<_>>())
+                    .unwrap_or_default();
+                // Remove the edge to vertex_id and track remaining edges.
+                vertex_buf.remove_edge_directed(vv, vertex_id)?;
+                if !vvedges.is_empty() {
+                    entry.insert(vvedges);
                 }
             }
         }

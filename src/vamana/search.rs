@@ -98,7 +98,6 @@ struct TraceState {
     /// Traced vertex ids mapped to their position in the request and the nav-space distance they
     /// were scored at, if they were scored at all.
     ids: HashMap<i64, (usize, Option<f64>)>,
-    // XXX this overlaps heavily with the seen candidates search.
     /// Every vertex scored during the search (entry point, seeds, and the edges of expanded
     /// vertices) with its nav-space query distance, in scoring order.
     pub scored: Vec<ScoredVertex>,

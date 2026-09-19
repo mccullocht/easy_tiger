@@ -2,8 +2,7 @@
 use crate::Neighbor;
 use crate::vamana::select_pruned_edges;
 use crate::vamana::{
-    EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex,
-    GraphVectorStore, prune_edges,
+    EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex, GraphVectorStore, prune_edges,
     search::{GraphSearcher, Options as GraphSearchOptions},
 };
 use std::collections::hash_map::Entry::Vacant;
@@ -34,10 +33,7 @@ pub fn insert_vector_with_options<F: FnMut(i64) -> bool>(
 ///
 /// May return a non found error if `vertex_id` is not present in the index.
 pub fn delete_vector(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
-    match index.config().edge_type {
-        EdgeType::Undirected => delete_vector_undirected(vertex_id, index),
-        EdgeType::Directed => delete_vector_directed(vertex_id, index),
-    }
+    delete_internal(vertex_id, index)
 }
 
 /// Upsert vector with the externally assigned `vertex_id`.
@@ -83,6 +79,10 @@ impl<'a, I: GraphVectorIndex> VertexBuffer<'a, I> {
             cache: HashMap::new(),
             buffer_limit,
         })
+    }
+
+    pub fn index(&self) -> &'a I {
+        self.index
     }
 
     /// Insert a new edge from src to dst. Call with arguments reversed to get a back edge.
@@ -270,7 +270,7 @@ fn insert_internal<F: FnMut(i64) -> bool>(
     vertex_buf.flush()
 }
 
-fn delete_vector_undirected(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
+pub fn delete_internal(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
     let mut graph = index.graph()?;
     let mut vectors = index.high_fidelity_vectors()?;
 
@@ -304,6 +304,18 @@ fn delete_vector_undirected(vertex_id: i64, index: &impl GraphVectorIndex) -> Re
     }
 
     let mut vertex_buf = VertexBuffer::new(index)?;
+    match index.config().edge_type {
+        EdgeType::Undirected => delete_vector_undirected(vertex_id, edges, &mut vertex_buf),
+        EdgeType::Directed => delete_vector_directed(vertex_id, edges, &mut vertex_buf),
+    }?;
+    vertex_buf.flush()
+}
+
+fn delete_vector_undirected<I: GraphVectorIndex>(
+    vertex_id: i64,
+    edges: Vec<i64>,
+    vertex_buf: &mut VertexBuffer<'_, I>,
+) -> Result<()> {
     for &e in edges.iter() {
         vertex_buf.remove_edge_directed(e, vertex_id)?;
     }
@@ -318,54 +330,30 @@ fn delete_vector_undirected(vertex_id: i64, index: &impl GraphVectorIndex) -> Re
         }
     }
 
-    vertex_buf.flush()
+    Ok(())
 }
 
 /// Delete a vector in a directed graph.
 ///
 /// This utilizes Inplace Delete (Algorithm 6) from https://www.vldb.org/pvldb/vol18/p5166-upreti.pdf
-fn delete_vector_directed(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
-    let mut vectors = index.high_fidelity_vectors()?;
+fn delete_vector_directed<I: GraphVectorIndex>(
+    vertex_id: i64,
+    edges: Vec<i64>,
+    vertex_buf: &mut VertexBuffer<'_, I>,
+) -> Result<()> {
+    let mut graph = vertex_buf.index().graph()?;
+    let mut vectors = vertex_buf.index().high_fidelity_vectors()?;
     let distance_fn = vectors.new_distance_function();
-
-    let mut graph = index.graph()?;
-    let ep = graph.entry_point().transpose()?;
-    if ep == Some(vertex_id) {
-        // The entry point is being deleted: search for the nearest neighbor to vertex_id's highest
-        // fidelity vector, excluding vertex_id itself, and promote the best result to be the new
-        // entry point. The search is seeded with vertex_id's neighbors because the entry point is
-        // filtered out of traversal and cannot seed the search itself. If there are no results then
-        // the graph is empty; remove the entry point.
-        let seeds = graph
-            .edges(vertex_id)
-            .transpose()?
-            .map(|e| e.collect::<Vec<_>>())
-            .unwrap_or_default();
-        let encoded = vectors.get(vertex_id).expect("row exists")?.to_vec();
-        let query = vectors.new_coder().decode(&encoded);
-        let mut searcher = GraphSearcher::new(index.config().index_search_params);
-        let options = GraphSearchOptions::with_filter(|id| id != vertex_id).with_seeds(seeds);
-        let (results, _) = searcher.search_with_options(&query, options, index)?;
-        match results.first() {
-            Some(neighbor) => graph.set_entry_point(neighbor.vertex())?,
-            None => graph.remove_entry_point()?,
-        }
-    }
-
-    let edges = graph.remove_vertex(vertex_id)?;
-    index.nav_vectors()?.remove(vertex_id)?;
-    if let Some(vectors) = index.rerank_vectors() {
-        vectors?.remove(vertex_id)?;
-    }
-
-    // Use VertexBuffer for all edge mutations.
-    let mut vertex_buf = VertexBuffer::new(index)?;
 
     // Build a map of vertices that reference vertex_id, searching within 2 hops.
     // Track remaining edges (after removing vertex_id) to know which vertices need replacement edges.
     let mut seen_vertexes: HashMap<i64, Vec<i64>> = HashMap::new();
     for &v in edges.iter() {
-        let vedges = graph.edges(v).transpose()?.map(|e| e.collect::<Vec<_>>()).unwrap_or_default();
+        let vedges = graph
+            .edges(v)
+            .transpose()?
+            .map(|e| e.collect::<Vec<_>>())
+            .unwrap_or_default();
         // Remove the edge to vertex_id and track remaining edges.
         vertex_buf.remove_edge_directed(v, vertex_id)?;
         if !vedges.is_empty() {
@@ -422,12 +410,8 @@ fn delete_vector_directed(vertex_id: i64, index: &impl GraphVectorIndex) -> Resu
         }
     }
 
-    vertex_buf.flush()
+    Ok(())
 }
-
-/// Rehydrates `edges` as neighbors with distances from `vertex_vector`, skipping any dangling
-/// edges, and prunes if needed. Returns `(neighbors, keep)` where `neighbors[..keep]` are the
-/// selected edges in ascending distance order and `neighbors[keep..]` are the pruned ones.
 
 #[cfg(test)]
 mod tests {

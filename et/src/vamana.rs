@@ -1,3 +1,4 @@
+mod analyze_self_recall;
 mod bulk_load;
 mod check_reachability;
 mod drop_index;
@@ -10,6 +11,7 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::{Args, Subcommand};
 
+use analyze_self_recall::{AnalyzeSelfRecallArgs, analyze_self_recall};
 use bulk_load::{BulkLoadArgs, bulk_load};
 use check_reachability::{CheckReachabilityArgs, check_reachability};
 use drop_index::drop_index;
@@ -69,6 +71,8 @@ impl From<EdgePruningArgs> for EdgePruningConfig {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Analyze self-recall: search with each vector as its own query and trace the result.
+    AnalyzeSelfRecall(AnalyzeSelfRecallArgs),
     /// Bulk load a set of vectors into an index.
     /// Requires that the index be uninitialized.
     BulkLoad(BulkLoadArgs),
@@ -91,6 +95,7 @@ pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
     let connection = Arc::clone(&cmd_connection);
     let index_name = args.wt.index_name();
     match args.command {
+        Command::AnalyzeSelfRecall(args) => analyze_self_recall(connection, index_name, args),
         Command::BulkLoad(args) => bulk_load(connection, index_name, args),
         Command::Search(args) => search(connection, index_name, args),
         Command::InitIndex(args) => init_index(connection, index_name, args),

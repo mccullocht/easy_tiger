@@ -405,7 +405,7 @@ fn insert_batch(
                 let vector: &[f32] = &vector;
 
                 // Search for centroid
-                let mut candidates = searcher.search_with_options(
+                let (mut candidates, _) = searcher.search_with_options(
                     vector,
                     GraphSearchOptions::default()
                         .with_result_scratch(std::mem::take(result_scratch)),

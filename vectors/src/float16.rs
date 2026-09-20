@@ -107,6 +107,7 @@ impl DotProductDistance {
             #[cfg(target_arch = "x86_64")]
             Kernel::AvxF16c => unsafe { x86_64::dot_f16_f16(a, b) },
         }
+        .clamp(0.0, 1.0)
     }
 }
 
@@ -140,6 +141,7 @@ impl<'a> DotProductQueryDistance<'a> {
             #[cfg(target_arch = "x86_64")]
             Kernel::AvxF16c => unsafe { x86_64::dot_f32_f16(&self.0, v) },
         }
+        .clamp(0.0, 1.0)
     }
 }
 
@@ -169,6 +171,7 @@ impl EuclideanDistance {
             #[cfg(target_arch = "x86_64")]
             Kernel::AvxF16c => unsafe { x86_64::l2_f16_f16(a, b) },
         }
+        .max(0.0)
     }
 }
 
@@ -200,6 +203,7 @@ impl<'a> EuclideanQueryDistance<'a> {
             #[cfg(target_arch = "x86_64")]
             Kernel::AvxF16c => unsafe { x86_64::l2_f32_f16(&self.0, v) },
         }
+        .max(0.0)
     }
 }
 

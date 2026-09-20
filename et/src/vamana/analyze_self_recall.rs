@@ -33,6 +33,10 @@ pub struct AnalyzeSelfRecallArgs {
     #[arg(short, long)]
     num_rerank: Option<usize>,
 
+    /// Add a new entry point as a seed.
+    #[arg(long)]
+    entry_point: Option<i64>,
+
     /// If true, print JSON search traces for every search run.
     #[arg(long, default_value_t = false)]
     trace: bool,
@@ -117,7 +121,9 @@ pub fn analyze_self_recall(
 
                 let (_, trace) = searcher.search_with_options(
                     &vector,
-                    Options::default().with_trace([vertex_id]),
+                    Options::default()
+                        .with_trace([vertex_id])
+                        .with_seeds(args.entry_point),
                     txn_idx,
                 )?;
                 let trace = trace.unwrap();

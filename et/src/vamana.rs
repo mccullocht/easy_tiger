@@ -2,6 +2,7 @@ mod analyze_self_recall;
 mod bulk_load;
 mod check_reachability;
 mod drop_index;
+mod entry_point;
 mod init_index;
 mod insert;
 mod lookup;
@@ -16,6 +17,7 @@ use bulk_load::{BulkLoadArgs, bulk_load};
 use check_reachability::{CheckReachabilityArgs, check_reachability};
 use drop_index::drop_index;
 use easy_tiger::vamana::{EdgePruningConfig, EdgeType};
+use entry_point::{EntryPointArgs, entry_point};
 use init_index::{InitIndexArgs, init_index};
 use insert::{InsertArgs, insert};
 use lookup::{LookupArgs, lookup};
@@ -88,6 +90,9 @@ pub enum Command {
     Insert(InsertArgs),
     /// Check whether every vertex in the graph is reachable from the entry point.
     CheckReachability(CheckReachabilityArgs),
+    /// Compute the mean of all high fidelity vectors and check whether a point in the graph is
+    /// closer to it than the current entry point.
+    EntryPoint(EntryPointArgs),
 }
 
 pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
@@ -103,6 +108,7 @@ pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
         Command::Lookup(args) => lookup(connection, index_name, args),
         Command::Insert(args) => insert(connection, index_name, args),
         Command::CheckReachability(args) => check_reachability(connection, index_name, args),
+        Command::EntryPoint(args) => entry_point(connection, index_name, args),
     }?;
     cmd_connection.checkpoint()?;
     Ok(())

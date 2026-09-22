@@ -204,33 +204,35 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             trace,
         )?;
 
-        println!(
-            "queries {} avg duration {:0.6}s max duration {:0.6}s",
-            stats.count,
-            stats.total_duration.as_secs_f64() / stats.count as f64,
-            stats.max_duration.as_secs_f64(),
-        );
-        println!(
-            "head search avg candidates {:.2} avg visited {:.2}",
-            stats.total_stats.head.candidates as f64 / stats.count as f64,
-            stats.total_stats.head.visited as f64 / stats.count as f64
-        );
-        println!(
-            "tail search avg postings {:.2} avg read {:.2} avg scored {:.2} avg reranked {:.2}",
-            stats.total_stats.postings_read as f64 / stats.count as f64,
-            stats.total_stats.posting_vectors_read as f64 / stats.count as f64,
-            stats.total_stats.posting_vectors_scored as f64 / stats.count as f64,
-            stats.total_stats.posting_vectors_reranked as f64 / stats.count as f64,
-        );
+        if !args.trace {
+            println!(
+                "queries {} avg duration {:0.6}s max duration {:0.6}s",
+                stats.count,
+                stats.total_duration.as_secs_f64() / stats.count as f64,
+                stats.max_duration.as_secs_f64(),
+            );
+            println!(
+                "head search avg candidates {:.2} avg visited {:.2}",
+                stats.total_stats.head.candidates as f64 / stats.count as f64,
+                stats.total_stats.head.visited as f64 / stats.count as f64
+            );
+            println!(
+                "tail search avg postings {:.2} avg read {:.2} avg scored {:.2} avg reranked {:.2}",
+                stats.total_stats.postings_read as f64 / stats.count as f64,
+                stats.total_stats.posting_vectors_read as f64 / stats.count as f64,
+                stats.total_stats.posting_vectors_scored as f64 / stats.count as f64,
+                stats.total_stats.posting_vectors_reranked as f64 / stats.count as f64,
+            );
 
-        let wt_stats = WiredTigerConnectionStats::try_from(&connection)?;
-        println!(
-            "WT {:15} bytes read on {:12} lookups",
-            wt_stats.read_bytes, wt_stats.read_ios
-        );
+            let wt_stats = WiredTigerConnectionStats::try_from(&connection)?;
+            println!(
+                "WT {:15} bytes read on {:12} lookups",
+                wt_stats.read_bytes, wt_stats.read_ios
+            );
 
-        if let Some((computer, mean_recall)) = recall_computer.zip(stats.mean_recall()) {
-            println!("{}: {:0.6}", computer.label(), mean_recall);
+            if let Some((computer, mean_recall)) = recall_computer.zip(stats.mean_recall()) {
+                println!("{}: {:0.6}", computer.label(), mean_recall);
+            }
         }
     }
 

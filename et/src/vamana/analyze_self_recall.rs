@@ -215,12 +215,18 @@ impl From<VertexIdTrace> for TraceSummary {
                 notable: vec![value],
                 ..Default::default()
             },
-            VertexTrace::Seen { distance: _ } => TraceSummary {
+            VertexTrace::Seen {
+                rank: _,
+                distance: _,
+            } => TraceSummary {
                 seen: 1,
                 notable: vec![value],
                 ..Default::default()
             },
-            VertexTrace::RerankDropped { distance: _ } => TraceSummary {
+            VertexTrace::RerankDropped {
+                rank: _,
+                distance: _,
+            } => TraceSummary {
                 rerank_dropped: 1,
                 notable: vec![value],
                 ..Default::default()

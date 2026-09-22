@@ -6,7 +6,7 @@ use crate::vamana::{
     search::{GraphSearcher, Options as GraphSearchOptions},
 };
 use std::collections::hash_map::Entry::Vacant;
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::num::NonZero;
 use wt_mdb::{Error, Result};
 
@@ -329,14 +329,14 @@ pub fn delete_internal(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<
     }
 
     let edges = graph.remove_vertex(vertex_id)?;
-    index.nav_vectors()?.remove(vertex_id)?;
+    let mut vector = index.nav_vectors()?.remove(vertex_id)?.to_vec();
     if let Some(vectors) = index.rerank_vectors() {
-        vectors?.remove(vertex_id)?;
+        vector = vectors?.remove(vertex_id)?.to_vec();
     }
 
     let mut vertex_buf = VertexBuffer::new(index)?;
     match index.config().edge_type {
-        EdgeType::Undirected => delete_vector_undirected(vertex_id, edges, &mut vertex_buf),
+        EdgeType::Undirected => delete_vector_undirected(vertex_id, vector, edges, &mut vertex_buf),
         EdgeType::Directed => delete_vector_directed(vertex_id, edges, &mut vertex_buf),
     }?;
     vertex_buf.flush()
@@ -344,6 +344,7 @@ pub fn delete_internal(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<
 
 fn delete_vector_undirected<I: GraphVectorIndex>(
     vertex_id: i64,
+    vector: Vec<u8>,
     edges: Vec<i64>,
     vertex_buf: &mut VertexBuffer<'_, I>,
 ) -> Result<()> {
@@ -351,6 +352,15 @@ fn delete_vector_undirected<I: GraphVectorIndex>(
         vertex_buf.remove_edge_directed(e, vertex_id)?;
     }
 
+    let edges = wolverine_repair_edges(vertex_id, vector, edges, vertex_buf.index())?;
+    for (src, dst) in edges {
+        if !vertex_buf.edge_exists(src, dst)? {
+            vertex_buf.insert_edge_directed(src, dst)?;
+            vertex_buf.insert_edge_directed(dst, src)?;
+        }
+    }
+
+    /* XXX
     // Insert all possible pairings of the edges from the deleted vertex.
     for (i, &src) in edges.iter().enumerate() {
         for &dst in edges.iter().skip(i + 1) {
@@ -360,8 +370,93 @@ fn delete_vector_undirected<I: GraphVectorIndex>(
             }
         }
     }
+    */
 
     Ok(())
+}
+
+/// Implement Wolverine++ edge repair: https://www.vldb.org/pvldb/vol18/p2268-zheng.pdf
+///
+/// Accepts the deleted vertex_id and the graph index.
+/// Produces a set of directed edges the target the immediate neighbors of `vertex_id`.
+fn wolverine_repair_edges(
+    vertex_id: i64,
+    vertex_vector: Vec<u8>,
+    vertex_edges: Vec<i64>,
+    reader: &impl GraphVectorIndex,
+) -> Result<HashSet<(i64, i64)>> {
+    let mut graph = reader.graph()?;
+    let mut vectors = reader.high_fidelity_vectors()?;
+    let dist_fn = vectors.new_distance_function();
+
+    // Populate a one-hop pool of vertex_id's immediate edges, pulling both vectors and the outbound
+    // edges from each member of the pool. Also pull the vectors of all two-hop edges.
+    let max_edges = reader.config().pruning.max_edges.get();
+    let mut one_hop_pool = Vec::with_capacity(max_edges);
+    let mut two_hop_pool = HashMap::new();
+    for e in vertex_edges {
+        let Some(vector) = vectors.get(e).transpose()?.map(|v| v.to_vec()) else {
+            continue;
+        };
+        let Some(edge_it) = graph.edges(e).transpose()? else {
+            continue;
+        };
+        let mut edges = Vec::with_capacity(max_edges);
+        for e in edge_it.filter(|&e| e != vertex_id) {
+            if let Entry::Vacant(ve) = two_hop_pool.entry(e) {
+                let Some(v) = vectors.get(e).transpose()? else {
+                    continue;
+                };
+                ve.insert(v.to_vec());
+            }
+            edges.push(e);
+        }
+        one_hop_pool.push((e, vector, edges));
+    }
+
+    let mut repair_edges = HashSet::new();
+    let mut seen = HashSet::new();
+    for (rid, rvec, _) in one_hop_pool.iter() {
+        seen.clear();
+
+        // Look for candidate in-edges to tid. Start by taking all one-hop candidates that are are
+        // closer to tid than they are to the deleted vertex.
+        let one_hop_candidates = one_hop_pool
+            .iter()
+            .filter(|(cid, cvec, _)| {
+                *rid != *cid
+                    && dist_fn.distance(cvec, rvec) < dist_fn.distance(&vertex_vector, rvec)
+            })
+            .collect::<Vec<_>>();
+        // Insert all one hop candidates in the seen and repair set.
+        for (cid, _, _) in one_hop_candidates.iter() {
+            seen.insert(*cid);
+            repair_edges.insert((*cid, *rid));
+        }
+        // For each two hop candidate that we haven't yet seen, evaluate the candidate region checks
+        // and add any candidate that passes to the repair edge set.
+        for &cid in one_hop_candidates
+            .iter()
+            .flat_map(|x| &x.2)
+            .filter(|&&cid| seen.insert(cid))
+        {
+            let cvec = two_hop_pool
+                .get(&cid)
+                .expect("only valid two hop pool edges kept");
+            let dist_c_r = dist_fn.distance(cvec, rvec);
+            let dist_v_r = dist_fn.distance(&vertex_vector, rvec);
+            let dist_c_v = dist_fn.distance(cvec, &vertex_vector);
+            // NB: the distance sum check is intended to operate on squared euclidean distances.
+            // Our euclidean distances are already squared, and our cosine similarities are computed
+            // from unit normalized vectors in a way that causes them to be a constant scale of the
+            // euclidean distance.
+            if dist_c_r < dist_v_r && dist_c_v > dist_v_r && dist_c_r + dist_v_r > dist_c_v {
+                repair_edges.insert((cid, *rid));
+            }
+        }
+    }
+
+    Ok(repair_edges)
 }
 
 /// Delete a vector in a directed graph.

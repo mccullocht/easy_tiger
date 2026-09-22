@@ -6,6 +6,7 @@ mod entry_point;
 mod init_index;
 mod insert;
 mod lookup;
+mod repair;
 mod search;
 
 use std::{io, num::NonZero, sync::Arc};
@@ -21,6 +22,7 @@ use entry_point::{EntryPointArgs, entry_point};
 use init_index::{InitIndexArgs, init_index};
 use insert::{InsertArgs, insert};
 use lookup::{LookupArgs, lookup};
+use repair::{RepairArgs, repair_command};
 use search::{SearchArgs, search};
 
 use crate::wt_args::WiredTigerArgs;
@@ -93,6 +95,10 @@ pub enum Command {
     /// Compute the mean of all high fidelity vectors and check whether a point in the graph is
     /// closer to it than the current entry point.
     EntryPoint(EntryPointArgs),
+    /// Repair the edges of a set of vertices, printing a diff of the edges for each.
+    ///
+    /// Runs in a single transaction; the changes are rolled back unless --commit is passed.
+    Repair(RepairArgs),
 }
 
 pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
@@ -109,6 +115,7 @@ pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
         Command::Insert(args) => insert(connection, index_name, args),
         Command::CheckReachability(args) => check_reachability(connection, index_name, args),
         Command::EntryPoint(args) => entry_point(connection, index_name, args),
+        Command::Repair(args) => repair_command(connection, index_name, args),
     }?;
     cmd_connection.checkpoint()?;
     Ok(())

@@ -59,7 +59,6 @@ pub enum VertexTrace {
     Seen { rank: usize, distance: f64 },
     /// The vertex entered the reranking step at this distance and rank, but fell below the rerank
     /// cut so it was not returned.
-    // XXX this should be in the rerank space, we already know it!
     RerankDropped { rank: usize, distance: f64 },
     /// The vertex was returned at this rank in the result set. The distance is in rerank space if
     /// reranking was performed, otherwise in nav space.
@@ -128,9 +127,7 @@ impl TraceState {
         self.seen.push(neighbor);
     }
 
-    /// Resolve the final trace for every traced id given the search results, the candidate list at
-    /// the end of traversal, and the nav vector store used to resolve vertex existence.
-    fn finish(mut self, results: &[Neighbor], candidates: &CandidateList) -> GraphSearchTrace {
+    fn graph_traversal_complete(&mut self) {
         self.seen.sort_unstable();
         for (i, &n) in self.seen.iter().enumerate() {
             if let Some(&rank) = self.ids.get(&n.vertex()) {
@@ -140,7 +137,11 @@ impl TraceState {
                 }
             }
         }
+    }
 
+    /// Resolve the final trace for every traced id given the search results, the candidate list at
+    /// the end of traversal, and the nav vector store used to resolve vertex existence.
+    fn finish(mut self, results: &[Neighbor], candidates: &CandidateList) -> GraphSearchTrace {
         for (i, c) in candidates.candidates.iter().enumerate() {
             if let Some(&rank) = self.ids.get(&c.neighbor.vertex()) {
                 self.traces[rank].trace = VertexTrace::RerankDropped {
@@ -158,6 +159,7 @@ impl TraceState {
                 }
             }
         }
+
         GraphSearchTrace {
             vectors: self.traces,
         }
@@ -569,6 +571,10 @@ impl GraphSearcher {
             {
                 break;
             }
+        }
+
+        if let Some(t) = trace.as_mut() {
+            t.graph_traversal_complete();
         }
 
         // If requested seen_candidates are sorted and pass through to reranking, otherwise we

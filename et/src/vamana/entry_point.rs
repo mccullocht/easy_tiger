@@ -29,10 +29,8 @@ pub fn entry_point(
     args: EntryPointArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableGraphVectorIndex::from_db(&connection, index_name)?);
-    let reader = TransactionGraphVectorIndex::new(
-        Arc::clone(&index),
-        connection.begin_transaction(None)?,
-    );
+    let reader =
+        TransactionGraphVectorIndex::new(Arc::clone(&index), connection.begin_transaction(None)?);
 
     let hi_table = index.high_fidelity_table();
     let coder = hi_table.new_coder();

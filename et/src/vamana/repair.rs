@@ -32,10 +32,8 @@ pub fn repair_command(
     args: RepairArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableGraphVectorIndex::from_db(&connection, index_name)?);
-    let txn_index = TransactionGraphVectorIndex::new(
-        Arc::clone(&index),
-        connection.begin_transaction(None)?,
-    );
+    let txn_index =
+        TransactionGraphVectorIndex::new(Arc::clone(&index), connection.begin_transaction(None)?);
 
     let before = read_edges(&txn_index, &args.ids)?;
 

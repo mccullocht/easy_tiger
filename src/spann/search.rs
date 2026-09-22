@@ -279,7 +279,6 @@ impl<'a> SearchTraceState<'a> {
             centroid_stats,
             head_trace: GraphSearchTrace {
                 vectors: Vec::new(),
-                scored: Vec::new(),
             },
         })
     }

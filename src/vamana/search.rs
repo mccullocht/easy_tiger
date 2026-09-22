@@ -58,6 +58,7 @@ pub enum VertexTrace {
     Seen { distance: f64 },
     /// The vertex survived in the candidate list to the end of the search but fell beyond the
     /// `num_rerank` cut, so it was never reranked nor returned. The distance is in nav space.
+    // XXX this should be in the rerank space and include the rank.
     RerankDropped { distance: f64 },
     /// The vertex was returned at this rank in the result set. The distance is in rerank space if
     /// reranking was performed, otherwise in nav space.
@@ -86,21 +87,17 @@ pub struct ScoredVertex {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct GraphSearchTrace {
     pub vectors: Vec<VertexIdTrace>,
-    /// Every vertex scored during the search (entry point, seeds, and the edges of expanded
-    /// vertices) with its nav-space query distance, in scoring order. Empty when the search was
-    /// not traced.
-    #[serde(default)]
-    pub scored: Vec<ScoredVertex>,
 }
 
 /// Accumulates the state of in-flight traced vertex ids during a graph search.
 struct TraceState {
-    /// Traced vertex ids mapped to their position in the request and the nav-space distance they
+    /// Traced vertex ids mapped to their rank in the request and the nav-space distance they
     /// were scored at, if they were scored at all.
     ids: HashMap<i64, (usize, Option<f64>)>,
+    // XXX this should just be a list of Neighbor. Do I want the original scored order?
     /// Every vertex scored during the search (entry point, seeds, and the edges of expanded
     /// vertices) with its nav-space query distance, in scoring order.
-    pub scored: Vec<ScoredVertex>,
+    scored: Vec<ScoredVertex>,
 }
 
 impl TraceState {
@@ -165,7 +162,6 @@ impl TraceState {
                 .into_iter()
                 .map(|(_, id, trace)| VertexIdTrace { id, trace })
                 .collect(),
-            scored: self.scored,
         }
     }
 }
@@ -1284,46 +1280,6 @@ mod test {
         assert_eq!(rerank_dropped, 6);
     }
 
-    /// The scored list captures the entry point and every edge of every expanded vertex, each once,
-    /// with nav-space distances that match the returned (nav-space) results when rerank is off.
-    #[test]
-    fn trace_scored_vertices() {
-        let index = build_test_graph(4);
-        let mut searcher = GraphSearcher::new(GraphSearchParams {
-            beam_width: NonZero::new(4).unwrap(),
-            num_rerank: 0,
-            patience: None,
-        });
-        let (results, trace) = searcher
-            .search_with_options(
-                &[-0.1, -0.1, -0.1, -0.1],
-                Options::default().with_trace([5]),
-                &index.reader(),
-            )
-            .unwrap();
-        let trace = trace.unwrap();
-
-        // The entry point (vertex 0 in the fixture) is always scored first.
-        assert_eq!(trace.scored.first().map(|s| s.id), Some(0));
-        // Each vertex is scored at most once: the seen set prevents rescoring.
-        let mut ids: Vec<i64> = trace.scored.iter().map(|s| s.id).collect();
-        let len = ids.len();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), len, "duplicate scored vertex ids");
-        // With num_rerank == 0 the result distances are nav-space, so they must match the scored
-        // entry for the same vertex.
-        for r in &results {
-            let scored = trace
-                .scored
-                .iter()
-                .find(|s| s.id == r.vertex())
-                .unwrap_or_else(|| panic!("result vertex {} was not scored", r.vertex()));
-            assert_eq!(scored.distance, r.distance());
-        }
-        assert!(trace.scored.len() >= results.len());
-    }
-
     /// With return_seen (no rerank) the results are every vertex scored during the search — the
     /// entry point, seeds, and the edges of expanded vertices — not just the final candidate list.
     #[test]
@@ -1340,7 +1296,7 @@ mod test {
         let baseline = searcher.search(&query, &index.reader()).unwrap();
         assert_eq!(baseline.len(), 4);
 
-        let (seen, trace) = searcher
+        let (seen, _) = searcher
             .search_with_options(
                 &query,
                 Options::default()
@@ -1349,7 +1305,6 @@ mod test {
                 &index.reader(),
             )
             .unwrap();
-        let trace = trace.unwrap();
 
         // The seen results are exactly the scored vertices, each once.
         assert!(seen.len() > baseline.len(), "seen results not exhaustive");
@@ -1357,9 +1312,6 @@ mod test {
         result_ids.sort_unstable();
         result_ids.dedup();
         assert_eq!(result_ids.len(), seen.len(), "duplicate seen result ids");
-        let mut scored_ids: Vec<i64> = trace.scored.iter().map(|s| s.id).collect();
-        scored_ids.sort_unstable();
-        assert_eq!(result_ids, scored_ids);
         // The entry point (vertex 0 in the fixture) is always among them.
         assert!(result_ids.contains(&0));
         // Sorted by nav distance, matching the best baseline result's distance.
@@ -1382,18 +1334,16 @@ mod test {
             num_rerank: 2,
             patience: None,
         });
-        let (seen, trace) = searcher
+        let (seen, _) = searcher
             .search_with_options(
                 &[-0.1, -0.1, -0.1, -0.1],
                 Options::default().return_seen(true).with_trace([0]),
                 &index.reader(),
             )
             .unwrap();
-        let trace = trace.unwrap();
 
         // Everything scored is reranked: more results than the rerank cut, one per scored vertex.
         assert!(seen.len() > 2, "seen results truncated to the rerank cut");
-        assert_eq!(seen.len(), trace.scored.len());
         for w in seen.windows(2) {
             assert!(
                 w[0].distance() <= w[1].distance(),

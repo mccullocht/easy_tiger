@@ -1,22 +1,28 @@
+mod analyze_self_recall;
 mod bulk_load;
 mod check_reachability;
 mod drop_index;
+mod entry_point;
 mod init_index;
 mod insert;
 mod lookup;
+mod repair;
 mod search;
 
 use std::{io, num::NonZero, sync::Arc};
 
 use clap::{Args, Subcommand};
 
+use analyze_self_recall::{AnalyzeSelfRecallArgs, analyze_self_recall};
 use bulk_load::{BulkLoadArgs, bulk_load};
 use check_reachability::{CheckReachabilityArgs, check_reachability};
 use drop_index::drop_index;
 use easy_tiger::vamana::{EdgePruningConfig, EdgeType};
+use entry_point::{EntryPointArgs, entry_point};
 use init_index::{InitIndexArgs, init_index};
 use insert::{InsertArgs, insert};
 use lookup::{LookupArgs, lookup};
+use repair::{RepairArgs, repair_command};
 use search::{SearchArgs, search};
 
 use crate::wt_args::WiredTigerArgs;
@@ -69,6 +75,8 @@ impl From<EdgePruningArgs> for EdgePruningConfig {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Analyze self-recall: search with each vector as its own query and trace the result.
+    AnalyzeSelfRecall(AnalyzeSelfRecallArgs),
     /// Bulk load a set of vectors into an index.
     /// Requires that the index be uninitialized.
     BulkLoad(BulkLoadArgs),
@@ -84,6 +92,13 @@ pub enum Command {
     Insert(InsertArgs),
     /// Check whether every vertex in the graph is reachable from the entry point.
     CheckReachability(CheckReachabilityArgs),
+    /// Compute the mean of all high fidelity vectors and check whether a point in the graph is
+    /// closer to it than the current entry point.
+    EntryPoint(EntryPointArgs),
+    /// Repair the edges of a set of vertices, printing a diff of the edges for each.
+    ///
+    /// Runs in a single transaction; the changes are rolled back unless --commit is passed.
+    Repair(RepairArgs),
 }
 
 pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
@@ -91,6 +106,7 @@ pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
     let connection = Arc::clone(&cmd_connection);
     let index_name = args.wt.index_name();
     match args.command {
+        Command::AnalyzeSelfRecall(args) => analyze_self_recall(connection, index_name, args),
         Command::BulkLoad(args) => bulk_load(connection, index_name, args),
         Command::Search(args) => search(connection, index_name, args),
         Command::InitIndex(args) => init_index(connection, index_name, args),
@@ -98,6 +114,8 @@ pub fn vamana_command(args: VamanaArgs) -> io::Result<()> {
         Command::Lookup(args) => lookup(connection, index_name, args),
         Command::Insert(args) => insert(connection, index_name, args),
         Command::CheckReachability(args) => check_reachability(connection, index_name, args),
+        Command::EntryPoint(args) => entry_point(connection, index_name, args),
+        Command::Repair(args) => repair_command(connection, index_name, args),
     }?;
     cmd_connection.checkpoint()?;
     Ok(())

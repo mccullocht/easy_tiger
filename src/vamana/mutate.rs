@@ -59,6 +59,37 @@ pub fn upsert_vector_with_options<F: FnMut(i64) -> bool>(
     insert_internal(vertex_id, vector, index, options)
 }
 
+/// Repair the edges for a vertex.
+///
+/// Search using the highest fidelity vector available for vertex_id and add the resulting edges
+/// back to vertex_id along with any back edges.
+pub fn repair(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
+    let mut graph = index.graph()?;
+    if graph.edges(vertex_id).is_none() {
+        return Ok(());
+    }
+
+    let mut vectors = index.high_fidelity_vectors()?;
+    let query = vectors
+        .new_coder()
+        .decode(vectors.get(vertex_id).expect("vertex_id found")?);
+
+    let mut searcher = GraphSearcher::new(index.config().index_search_params);
+    let (candidates, _) = searcher.search_with_options(
+        &query,
+        GraphSearchOptions::default().return_seen(true),
+        index,
+    )?;
+
+    let mut vertex_buf = VertexBuffer::new(index)?;
+    for e in candidates.into_iter().map(|n| n.vertex()) {
+        vertex_buf.insert_edge_directed(vertex_id, e)?;
+        vertex_buf.insert_edge_directed(e, vertex_id)?;
+    }
+
+    vertex_buf.flush()
+}
+
 struct VertexBuffer<'a, I: GraphVectorIndex> {
     index: &'a I,
     graph: I::Graph<'a>,

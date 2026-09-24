@@ -398,10 +398,12 @@ impl<'a> SearchTraceState<'a> {
             .into_iter()
             .map(|(_, id, trace)| VectorIdTrace { id, trace })
             .collect();
-        let mut centroids: Vec<CentroidTrace> =
-            self.centroid_traces.drain().map(|(_, t)| t).collect();
-        centroids.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
-        SearchTrace { vectors, centroids }
+        // TODO: optionally emit centroid data for depth selection purposes.
+        // We don't emit this unconditionally because if we do it makes up 80% of the output.
+        SearchTrace {
+            vectors,
+            centroids: vec![],
+        }
     }
 }
 

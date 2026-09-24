@@ -106,6 +106,7 @@ struct QueryTrace {
     stats: SearchStats,
     traces: Vec<VectorIdTrace>,
     centroids: Vec<CentroidTrace>,
+    max_centroid_distance: Option<f64>,
 }
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
@@ -352,6 +353,7 @@ impl SearcherState {
                 recall,
                 traces: trace.vectors,
                 centroids: trace.centroids,
+                max_centroid_distance: trace.max_centroid_distance,
             };
             println!(
                 "{}",

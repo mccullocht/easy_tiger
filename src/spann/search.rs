@@ -234,6 +234,9 @@ pub struct SearchTrace {
     pub vectors: Vec<VectorIdTrace>,
     /// Information about every centroid observed by the head search, farthest to closest.
     pub centroids: Vec<CentroidTrace>,
+    /// Distance from the query to the farthest centroid whose postings were searched, or `None` if
+    /// no centroids were selected.
+    pub max_centroid_distance: Option<f64>,
 }
 
 struct SearchTraceState<'a> {
@@ -242,6 +245,7 @@ struct SearchTraceState<'a> {
     centroid_traces: HashMap<u32, CentroidTrace>,
     centroid_stats: TypedCursorGuard<'a, u32, CentroidCounts>,
     head_trace: GraphSearchTrace,
+    max_centroid_distance: Option<f64>,
 }
 
 impl<'a> SearchTraceState<'a> {
@@ -280,6 +284,7 @@ impl<'a> SearchTraceState<'a> {
             head_trace: GraphSearchTrace {
                 vectors: Vec::new(),
             },
+            max_centroid_distance: None,
         })
     }
 
@@ -311,8 +316,12 @@ impl<'a> SearchTraceState<'a> {
         }
     }
 
-    fn observe_selected_centroids(&mut self, centroids: impl Iterator<Item = u32>) {
-        for cid in centroids {
+    fn observe_selected_centroids(&mut self, centroids: &[Neighbor]) {
+        self.max_centroid_distance = centroids
+            .iter()
+            .map(|n| n.distance())
+            .fold(None, |m: Option<f64>, d| Some(m.map_or(d, |m| m.max(d))));
+        for cid in centroids.iter().map(|n| n.vertex() as u32) {
             if let Some(t) = self.centroid_traces.get_mut(&cid) {
                 t.selected = true;
             }
@@ -403,6 +412,7 @@ impl<'a> SearchTraceState<'a> {
         SearchTrace {
             vectors,
             centroids: vec![],
+            max_centroid_distance: self.max_centroid_distance,
         }
     }
 }
@@ -489,7 +499,7 @@ impl Searcher {
 
         centroids = self.params.centroid_selector.select(centroids);
         if let Some(t) = trace_state.as_mut() {
-            t.observe_selected_centroids(centroids.iter().map(|n| n.vertex() as u32));
+            t.observe_selected_centroids(&centroids);
         }
         self.stats.postings_read = centroids.len();
 

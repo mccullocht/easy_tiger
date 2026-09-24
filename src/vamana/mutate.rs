@@ -1,5 +1,4 @@
 //! Tools for mutating a vamana graph vector index.
-use crate::Neighbor;
 use crate::vamana::select_pruned_edges;
 use crate::vamana::{
     EdgeSetDistanceComputer, EdgeType, Graph, GraphVectorIndex, GraphVectorStore, prune_edges,
@@ -337,7 +336,7 @@ pub fn delete_internal(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<
     let mut vertex_buf = VertexBuffer::new(index)?;
     match index.config().edge_type {
         EdgeType::Undirected => delete_vector_undirected(vertex_id, vector, edges, &mut vertex_buf),
-        EdgeType::Directed => delete_vector_directed(vertex_id, edges, &mut vertex_buf),
+        EdgeType::Directed => delete_vector_directed(vertex_id, vector, edges, &mut vertex_buf),
     }?;
     vertex_buf.flush()
 }
@@ -359,18 +358,6 @@ fn delete_vector_undirected<I: GraphVectorIndex>(
             vertex_buf.insert_edge_directed(dst, src)?;
         }
     }
-
-    /* XXX
-    // Insert all possible pairings of the edges from the deleted vertex.
-    for (i, &src) in edges.iter().enumerate() {
-        for &dst in edges.iter().skip(i + 1) {
-            if !vertex_buf.edge_exists(src, dst)? {
-                vertex_buf.insert_edge_directed(src, dst)?;
-                vertex_buf.insert_edge_directed(dst, src)?;
-            }
-        }
-    }
-    */
 
     Ok(())
 }
@@ -461,80 +448,45 @@ fn wolverine_repair_edges(
 
 /// Delete a vector in a directed graph.
 ///
-/// This utilizes Inplace Delete (Algorithm 6) from https://www.vldb.org/pvldb/vol18/p5166-upreti.pdf
+/// In a directed graph the in-edges to `vertex_id` are not known, so approximate them by walking
+/// two hops out from `vertex_id` and dropping any edge to `vertex_id` found along the way.
+/// Replacement edges are generated with Wolverine++ and, unlike the undirected case, are only
+/// linked in one direction.
 fn delete_vector_directed<I: GraphVectorIndex>(
     vertex_id: i64,
+    vector: Vec<u8>,
     edges: Vec<i64>,
     vertex_buf: &mut VertexBuffer<'_, I>,
 ) -> Result<()> {
     let mut graph = vertex_buf.index().graph()?;
-    let mut vectors = vertex_buf.index().high_fidelity_vectors()?;
-    let distance_fn = vectors.new_distance_function();
 
-    // Build a map of vertices that reference vertex_id, searching within 2 hops.
-    // Track remaining edges (after removing vertex_id) to know which vertices need replacement edges.
-    let mut seen_vertexes: HashMap<i64, Vec<i64>> = HashMap::new();
+    // Remove edges to vertex_id from any vertex within 2 hops. Always visit 2-hop neighbors (even
+    // when the 1-hop vertex has no other remaining edges) so that vertices reachable only through
+    // that vertex are discovered and can get their own vertex_id edge removed.
+    let mut seen_vertexes = HashSet::new();
     for &v in edges.iter() {
         let vedges = graph
             .edges(v)
             .transpose()?
             .map(|e| e.collect::<Vec<_>>())
             .unwrap_or_default();
-        // Remove the edge to vertex_id and track remaining edges.
-        vertex_buf.remove_edge_directed(v, vertex_id)?;
-        // Always visit 2-hop neighbors (even when v has no remaining edges) so that vertices
-        // reachable only through v are discovered and can get their own vertex_id edge removed.
-        if !vedges.is_empty() {
-            seen_vertexes.entry(v).or_default();
+        if seen_vertexes.insert(v) {
+            vertex_buf.remove_edge_directed(v, vertex_id)?;
         }
-        for &vv in vedges.iter() {
-            if let Entry::Vacant(entry) = seen_vertexes.entry(vv) {
-                let vvedges = graph
-                    .edges(vv)
-                    .transpose()?
-                    .map(|e| e.collect::<Vec<_>>())
-                    .unwrap_or_default();
-                // Remove the edge to vertex_id and track remaining edges.
+        for vv in vedges.into_iter().filter(|&vv| vv != vertex_id) {
+            if seen_vertexes.insert(vv) {
                 vertex_buf.remove_edge_directed(vv, vertex_id)?;
-                if !vvedges.is_empty() {
-                    entry.insert(vvedges);
-                }
             }
         }
     }
+    drop(graph);
 
-    // Each vertex that I removed an edge from may get replacement edges.
-    // Fetch these vectors since they will be used repeatedly.
-    let mut replacement_candidates = Vec::with_capacity(edges.len());
-    for e in edges {
-        if let Some(v) = vectors.get(e).transpose()? {
-            replacement_candidates.push((e, v.to_vec()));
-        }
-    }
-
-    // For each vertex that we removed vertex_id from, score all of the replacement candidates
-    // and insert the top candidates via VertexBuffer.
-    let mut replacements = Vec::with_capacity(replacement_candidates.len());
-    for (id, remaining_edges) in seen_vertexes.iter_mut() {
-        replacements.clear();
-
-        let cvector = vectors.get(*id).expect("row exists")?.to_vec();
-        for (rid, rv) in replacement_candidates.iter() {
-            // Skip anything that exists already in the edge set.
-            if !remaining_edges.contains(rid) {
-                replacements.push(Neighbor::new(*rid, distance_fn.distance(&cvector, rv)));
-            }
-        }
-
-        if replacements.is_empty() {
-            continue;
-        }
-
-        if replacements.len() > 4 {
-            replacements.select_nth_unstable(3);
-        }
-        for c in replacements.iter().take(4).map(|n| n.vertex()) {
-            vertex_buf.insert_edge_directed(*id, c)?;
+    // Edges to vertex_id are only buffered for removal at this point, but the repair candidate
+    // pools skip them so the stale graph state does not leak into the replacement edges.
+    let repair_edges = wolverine_repair_edges(vertex_id, vector, edges, vertex_buf.index())?;
+    for (src, dst) in repair_edges {
+        if !vertex_buf.edge_exists(src, dst)? {
+            vertex_buf.insert_edge_directed(src, dst)?;
         }
     }
 

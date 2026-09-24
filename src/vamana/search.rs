@@ -52,8 +52,8 @@ pub enum VertexTrace {
     #[default]
     NotFound,
     /// The vertex exists in the graph but was never scored during the search: graph traversal
-    /// never reached it.
-    Unseen,
+    /// never reached it. Contains the nav distance that would've been computed.
+    Unseen { distance: f64 },
     /// The vertex was seen during graph traversal at this distance and final rank, but the rank was
     /// not high enough to rerank and/or return at the end
     Seen { rank: usize, distance: f64 },
@@ -101,16 +101,22 @@ struct TraceState {
 }
 
 impl TraceState {
-    fn new(traced: &[i64], graph: &mut impl Graph) -> Result<Self> {
+    fn new(
+        traced: &[i64],
+        nav_query: &dyn QueryVectorDistance,
+        nav: &mut impl GraphVectorStore,
+    ) -> Result<Self> {
         let traces = traced
             .iter()
             .map(|&id| {
                 Ok(VertexIdTrace {
                     id,
-                    trace: graph
-                        .edges(id)
+                    trace: nav
+                        .get(id)
                         .transpose()?
-                        .map(|_| VertexTrace::Unseen)
+                        .map(|v| VertexTrace::Unseen {
+                            distance: nav_query.distance(v),
+                        })
                         .unwrap_or(VertexTrace::NotFound),
                 })
             })
@@ -139,8 +145,6 @@ impl TraceState {
         }
     }
 
-    /// Resolve the final trace for every traced id given the search results, the candidate list at
-    /// the end of traversal, and the nav vector store used to resolve vertex existence.
     fn finish(mut self, results: &[Neighbor], candidates: &CandidateList) -> GraphSearchTrace {
         for (i, c) in candidates.candidates.iter().enumerate() {
             if let Some(&rank) = self.ids.get(&c.neighbor.vertex()) {
@@ -328,7 +332,7 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<Vec<Neighbor>> {
         self.seen.clear();
-        self.search_internal(query, Options::default(), None, reader)
+        self.search_internal(query, Options::default(), reader)
             .map(|(results, _)| results)
     }
 
@@ -344,12 +348,7 @@ impl GraphSearcher {
         reader: &impl GraphVectorIndex,
     ) -> Result<(Vec<Neighbor>, Option<GraphSearchTrace>)> {
         self.seen.clear();
-        let trace = if !options.trace.is_empty() {
-            Some(TraceState::new(&options.trace, &mut reader.graph()?)?)
-        } else {
-            None
-        };
-        self.search_internal(query, options, trace, reader)
+        self.search_internal(query, options, reader)
     }
 
     /// Search for the vector at `vertex_id` and return matching candidates.
@@ -399,7 +398,6 @@ impl GraphSearcher {
             Options::default(),
             rerank_query.as_ref().map(|q| q.as_ref()),
             reader,
-            None,
         )
         .map(|(results, _)| results)
     }
@@ -408,7 +406,6 @@ impl GraphSearcher {
         &mut self,
         query: &[f32],
         options: Options<F>,
-        trace: Option<TraceState>,
         reader: &impl GraphVectorIndex,
     ) -> Result<(Vec<Neighbor>, Option<GraphSearchTrace>)> {
         // Center the query the same way the stored vectors were; every downstream query distance
@@ -433,7 +430,6 @@ impl GraphSearcher {
             options,
             rerank_query.as_ref().map(|q| q.as_ref()),
             reader,
-            trace,
         )
     }
 
@@ -514,10 +510,14 @@ impl GraphSearcher {
         mut options: Options<F>,
         rerank_query: Option<&dyn QueryVectorDistance>,
         reader: &impl GraphVectorIndex,
-        mut trace: Option<TraceState>,
     ) -> Result<(Vec<Neighbor>, Option<GraphSearchTrace>)> {
         let mut graph = reader.graph()?;
         let mut nav = reader.nav_vectors()?;
+        let mut trace = if !options.trace.is_empty() {
+            Some(TraceState::new(&options.trace, nav_query, &mut nav)?)
+        } else {
+            None
+        };
         let mut seen_candidates = self.initialize_search(
             nav_query,
             &mut graph,
@@ -1224,7 +1224,7 @@ mod test {
             }
             match t.trace {
                 VertexTrace::Found { .. } => found += 1,
-                VertexTrace::Unseen => {}
+                VertexTrace::Unseen { distance } => assert!(distance >= 0.0),
                 other => panic!("unreachable state {other:?}"),
             }
         }
@@ -1279,9 +1279,8 @@ mod test {
                     rerank_dropped += 1;
                 }
                 VertexTrace::Seen { rank: _, distance } => assert!(distance >= 0.0),
-                VertexTrace::Unseen | VertexTrace::NotFound => {
-                    assert!(t.id == 300 || t.trace == VertexTrace::Unseen)
-                }
+                VertexTrace::Unseen { distance } => assert!(distance >= 0.0),
+                VertexTrace::NotFound => assert_eq!(t.id, 300),
             }
         }
         assert_eq!(found, 2);

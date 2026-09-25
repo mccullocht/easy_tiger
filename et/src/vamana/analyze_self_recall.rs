@@ -210,7 +210,7 @@ impl From<VertexIdTrace> for TraceSummary {
                 notable: vec![value],
                 ..Default::default()
             },
-            VertexTrace::Unseen => TraceSummary {
+            VertexTrace::Unseen { distance: _ } => TraceSummary {
                 unseen: 1,
                 notable: vec![value],
                 ..Default::default()

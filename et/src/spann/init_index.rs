@@ -84,6 +84,11 @@ pub struct InitIndexArgs {
     #[arg(long)]
     rerank_format: F32VectorCoding,
 
+    /// Store posting vectors as residuals against their assigned centroid (v - c).
+    /// Queries are adjusted per centroid; the rerank table is unaffected.
+    #[arg(long, default_value_t = false)]
+    center_postings: bool,
+
     /// If set, apply an orthogonal rotation seeded with this value to every vector on ingress
     /// (both ingestion and search). Must remain fixed for the life of the index.
     #[arg(long)]
@@ -147,6 +152,7 @@ pub fn init_index(
         },
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,
+        center_postings: args.center_postings,
         rotation_seed: args.rotation_seed,
     };
     let index = Arc::new(TableIndex::init_index(

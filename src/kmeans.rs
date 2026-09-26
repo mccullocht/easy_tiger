@@ -209,12 +209,16 @@ mod bp {
         let mut adjustment_mult = 1;
 
         for _ in 0..max_iters {
-            let split_adjustment =
-                (half.abs_diff(current_candidate.split) / 10 * adjustment_mult).max(1);
+            let split_adjustment = (half.abs_diff(current_candidate.split) / 10)
+                .saturating_mul(adjustment_mult)
+                .max(1);
             // Adjust the split using a potentially scaling adjustment. The adjustment must leave at
             // least once vector in each cluster.
             let target_split = if current_candidate.split < half {
-                (current_candidate.split + split_adjustment).max(dataset.len() - 1)
+                current_candidate
+                    .split
+                    .saturating_add(split_adjustment)
+                    .min(dataset.len() - 1)
             } else {
                 current_candidate.split - split_adjustment.min(current_candidate.split - 1)
             };
@@ -232,7 +236,7 @@ mod bp {
                 // Try harder to fix the split by taking elements from the "far" side of the split.
                 // This improves the odds of convergence but also indicates that we probably chose
                 // poor initial centroids.
-                adjustment_mult *= 2;
+                adjustment_mult = adjustment_mult.saturating_mul(2);
             }
         }
 

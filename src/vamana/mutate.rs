@@ -76,7 +76,7 @@ pub fn repair(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
     let (candidates, _) = searcher.search_with_options(
         &query,
-        GraphSearchOptions::default().return_seen(true),
+        GraphSearchOptions::with_filter(|id| id != vertex_id).return_seen(true),
         index,
     )?;
 

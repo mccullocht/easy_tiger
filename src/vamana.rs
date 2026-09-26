@@ -346,7 +346,7 @@ fn select_pruned_edges(
     debug_assert!(edges.is_sorted());
 
     let mut selected = vec![0]; // we always keep the first node.
-    for i in 1..edges.len() {
+    for (i, e) in edges.iter().enumerate().skip(1) {
         if selected
             .iter()
             .any(|&j| edges[i].distance / edge_distance_computer.distance(i, j) > config.alpha)

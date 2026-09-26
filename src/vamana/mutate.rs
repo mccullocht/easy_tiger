@@ -253,6 +253,7 @@ fn insert_internal<F: FnMut(i64) -> bool>(
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
     let (mut candidate_edges, _) = searcher.search_with_options(vector, options, index)?;
     let mut graph = index.graph()?;
+    // XXX this assumes the graph is empty which may not be true.
     if candidate_edges.is_empty() {
         graph.set_entry_point(vertex_id)?;
     }

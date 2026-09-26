@@ -13,7 +13,6 @@ use easy_tiger::{
     },
     vamana::search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
 };
-use half::slice::HalfFloatSliceExt;
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use rand::SeedableRng;
 use rayon::prelude::*;
@@ -395,11 +394,18 @@ fn insert_batch(
                 (txn_idx, searcher, result_scratch)
             },
             |(txn_idx, searcher, result_scratch), i| {
-                let vector: Vec<f32> = vectors[i].to_f32_vec();
+                // Apply the configured ingress rotation before searching the head and encoding
+                // the posting/rerank vectors so stored vectors and queries share a space.
+                let vector: Vec<f32> = vectors::prepare_vector_from_f16(
+                    &vectors[i],
+                    index.rotator(),
+                    index.head_config().config().similarity.angular(),
+                    None,
+                );
                 let vector: &[f32] = &vector;
 
                 // Search for centroid
-                let mut candidates = searcher.search_with_options(
+                let (mut candidates, _) = searcher.search_with_options(
                     vector,
                     GraphSearchOptions::default()
                         .with_result_scratch(std::mem::take(result_scratch)),

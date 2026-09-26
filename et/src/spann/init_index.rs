@@ -89,6 +89,11 @@ pub struct InitIndexArgs {
     #[arg(long, default_value_t = false)]
     center_postings: bool,
 
+    /// If set, apply an orthogonal rotation seeded with this value to every vector on ingress
+    /// (both ingestion and search). Must remain fixed for the life of the index.
+    #[arg(long)]
+    rotation_seed: Option<u64>,
+
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value_t = false)]
     drop_tables: bool,
@@ -148,6 +153,7 @@ pub fn init_index(
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,
         center_postings: args.center_postings,
+        rotation_seed: args.rotation_seed,
     };
     let index = Arc::new(TableIndex::init_index(
         &connection,

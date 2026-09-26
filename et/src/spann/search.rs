@@ -15,12 +15,15 @@ use easy_tiger::{
     spann::{
         TableIndex, TransactionIndex,
         search::{
-            CentroidSelector, CentroidSelectorAlgorithm, SearchParams, SearchStats, Searcher,
+            CentroidSelector, CentroidSelectorAlgorithm, CentroidTrace, SearchParams, SearchStats,
+            Searcher, VectorIdTrace,
         },
     },
     vamana::{GraphSearchParams, PatienceParams},
 };
 use half::slice::HalfFloatSliceExt;
+use serde::Serialize;
+use tracing::warn;
 use vectors::f16;
 use wt_mdb::Connection;
 
@@ -70,6 +73,12 @@ pub struct SearchArgs {
     /// If the index does not have a rerank format, this is ignored.
     #[arg(long)]
     posting_rerank_budget: Option<usize>,
+    /// Z-score to apply to distance estimate bounds in re-ranking queue.
+    ///
+    /// Larger Z-scores increase confidence that each distance estimate is in range, increasing
+    /// recall at the cost of needing to rerank more vectors.
+    #[arg(long, default_value_t = 1.0)]
+    posting_rerank_z_score: f64,
     /// Maximum number of queries to run. If unset, run all queries in the vector file.
     #[arg(short, long)]
     limit: Option<usize>,
@@ -77,10 +86,27 @@ pub struct SearchArgs {
     #[command(flatten)]
     recall: RecallArgs,
 
+    /// Trace the search for the golden neighbors of each query, writing one JSON object per
+    /// query to stdout. Requires --neighbors and --recall-k to be set; the top --recall-k
+    /// neighbors from the golden file are used as the traced vectors.
+    #[arg(long)]
+    trace: bool,
+
     #[arg(long, default_value = "1")]
     warmup_iters: usize,
     #[arg(long, default_value = "2")]
     test_iters: usize,
+}
+
+/// A single query's search trace, packaged for output.
+#[derive(Serialize)]
+struct QueryTrace {
+    query_index: usize,
+    recall: Option<f64>,
+    stats: SearchStats,
+    traces: Vec<VectorIdTrace>,
+    centroids: Vec<CentroidTrace>,
+    max_centroid_distance: Option<f64>,
 }
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
@@ -120,9 +146,20 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         num_rerank: args
             .posting_rerank_budget
             .unwrap_or(args.posting_candidates.get()),
+        z_score: args.posting_rerank_z_score,
     };
     let recall_computer = RecallComputer::from_args(args.recall)?;
     if let Some(computer) = recall_computer.as_ref() {
+        if computer.k() > args.posting_candidates.get() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "--posting-candidates ({}) must be >= recall k ({})",
+                    args.posting_candidates.get(),
+                    computer.k(),
+                ),
+            ));
+        }
         if computer.neighbors_len() < limit {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -134,6 +171,12 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             ));
         }
     }
+    let trace = if args.trace && recall_computer.is_none() {
+        warn!("--trace has no effect without --neighbors and --recall-k");
+        false
+    } else {
+        args.trace
+    };
 
     if args.warmup_iters > 0 {
         search_phase(
@@ -145,6 +188,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             &connection,
             search_params.clone(),
             recall_computer.as_ref(),
+            false,
         )?;
     }
 
@@ -158,35 +202,38 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             &connection,
             search_params,
             recall_computer.as_ref(),
+            trace,
         )?;
 
-        println!(
-            "queries {} avg duration {:0.6}s max duration {:0.6}s",
-            stats.count,
-            stats.total_duration.as_secs_f64() / stats.count as f64,
-            stats.max_duration.as_secs_f64(),
-        );
-        println!(
-            "head search avg candidates {:.2} avg visited {:.2}",
-            stats.total_stats.head.candidates as f64 / stats.count as f64,
-            stats.total_stats.head.visited as f64 / stats.count as f64
-        );
-        println!(
-            "tail search avg postings {:.2} avg read {:.2} avg scored {:.2} avg reranked {:.2}",
-            stats.total_stats.postings_read as f64 / stats.count as f64,
-            stats.total_stats.posting_vectors_read as f64 / stats.count as f64,
-            stats.total_stats.posting_vectors_scored as f64 / stats.count as f64,
-            stats.total_stats.posting_vectors_reranked as f64 / stats.count as f64,
-        );
+        if !args.trace {
+            println!(
+                "queries {} avg duration {:0.6}s max duration {:0.6}s",
+                stats.count,
+                stats.total_duration.as_secs_f64() / stats.count as f64,
+                stats.max_duration.as_secs_f64(),
+            );
+            println!(
+                "head search avg candidates {:.2} avg visited {:.2}",
+                stats.total_stats.head.candidates as f64 / stats.count as f64,
+                stats.total_stats.head.visited as f64 / stats.count as f64
+            );
+            println!(
+                "tail search avg postings {:.2} avg read {:.2} avg scored {:.2} avg reranked {:.2}",
+                stats.total_stats.postings_read as f64 / stats.count as f64,
+                stats.total_stats.posting_vectors_read as f64 / stats.count as f64,
+                stats.total_stats.posting_vectors_scored as f64 / stats.count as f64,
+                stats.total_stats.posting_vectors_reranked as f64 / stats.count as f64,
+            );
 
-        let wt_stats = WiredTigerConnectionStats::try_from(&connection)?;
-        println!(
-            "WT {:15} bytes read on {:12} lookups",
-            wt_stats.read_bytes, wt_stats.read_ios
-        );
+            let wt_stats = WiredTigerConnectionStats::try_from(&connection)?;
+            println!(
+                "WT {:15} bytes read on {:12} lookups",
+                wt_stats.read_bytes, wt_stats.read_ios
+            );
 
-        if let Some((computer, mean_recall)) = recall_computer.zip(stats.mean_recall()) {
-            println!("{}: {:0.6}", computer.label(), mean_recall);
+            if let Some((computer, mean_recall)) = recall_computer.zip(stats.mean_recall()) {
+                println!("{}: {:0.6}", computer.label(), mean_recall);
+            }
         }
     }
 
@@ -203,6 +250,7 @@ fn search_phase<Q: Send + Sync>(
     connection: &Arc<Connection>,
     search_params: SearchParams,
     recall_computer: Option<&RecallComputer>,
+    trace: bool,
 ) -> io::Result<AggregateSearchStats> {
     let query_indices = (0..limit).cycle().take(iters * limit).collect::<Vec<_>>();
     let progress = progress_bar(query_indices.len(), name);
@@ -213,7 +261,14 @@ fn search_phase<Q: Send + Sync>(
         query_indices
             .into_iter()
             .progress_with(progress.clone())
-            .map(|index| searcher.query(index, &query_vectors[index].to_f32_vec(), recall_computer))
+            .map(|index| {
+                searcher.query(
+                    index,
+                    &query_vectors[index].to_f32_vec(),
+                    recall_computer,
+                    trace,
+                )
+            })
             .reduce(|a, b| match (a, b) {
                 (Ok(a), Ok(b)) => Ok(a + b),
                 (Ok(_), Err(b)) => Err(b),
@@ -229,8 +284,12 @@ fn search_phase<Q: Send + Sync>(
             .map_init(
                 || SearcherState::new(index, connection, search_params.clone()).unwrap(),
                 |searcher, index| {
-                    let stats =
-                        searcher.query(index, &query_vectors[index].to_f32_vec(), recall_computer);
+                    let stats = searcher.query(
+                        index,
+                        &query_vectors[index].to_f32_vec(),
+                        recall_computer,
+                        trace,
+                    );
                     progress.inc(1);
                     stats
                 },
@@ -266,19 +325,42 @@ impl SearcherState {
         index: usize,
         query: &[f32],
         recall_computer: Option<&RecallComputer>,
+        trace: bool,
     ) -> io::Result<AggregateSearchStats> {
         let reader = TransactionIndex::new(&self.index, self.connection.begin_transaction(None)?);
         let mut posting_cursor = reader
             .transaction()
             .open_cursor::<u32, Vec<u8>>(self.index.postings_table_name())?;
         let start = Instant::now();
-        let results = self.searcher.search(query, &reader, &mut posting_cursor)?;
+        let traced_vectors = if trace {
+            recall_computer.map(|r| r.traced_vector_ids(index))
+        } else {
+            None
+        };
+        let (results, trace) = self.searcher.search_with_trace(
+            query,
+            &reader,
+            &mut posting_cursor,
+            traced_vectors.as_deref(),
+        )?;
         let duration = Instant::now() - start;
-        Ok(AggregateSearchStats::new(
-            duration,
-            self.searcher.stats(),
-            recall_computer.map(|r| r.compute_recall(index, &results)),
-        ))
+        let stats = self.searcher.stats();
+        let recall = recall_computer.map(|r| r.compute_recall(index, &results));
+        if let (Some(_), Some(trace)) = (traced_vectors, trace) {
+            let query_trace = QueryTrace {
+                query_index: index,
+                stats,
+                recall,
+                traces: trace.vectors,
+                centroids: trace.centroids,
+                max_centroid_distance: trace.max_centroid_distance,
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&query_trace).expect("QueryTrace is serializable")
+            );
+        }
+        Ok(AggregateSearchStats::new(duration, stats, recall))
     }
 }
 

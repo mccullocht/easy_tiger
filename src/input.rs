@@ -113,6 +113,12 @@ where
     pub fn data(&self) -> &D {
         &self.data
     }
+
+    /// Contiguous element slice over the flat element range `[start, end)`, where row `r`
+    /// occupies elements `r * stride .. (r + 1) * stride`.
+    pub fn flat_slice(&self, start: usize, end: usize) -> &[E] {
+        &self.raw_vectors[start..end]
+    }
 }
 
 impl<E> DerefVectorStore<E, Mmap> {
@@ -337,5 +343,25 @@ mod test {
             assert_eq!(&store[i], expected.as_slice());
         }
         assert_eq!(store.iter().count(), len);
+    }
+
+    #[test]
+    fn flat_slice_spans_rows() {
+        let len = 5;
+        let dim = 4;
+        let data = bigann_f32(len, dim);
+        let store: DerefVectorStore<f32, Vec<u8>> = DerefVectorStore::new(data).unwrap();
+
+        assert_eq!(store.flat_slice(0, 0), &[] as &[f32]);
+        for r in 0..len {
+            assert_eq!(
+                store.flat_slice(r * dim, (r + 1) * dim),
+                &store[r],
+                "flat_slice mismatch for row {r}"
+            );
+        }
+        // A multi-row range is the concatenation of the rows.
+        let expected: Vec<f32> = (dim..3 * dim).map(|x| x as f32).collect();
+        assert_eq!(store.flat_slice(dim, 3 * dim), expected.as_slice());
     }
 }

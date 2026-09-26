@@ -1,9 +1,12 @@
 use std::{io, sync::Arc};
 
 use clap::Args;
-use easy_tiger::vamana::{
-    Graph, GraphVectorStore,
-    wt::{CursorGraph, CursorVectorStore, TableGraphVectorIndex},
+use easy_tiger::{
+    Neighbor,
+    vamana::{
+        Graph, GraphVectorStore,
+        wt::{CursorGraph, CursorVectorStore, TableGraphVectorIndex},
+    },
 };
 use wt_mdb::Connection;
 
@@ -16,6 +19,11 @@ pub struct LookupArgs {
     /// If true, print the undirected graph edges.
     #[arg(short, long, default_value = "true")]
     edges: bool,
+
+    /// If true, score each edge against the source vertex using the highest fidelity vectors
+    /// available and print edges sorted in ascending order by distance.
+    #[arg(short, long, default_value_t = false)]
+    score: bool,
 
     /// If true, print vector status and number of bytes.
     #[arg(short, long, default_value_t = false)]
@@ -39,7 +47,12 @@ pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -
             Some(result) => match result {
                 Err(e) => println!("Vertex error {e}"),
                 Ok(edges) => {
-                    println!("edges: {:?}", edges.collect::<Vec<_>>());
+                    let edges = edges.collect::<Vec<_>>();
+                    if args.score {
+                        print_scored_edges(&txn, &index, args.id, &edges)?;
+                    } else {
+                        println!("edges: {edges:?}");
+                    }
                 }
             },
         };
@@ -69,6 +82,58 @@ pub fn lookup(connection: Arc<Connection>, index_name: &str, args: LookupArgs) -
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Score `edges` against `src_id` using the highest fidelity vectors available for `index`
+/// (the rerank vectors if present, otherwise the navigational vectors) and print them sorted
+/// in ascending order by distance.
+fn print_scored_edges(
+    txn: &wt_mdb::Transaction,
+    index: &TableGraphVectorIndex,
+    src_id: i64,
+    edges: &[i64],
+) -> io::Result<()> {
+    let table = index.high_fidelity_table();
+    let mut vectors = CursorVectorStore::new(
+        txn.open_record_cursor(table.name())?,
+        index.config().similarity,
+        table.format(),
+        table.centroid().map(Arc::from),
+    );
+
+    let src = match vectors.get(src_id) {
+        None => {
+            println!("Source vector not found!");
+            return Ok(());
+        }
+        Some(Err(e)) => {
+            println!("Source vector error {e}");
+            return Ok(());
+        }
+        Some(Ok(v)) => v.to_vec(),
+    };
+
+    let distance_fn = table.new_distance_function();
+    let mut scored = Vec::with_capacity(edges.len());
+    for &edge in edges {
+        match vectors.get(edge) {
+            None => println!("edge {edge}: vector not found"),
+            Some(Err(e)) => println!("edge {edge}: vector error {e}"),
+            Some(Ok(v)) => scored.push(Neighbor::new(edge, distance_fn.distance(&src, v))),
+        }
+    }
+    scored.sort_unstable();
+
+    println!("edges:");
+    for neighbor in &scored {
+        println!(
+            "  {:>12}  distance={:.6}",
+            neighbor.vertex(),
+            neighbor.distance()
+        );
     }
 
     Ok(())

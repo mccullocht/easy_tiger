@@ -302,20 +302,19 @@ impl EdgeSetDistanceComputer {
         edges: &[i64],
     ) -> Result<(Vec<Neighbor>, Self)> {
         let distance_fn = store.new_distance_function();
-        let mut neighbors = Vec::with_capacity(edges.len());
-        let mut vectors = Vec::with_capacity(edges.len());
+        let mut neighbors_and_vectors = Vec::with_capacity(edges.len());
         for e in edges {
             let Some(vector) = store.get(*e).transpose()? else {
                 continue;
             };
-            neighbors.push(Neighbor::new(
-                *e,
-                distance_fn.distance(vertex_vector, vector),
+            neighbors_and_vectors.push((
+                Neighbor::new(*e, distance_fn.distance(vertex_vector, vector)),
+                vector.to_vec(),
             ));
-            vectors.push(vector.to_vec());
         }
-        neighbors.sort_unstable();
+        neighbors_and_vectors.sort_by_key(|t| t.0);
 
+        let (neighbors, vectors) = neighbors_and_vectors.into_iter().unzip();
         Ok((
             neighbors,
             Self {

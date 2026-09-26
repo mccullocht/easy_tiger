@@ -253,7 +253,11 @@ fn insert_internal<F: FnMut(i64) -> bool>(
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
     let (mut candidate_edges, _) = searcher.search_with_options(vector, options, index)?;
     let mut graph = index.graph()?;
-    if candidate_edges.is_empty() && graph.entry_point().transpose()?.is_none() {
+    // TODO: the candidate set could be empty if there is a filter. The current state works in
+    // SPANN because we will filter out rebalance source vertices and the new vertices should be
+    // searched going forward, but there needs to be a better plan here. Evaluate removing the
+    // source filter entirely in this case.
+    if candidate_edges.is_empty() {
         graph.set_entry_point(vertex_id)?;
     }
 

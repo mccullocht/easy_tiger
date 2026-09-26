@@ -349,7 +349,7 @@ fn select_pruned_edges(
     for (i, e) in edges.iter().enumerate().skip(1) {
         if selected
             .iter()
-            .any(|&j| edges[i].distance / edge_distance_computer.distance(i, j) > config.alpha)
+            .any(|&j| e.distance / edge_distance_computer.distance(i, j) > config.alpha)
         {
             continue;
         }

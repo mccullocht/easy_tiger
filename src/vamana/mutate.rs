@@ -416,6 +416,15 @@ fn wolverine_repair_edges(
                     && dist_fn.distance(cvec, rvec) < dist_fn.distance(&vertex_vector, rvec)
             })
             .collect::<Vec<_>>();
+        // If the deleted vertex was closer to rid than any of its peers there are no one hop
+        // candidates, and so no two hop candidates either. Fall back to linking all peers to rid
+        // so that rid is not disconnected from the graph.
+        if one_hop_candidates.is_empty() {
+            for (cid, _, _) in one_hop_pool.iter().filter(|(cid, _, _)| *cid != *rid) {
+                repair_edges.insert((*cid, *rid));
+            }
+            continue;
+        }
         // Insert all one hop candidates in the seen and repair set.
         for (cid, _, _) in one_hop_candidates.iter() {
             seen.insert(*cid);

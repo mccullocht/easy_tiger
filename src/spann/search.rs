@@ -215,8 +215,6 @@ pub struct CentroidTrace {
     pub distance: f64,
     /// The number of vectors assigned to this centroid.
     pub num_vectors: usize,
-    /// Whether this centroid's postings were searched.
-    pub selected: bool,
     /// The number of traced vectors assigned to this centroid.
     pub num_traced_vectors: usize,
 }
@@ -314,7 +312,6 @@ impl<'a> SearchTraceState<'a> {
                     centroid_id: cid,
                     distance: n.distance(),
                     num_vectors,
-                    selected: false,
                     num_traced_vectors: self.centroids.get(&cid).map_or(0, Vec::len),
                 },
             );
@@ -327,9 +324,6 @@ impl<'a> SearchTraceState<'a> {
             .map(|n| n.distance())
             .fold(None, |m: Option<f64>, d| Some(m.map_or(d, |m| m.max(d))));
         for cid in centroids.iter().map(|n| n.vertex() as u32) {
-            if let Some(t) = self.centroid_traces.get_mut(&cid) {
-                t.selected = true;
-            }
             let Some(ids) = self.centroids.get(&cid) else {
                 continue;
             };

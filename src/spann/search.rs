@@ -208,14 +208,19 @@ pub enum VectorTrace {
 
 /// Information about a single centroid observed during a traced search.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct CentroidTrace {
     /// The centroid's id.
+    #[serde(rename = "cid")]
     pub centroid_id: u32,
     /// The distance from the query to the centroid.
+    #[serde(rename = "dist")]
     pub distance: f64,
     /// The number of vectors assigned to this centroid.
+    #[serde(rename = "cnt")]
     pub num_vectors: usize,
     /// The number of traced vectors assigned to this centroid.
+    #[serde(rename = "tcnt")]
     pub num_traced_vectors: usize,
 }
 

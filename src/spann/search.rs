@@ -6,6 +6,7 @@ use std::{
     io,
     num::NonZero,
     ops::{Add, AddAssign},
+    range::RangeInclusive,
     str::FromStr,
     sync::LazyLock,
 };
@@ -44,6 +45,16 @@ pub enum CentroidSelectorAlgorithm {
     TopN(usize),
     /// Select centroids from closest to farthest until we will score the request number of vectors.
     VectorCount(usize),
+    /// Select centroids by vector count with a distance ratio decay function to prune the set.
+    ///
+    /// This tracks the cumulative vector count at each step and uses the ratio between the first
+    /// and current centroids capped by a budget limit. This arrangement will prune more centroids
+    /// if the distance spread is large.
+    VectorCountDecay {
+        range: RangeInclusive<usize>,
+        budget: usize,
+        beta: f64,
+    },
 }
 
 impl FromStr for CentroidSelectorAlgorithm {
@@ -67,6 +78,53 @@ impl FromStr for CentroidSelectorAlgorithm {
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid number"))?;
                 Ok(Self::VectorCount(n))
             }
+            s if s.starts_with("vector_count_decay:") => {
+                let params = s.split(':').collect::<Vec<_>>();
+                if params.len() != 4 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "decay must have three : separated parameters",
+                    ));
+                }
+                let (lostr, histr) = params[1].split_once("..=").ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "budget must be a range (x..=y)",
+                    )
+                })?;
+                let lo = lostr.parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "lower bound must be an unsigned integer",
+                    )
+                })?;
+                let hi = histr.parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "upper bound must be an unsigned integer",
+                    )
+                })?;
+                if hi < lo {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "upper bound is below lower bound",
+                    ));
+                }
+                let budget = params[2].parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "budget must be an unsigned integer",
+                    )
+                })?;
+                let beta = params[3].parse::<f64>().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "beta must be a float")
+                })?;
+                Ok(Self::VectorCountDecay {
+                    range: (lo..=hi).into(),
+                    budget,
+                    beta,
+                })
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unknown centroid selection algorithm",
@@ -80,6 +138,15 @@ impl std::fmt::Display for CentroidSelectorAlgorithm {
         match self {
             Self::TopN(n) => write!(f, "top_n:{}", n),
             Self::VectorCount(n) => write!(f, "vector_count:{}", n),
+            Self::VectorCountDecay {
+                range,
+                budget,
+                beta,
+            } => write!(
+                f,
+                "vector_count_decay:{}..={}:{budget}{beta}",
+                range.start, range.last
+            ),
         }
     }
 }
@@ -92,6 +159,17 @@ pub enum CentroidSelector {
     /// Select centroids until we will score the requested number of vectors, using statistics about
     /// the distribution of vectors across centroids.
     VectorCount { count: usize, stats: CentroidStats },
+    /// Select each centroid using a lower and upper bound on vector count plus a decay function
+    /// based on total vectors up to that point and a budget:
+    ///   cumulative_vectors * (dist / dist0)^beta <= budget.
+    /// dist0 is the distance to the first centroid with a non-zero distance. If no such centroid
+    /// exists, select everything.
+    VectorCountDecay {
+        range: RangeInclusive<usize>,
+        budget: usize,
+        beta: f64,
+        stats: CentroidStats,
+    },
 }
 
 impl CentroidSelector {
@@ -103,6 +181,19 @@ impl CentroidSelector {
             CentroidSelectorAlgorithm::VectorCount(n) => {
                 let stats = CentroidStats::from_index_stats(txn_idx)?;
                 Ok(Self::VectorCount { count: n, stats })
+            }
+            CentroidSelectorAlgorithm::VectorCountDecay {
+                range,
+                budget,
+                beta,
+            } => {
+                let stats = CentroidStats::from_index_stats(txn_idx)?;
+                Ok(Self::VectorCountDecay {
+                    range,
+                    budget,
+                    beta,
+                    stats,
+                })
             }
         }
     }
@@ -123,6 +214,39 @@ impl CentroidSelector {
                     selected += stats
                         .assignment_counts(c.vertex() as usize)
                         .map_or(0usize, |counts| counts.total() as usize);
+                }
+            }
+            Self::VectorCountDecay {
+                range,
+                budget,
+                beta,
+                stats,
+            } => {
+                let Some(d0) = candidates.iter().map(|n| n.distance()).find(|&d| d > 0.0) else {
+                    return candidates;
+                };
+                let budget = *budget as f64;
+                let mut selected = 0usize;
+                for (i, c) in candidates.iter().enumerate() {
+                    if selected >= range.last {
+                        // We've exceeded the maximum vectors selected, so break.
+                        candidates.truncate(i);
+                        break;
+                    }
+
+                    selected += stats
+                        .assignment_counts(c.vertex() as usize)
+                        .map_or(0, |counts| counts.total() as usize);
+                    if selected < range.start {
+                        // We have yet to select the minimum number of vectors so continue without
+                        // evaluating the decay function.
+                        continue;
+                    }
+
+                    if selected as f64 * (c.distance() / d0).powf(*beta) > budget {
+                        candidates.truncate(i);
+                        break;
+                    }
                 }
             }
         };

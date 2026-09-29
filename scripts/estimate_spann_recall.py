@@ -15,6 +15,9 @@ Usage:
   # Vector-count policy: select centroids until we cover 50k vectors
   uv run estimate_spann_recall.py trace.jsonl --policy vector_count --vector-count 50000
 
+  # Decay policy: top-n with rank inflated by (dist / closest dist) ** decay
+  uv run estimate_spann_recall.py trace.jsonl --policy decay --depth 2000 --decay 4
+
   # Gzipped input
   uv run estimate_spann_recall.py trace.jsonl.gz --policy top_n --top-n 10
 
@@ -193,6 +196,42 @@ class BetaPolicy(CentroidPolicy):
         return cls(args["top_n"], args["beta"])
 
 
+class DecayPolicy(CentroidPolicy):
+    """Top-n where each centroid's rank is inflated by its distance relative to the closest centroid.
+
+    Selects centroids in distance order while (rank + 1) * (dist / dist0) ** decay <= n.
+    This is a global threshold on log(rank + 1) + decay * log(dist / dist0), which approximates
+    the expected number of neighbors per vector scanned, so the threshold trades recall for cost at
+    a roughly constant marginal rate across queries. Both parameters are invariant to scaling of
+    the distance function; a non-squared L2 distance would need twice the decay of squared L2.
+    """
+
+    name: str
+
+    def __init__(self, n: float, decay: float) -> None:
+        self._log_n = math.log(n)
+        self._decay = decay
+        self.name = f"decay({n}, {decay})"
+
+    def select(self, centroids: list[CentroidTrace]) -> list[CentroidTrace]:
+        sorted_c = sorted(centroids, key=lambda c: c.dist)
+        # Use the closest non-zero distance as the reference so an exact centroid match still works.
+        d0 = next((c.dist for c in sorted_c if c.dist > 0.0), None)
+        if d0 is None:
+            return sorted_c
+        selected: list[CentroidTrace] = []
+        for i, c in enumerate(sorted_c):
+            ratio = max(c.dist, d0) / d0
+            if math.log(i + 1) + self._decay * math.log(ratio) > self._log_n:
+                break
+            selected.append(c)
+        return selected
+
+    @classmethod
+    def from_args(cls, args: dict[str, Any]) -> CentroidPolicy:
+        return cls(args["depth"], args["decay"])
+
+
 class OraclePolicy(CentroidPolicy):
     name: str
 
@@ -217,6 +256,7 @@ POLICY_MAP: dict[str, type[CentroidPolicy]] = {
     "vector_count": VectorCountPolicy,
     "alpha": AlphaPolicy,
     "beta": BetaPolicy,
+    "decay": DecayPolicy,
     "oracle": OraclePolicy,
 }
 
@@ -343,21 +383,16 @@ def print_summary(results: list[QueryResult], policy_name: str) -> None:
     _stats("vectors covered", vecs)
     print()
 
-    show_n = min(20, len(results))
-    # Show queries with lowest recall
-    by_recall = sorted(results, key=lambda r: r.recall)
-    print(f"Queries with lowest recall (Top-{show_n}):")
-    print(f"{'Query':>6s}  {'Traced':>8s}  {'Found':>8s}  {'Recall':>8s}  {'Cents':>6s}  {'Vecs':>8s}")
-    print("-" * 56)
-    for r in by_recall[:show_n]:
-        print(f"{r.query_index:>6d}  {r.total_traced:>8d}  {r.estimated_found:>8d}  {r.recall:>8.6f}  {r.centroids_searched:>6d}  {r.vectors_covered:>8d}")
-    if len(results) > show_n:
-        print(f"... ({len(results) - show_n} more queries)")
-    print(f"Queries with highest recall (Top-{show_n}):")
-    print(f"{'Query':>6s}  {'Traced':>8s}  {'Found':>8s}  {'Recall':>8s}  {'Cents':>6s}  {'Vecs':>8s}")
-    print("-" * 56)
-    for r in by_recall[-show_n:]:
-        print(f"{r.query_index:>6d}  {r.total_traced:>8d}  {r.estimated_found:>8d}  {r.recall:>8.6f}  {r.centroids_searched:>6d}  {r.vectors_covered:>8d}")
+    #show_n = min(20, len(results))
+    ## Show queries with lowest recall
+    #by_recall = sorted(results, key=lambda r: r.recall)
+    #print(f"Queries with lowest recall (Top-{show_n}):")
+    #print(f"{'Query':>6s}  {'Traced':>8s}  {'Found':>8s}  {'Recall':>8s}  {'Cents':>6s}  {'Vecs':>8s}")
+    #print("-" * 56)
+    #for r in by_recall[:show_n]:
+    #    print(f"{r.query_index:>6d}  {r.total_traced:>8d}  {r.estimated_found:>8d}  {r.recall:>8.6f}  {r.centroids_searched:>6d}  {r.vectors_covered:>8d}")
+    #if len(results) > show_n:
+    #    print(f"... ({len(results) - show_n} more queries)")
 
 
 def print_json(results: list[QueryResult]) -> None:
@@ -418,6 +453,19 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="For beta policy",
+    )
+    parser.add_argument(
+        "--depth",
+        type=float,
+        default=2000.0,
+        help="For decay policy: effective rank limit n (default: 2000).",
+    )
+    parser.add_argument(
+        "--decay",
+        type=float,
+        default=4.0,
+        help="For decay policy: exponent applied to dist / closest dist when inflating rank "
+        "(default: 4).",
     )
     parser.add_argument(
         "--limit",

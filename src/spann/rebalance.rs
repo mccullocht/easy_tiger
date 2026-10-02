@@ -530,7 +530,7 @@ mod parallel {
         txn_idx.commit(None)
     }
 
-    fn partition_postings<'a>(
+    fn partition_postings(
         txn_idx: &TransactionIndex,
         centroid_id: u32,
         vectors: &(impl VectorStore<Elem = f32> + Send + Sync),

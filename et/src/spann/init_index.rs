@@ -84,6 +84,14 @@ pub struct InitIndexArgs {
     #[arg(long)]
     rerank_format: F32VectorCoding,
 
+    /// If true, read rerank vectors during centroid splits to generate new centroids.
+    ///
+    /// Using higher fidelity vectors can result in much more accurate centroid generation that is
+    /// does a better job partitioning vectors and is less prone to split/merge repetition cycles.
+    /// It also costs more since we need perform a random read for each vector.
+    #[arg(long, default_value_t = false)]
+    split_rerank_vectors: bool,
+
     /// If set, apply an orthogonal rotation seeded with this value to every vector on ingress
     /// (both ingestion and search). Must remain fixed for the life of the index.
     #[arg(long)]
@@ -147,6 +155,7 @@ pub fn init_index(
         },
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,
+        split_rerank_vectors: args.split_rerank_vectors,
         rotation_seed: args.rotation_seed,
     };
     let index = Arc::new(TableIndex::init_index(

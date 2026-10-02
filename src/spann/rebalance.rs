@@ -277,7 +277,7 @@ mod parallel {
     use wt_mdb::{Connection, Error, Result};
 
     use crate::{
-        input::VecVectorStore,
+        input::{VecVectorStore, VectorStore},
         posting_block::PostingBlock,
         spann::{
             CentroidAssignment, TableIndex, TransactionIndex,
@@ -454,13 +454,43 @@ mod parallel {
                         PostingBlock::new(raw_posting, txn_idx.index().posting_vector_len())
                             .expect("valid posting block");
                     let mut rng = rng_supplier();
-                    let centroids =
-                        partition_postings(txn_idx, s, block.iter().map(|(_, v)| v), &mut rng);
+                    let posting_vectors = extract_posting_vectors(txn_idx, &block)?;
+                    let centroids = partition_postings(txn_idx, s, &posting_vectors, &mut rng);
                     Ok(Some((t0, t1, centroids)))
                 },
             )
             .filter_map(|r: Result<Option<_>>| r.transpose())
             .collect()
+    }
+
+    fn extract_posting_vectors(
+        txn_idx: &TransactionIndex,
+        block: &PostingBlock<'_>,
+    ) -> Result<VecVectorStore<f32>> {
+        let len = block.len();
+        let mut scratch_vector =
+            vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
+        let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), len);
+        if txn_idx.index().config().split_rerank_vectors {
+            let coder = txn_idx.index().config().rerank_format.coder();
+            let mut cursor = txn_idx
+                .transaction()
+                .open_cursor::<i64, Vec<u8>>(txn_idx.index().raw_vectors_table_name())?;
+            for vid in block.iter().map(|x| x.0) {
+                let Some(v) = unsafe { cursor.seek_exact_unsafe(vid).transpose() }? else {
+                    continue;
+                };
+                coder.decode_to(v, &mut scratch_vector);
+                clustering_vectors.push(&scratch_vector);
+            }
+        } else {
+            let coder = txn_idx.index().config().posting_coder.coder();
+            for v in block.iter().map(|x| x.1) {
+                coder.decode_to(v, &mut scratch_vector);
+                clustering_vectors.push(&scratch_vector);
+            }
+        }
+        Ok(clustering_vectors)
     }
 
     /// Insert pre-computed split centroids into the head index.
@@ -500,24 +530,14 @@ mod parallel {
         txn_idx.commit(None)
     }
 
-    fn partition_postings<'a>(
+    fn partition_postings(
         txn_idx: &TransactionIndex,
         centroid_id: u32,
-        vectors: impl ExactSizeIterator<Item = &'a [u8]>,
+        vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
         rng: &mut impl Rng,
     ) -> VecVectorStore<f32> {
-        let len = vectors.len();
-        let posting_coder = txn_idx.index().config().posting_coder.coder();
-        let mut scratch_vector =
-            vec![0.0f32; txn_idx.index().head_config().config().dimensions.get()];
-        let mut clustering_vectors = VecVectorStore::with_capacity(scratch_vector.len(), len);
-        for v in vectors {
-            posting_coder.decode_to(v, &mut scratch_vector);
-            clustering_vectors.push(&scratch_vector);
-        }
-
         let mut centroids = match crate::kmeans::balanced_binary_partition(
-            &clustering_vectors,
+            vectors,
             100,
             txn_idx.index().config().min_centroid_len,
             rng,
@@ -526,7 +546,7 @@ mod parallel {
             Err(r) => {
                 warn!(
                     "split_centroid: binary partition of centroid {centroid_id} (count {}) failed to converge!",
-                    len
+                    vectors.len()
                 );
                 r
             }

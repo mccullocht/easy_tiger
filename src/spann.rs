@@ -46,6 +46,14 @@ pub struct IndexConfig {
     pub max_centroid_len: usize,
     /// Vector coding used to build a vector id keyed vector table for re-ranking results.
     pub rerank_format: F32VectorCoding,
+    /// If true, read rerank vectors during centroid splits to generate new centroids.
+    ///
+    /// Using higher fidelity vectors can result in much more accurate centroid generation that is
+    /// does a better job partitioning vectors and is less prone to split/merge repetition cycles.
+    /// It also costs more since we need perform a random read for each vector.
+    #[serde(default)]
+    pub split_rerank_vectors: bool,
+
     /// Seed for an orthogonal rotation applied to all vectors on ingress (both ingestion and
     /// search).
     ///

@@ -536,8 +536,16 @@ mod parallel {
         vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
         rng: &mut impl Rng,
     ) -> VecVectorStore<f32> {
+        let mut cvectors = txn_idx.head().high_fidelity_vectors().unwrap(); // XXX
+        let centroid = cvectors.new_coder().decode(
+            cvectors
+                .get(centroid_id as i64)
+                .unwrap_or(Err(Error::not_found_error()))
+                .unwrap(), // XXX
+        );
         let mut centroids = match crate::kmeans::balanced_binary_partition(
             vectors,
+            &centroid,
             100,
             txn_idx.index().config().min_centroid_len,
             rng,

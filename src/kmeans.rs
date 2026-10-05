@@ -138,14 +138,16 @@ fn compute_centroid_distance_max<
 /// Returns the centroid vectors, these are return as an error if partitioning doesn't converge.
 pub fn balanced_binary_partition(
     dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
-    max_iters: usize,
+    original_centroid: &[f32],
     min_cluster_size: usize,
+    max_iters: usize,
     rng: &mut impl Rng,
 ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
     bp::bp(
         dataset,
-        min_cluster_size..=(dataset.len() - min_cluster_size),
+        original_centroid,
         max_iters,
+        min_cluster_size..=(dataset.len() - min_cluster_size),
         rng,
     )
 }
@@ -161,13 +163,14 @@ mod bp {
 
     pub fn bp(
         dataset: &(impl VectorStore<Elem = f32> + Send + Sync),
-        acceptable_split: RangeInclusive<usize>,
+        original_centroid: &[f32],
         max_iters: usize,
+        acceptable_split: RangeInclusive<usize>,
         rng: &mut impl Rng,
     ) -> Result<VecVectorStore<f32>, VecVectorStore<f32>> {
         assert!(!acceptable_split.is_empty());
         let half = dataset.len() / 2;
-        let mut state = IterState::new(dataset);
+        let mut state = IterState::new(dataset, original_centroid);
         let mut num_acceptable = 0;
         let mut current_candidate = (0..max_iters)
             .map_while(|_| {
@@ -189,7 +192,9 @@ mod bp {
                     .unwrap()
                     .sample(rng);
                 let c = Candidate::from_sampled_vectors(first, second, &mut state);
-                if acceptable_split.contains(&c.split) {
+                if c.counts[0] >= *acceptable_split.start()
+                    && c.counts[1] >= *acceptable_split.start()
+                {
                     num_acceptable += 1;
                 }
                 Some(c)
@@ -246,14 +251,16 @@ mod bp {
     /// Container for the dataset and reusable buffers for certain operations.
     pub struct IterState<'v, V> {
         dataset: &'v V,
+        original_centroid: &'v [f32],
         distances: Vec<(usize, f64, f64, f64)>,
         assignments: Vec<usize>,
     }
 
     impl<'v, V: VectorStore<Elem = f32> + Send + Sync> IterState<'v, V> {
-        pub fn new(dataset: &'v V) -> Self {
+        pub fn new(dataset: &'v V, original_centroid: &'v [f32]) -> Self {
             Self {
                 dataset,
+                original_centroid,
                 distances: vec![(0usize, 0.0, 0.0, 0.0); dataset.len()],
                 assignments: vec![0usize; dataset.len()],
             }
@@ -264,6 +271,7 @@ mod bp {
     pub struct Candidate {
         centroids: VecVectorStore<f32>,
         split: usize,
+        counts: [usize; 3],
         distance_sum: f64,
     }
 
@@ -275,6 +283,7 @@ mod bp {
             let mut candidate = Self {
                 centroids,
                 split: 0,
+                counts: [0usize; 3],
                 distance_sum: 0.0,
             };
             candidate.update_split(state);
@@ -338,15 +347,20 @@ mod bp {
             state: &mut IterState<'_, impl VectorStore<Elem = f32> + Send + Sync>,
         ) {
             let dist_fn = EuclideanDistance::get();
-            state
-                .distances
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(i, d)| {
-                    let ldist = dist_fn.distance_f32(&self.centroids[0], &state.dataset[i]);
-                    let rdist = dist_fn.distance_f32(&self.centroids[1], &state.dataset[i]);
-                    *d = (i, ldist, rdist, ldist - rdist)
-                });
+            self.counts = [0usize; 3];
+            state.distances.iter_mut().enumerate().for_each(|(i, d)| {
+                let ldist = dist_fn.distance_f32(&self.centroids[0], &state.dataset[i]);
+                let rdist = dist_fn.distance_f32(&self.centroids[1], &state.dataset[i]);
+                let odist = dist_fn.distance_f32(state.original_centroid, &state.dataset[i]);
+                if odist < ldist && odist < rdist {
+                    self.counts[2] += 1;
+                } else if ldist < odist {
+                    self.counts[0] += 1;
+                } else {
+                    self.counts[1] += 1;
+                }
+                *d = (i, ldist, rdist, ldist - rdist)
+            });
             state
                 .distances
                 .sort_unstable_by(|a, b| a.3.total_cmp(&b.3).then_with(|| a.0.cmp(&b.0)));
@@ -463,8 +477,9 @@ fn hkmeans_step(
         match training_data.len().div_ceil(*params.cluster_size.end()) {
             2 => balanced_binary_partition(
                 training_data,
-                params.params.iters,
+                &[], // TODO: this is broken
                 *params.cluster_size.start(),
+                params.params.iters,
                 rng,
             ),
             _ => kmeans(

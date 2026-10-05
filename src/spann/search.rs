@@ -8,6 +8,7 @@ use std::{
     ops::{Add, AddAssign},
     range::RangeInclusive,
     str::FromStr,
+    sync::LazyLock,
 };
 
 use ahash::{HashMap, HashMapExt};
@@ -32,6 +33,10 @@ use crate::{
         },
     },
 };
+
+static TRACE_EMIT_CENTROIDS: LazyLock<bool> = LazyLock::new(
+    || matches!(std::env::var("ET_SPANN_TRACE_EMIT_CENTROIDS"), Ok(s) if s.eq_ignore_ascii_case("true") || s == "1"),
+);
 
 /// The algorithm used to select centroids to search in the tail index.
 #[derive(Debug, Copy, Clone)]
@@ -321,24 +326,25 @@ pub enum VectorTrace {
     PostingQueuePruned { distance: f64, error: f64 },
     /// The vector was reranked but ranked beyond the limit at the end.
     RerankPruned { rank: usize, distance: f64 },
-    /// The vector was found and returned at `rank` in the final result set. `rank_delta` is the
-    /// actual rank minus the expected rank recorded when the trace entry was created (its position
-    /// in the traced vector list); negative means it ranked better than expected.
-    Found { rank: usize, rank_delta: isize },
+    /// The vector was found and returned at `rank` in the final result set.
+    Found { rank: usize },
 }
 
 /// Information about a single centroid observed during a traced search.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct CentroidTrace {
     /// The centroid's id.
+    #[serde(rename = "cid")]
     pub centroid_id: u32,
     /// The distance from the query to the centroid.
+    #[serde(rename = "dist")]
     pub distance: f64,
     /// The number of vectors assigned to this centroid.
+    #[serde(rename = "cnt")]
     pub num_vectors: usize,
-    /// Whether this centroid's postings were searched.
-    pub selected: bool,
     /// The number of traced vectors assigned to this centroid.
+    #[serde(rename = "tcnt")]
     pub num_traced_vectors: usize,
 }
 
@@ -357,7 +363,9 @@ pub struct SearchTrace {
     /// The trace for each requested vector, ordered by the vector's rank in the request.
     pub vectors: Vec<VectorIdTrace>,
     /// Information about every centroid observed by the head search, farthest to closest.
-    pub centroids: Vec<CentroidTrace>,
+    /// This is very large so it is only emitted if `ET_SPANN_TRACE_EMIT_CENTROIDS=true` is set in
+    /// the environment.
+    pub centroids: Option<Vec<CentroidTrace>>,
     /// Distance from the query to the farthest centroid whose postings were searched, or `None` if
     /// no centroids were selected.
     pub max_centroid_distance: Option<f64>,
@@ -433,7 +441,6 @@ impl<'a> SearchTraceState<'a> {
                     centroid_id: cid,
                     distance: n.distance(),
                     num_vectors,
-                    selected: false,
                     num_traced_vectors: self.centroids.get(&cid).map_or(0, Vec::len),
                 },
             );
@@ -446,9 +453,6 @@ impl<'a> SearchTraceState<'a> {
             .map(|n| n.distance())
             .fold(None, |m: Option<f64>, d| Some(m.map_or(d, |m| m.max(d))));
         for cid in centroids.iter().map(|n| n.vertex() as u32) {
-            if let Some(t) = self.centroid_traces.get_mut(&cid) {
-                t.selected = true;
-            }
             let Some(ids) = self.centroids.get(&cid) else {
                 continue;
             };
@@ -470,15 +474,11 @@ impl<'a> SearchTraceState<'a> {
 
     fn observe_rerank(&mut self, results: &[Neighbor], limit: usize) {
         for (i, r) in results.iter().enumerate() {
-            let Some((expected_rank, trace)) = self.ids.get_mut(&r.vertex()) else {
+            let Some((_, trace)) = self.ids.get_mut(&r.vertex()) else {
                 continue;
             };
-            let rank_delta = i as isize - *expected_rank as isize;
             *trace = if i < limit {
-                VectorTrace::Found {
-                    rank: i,
-                    rank_delta,
-                }
+                VectorTrace::Found { rank: i }
             } else {
                 VectorTrace::RerankPruned {
                     rank: i,
@@ -492,13 +492,10 @@ impl<'a> SearchTraceState<'a> {
     /// when rerank is skipped and the posting-scored results are returned directly.
     fn observe_results(&mut self, results: &[Neighbor]) {
         for (i, r) in results.iter().enumerate() {
-            let Some((expected_rank, trace)) = self.ids.get_mut(&r.vertex()) else {
+            let Some((_, trace)) = self.ids.get_mut(&r.vertex()) else {
                 continue;
             };
-            *trace = VectorTrace::Found {
-                rank: i,
-                rank_delta: i as isize - *expected_rank as isize,
-            };
+            *trace = VectorTrace::Found { rank: i };
         }
     }
 
@@ -535,7 +532,13 @@ impl<'a> SearchTraceState<'a> {
         // We don't emit this unconditionally because if we do it makes up 80% of the output.
         SearchTrace {
             vectors,
-            centroids: vec![],
+            centroids: if *TRACE_EMIT_CENTROIDS {
+                let mut centroids = self.centroid_traces.into_values().collect::<Vec<_>>();
+                centroids.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
+                Some(centroids)
+            } else {
+                None
+            },
             max_centroid_distance: self.max_centroid_distance,
         }
     }

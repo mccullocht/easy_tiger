@@ -12,10 +12,12 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
         GraphSearchParams, PatienceParams,
-        search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
+        search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions, VertexIdTrace},
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
     },
 };
+use serde::Serialize;
+use tracing::warn;
 use vectors::f16;
 use wt_mdb::Connection;
 
@@ -61,10 +63,25 @@ pub struct SearchArgs {
     #[command(flatten)]
     recall: RecallArgs,
 
+    /// Trace the search for the golden neighbors of each query, writing one JSON object per
+    /// query to stdout. Requires --neighbors and --recall-k to be set; the top --recall-k
+    /// neighbors from the golden file are used as the traced vectors.
+    #[arg(long)]
+    trace: bool,
+
     #[arg(long, default_value = "1")]
     warmup_iters: usize,
     #[arg(long, default_value = "2")]
     test_iters: usize,
+}
+
+/// A single query's search trace, packaged for output.
+#[derive(Serialize)]
+struct QueryTrace {
+    query_index: usize,
+    recall: Option<f64>,
+    stats: GraphSearchStats,
+    traces: Vec<VertexIdTrace>,
 }
 
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
@@ -107,6 +124,12 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             ));
         }
     }
+    let trace = if args.trace && recall_computer.is_none() {
+        warn!("--trace has no effect without --neighbors and --recall-k");
+        false
+    } else {
+        args.trace
+    };
 
     if args.warmup_iters > 0 {
         search_phase(
@@ -119,6 +142,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             &connection,
             search_params,
             recall_computer.as_ref(),
+            false,
         )?;
     }
 
@@ -133,7 +157,12 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             &connection,
             search_params,
             recall_computer.as_ref(),
+            trace,
         )?;
+
+        if trace {
+            return Ok(());
+        }
 
         println!(
             "queries {} avg duration {:0.6}s max duration {:0.6}s  avg candidates {:.2} avg added {:.2} avg visited {:.2} avg filtered {:.2}",
@@ -175,6 +204,7 @@ fn search_phase<Q: Send + Sync>(
     connection: &Arc<Connection>,
     search_params: GraphSearchParams,
     recall_computer: Option<&RecallComputer>,
+    trace: bool,
 ) -> io::Result<AggregateSearchStats> {
     let query_indices = (0..limit).cycle().take(iters * limit).collect::<Vec<_>>();
     let progress = progress_bar(query_indices.len(), name);
@@ -186,7 +216,13 @@ fn search_phase<Q: Send + Sync>(
             .into_iter()
             .progress_with(progress.clone())
             .map(|index| {
-                searcher.query(index, &query_vectors[index], record_limit, recall_computer)
+                searcher.query(
+                    index,
+                    &query_vectors[index],
+                    record_limit,
+                    recall_computer,
+                    trace,
+                )
             })
             .reduce(|a, b| match (a, b) {
                 (Ok(a), Ok(b)) => Ok(a + b),
@@ -203,8 +239,13 @@ fn search_phase<Q: Send + Sync>(
             .map_init(
                 || SearcherState::new(index, connection, search_params).unwrap(),
                 |searcher, index| {
-                    let stats =
-                        searcher.query(index, &query_vectors[index], record_limit, recall_computer);
+                    let stats = searcher.query(
+                        index,
+                        &query_vectors[index],
+                        record_limit,
+                        recall_computer,
+                        trace,
+                    );
                     progress.inc(1);
                     stats
                 },
@@ -243,6 +284,7 @@ impl SearcherState {
         query: &[f16],
         record_limit: i64,
         recall_computer: Option<&RecallComputer>,
+        trace: bool,
     ) -> io::Result<AggregateSearchStats> {
         let reader = TransactionGraphVectorIndex::new(
             Arc::clone(&self.index),
@@ -251,18 +293,34 @@ impl SearcherState {
         for (o, x) in self.query_buf.iter_mut().zip(query.iter()) {
             *o = x.to_f32();
         }
+        let traced_vectors = if trace {
+            recall_computer.map(|r| r.traced_vector_ids(index))
+        } else {
+            None
+        };
         let start = Instant::now();
-        let (results, _) = self.searcher.search_with_options(
+        let (results, trace) = self.searcher.search_with_options(
             &self.query_buf,
-            GraphSearchOptions::with_filter(|i| i < record_limit),
+            GraphSearchOptions::with_filter(|i| i < record_limit)
+                .with_trace(traced_vectors.iter().flatten().copied()),
             &reader,
         )?;
         let duration = Instant::now() - start;
-        Ok(AggregateSearchStats::new(
-            duration,
-            self.searcher.stats(),
-            recall_computer.map(|r| r.compute_recall(index, &results)),
-        ))
+        let stats = self.searcher.stats();
+        let recall = recall_computer.map(|r| r.compute_recall(index, &results));
+        if let Some(trace) = trace {
+            let query_trace = QueryTrace {
+                query_index: index,
+                recall,
+                stats,
+                traces: trace.vectors,
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&query_trace).expect("QueryTrace is serializable")
+            );
+        }
+        Ok(AggregateSearchStats::new(duration, stats, recall))
     }
 }
 

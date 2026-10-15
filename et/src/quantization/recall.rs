@@ -12,7 +12,7 @@ use memmap2::Mmap;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use tdigests::TDigest;
-use vectors::{F32VectorCoding, VectorSimilarity, f16};
+use vectors::{F32VectorCoding, VectorSimilarity, f16, rotate::Rotator};
 
 #[derive(Args)]
 pub struct QuantizationRecallArgs {
@@ -72,6 +72,11 @@ pub struct QuantizationRecallArgs {
     /// Use a fixed value for repeatability.
     #[arg(long, default_value_t = 0x7774_7370414E4E)]
     seed: u64,
+
+    /// If set, rotate all query and doc vectors using this seed before quantizing and/or
+    /// comparing distances.
+    #[arg(long)]
+    rotation_seed: Option<u64>,
 }
 
 pub fn recall(
@@ -100,7 +105,13 @@ pub fn recall(
         "must provide recall args",
     ))?;
 
-    let centers = match args.centers {
+    let rotator = args
+        .rotation_seed
+        .map(|seed| Rotator::new(doc_vectors.elem_stride(), seed));
+
+    // Centers are computed over unrotated vectors and rotated afterward. Rotation is orthogonal so
+    // this is equivalent to computing centers over rotated vectors.
+    let mut centers = match args.centers {
         0 => None,
         1 => {
             let vectors = SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect());
@@ -143,6 +154,11 @@ pub fn recall(
             Some(centers.unwrap_or_else(|e| e))
         }
     };
+    if let (Some(r), Some(cs)) = (rotator.as_ref(), centers.as_mut()) {
+        for c in cs.iter_mut() {
+            r.rotate(c);
+        }
+    }
 
     let coder = args.format.coder();
     let num_centers = centers.as_ref().map_or(1, |cs| cs.len());
@@ -150,8 +166,8 @@ pub fn recall(
     let query_scorers = (0..query_limit)
         .into_par_iter()
         .map(|i| {
-            let mut query = vec![0.0f32; query_vectors.elem_stride()];
-            query_vectors[i].convert_to_f32_slice(&mut query);
+            let query =
+                vectors::prepare_vector_from_f16(&query_vectors[i], rotator.as_ref(), false, None);
             (0..num_centers)
                 .map(|ci| {
                     let center = centers.as_ref().map(|cs| cs[ci].as_ref());
@@ -176,7 +192,8 @@ pub fn recall(
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .for_each(|d| {
-            let doc_f32 = doc_vectors[d].to_f32_vec();
+            let doc_f32 =
+                vectors::prepare_vector_from_f16(&doc_vectors[d], rotator.as_ref(), false, None);
             let center_idx = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
             let center = centers.as_ref().map(|cs| cs[center_idx].as_ref());
             let doc = coder.encode(&vectors::prepare_vector(&doc_f32, None, false, center));
@@ -192,8 +209,9 @@ pub fn recall(
         .into_iter()
         .enumerate()
         .map(|(i, r)| {
-            let results = r.into_neighbors();
+            let mut results = r.into_neighbors();
             depth.push(results.len() as f64);
+            results.truncate(k);
             recall_computer.compute_recall(i, &results)
         })
         .collect::<Vec<_>>();

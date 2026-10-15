@@ -74,10 +74,12 @@ impl Inner {
     }
 
     fn prune(&mut self) -> Option<f64> {
+        // Fold the overflow back into the candidate set: `ub` then reflects every competitive
+        // candidate seen (tightening the bound used to skip work elsewhere), and the overflow
+        // list is rebuilt from scratch below instead of accumulating across prunes.
+        self.results.extend(self.overflow.drain(..));
         let (_, t, overflow_candidates) = self.results.select_nth_unstable(self.n - 1);
         let ub = t.n.distance();
-        // Discard any overflow candidates that are no longer competitive.
-        self.overflow.retain(|n| n.n.distance() <= ub);
         // Examine all the remaining results and save them in overflow if they are competitive.
         for n in overflow_candidates {
             let n = BoundNeighbor::from_lower(n.n.vertex(), n.e);
@@ -86,6 +88,17 @@ impl Inner {
             }
         }
         self.results.truncate(self.n);
+
+        // Candidates tied exactly with `ub` are never evicted by `ub` tightening (they are equal
+        // to it), so on data with many duplicate distances the overflow list would grow with the
+        // number of candidates streamed. Keep only the smallest ones by (distance, vertex id);
+        // the evicted entries are the least competitive ties and cannot affect the top n beyond
+        // which tied vertices are emitted.
+        if self.overflow.len() > self.n * 2 {
+            self.overflow
+                .select_nth_unstable_by(self.n * 2 - 1, |a, b| a.n.cmp(&b.n));
+            self.overflow.truncate(self.n * 2);
+        }
         Some(ub)
     }
 
@@ -149,5 +162,32 @@ impl TopNeighbors {
     /// Extract the list of the top N neighbors.
     pub fn into_neighbors(self) -> Vec<Neighbor> {
         self.rep.into_inner().into_inner().unwrap().into_neighbors()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TopNeighbors;
+    use easy_tiger::Neighbor;
+
+    #[test]
+    fn identical_distances_do_not_accumulate() {
+        // Candidates tied at exactly the running upper bound can never be evicted by it
+        // tightening, so on tie-heavy data the overflow list must stay bounded.
+        let top = TopNeighbors::new(10);
+        for v in 0..100_000i64 {
+            top.add(Neighbor::new(v, 0.5));
+        }
+        let neighbors = top.into_neighbors();
+        // results + the capped overflow of ties; callers take(n).
+        assert!(
+            neighbors.len() <= 30,
+            "overflow grew unbounded: {}",
+            neighbors.len()
+        );
+        // Ties are emitted in ascending vertex id order and the smallest ids win.
+        for (i, n) in neighbors.iter().enumerate() {
+            assert_eq!(n.vertex(), i as i64);
+        }
     }
 }

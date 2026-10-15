@@ -139,6 +139,36 @@ impl<E> DerefVectorStore<E, Mmap> {
         let mmap = unsafe { Mmap::map(&File::open(path)?)? };
         Self::new(mmap)
     }
+
+    /// Release the resident pages backing rows `[start, end)` back to the OS, best effort.
+    ///
+    /// Streaming through a large file-backed store faults in its pages linearly, so the process's
+    /// resident set grows to the size of the file even though every page is clean cache. The
+    /// pages simply re-fault from the page cache if the range is read again.
+    pub fn advise_dontneed_rows(&self, start: usize, end: usize) {
+        let elem_bytes = std::mem::size_of::<E>();
+        // Rows live at a header offset within the mapping (BigANN); recover it from pointers
+        // rather than duplicating the layout knowledge here.
+        let vec_offset = self.raw_vectors.as_ptr() as usize - self.data.as_ptr() as usize;
+        let byte_start = vec_offset + start * self.stride * elem_bytes;
+        let byte_end = vec_offset + end * self.stride * elem_bytes;
+        // madvise requires a page-aligned address; round down and cover through the range end.
+        // Assumes 4 KiB pages, the common case; on larger-page kernels madvise fails EINVAL and
+        // this degrades to a no-op.
+        const PAGE_MASK: usize = 4095;
+        let offset = byte_start & !PAGE_MASK;
+        // Safety: this mapping is a read-only shared file mapping, so MADV_DONTNEED only drops
+        // clean page-cache pages; subsequent reads repopulate them from the file's up-to-date
+        // contents. (The unchecked variant is required because DONTNEED is unsafe for private
+        // anonymous mappings, where it would zero the pages — not our case.)
+        unsafe {
+            let _ = self.data.unchecked_advise_range(
+                memmap2::UncheckedAdvice::DontNeed,
+                offset,
+                byte_end - offset,
+            );
+        }
+    }
 }
 
 impl<E, D> VectorStore for DerefVectorStore<E, D> {
@@ -316,6 +346,7 @@ impl<V: VectorStore> Index<usize> for SubsetViewVectorStore<'_, V> {
 #[cfg(test)]
 mod test {
     use super::{DerefVectorStore, VectorStore};
+    use memmap2::Mmap;
 
     /// Build a BigANN-formatted byte buffer: an 8 byte `<len,dim>` header followed by
     /// `len * dim` little-endian `f32` values counting up from 0.0.
@@ -363,5 +394,25 @@ mod test {
         // A multi-row range is the concatenation of the rows.
         let expected: Vec<f32> = (dim..3 * dim).map(|x| x as f32).collect();
         assert_eq!(store.flat_slice(dim, 3 * dim), expected.as_slice());
+    }
+
+    #[test]
+    fn advise_dontneed_preserves_data() {
+        let len = 5;
+        let dim = 4;
+        let data = bigann_f32(len, dim);
+        let mut path = std::env::temp_dir();
+        path.push(format!("easy_tiger_advise_test_{}", std::process::id()));
+        std::fs::write(&path, &data).unwrap();
+        let store: DerefVectorStore<f32, Mmap> = DerefVectorStore::from_file(&path).unwrap();
+
+        store.advise_dontneed_rows(1, 3);
+
+        // The released pages must re-fault transparently with identical contents.
+        for r in 0..len {
+            let expected: Vec<f32> = (r * dim..(r + 1) * dim).map(|x| x as f32).collect();
+            assert_eq!(&store[r], expected.as_slice(), "row {r} changed");
+        }
+        std::fs::remove_file(&path).ok();
     }
 }

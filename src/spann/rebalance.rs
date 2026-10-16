@@ -75,7 +75,7 @@ pub struct RebalancePhaseDurations {
     pub insert_split_centroids: std::time::Duration,
     pub posting_reassignments: std::time::Duration,
     pub apply_posting_reassignments: std::time::Duration,
-    pub remove_source_centroids: std::time::Duration,
+    pub remove_merge_sources: std::time::Duration,
     pub select_nearby_centroids: std::time::Duration,
     pub compute_nearby_reassignments: std::time::Duration,
     pub apply_nearby_reassignments: std::time::Duration,
@@ -91,7 +91,7 @@ impl Add for RebalancePhaseDurations {
             posting_reassignments: self.posting_reassignments + rhs.posting_reassignments,
             apply_posting_reassignments: self.apply_posting_reassignments
                 + rhs.apply_posting_reassignments,
-            remove_source_centroids: self.remove_source_centroids + rhs.remove_source_centroids,
+            remove_merge_sources: self.remove_merge_sources + rhs.remove_merge_sources,
             select_nearby_centroids: self.select_nearby_centroids + rhs.select_nearby_centroids,
             compute_nearby_reassignments: self.compute_nearby_reassignments
                 + rhs.compute_nearby_reassignments,
@@ -390,13 +390,6 @@ mod parallel {
             self.postings.insert(target, record_id, &v)
         }
 
-        pub fn copy_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
-            self.assignments
-                .overwrite(record_id, CentroidAssignment::new(target))?;
-            let v = self.postings.get(source, record_id)?;
-            self.postings.insert(target, record_id, &v)
-        }
-
         pub fn flush(mut self) -> Result<()> {
             self.postings
                 .flush()
@@ -532,7 +525,7 @@ mod parallel {
     /// so that new centroids select edges against current rather than stale source vectors.
     ///
     /// Excludes every merge source in `ops` from selection as an edge. Merge sources are still
-    /// present in the graph at this point and will be removed later by `remove_source_centroids`;
+    /// present in the graph at this point and will be removed later by `remove_merge_sources`;
     /// linking to them would only create edges that need to be repaired on deletion.
     ///
     /// Also writes an empty stats row for each new centroid so that the id is reserved even if no
@@ -606,10 +599,7 @@ mod parallel {
         centroids
     }
 
-    pub type TargetCentroidSourceMap = HashMap<u32, Vec<(u32, i64)>>;
-
-    /// Generate a list of all reassignments out of ops assuming an updated head index.
-    /// Assignments are grouped by _target_ centroid, listing the source centroid and vector.
+    /// Generate a list of all posting moves out of ops assuming an updated head index.
     ///
     /// Vectors that remain in a split source centroid are not listed.
     pub fn posting_reassignments(
@@ -617,7 +607,7 @@ mod parallel {
         index: &Arc<TableIndex>,
         ops: &[RebalanceOp],
         split_centroids: &[SplitCentroids],
-    ) -> Result<(TargetCentroidSourceMap, RebalanceStats)> {
+    ) -> Result<(Vec<PostingMove>, RebalanceStats)> {
         #[derive(Debug, Clone)]
         enum Target {
             Centroid(u32),
@@ -720,11 +710,11 @@ mod parallel {
             .map(|(_, _, stats)| *stats)
             .fold(RebalanceStats::default(), |acc, s| acc + s);
 
-        // Assign targets to any vector that does not yet have one and group by target centroid.
+        // Assign targets to any vector that does not yet have one.
         // Only merge sources are excluded; split sources remain valid targets.
         let coder = index.new_posting_coder();
         let filter = merge_sources(ops);
-        let (by_target, search_stats) = centroid_reassignments
+        let (moves, search_stats) = centroid_reassignments
             .into_par_iter()
             .map_init(
                 || {
@@ -743,7 +733,7 @@ mod parallel {
                     (txn, searcher, result_scratch)
                 },
                 |(txn, searcher, result_scratch), (source, postings, _)| {
-                    let mut m = HashMap::<u32, Vec<(u32, i64)>>::new();
+                    let mut m = vec![];
                     let mut s = GraphSearchStats::default();
                     for (vector_id, target) in postings {
                         let centroid = match target {
@@ -768,57 +758,35 @@ mod parallel {
                         if centroid == source {
                             continue;
                         }
-                        m.entry(centroid).or_default().push((source, vector_id));
+                        m.push(PostingMove {
+                            record_id: vector_id,
+                            source,
+                            target: centroid,
+                        });
                     }
-                    Ok::<(HashMap<u32, Vec<(u32, i64)>>, GraphSearchStats), Error>((m, s))
+                    Ok::<(Vec<PostingMove>, GraphSearchStats), Error>((m, s))
                 },
             )
             .try_reduce(
-                || (HashMap::new(), GraphSearchStats::default()),
+                || (vec![], GraphSearchStats::default()),
                 |(mut acc, mut acc_stats), (partial, partial_stats)| {
-                    for (centroid, list) in partial {
-                        acc.entry(centroid).or_default().extend_from_slice(&list);
-                    }
+                    acc.extend_from_slice(&partial);
                     acc_stats += partial_stats;
                     Ok((acc, acc_stats))
                 },
             )?;
         stats.search_stats = search_stats;
-        Ok((by_target, stats))
-    }
-
-    /// Apply all posting reassignments by copying vectors to their target centroids.
-    pub fn apply_posting_reassignments(
-        connection: &Arc<Connection>,
-        index: &Arc<TableIndex>,
-        reassignments: &HashMap<u32, Vec<(u32, i64)>>,
-    ) -> Result<()> {
-        reassignments
-            .par_iter()
-            .try_for_each(|(target, reassignments)| {
-                let txn = TransactionIndex::new(index, connection.begin_transaction(None)?);
-                let mut updater = PostingUpdater::new(&txn)?;
-                for (source, vector_id) in reassignments {
-                    debug_assert_ne!(source, target);
-                    updater.copy_posting(*vector_id, *source, *target)?
-                }
-                updater.flush()?;
-                txn.commit(None)?;
-                Ok::<_, Error>(())
-            })
+        Ok((moves, stats))
     }
 
     /// Remove merge source centroid ids from stats, postings, and the head graph.
     ///
-    /// Split sources retain their id: any posting copied out of the source by
-    /// `apply_posting_reassignments` is removed from the source posting and the source stats are
-    /// recomputed from the remaining postings.
+    /// All postings must have been moved out of the merge sources before calling this.
     // NB: deliberately sequential to avoid high conflict rate.
-    pub fn remove_source_centroids(
+    pub fn remove_merge_sources(
         connection: &Arc<Connection>,
         index: &Arc<TableIndex>,
         ops: &[RebalanceOp],
-        reassignments: &TargetCentroidSourceMap,
     ) -> Result<()> {
         let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
         let mut stats_cursor = txn_idx
@@ -826,40 +794,16 @@ mod parallel {
             .open_cursor::<u32, CentroidCounts>(index.centroid_stats_table_name())?;
         let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
 
-        let mut split_evictions: HashMap<u32, Vec<i64>> = HashMap::new();
-        for op in ops {
-            match op {
-                RebalanceOp::Merge(s) => {
-                    stats_cursor.remove(*s).or_else(|e| {
-                        if e == Error::not_found_error() {
-                            Ok(())
-                        } else {
-                            Err(e)
-                        }
-                    })?;
-                    postings.remove_centroid(*s)?;
-                    delete_vector(*s as i64, txn_idx.head())?;
+        for s in merge_sources(ops) {
+            stats_cursor.remove(s).or_else(|e| {
+                if e == Error::not_found_error() {
+                    Ok(())
+                } else {
+                    Err(e)
                 }
-                RebalanceOp::Split(s, _) => {
-                    split_evictions.insert(*s, vec![]);
-                }
-            }
-        }
-
-        for (source, vector_id) in reassignments.values().flatten() {
-            if let Some(evictions) = split_evictions.get_mut(source) {
-                evictions.push(*vector_id);
-            }
-        }
-        for (source, evictions) in split_evictions {
-            for vector_id in evictions {
-                let removed = postings.remove(source, vector_id)?;
-                debug_assert!(removed.is_some());
-            }
-            // Recompute from postings rather than adjusting, as stats for copied postings were
-            // incremented in the target without decrementing the source.
-            let primary = postings.centroid_len(source)? as u32;
-            stats_cursor.set(source, CentroidCounts { primary })?;
+            })?;
+            postings.remove_centroid(s)?;
+            delete_vector(s as i64, txn_idx.head())?;
         }
 
         postings.flush()?;
@@ -935,11 +879,12 @@ mod parallel {
         Ok((nearby_to_targets, search_stats))
     }
 
-    #[derive(Debug, Copy, Clone)]
+    /// Move of a single posting from `source` to `target` centroid.
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
     pub struct PostingMove {
-        record_id: i64,
-        source: u32,
-        target: u32,
+        pub record_id: i64,
+        pub source: u32,
+        pub target: u32,
     }
 
     /// For each nearby centroid examine all postings and compare them against each of the target
@@ -1006,8 +951,9 @@ mod parallel {
         Ok((moves, stats))
     }
 
-    /// Apply all computed nearby reassignments to the index.
-    pub fn apply_nearby_reassignments(
+    /// Apply posting moves to the index in a single transaction.
+    // NB: deliberately sequential as moves out of a single source would conflict.
+    pub fn apply_posting_moves(
         connection: &Arc<Connection>,
         index: &Arc<TableIndex>,
         moves: &[PostingMove],
@@ -1053,12 +999,12 @@ pub fn parallel_rebalance<R: Rng>(
     let posting_reassignments = start.elapsed();
 
     let start = std::time::Instant::now();
-    parallel::apply_posting_reassignments(connection, index, &reassignments)?;
+    parallel::apply_posting_moves(connection, index, &reassignments)?;
     let apply_posting_reassignments = start.elapsed();
 
     let start = std::time::Instant::now();
-    parallel::remove_source_centroids(connection, index, &ops, &reassignments)?;
-    let remove_source_centroids = start.elapsed();
+    parallel::remove_merge_sources(connection, index, &ops)?;
+    let remove_merge_sources = start.elapsed();
 
     let start = std::time::Instant::now();
     let (nearby_to_targets, _) =
@@ -1072,7 +1018,7 @@ pub fn parallel_rebalance<R: Rng>(
     stats.split_stats += nearby_stats;
 
     let start = std::time::Instant::now();
-    parallel::apply_nearby_reassignments(connection, index, &nearby_reassignments)?;
+    parallel::apply_posting_moves(connection, index, &nearby_reassignments)?;
     let apply_nearby_reassignments = start.elapsed();
 
     stats.phase_durations += RebalancePhaseDurations {
@@ -1080,7 +1026,7 @@ pub fn parallel_rebalance<R: Rng>(
         insert_split_centroids,
         posting_reassignments,
         apply_posting_reassignments,
-        remove_source_centroids,
+        remove_merge_sources,
         select_nearby_centroids,
         compute_nearby_reassignments,
         apply_nearby_reassignments,
@@ -1133,7 +1079,7 @@ mod tests {
     /// Intermediate state from each rebalance phase.
     struct Phases {
         ops: Vec<RebalanceOp>,
-        reassignments: parallel::TargetCentroidSourceMap,
+        reassignments: Vec<parallel::PostingMove>,
         nearby: HashMap<u32, Vec<u32>>,
     }
 
@@ -1284,12 +1230,12 @@ mod tests {
             parallel::insert_split_centroids(conn, index, &ops, &splits).unwrap();
             let (reassignments, _) =
                 parallel::posting_reassignments(conn, index, &ops, &splits).unwrap();
-            parallel::apply_posting_reassignments(conn, index, &reassignments).unwrap();
-            parallel::remove_source_centroids(conn, index, &ops, &reassignments).unwrap();
+            parallel::apply_posting_moves(conn, index, &reassignments).unwrap();
+            parallel::remove_merge_sources(conn, index, &ops).unwrap();
             let (nearby, _) =
                 parallel::select_nearby_centroids(conn, index, &ops, &splits).unwrap();
             let (moves, _) = parallel::compute_nearby_reassignments(conn, index, &nearby).unwrap();
-            parallel::apply_nearby_reassignments(conn, index, &moves).unwrap();
+            parallel::apply_posting_moves(conn, index, &moves).unwrap();
             Phases {
                 ops,
                 reassignments,
@@ -1581,11 +1527,16 @@ mod tests {
         );
         // The retained source is a valid target when reassigning merged vectors. Check this
         // directly as nearby reassignment may otherwise correct the assignment.
-        let to_source = phases.reassignments[&s]
-            .iter()
-            .copied()
-            .collect::<HashSet<_>>();
-        assert!(merged.iter().all(|id| to_source.contains(&(m, *id))));
+        let to_source = phases.reassignments.iter().collect::<HashSet<_>>();
+        assert!(
+            merged
+                .iter()
+                .all(|id| to_source.contains(&parallel::PostingMove {
+                    record_id: *id,
+                    source: m,
+                    target: s,
+                }))
+        );
 
         let snap = f.check();
         assert_eq!(

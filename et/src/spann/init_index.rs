@@ -171,7 +171,7 @@ pub fn init_index(
     );
     // Insert a dummy vector into the head index to provide somewhere for the first insert to go.
     // This vector is not a good vector (particularly for angular distance metrics) but it will
-    // disappear as soon as we need to split the initial centroid.
+    // be replaced as soon as we need to split the initial centroid.
     insert_vector(&vec![0.0f32; args.dimensions.get()], &head_index)?;
     head_index.commit(None)?;
 

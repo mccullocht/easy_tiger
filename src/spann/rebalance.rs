@@ -273,7 +273,7 @@ mod parallel {
         sync::Arc,
     };
     use tracing::warn;
-    use vectors::{F32VectorCoder, F32VectorCoding, QueryVectorDistance, VectorSimilarity};
+    use vectors::QueryVectorDistance;
     use wt_mdb::{Connection, Error, Result};
 
     use crate::{
@@ -289,7 +289,6 @@ mod parallel {
             GraphVectorIndex, GraphVectorStore,
             mutate::{delete_vector, upsert_vector_with_options},
             search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
-            wt::CursorVectorStore,
         },
     };
 
@@ -335,70 +334,34 @@ mod parallel {
         pub centroids: VecVectorStore<f32>,
     }
 
-    pub struct CentroidDistanceFactory<'a> {
-        centroid_store: CursorVectorStore<'a>,
-        posting_format: F32VectorCoding,
-        head_coder: Option<Box<dyn F32VectorCoder>>,
+    /// Return a distance function for a centroid vector encoded in the head high fidelity format,
+    /// such as one read before the centroid was overwritten.
+    fn encoded_centroid_distance(
+        txn_idx: &TransactionIndex,
+        centroid: &[u8],
+    ) -> Box<dyn QueryVectorDistance> {
+        let head_config = txn_idx.index().head_config();
+        let similarity = head_config.config().similarity;
+        let head_format = head_config.high_fidelity_table().format();
+        let posting_format = txn_idx.index().config().posting_coder;
+        if head_format == posting_format {
+            posting_format.query_distance_symmetric(similarity, centroid.to_vec())
+        } else {
+            posting_format
+                .query_distance_asymmetric(similarity, head_format.coder().decode(centroid))
+        }
     }
 
-    impl<'a> CentroidDistanceFactory<'a> {
-        pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
-            let centroid_store = txn_idx.head().high_fidelity_vectors()?;
-            let posting_format = txn_idx.index().config().posting_coder;
-            let head_format = centroid_store.format();
-            let head_coder = if posting_format == head_format {
-                None
-            } else {
-                Some(head_format.coder())
-            };
-            Ok(Self {
-                centroid_store,
-                posting_format,
-                head_coder,
-            })
-        }
-
-        pub fn distance_to_centroid(
-            &mut self,
-            centroid_id: u32,
-        ) -> Result<Box<dyn QueryVectorDistance>> {
-            let similarity = self.centroid_store.similarity();
-            let query = self
-                .centroid_store
-                .get(centroid_id as i64)
-                .unwrap_or_else(|| Err(Error::not_found_error()))?;
-            Ok(Self::distance_to_query(
-                similarity,
-                self.posting_format,
-                self.head_coder.as_deref(),
-                query,
-            ))
-        }
-
-        /// Return a distance function for a centroid vector encoded in the head high fidelity
-        /// format, such as one read before the centroid was overwritten.
-        pub fn distance_to_encoded(&self, query: &[u8]) -> Box<dyn QueryVectorDistance> {
-            Self::distance_to_query(
-                self.centroid_store.similarity(),
-                self.posting_format,
-                self.head_coder.as_deref(),
-                query,
-            )
-        }
-
-        fn distance_to_query(
-            similarity: VectorSimilarity,
-            posting_format: F32VectorCoding,
-            head_coder: Option<&dyn F32VectorCoder>,
-            query: &[u8],
-        ) -> Box<dyn QueryVectorDistance> {
-            if let Some(head_coder) = head_coder {
-                let query = head_coder.decode(query);
-                posting_format.query_distance_asymmetric(similarity, query)
-            } else {
-                posting_format.query_distance_symmetric(similarity, query.to_vec())
-            }
-        }
+    /// Return a distance function for the current head vector of `centroid_id`.
+    fn centroid_distance(
+        txn_idx: &TransactionIndex,
+        centroid_id: u32,
+    ) -> Result<Box<dyn QueryVectorDistance>> {
+        let mut centroid_store = txn_idx.head().high_fidelity_vectors()?;
+        let centroid = centroid_store
+            .get(centroid_id as i64)
+            .unwrap_or_else(|| Err(Error::not_found_error()))?;
+        Ok(encoded_centroid_distance(txn_idx, centroid))
     }
 
     struct PostingUpdater<'a> {
@@ -510,8 +473,7 @@ mod parallel {
                         .get(s as i64)
                         .unwrap_or_else(|| Err(Error::not_found_error()))?
                         .to_vec();
-                    let source_distfn = CentroidDistanceFactory::new(txn_idx)?
-                        .distance_to_encoded(&old_source_vector);
+                    let source_distfn = encoded_centroid_distance(txn_idx, &old_source_vector);
                     let coder = index.new_posting_coder();
                     if source_distfn.distance(&coder.encode(&centroids[1]))
                         < source_distfn.distance(&coder.encode(&centroids[0]))
@@ -704,12 +666,11 @@ mod parallel {
                             let Some(split) = splits.get(s) else {
                                 return Ok((*s, vec![], RebalanceStats::default()));
                             };
-                            let mut f = CentroidDistanceFactory::new(txn)?;
                             // The source has been overwritten in the head index, use the vector
                             // captured before the split.
-                            let s_distfn = f.distance_to_encoded(&split.old_source_vector);
-                            let t0_distfn = f.distance_to_centroid(split.source)?;
-                            let t1_distfn = f.distance_to_centroid(split.new)?;
+                            let s_distfn = encoded_centroid_distance(txn, &split.old_source_vector);
+                            let t0_distfn = centroid_distance(txn, split.source)?;
+                            let t1_distfn = centroid_distance(txn, split.new)?;
                             let postings = block
                                 .iter()
                                 .map(|(id, v)| {
@@ -1001,12 +962,11 @@ mod parallel {
                 },
                 |txn, (nearby, targets)| {
                     let mut updater = PostingUpdater::new(txn)?;
-                    let mut f = CentroidDistanceFactory::new(txn)?;
                     let postings = updater.read_centroid(*nearby)?;
-                    let nearby_distfn = f.distance_to_centroid(*nearby)?;
+                    let nearby_distfn = centroid_distance(txn, *nearby)?;
                     let targets_distfn = targets
                         .iter()
-                        .map(|c| f.distance_to_centroid(*c))
+                        .map(|c| centroid_distance(txn, *c))
                         .collect::<Result<Vec<_>>>()?;
                     let moves = postings
                         .iter()

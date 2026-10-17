@@ -1,14 +1,22 @@
 //! Abstraction for token indexing.
 
-use std::{collections::BTreeMap, io};
+use std::{borrow::Cow, collections::BTreeMap};
+
+use wt_mdb::{IndexCursorGuard, Transaction};
 
 // XXX impl Error
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Error {
     UnknownDocFormat(u8),
     UnknownPayloadFormat(u8),
     Coding(&'static str),
-    Io(io::Error),
+    WiredTiger(wt_mdb::Error),
+}
+
+impl From<wt_mdb::Error> for Error {
+    fn from(value: wt_mdb::Error) -> Self {
+        Self::WiredTiger(value)
+    }
 }
 
 pub const DOC_ITER_SENTINEL: i64 = i64::MAX;
@@ -73,12 +81,25 @@ impl<T: DocIterator + ?Sized> DocIterator for Box<T> {
 /// It is recommended to use [`DOC_ITER_SENTINEL`] as the limit for short posting lists as it makes
 /// them easy to find -- seeking to a target docid will always return that block.
 pub fn doc_block_key(field: &str, posting_key: &[u8], limit_docid: i64) -> Vec<u8> {
-    let mut key = Vec::with_capacity(field.len() + posting_key.len() + 10);
+    doc_block_key_internal(field, posting_key, Some(limit_docid))
+}
+
+/// Construct a prefix that matches all of the blocks for a term posting.
+pub fn doc_block_prefix(field: &str, posting_key: &[u8]) -> Vec<u8> {
+    doc_block_key_internal(field, posting_key, None)
+}
+
+fn doc_block_key_internal(field: &str, posting_key: &[u8], limit_docid: Option<i64>) -> Vec<u8> {
+    let mut key = Vec::with_capacity(
+        field.len() + posting_key.len() + limit_docid.map(|_| 8).unwrap_or_default() + 2,
+    );
     key.extend_from_slice(field.as_bytes());
     key.push(b':');
     key.extend_from_slice(posting_key);
     key.push(b':');
-    key.extend_from_slice(&limit_docid.to_be_bytes());
+    if let Some(d) = limit_docid {
+        key.extend_from_slice(&d.to_be_bytes());
+    }
     key
 }
 
@@ -224,8 +245,10 @@ pub struct DocIteratorBlock<'a> {
     docs: Vec<i64>,
     /// Index of the current doc in `docs`.
     index: usize,
-    /// Remaining undecoded payload bytes.
-    payloads: &'a [u8],
+    /// Encoded block data.
+    data: Cow<'a, [u8]>,
+    /// Offset in `data` of the remaining undecoded payload bytes.
+    payload_offset: usize,
     /// Rank of the payload at the start of `payloads`.
     next_payload_rank: usize,
     payload: u64,
@@ -236,7 +259,12 @@ impl<'a> DocIteratorBlock<'a> {
     /// Create a new iterator over the encoded block `data`, positioned on the first doc.
     ///
     /// Returns an error if the block header or docs are malformed.
-    pub fn new(mut data: &'a [u8]) -> Result<Self, Error> {
+    pub fn new(data: &'a [u8]) -> Result<Self, Error> {
+        Self::from_cow(data.into())
+    }
+
+    fn from_cow(block: Cow<'a, [u8]>) -> Result<Self, Error> {
+        let mut data: &[u8] = &block;
         let len = usize::try_from(
             leb128::read::unsigned(&mut data).map_err(|_| Error::Coding("invalid entry count"))?,
         )
@@ -267,12 +295,14 @@ impl<'a> DocIteratorBlock<'a> {
         }
         docs.push(DOC_ITER_SENTINEL);
 
+        let payload_offset = block.len() - payloads.len();
         Ok(Self {
             doc_format,
             payload_format,
             docs,
             index: 0,
-            payloads,
+            data: block,
+            payload_offset,
             next_payload_rank: 0,
             payload: 0,
             error: None,
@@ -297,6 +327,30 @@ impl<'a> DocIteratorBlock<'a> {
     }
 }
 
+impl DocIteratorBlock<'static> {
+    /// Create a new iterator over the encoded block `data`, positioned on the first doc.
+    ///
+    /// Returns an error if the block header or docs are malformed.
+    pub fn from_vec(data: Vec<u8>) -> Result<Self, Error> {
+        Self::from_cow(data.into())
+    }
+
+    /// Create an iterator with no entries.
+    fn empty() -> Self {
+        Self {
+            doc_format: DocFormat::LEB128,
+            payload_format: PayloadFormat::None,
+            docs: vec![DOC_ITER_SENTINEL],
+            index: 0,
+            data: Cow::Borrowed(&[]),
+            payload_offset: 0,
+            next_payload_rank: 0,
+            payload: 0,
+            error: None,
+        }
+    }
+}
+
 impl DocIterator for DocIteratorBlock<'_> {
     fn doc(&mut self) -> i64 {
         self.docs[self.index]
@@ -307,13 +361,14 @@ impl DocIterator for DocIteratorBlock<'_> {
             return 0;
         }
         if self.next_payload_rank <= self.index {
-            match self.payload_format.decode_to(
-                &mut self.payloads,
-                self.next_payload_rank,
-                self.index,
-            ) {
+            let mut payloads = &self.data[self.payload_offset..];
+            match self
+                .payload_format
+                .decode_to(&mut payloads, self.next_payload_rank, self.index)
+            {
                 Ok(p) => {
                     self.payload = p;
+                    self.payload_offset = self.data.len() - payloads.len();
                     self.next_payload_rank = self.index + 1;
                 }
                 Err(e) => {
@@ -344,6 +399,137 @@ impl DocIterator for DocIteratorBlock<'_> {
 
     fn error(&self) -> Result<(), Error> {
         self.error.map_or(Ok(()), |e| Err(Error::Coding(e)))
+    }
+}
+
+/// Iterates over all of the docs for a term by reading the sequence of [`DocIteratorBlock`]s
+/// stored under keys produced by [`doc_block_key`].
+///
+/// Blocks are read in key order so block limit docids must be non-negative.
+pub struct TermDocIterator<'a> {
+    cursor: IndexCursorGuard<'a>,
+    /// Key prefix shared by all blocks in the posting.
+    prefix_len: usize,
+    /// Upper bound key for all blocks in the posting.
+    upper_bound: Vec<u8>,
+    block: DocIteratorBlock<'static>,
+    /// Limit docid for `block`; no doc after this value will appear in `block`.
+    block_limit: i64,
+    cost: u64,
+    error: Option<Error>,
+}
+
+impl<'a> TermDocIterator<'a> {
+    /// Create a new iterator over the blocks for `term` in `field` in `table_name`, positioned on
+    /// the first doc.
+    ///
+    /// `cost` is returned by [`DocIterator::cost`].
+    pub fn new(
+        txn: &'a Transaction,
+        table_name: &str,
+        field: &str,
+        term: &[u8],
+        cost: u64,
+    ) -> Result<Self, Error> {
+        let mut cursor = txn.open_index_cursor(table_name)?;
+        let mut upper_bound = doc_block_prefix(field, term);
+        let prefix_len = upper_bound.len();
+        upper_bound.extend_from_slice(&[0xff; 8]);
+        cursor.set_bounds(&upper_bound[..prefix_len]..=upper_bound.as_slice())?;
+        let mut it = Self {
+            cursor,
+            prefix_len,
+            upper_bound,
+            block: DocIteratorBlock::empty(),
+            block_limit: i64::MIN,
+            cost,
+            error: None,
+        };
+        it.load_next_block()?;
+        it.settle(i64::MIN);
+        it.error()?;
+        Ok(it)
+    }
+
+    /// Read the next block from the cursor, or an empty block if there are no more blocks.
+    fn load_next_block(&mut self) -> Result<(), Error> {
+        let Some((key, value)) = self.cursor.next().transpose()? else {
+            self.block = DocIteratorBlock::empty();
+            self.block_limit = DOC_ITER_SENTINEL;
+            return Ok(());
+        };
+        let limit_bytes = key
+            .get(self.prefix_len..)
+            .and_then(|b| <[u8; 8]>::try_from(b).ok())
+            .ok_or(Error::Coding("invalid doc block key"))?;
+        self.block = DocIteratorBlock::from_vec(value)?;
+        self.block_limit = i64::from_be_bytes(limit_bytes);
+        Ok(())
+    }
+
+    /// Load the first block that may contain `target`, seeking if the next block does not.
+    fn load_block_for(&mut self, target: i64) -> Result<(), Error> {
+        self.load_next_block()?;
+        if self.block_limit < target {
+            let mut lower_bound = self.upper_bound[..self.prefix_len].to_vec();
+            lower_bound.extend_from_slice(&target.to_be_bytes());
+            self.cursor
+                .set_bounds(lower_bound.as_slice()..=self.upper_bound.as_slice())?;
+            self.load_next_block()?;
+        }
+        Ok(())
+    }
+
+    /// Advance to the first doc at or after `target`, loading blocks as needed.
+    ///
+    /// Maintains the invariant that `block` is only exhausted if the iterator is exhausted.
+    fn settle(&mut self, target: i64) -> i64 {
+        loop {
+            let doc = self.block.advance_to(target);
+            if doc != DOC_ITER_SENTINEL || self.block_limit == DOC_ITER_SENTINEL {
+                return doc;
+            }
+            if let Err(e) = self
+                .block
+                .error()
+                .and_then(|()| self.load_block_for(target))
+            {
+                self.error = Some(e);
+                self.block = DocIteratorBlock::empty();
+                self.block_limit = DOC_ITER_SENTINEL;
+                return DOC_ITER_SENTINEL;
+            }
+        }
+    }
+}
+
+impl DocIterator for TermDocIterator<'_> {
+    fn doc(&mut self) -> i64 {
+        self.block.doc()
+    }
+
+    fn payload(&mut self) -> u64 {
+        self.block.payload()
+    }
+
+    fn advance(&mut self) -> i64 {
+        self.block.advance();
+        self.settle(i64::MIN)
+    }
+
+    fn advance_to(&mut self, target: i64) -> i64 {
+        self.settle(target)
+    }
+
+    fn cost(&self) -> u64 {
+        self.cost
+    }
+
+    fn error(&self) -> Result<(), Error> {
+        match &self.error {
+            Some(e) => Err(e.clone()),
+            None => self.block.error(),
+        }
     }
 }
 
@@ -626,5 +812,175 @@ mod test {
         }
         assert!(matches!(it.error(), Err(Error::Coding(_))));
         assert!(DocIteratorBlockMut::deserialize(truncated).is_err());
+    }
+
+    struct TermFixture {
+        // Must be dropped before `_dir`.
+        conn: std::sync::Arc<wt_mdb::Connection>,
+        _dir: tempfile::TempDir,
+    }
+
+    const TABLE: &str = "postings";
+
+    /// (field, term, limit_docid, entries)
+    type TestBlock<'a> = (&'a str, &'a [u8], i64, &'a [(i64, u64)]);
+
+    impl TermFixture {
+        /// Create a table containing `blocks`.
+        fn new(blocks: &[TestBlock<'_>]) -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let conn = wt_mdb::Connection::open(
+                dir.path().to_str().unwrap(),
+                Some(
+                    wt_mdb::connection::OptionsBuilder::default()
+                        .create()
+                        .into(),
+                ),
+            )
+            .unwrap();
+            conn.create_table(
+                TABLE,
+                Some(
+                    wt_mdb::connection::CreateOptionsBuilder::default()
+                        .key_format::<Vec<u8>>()
+                        .value_format::<Vec<u8>>()
+                        .into(),
+                ),
+            )
+            .unwrap();
+            let txn = conn.begin_transaction(None).unwrap();
+            {
+                let mut cursor = txn.open_index_cursor(TABLE).unwrap();
+                for &(field, term, limit, entries) in blocks {
+                    cursor
+                        .set(
+                            &doc_block_key(field, term, limit),
+                            &build(PayloadFormat::LEB128, entries).serialize(),
+                        )
+                        .unwrap();
+                }
+            }
+            txn.commit(None).unwrap();
+            Self { conn, _dir: dir }
+        }
+
+        fn txn(&self) -> Transaction {
+            self.conn.begin_transaction(None).unwrap()
+        }
+    }
+
+    fn multi_block_fixture() -> TermFixture {
+        TermFixture::new(&[
+            ("f", b"a", 99, &[(1, 10), (5, 50), (50, 500)]),
+            ("f", b"a", 199, &[(150, 1500)]),
+            ("f", b"a", 299, &[]),
+            ("f", b"a", 399, &[(300, 3000)]),
+            ("f", b"a", DOC_ITER_SENTINEL, &[(400, 4000), (1000, 10000)]),
+            // Neighboring keys that should not be visited.
+            ("f", b"", DOC_ITER_SENTINEL, &[(2, 2)]),
+            ("f", b"ab", DOC_ITER_SENTINEL, &[(3, 3)]),
+            ("g", b"a", DOC_ITER_SENTINEL, &[(4, 4)]),
+        ])
+    }
+
+    const MULTI_BLOCK_ENTRIES: &[(i64, u64)] = &[
+        (1, 10),
+        (5, 50),
+        (50, 500),
+        (150, 1500),
+        (300, 3000),
+        (400, 4000),
+        (1000, 10000),
+    ];
+
+    #[test]
+    fn term_iterate() {
+        let fixture = multi_block_fixture();
+        let txn = fixture.txn();
+        let mut it = TermDocIterator::new(&txn, TABLE, "f", b"a", 7).unwrap();
+        assert_eq!(it.cost(), 7);
+        let mut out = vec![];
+        while it.doc() != DOC_ITER_SENTINEL {
+            out.push((it.doc(), it.payload()));
+            it.advance();
+        }
+        it.error().unwrap();
+        assert_eq!(out, MULTI_BLOCK_ENTRIES);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.payload(), 0);
+    }
+
+    #[test]
+    fn term_advance_to() {
+        let fixture = multi_block_fixture();
+        let txn = fixture.txn();
+        let mut it = TermDocIterator::new(&txn, TABLE, "f", b"a", 7).unwrap();
+        // Within the current block.
+        assert_eq!(it.advance_to(5), 5);
+        assert_eq!(it.payload(), 50);
+        // Past the end of the current block into the next block.
+        assert_eq!(it.advance_to(100), 150);
+        assert_eq!(it.payload(), 1500);
+        // Into the range of the empty block.
+        assert_eq!(it.advance_to(250), 300);
+        assert_eq!(it.payload(), 3000);
+        // Doc in the current block is not before target.
+        assert_eq!(it.advance_to(200), 300);
+        assert_eq!(it.advance(), 400);
+        assert_eq!(it.advance_to(1001), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+
+        // Skip past multiple blocks with a seek.
+        let mut it = TermDocIterator::new(&txn, TABLE, "f", b"a", 7).unwrap();
+        assert_eq!(it.advance_to(400), 400);
+        assert_eq!(it.payload(), 4000);
+        assert_eq!(it.advance(), 1000);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn term_missing() {
+        let fixture = multi_block_fixture();
+        let txn = fixture.txn();
+        let mut it = TermDocIterator::new(&txn, TABLE, "f", b"b", 0).unwrap();
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert_eq!(it.cost(), 0);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(10), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn term_neighbors() {
+        let fixture = multi_block_fixture();
+        let txn = fixture.txn();
+        for (field, term, doc) in [("f", b"".as_slice(), 2), ("f", b"ab", 3), ("g", b"a", 4)] {
+            let mut it = TermDocIterator::new(&txn, TABLE, field, term, 1).unwrap();
+            assert_eq!(it.doc(), doc);
+            assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+            it.error().unwrap();
+        }
+    }
+
+    #[test]
+    fn term_corrupt_block() {
+        let fixture = TermFixture::new(&[
+            ("f", b"a", 99, &[(1, 10)]),
+            ("f", b"a", DOC_ITER_SENTINEL, &[(100, 1000)]),
+        ]);
+        {
+            let txn = fixture.txn();
+            txn.open_index_cursor(TABLE)
+                .unwrap()
+                .set(&doc_block_key("f", b"a", DOC_ITER_SENTINEL), &[1, 0, 9])
+                .unwrap();
+            txn.commit(None).unwrap();
+        }
+        let txn = fixture.txn();
+        let mut it = TermDocIterator::new(&txn, TABLE, "f", b"a", 7).unwrap();
+        assert_eq!(it.doc(), 1);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::UnknownPayloadFormat(9))));
     }
 }

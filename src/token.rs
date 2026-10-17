@@ -533,6 +533,112 @@ impl DocIterator for TermDocIterator<'_> {
     }
 }
 
+/// Yields only the docs that appear in every input iterator.
+///
+/// The two cheapest inputs lead iteration, advancing against each other until they agree on a doc.
+/// The remaining inputs are only advanced to docs that both leads agree on, in ascending cost
+/// order.
+pub struct ConjunctionDocIterator<'a> {
+    lead1: Box<dyn DocIterator + 'a>,
+    lead2: Box<dyn DocIterator + 'a>,
+    /// Remaining iterators in ascending cost order.
+    others: Vec<Box<dyn DocIterator + 'a>>,
+    doc: i64,
+}
+
+impl<'a> ConjunctionDocIterator<'a> {
+    /// Create a new iterator over the intersection of `first`, `second`, and `rest`, positioned on
+    /// the first matching doc.
+    pub fn new(
+        first: Box<dyn DocIterator + 'a>,
+        second: Box<dyn DocIterator + 'a>,
+        rest: Vec<Box<dyn DocIterator + 'a>>,
+    ) -> Self {
+        let mut others = rest;
+        others.push(first);
+        others.push(second);
+        others.sort_by_key(|it| it.cost());
+        let mut others = others.into_iter();
+        let mut it = Self {
+            lead1: others.next().unwrap(),
+            lead2: others.next().unwrap(),
+            others: others.collect(),
+            doc: i64::MIN,
+        };
+        let target = it.lead1.doc();
+        it.do_next(target);
+        it
+    }
+
+    /// Find the first doc at or after `doc` that matches all iterators, where `doc` is the
+    /// current doc of `lead1`.
+    fn do_next(&mut self, mut doc: i64) -> i64 {
+        'advance_leads: while doc != DOC_ITER_SENTINEL {
+            let next2 = advance_if_behind(&mut *self.lead2, doc);
+            if next2 != doc {
+                doc = self.lead1.advance_to(next2);
+                if doc != next2 {
+                    continue;
+                }
+            }
+
+            for other in self.others.iter_mut() {
+                let next = advance_if_behind(&mut **other, doc);
+                if next != doc {
+                    doc = self.lead1.advance_to(next);
+                    continue 'advance_leads;
+                }
+            }
+            break;
+        }
+        self.doc = doc;
+        doc
+    }
+}
+
+/// Advance `it` to `target` if it is positioned before `target` and return its current doc.
+fn advance_if_behind(it: &mut dyn DocIterator, target: i64) -> i64 {
+    let doc = it.doc();
+    if doc < target {
+        it.advance_to(target)
+    } else {
+        doc
+    }
+}
+
+impl DocIterator for ConjunctionDocIterator<'_> {
+    fn doc(&mut self) -> i64 {
+        self.doc
+    }
+
+    fn payload(&mut self) -> u64 {
+        0
+    }
+
+    fn advance(&mut self) -> i64 {
+        let doc = self.lead1.advance();
+        self.do_next(doc)
+    }
+
+    fn advance_to(&mut self, target: i64) -> i64 {
+        if target <= self.doc {
+            return self.doc;
+        }
+        let doc = self.lead1.advance_to(target);
+        self.do_next(doc)
+    }
+
+    fn cost(&self) -> u64 {
+        self.lead1.cost()
+    }
+
+    fn error(&self) -> Result<(), Error> {
+        self.lead1.error()?;
+        self.lead2.error()?;
+        self.others.iter().try_for_each(|it| it.error())
+    }
+}
+
 fn read_u8(data: &mut &[u8]) -> Result<u8, Error> {
     let (b, rest) = data
         .split_first()
@@ -982,5 +1088,109 @@ mod test {
         assert_eq!(it.doc(), 1);
         assert_eq!(it.advance(), DOC_ITER_SENTINEL);
         assert!(matches!(it.error(), Err(Error::UnknownPayloadFormat(9))));
+    }
+
+    fn block_iter(docs: &[i64]) -> Box<dyn DocIterator> {
+        let mut block = DocIteratorBlockMut::new(DocFormat::LEB128, PayloadFormat::LEB128);
+        for &d in docs {
+            block.insert(d, 1);
+        }
+        Box::new(DocIteratorBlock::from_vec(block.serialize()).unwrap())
+    }
+
+    fn collect_docs(it: &mut dyn DocIterator) -> Vec<i64> {
+        let mut out = vec![];
+        while it.doc() != DOC_ITER_SENTINEL {
+            assert_eq!(it.payload(), 0);
+            out.push(it.doc());
+            it.advance();
+        }
+        it.error().unwrap();
+        out
+    }
+
+    #[test]
+    fn conjunction() {
+        let mut it = ConjunctionDocIterator::new(
+            block_iter(&[-3, 1, 2, 5, 8, 13, 21, 34]),
+            block_iter(&[-3, 2, 3, 5, 13, 21, 22]),
+            vec![block_iter(&[-3, 0, 2, 4, 5, 6, 13, 21, 100])],
+        );
+        assert_eq!(it.cost(), 7);
+        assert_eq!(collect_docs(&mut it), vec![-3, 2, 5, 13, 21]);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+    }
+
+    #[test]
+    fn conjunction_advance_to() {
+        let mut it = ConjunctionDocIterator::new(
+            block_iter(&[1, 2, 5, 8, 13, 21, 34]),
+            block_iter(&[2, 3, 5, 13, 21, 22]),
+            vec![],
+        );
+        assert_eq!(it.doc(), 2);
+        assert_eq!(it.advance_to(2), 2);
+        assert_eq!(it.advance_to(6), 13);
+        assert_eq!(it.advance_to(13), 13);
+        assert_eq!(it.advance_to(14), 21);
+        assert_eq!(it.advance_to(22), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(100), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn conjunction_disjoint() {
+        let mut it =
+            ConjunctionDocIterator::new(block_iter(&[1, 3, 5]), block_iter(&[2, 4, 6]), vec![]);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+
+        let mut it = ConjunctionDocIterator::new(block_iter(&[1, 3, 5]), block_iter(&[]), vec![]);
+        assert_eq!(it.cost(), 0);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn conjunction_random() {
+        use rand::prelude::*;
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        for _ in 0..100 {
+            let num_iters = rng.random_range(2..6);
+            let doc_lists: Vec<Vec<i64>> = (0..num_iters)
+                .map(|_| {
+                    let density = rng.random_range(0.1..0.9);
+                    (0..500).filter(|_| rng.random_bool(density)).collect()
+                })
+                .collect();
+            let expected: Vec<i64> = doc_lists[0]
+                .iter()
+                .copied()
+                .filter(|d| doc_lists[1..].iter().all(|l| l.contains(d)))
+                .collect();
+            let mut iters = doc_lists.iter().map(|l| block_iter(l));
+            let first = iters.next().unwrap();
+            let second = iters.next().unwrap();
+            let mut it = ConjunctionDocIterator::new(first, second, iters.collect());
+            assert_eq!(collect_docs(&mut it), expected);
+        }
+    }
+
+    #[test]
+    fn conjunction_error() {
+        let mut block = DocIteratorBlockMut::new(DocFormat::LEB128, PayloadFormat::LEB128);
+        block.insert(1, 1 << 40);
+        let mut data = block.serialize();
+        data.truncate(data.len() - 2);
+        // Reading the truncated payload terminates the input with an error.
+        let mut failed = DocIteratorBlock::from_vec(data).unwrap();
+        failed.payload();
+        let mut it = ConjunctionDocIterator::new(
+            block_iter(&[1, 2]),
+            block_iter(&[1, 2, 3]),
+            vec![Box::new(failed)],
+        );
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
     }
 }

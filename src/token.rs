@@ -41,6 +41,32 @@ pub trait DocIterator {
     fn error(&self) -> Result<(), Error>;
 }
 
+impl<T: DocIterator + ?Sized> DocIterator for Box<T> {
+    fn doc(&mut self) -> i64 {
+        (**self).doc()
+    }
+
+    fn payload(&mut self) -> u64 {
+        (**self).payload()
+    }
+
+    fn advance(&mut self) -> i64 {
+        (**self).advance()
+    }
+
+    fn advance_to(&mut self, target: i64) -> i64 {
+        (**self).advance_to(target)
+    }
+
+    fn cost(&self) -> u64 {
+        (**self).cost()
+    }
+
+    fn error(&self) -> Result<(), Error> {
+        (**self).error()
+    }
+}
+
 /// Construct a key for a posting block given a field name, key, and the last possible docid that
 /// can appear in the block.
 ///

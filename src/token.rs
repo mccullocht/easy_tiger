@@ -445,37 +445,43 @@ impl<'a> TermDocIterator<'a> {
             cost,
             error: None,
         };
-        it.load_next_block()?;
+        it.load_next_block(i64::MIN)?;
         it.settle(i64::MIN);
         it.error()?;
         Ok(it)
     }
 
     /// Read the next block from the cursor, or an empty block if there are no more blocks.
-    fn load_next_block(&mut self) -> Result<(), Error> {
-        let Some((key, value)) = self.cursor.next().transpose()? else {
+    ///
+    /// If the next block ends before `target` it is not loaded and this returns false.
+    fn load_next_block(&mut self, target: i64) -> Result<bool, Error> {
+        // Safety: the value is copied before the cursor is repositioned.
+        let Some((key, value)) = unsafe { self.cursor.next_unsafe() }.transpose()? else {
             self.block = DocIteratorBlock::empty();
             self.block_limit = DOC_ITER_SENTINEL;
-            return Ok(());
+            return Ok(true);
         };
-        let limit_bytes = key
+        let limit = key
             .get(self.prefix_len..)
             .and_then(|b| <[u8; 8]>::try_from(b).ok())
+            .map(i64::from_be_bytes)
             .ok_or(Error::Coding("invalid doc block key"))?;
-        self.block = DocIteratorBlock::from_vec(value)?;
-        self.block_limit = i64::from_be_bytes(limit_bytes);
-        Ok(())
+        if limit < target {
+            return Ok(false);
+        }
+        self.block = DocIteratorBlock::from_vec(value.to_vec())?;
+        self.block_limit = limit;
+        Ok(true)
     }
 
     /// Load the first block that may contain `target`, seeking if the next block does not.
     fn load_block_for(&mut self, target: i64) -> Result<(), Error> {
-        self.load_next_block()?;
-        if self.block_limit < target {
+        if !self.load_next_block(target)? {
             let mut lower_bound = self.upper_bound[..self.prefix_len].to_vec();
             lower_bound.extend_from_slice(&target.to_be_bytes());
             self.cursor
                 .set_bounds(lower_bound.as_slice()..=self.upper_bound.as_slice())?;
-            self.load_next_block()?;
+            self.load_next_block(i64::MIN)?;
         }
         Ok(())
     }
@@ -645,11 +651,15 @@ impl DocIterator for ConjunctionDocIterator<'_> {
 /// the payload is the id of the centroid that vector is assigned to. Docs from `input` that do not
 /// appear in `assignments` are skipped, as are docs assigned to a centroid that has already been
 /// yielded. The payload for each doc is its centroid id.
+///
+/// Iteration ends early once every centroid has been yielded.
 pub struct CentroidParentFilterDocIterator<'a> {
     input: Box<dyn DocIterator + 'a>,
     assignments: Box<dyn DocIterator + 'a>,
     /// Bitmap of centroid ids that have already been yielded.
     seen: Vec<u64>,
+    /// Number of centroids that have not yet been yielded.
+    unseen: u32,
     doc: i64,
     centroid: u64,
     error: Option<Error>,
@@ -660,15 +670,19 @@ impl<'a> CentroidParentFilterDocIterator<'a> {
     /// positioned on the first matching doc.
     ///
     /// All centroid ids in `assignments` must be no greater than `max_centroid_id`.
+    /// `num_centroids` is the number of distinct centroid ids that may appear in `assignments`;
+    /// if it is too small some centroids will not be yielded.
     pub fn new(
         input: Box<dyn DocIterator + 'a>,
         assignments: Box<dyn DocIterator + 'a>,
         max_centroid_id: u32,
+        num_centroids: u32,
     ) -> Self {
         let mut it = Self {
             input,
             assignments,
             seen: vec![0; max_centroid_id as usize / 64 + 1],
+            unseen: num_centroids,
             doc: i64::MIN,
             centroid: 0,
             error: None,
@@ -683,6 +697,11 @@ impl<'a> CentroidParentFilterDocIterator<'a> {
     fn do_next(&mut self, mut doc: i64) -> i64 {
         self.centroid = 0;
         while doc != DOC_ITER_SENTINEL {
+            if self.unseen == 0 {
+                // Every centroid has been yielded so no remaining doc can match.
+                doc = DOC_ITER_SENTINEL;
+                break;
+            }
             let assigned = advance_if_behind(&mut *self.assignments, doc);
             if assigned != doc {
                 // No assignment for doc; skip to the next doc that has one.
@@ -704,6 +723,7 @@ impl<'a> CentroidParentFilterDocIterator<'a> {
             let mask = 1u64 << (centroid % 64);
             if *word & mask == 0 {
                 *word |= mask;
+                self.unseen -= 1;
                 self.centroid = centroid;
                 break;
             }
@@ -1340,6 +1360,7 @@ mod test {
             block_iter(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
             payload_iter(ASSIGNMENTS),
             127,
+            128,
         );
         assert_eq!(it.cost(), 12);
         assert_eq!(
@@ -1351,11 +1372,48 @@ mod test {
     }
 
     #[test]
+    fn centroid_parent_filter_early_termination() {
+        let input = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        // num_centroids matches the number of distinct centroids in ASSIGNMENTS.
+        let mut it = CentroidParentFilterDocIterator::new(
+            block_iter(&input),
+            payload_iter(ASSIGNMENTS),
+            127,
+            5,
+        );
+        assert_eq!(
+            collect_entries(&mut it),
+            vec![(1, 0), (2, 70), (5, 3), (9, 127), (10, 1)]
+        );
+
+        // Stops once num_centroids have been yielded.
+        let mut it = CentroidParentFilterDocIterator::new(
+            block_iter(&input),
+            payload_iter(ASSIGNMENTS),
+            127,
+            2,
+        );
+        assert_eq!(collect_entries(&mut it), vec![(1, 0), (2, 70)]);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(100), DOC_ITER_SENTINEL);
+
+        let mut it = CentroidParentFilterDocIterator::new(
+            block_iter(&input),
+            payload_iter(ASSIGNMENTS),
+            127,
+            0,
+        );
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
     fn centroid_parent_filter_advance_to() {
         let mut it = CentroidParentFilterDocIterator::new(
             block_iter(&[1, 3, 4, 6, 8, 9, 10]),
             payload_iter(ASSIGNMENTS),
             127,
+            128,
         );
         assert_eq!(it.doc(), 1);
         assert_eq!(it.advance_to(1), 1);
@@ -1382,6 +1440,11 @@ mod test {
                     assignments.push((d, rng.random_range(0..=max_centroid_id) as u64));
                 }
             }
+            let num_centroids = assignments
+                .iter()
+                .map(|&(_, c)| c)
+                .collect::<std::collections::HashSet<_>>()
+                .len() as u32;
             let input: Vec<i64> = (0..500).filter(|_| rng.random_bool(0.5)).collect();
             let mut seen = std::collections::HashSet::new();
             let expected: Vec<(i64, u64)> = input
@@ -1393,6 +1456,7 @@ mod test {
                 block_iter(&input),
                 payload_iter(&assignments),
                 max_centroid_id,
+                num_centroids,
             );
             assert_eq!(collect_entries(&mut it), expected);
         }
@@ -1404,6 +1468,7 @@ mod test {
             block_iter(&[1, 2, 3]),
             payload_iter(&[(1, 0), (2, 64), (3, 1)]),
             63,
+            64,
         );
         assert_eq!(it.doc(), 1);
         assert_eq!(it.advance(), DOC_ITER_SENTINEL);

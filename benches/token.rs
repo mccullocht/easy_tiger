@@ -145,6 +145,7 @@ fn centroid_parent_filter_benchmarks(c: &mut Criterion) {
                     Box::new(input),
                     Box::new(assignments),
                     max_centroid_id,
+                    max_centroid_id + 1,
                 );
                 let mut count = 0usize;
                 while it.doc() != DOC_ITER_SENTINEL {

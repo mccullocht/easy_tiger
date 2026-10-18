@@ -155,7 +155,7 @@ fn distance_from_dot_unnormalized(
 ) -> f32 {
     let l2_dist = l2_norms_sq.0 + l2_norms_sq.1 - (2.0 * dot_unnormalized);
     match similarity {
-        VectorSimilarity::Euclidean => l2_dist,
+        VectorSimilarity::Euclidean => l2_dist.max(0.0),
         // Normalize angular distance into a value in [0,1] where lower is closer.
         VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
     }

@@ -83,6 +83,18 @@ impl RecallComputer {
         self.neighbors.len()
     }
 
+    /// Return the top `k` golden neighbor vertex ids for `query_index`, for use as traced vectors
+    /// in [`easy_tiger::spann::search::Searcher::search_with_trace`].
+    ///
+    /// *Panics* if `query_index` is out of bounds in the golden file.
+    pub fn traced_vector_ids(&self, query_index: usize) -> Vec<i64> {
+        self.neighbors[query_index]
+            .iter()
+            .take(self.k)
+            .map(|v| *v as i64)
+            .collect()
+    }
+
     /// Format a summary line for the per-query results in `values`.
     ///
     /// For [`RecallMetric::Simple`] this reports the mean. For [`RecallMetric::Depth`] it also

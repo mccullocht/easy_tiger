@@ -63,12 +63,6 @@ pub fn delete_sim(
     args: DeleteSimArgs,
 ) -> io::Result<()> {
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
-    if index.config().rerank_format.is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "index has no rerank format; there are no rerank vectors to simulate deletes over",
-        ));
-    }
 
     let head_params = GraphSearchParams {
         beam_width: args.head_candidates,
@@ -166,12 +160,7 @@ impl Worker {
         let reader = TransactionIndex::new(&self.index, self.connection.begin_transaction(None)?);
 
         // Read and decode this record's rerank vector to use as the query.
-        let rerank_coder = self
-            .index
-            .config()
-            .rerank_format
-            .expect("rerank format is set")
-            .coder();
+        let rerank_coder = self.index.config().rerank_format.coder();
         let query: Vec<f32> = {
             let mut raw_cursor = reader
                 .transaction()

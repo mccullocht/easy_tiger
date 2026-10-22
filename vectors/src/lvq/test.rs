@@ -477,3 +477,35 @@ fn bitplane_split4_roundtrip() {
         assert_eq!(bitplane_join4(&split, dimensions), dims, "dim {dimensions}");
     }
 }
+
+// A float query compared against its own TLVQ8 encoding should be (nearly) zero distance.
+#[test]
+fn tlvq8_rerank_self_distance() {
+    let seed = SysRng::default().try_next_u64().unwrap();
+    println!("SEED {seed:#016x}");
+    let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+    let coder = F32VectorCoding::TLVQ8.coder();
+    for i in 0..1024 {
+        let dim = rng.random_range(128..=256);
+        let v = (0..dim)
+            .map(|_| rng.random_range(-1.0f32..=1.0))
+            .collect::<Vec<_>>();
+        for sim in VectorSimilarity::all() {
+            let v = if sim.angular() {
+                l2_normalize(&v).0.into_owned()
+            } else {
+                v.clone()
+            };
+            let encoded = coder.encode(&v);
+            let dist = F32VectorCoding::TLVQ8
+                .query_distance_asymmetric_for_rerank(sim, v.as_slice())
+                .distance(&encoded);
+            // Error is dominated by f32 rounding, which scales with the squared norm.
+            let l2_norm_sq = v.iter().map(|&x| x as f64 * x as f64).sum::<f64>();
+            assert!(
+                dist <= 1e-5 * l2_norm_sq,
+                "index={i} sim={sim} dist={dist} l2_norm_sq={l2_norm_sq}"
+            );
+        }
+    }
+}

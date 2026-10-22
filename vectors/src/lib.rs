@@ -298,6 +298,26 @@ impl F32VectorCoding {
         }
     }
 
+    /// Like [`Self::query_distance_asymmetric`] but favors accuracy over speed, for use when
+    /// reranking a small number of candidates.
+    ///
+    /// For most codings this is identical to [`Self::query_distance_asymmetric`]. For
+    /// [`Self::TLVQ8`] the query is not quantized; distance is computed between the float query and
+    /// the quantized doc.
+    pub fn query_distance_asymmetric_for_rerank<'a>(
+        &self,
+        similarity: VectorSimilarity,
+        query: impl Into<Cow<'a, [f32]>>,
+    ) -> Box<dyn QueryVectorDistance + 'a> {
+        match *self {
+            F32VectorCoding::TLVQ8 => Box::new(lvq::TurboPrimaryFloatQueryDistance8::new(
+                similarity,
+                query.into(),
+            )),
+            _ => self.query_distance_asymmetric(similarity, query),
+        }
+    }
+
     /// Create a new [`QueryVectorDistance`] that computes distance between a fixed query encoded
     /// in this format and other vectors that are also in this format.
     ///
@@ -612,6 +632,11 @@ mod test {
         let query_dist = query_dist_fn.distance(&b.qvec);
 
         assert_float_near!(f32_dist, query_dist, threshold, index);
+
+        let rerank_dist_fn = format.query_distance_asymmetric_for_rerank(similarity, &a.rvec);
+        let rerank_dist = rerank_dist_fn.distance(&b.qvec);
+
+        assert_float_near!(f32_dist, rerank_dist, threshold, index);
     }
 
     use F32VectorCoding::{F16, TLVQ1, TLVQ2, TLVQ4, TLVQ8};

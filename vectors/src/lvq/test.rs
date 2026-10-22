@@ -294,6 +294,12 @@ fn check_lvq_centered_distance(
         .query_distance_asymmetric(sim, a.as_slice())
         .distance(&enc_b);
     assert_abs_diff_eq!(f32_dist, qda, epsilon = abs_epsilon);
+
+    // f32-query vs doc rerank distance
+    let qdr = format
+        .query_distance_asymmetric_for_rerank(sim, a.as_slice())
+        .distance(&enc_b);
+    assert_abs_diff_eq!(f32_dist, qdr, epsilon = abs_epsilon);
 }
 
 macro_rules! lvq_centered_distance_135_test {

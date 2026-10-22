@@ -725,6 +725,85 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
     }
 }
 
+/// Asymmetric distance for an 8-bit document with an unquantized float query.
+///
+/// This is more accurate than [`TurboPrimaryQueryDistance`] since the query is not quantized, at
+/// the cost of float arithmetic in the inner loop; it is intended for reranking.
+#[derive(Debug, Clone)]
+pub struct TurboPrimaryFloatQueryDistance8<'a> {
+    similarity: VectorSimilarity,
+
+    query: Cow<'a, [f32]>,
+    query_sum: f32,
+    l2_norm_sq: f32,
+    error_terms: ErrorBoundTerms,
+}
+
+impl<'a> TurboPrimaryFloatQueryDistance8<'a> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'a, [f32]>) -> Self {
+        let query_sum = query.iter().sum::<f32>();
+        let l2_norm_sq = query.iter().map(|&q| q * q).sum::<f32>();
+        // The query is exact so the only error contribution comes from the doc.
+        let header = PrimaryVectorHeader {
+            l2_norm: l2_norm_sq.sqrt(),
+            perpendicular_error_term: 0.0,
+            parallel_error_term: 0.0,
+            lower: 0.0,
+            upper: 0.0,
+            component_sum: 0,
+        };
+        let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
+        Self {
+            similarity,
+            query,
+            query_sum,
+            l2_norm_sq,
+            error_terms,
+        }
+    }
+
+    #[inline(always)]
+    fn distance_internal_raw(&self, vector: &[u8]) -> f64 {
+        let vector = TurboPrimaryVector::<8>::new(vector).expect("valid primary vector");
+        self.distance_internal(&vector)
+    }
+
+    #[inline(always)]
+    fn distance_internal(&self, vector: &TurboPrimaryVector<8>) -> f64 {
+        // Each doc component decodes to lower + delta * q, so the float dot product is
+        // delta * dot(query, q) + lower * sum(query).
+        let qdot = scalar::query_f32_doc8_dot(&self.query, vector.rep.data);
+        let terms = &vector.rep.terms;
+        let dot = terms.delta.mul_add(qdot, terms.lower * self.query_sum)
+            * (1.0 + terms.parallel_error_term);
+        distance_from_dot_unnormalized(
+            self.similarity,
+            dot,
+            (self.l2_norm_sq, vector.l2_norm.powi(2)),
+        )
+        .into()
+    }
+}
+
+impl QueryVectorDistance for TurboPrimaryFloatQueryDistance8<'_> {
+    fn distance(&self, vector: &[u8]) -> f64 {
+        self.distance_internal_raw(vector)
+    }
+
+    fn bulk_distance(&self, vectors: &[&[u8]], out: &mut [f64]) {
+        for (vector, out) in vectors.iter().zip(out.iter_mut()) {
+            *out = self.distance_internal_raw(vector);
+        }
+    }
+
+    fn estimated_distance(&self, vector: &[u8]) -> EstimatedDistance {
+        let vector = TurboPrimaryVector::<8>::new(vector).expect("valid primary vector");
+        let distance = self.distance_internal(&vector);
+        let error = self.error_terms.error_bound(&vector).into();
+        EstimatedDistance { distance, error }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct VectorEncodeTerms {
     lower: f32,

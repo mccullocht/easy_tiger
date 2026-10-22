@@ -318,6 +318,32 @@ impl F32VectorCoding {
         }
     }
 
+    /// Return the unpacked quantized codes of `encoded` if this is an LVQ coding, otherwise `None`.
+    ///
+    /// This is intended for diagnostics. The output may contain trailing padding codes beyond the
+    /// dimensions of the original vector.
+    pub fn lvq_codes(&self, encoded: &[u8]) -> Option<Vec<u8>> {
+        match self {
+            Self::TLVQ1 => Some(lvq::primary_codes::<1>(encoded)),
+            Self::TLVQ2 => Some(lvq::primary_codes::<2>(encoded)),
+            Self::TLVQ4 => Some(lvq::primary_codes::<4>(encoded)),
+            Self::TLVQ8 => Some(lvq::primary_codes::<8>(encoded)),
+            _ => None,
+        }
+    }
+
+    /// Return the number of bits per dimension in the quantized codes of an LVQ coding, otherwise
+    /// `None`.
+    pub fn lvq_bits(&self) -> Option<usize> {
+        match self {
+            Self::TLVQ1 => Some(1),
+            Self::TLVQ2 => Some(2),
+            Self::TLVQ4 => Some(4),
+            Self::TLVQ8 => Some(8),
+            _ => None,
+        }
+    }
+
     /// Create a new [`QueryVectorDistance`] that computes distance between a fixed query encoded
     /// in this format and other vectors that are also in this format.
     ///

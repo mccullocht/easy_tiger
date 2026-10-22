@@ -439,6 +439,14 @@ impl<'a, const B: usize> TurboPrimaryVector<'a, B> {
     }
 }
 
+/// Return the unpacked primary codes of a vector encoded with [`TurboPrimaryCoder<B>`].
+///
+/// The output may contain trailing padding codes beyond the dimensions of the original vector.
+pub fn primary_codes<const B: usize>(encoded: &[u8]) -> Vec<u8> {
+    let vector = TurboPrimaryVector::<B>::new(encoded).expect("valid primary vector");
+    packing::TurboUnpacker::<B>::new(vector.rep.data).collect()
+}
+
 #[derive(Debug, Default)]
 pub struct TurboPrimaryCoder<const B: usize> {
     k: Kernel,

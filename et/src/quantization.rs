@@ -1,6 +1,7 @@
 mod distance_loss;
 mod loss;
 mod recall;
+mod reencode;
 mod rotate;
 
 use std::{io, path::PathBuf};
@@ -16,6 +17,7 @@ use vectors::f16;
 use distance_loss::{DistanceLossArgs, distance_loss};
 use loss::{LossArgs, loss};
 use recall::{QuantizationRecallArgs, recall};
+use reencode::{ReencodeArgs, reencode};
 use rotate::{RotateArgs, rotate};
 
 #[derive(Args)]
@@ -43,6 +45,8 @@ pub enum Command {
     Recall(QuantizationRecallArgs),
     /// Apply an orthogonal rotation to each vector and write to an output file.
     Rotate(RotateArgs),
+    /// Measure how often LVQ vectors survive an encode -> decode -> encode round trip.
+    Reencode(ReencodeArgs),
 }
 
 pub fn quantization(args: QuantizationArgs) -> io::Result<()> {
@@ -64,6 +68,7 @@ fn cmd(cmd: Command, vectors: &(impl VectorStore<Elem = f16> + Send + Sync)) -> 
         Command::DistanceLoss(args) => distance_loss(args, vectors),
         Command::Recall(args) => recall(args, vectors),
         Command::Rotate(args) => rotate(args, vectors),
+        Command::Reencode(args) => reencode(args, vectors),
     }
 }
 

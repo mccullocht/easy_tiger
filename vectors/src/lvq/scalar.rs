@@ -31,13 +31,22 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
 
 pub fn optimize_interval_scalar(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     let norm_sq = stats.l2_norm_sq;
-    let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq.into(), bits);
+    let minmax_loss = compute_loss(vector, (stats.min, stats.max), norm_sq.into(), bits);
 
     let scale = (1.0 - LAMBDA) / norm_sq;
     let mut lower =
         (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
     let mut upper =
         (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
+    // Descent may step through intervals worse than the grid starting point to reach a better one,
+    // so track the best interval seen and never return anything worse than [min, max].
+    let grid_loss = compute_loss(vector, (lower, upper), norm_sq.into(), bits);
+    let mut best = if grid_loss <= minmax_loss {
+        (lower, upper, grid_loss)
+    } else {
+        (stats.min, stats.max, minmax_loss)
+    };
+    let mut loss = minmax_loss;
 
     let points_incl = ((1 << bits) - 1) as f32;
     for _ in 0..5 {
@@ -83,8 +92,11 @@ pub fn optimize_interval_scalar(vector: &[f32], stats: &VectorStats, bits: usize
         lower = lower_candidate;
         upper = upper_candidate;
         loss = loss_candidate;
+        if loss < best.2 {
+            best = (lower, upper, loss);
+        }
     }
-    (lower, upper)
+    (best.0, best.1)
 }
 
 pub fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {

@@ -98,13 +98,22 @@ fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f32 {
 
 pub fn optimize_interval_neon(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     let norm_sq: f64 = stats.l2_norm_sq.into();
-    let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
+    let minmax_loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
 
     let scale = (1.0 - LAMBDA) / norm_sq as f32;
     let mut lower =
         (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
     let mut upper =
         (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
+    // Descent may step through intervals worse than the grid starting point to reach a better one,
+    // so track the best interval seen and never return anything worse than [min, max].
+    let grid_loss = compute_loss(vector, (lower, upper), norm_sq, bits);
+    let mut best = if grid_loss <= minmax_loss {
+        (lower, upper, grid_loss)
+    } else {
+        (stats.min, stats.max, minmax_loss)
+    };
+    let mut loss = minmax_loss;
 
     let points_incl = ((1 << bits) - 1) as f32;
     for _ in 0..5 {
@@ -179,8 +188,11 @@ pub fn optimize_interval_neon(vector: &[f32], stats: &VectorStats, bits: usize) 
         lower = lower_candidate;
         upper = upper_candidate;
         loss = loss_candidate;
+        if loss < best.2 {
+            best = (lower, upper, loss);
+        }
     }
-    (lower, upper)
+    (best.0, best.1)
 }
 
 fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {

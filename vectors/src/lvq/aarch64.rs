@@ -782,6 +782,33 @@ pub fn primary_query8_dot_unnormalized<const B: usize>(
     dot
 }
 
+#[inline]
+pub fn query_f32_doc8_dot(query: &[f32], doc: &[u8]) -> f32 {
+    let (qhead, qtail) = query.as_chunks::<16>();
+    let (dhead, dtail) = doc.split_at(qhead.len() * 16);
+    let dot = unsafe {
+        let mut dot = [vdupq_n_f32(0.0); 4];
+        let mut dit = TLVQExpander32::<8>::new(dhead.as_ptr());
+        for q in qhead {
+            let q = q.as_chunks::<4>().0;
+            let d = dit.next();
+            dot[0] = vfmaq_f32(dot[0], vld1q_f32(q[0].as_ptr()), d[0]);
+            dot[1] = vfmaq_f32(dot[1], vld1q_f32(q[1].as_ptr()), d[1]);
+            dot[2] = vfmaq_f32(dot[2], vld1q_f32(q[2].as_ptr()), d[2]);
+            dot[3] = vfmaq_f32(dot[3], vld1q_f32(q[3].as_ptr()), d[3]);
+        }
+        vaddvq_f32(vaddq_f32(
+            vaddq_f32(dot[0], dot[1]),
+            vaddq_f32(dot[2], dot[3]),
+        ))
+    };
+    dot + qtail
+        .iter()
+        .zip(dtail.iter())
+        .map(|(&q, &d)| q * d as f32)
+        .sum::<f32>()
+}
+
 /// Compute the unnormalized dot product of a bitplane-split 4-bit query with a 1-bit document.
 ///
 /// `query` must be the output of `packing::bitplane_split4()`; `doc` is the packed 1-bit document

@@ -731,6 +731,7 @@ impl QueryVectorDistance for TurboPrimaryQueryDistance1 {
 /// the cost of float arithmetic in the inner loop; it is intended for reranking.
 #[derive(Debug, Clone)]
 pub struct TurboPrimaryFloatQueryDistance8<'a> {
+    k: Kernel,
     similarity: VectorSimilarity,
 
     query: Cow<'a, [f32]>,
@@ -754,6 +755,7 @@ impl<'a> TurboPrimaryFloatQueryDistance8<'a> {
         };
         let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
         Self {
+            k: Kernel::default(),
             similarity,
             query,
             query_sum,
@@ -772,7 +774,11 @@ impl<'a> TurboPrimaryFloatQueryDistance8<'a> {
     fn distance_internal(&self, vector: &TurboPrimaryVector<8>) -> f64 {
         // Each doc component decodes to lower + delta * q, so the float dot product is
         // delta * dot(query, q) + lower * sum(query).
-        let qdot = scalar::query_f32_doc8_dot(&self.query, vector.rep.data);
+        let qdot = match self.k {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::query_f32_doc8_dot(&self.query, vector.rep.data),
+            _ => scalar::query_f32_doc8_dot(&self.query, vector.rep.data),
+        };
         let terms = &vector.rep.terms;
         let dot = terms.delta.mul_add(qdot, terms.lower * self.query_sum)
             * (1.0 + terms.parallel_error_term);

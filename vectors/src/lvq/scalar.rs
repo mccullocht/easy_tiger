@@ -194,6 +194,18 @@ pub fn query4_doc1_bitplane_dot(query: &[u8], doc: &[u8]) -> u32 {
     pdot[0] + pdot[1] * 2 + pdot[2] * 4 + pdot[3] * 8
 }
 
+#[inline]
+pub fn primary_query8_dot_unnormalized<const B: usize>(
+    query: &[u8],
+    doc: &TurboPrimaryVector<'_, B>,
+) -> u32 {
+    query
+        .iter()
+        .zip(TurboUnpacker::<B>::new(doc.rep.data))
+        .map(|(&q, d)| q as u32 * d as u32)
+        .sum::<u32>()
+}
+
 /// Compute the dot product of a float query with the raw quantized components of an 8-bit doc.
 ///
 /// The result must be corrected using the doc's decode terms to produce a float dot product.
@@ -205,16 +217,4 @@ pub fn query_f32_doc8_dot(query: &[f32], doc: &[u8]) -> f32 {
         .zip(doc.iter())
         .map(|(&q, &d)| q * d as f32)
         .sum::<f32>()
-}
-
-#[inline]
-pub fn primary_query8_dot_unnormalized<const B: usize>(
-    query: &[u8],
-    doc: &TurboPrimaryVector<'_, B>,
-) -> u32 {
-    query
-        .iter()
-        .zip(TurboUnpacker::<B>::new(doc.rep.data))
-        .map(|(&q, d)| q as u32 * d as u32)
-        .sum::<u32>()
 }

@@ -16,7 +16,7 @@ use std::arch::aarch64::{
 use crate::lvq::{TurboPrimaryVector, VectorEncodeTerms, scalar};
 use crate::packing::{self, TURBO_BLOCK_SIZE};
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats};
+use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats, round_f16};
 
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let tail_split = vector.len() & !3;
@@ -98,25 +98,40 @@ fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f32 {
 
 pub fn optimize_interval_neon(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     let norm_sq: f64 = stats.l2_norm_sq.into();
-    let minmax_loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
+    // Bounds are stored as f16 so loss is evaluated on f16-rounded bounds. Rounding may collapse a
+    // narrow interval to a single point, which cannot be used for quantization.
+    let interval_loss = |lower: f32, upper: f32| {
+        if upper > lower {
+            compute_loss(vector, (lower, upper), norm_sq, bits)
+        } else {
+            f64::INFINITY
+        }
+    };
+    let (min, max) = (round_f16(stats.min), round_f16(stats.max));
+    let minmax_loss = interval_loss(min, max);
 
     let scale = (1.0 - LAMBDA) / norm_sq as f32;
-    let mut lower =
-        (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
-    let mut upper =
-        (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
+    let mut lower = round_f16(
+        (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max),
+    );
+    let mut upper = round_f16(
+        (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max),
+    );
     // Descent may step through intervals worse than the grid starting point to reach a better one,
     // so track the best interval seen and never return anything worse than [min, max].
-    let grid_loss = compute_loss(vector, (lower, upper), norm_sq, bits);
+    let grid_loss = interval_loss(lower, upper);
     let mut best = if grid_loss <= minmax_loss {
         (lower, upper, grid_loss)
     } else {
-        (stats.min, stats.max, minmax_loss)
+        (min, max, minmax_loss)
     };
     let mut loss = minmax_loss;
 
     let points_incl = ((1 << bits) - 1) as f32;
     for _ in 0..5 {
+        if upper <= lower {
+            break;
+        }
         let step_inv = points_incl / (upper - lower);
         // calculate the grid points for coordinate descent.
         let tail_split = vector.len() & !3;
@@ -175,9 +190,12 @@ pub fn optimize_interval_neon(vector: &[f32], stats: &VectorStats, bits: usize) 
             break;
         }
 
-        let lower_candidate = (m2 * dax - m1 * dbx) / det;
-        let upper_candidate = (m0 * dbx - m1 * dax) / det;
+        let lower_candidate = round_f16((m2 * dax - m1 * dbx) / det);
+        let upper_candidate = round_f16((m0 * dbx - m1 * dax) / det);
         if (lower - lower_candidate).abs() < 1e-8 && (upper - upper_candidate).abs() < 1e-8 {
+            break;
+        }
+        if upper_candidate <= lower_candidate {
             break;
         }
         let loss_candidate =

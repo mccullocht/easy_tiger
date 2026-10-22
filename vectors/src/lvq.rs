@@ -127,23 +127,33 @@ impl VectorStats {
     }
 }
 
+/// Round `x` to the nearest f16 value.
+#[inline]
+fn round_f16(x: f32) -> f32 {
+    f16::from_f32(x).to_f32()
+}
+
+/// Select the quantization interval for `vector`.
+///
+/// The interval bounds are stored as f16, so the returned bounds are always f16 values. This keeps
+/// the values used to quantize the vector consistent with the values a caller sees when decoding
+/// it, and kernels evaluate loss on the rounded bounds during optimization.
 fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     // There are several spots in the optimization routine where we may divide by the input range
     // and if that range is zero then it produces NaNs.
-    let (lower, upper) = if stats.min == stats.max {
-        (stats.min, stats.min + f32::MIN_POSITIVE)
-    } else {
-        match k {
-            Kernel::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe { x86_64::optimize_interval_avx512(vector, stats, bits) },
-        }
-    };
-    // The interval bounds are stored as f16, so round them here to keep the values used to
-    // quantize the vector consistent with the values a caller sees when decoding it.
-    (f16::from_f32(lower).to_f32(), f16::from_f32(upper).to_f32())
+    if stats.min == stats.max {
+        return (
+            round_f16(stats.min),
+            round_f16(stats.min + f32::MIN_POSITIVE),
+        );
+    }
+    match k {
+        Kernel::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
+        #[cfg(target_arch = "aarch64")]
+        Kernel::Neon => aarch64::optimize_interval_neon(vector, stats, bits),
+        #[cfg(target_arch = "x86_64")]
+        Kernel::Avx512 => unsafe { x86_64::optimize_interval_avx512(vector, stats, bits) },
+    }
 }
 
 /// Transform the unnormalized dot product of two vectors into an appropriate distance for the

@@ -211,7 +211,6 @@ pub fn recall(
         .map(|(i, r)| {
             let mut results = r.into_neighbors();
             depth.push(results.len() as f64);
-            results.truncate(k);
             recall_computer.compute_recall(i, &results)
         })
         .collect::<Vec<_>>();

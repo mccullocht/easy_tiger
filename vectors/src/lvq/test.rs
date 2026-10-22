@@ -185,32 +185,32 @@ tlvq_coder_test!(
     TurboPrimaryCoder::<8>,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        perpendicular_error_term: 0.0075108674,
-        parallel_error_term: -0.00057935715,
-        lower: -0.9199219,
-        upper: 0.9116211,
+        perpendicular_error_term: 0.0073568975,
+        parallel_error_term: 0.00010049343,
+        lower: -0.9189453,
+        upper: 0.9111328,
         component_sum: 2875,
     },
     [
-        -0.9199219,
-        -0.05801932,
-        0.6602328,
-        0.6674153,
-        0.57404256,
-        0.43039212,
-        0.64586776,
-        -0.0005591512,
-        -0.20166975,
-        -0.43151042,
-        0.73205805,
-        -0.70444626,
-        -0.27349496,
-        0.5381299,
-        -0.73317635,
-        0.43757465,
-        0.91162103,
-        0.6961454,
-        0.20055145
+        -0.9189453,
+        -0.057732087,
+        0.6599456,
+        0.66712236,
+        0.5738243,
+        0.43028873,
+        0.64559203,
+        -0.00031787157,
+        -0.20126763,
+        -0.43092448,
+        0.73171335,
+        -0.703642,
+        -0.2730354,
+        0.5379404,
+        -0.7323491,
+        0.43746552,
+        0.9111328,
+        0.6958295,
+        0.20063189,
     ]
 );
 
@@ -406,6 +406,76 @@ lvq_coding_simd_test!(tlvq1_coding_simd, TurboPrimaryCoder::<1>);
 lvq_coding_simd_test!(tlvq2_coding_simd, TurboPrimaryCoder::<2>);
 lvq_coding_simd_test!(tlvq4_coding_simd, TurboPrimaryCoder::<4>);
 lvq_coding_simd_test!(tlvq8_coding_simd, TurboPrimaryCoder::<8>);
+
+// Re-encoding a decoded vector must reproduce the original codes and interval exactly: every
+// decoded component lies on the original quantization grid, so [min, max] of the decoded vector
+// has zero loss and interval optimization must select it.
+//
+// Inputs are gaussian, optionally with a few large outlier dimensions; without a fallback to
+// [min, max] the optimizer may clip outliers and re-encoding would produce different codes.
+macro_rules! lvq_reencode_test {
+    ($name:ident, $bits:literal) => {
+        #[test]
+        fn $name() {
+            let seed = SysRng::default().try_next_u64().unwrap();
+            println!("SEED {seed:#016x}");
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+            let mut gauss = || {
+                // Box-Muller transform.
+                let u1: f32 = rng.random_range(f32::EPSILON..1.0);
+                let u2: f32 = rng.random_range(0.0..1.0);
+                (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+            };
+            let kernels = Kernel::CANDIDATES
+                .iter()
+                .copied()
+                .filter(Kernel::is_available)
+                .collect::<Vec<_>>();
+            for i in 0..256 {
+                let dim = 100 + (i * 37) % 1000;
+                let outliers = i % 2 == 1;
+                let vec = (0..dim)
+                    .map(|d| gauss() * if outliers && d % 97 == 0 { 10.0 } else { 1.0 })
+                    .collect::<Vec<_>>();
+                let vec = l2_normalize(&vec).0.into_owned();
+                for &k in &kernels {
+                    let coder = TurboPrimaryCoder::<$bits>::with_kernel(k);
+                    let encoded = coder.encode(&vec);
+                    let (header, codes) = PrimaryVectorHeader::deserialize(&encoded).unwrap();
+                    let decoded = coder.decode(&encoded);
+                    // Angular callers will typically re-normalize the decoded vector. Scaling
+                    // the vector scales the grid, so codes should be unaffected.
+                    for renormalize in [false, true] {
+                        let decoded = if renormalize {
+                            l2_normalize(&decoded).0.into_owned()
+                        } else {
+                            decoded.clone()
+                        };
+                        let reencoded = coder.encode(&decoded);
+                        let (reheader, recodes) =
+                            PrimaryVectorHeader::deserialize(&reencoded).unwrap();
+                        assert_eq!(
+                            codes, recodes,
+                            "index {i} dim {dim} outliers {outliers} kernel {k:?} renormalize {renormalize}"
+                        );
+                        if !renormalize {
+                            assert_eq!(
+                                (header.lower, header.upper),
+                                (reheader.lower, reheader.upper),
+                                "index {i} dim {dim} outliers {outliers} kernel {k:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    };
+}
+
+lvq_reencode_test!(tlvq1_reencode, 1);
+lvq_reencode_test!(tlvq2_reencode, 2);
+lvq_reencode_test!(tlvq4_reencode, 4);
+lvq_reencode_test!(tlvq8_reencode, 8);
 
 /// Reconstruct the 4 bit dimension values from the output of `bitplane_split4`.
 ///

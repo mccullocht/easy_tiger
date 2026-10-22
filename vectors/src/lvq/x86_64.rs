@@ -22,7 +22,7 @@ use std::arch::x86_64::{
 use crate::lvq::{TurboPrimaryVector, VectorEncodeTerms};
 use crate::packing::{self, TURBO_BLOCK_SIZE};
 
-use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats};
+use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats, round_f16};
 
 /// For an input vector `v` where all values are non-negative, round each value with ties (e.g. 0.5)
 /// rounding away from zero.
@@ -156,25 +156,40 @@ pub unsafe fn optimize_interval_avx512(
     bits: usize,
 ) -> (f32, f32) {
     let norm_sq = stats.l2_norm_sq;
-    let minmax_loss = unsafe { compute_loss(vector, (stats.min, stats.max), norm_sq.into(), bits) };
+    // Bounds are stored as f16 so loss is evaluated on f16-rounded bounds. Rounding may collapse a
+    // narrow interval to a single point, which cannot be used for quantization.
+    let interval_loss = |lower: f32, upper: f32| {
+        if upper > lower {
+            unsafe { compute_loss(vector, (lower, upper), norm_sq.into(), bits) }
+        } else {
+            f64::INFINITY
+        }
+    };
+    let (min, max) = (round_f16(stats.min), round_f16(stats.max));
+    let minmax_loss = interval_loss(min, max);
 
     let scale = (1.0 - LAMBDA) / norm_sq;
-    let mut lower =
-        (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
-    let mut upper =
-        (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
+    let mut lower = round_f16(
+        (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max),
+    );
+    let mut upper = round_f16(
+        (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max),
+    );
     // Descent may step through intervals worse than the grid starting point to reach a better one,
     // so track the best interval seen and never return anything worse than [min, max].
-    let grid_loss = unsafe { compute_loss(vector, (lower, upper), norm_sq.into(), bits) };
+    let grid_loss = interval_loss(lower, upper);
     let mut best = if grid_loss <= minmax_loss {
         (lower, upper, grid_loss)
     } else {
-        (stats.min, stats.max, minmax_loss)
+        (min, max, minmax_loss)
     };
     let mut loss = minmax_loss;
 
     let points_incl = ((1 << bits) - 1) as f32;
     for _ in 0..5 {
+        if upper <= lower {
+            break;
+        }
         let lowerv = _mm512_set1_ps(lower);
         let upperv = _mm512_set1_ps(upper);
         let step_inv = _mm512_set1_ps(points_incl / (upper - lower));
@@ -217,9 +232,12 @@ pub unsafe fn optimize_interval_avx512(
             break;
         }
 
-        let lower_candidate = (m2 * dax - m1 * dbx) / det;
-        let upper_candidate = (m0 * dbx - m1 * dax) / det;
+        let lower_candidate = round_f16((m2 * dax - m1 * dbx) / det);
+        let upper_candidate = round_f16((m0 * dbx - m1 * dax) / det);
         if (lower - lower_candidate).abs() < 1e-8 && (upper - upper_candidate).abs() < 1e-8 {
+            break;
+        }
+        if upper_candidate <= lower_candidate {
             break;
         }
         let loss_candidate = unsafe {

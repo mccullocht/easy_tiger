@@ -167,6 +167,15 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| std::hint::black_box(query_dist.distance(&y)))
         });
+
+        // Rerank distance only differs from query distance for TLVQ8.
+        let rerank_dist = (encoding == F32VectorCoding::TLVQ8)
+            .then(|| encoding.query_distance_asymmetric_for_rerank(sim, &a));
+        if let Some(rerank_dist) = rerank_dist.as_ref() {
+            group.bench_function(&format!("rerank/{sim}"), |b| {
+                b.iter(|| std::hint::black_box(rerank_dist.distance(&y)))
+            });
+        }
         drop(group);
 
         let mut group = c.benchmark_group(format!("{encoding}/bulk_distance"));
@@ -197,6 +206,16 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
                 })
             })
         });
+        if let Some(rerank_dist) = rerank_dist.as_ref() {
+            group.bench_function(&format!("rerank/{sim}"), |b| {
+                b.iter(|| {
+                    std::hint::black_box({
+                        rerank_dist.bulk_distance(&bulk_docs, &mut bulk_out);
+                        bulk_out[0]
+                    })
+                })
+            });
+        }
     }
 }
 

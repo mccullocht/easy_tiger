@@ -132,6 +132,8 @@ fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize
     // and if that range is zero then it produces NaNs.
     let (lower, upper) = if stats.min == stats.max {
         (stats.min, stats.min + f32::MIN_POSITIVE)
+    } else if bits == 8 {
+        (stats.min, stats.max)
     } else {
         match k {
             Kernel::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),

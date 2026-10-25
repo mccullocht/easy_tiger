@@ -96,14 +96,16 @@ fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f32 {
     }
 }
 
+use super::round_to_f16;
+
 pub fn optimize_interval_neon(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     let norm_sq: f64 = stats.l2_norm_sq.into();
 
     let scale = (1.0 - LAMBDA) / norm_sq as f32;
-    let mut lower =
-        (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
-    let mut upper =
-        (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
+    let mut lower = round_to_f16(MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean)
+        .clamp(stats.min, stats.max);
+    let mut upper = round_to_f16(MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean)
+        .clamp(stats.min, stats.max);
     let mut loss = compute_loss(vector, (lower, upper), norm_sq, bits);
 
     let points_incl = ((1 << bits) - 1) as f32;
@@ -166,8 +168,8 @@ pub fn optimize_interval_neon(vector: &[f32], stats: &VectorStats, bits: usize) 
             break;
         }
 
-        let lower_candidate = (m2 * dax - m1 * dbx) / det;
-        let upper_candidate = (m0 * dbx - m1 * dax) / det;
+        let lower_candidate = round_to_f16((m2 * dax - m1 * dbx) / det);
+        let upper_candidate = round_to_f16((m0 * dbx - m1 * dax) / det);
         if (lower - lower_candidate).abs() < 1e-8 && (upper - upper_candidate).abs() < 1e-8 {
             break;
         }

@@ -127,11 +127,15 @@ impl VectorStats {
     }
 }
 
+fn round_to_f16(v: f32) -> f32 {
+    f16::from_f32(v).to_f32()
+}
+
 fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     // There are several spots in the optimization routine where we may divide by the input range
     // and if that range is zero then it produces NaNs.
     let (lower, upper) = if stats.min == stats.max {
-        (stats.min, stats.min + f32::MIN_POSITIVE)
+        (stats.min, stats.min + f16::MIN_POSITIVE.to_f32())
     } else if bits == 8 {
         (stats.min, stats.max)
     } else {
@@ -145,7 +149,7 @@ fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize
     };
     // The interval bounds are stored as f16, so round them here to keep the values used to
     // quantize the vector consistent with the values a caller sees when decoding it.
-    (f16::from_f32(lower).to_f32(), f16::from_f32(upper).to_f32())
+    (round_to_f16(lower), round_to_f16(upper))
 }
 
 /// Transform the unnormalized dot product of two vectors into an appropriate distance for the

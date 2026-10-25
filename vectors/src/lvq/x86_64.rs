@@ -149,6 +149,8 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
     }
 }
 
+use super::round_to_f16;
+
 #[target_feature(enable = "avx512f")]
 pub unsafe fn optimize_interval_avx512(
     vector: &[f32],
@@ -158,10 +160,10 @@ pub unsafe fn optimize_interval_avx512(
     let norm_sq = stats.l2_norm_sq;
 
     let scale = (1.0 - LAMBDA) / norm_sq;
-    let mut lower =
-        (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
-    let mut upper =
-        (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
+    let mut lower = round_to_f16(MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean)
+        .clamp(stats.min, stats.max);
+    let mut upper = round_to_f16(MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean)
+        .clamp(stats.min, stats.max);
     let mut loss = unsafe { compute_loss(vector, (lower, upper), norm_sq.into(), bits) };
 
     let points_incl = ((1 << bits) - 1) as f32;
@@ -208,8 +210,8 @@ pub unsafe fn optimize_interval_avx512(
             break;
         }
 
-        let lower_candidate = (m2 * dax - m1 * dbx) / det;
-        let upper_candidate = (m0 * dbx - m1 * dax) / det;
+        let lower_candidate = round_to_f16((m2 * dax - m1 * dbx) / det);
+        let upper_candidate = round_to_f16((m0 * dbx - m1 * dax) / det);
         if (lower - lower_candidate).abs() < 1e-8 && (upper - upper_candidate).abs() < 1e-8 {
             break;
         }

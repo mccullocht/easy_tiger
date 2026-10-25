@@ -156,13 +156,13 @@ pub unsafe fn optimize_interval_avx512(
     bits: usize,
 ) -> (f32, f32) {
     let norm_sq = stats.l2_norm_sq;
-    let mut loss = unsafe { compute_loss(vector, (stats.min, stats.max), norm_sq.into(), bits) };
 
     let scale = (1.0 - LAMBDA) / norm_sq;
     let mut lower =
         (MINIMUM_MSE_GRID[bits - 1].0 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
     let mut upper =
         (MINIMUM_MSE_GRID[bits - 1].1 * stats.std_dev + stats.mean).clamp(stats.min, stats.max);
+    let mut loss = unsafe { compute_loss(vector, (lower, upper), norm_sq.into(), bits) };
 
     let points_incl = ((1 << bits) - 1) as f32;
     for _ in 0..5 {

@@ -4,7 +4,6 @@ use std::{borrow::Cow, collections::BTreeMap};
 
 use wt_mdb::{IndexCursorGuard, Transaction};
 
-// XXX impl Error
 #[derive(Debug, Clone)]
 pub enum Error {
     UnknownDocFormat(u8),
@@ -18,6 +17,19 @@ impl From<wt_mdb::Error> for Error {
         Self::WiredTiger(value)
     }
 }
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownDocFormat(t) => write!(f, "UnknownDocFormat({t})"),
+            Self::UnknownPayloadFormat(t) => write!(f, "UnknownPayloadFormat({t})"),
+            Self::Coding(s) => write!(f, "Coding({s})"),
+            Self::WiredTiger(e) => write!(f, "WiredTiger({e})"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 type DocId = u64;
 type Payload = u64;

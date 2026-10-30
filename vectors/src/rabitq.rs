@@ -360,7 +360,11 @@ impl QueryVectorDistance for QueryDistance {
         debug_assert!(error.is_finite() && error >= 0.0);
         EstimatedDistance {
             distance: self.distance_internal(header, vector),
-            error: if error.is_finite() { error.max(0.0) } else { 0.0 },
+            error: if error.is_finite() {
+                error.max(0.0)
+            } else {
+                0.0
+            },
         }
     }
 }

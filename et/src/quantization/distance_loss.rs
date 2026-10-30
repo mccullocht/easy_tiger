@@ -116,13 +116,8 @@ pub fn distance_loss(
             let doc_f32 = vectors[d].to_f32_vec();
             let doc_q = coder
                 .encode(
-                    &vectors::prepare_vector(
-                        &doc_f32,
-                        rotator.as_ref(),
-                        false,
-                        center.as_deref(),
-                    )
-                    .expect("doc vector must be finite"),
+                    &vectors::prepare_vector(&doc_f32, rotator.as_ref(), false, center.as_deref())
+                        .expect("doc vector must be finite"),
                 )
                 .expect("doc vector must be finite");
             let mut stats = DistanceLossStats::default();

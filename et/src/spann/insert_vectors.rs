@@ -195,7 +195,7 @@ pub fn insert_vectors(
     phase("Insert:", pd.insert_split_centroids);
     phase("Reassign:", pd.posting_reassignments);
     phase("Apply Reassign:", pd.apply_posting_reassignments);
-    phase("Remove:", pd.remove_source_centroids);
+    phase("Remove:", pd.remove_merge_sources);
     phase("Nearby Find:", pd.select_nearby_centroids);
     phase("Nearby Select:", pd.compute_nearby_reassignments);
     phase("Nearby Apply:", pd.apply_nearby_reassignments);
@@ -406,7 +406,7 @@ fn insert_batch(
                 let vector: &[f32] = &vector;
 
                 // Search for centroid
-                let mut candidates = searcher.search_with_options(
+                let (mut candidates, _) = searcher.search_with_options(
                     vector,
                     GraphSearchOptions::default()
                         .with_result_scratch(std::mem::take(result_scratch)),

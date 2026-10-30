@@ -351,7 +351,10 @@ fn degenerate_inputs_are_finite() {
 
         let sd = new_symmetric_distance().distance(&encoded, &en);
         assert!(sd.is_finite(), "{name}: symmetric distance {sd}");
-        assert!((-1e-6..=1.0 + 1e-6).contains(&sd), "{name}: symmetric distance out of range {sd}");
+        assert!(
+            (-1e-6..=1.0 + 1e-6).contains(&sd),
+            "{name}: symmetric distance out of range {sd}"
+        );
 
         // degenerate as the asymmetric query, and as the doc
         let ad = new_asymmetric_distance(v).unwrap().distance(&en);

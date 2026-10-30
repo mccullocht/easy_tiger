@@ -83,7 +83,10 @@ impl I1DotProductQueryDistance {
         // query and ranked a stray NaN as the maximum. A zero query gives a zero scale.
         let max_abs = query.iter().copied().map(f32::abs).fold(0.0f32, f32::max) as f64;
         let (scale, inv_scale) = if max_abs > 0.0 {
-            ((f64::from(i8::MAX) / max_abs) as f32, max_abs / f64::from(i8::MAX))
+            (
+                (f64::from(i8::MAX) / max_abs) as f32,
+                max_abs / f64::from(i8::MAX),
+            )
         } else {
             (0.0, 0.0)
         };

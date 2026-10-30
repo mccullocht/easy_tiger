@@ -27,7 +27,10 @@ impl fmt::Display for Error {
                 write!(f, "non-finite vector component at index {index}")
             }
             Self::NonFiniteMagnitude => {
-                write!(f, "vector magnitude is not finite (component values overflow)")
+                write!(
+                    f,
+                    "vector magnitude is not finite (component values overflow)"
+                )
             }
             Self::EmptyVector => write!(f, "vector is empty"),
         }

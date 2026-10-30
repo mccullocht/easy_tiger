@@ -354,12 +354,18 @@ fn fill_vector_decode() {
         // Distances between degenerate vectors must stay finite, not just decode.
         for sim in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
             let sd = coding.distance_symmetric(sim).distance(&encoded, &encoded);
-            assert!(sd.is_finite(), "{coding} {sim} self-distance not finite: {sd}");
+            assert!(
+                sd.is_finite(),
+                "{coding} {sim} self-distance not finite: {sd}"
+            );
             let qd = coding
                 .query_distance_asymmetric(sim, vector.clone())
                 .unwrap()
                 .distance(&encoded);
-            assert!(qd.is_finite(), "{coding} {sim} query distance not finite: {qd}");
+            assert!(
+                qd.is_finite(),
+                "{coding} {sim} query distance not finite: {qd}"
+            );
         }
     }
 }

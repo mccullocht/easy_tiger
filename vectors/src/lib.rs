@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 pub use half::f16;
 
-pub use crate::error::{Error, Result};
 pub(crate) use crate::error::check_finite_vector;
+pub use crate::error::{Error, Result};
 use crate::{float32::l2_norm, rotate::Rotator};
 
 /// Coerce a non-finite distance to a finite fallback.
@@ -738,7 +738,10 @@ mod degenerate_test {
     }
 
     fn check_finite(label: &str, distance: f64, angular: bool) {
-        assert!(distance.is_finite(), "{label}: distance is not finite ({distance})");
+        assert!(
+            distance.is_finite(),
+            "{label}: distance is not finite ({distance})"
+        );
         if angular {
             assert!(
                 (-1e-6..=1.0 + 1e-6).contains(&distance),
@@ -764,8 +767,16 @@ mod degenerate_test {
         let eb = coder.encode(b).unwrap();
 
         let sym = coding.distance_symmetric(sim);
-        check_finite(&format!("{label} sym(a,b)"), sym.distance(&ea, &eb), angular);
-        check_finite(&format!("{label} sym(b,a)"), sym.distance(&eb, &ea), angular);
+        check_finite(
+            &format!("{label} sym(a,b)"),
+            sym.distance(&ea, &eb),
+            angular,
+        );
+        check_finite(
+            &format!("{label} sym(b,a)"),
+            sym.distance(&eb, &ea),
+            angular,
+        );
 
         let asym = coding.query_distance_asymmetric(sim, a.to_vec()).unwrap();
         check_finite(&format!("{label} asym(a->b)"), asym.distance(&eb), angular);
@@ -834,7 +845,9 @@ mod degenerate_test {
 /// [`Error`] from its preparation/encode boundary rather than persisting silently corrupt codes.
 #[cfg(test)]
 mod nonfinite_input_test {
-    use crate::{Error, F32VectorCoding, VectorSimilarity, f16, prepare_vector, prepare_vector_from_f16};
+    use crate::{
+        Error, F32VectorCoding, VectorSimilarity, f16, prepare_vector, prepare_vector_from_f16,
+    };
 
     #[test]
     fn prepare_vector_rejects_nan() {
@@ -968,8 +981,7 @@ mod prepare_test {
                     assert_eq!(in_place, got);
 
                     let f16_in: Vec<f16> = v.iter().map(|d| f16::from_f32(*d)).collect();
-                    let from_f16 =
-                        prepare_vector_from_f16(&f16_in, rotator, norm, center).unwrap();
+                    let from_f16 = prepare_vector_from_f16(&f16_in, rotator, norm, center).unwrap();
                     let want_f16 = manual(
                         &f16_in.iter().map(|d| d.to_f32()).collect::<Vec<_>>(),
                         rotator,

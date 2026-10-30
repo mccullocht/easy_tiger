@@ -157,9 +157,8 @@ fn distance_from_dot_unnormalized(
 ) -> f32 {
     let l2_dist = l2_norms_sq.0 + l2_norms_sq.1 - (2.0 * dot_unnormalized);
     let d = match similarity {
-        VectorSimilarity::Euclidean => l2_dist,
-        // Normalize angular distance into a value in [0,1] where lower is closer. `clamp` does not
-        // remove NaN, so `sanitize_distance` below is the real guard.
+        VectorSimilarity::Euclidean => l2_dist.max(0.0),
+        // Normalize angular distance into a value in [0,1] where lower is closer.
         VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
     };
     debug_assert!(d.is_finite());
@@ -191,7 +190,11 @@ impl ErrorBoundTerms {
         let doc_error = vector.perpendicular_error_term * self.l2_norm;
         let bound = (query_error.powi(2) + doc_error.powi(2)).sqrt() * self.mult;
         debug_assert!(bound.is_finite() && bound >= 0.0);
-        if bound.is_finite() { bound.max(0.0) } else { 0.0 }
+        if bound.is_finite() {
+            bound.max(0.0)
+        } else {
+            0.0
+        }
     }
 }
 
@@ -521,8 +524,9 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         } else {
             0.0
         };
-        let perp_error_sq =
-            (quant_stats.residual_error_sq - quant_stats.residual_ip.powi(2) * inv_norm_sq).max(0.0);
+        let perp_error_sq = (quant_stats.residual_error_sq
+            - quant_stats.residual_ip.powi(2) * inv_norm_sq)
+            .max(0.0);
         header.perpendicular_error_term = perp_error_sq.sqrt();
         header.parallel_error_term = quant_stats.residual_ip * inv_norm_sq;
 

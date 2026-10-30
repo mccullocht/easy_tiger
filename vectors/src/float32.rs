@@ -90,7 +90,7 @@ pub fn l2_norm(vector: impl AsRef<[f32]>) -> f32 {
 pub fn l2_normalize<'a>(vector: impl Into<Cow<'a, [f32]>>) -> (Cow<'a, [f32]>, f32) {
     let mut vector: Cow<'a, [f32]> = vector.into();
     let norm = l2_norm(&vector);
-    if norm != 1.0 {
+    if norm.is_finite() && norm != 0.0 && norm != 1.0 {
         let norm_inv = norm.recip();
         for d in vector.to_mut().iter_mut() {
             *d *= norm_inv;
@@ -119,9 +119,11 @@ impl F32VectorCoder for VectorCoder {
         dimensions * std::mem::size_of::<f32>()
     }
 
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) -> crate::Result<()> {
+        crate::check_finite_vector(vector)?;
         assert!(out.len() >= std::mem::size_of_val(vector));
         Self::encode_it(vector.iter().copied(), out);
+        Ok(())
     }
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
@@ -150,17 +152,21 @@ impl EuclideanDistance {
 
 impl VectorDistance for EuclideanDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
-        l2sq(query, doc, Some(self.0))
+        let d = l2sq(query, doc, Some(self.0));
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, false)
     }
 }
 
 impl F32VectorDistance for EuclideanDistance {
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
-        l2sq(
+        let d = l2sq(
             bytemuck::cast_slice(a),
             bytemuck::cast_slice(b),
             Some(self.0),
-        )
+        );
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, false)
     }
 }
 
@@ -180,19 +186,23 @@ impl DotProductDistance {
 impl VectorDistance for DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // Assuming values are normalized, this will produce a distance in [0,1]
-        (-dot(query, doc, Some(self.0)) + 1.0) / 2.0
+        let d = (-dot(query, doc, Some(self.0)) + 1.0) / 2.0;
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, true)
     }
 }
 
 impl F32VectorDistance for DotProductDistance {
     fn distance_f32(&self, a: &[f32], b: &[f32]) -> f64 {
         // Assuming values are normalized, this will produce a distance in [0,1]
-        (-dot(
+        let d = (-dot(
             bytemuck::cast_slice(a),
             bytemuck::cast_slice(b),
             Some(self.0),
         ) + 1.0)
-            / 2.0
+            / 2.0;
+        debug_assert!(d.is_finite());
+        crate::sanitize_distance(d, true)
     }
 }
 

@@ -349,6 +349,7 @@ mod parallel {
         } else {
             posting_format
                 .query_distance_asymmetric(similarity, head_format.coder().decode(centroid))
+                .expect("centroid vector is finite")
         }
     }
 
@@ -468,9 +469,15 @@ mod parallel {
                         .to_vec();
                     let source_distfn = encoded_centroid_distance(txn_idx, &old_source_vector);
                     let coder = index.new_posting_coder();
-                    if source_distfn.distance(&coder.encode(&centroids[1]))
-                        < source_distfn.distance(&coder.encode(&centroids[0]))
-                    {
+                    if source_distfn.distance(
+                        &coder
+                            .encode(&centroids[1])
+                            .expect("split centroid is finite"),
+                    ) < source_distfn.distance(
+                        &coder
+                            .encode(&centroids[0])
+                            .expect("split centroid is finite"),
+                    ) {
                         let c0 = centroids[0].to_vec();
                         centroids.swap_remove(0);
                         centroids.push(&c0);
@@ -593,7 +600,8 @@ mod parallel {
         // space the head index navigates when similarity is angular.
         if txn_idx.index().head_config().config().similarity.angular() {
             for centroid in centroids.iter_mut() {
-                vectors::prepare_vector_in_place(centroid, None, true, None);
+                vectors::prepare_vector_in_place(centroid, None, true, None)
+                    .expect("split centroid is finite");
             }
         }
         centroids
@@ -1176,9 +1184,15 @@ mod tests {
                         .insert(*id, CentroidAssignment::new(centroid))
                         .unwrap();
                     postings
-                        .insert(centroid, *id, &posting_coder.encode(v))
+                        .insert(
+                            centroid,
+                            *id,
+                            &posting_coder.encode(v).expect("finite vector"),
+                        )
                         .unwrap();
-                    raw_cursor.set(*id, &raw_coder.encode(v)).unwrap();
+                    raw_cursor
+                        .set(*id, &raw_coder.encode(v).expect("finite vector"))
+                        .unwrap();
                 }
                 postings.flush().unwrap();
                 assignments.flush().unwrap();
@@ -1289,7 +1303,10 @@ mod tests {
                     );
                     assert_eq!(
                         v,
-                        posting_coder.encode(&self.vectors[&id]).as_slice(),
+                        posting_coder
+                            .encode(&self.vectors[&id])
+                            .expect("finite vector")
+                            .as_slice(),
                         "record {id} posting vector"
                     );
                 }

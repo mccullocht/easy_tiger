@@ -167,17 +167,22 @@ pub fn recall(
         .into_par_iter()
         .map(|i| {
             let query =
-                vectors::prepare_vector_from_f16(&query_vectors[i], rotator.as_ref(), false, None);
+                vectors::prepare_vector_from_f16(&query_vectors[i], rotator.as_ref(), false, None)
+                    .expect("query vector must be finite");
             (0..num_centers)
                 .map(|ci| {
                     let center = centers.as_ref().map(|cs| cs[ci].as_ref());
-                    let query = vectors::prepare_vector(&query, None, false, center);
+                    let query = vectors::prepare_vector(&query, None, false, center)
+                        .expect("query vector must be finite");
                     if args.quantize_query {
-                        args.format
-                            .query_distance_symmetric(args.similarity, coder.encode(&query))
+                        args.format.query_distance_symmetric(
+                            args.similarity,
+                            coder.encode(&query).expect("query vector must be finite"),
+                        )
                     } else {
                         args.format
                             .query_distance_asymmetric(args.similarity, query)
+                            .expect("query vector must be finite")
                     }
                 })
                 .collect::<Vec<_>>()
@@ -193,10 +198,16 @@ pub fn recall(
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
         .for_each(|d| {
             let doc_f32 =
-                vectors::prepare_vector_from_f16(&doc_vectors[d], rotator.as_ref(), false, None);
+                vectors::prepare_vector_from_f16(&doc_vectors[d], rotator.as_ref(), false, None)
+                    .expect("doc vector must be finite");
             let center_idx = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
             let center = centers.as_ref().map(|cs| cs[center_idx].as_ref());
-            let doc = coder.encode(&vectors::prepare_vector(&doc_f32, None, false, center));
+            let doc = coder
+                .encode(
+                    &vectors::prepare_vector(&doc_f32, None, false, center)
+                        .expect("doc vector must be finite"),
+                )
+                .expect("doc vector must be finite");
             for (q, s) in query_scorers.iter().enumerate() {
                 let mut estimate = s[center_idx].estimated_distance(&doc);
                 estimate.error *= args.z_score;

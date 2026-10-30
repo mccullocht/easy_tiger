@@ -401,7 +401,8 @@ fn insert_batch(
                     index.rotator(),
                     index.head_config().config().similarity.angular(),
                     None,
-                );
+                )
+                .expect("input vector must be finite");
                 let vector: &[f32] = &vector;
 
                 // Search for centroid
@@ -418,8 +419,12 @@ fn insert_batch(
                 Ok::<_, Error>(InsertRecord {
                     record_id: i as i64,
                     assignment: CentroidAssignment::new(centroid_id),
-                    posting_vector: posting_coder.encode(vector),
-                    rerank_vector: rerank_coder.encode(vector),
+                    posting_vector: posting_coder
+                        .encode(vector)
+                        .expect("input vector must be finite"),
+                    rerank_vector: rerank_coder
+                        .encode(vector)
+                        .expect("input vector must be finite"),
                     stats: searcher.stats(),
                 })
             },

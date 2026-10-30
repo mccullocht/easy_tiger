@@ -80,7 +80,8 @@ pub fn generate(args: GenerateArgs) -> io::Result<()> {
                 for x in &mut v {
                     *x = StandardNormal.sample(&mut rng);
                 }
-                vectors::prepare_vector_in_place(&mut v, None, true, None);
+                vectors::prepare_vector_in_place(&mut v, None, true, None)
+                    .expect("generated vector must be finite");
                 write_vector(&mut out, &v, &mut v16)?;
             }
         }
@@ -158,7 +159,8 @@ fn random_unit_vector(rng: &mut impl Rng, out: &mut [f32]) {
     for x in &mut *out {
         *x = StandardNormal.sample(rng);
     }
-    vectors::prepare_vector_in_place(out, None, true, None);
+    vectors::prepare_vector_in_place(out, None, true, None)
+        .expect("generated vector must be finite");
 }
 
 /// Squared Euclidean distance between two unit vectors: ‖a − b‖² = 2(1 − a·b).
@@ -183,7 +185,8 @@ fn apply_perturbation(center: &[f32], sigma: f32, alpha: f32, noise: &[f32], out
     for ((o, c), g) in out.iter_mut().zip(center).zip(noise) {
         *o = c + alpha * sigma * g;
     }
-    vectors::prepare_vector_in_place(out, None, true, None);
+    vectors::prepare_vector_in_place(out, None, true, None)
+        .expect("generated vector must be finite");
 }
 
 /// Generates one clustered vector into `out`: perturb `center` with σ·g and

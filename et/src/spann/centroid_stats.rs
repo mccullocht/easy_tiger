@@ -115,7 +115,9 @@ fn print_posting_stats(
                     .unwrap_or(Err(Error::not_found_error()))
                     .unwrap();
                 let block = PostingBlock::new(data, vector_len).unwrap();
-                let dist_fn = posting_coder.query_distance_asymmetric(similarity, centroid);
+                let dist_fn = posting_coder
+                    .query_distance_asymmetric(similarity, centroid)
+                    .expect("centroid vector is finite");
                 let sum: f64 = block.iter().map(|(_, v)| dist_fn.distance(v)).sum();
                 progress.inc(1);
                 Ok::<_, Error>((centroid_id, sum, block.len()))

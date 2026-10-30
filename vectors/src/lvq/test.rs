@@ -61,6 +61,43 @@ fn vector_stats_simd() {
     }
 }
 
+// A vector whose range is narrow relative to its magnitude collapses the interval to a single
+// value when rounded to f16, which previously produced NaNs during optimization and an empty
+// interval for the quantizer.
+#[test]
+fn optimize_interval_narrow_range() {
+    let vector: Vec<f32> = (0..64)
+        .map(|i| 100.0 + (i as f32 - 32.0) * 0.0003)
+        .collect();
+    for k in std::iter::once(Kernel::Scalar).chain(Kernel::accelerated()) {
+        let stats = VectorStats::new(k, &vector);
+        for bits in 1..=8 {
+            let (lower, upper) = super::optimize_interval(k, &vector, &stats, bits);
+            assert!(
+                lower.is_finite() && upper.is_finite() && lower < upper,
+                "kernel={k:?} bits={bits} interval=({lower}, {upper})"
+            );
+        }
+    }
+}
+
+#[test]
+fn round_interval_to_f16_widens_empty() {
+    use half::f16;
+    let max = f16::MAX.to_f32();
+    for (input, expected) in [
+        ((-0.5, 0.25), (-0.5, 0.25)),
+        ((0.0, 0.0), (0.0, f16::from_bits(1).to_f32())),
+        ((-0.0, -0.0), (-0.0, f16::from_bits(1).to_f32())),
+        ((100.0, 100.01), (100.0, 100.0625)),
+        ((-100.0, -100.01), (-100.0, -99.9375)),
+        ((max, max), (65472.0, max)),
+    ] {
+        let actual = super::round_interval_to_f16(input.0, input.1);
+        assert_eq!(actual, expected, "input={input:?}");
+    }
+}
+
 macro_rules! tlvq_coder_test {
     ($name:ident, $coder:ty, $primary_header:expr, $decoded:expr) => {
         #[test]

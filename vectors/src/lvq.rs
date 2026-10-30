@@ -131,12 +131,49 @@ fn round_to_f16(v: f32) -> f32 {
     f16::from_f32(v).to_f32()
 }
 
+/// Returns true if the interval is non-empty and contains no NaNs.
+fn interval_is_valid(lower: f32, upper: f32) -> bool {
+    lower < upper
+}
+
+/// Returns true if the candidate interval is close enough to the current interval that further
+/// optimization would not produce a meaningful change.
+fn interval_converged(current: (f32, f32), candidate: (f32, f32)) -> bool {
+    let approx_eq = |a: f32, b: f32| (a - b).abs() <= f32::EPSILON * a.abs().max(b.abs());
+    approx_eq(current.0, candidate.0) && approx_eq(current.1, candidate.1)
+}
+
+/// Returns the smallest f16 value greater than `v`, which must be finite.
+fn f16_next_up(v: f16) -> f16 {
+    if v == f16::ZERO {
+        // Matches both +0 and -0; the next value up is the smallest positive subnormal.
+        f16::from_bits(1)
+    } else if v.is_sign_positive() {
+        f16::from_bits(v.to_bits() + 1)
+    } else {
+        f16::from_bits(v.to_bits() - 1)
+    }
+}
+
+/// Round the interval bounds to f16, widening the interval by one f16 step if rounding collapses
+/// it. The quantizer can't represent anything with an empty interval.
+fn round_interval_to_f16(lower: f32, upper: f32) -> (f32, f32) {
+    let lower = f16::from_f32(lower);
+    let upper = f16::from_f32(upper);
+    if lower < upper {
+        (lower.to_f32(), upper.to_f32())
+    } else if lower < f16::MAX {
+        (lower.to_f32(), f16_next_up(lower).to_f32())
+    } else {
+        (-f16_next_up(-upper).to_f32(), upper.to_f32())
+    }
+}
+
 fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     // There are several spots in the optimization routine where we may divide by the input range
-    // and if that range is zero then it produces NaNs.
-    let (lower, upper) = if stats.min == stats.max {
-        (stats.min, stats.min + f16::MIN_POSITIVE.to_f32())
-    } else if bits == 8 {
+    // and if that range is zero then it produces NaNs; the empty interval is widened below.
+    // Optimization has little impact at 8 bits so min/max is used directly.
+    let (lower, upper) = if stats.min == stats.max || bits == 8 {
         (stats.min, stats.max)
     } else {
         match k {
@@ -149,7 +186,7 @@ fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize
     };
     // The interval bounds are stored as f16, so round them here to keep the values used to
     // quantize the vector consistent with the values a caller sees when decoding it.
-    (round_to_f16(lower), round_to_f16(upper))
+    round_interval_to_f16(lower, upper)
 }
 
 /// Transform the unnormalized dot product of two vectors into an appropriate distance for the

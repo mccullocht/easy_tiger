@@ -19,26 +19,42 @@ impl From<wt_mdb::Error> for Error {
     }
 }
 
-pub const DOC_ITER_SENTINEL: i64 = i64::MAX;
+type DocId = u64;
+type Payload = u64;
 
+/// Sentinel value returned at the end of iteration.
+pub const DOC_ITER_SENTINEL: DocId = u64::MAX;
+
+/// An iterator over a set of documents.
+///
+/// Each iterator could represent a single term list or some compound operation: conjunction,
+/// disjunction, negation, or positional operations like phrases.
+///
+/// [`DocIterator`]s begin positioned at the first matching document. Callers can iterate using
+/// [`DocIterator::advance`] or skip forward using [`DocIterator::advance_to`], and read any
+/// associated payload value with each hit. If an error occurs during iteration the iterator will
+/// be advanced to the end of the list ([`DOC_ITER_SENTINEL`]) and the error will be exposed via
+/// the [`DocIterator::error`] method.
 pub trait DocIterator {
     /// Return the current doc, or [`DOC_ITER_SENTINEL`] if there are no more docs.
-    fn doc(&mut self) -> i64;
+    fn doc(&mut self) -> DocId;
     /// Return the payload value for the current doc, or `0` if `doc()` is the sentinel value.
-    fn payload(&mut self) -> u64;
+    fn payload(&mut self) -> Payload;
 
     /// Advance to the next document and returns its id.
     ///
     /// Returns [`DOC_ITER_SENTINEL`] if there are no more docs.
     /// It is legal to `advance()` after the sentinel value is returned; further calls should also
     /// return the sentinel value.
-    fn advance(&mut self) -> i64;
+    fn advance(&mut self) -> DocId;
     /// Advance to the next document at or after `target` and return its id.
     ///
     /// Returns [`DOC_ITER_SENTINEL`] if there are no more docs.
+    ///
+    /// If the iterator is position before `target` its positional will remain unchanged.
     /// It is legal to `advance_to()` after the sentinel value is returned; further calls should
     /// also return the sentinel value.
-    fn advance_to(&mut self, target: i64) -> i64;
+    fn advance_to(&mut self, target: DocId) -> DocId;
 
     /// Cost of this iterator, proportional to hit count and cost of access.
     fn cost(&self) -> u64;
@@ -50,19 +66,19 @@ pub trait DocIterator {
 }
 
 impl<T: DocIterator + ?Sized> DocIterator for Box<T> {
-    fn doc(&mut self) -> i64 {
+    fn doc(&mut self) -> DocId {
         (**self).doc()
     }
 
-    fn payload(&mut self) -> u64 {
+    fn payload(&mut self) -> Payload {
         (**self).payload()
     }
 
-    fn advance(&mut self) -> i64 {
+    fn advance(&mut self) -> DocId {
         (**self).advance()
     }
 
-    fn advance_to(&mut self, target: i64) -> i64 {
+    fn advance_to(&mut self, target: DocId) -> DocId {
         (**self).advance_to(target)
     }
 
@@ -80,7 +96,7 @@ impl<T: DocIterator + ?Sized> DocIterator for Box<T> {
 ///
 /// It is recommended to use [`DOC_ITER_SENTINEL`] as the limit for short posting lists as it makes
 /// them easy to find -- seeking to a target docid will always return that block.
-pub fn doc_block_key(field: &str, posting_key: &[u8], limit_docid: i64) -> Vec<u8> {
+pub fn doc_block_key(field: &str, posting_key: &[u8], limit_docid: DocId) -> Vec<u8> {
     doc_block_key_internal(field, posting_key, Some(limit_docid))
 }
 
@@ -89,7 +105,7 @@ pub fn doc_block_prefix(field: &str, posting_key: &[u8]) -> Vec<u8> {
     doc_block_key_internal(field, posting_key, None)
 }
 
-fn doc_block_key_internal(field: &str, posting_key: &[u8], limit_docid: Option<i64>) -> Vec<u8> {
+fn doc_block_key_internal(field: &str, posting_key: &[u8], limit_docid: Option<DocId>) -> Vec<u8> {
     let mut key = Vec::with_capacity(
         field.len() + posting_key.len() + limit_docid.map(|_| 8).unwrap_or_default() + 2,
     );
@@ -130,7 +146,7 @@ impl DocFormat {
     /// Encode `docs` to `out`. `prev` is the doc immediately preceding the first entry in `docs`.
     ///
     /// `docs` must be strictly increasing and greater than `prev`.
-    fn encode(self, mut prev: i64, docs: impl Iterator<Item = i64>, out: &mut Vec<u8>) {
+    fn encode(self, mut prev: DocId, docs: impl Iterator<Item = DocId>, out: &mut Vec<u8>) {
         match self {
             DocFormat::LEB128 => {
                 for doc in docs {
@@ -146,19 +162,17 @@ impl DocFormat {
     /// preceding the first encoded doc.
     fn decode(
         self,
-        mut prev: i64,
+        mut prev: DocId,
         count: usize,
         mut data: &[u8],
-        out: &mut Vec<i64>,
+        out: &mut Vec<DocId>,
     ) -> Result<(), &'static str> {
         match self {
             DocFormat::LEB128 => {
                 for _ in 0..count {
                     let delta =
                         leb128::read::unsigned(&mut data).map_err(|_| "invalid doc delta")?;
-                    prev = prev
-                        .checked_add_unsigned(delta)
-                        .ok_or("doc delta overflow")?;
+                    prev = prev.checked_add(delta).ok_or("doc delta overflow")?;
                     out.push(prev);
                 }
             }
@@ -194,7 +208,7 @@ impl TryFrom<u8> for PayloadFormat {
 
 impl PayloadFormat {
     /// Encode `payloads` to `out`.
-    fn encode(self, payloads: impl Iterator<Item = u64>, out: &mut Vec<u8>) {
+    fn encode(self, payloads: impl Iterator<Item = Payload>, out: &mut Vec<u8>) {
         match self {
             PayloadFormat::None => {}
             PayloadFormat::LEB128 => {
@@ -209,7 +223,12 @@ impl PayloadFormat {
     ///
     /// `data` begins at the payload at rank `rank` and is advanced past the `target` payload.
     /// `target` must be at least `rank`.
-    fn decode_to(self, data: &mut &[u8], rank: usize, target: usize) -> Result<u64, &'static str> {
+    fn decode_to(
+        self,
+        data: &mut &[u8],
+        rank: usize,
+        target: usize,
+    ) -> Result<Payload, &'static str> {
         debug_assert!(rank <= target);
         match self {
             PayloadFormat::None => Ok(0),
@@ -242,7 +261,7 @@ pub struct DocIteratorBlock<'a> {
     doc_format: DocFormat,
     payload_format: PayloadFormat,
     /// Decoded docs followed by [`DOC_ITER_SENTINEL`].
-    docs: Vec<i64>,
+    docs: Vec<DocId>,
     /// Index of the current doc in `docs`.
     index: usize,
     /// Encoded block data.
@@ -251,7 +270,7 @@ pub struct DocIteratorBlock<'a> {
     payload_offset: usize,
     /// Rank of the payload at the start of `payloads`.
     next_payload_rank: usize,
-    payload: u64,
+    payload: Payload,
     error: Option<&'static str>,
 }
 
@@ -275,8 +294,8 @@ impl<'a> DocIteratorBlock<'a> {
         let mut docs = Vec::with_capacity(len.saturating_add(1).min(data.len() + 1));
         let mut payloads = &data[data.len()..];
         if len > 0 {
-            let first_doc =
-                leb128::read::signed(&mut data).map_err(|_| Error::Coding("invalid first doc"))?;
+            let first_doc = leb128::read::unsigned(&mut data)
+                .map_err(|_| Error::Coding("invalid first doc"))?;
             docs.push(first_doc);
             let doc_data = if payload_format == PayloadFormat::None {
                 data
@@ -352,11 +371,11 @@ impl DocIteratorBlock<'static> {
 }
 
 impl DocIterator for DocIteratorBlock<'_> {
-    fn doc(&mut self) -> i64 {
+    fn doc(&mut self) -> DocId {
         self.docs[self.index]
     }
 
-    fn payload(&mut self) -> u64 {
+    fn payload(&mut self) -> Payload {
         if self.index >= self.len() || self.payload_format == PayloadFormat::None {
             return 0;
         }
@@ -382,12 +401,12 @@ impl DocIterator for DocIteratorBlock<'_> {
         self.payload
     }
 
-    fn advance(&mut self) -> i64 {
+    fn advance(&mut self) -> DocId {
         self.index = (self.index + 1).min(self.len());
         self.docs[self.index]
     }
 
-    fn advance_to(&mut self, target: i64) -> i64 {
+    fn advance_to(&mut self, target: DocId) -> DocId {
         // The trailing sentinel ensures this never moves past the end.
         self.index += self.docs[self.index..].partition_point(|&d| d < target);
         self.docs[self.index]
@@ -414,7 +433,7 @@ pub struct TermDocIterator<'a> {
     upper_bound: Vec<u8>,
     block: DocIteratorBlock<'static>,
     /// Limit docid for `block`; no doc after this value will appear in `block`.
-    block_limit: i64,
+    block_limit: DocId,
     cost: u64,
     error: Option<Error>,
 }
@@ -441,12 +460,12 @@ impl<'a> TermDocIterator<'a> {
             prefix_len,
             upper_bound,
             block: DocIteratorBlock::empty(),
-            block_limit: i64::MIN,
+            block_limit: 0,
             cost,
             error: None,
         };
-        it.load_next_block(i64::MIN)?;
-        it.settle(i64::MIN);
+        it.load_next_block(0)?;
+        it.settle(0);
         it.error()?;
         Ok(it)
     }
@@ -454,7 +473,7 @@ impl<'a> TermDocIterator<'a> {
     /// Read the next block from the cursor, or an empty block if there are no more blocks.
     ///
     /// If the next block ends before `target` it is not loaded and this returns false.
-    fn load_next_block(&mut self, target: i64) -> Result<bool, Error> {
+    fn load_next_block(&mut self, target: DocId) -> Result<bool, Error> {
         // Safety: the value is copied before the cursor is repositioned.
         let Some((key, value)) = unsafe { self.cursor.next_unsafe() }.transpose()? else {
             self.block = DocIteratorBlock::empty();
@@ -464,7 +483,7 @@ impl<'a> TermDocIterator<'a> {
         let limit = key
             .get(self.prefix_len..)
             .and_then(|b| <[u8; 8]>::try_from(b).ok())
-            .map(i64::from_be_bytes)
+            .map(u64::from_be_bytes)
             .ok_or(Error::Coding("invalid doc block key"))?;
         if limit < target {
             return Ok(false);
@@ -475,13 +494,13 @@ impl<'a> TermDocIterator<'a> {
     }
 
     /// Load the first block that may contain `target`, seeking if the next block does not.
-    fn load_block_for(&mut self, target: i64) -> Result<(), Error> {
+    fn load_block_for(&mut self, target: DocId) -> Result<(), Error> {
         if !self.load_next_block(target)? {
             let mut lower_bound = self.upper_bound[..self.prefix_len].to_vec();
             lower_bound.extend_from_slice(&target.to_be_bytes());
             self.cursor
                 .set_bounds(lower_bound.as_slice()..=self.upper_bound.as_slice())?;
-            self.load_next_block(i64::MIN)?;
+            self.load_next_block(0)?;
         }
         Ok(())
     }
@@ -489,7 +508,7 @@ impl<'a> TermDocIterator<'a> {
     /// Advance to the first doc at or after `target`, loading blocks as needed.
     ///
     /// Maintains the invariant that `block` is only exhausted if the iterator is exhausted.
-    fn settle(&mut self, target: i64) -> i64 {
+    fn settle(&mut self, target: DocId) -> DocId {
         loop {
             let doc = self.block.advance_to(target);
             if doc != DOC_ITER_SENTINEL || self.block_limit == DOC_ITER_SENTINEL {
@@ -510,20 +529,20 @@ impl<'a> TermDocIterator<'a> {
 }
 
 impl DocIterator for TermDocIterator<'_> {
-    fn doc(&mut self) -> i64 {
+    fn doc(&mut self) -> DocId {
         self.block.doc()
     }
 
-    fn payload(&mut self) -> u64 {
+    fn payload(&mut self) -> Payload {
         self.block.payload()
     }
 
-    fn advance(&mut self) -> i64 {
+    fn advance(&mut self) -> DocId {
         self.block.advance();
-        self.settle(i64::MIN)
+        self.settle(0)
     }
 
-    fn advance_to(&mut self, target: i64) -> i64 {
+    fn advance_to(&mut self, target: DocId) -> DocId {
         self.settle(target)
     }
 
@@ -549,7 +568,7 @@ pub struct ConjunctionDocIterator<'a> {
     lead2: Box<dyn DocIterator + 'a>,
     /// Remaining iterators in ascending cost order.
     others: Vec<Box<dyn DocIterator + 'a>>,
-    doc: i64,
+    doc: DocId,
 }
 
 impl<'a> ConjunctionDocIterator<'a> {
@@ -569,7 +588,7 @@ impl<'a> ConjunctionDocIterator<'a> {
             lead1: others.next().unwrap(),
             lead2: others.next().unwrap(),
             others: others.collect(),
-            doc: i64::MIN,
+            doc: 0,
         };
         let target = it.lead1.doc();
         it.do_next(target);
@@ -578,7 +597,7 @@ impl<'a> ConjunctionDocIterator<'a> {
 
     /// Find the first doc at or after `doc` that matches all iterators, where `doc` is the
     /// current doc of `lead1`.
-    fn do_next(&mut self, mut doc: i64) -> i64 {
+    fn do_next(&mut self, mut doc: DocId) -> DocId {
         'advance_leads: while doc != DOC_ITER_SENTINEL {
             let next2 = advance_if_behind(&mut *self.lead2, doc);
             if next2 != doc {
@@ -603,7 +622,7 @@ impl<'a> ConjunctionDocIterator<'a> {
 }
 
 /// Advance `it` to `target` if it is positioned before `target` and return its current doc.
-fn advance_if_behind(it: &mut dyn DocIterator, target: i64) -> i64 {
+fn advance_if_behind(it: &mut dyn DocIterator, target: DocId) -> DocId {
     let doc = it.doc();
     if doc < target {
         it.advance_to(target)
@@ -613,20 +632,20 @@ fn advance_if_behind(it: &mut dyn DocIterator, target: i64) -> i64 {
 }
 
 impl DocIterator for ConjunctionDocIterator<'_> {
-    fn doc(&mut self) -> i64 {
+    fn doc(&mut self) -> DocId {
         self.doc
     }
 
-    fn payload(&mut self) -> u64 {
+    fn payload(&mut self) -> Payload {
         0
     }
 
-    fn advance(&mut self) -> i64 {
+    fn advance(&mut self) -> DocId {
         let doc = self.lead1.advance();
         self.do_next(doc)
     }
 
-    fn advance_to(&mut self, target: i64) -> i64 {
+    fn advance_to(&mut self, target: DocId) -> DocId {
         if target <= self.doc {
             return self.doc;
         }
@@ -660,7 +679,7 @@ pub struct CentroidParentFilterDocIterator<'a> {
     seen: Vec<u64>,
     /// Number of centroids that have not yet been yielded.
     unseen: u32,
-    doc: i64,
+    doc: DocId,
     centroid: u64,
     error: Option<Error>,
 }
@@ -683,7 +702,7 @@ impl<'a> CentroidParentFilterDocIterator<'a> {
             assignments,
             seen: vec![0; max_centroid_id as usize / 64 + 1],
             unseen: num_centroids,
-            doc: i64::MIN,
+            doc: 0,
             centroid: 0,
             error: None,
         };
@@ -694,7 +713,7 @@ impl<'a> CentroidParentFilterDocIterator<'a> {
 
     /// Find the first doc at or after `doc` with an unseen centroid, where `doc` is the current
     /// doc of `input`.
-    fn do_next(&mut self, mut doc: i64) -> i64 {
+    fn do_next(&mut self, mut doc: DocId) -> DocId {
         self.centroid = 0;
         while doc != DOC_ITER_SENTINEL {
             if self.unseen == 0 {
@@ -735,15 +754,15 @@ impl<'a> CentroidParentFilterDocIterator<'a> {
 }
 
 impl DocIterator for CentroidParentFilterDocIterator<'_> {
-    fn doc(&mut self) -> i64 {
+    fn doc(&mut self) -> DocId {
         self.doc
     }
 
-    fn payload(&mut self) -> u64 {
+    fn payload(&mut self) -> Payload {
         self.centroid
     }
 
-    fn advance(&mut self) -> i64 {
+    fn advance(&mut self) -> DocId {
         if self.doc == DOC_ITER_SENTINEL {
             return DOC_ITER_SENTINEL;
         }
@@ -751,7 +770,7 @@ impl DocIterator for CentroidParentFilterDocIterator<'_> {
         self.do_next(doc)
     }
 
-    fn advance_to(&mut self, target: i64) -> i64 {
+    fn advance_to(&mut self, target: DocId) -> DocId {
         if target <= self.doc {
             return self.doc;
         }
@@ -786,7 +805,7 @@ pub struct DocIteratorBlockMut {
     doc_format: DocFormat,
     payload_format: PayloadFormat,
     /// Current entries mapping doc -> payload.
-    entries: BTreeMap<i64, u64>,
+    entries: BTreeMap<DocId, Payload>,
     /// If true, block contents has been modified.
     dirty: bool,
 }
@@ -820,12 +839,12 @@ impl DocIteratorBlockMut {
     }
 
     /// Return an iterator over the current (doc, payload) entries in the block.
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (i64, u64)> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (DocId, Payload)> {
         self.entries.iter().map(|(&d, &p)| (d, p))
     }
 
     /// Lookup the payload for `doc`, returning `None` if not found.
-    pub fn lookup(&self, doc: i64) -> Option<u64> {
+    pub fn lookup(&self, doc: DocId) -> Option<u64> {
         self.entries.get(&doc).copied()
     }
 
@@ -834,14 +853,14 @@ impl DocIteratorBlockMut {
     /// `payload` is not serialized if the payload format is [`PayloadFormat::None`].
     ///
     /// *Panics* if `doc` is [`DOC_ITER_SENTINEL`].
-    pub fn insert(&mut self, doc: i64, payload: u64) {
+    pub fn insert(&mut self, doc: DocId, payload: Payload) {
         assert_ne!(doc, DOC_ITER_SENTINEL);
         self.dirty = true;
         self.entries.insert(doc, payload);
     }
 
     /// Remove the entry for `doc`, returning its payload if it was present.
-    pub fn remove(&mut self, doc: i64) -> Option<u64> {
+    pub fn remove(&mut self, doc: DocId) -> Option<Payload> {
         let result = self.entries.remove(&doc);
         self.dirty |= result.is_some();
         result
@@ -856,7 +875,7 @@ impl DocIteratorBlockMut {
         let Some(&first_doc) = self.entries.keys().next() else {
             return out;
         };
-        leb128::write::signed(&mut out, first_doc).unwrap();
+        leb128::write::unsigned(&mut out, first_doc).unwrap();
 
         if self.payload_format == PayloadFormat::None {
             self.doc_format
@@ -905,7 +924,7 @@ impl DocIteratorBlockMut {
 mod test {
     use super::*;
 
-    fn collect(data: &[u8]) -> Vec<(i64, u64)> {
+    fn collect(data: &[u8]) -> Vec<(DocId, Payload)> {
         let mut it = DocIteratorBlock::new(data).unwrap();
         let mut out = vec![];
         while it.doc() != DOC_ITER_SENTINEL {
@@ -916,7 +935,7 @@ mod test {
         out
     }
 
-    fn build(payload_format: PayloadFormat, entries: &[(i64, u64)]) -> DocIteratorBlockMut {
+    fn build(payload_format: PayloadFormat, entries: &[(DocId, Payload)]) -> DocIteratorBlockMut {
         let mut block = DocIteratorBlockMut::new(DocFormat::LEB128, payload_format);
         for &(d, p) in entries {
             block.insert(d, p);
@@ -924,7 +943,7 @@ mod test {
         block
     }
 
-    const ENTRIES: &[(i64, u64)] = &[(-5, 7), (0, 0), (3, 1 << 40), (300, 2), (1 << 50, 9)];
+    const ENTRIES: &[(DocId, Payload)] = &[(0, 0), (3, 1 << 40), (300, 2), (1 << 50, 9)];
 
     #[test]
     fn empty() {
@@ -989,7 +1008,6 @@ mod test {
         let data = build(PayloadFormat::None, ENTRIES).serialize();
         let mut it = DocIteratorBlock::new(&data).unwrap();
         assert_eq!(it.cost(), ENTRIES.len() as u64);
-        assert_eq!(it.advance_to(-10), -5);
         assert_eq!(it.advance_to(0), 0);
         assert_eq!(it.advance_to(0), 0);
         assert_eq!(it.advance_to(4), 300);
@@ -1009,10 +1027,10 @@ mod test {
         block.insert(3, 4);
         block.insert(100, 5);
         assert_eq!(block.lookup(3), Some(4));
-        assert_eq!(block.len(), 5);
+        assert_eq!(block.len(), 4);
         assert_eq!(
             collect(&block.serialize()),
-            &[(-5, 7), (0, 0), (3, 4), (100, 5), (1 << 50, 9)]
+            &[(0, 0), (3, 4), (100, 5), (1 << 50, 9)]
         );
     }
 
@@ -1062,7 +1080,7 @@ mod test {
     const TABLE: &str = "postings";
 
     /// (field, term, limit_docid, entries)
-    type TestBlock<'a> = (&'a str, &'a [u8], i64, &'a [(i64, u64)]);
+    type TestBlock<'a> = (&'a str, &'a [u8], DocId, &'a [(DocId, Payload)]);
 
     impl TermFixture {
         /// Create a table containing `blocks`.
@@ -1122,7 +1140,7 @@ mod test {
         ])
     }
 
-    const MULTI_BLOCK_ENTRIES: &[(i64, u64)] = &[
+    const MULTI_BLOCK_ENTRIES: &[(DocId, Payload)] = &[
         (1, 10),
         (5, 50),
         (50, 500),
@@ -1223,7 +1241,7 @@ mod test {
         assert!(matches!(it.error(), Err(Error::UnknownPayloadFormat(9))));
     }
 
-    fn block_iter(docs: &[i64]) -> Box<dyn DocIterator> {
+    fn block_iter(docs: &[DocId]) -> Box<dyn DocIterator> {
         let mut block = DocIteratorBlockMut::new(DocFormat::LEB128, PayloadFormat::LEB128);
         for &d in docs {
             block.insert(d, 1);
@@ -1231,7 +1249,7 @@ mod test {
         Box::new(DocIteratorBlock::from_vec(block.serialize()).unwrap())
     }
 
-    fn collect_docs(it: &mut dyn DocIterator) -> Vec<i64> {
+    fn collect_docs(it: &mut dyn DocIterator) -> Vec<DocId> {
         let mut out = vec![];
         while it.doc() != DOC_ITER_SENTINEL {
             assert_eq!(it.payload(), 0);
@@ -1245,12 +1263,12 @@ mod test {
     #[test]
     fn conjunction() {
         let mut it = ConjunctionDocIterator::new(
-            block_iter(&[-3, 1, 2, 5, 8, 13, 21, 34]),
-            block_iter(&[-3, 2, 3, 5, 13, 21, 22]),
-            vec![block_iter(&[-3, 0, 2, 4, 5, 6, 13, 21, 100])],
+            block_iter(&[1, 2, 5, 8, 13, 21, 34]),
+            block_iter(&[2, 3, 5, 13, 21, 22]),
+            vec![block_iter(&[0, 2, 4, 5, 6, 13, 21, 100])],
         );
-        assert_eq!(it.cost(), 7);
-        assert_eq!(collect_docs(&mut it), vec![-3, 2, 5, 13, 21]);
+        assert_eq!(it.cost(), 6);
+        assert_eq!(collect_docs(&mut it), vec![2, 5, 13, 21]);
         assert_eq!(it.advance(), DOC_ITER_SENTINEL);
     }
 
@@ -1290,13 +1308,13 @@ mod test {
         let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
         for _ in 0..100 {
             let num_iters = rng.random_range(2..6);
-            let doc_lists: Vec<Vec<i64>> = (0..num_iters)
+            let doc_lists: Vec<Vec<DocId>> = (0..num_iters)
                 .map(|_| {
                     let density = rng.random_range(0.1..0.9);
                     (0..500).filter(|_| rng.random_bool(density)).collect()
                 })
                 .collect();
-            let expected: Vec<i64> = doc_lists[0]
+            let expected: Vec<DocId> = doc_lists[0]
                 .iter()
                 .copied()
                 .filter(|d| doc_lists[1..].iter().all(|l| l.contains(d)))
@@ -1327,13 +1345,13 @@ mod test {
         assert!(matches!(it.error(), Err(Error::Coding(_))));
     }
 
-    fn payload_iter(entries: &[(i64, u64)]) -> Box<dyn DocIterator> {
+    fn payload_iter(entries: &[(DocId, Payload)]) -> Box<dyn DocIterator> {
         Box::new(
             DocIteratorBlock::from_vec(build(PayloadFormat::LEB128, entries).serialize()).unwrap(),
         )
     }
 
-    fn collect_entries(it: &mut dyn DocIterator) -> Vec<(i64, u64)> {
+    fn collect_entries(it: &mut dyn DocIterator) -> Vec<(DocId, Payload)> {
         let mut out = vec![];
         while it.doc() != DOC_ITER_SENTINEL {
             out.push((it.doc(), it.payload()));
@@ -1343,7 +1361,7 @@ mod test {
         out
     }
 
-    const ASSIGNMENTS: &[(i64, u64)] = &[
+    const ASSIGNMENTS: &[(DocId, Payload)] = &[
         (1, 0),
         (2, 70),
         (3, 0),
@@ -1445,9 +1463,9 @@ mod test {
                 .map(|&(_, c)| c)
                 .collect::<std::collections::HashSet<_>>()
                 .len() as u32;
-            let input: Vec<i64> = (0..500).filter(|_| rng.random_bool(0.5)).collect();
+            let input: Vec<DocId> = (0..500).filter(|_| rng.random_bool(0.5)).collect();
             let mut seen = std::collections::HashSet::new();
-            let expected: Vec<(i64, u64)> = input
+            let expected: Vec<(DocId, Payload)> = input
                 .iter()
                 .filter_map(|d| assignments.iter().find(|(a, _)| a == d).copied())
                 .filter(|&(_, c)| seen.insert(c))

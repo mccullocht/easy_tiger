@@ -9,6 +9,7 @@ pub mod input;
 pub mod kmeans;
 pub mod posting_block;
 pub mod spann;
+pub mod token;
 pub mod vamana;
 
 use std::cmp::Ordering;

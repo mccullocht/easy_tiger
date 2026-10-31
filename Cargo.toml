@@ -62,8 +62,13 @@ wt_mdb = { path = "./wt_mdb" }
 
 [dev-dependencies]
 approx = { workspace = true }
+criterion = { workspace = true }
 rand_xoshiro = { workspace = true }
 tempfile = { workspace = true }
+
+[[bench]]
+name = "token"
+harness = false
 
 [build-dependencies]
 cc = { workspace = true }

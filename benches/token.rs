@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use easy_tiger::token::{
-    CentroidParentFilterDocIterator, DOC_ITER_SENTINEL, DocFormat, DocIterator,
-    DocIteratorBlockMut, PayloadFormat, TermDocIterator, doc_block_key,
+    CentroidParentFilterDocIterator, DOC_ITER_SENTINEL, DocFormat, DocId, DocIterator,
+    DocIteratorBlockMut, Payload, PayloadFormat, TermDocIterator, doc_block_key,
 };
 use rand::prelude::*;
 use wt_mdb::{
@@ -58,7 +58,7 @@ fn generate_assignments(rng: &mut impl Rng) -> (Vec<u64>, u32) {
 fn write_posting(
     cursor: &mut wt_mdb::IndexCursorGuard<'_>,
     term: &[u8],
-    entries: impl ExactSizeIterator<Item = (i64, u64)>,
+    entries: impl ExactSizeIterator<Item = (DocId, Payload)>,
     payload_format: PayloadFormat,
 ) {
     let num_blocks = entries.len().div_ceil(BLOCK_LEN);
@@ -74,7 +74,10 @@ fn write_posting(
             limit = DOC_ITER_SENTINEL;
         }
         cursor
-            .set(&doc_block_key(FIELD, term, limit), &block.serialize())
+            .set(
+                &doc_block_key(FIELD, term, limit).unwrap(),
+                &block.serialize(),
+            )
             .unwrap();
     }
 }
@@ -110,7 +113,10 @@ fn centroid_parent_filter_benchmarks(c: &mut Criterion) {
             write_posting(
                 &mut cursor,
                 ASSIGNMENT_TERM,
-                assignments.iter().enumerate().map(|(d, &c)| (d as i64, c)),
+                assignments
+                    .iter()
+                    .enumerate()
+                    .map(|(d, &c)| (d as DocId, c)),
                 PayloadFormat::LEB128,
             );
             for &len in INPUT_LENS {
@@ -119,7 +125,7 @@ fn centroid_parent_filter_benchmarks(c: &mut Criterion) {
                 write_posting(
                     &mut cursor,
                     &input_term(len),
-                    docs.into_iter().map(|d| (d as i64, 0)),
+                    docs.into_iter().map(|d| (d as DocId, 0)),
                     PayloadFormat::None,
                 );
             }

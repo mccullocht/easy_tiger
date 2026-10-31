@@ -11,6 +11,7 @@ use wt_mdb::{IndexCursorGuard, Transaction};
 pub enum Error {
     UnknownDocFormat(u8),
     UnknownPayloadFormat(u8),
+    InvalidFieldName(String),
     Coding(&'static str),
     WiredTiger(wt_mdb::Error),
 }
@@ -26,6 +27,7 @@ impl std::fmt::Display for Error {
         match self {
             Self::UnknownDocFormat(t) => write!(f, "UnknownDocFormat({t})"),
             Self::UnknownPayloadFormat(t) => write!(f, "UnknownPayloadFormat({t})"),
+            Self::InvalidFieldName(n) => write!(f, "InvalidFieldName({n:?})"),
             Self::Coding(s) => write!(f, "Coding({s})"),
             Self::WiredTiger(e) => write!(f, "WiredTiger({e})"),
         }
@@ -34,8 +36,8 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-type DocId = u64;
-type Payload = u64;
+pub type DocId = u64;
+pub type Payload = u64;
 
 /// Sentinel value returned at the end of iteration.
 pub const DOC_ITER_SENTINEL: DocId = u64::MAX;
@@ -109,29 +111,38 @@ impl<T: DocIterator + ?Sized> DocIterator for Box<T> {
 /// Construct a key for a posting block given a field name, key, and the last possible docid that
 /// can appear in the block.
 ///
+/// Keys are `field ':' escape(posting_key) 0x00 0x00 limit_be`, where `escape` replaces each 0x00
+/// with 0x00 0xff. This preserves lexicographic order of posting keys and ensures that no key for
+/// one posting falls within the range of another. `field` may not contain ':'.
+///
 /// It is recommended to use [`DOC_ITER_SENTINEL`] as the limit for short posting lists as it makes
 /// them easy to find -- seeking to a target docid will always return that block.
-pub fn doc_block_key(field: &str, posting_key: &[u8], limit_docid: DocId) -> Vec<u8> {
-    doc_block_key_internal(field, posting_key, Some(limit_docid))
+pub fn doc_block_key(
+    field: &str,
+    posting_key: &[u8],
+    limit_docid: DocId,
+) -> Result<Vec<u8>, Error> {
+    let mut key = doc_block_prefix(field, posting_key)?;
+    key.extend_from_slice(&limit_docid.to_be_bytes());
+    Ok(key)
 }
 
 /// Construct a prefix that matches all of the blocks for a term posting.
-pub fn doc_block_prefix(field: &str, posting_key: &[u8]) -> Vec<u8> {
-    doc_block_key_internal(field, posting_key, None)
-}
-
-fn doc_block_key_internal(field: &str, posting_key: &[u8], limit_docid: Option<DocId>) -> Vec<u8> {
-    let mut key = Vec::with_capacity(
-        field.len() + posting_key.len() + limit_docid.map(|_| 8).unwrap_or_default() + 2,
-    );
+pub fn doc_block_prefix(field: &str, posting_key: &[u8]) -> Result<Vec<u8>, Error> {
+    if field.contains(':') {
+        return Err(Error::InvalidFieldName(field.to_owned()));
+    }
+    let mut key = Vec::with_capacity(field.len() + posting_key.len() + 11);
     key.extend_from_slice(field.as_bytes());
     key.push(b':');
-    key.extend_from_slice(posting_key);
-    key.push(b':');
-    if let Some(d) = limit_docid {
-        key.extend_from_slice(&d.to_be_bytes());
+    for &b in posting_key {
+        key.push(b);
+        if b == 0 {
+            key.push(0xff);
+        }
     }
-    key
+    key.extend_from_slice(&[0, 0]);
+    Ok(key)
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -466,7 +477,7 @@ impl<'a> TermDocIterator<'a> {
         cost: u64,
     ) -> Result<Self, Error> {
         let mut cursor = txn.open_index_cursor(table_name)?;
-        let mut upper_bound = doc_block_prefix(field, term);
+        let mut upper_bound = doc_block_prefix(field, term)?;
         let prefix_len = upper_bound.len();
         upper_bound.extend_from_slice(&[0xff; 8]);
         cursor.set_bounds(&upper_bound[..prefix_len]..=upper_bound.as_slice())?;
@@ -1257,7 +1268,7 @@ mod test {
                 for &(field, term, limit, entries) in blocks {
                     cursor
                         .set(
-                            &doc_block_key(field, term, limit),
+                            &doc_block_key(field, term, limit).unwrap(),
                             &build(PayloadFormat::LEB128, entries).serialize(),
                         )
                         .unwrap();
@@ -1283,6 +1294,11 @@ mod test {
             ("f", b"", DOC_ITER_SENTINEL, &[(2, 2)]),
             ("f", b"ab", DOC_ITER_SENTINEL, &[(3, 3)]),
             ("g", b"a", DOC_ITER_SENTINEL, &[(4, 4)]),
+            ("f", b"a:b", DOC_ITER_SENTINEL, &[(5, 5)]),
+            ("f", b"a:\0\0\0\0\0\0\0\x01", DOC_ITER_SENTINEL, &[(6, 6)]),
+            ("f", b"a\0", DOC_ITER_SENTINEL, &[(7, 7)]),
+            ("f", b"a\0\xff\xff\xff\xff\xff\xff\xff\xff", 99, &[(8, 8)]),
+            ("f", b"\0", DOC_ITER_SENTINEL, &[(9, 9)]),
         ])
     }
 
@@ -1358,12 +1374,116 @@ mod test {
     fn term_neighbors() {
         let fixture = multi_block_fixture();
         let txn = fixture.txn();
-        for (field, term, doc) in [("f", b"".as_slice(), 2), ("f", b"ab", 3), ("g", b"a", 4)] {
+        for (field, term, doc) in [
+            ("f", b"".as_slice(), 2),
+            ("f", b"ab", 3),
+            ("g", b"a", 4),
+            ("f", b"a:b", 5),
+            ("f", b"a:\0\0\0\0\0\0\0\x01", 6),
+            ("f", b"a\0", 7),
+            ("f", b"a\0\xff\xff\xff\xff\xff\xff\xff\xff", 8),
+            ("f", b"\0", 9),
+        ] {
             let mut it = TermDocIterator::new(&txn, TABLE, field, term, 1).unwrap();
-            assert_eq!(it.doc(), doc);
+            assert_eq!(it.doc(), doc, "term {term:?}");
             assert_eq!(it.advance(), DOC_ITER_SENTINEL);
             it.error().unwrap();
         }
+    }
+
+    #[test]
+    fn term_invalid_field_name() {
+        let fixture = multi_block_fixture();
+        let txn = fixture.txn();
+        assert!(matches!(
+            TermDocIterator::new(&txn, TABLE, "f:a", b"b", 1),
+            Err(Error::InvalidFieldName(n)) if n == "f:a"
+        ));
+    }
+
+    const KEY_TEST_TERMS: &[&[u8]] = &[
+        b"",
+        b"\0",
+        b"\0\0",
+        b"\0\x01",
+        b"\0\xff",
+        b"\x01",
+        b":",
+        b"a",
+        b"a\0",
+        b"a\0\0",
+        b"a\0\xff",
+        b"a\0\xff\xff\xff\xff\xff\xff\xff\xff",
+        b"a\x01",
+        b"a:",
+        b"a:\0\0\0\0\0\0\0\x01",
+        b"a:b",
+        b"ab",
+        b"a\xff",
+        b"\xff",
+        b"\xff\0",
+    ];
+
+    const KEY_TEST_LIMITS: &[DocId] = &[0, 1, 0xff, 1 << 56, DOC_ITER_SENTINEL];
+
+    #[test]
+    fn doc_block_key_escapes_term() {
+        assert_eq!(
+            doc_block_key("f", b"a\0b", 0x0102).unwrap(),
+            b"f:a\0\xffb\0\0\0\0\0\0\0\0\x01\x02"
+        );
+        assert_eq!(doc_block_prefix("f", b"").unwrap(), b"f:\0\0");
+        assert_eq!(
+            doc_block_prefix("f", b"\0\0").unwrap(),
+            b"f:\0\xff\0\xff\0\0"
+        );
+    }
+
+    #[test]
+    fn doc_block_key_invalid_field_name() {
+        for field in [":", "f:", ":f", "f:g"] {
+            assert!(matches!(
+                doc_block_key(field, b"a", 0),
+                Err(Error::InvalidFieldName(n)) if n == field
+            ));
+            assert!(matches!(
+                doc_block_prefix(field, b"a"),
+                Err(Error::InvalidFieldName(n)) if n == field
+            ));
+        }
+    }
+
+    #[test]
+    fn doc_block_key_ranges_disjoint() {
+        for &t1 in KEY_TEST_TERMS {
+            let prefix = doc_block_prefix("f", t1).unwrap();
+            let mut upper = prefix.clone();
+            upper.extend_from_slice(&[0xff; 8]);
+            for &t2 in KEY_TEST_TERMS.iter().filter(|&&t| t != t1) {
+                for &limit in KEY_TEST_LIMITS {
+                    let key = doc_block_key("f", t2, limit).unwrap();
+                    assert!(
+                        !(prefix.as_slice()..=upper.as_slice()).contains(&key.as_slice()),
+                        "key for {t2:?} limit {limit} in range of {t1:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn doc_block_key_order() {
+        let mut terms = KEY_TEST_TERMS.to_vec();
+        terms.sort();
+        let keys = terms
+            .iter()
+            .flat_map(|t| {
+                KEY_TEST_LIMITS
+                    .iter()
+                    .map(|&l| doc_block_key("f", t, l).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert!(keys.is_sorted());
     }
 
     #[test]
@@ -1376,7 +1496,10 @@ mod test {
             let txn = fixture.txn();
             txn.open_index_cursor(TABLE)
                 .unwrap()
-                .set(&doc_block_key("f", b"a", DOC_ITER_SENTINEL), &[1, 0, 9])
+                .set(
+                    &doc_block_key("f", b"a", DOC_ITER_SENTINEL).unwrap(),
+                    &[1, 0, 9],
+                )
                 .unwrap();
             txn.commit(None).unwrap();
         }

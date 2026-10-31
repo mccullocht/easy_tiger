@@ -1,6 +1,9 @@
 //! Abstraction for token indexing.
 
-use std::{borrow::Cow, collections::BTreeMap};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BinaryHeap},
+};
 
 use wt_mdb::{IndexCursorGuard, Transaction};
 
@@ -673,6 +676,137 @@ impl DocIterator for ConjunctionDocIterator<'_> {
         self.lead1.error()?;
         self.lead2.error()?;
         self.others.iter().try_for_each(|it| it.error())
+    }
+}
+
+/// Yields the docs that appear in any input iterator.
+///
+/// Inputs are kept in a min-heap ordered by their current doc. Iteration terminates early if any
+/// input fails.
+pub struct DisjunctionDocIterator<'a> {
+    heap: BinaryHeap<DisjunctionEntry<'a>>,
+    doc: DocId,
+    cost: u64,
+}
+
+/// An input to [`DisjunctionDocIterator`] ordered so that the lowest doc is at the top of the heap.
+struct DisjunctionEntry<'a> {
+    doc: DocId,
+    it: Box<dyn DocIterator + 'a>,
+}
+
+impl DisjunctionEntry<'_> {
+    /// Set the current doc to `doc` and return false if the input failed.
+    fn update(&mut self, doc: DocId) -> bool {
+        self.doc = doc;
+        doc != DOC_ITER_SENTINEL || self.it.error().is_ok()
+    }
+}
+
+impl PartialEq for DisjunctionEntry<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.doc == other.doc
+    }
+}
+
+impl Eq for DisjunctionEntry<'_> {}
+
+impl PartialOrd for DisjunctionEntry<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DisjunctionEntry<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.doc.cmp(&self.doc)
+    }
+}
+
+impl<'a> DisjunctionDocIterator<'a> {
+    /// Create a new iterator over the union of `iters`, positioned on the first matching doc.
+    pub fn new(iters: Vec<Box<dyn DocIterator + 'a>>) -> Self {
+        let cost = iters
+            .iter()
+            .map(|it| it.cost())
+            .fold(0, u64::saturating_add);
+        let mut failed = false;
+        let heap = iters
+            .into_iter()
+            .map(|mut it| {
+                let doc = it.doc();
+                let mut entry = DisjunctionEntry { doc: 0, it };
+                failed |= !entry.update(doc);
+                entry
+            })
+            .collect();
+        let mut it = Self {
+            heap,
+            doc: DOC_ITER_SENTINEL,
+            cost,
+        };
+        if !failed {
+            it.settle();
+        }
+        it
+    }
+
+    /// Position on the lowest doc among all inputs.
+    fn settle(&mut self) -> DocId {
+        self.doc = self.heap.peek().map_or(DOC_ITER_SENTINEL, |e| e.doc);
+        self.doc
+    }
+}
+
+impl DocIterator for DisjunctionDocIterator<'_> {
+    fn doc(&mut self) -> DocId {
+        self.doc
+    }
+
+    fn payload(&mut self) -> Payload {
+        0
+    }
+
+    fn advance(&mut self) -> DocId {
+        if self.doc == DOC_ITER_SENTINEL {
+            return DOC_ITER_SENTINEL;
+        }
+        while let Some(mut top) = self.heap.peek_mut()
+            && top.doc == self.doc
+        {
+            let next = top.it.advance();
+            if !top.update(next) {
+                drop(top);
+                self.doc = DOC_ITER_SENTINEL;
+                return DOC_ITER_SENTINEL;
+            }
+        }
+        self.settle()
+    }
+
+    fn advance_to(&mut self, target: DocId) -> DocId {
+        if target <= self.doc {
+            return self.doc;
+        }
+        while let Some(mut top) = self.heap.peek_mut()
+            && top.doc < target
+        {
+            let next = top.it.advance_to(target);
+            if !top.update(next) {
+                drop(top);
+                self.doc = DOC_ITER_SENTINEL;
+                return DOC_ITER_SENTINEL;
+            }
+        }
+        self.settle()
+    }
+
+    fn cost(&self) -> u64 {
+        self.cost
+    }
+
+    fn error(&self) -> Result<(), Error> {
+        self.heap.iter().try_for_each(|e| e.it.error())
     }
 }
 
@@ -1355,6 +1489,157 @@ mod test {
         );
         assert_eq!(it.doc(), DOC_ITER_SENTINEL);
         assert!(matches!(it.error(), Err(Error::Coding(_))));
+    }
+
+    #[test]
+    fn disjunction() {
+        let mut it = DisjunctionDocIterator::new(vec![
+            block_iter(&[1, 2, 5, 8]),
+            block_iter(&[2, 3, 5, 13]),
+            block_iter(&[0, 5, 100]),
+        ]);
+        assert_eq!(it.cost(), 11);
+        assert_eq!(collect_docs(&mut it), vec![0, 1, 2, 3, 5, 8, 13, 100]);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+    }
+
+    #[test]
+    fn disjunction_advance_to() {
+        let mut it =
+            DisjunctionDocIterator::new(vec![block_iter(&[1, 5, 8, 21]), block_iter(&[2, 5, 13])]);
+        assert_eq!(it.doc(), 1);
+        assert_eq!(it.advance_to(1), 1);
+        assert_eq!(it.advance_to(3), 5);
+        assert_eq!(it.advance_to(5), 5);
+        assert_eq!(it.advance(), 8);
+        assert_eq!(it.advance_to(9), 13);
+        assert_eq!(it.advance_to(22), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(100), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn disjunction_empty() {
+        let mut it = DisjunctionDocIterator::new(vec![]);
+        assert_eq!(it.cost(), 0);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+
+        let mut it = DisjunctionDocIterator::new(vec![block_iter(&[]), block_iter(&[])]);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(1), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn disjunction_random() {
+        use rand::prelude::*;
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        for _ in 0..100 {
+            let num_iters = rng.random_range(1..6);
+            let doc_lists: Vec<Vec<DocId>> = (0..num_iters)
+                .map(|_| {
+                    let density = rng.random_range(0.01..0.5);
+                    (0..500).filter(|_| rng.random_bool(density)).collect()
+                })
+                .collect();
+            let expected: Vec<DocId> = doc_lists
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let mut it =
+                DisjunctionDocIterator::new(doc_lists.iter().map(|l| block_iter(l)).collect());
+            assert_eq!(collect_docs(&mut it), expected);
+
+            let mut it =
+                DisjunctionDocIterator::new(doc_lists.iter().map(|l| block_iter(l)).collect());
+            let mut target = 0;
+            loop {
+                target += rng.random_range(1..20);
+                let want = expected
+                    .iter()
+                    .copied()
+                    .find(|&d| d >= target)
+                    .unwrap_or(DOC_ITER_SENTINEL);
+                assert_eq!(it.advance_to(target), want);
+                if want == DOC_ITER_SENTINEL {
+                    break;
+                }
+                target = want;
+            }
+            it.error().unwrap();
+        }
+    }
+
+    #[test]
+    fn disjunction_error() {
+        let mut block = DocIteratorBlockMut::new(DocFormat::LEB128, PayloadFormat::LEB128);
+        block.insert(3, 1 << 40);
+        let mut data = block.serialize();
+        data.truncate(data.len() - 2);
+        let failed = || {
+            // Reading the truncated payload terminates the input with an error.
+            let mut it = DocIteratorBlock::from_vec(data.clone()).unwrap();
+            it.payload();
+            Box::new(it)
+        };
+
+        // Input failed before construction.
+        let mut it = DisjunctionDocIterator::new(vec![block_iter(&[1, 2]), failed()]);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+
+        // Input fails during iteration, before other inputs are exhausted.
+        let mut it = DisjunctionDocIterator::new(vec![
+            block_iter(&[1, 2, 5]),
+            Box::new(FailingDocIterator(block_iter(&[3]))),
+        ]);
+        assert_eq!(it.doc(), 1);
+        assert_eq!(it.advance(), 2);
+        assert_eq!(it.advance(), 3);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+
+        let mut it = DisjunctionDocIterator::new(vec![
+            block_iter(&[1, 2, 5]),
+            Box::new(FailingDocIterator(block_iter(&[3]))),
+        ]);
+        assert_eq!(it.advance_to(4), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+    }
+
+    /// Wraps an iterator and reports an error once it is exhausted.
+    struct FailingDocIterator(Box<dyn DocIterator>);
+
+    impl DocIterator for FailingDocIterator {
+        fn doc(&mut self) -> DocId {
+            self.0.doc()
+        }
+
+        fn payload(&mut self) -> Payload {
+            self.0.payload()
+        }
+
+        fn advance(&mut self) -> DocId {
+            self.0.advance()
+        }
+
+        fn advance_to(&mut self, target: DocId) -> DocId {
+            self.0.advance_to(target)
+        }
+
+        fn cost(&self) -> u64 {
+            self.0.cost()
+        }
+
+        fn error(&self) -> Result<(), Error> {
+            Err(Error::Coding("failed"))
+        }
     }
 
     fn payload_iter(entries: &[(DocId, Payload)]) -> Box<dyn DocIterator> {

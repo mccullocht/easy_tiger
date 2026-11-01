@@ -74,11 +74,7 @@ impl Transaction {
     ///
     /// Accepts a level which may be no higher than the connection level, and optionally a table
     /// name to observe the stats of.
-    pub fn open_stats_cursor(
-        &self,
-        level: Statistics,
-        table: Option<&str>,
-    ) -> Result<StatCursor> {
+    pub fn open_stats_cursor(&self, level: Statistics, table: Option<&str>) -> Result<StatCursor> {
         let table_stats_uri = table.map(|t| {
             CString::new(format!("statistics:table:{t}")).expect("no nulls in table name")
         });

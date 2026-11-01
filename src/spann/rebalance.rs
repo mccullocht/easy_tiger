@@ -364,13 +364,13 @@ mod parallel {
         Ok(encoded_centroid_distance(txn_idx, centroid))
     }
 
-    struct PostingUpdater<'a> {
-        postings: BlockPostingsMut<'a>,
-        assignments: CentroidAssignmentUpdater<'a>,
+    struct PostingUpdater {
+        postings: BlockPostingsMut,
+        assignments: CentroidAssignmentUpdater,
     }
 
-    impl<'a> PostingUpdater<'a> {
-        pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
+    impl PostingUpdater {
+        pub fn new(txn_idx: &TransactionIndex) -> Result<Self> {
             Ok(Self {
                 postings: BlockPostingsMut::from_txn(txn_idx)?,
                 assignments: CentroidAssignmentUpdater::new(txn_idx)?,

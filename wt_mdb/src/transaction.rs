@@ -1,4 +1,4 @@
-use std::{ffi::CString, sync::Arc};
+use std::{ffi::CString, rc::Rc, sync::Arc};
 
 use crate::{
     Connection, IndexCursorGuard, RecordCursorGuard, Result, StatCursor, Statistics,
@@ -14,9 +14,12 @@ use crate::{
 ///
 /// If this transaction is not committed or rolled back explicitly it will be rolled back when
 /// it is dropped.
+///
+/// `Transaction` is neither `Send` nor `Sync`: it shares its underlying session with every cursor
+/// it opens. Cursors may outlive the transaction, but once it has been committed, rolled back, or
+/// dropped any operation that positions those cursors will fail.
 pub struct Transaction {
-    session: Session,
-    open: bool, // true if the transaction is open.
+    session: Rc<Session>,
 }
 
 impl Transaction {
@@ -30,8 +33,7 @@ impl Transaction {
         let session = connection.open_session()?;
         session.begin_transaction(options)?;
         Ok(Self {
-            session,
-            open: true,
+            session: Rc::new(session),
         })
     }
 
@@ -44,27 +46,27 @@ impl Transaction {
     pub fn open_cursor<K: Formatted, V: Formatted>(
         &self,
         table_name: &str,
-    ) -> Result<TypedCursorGuard<'_, K, V>> {
+    ) -> Result<TypedCursorGuard<K, V>> {
         let table_uri = table_uri(table_name);
         self.session.get_or_create_typed_cursor_uri(&table_uri)
     }
 
     /// Open a cursor over `table_name` with `i64` keys and byte-array values.
-    pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursorGuard<'_>> {
+    pub fn open_record_cursor(&self, table_name: &str) -> Result<RecordCursorGuard> {
         let table_uri = table_uri(table_name);
         self.session
             .get_or_create_typed_cursor_uri::<i64, Vec<u8>>(&table_uri)
     }
 
     /// Open a cursor over `table_name` with byte array keys and values.
-    pub fn open_index_cursor(&self, table_name: &str) -> Result<IndexCursorGuard<'_>> {
+    pub fn open_index_cursor(&self, table_name: &str) -> Result<IndexCursorGuard> {
         let table_uri = table_uri(table_name);
         self.session
             .get_or_create_typed_cursor_uri::<Vec<u8>, Vec<u8>>(&table_uri)
     }
 
     /// Open a metadata cursor.
-    pub fn open_metadata_cursor(&self) -> Result<MetadataCursorGuard<'_>> {
+    pub fn open_metadata_cursor(&self) -> Result<MetadataCursorGuard> {
         self.session.get_or_create_typed_cursor_uri(METADATA_URI)
     }
 
@@ -76,7 +78,7 @@ impl Transaction {
         &self,
         level: Statistics,
         table: Option<&str>,
-    ) -> Result<StatCursor<'_>> {
+    ) -> Result<StatCursor> {
         let table_stats_uri = table.map(|t| {
             CString::new(format!("statistics:table:{t}")).expect("no nulls in table name")
         });
@@ -105,8 +107,7 @@ impl Transaction {
         session.set_read_only(true);
         session.begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(ts)))?;
         Ok(Transaction {
-            session,
-            open: true,
+            session: Rc::new(session),
         })
     }
 
@@ -140,21 +141,20 @@ impl Transaction {
     ///
     /// This may result in a WT_ROLLBACK error if there was a conflict with another transaction, in
     /// which case the caller should retry.
-    pub fn commit(mut self, options: Option<CommitTransactionOptions>) -> Result<()> {
-        self.open = false;
+    pub fn commit(self, options: Option<CommitTransactionOptions>) -> Result<()> {
         self.session.commit_transaction(options)
     }
 
     /// Rollback this transaction with any specified options.
-    pub fn rollback(mut self, options: Option<RollbackTransactionOptions>) -> Result<()> {
-        self.open = false;
+    pub fn rollback(self, options: Option<RollbackTransactionOptions>) -> Result<()> {
         self.session.rollback_transaction(options)
     }
 }
 
 impl Drop for Transaction {
     fn drop(&mut self) {
-        if self.open {
+        // This may still be active if commit() failed before reaching WiredTiger.
+        if self.session.transaction_active() {
             // We ignore the result of rollback here, since we can't do anything about it.
             let _ = self.session.rollback_transaction(None);
         }
@@ -193,8 +193,7 @@ impl ReadTransactionFactory {
         session.set_read_only(true);
         session.begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(self.ts)))?;
         Ok(Transaction {
-            session,
-            open: true,
+            session: Rc::new(session),
         })
     }
 }

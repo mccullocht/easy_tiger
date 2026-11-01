@@ -451,8 +451,8 @@ impl DocIterator for DocIteratorBlock<'_> {
 /// stored under keys produced by [`doc_block_key`].
 ///
 /// Blocks are read in key order so block limit docids must be non-negative.
-pub struct TermDocIterator<'a> {
-    cursor: IndexCursorGuard<'a>,
+pub struct TermDocIterator {
+    cursor: IndexCursorGuard,
     /// Key prefix shared by all blocks in the posting.
     prefix_len: usize,
     /// Upper bound key for all blocks in the posting.
@@ -464,13 +464,13 @@ pub struct TermDocIterator<'a> {
     error: Option<Error>,
 }
 
-impl<'a> TermDocIterator<'a> {
+impl TermDocIterator {
     /// Create a new iterator over the blocks for `term` in `field` in `table_name`, positioned on
     /// the first doc.
     ///
     /// `cost` is returned by [`DocIterator::cost`].
     pub fn new(
-        txn: &'a Transaction,
+        txn: &Transaction,
         table_name: &str,
         field: &str,
         term: &[u8],
@@ -554,7 +554,7 @@ impl<'a> TermDocIterator<'a> {
     }
 }
 
-impl DocIterator for TermDocIterator<'_> {
+impl DocIterator for TermDocIterator {
     fn doc(&mut self) -> DocId {
         self.block.doc()
     }

@@ -56,7 +56,7 @@ fn generate_assignments(rng: &mut impl Rng) -> (Vec<u64>, u32) {
 
 /// Write the posting for `term` to `cursor` in blocks of [`BLOCK_LEN`] entries.
 fn write_posting(
-    cursor: &mut wt_mdb::IndexCursorGuard<'_>,
+    cursor: &mut wt_mdb::IndexCursorGuard,
     term: &[u8],
     entries: impl ExactSizeIterator<Item = (DocId, Payload)>,
     payload_format: PayloadFormat,

@@ -3,9 +3,10 @@ mod typed_cursor;
 
 use std::{
     borrow::Cow,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::{CStr, CString, c_char, c_void},
     ptr::NonNull,
+    rc::Rc,
     sync::Arc,
 };
 
@@ -97,8 +98,6 @@ impl Drop for InnerCursor {
         }
     }
 }
-
-unsafe impl Send for InnerCursor {}
 
 /// Used to select the type of query timestamp to read from the session.
 pub enum QueryTransactionTimestampType {
@@ -291,21 +290,19 @@ impl ConfigurationString for RollbackTransactionOptions {
 }
 
 const DEFAULT_CURSOR_OPTIONS: &CStr = c"raw";
-const DEFAULT_RO_CURSOR_OPTIONS: &CStr = c"raw,readonly";
 
 /// A WiredTiger session.
 ///
 /// `Session`s are used to create cursors to view and mutate data and manage transaction state.
 ///
-/// `Session` is `Send` and may be freely passed to other threads but it is not `Sync` as it is
-/// unsafe to access without synchronization. `RecordCursor`s reference their parent `Session` so
-/// it is not possible to `Send` a `Session` with open cursors. Some `Session` APIs support cursor
-/// caching to try to mitigate the costs of opening/closing cursors to perform a `Send`.
+/// `Session` is neither `Send` nor `Sync`. Cursors share ownership of their parent `Session` via
+/// an `Rc` so the session remains open until both the owning `Transaction` and all of its cursors
+/// have been dropped.
 pub(crate) struct Session {
     ptr: NonNull<WT_SESSION>,
     connection: Arc<Connection>,
     cached_cursors: RefCell<Vec<InnerCursor>>,
-    default_cursor_options: &'static CStr,
+    transaction_active: Cell<bool>,
 }
 
 impl Session {
@@ -314,15 +311,7 @@ impl Session {
             ptr: session,
             connection: connection.clone(),
             cached_cursors: RefCell::new(vec![]),
-            default_cursor_options: DEFAULT_CURSOR_OPTIONS,
-        }
-    }
-
-    pub(crate) fn set_read_only(&mut self, read_only: bool) {
-        self.default_cursor_options = if read_only {
-            DEFAULT_RO_CURSOR_OPTIONS
-        } else {
-            DEFAULT_CURSOR_OPTIONS
+            transaction_active: Cell::new(false),
         }
     }
 
@@ -366,14 +355,14 @@ impl Session {
 
     // NB: this doesn't accept options because we don't check options when serving from the cache.
     pub(crate) fn get_or_create_typed_cursor_uri<K: Formatted, V: Formatted>(
-        &self,
+        self: &Rc<Self>,
         uri: &CStr,
-    ) -> Result<TypedCursorGuard<'_, K, V>> {
+    ) -> Result<TypedCursorGuard<K, V>> {
         let mut cursor_cache = self.cached_cursors.borrow_mut();
         cursor_cache
             .iter()
             .position(|c| c.uri() == uri)
-            .map(|i| TypedCursor::new(cursor_cache.remove(i), self))
+            .map(|i| TypedCursor::new(cursor_cache.remove(i), Rc::clone(self)))
             .unwrap_or_else(|| self.new_typed_cursor_uri::<K, V>(uri, None))
             .map(TypedCursorGuard::new)
     }
@@ -395,11 +384,11 @@ impl Session {
         options: Option<&CStr>,
     ) -> Result<InnerCursor> {
         let options: Cow<'_, CStr> = if let Some(o) = options {
-            CString::new([self.default_cursor_options.to_bytes(), b",", o.to_bytes()].concat())
+            CString::new([DEFAULT_CURSOR_OPTIONS.to_bytes(), b",", o.to_bytes()].concat())
                 .expect("no nulls")
                 .into()
         } else {
-            self.default_cursor_options.into()
+            DEFAULT_CURSOR_OPTIONS.into()
         };
         let mut cursorp: *mut WT_CURSOR = std::ptr::null_mut();
         unsafe {
@@ -418,12 +407,17 @@ impl Session {
     }
 
     pub(crate) fn new_typed_cursor_uri<K: Formatted, V: Formatted>(
-        &self,
+        self: &Rc<Self>,
         uri: &CStr,
         options: Option<&CStr>,
-    ) -> Result<TypedCursor<'_, K, V>> {
+    ) -> Result<TypedCursor<K, V>> {
         let inner = self.open_raw_cursor(uri, options)?;
-        TypedCursor::new(inner, self)
+        TypedCursor::new(inner, Rc::clone(self))
+    }
+
+    /// Returns true if a transaction is active on this session.
+    pub(crate) fn transaction_active(&self) -> bool {
+        self.transaction_active.get()
     }
 
     /// Starts a transaction in this session.
@@ -436,6 +430,7 @@ impl Session {
     /// but otherwise behavior is unspecified.
     pub fn begin_transaction(&self, options: Option<BeginTransactionOptions>) -> Result<()> {
         unsafe { wt_call!(self.ptr, begin_transaction, options.as_config_ptr()) }?;
+        self.transaction_active.set(true);
         if let Some(ts) = options.and_then(|o| o.read_timestamp) {
             self.set_transaction_timestamp(SetTransactionTimestampType::Read, ts)?;
         }
@@ -453,6 +448,8 @@ impl Session {
         if let Some(ts) = options.as_ref().and_then(|o| o.commit_timestamp) {
             self.set_transaction_timestamp(SetTransactionTimestampType::Commit, ts)?;
         }
+        // The transaction is over whether or not the commit succeeds.
+        self.transaction_active.set(false);
         unsafe { wt_call!(self.ptr, commit_transaction, options.as_config_ptr()) }
     }
 
@@ -463,6 +460,7 @@ impl Session {
     /// A transaction must be in progress when this method is called or an error will be returned (EINVAL) but behavior
     /// is otherwise unspecified.
     pub fn rollback_transaction(&self, options: Option<RollbackTransactionOptions>) -> Result<()> {
+        self.transaction_active.set(false);
         unsafe { wt_call!(self.ptr, rollback_transaction, options.as_config_ptr()) }
     }
 
@@ -531,8 +529,6 @@ impl Drop for Session {
     }
 }
 
-unsafe impl Send for Session {}
-
 /// Owned value produced by a StatCursor.
 #[derive(Debug, Clone)]
 pub struct StatValue {
@@ -594,10 +590,10 @@ impl Formatted for StatValue {
     }
 }
 
-pub type RecordCursor<'a> = TypedCursor<'a, i64, Vec<u8>>;
-pub type RecordCursorGuard<'a> = TypedCursorGuard<'a, i64, Vec<u8>>;
-pub type IndexCursor<'a> = TypedCursor<'a, Vec<u8>, Vec<u8>>;
-pub type IndexCursorGuard<'a> = TypedCursorGuard<'a, Vec<u8>, Vec<u8>>;
-pub type MetadataCursor<'a> = TypedCursor<'a, CString, CString>;
-pub type MetadataCursorGuard<'a> = TypedCursorGuard<'a, CString, CString>;
-pub type StatCursor<'a> = TypedCursor<'a, i32, StatValue>;
+pub type RecordCursor = TypedCursor<i64, Vec<u8>>;
+pub type RecordCursorGuard = TypedCursorGuard<i64, Vec<u8>>;
+pub type IndexCursor = TypedCursor<Vec<u8>, Vec<u8>>;
+pub type IndexCursorGuard = TypedCursorGuard<Vec<u8>, Vec<u8>>;
+pub type MetadataCursor = TypedCursor<CString, CString>;
+pub type MetadataCursorGuard = TypedCursorGuard<CString, CString>;
+pub type StatCursor = TypedCursor<i32, StatValue>;

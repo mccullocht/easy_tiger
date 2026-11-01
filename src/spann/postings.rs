@@ -18,16 +18,16 @@ use crate::posting_block::{PostingBlock, PostingBlockMut};
 /// Each centroid maps to a single row whose value is a serialized [`PostingBlock`] containing all
 /// vectors assigned to that centroid. Modified blocks are held in memory and written to storage
 /// only when [`flush`] is called.
-pub struct BlockPostingsMut<'a> {
+pub struct BlockPostingsMut {
     // TODO: consider RefCell/inner mutability for the cursor since the cursor makes this struct
     // Send + !Sync anyway.
-    cursor: TypedCursorGuard<'a, u32, Vec<u8>>,
+    cursor: TypedCursorGuard<u32, Vec<u8>>,
     vector_len: usize,
     cached: HashMap<u32, PostingBlockMut>,
 }
 
-impl<'a> BlockPostingsMut<'a> {
-    pub fn new(cursor: TypedCursorGuard<'a, u32, Vec<u8>>, vector_len: usize) -> Self {
+impl BlockPostingsMut {
+    pub fn new(cursor: TypedCursorGuard<u32, Vec<u8>>, vector_len: usize) -> Self {
         Self {
             cursor,
             vector_len,
@@ -35,7 +35,7 @@ impl<'a> BlockPostingsMut<'a> {
         }
     }
 
-    pub fn from_txn(txn_idx: &'a TransactionIndex) -> Result<Self> {
+    pub fn from_txn(txn_idx: &TransactionIndex) -> Result<Self> {
         txn_idx
             .transaction()
             .open_cursor::<u32, Vec<u8>>(txn_idx.index().postings_table_name())

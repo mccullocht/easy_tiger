@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use easy_tiger::token::{
-    CentroidParentFilterDocIterator, DOC_ITER_SENTINEL, DocFormat, DocId, DocIterator,
-    DocIteratorBlockMut, Payload, PayloadFormat, TermDocIterator, doc_block_key,
+    CentroidParentFilterDocIterator, DOC_ITER_SENTINEL, DocId, DocIterator, DocIteratorBlockMut,
+    Payload, PayloadFormat, TermDocIterator, doc_block_key,
 };
 use rand::prelude::*;
 use wt_mdb::{
@@ -64,7 +64,7 @@ fn write_posting(
     let num_blocks = entries.len().div_ceil(BLOCK_LEN);
     let mut entries = entries.peekable();
     for i in 0..num_blocks {
-        let mut block = DocIteratorBlockMut::new(DocFormat::LEB128, payload_format);
+        let mut block = DocIteratorBlockMut::new(payload_format);
         let mut limit = DOC_ITER_SENTINEL;
         for (doc, payload) in entries.by_ref().take(BLOCK_LEN) {
             block.insert(doc, payload);

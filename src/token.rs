@@ -702,7 +702,7 @@ impl PayloadFormat {
         debug_assert!(rank <= target && target < len);
         match self {
             PayloadFormat::None => {
-                *decoded = DecodedPayloads::Single(0);
+                decoded.single = 0;
                 Ok(target + 1)
             }
             PayloadFormat::LEB128 => {
@@ -714,8 +714,7 @@ impl PayloadFormat {
                         .ok_or("invalid payload")?;
                     *data = &data[end + 1..];
                 }
-                let payload = leb128::read::unsigned(data).map_err(|_| "invalid payload")?;
-                *decoded = DecodedPayloads::Single(payload);
+                decoded.single = leb128::read::unsigned(data).map_err(|_| "invalid payload")?;
                 Ok(target + 1)
             }
             PayloadFormat::BitPacked => {
@@ -731,8 +730,12 @@ impl PayloadFormat {
                         .split_at_checked(bitpacked_len(n, num_bits))
                         .ok_or("truncated payloads")?;
                     *data = rest;
-                    if target < chunk_rank + n {
-                        let chunk = decoded.chunk_mut();
+                    let next_rank = chunk_rank + n;
+                    if target < next_rank {
+                        if next_rank == len && !data.is_empty() {
+                            return Err("unexpected bitpacked payload data");
+                        }
+                        let chunk = &mut decoded.chunk;
                         let bitpacker = BitPacker4x::new();
                         if n == BITPACKED_CHUNK_LEN {
                             bitpacker.decompress(packed, chunk, num_bits);
@@ -741,9 +744,9 @@ impl PayloadFormat {
                             block[..packed.len()].copy_from_slice(packed);
                             bitpacker.decompress(&block, chunk, num_bits);
                         }
-                        return Ok(chunk_rank + n);
+                        return Ok(next_rank);
                     }
-                    chunk_rank += n;
+                    chunk_rank = next_rank;
                 }
             }
         }
@@ -751,30 +754,29 @@ impl PayloadFormat {
 }
 
 /// Payloads most recently decoded by [`PayloadFormat::decode_to`].
-enum DecodedPayloads {
-    /// A single payload.
-    Single(Payload),
+///
+/// Which field holds the decoded payloads depends on the [`PayloadFormat`].
+struct DecodedPayloads {
+    /// A single payload decoded from any format other than [`PayloadFormat::BitPacked`].
+    single: Payload,
     /// A [`PayloadFormat::BitPacked`] chunk.
-    Chunk(Box<[u32; BITPACKED_CHUNK_LEN]>),
+    chunk: [u32; BITPACKED_CHUNK_LEN],
 }
 
 impl DecodedPayloads {
-    /// Return the chunk buffer, allocating it if needed.
-    fn chunk_mut(&mut self) -> &mut [u32; BITPACKED_CHUNK_LEN] {
-        if let DecodedPayloads::Single(_) = self {
-            *self = DecodedPayloads::Chunk(Box::new([0; BITPACKED_CHUNK_LEN]));
-        }
-        match self {
-            DecodedPayloads::Chunk(chunk) => chunk,
-            DecodedPayloads::Single(_) => unreachable!(),
+    fn new() -> Self {
+        Self {
+            single: 0,
+            chunk: [0; BITPACKED_CHUNK_LEN],
         }
     }
 
-    /// Return the decoded payload at `rank` within the block.
-    fn get(&self, rank: usize) -> Payload {
-        match self {
-            DecodedPayloads::Single(payload) => *payload,
-            DecodedPayloads::Chunk(chunk) => chunk[rank % BITPACKED_CHUNK_LEN].into(),
+    /// Return the decoded payload at `rank` within the block, which was encoded with `format`.
+    fn get(&self, format: PayloadFormat, rank: usize) -> Payload {
+        if format == PayloadFormat::BitPacked {
+            self.chunk[rank % BITPACKED_CHUNK_LEN].into()
+        } else {
+            self.single
         }
     }
 }
@@ -868,7 +870,7 @@ impl<'a> DocIteratorBlock<'a> {
             data: block,
             payload_offset,
             next_payload_rank: 0,
-            decoded_payloads: DecodedPayloads::Single(0),
+            decoded_payloads: DecodedPayloads::new(),
             error: None,
         })
     }
@@ -928,7 +930,7 @@ impl DocIteratorBlock<'static> {
             data: Cow::Borrowed(&[]),
             payload_offset: 0,
             next_payload_rank: 0,
-            decoded_payloads: DecodedPayloads::Single(0),
+            decoded_payloads: DecodedPayloads::new(),
             error: None,
         }
     }
@@ -964,7 +966,7 @@ impl DocIterator for DocIteratorBlock<'_> {
                 }
             }
         }
-        self.decoded_payloads.get(self.rank)
+        self.decoded_payloads.get(self.payload_format, self.rank)
     }
 
     fn advance(&mut self) -> DocId {
@@ -2194,14 +2196,18 @@ mod test {
                 for step in [1, 50] {
                     let mut remaining = data.as_slice();
                     let mut next_rank = 0;
-                    let mut decoded = DecodedPayloads::Single(0);
+                    let mut decoded = DecodedPayloads::new();
                     for target in (0..len).step_by(step) {
                         if next_rank <= target {
                             next_rank = PayloadFormat::BitPacked
                                 .decode_to(&mut remaining, next_rank, target, len, &mut decoded)
                                 .unwrap();
                         }
-                        assert_eq!(decoded.get(target), payloads[target], "{context}");
+                        assert_eq!(
+                            decoded.get(PayloadFormat::BitPacked, target),
+                            payloads[target],
+                            "{context}"
+                        );
                     }
                 }
             }
@@ -2237,6 +2243,15 @@ mod test {
         it.error().unwrap();
         check_err(&data[..6 + 16 * 7], 128);
         check_err(&data[..5], 0);
+
+        // Trailing data is only detected when the last chunk is read.
+        let mut trailing = data.clone();
+        trailing.push(0);
+        check_err(&trailing, 299);
+        let mut it = DocIteratorBlock::new(&trailing).unwrap();
+        assert_eq!(it.advance_to(255), 255);
+        assert_eq!(it.payload(), 255);
+        it.error().unwrap();
     }
 
     #[test]

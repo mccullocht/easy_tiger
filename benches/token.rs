@@ -3,7 +3,7 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use easy_tiger::token::{
     CentroidParentFilterDocIterator, DOC_ITER_SENTINEL, DocId, DocIterator, DocIteratorBlockMut,
-    Payload, PayloadFormat, TermDocIterator, doc_block_key,
+    Payload, TermDocIterator, doc_block_key,
 };
 use rand::prelude::*;
 use wt_mdb::{
@@ -59,12 +59,12 @@ fn write_posting(
     cursor: &mut wt_mdb::IndexCursorGuard,
     term: &[u8],
     entries: impl ExactSizeIterator<Item = (DocId, Payload)>,
-    payload_format: PayloadFormat,
+    has_payloads: bool,
 ) {
     let num_blocks = entries.len().div_ceil(BLOCK_LEN);
     let mut entries = entries.peekable();
     for i in 0..num_blocks {
-        let mut block = DocIteratorBlockMut::new(payload_format);
+        let mut block = DocIteratorBlockMut::new(has_payloads);
         let mut limit = DOC_ITER_SENTINEL;
         for (doc, payload) in entries.by_ref().take(BLOCK_LEN) {
             block.insert(doc, payload);
@@ -117,7 +117,7 @@ fn centroid_parent_filter_benchmarks(c: &mut Criterion) {
                     .iter()
                     .enumerate()
                     .map(|(d, &c)| (d as DocId, c)),
-                PayloadFormat::LEB128,
+                true,
             );
             for &len in INPUT_LENS {
                 let mut docs = rand::seq::index::sample(&mut rng, NUM_DOCS, len).into_vec();
@@ -126,7 +126,7 @@ fn centroid_parent_filter_benchmarks(c: &mut Criterion) {
                     &mut cursor,
                     &input_term(len),
                     docs.into_iter().map(|d| (d as DocId, 0)),
-                    PayloadFormat::None,
+                    false,
                 );
             }
         }

@@ -214,7 +214,7 @@ impl DocFormat {
             }
             DocFormat::Range => {
                 for doc in docs {
-                    assert_eq!(doc, prev + 1, "docs must be contiguous");
+                    debug_assert_eq!(doc, prev + 1, "docs must be contiguous");
                     prev = doc;
                 }
             }
@@ -310,12 +310,13 @@ impl BitmapDocs {
         if first_byte & 1 == 0 || last_byte == 0 {
             return Err("non-canonical doc bitmap");
         }
-        if bitmap
+        let (bc, br) = bitmap.as_chunks::<8>();
+        let bitmap_count = bc
             .iter()
-            .map(|b| b.count_ones() as usize)
-            .sum::<usize>()
-            != count
-        {
+            .map(|w| u64::from_ne_bytes(*w).count_ones() as usize)
+            .chain(br.iter().map(|b| b.count_ones() as usize))
+            .sum::<usize>();
+        if bitmap_count != count {
             return Err("doc bitmap count mismatch");
         }
         let last_bit = (bitmap.len() as u64 - 1) * 8 + u64::from(7 - last_byte.leading_zeros());
@@ -611,7 +612,7 @@ impl DocIteratorBlock<'static> {
         Self {
             doc_format: DocFormat::Range,
             payload_format: PayloadFormat::None,
-            docs: Docs::List(Vec::new()),
+            docs: Docs::Range(DOC_ITER_SENTINEL),
             len: 0,
             rank: 0,
             doc: DOC_ITER_SENTINEL,

@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeMap, BinaryHeap},
 };
 
+use bitpacking::{BitPacker, BitPacker4x};
 use wt_mdb::{IndexCursorGuard, Transaction};
 
 #[derive(Debug, Clone)]
@@ -157,6 +158,80 @@ pub enum DocFormat {
     /// Bits are ordered least significant first within each byte. Bit 0 is always set and the
     /// last byte is never zero.
     Bitmap = 2,
+    /// Docs after the first are delta encoded in chunks of [`BITPACKED_CHUNK_LEN`] docs, each as
+    /// a [`BitPacker4x`] block with its own bit width.
+    ///
+    /// Each chunk is encoded as the bit width (u8) followed by the packed bytes. Only the last
+    /// chunk may hold fewer than [`BITPACKED_CHUNK_LEN`] docs; its packed bytes are truncated to
+    /// the length needed to hold the docs that are present (see [`bitpacked_len`]). Within a chunk
+    /// docs are packed as offsets from the doc before the chunk, so each chunk may span no more than
+    /// [`u32::MAX`].
+    BitPacked = 3,
+}
+
+/// Number of docs in each [`DocFormat::BitPacked`] chunk.
+const BITPACKED_CHUNK_LEN: usize = BitPacker4x::BLOCK_LEN;
+
+/// Return the number of bytes needed to hold the first `len` values of a [`BitPacker4x`] block
+/// packed with `num_bits`.
+///
+/// [`BitPacker4x`] interleaves values across four 32-bit lanes: value `i` is packed at position
+/// `i / 4` of lane `i % 4`, and the output is a sequence of 16 byte words each holding the next 32
+/// bits of every lane. The bytes needed are determined by the length of the longest lane.
+fn bitpacked_len(len: usize, num_bits: u8) -> usize {
+    (len.div_ceil(4) * usize::from(num_bits)).div_ceil(32) * 16
+}
+
+/// Split `docs` into [`DocFormat::BitPacked`] chunks and call `f` with a [`BitPacker4x`] block of
+/// offsets for each chunk and the number of docs in the chunk.
+///
+/// Offsets are relative to the doc before the chunk, beginning with `first`. The last chunk is
+/// padded with its last offset so that padding does not increase the bit width.
+///
+/// Returns false without visiting the remaining chunks if a chunk spans more than [`u32::MAX`].
+///
+/// *Panics* if `docs` are not strictly increasing and greater than `first`.
+fn bitpacked_chunks(
+    first: DocId,
+    docs: impl Iterator<Item = DocId>,
+    mut f: impl FnMut(&[u32; BITPACKED_CHUNK_LEN], usize),
+) -> bool {
+    let mut offsets = [0u32; BITPACKED_CHUNK_LEN];
+    let mut len = 0;
+    let mut base = first;
+    let mut prev = first;
+    for doc in docs {
+        assert!(doc > prev, "docs must be strictly increasing");
+        let Ok(offset) = u32::try_from(doc - base) else {
+            return false;
+        };
+        offsets[len] = offset;
+        len += 1;
+        prev = doc;
+        if len == BITPACKED_CHUNK_LEN {
+            f(&offsets, len);
+            base = doc;
+            len = 0;
+        }
+    }
+    if len > 0 {
+        let last = offsets[len - 1];
+        offsets[len..].fill(last);
+        f(&offsets, len);
+    }
+    true
+}
+
+/// Return the [`DocFormat::BitPacked`] encoded length of `docs`, or `None` if they cannot be
+/// encoded.
+fn bitpacked_encoded_len(first: DocId, docs: impl Iterator<Item = DocId>) -> Option<u64> {
+    let bitpacker = BitPacker4x::new();
+    let mut encoded_len = 0;
+    bitpacked_chunks(first, docs, |offsets, len| {
+        let num_bits = bitpacker.num_bits_sorted(0, offsets);
+        encoded_len += 1 + bitpacked_len(len, num_bits) as u64;
+    })
+    .then_some(encoded_len)
 }
 
 impl From<DocFormat> for u8 {
@@ -173,24 +248,52 @@ impl TryFrom<u8> for DocFormat {
             0 => Ok(DocFormat::LEB128),
             1 => Ok(DocFormat::Range),
             2 => Ok(DocFormat::Bitmap),
+            3 => Ok(DocFormat::BitPacked),
             _ => Err(Error::UnknownDocFormat(value)),
         }
     }
 }
 
 impl DocFormat {
-    /// Select a compact format for `len` strictly increasing docs from `first` to `last`.
+    /// Select a compact format for `len` strictly increasing docs from `first` to `last`. `docs`
+    /// are the docs after `first`.
     ///
-    /// Every [`DocFormat::LEB128`] delta is at least one byte, so [`DocFormat::Bitmap`] is selected
-    /// whenever it is no larger than that lower bound. This may miss some cases where the bitmap is
-    /// slightly smaller because many deltas need multiple bytes.
-    fn select(len: usize, first: DocId, last: DocId) -> Self {
+    /// The smallest encoding is selected, preferring [`DocFormat::Bitmap`] then
+    /// [`DocFormat::BitPacked`] on ties. Every [`DocFormat::LEB128`] delta is at least one byte, so
+    /// the exact [`DocFormat::LEB128`] length is only computed if neither of the other formats is
+    /// smaller than that lower bound.
+    fn select(
+        len: usize,
+        first: DocId,
+        last: DocId,
+        docs: impl Iterator<Item = DocId> + Clone,
+    ) -> Self {
         let len = len as u64;
         let span = last - first;
         if len == 0 || span == len - 1 {
-            DocFormat::Range
-        } else if span / 8 < len - 1 {
+            return DocFormat::Range;
+        }
+        let leb128_min_len = len - 1;
+        let bitmap_len = span / 8 + 1;
+        let bitpacked_len = bitpacked_encoded_len(first, docs.clone()).unwrap_or(u64::MAX);
+        if bitmap_len <= bitpacked_len.min(leb128_min_len) {
+            return DocFormat::Bitmap;
+        }
+        if bitpacked_len < leb128_min_len {
+            return DocFormat::BitPacked;
+        }
+        let mut prev = first;
+        let leb128_len = docs
+            .map(|doc| {
+                let delta = doc - prev;
+                prev = doc;
+                u64::from((u64::BITS - delta.leading_zeros()).div_ceil(7))
+            })
+            .sum::<u64>();
+        if bitmap_len <= bitpacked_len.min(leb128_len) {
             DocFormat::Bitmap
+        } else if bitpacked_len <= leb128_len {
+            DocFormat::BitPacked
         } else {
             DocFormat::LEB128
         }
@@ -201,7 +304,8 @@ impl DocFormat {
     ///
     /// `docs` must be strictly increasing and greater than `first`.
     ///
-    /// *Panics* if `docs` are not contiguous and the format is [`DocFormat::Range`].
+    /// *Panics* if `docs` are not contiguous and the format is [`DocFormat::Range`], or if a chunk
+    /// spans more than [`u32::MAX`] and the format is [`DocFormat::BitPacked`].
     fn encode(self, first: DocId, docs: impl Iterator<Item = DocId>, out: &mut Vec<u8>) {
         let mut prev = first;
         match self {
@@ -231,6 +335,17 @@ impl DocFormat {
                     out[i] |= 1 << (bit % 8);
                     prev = doc;
                 }
+            }
+            DocFormat::BitPacked => {
+                let bitpacker = BitPacker4x::new();
+                let mut packed = [0u8; BITPACKED_CHUNK_LEN * 4];
+                let encoded = bitpacked_chunks(first, docs, |offsets, len| {
+                    let num_bits = bitpacker.num_bits_sorted(0, offsets);
+                    bitpacker.compress_sorted(0, offsets, &mut packed, num_bits);
+                    out.push(num_bits);
+                    out.extend_from_slice(&packed[..bitpacked_len(len, num_bits)]);
+                });
+                assert!(encoded, "bitpacked chunk span must fit in u32");
             }
         }
     }
@@ -273,6 +388,49 @@ impl DocFormat {
                 Ok(Docs::Range(first))
             }
             DocFormat::Bitmap => BitmapDocs::new(first, len, data, offset).map(Docs::Bitmap),
+            DocFormat::BitPacked => {
+                let bitpacker = BitPacker4x::new();
+                let mut data = data;
+                // Each doc needs at least one bit; bound the allocation for corrupt counts.
+                let mut docs = Vec::with_capacity(len.min(data.len() * 8 + 1));
+                docs.push(first);
+                let mut offsets = [0u32; BITPACKED_CHUNK_LEN];
+                while docs.len() < len {
+                    let n = (len - docs.len()).min(BITPACKED_CHUNK_LEN);
+                    let (&num_bits, rest) = data.split_first().ok_or("truncated bitpacked docs")?;
+                    if num_bits == 0 || num_bits > 32 {
+                        return Err("invalid bitpacked num bits");
+                    }
+                    let (packed, rest) = rest
+                        .split_at_checked(bitpacked_len(n, num_bits))
+                        .ok_or("truncated bitpacked docs")?;
+                    data = rest;
+                    if n == BITPACKED_CHUNK_LEN {
+                        bitpacker.decompress_sorted(0, packed, &mut offsets, num_bits);
+                    } else {
+                        let mut block = [0u8; BITPACKED_CHUNK_LEN * 4];
+                        block[..packed.len()].copy_from_slice(packed);
+                        bitpacker.decompress_sorted(0, &block, &mut offsets, num_bits);
+                    }
+                    let offsets = &offsets[..n];
+                    // Deltas that overflow u32 wrap and appear as a decrease.
+                    if offsets[0] == 0 || !offsets.is_sorted_by(|a, b| a < b) {
+                        return Err("bitpacked docs not strictly increasing");
+                    }
+                    let base = *docs.last().unwrap();
+                    if base
+                        .checked_add(u64::from(offsets[n - 1]))
+                        .is_none_or(|last| last == DOC_ITER_SENTINEL)
+                    {
+                        return Err("bitpacked doc overflow");
+                    }
+                    docs.extend(offsets.iter().map(|&o| base + u64::from(o)));
+                }
+                if !data.is_empty() {
+                    return Err("unexpected bitpacked doc data");
+                }
+                Ok(Docs::List(docs))
+            }
         }
     }
 }
@@ -483,8 +641,8 @@ impl PayloadFormat {
 /// * remaining docs encoded with [`DocFormat`]
 /// * payloads encoded with [`PayloadFormat`]
 ///
-/// [`DocFormat::LEB128`] docs are decoded eagerly on construction; other doc formats are read in
-/// place. Payloads are decoded lazily as they are read.
+/// [`DocFormat::LEB128`] and [`DocFormat::BitPacked`] docs are decoded eagerly on construction;
+/// other doc formats are read in place. Payloads are decoded lazily as they are read.
 pub struct DocIteratorBlock<'a> {
     doc_format: DocFormat,
     payload_format: PayloadFormat,
@@ -1296,9 +1454,12 @@ impl DocIteratorBlockMut {
             self.entries.first_key_value(),
             self.entries.last_key_value(),
         ) {
-            (Some((&first, _)), Some((&last, _))) => {
-                DocFormat::select(self.entries.len(), first, last)
-            }
+            (Some((&first, _)), Some((&last, _))) => DocFormat::select(
+                self.entries.len(),
+                first,
+                last,
+                self.entries.keys().copied().skip(1),
+            ),
             _ => DocFormat::Range,
         }
     }
@@ -1488,11 +1649,26 @@ mod test {
         assert_eq!(format_of([]), DocFormat::Range);
         assert_eq!(format_of([7]), DocFormat::Range);
         assert_eq!(format_of(10..20), DocFormat::Range);
+        // 26 bitmap bytes vs 33 bitpacked bytes.
         assert_eq!(format_of((0..=200).step_by(2)), DocFormat::Bitmap);
-        // 88 bitmap bytes vs at least 100 delta bytes.
-        assert_eq!(format_of((0..=700).step_by(7)), DocFormat::Bitmap);
-        // 101 bitmap bytes vs at least 100 delta bytes.
-        assert_eq!(format_of((0..=800).step_by(8)), DocFormat::LEB128);
+        // 38 bitmap bytes vs 33 bitpacked bytes.
+        assert_eq!(format_of((0..=300).step_by(3)), DocFormat::BitPacked);
+        // 88 bitmap bytes vs 49 bitpacked bytes vs 100 delta bytes.
+        assert_eq!(format_of((0..=700).step_by(7)), DocFormat::BitPacked);
+        // Multiple chunks: 263 bitmap bytes vs 131 bitpacked bytes vs at least 300 delta bytes.
+        assert_eq!(format_of((0..=2100).step_by(7)), DocFormat::BitPacked);
+        // Multiple chunks: 76 bitmap bytes vs 83 bitpacked bytes.
+        assert_eq!(format_of((0..=600).step_by(2)), DocFormat::Bitmap);
+        // One large delta: 209 bitpacked bytes vs 55 delta bytes.
+        assert_eq!(
+            format_of((0..100).step_by(2).chain([1 << 31])),
+            DocFormat::LEB128
+        );
+        // Each chunk spans no more than u32::MAX though the block does: 947 bitpacked bytes vs
+        // 1196 delta bytes.
+        assert_eq!(format_of((0..300).map(|d| d << 24)), DocFormat::BitPacked);
+        // Chunk span does not fit in u32.
+        assert_eq!(format_of((0..=300).map(|d| d << 33)), DocFormat::LEB128);
         assert_eq!(
             format_of(ENTRIES.iter().map(|&(d, _)| d)),
             DocFormat::LEB128
@@ -1573,8 +1749,9 @@ mod test {
     #[test]
     fn bitmap_block() {
         check_block(&(0..=200).step_by(2).collect::<Vec<_>>(), DocFormat::Bitmap);
+        // Multiple bitpacked chunks.
         check_block(
-            &(1_000_003..=1_000_703).step_by(7).collect::<Vec<_>>(),
+            &(1_000_003..=1_000_603).step_by(2).collect::<Vec<_>>(),
             DocFormat::Bitmap,
         );
         // Spans several empty words.
@@ -1587,6 +1764,155 @@ mod test {
             &(3..67).chain(130..192).collect::<Vec<_>>(),
             DocFormat::Bitmap,
         );
+    }
+
+    #[test]
+    fn bitpacked_block() {
+        check_block(
+            &(0..=700).step_by(7).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // The last doc is packed in a lane word past (num_bits * len) / 128 words.
+        check_block(
+            &(0..=1717).step_by(17).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // Full chunk with varying deltas, some of which need multiple LEB128 bytes.
+        check_block(
+            &(0..129).map(|i| (1 << 40) + i * i).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // Two full chunks.
+        check_block(
+            &(0..=1280).step_by(5).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // Chunks with different bit widths and a partial last chunk.
+        check_block(
+            &(0..=128)
+                .map(|i| i * 3)
+                .chain((1..=200).map(|i| 384 + i * 100))
+                .collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+    }
+
+    #[test]
+    fn bitpacked_codec() {
+        use rand::prelude::*;
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        for len in 1..=BITPACKED_CHUNK_LEN * 3 + 5 {
+            for num_bits in 1..=32u8 {
+                let first = rng.random_range(0..1 << 50);
+                let mut docs = vec![first];
+                let mut expected_len = 0;
+                for chunk_start in (0..len).step_by(BITPACKED_CHUNK_LEN) {
+                    let n = (len - chunk_start).min(BITPACKED_CHUNK_LEN);
+                    // One delta uses all num_bits; the rest keep the chunk span within a u32.
+                    let top = 1u64 << (num_bits - 1);
+                    let max_delta =
+                        ((1 << num_bits) - 1).min((u64::from(u32::MAX) - top) / n as u64);
+                    for i in 0..n {
+                        let delta = if i == n / 2 {
+                            top
+                        } else {
+                            rng.random_range(1..=max_delta)
+                        };
+                        docs.push(docs.last().unwrap() + delta);
+                    }
+                    expected_len += 1 + bitpacked_len(n, num_bits);
+                }
+                let context = format!("len {len} num_bits {num_bits}");
+                let mut data = vec![];
+                DocFormat::BitPacked.encode(first, docs[1..].iter().copied(), &mut data);
+                assert_eq!(data.len(), expected_len, "{context}");
+                assert_eq!(
+                    bitpacked_encoded_len(first, docs[1..].iter().copied()),
+                    Some(expected_len as u64),
+                    "{context}"
+                );
+                let Ok(Docs::List(decoded)) =
+                    DocFormat::BitPacked.decode(first, docs.len(), &data, 0)
+                else {
+                    panic!("decode failed {context}");
+                };
+                assert_eq!(decoded, docs, "{context}");
+            }
+        }
+    }
+
+    #[test]
+    fn corrupt_bitpacked() {
+        let entries = (0..=700).step_by(7).map(|d| (d, 0)).collect::<Vec<_>>();
+        let data = build(PayloadFormat::None, &entries).serialize();
+        assert_eq!(data[1], u8::from(DocFormat::BitPacked));
+        DocIteratorBlock::new(&data).unwrap();
+        // count (1 byte), formats (2 bytes), first doc (1 byte), num bits (1 byte).
+        assert_eq!(data[4], 3);
+
+        let check_err = |data: &[u8]| {
+            assert!(matches!(DocIteratorBlock::new(data), Err(Error::Coding(_))));
+        };
+        let mut trailing = data.clone();
+        trailing.push(0);
+        check_err(&trailing);
+        check_err(&data[..data.len() - 1]);
+        check_err(&data[..5]);
+        check_err(&data[..4]);
+        for num_bits in [0, 2, 4, 33] {
+            let mut bad = data.clone();
+            bad[4] = num_bits;
+            check_err(&bad);
+        }
+        // The extra doc is decoded from padding and repeats the last doc.
+        let mut wrong_count = data.clone();
+        wrong_count[0] += 1;
+        check_err(&wrong_count);
+        let mut single = vec![1, DocFormat::BitPacked.into(), 0, 7];
+        assert_eq!(collect(&single), &[(7, 0)]);
+        single.extend_from_slice(&[1; 17]);
+        check_err(&single);
+
+        // Docs must be strictly increasing.
+        let mut zeros = data.clone();
+        zeros[5..].fill(0);
+        check_err(&zeros);
+        // Deltas that overflow u32 wrap around.
+        let mut wrap = vec![3, DocFormat::BitPacked.into(), 0, 0, 32];
+        wrap.extend_from_slice(&[0xff; 16]);
+        check_err(&wrap);
+
+        // A single doc with offset 1 from `first`.
+        let offset_one = |first| {
+            let mut data = vec![2, DocFormat::BitPacked.into(), 0];
+            leb128::write::unsigned(&mut data, first).unwrap();
+            data.push(1);
+            data.extend_from_slice(&[1; 16]);
+            data
+        };
+        check_err(&offset_one(DOC_ITER_SENTINEL - 1));
+        assert_eq!(
+            collect(&offset_one(DOC_ITER_SENTINEL - 2)),
+            &[(DOC_ITER_SENTINEL - 2, 0), (DOC_ITER_SENTINEL - 1, 0)]
+        );
+
+        // Corrupt and truncate chunks after the first.
+        let entries = (0..=2100).step_by(7).map(|d| (d, 0)).collect::<Vec<_>>();
+        let data = build(PayloadFormat::None, &entries).serialize();
+        assert_eq!(data[2], u8::from(DocFormat::BitPacked));
+        DocIteratorBlock::new(&data).unwrap();
+        // count (2 bytes), formats (2 bytes), first doc (1 byte), first chunk (49 bytes).
+        assert_eq!(data[54], 3);
+        for num_bits in [0, 33] {
+            let mut bad = data.clone();
+            bad[54] = num_bits;
+            check_err(&bad);
+        }
+        check_err(&data[..55]);
+        check_err(&data[..data.len() - 1]);
+        let mut wrong_count = data.clone();
+        wrong_count[0] += 1;
+        check_err(&wrong_count);
     }
 
     #[test]

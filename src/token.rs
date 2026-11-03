@@ -148,7 +148,15 @@ pub fn doc_block_prefix(field: &str, posting_key: &[u8]) -> Result<Vec<u8>, Erro
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DocFormat {
+    /// Each doc after the first is encoded as an unsigned LEB128 delta from the previous doc.
     LEB128 = 0,
+    /// Docs are contiguous starting at the first doc; no doc data is stored.
+    Range = 1,
+    /// Docs are encoded as a bitmap where bit `i` is set if `first_doc + i` is present.
+    ///
+    /// Bits are ordered least significant first within each byte. Bit 0 is always set and the
+    /// last byte is never zero.
+    Bitmap = 2,
 }
 
 impl From<DocFormat> for u8 {
@@ -163,47 +171,239 @@ impl TryFrom<u8> for DocFormat {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(DocFormat::LEB128),
+            1 => Ok(DocFormat::Range),
+            2 => Ok(DocFormat::Bitmap),
             _ => Err(Error::UnknownDocFormat(value)),
         }
     }
 }
 
 impl DocFormat {
-    /// Encode `docs` to `out`. `prev` is the doc immediately preceding the first entry in `docs`.
+    /// Select a compact format for `len` strictly increasing docs from `first` to `last`.
     ///
-    /// `docs` must be strictly increasing and greater than `prev`.
-    fn encode(self, mut prev: DocId, docs: impl Iterator<Item = DocId>, out: &mut Vec<u8>) {
+    /// Every [`DocFormat::LEB128`] delta is at least one byte, so [`DocFormat::Bitmap`] is selected
+    /// whenever it is no larger than that lower bound. This may miss some cases where the bitmap is
+    /// slightly smaller because many deltas need multiple bytes.
+    fn select(len: usize, first: DocId, last: DocId) -> Self {
+        let len = len as u64;
+        let span = last - first;
+        if len == 0 || span == len - 1 {
+            DocFormat::Range
+        } else if span / 8 < len - 1 {
+            DocFormat::Bitmap
+        } else {
+            DocFormat::LEB128
+        }
+    }
+
+    /// Encode `docs` to `out`. `first` is the first doc in the block and is not included in
+    /// `docs`.
+    ///
+    /// `docs` must be strictly increasing and greater than `first`.
+    ///
+    /// *Panics* if `docs` are not contiguous and the format is [`DocFormat::Range`].
+    fn encode(self, first: DocId, docs: impl Iterator<Item = DocId>, out: &mut Vec<u8>) {
+        let mut prev = first;
         match self {
             DocFormat::LEB128 => {
                 for doc in docs {
                     assert!(doc > prev, "docs must be strictly increasing");
-                    leb128::write::unsigned(out, doc.abs_diff(prev)).unwrap();
+                    leb128::write::unsigned(out, doc - prev).unwrap();
+                    prev = doc;
+                }
+            }
+            DocFormat::Range => {
+                for doc in docs {
+                    debug_assert_eq!(doc, prev + 1, "docs must be contiguous");
+                    prev = doc;
+                }
+            }
+            DocFormat::Bitmap => {
+                let start = out.len();
+                out.push(1);
+                for doc in docs {
+                    assert!(doc > prev, "docs must be strictly increasing");
+                    let bit = doc - first;
+                    let i = start + usize::try_from(bit / 8).unwrap();
+                    if i >= out.len() {
+                        out.resize(i + 1, 0);
+                    }
+                    out[i] |= 1 << (bit % 8);
                     prev = doc;
                 }
             }
         }
     }
 
-    /// Decode `count` docs from `data` and append them to `out`. `prev` is the doc immediately
-    /// preceding the first encoded doc.
+    /// Decode `len` docs from `data` beginning with `first`.
+    ///
+    /// `offset` is the position of `data` within the block.
     fn decode(
         self,
-        mut prev: DocId,
-        count: usize,
-        mut data: &[u8],
-        out: &mut Vec<DocId>,
-    ) -> Result<(), &'static str> {
+        first: DocId,
+        len: usize,
+        data: &[u8],
+        offset: usize,
+    ) -> Result<Docs, &'static str> {
+        let last_rank = u64::try_from(len - 1).map_err(|_| "entry count overflow")?;
         match self {
             DocFormat::LEB128 => {
-                for _ in 0..count {
+                let mut data = data;
+                let mut docs = Vec::with_capacity(len.min(data.len() + 1));
+                docs.push(first);
+                let mut prev = first;
+                for _ in 1..len {
                     let delta =
                         leb128::read::unsigned(&mut data).map_err(|_| "invalid doc delta")?;
                     prev = prev.checked_add(delta).ok_or("doc delta overflow")?;
-                    out.push(prev);
+                    docs.push(prev);
                 }
+                Ok(Docs::List(docs))
+            }
+            DocFormat::Range => {
+                if !data.is_empty() {
+                    return Err("unexpected range doc data");
+                }
+                if first
+                    .checked_add(last_rank)
+                    .is_none_or(|last| last == DOC_ITER_SENTINEL)
+                {
+                    return Err("doc range overflow");
+                }
+                Ok(Docs::Range(first))
+            }
+            DocFormat::Bitmap => BitmapDocs::new(first, len, data, offset).map(Docs::Bitmap),
+        }
+    }
+}
+
+/// Decoded representation of the docs in a [`DocIteratorBlock`].
+enum Docs {
+    /// Fully decoded docs.
+    List(Vec<DocId>),
+    /// Contiguous docs beginning with the contained doc.
+    Range(DocId),
+    Bitmap(BitmapDocs),
+}
+
+/// Cursor over a [`DocFormat::Bitmap`] encoded set of docs, read in place from the block data.
+struct BitmapDocs {
+    /// Doc represented by bit 0.
+    base: DocId,
+    /// Offset of the bitmap within the block data.
+    offset: usize,
+    /// Length of the bitmap in bytes.
+    len: usize,
+    /// Index of the word containing the current doc.
+    word_index: usize,
+    /// Bits of the word at `word_index` at or after the current doc.
+    word: u64,
+}
+
+impl BitmapDocs {
+    /// Create a cursor over `bitmap` positioned on the first doc. `bitmap` must contain exactly
+    /// `count` docs and is located at `offset` within the block data.
+    fn new(base: DocId, count: usize, bitmap: &[u8], offset: usize) -> Result<Self, &'static str> {
+        let (Some(&first_byte), Some(&last_byte)) = (bitmap.first(), bitmap.last()) else {
+            return Err("empty doc bitmap");
+        };
+        if first_byte & 1 == 0 || last_byte == 0 {
+            return Err("non-canonical doc bitmap");
+        }
+        let (bc, br) = bitmap.as_chunks::<8>();
+        let bitmap_count = bc
+            .iter()
+            .map(|w| u64::from_ne_bytes(*w).count_ones() as usize)
+            .chain(br.iter().map(|b| b.count_ones() as usize))
+            .sum::<usize>();
+        if bitmap_count != count {
+            return Err("doc bitmap count mismatch");
+        }
+        let last_bit = (bitmap.len() as u64 - 1) * 8 + u64::from(7 - last_byte.leading_zeros());
+        if base
+            .checked_add(last_bit)
+            .is_none_or(|last| last == DOC_ITER_SENTINEL)
+        {
+            return Err("doc bitmap overflow");
+        }
+        let mut docs = Self {
+            base,
+            offset,
+            len: bitmap.len(),
+            word_index: 0,
+            word: 0,
+        };
+        docs.word = docs.load(bitmap, 0);
+        Ok(docs)
+    }
+
+    fn num_words(&self) -> usize {
+        self.len.div_ceil(8)
+    }
+
+    /// Return the bitmap within the block `data`.
+    fn bitmap<'a>(&self, data: &'a [u8]) -> &'a [u8] {
+        &data[self.offset..self.offset + self.len]
+    }
+
+    /// Load word `i` of `bitmap`, zero padding a trailing partial word.
+    fn load(&self, bitmap: &[u8], i: usize) -> u64 {
+        let start = i * 8;
+        match bitmap.get(start..start + 8) {
+            Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
+            None => {
+                let mut buf = [0u8; 8];
+                let rest = &bitmap[start..];
+                buf[..rest.len()].copy_from_slice(rest);
+                u64::from_le_bytes(buf)
             }
         }
-        Ok(())
+    }
+
+    /// Return the current doc. Only valid if the cursor is not exhausted.
+    fn doc(&self) -> DocId {
+        self.base + (self.word_index * 64) as u64 + u64::from(self.word.trailing_zeros())
+    }
+
+    /// Advance to the next doc in block `data`.
+    fn advance(&mut self, data: &[u8]) {
+        self.word &= self.word.wrapping_sub(1);
+        self.skip_empty(self.bitmap(data));
+    }
+
+    /// Advance to the first doc at or after `target` in block `data` and return the number of
+    /// docs skipped. `target` must be greater than the current doc.
+    ///
+    /// If there is no such doc this returns the number of docs remaining.
+    fn advance_to(&mut self, data: &[u8], target: DocId) -> usize {
+        let bitmap = self.bitmap(data);
+        let bit = target - self.base;
+        let target_word = usize::try_from(bit / 64).map_or(usize::MAX, |w| w.min(self.num_words()));
+        let mut skipped = 0;
+        if target_word > self.word_index {
+            skipped += self.word.count_ones() as usize;
+            skipped += (self.word_index + 1..target_word)
+                .map(|i| self.load(bitmap, i).count_ones() as usize)
+                .sum::<usize>();
+            if target_word == self.num_words() {
+                return skipped;
+            }
+            self.word_index = target_word;
+            self.word = self.load(bitmap, target_word);
+        }
+        let masked = self.word & (u64::MAX << (bit % 64));
+        skipped += (self.word ^ masked).count_ones() as usize;
+        self.word = masked;
+        self.skip_empty(bitmap);
+        skipped
+    }
+
+    /// Advance past any empty words, stopping at the last word.
+    fn skip_empty(&mut self, bitmap: &[u8]) {
+        while self.word == 0 && self.word_index + 1 < self.num_words() {
+            self.word_index += 1;
+            self.word = self.load(bitmap, self.word_index);
+        }
     }
 }
 
@@ -277,19 +477,24 @@ impl PayloadFormat {
 /// * number of entries (unsigned LEB128)
 /// * doc format (u8)
 /// * payload format (u8)
-/// * first docid (signed LEB128); omitted if there are no entries.
-/// * docs len (unsigned LEB128); omitted if there are no entries or payload format is `None`.
+/// * first docid (unsigned LEB128); omitted if there are no entries.
+/// * docs len (unsigned LEB128); omitted if there are no entries, payload format is `None`, or doc
+///   format is [`DocFormat::Range`].
 /// * remaining docs encoded with [`DocFormat`]
 /// * payloads encoded with [`PayloadFormat`]
 ///
-/// Docs are decoded eagerly on construction; payloads are decoded lazily as they are read.
+/// [`DocFormat::LEB128`] docs are decoded eagerly on construction; other doc formats are read in
+/// place. Payloads are decoded lazily as they are read.
 pub struct DocIteratorBlock<'a> {
     doc_format: DocFormat,
     payload_format: PayloadFormat,
-    /// Decoded docs followed by [`DOC_ITER_SENTINEL`].
-    docs: Vec<DocId>,
-    /// Index of the current doc in `docs`.
-    index: usize,
+    docs: Docs,
+    /// Number of entries in the block.
+    len: usize,
+    /// Rank of the current doc in the block, or `len` if exhausted.
+    rank: usize,
+    /// Current doc, or [`DOC_ITER_SENTINEL`] if exhausted.
+    doc: DocId,
     /// Encoded block data.
     data: Cow<'a, [u8]>,
     /// Offset in `data` of the remaining undecoded payload bytes.
@@ -317,14 +522,17 @@ impl<'a> DocIteratorBlock<'a> {
         let doc_format = DocFormat::try_from(read_u8(&mut data)?)?;
         let payload_format = PayloadFormat::try_from(read_u8(&mut data)?)?;
 
-        let mut docs = Vec::with_capacity(len.saturating_add(1).min(data.len() + 1));
+        let mut docs = Docs::List(Vec::new());
+        let mut doc = DOC_ITER_SENTINEL;
         let mut payloads = &data[data.len()..];
         if len > 0 {
             let first_doc = leb128::read::unsigned(&mut data)
                 .map_err(|_| Error::Coding("invalid first doc"))?;
-            docs.push(first_doc);
             let doc_data = if payload_format == PayloadFormat::None {
                 data
+            } else if doc_format == DocFormat::Range {
+                payloads = data;
+                &data[..0]
             } else {
                 let docs_len = leb128::read::unsigned(&mut data)
                     .map_err(|_| Error::Coding("invalid docs len"))?;
@@ -334,18 +542,20 @@ impl<'a> DocIteratorBlock<'a> {
                 payloads = payload_data;
                 doc_data
             };
-            doc_format
-                .decode(first_doc, len - 1, doc_data, &mut docs)
+            docs = doc_format
+                .decode(first_doc, len, doc_data, block.len() - data.len())
                 .map_err(Error::Coding)?;
+            doc = first_doc;
         }
-        docs.push(DOC_ITER_SENTINEL);
 
         let payload_offset = block.len() - payloads.len();
         Ok(Self {
             doc_format,
             payload_format,
             docs,
-            index: 0,
+            len,
+            rank: 0,
+            doc,
             data: block,
             payload_offset,
             next_payload_rank: 0,
@@ -364,11 +574,28 @@ impl<'a> DocIteratorBlock<'a> {
 
     /// Return the number of entries in the block.
     pub fn len(&self) -> usize {
-        self.docs.len() - 1
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.len == 0
+    }
+
+    /// Position on the doc at `rank`, or exhaust the iterator if `rank` is at least `len`.
+    ///
+    /// A [`Docs::Bitmap`] cursor must already be positioned on the doc at `rank`.
+    fn seek_rank(&mut self, rank: usize) -> DocId {
+        self.rank = rank.min(self.len);
+        self.doc = if self.rank == self.len {
+            DOC_ITER_SENTINEL
+        } else {
+            match &self.docs {
+                Docs::List(docs) => docs[self.rank],
+                Docs::Range(first) => first + self.rank as u64,
+                Docs::Bitmap(bitmap) => bitmap.doc(),
+            }
+        };
+        self.doc
     }
 }
 
@@ -383,10 +610,12 @@ impl DocIteratorBlock<'static> {
     /// Create an iterator with no entries.
     fn empty() -> Self {
         Self {
-            doc_format: DocFormat::LEB128,
+            doc_format: DocFormat::Range,
             payload_format: PayloadFormat::None,
-            docs: vec![DOC_ITER_SENTINEL],
-            index: 0,
+            docs: Docs::Range(DOC_ITER_SENTINEL),
+            len: 0,
+            rank: 0,
+            doc: DOC_ITER_SENTINEL,
             data: Cow::Borrowed(&[]),
             payload_offset: 0,
             next_payload_rank: 0,
@@ -398,28 +627,28 @@ impl DocIteratorBlock<'static> {
 
 impl DocIterator for DocIteratorBlock<'_> {
     fn doc(&mut self) -> DocId {
-        self.docs[self.index]
+        self.doc
     }
 
     fn payload(&mut self) -> Payload {
-        if self.index >= self.len() || self.payload_format == PayloadFormat::None {
+        if self.rank >= self.len || self.payload_format == PayloadFormat::None {
             return 0;
         }
-        if self.next_payload_rank <= self.index {
+        if self.next_payload_rank <= self.rank {
             let mut payloads = &self.data[self.payload_offset..];
             match self
                 .payload_format
-                .decode_to(&mut payloads, self.next_payload_rank, self.index)
+                .decode_to(&mut payloads, self.next_payload_rank, self.rank)
             {
                 Ok(p) => {
                     self.payload = p;
                     self.payload_offset = self.data.len() - payloads.len();
-                    self.next_payload_rank = self.index + 1;
+                    self.next_payload_rank = self.rank + 1;
                 }
                 Err(e) => {
                     // Terminate iteration so the caller will check error().
                     self.error = Some(e);
-                    self.index = self.len();
+                    self.seek_rank(self.len);
                     return 0;
                 }
             }
@@ -428,18 +657,31 @@ impl DocIterator for DocIteratorBlock<'_> {
     }
 
     fn advance(&mut self) -> DocId {
-        self.index = (self.index + 1).min(self.len());
-        self.docs[self.index]
+        if self.rank >= self.len {
+            return DOC_ITER_SENTINEL;
+        }
+        if let Docs::Bitmap(bitmap) = &mut self.docs {
+            bitmap.advance(&self.data);
+        }
+        self.seek_rank(self.rank + 1)
     }
 
     fn advance_to(&mut self, target: DocId) -> DocId {
-        // The trailing sentinel ensures this never moves past the end.
-        self.index += self.docs[self.index..].partition_point(|&d| d < target);
-        self.docs[self.index]
+        // This also handles the exhausted case as no target is greater than the sentinel.
+        if target <= self.doc {
+            return self.doc;
+        }
+        let rank = match &mut self.docs {
+            Docs::List(docs) => self.rank + docs[self.rank..].partition_point(|&d| d < target),
+            // target > doc >= first so this cannot underflow.
+            Docs::Range(first) => usize::try_from(target - *first).unwrap_or(usize::MAX),
+            Docs::Bitmap(bitmap) => self.rank + bitmap.advance_to(&self.data, target),
+        };
+        self.seek_rank(rank)
     }
 
     fn cost(&self) -> u64 {
-        self.len() as u64
+        self.len as u64
     }
 
     fn error(&self) -> Result<(), Error> {
@@ -958,8 +1200,9 @@ fn read_u8(data: &mut &[u8]) -> Result<u8, Error> {
 
 /// A mutable doc block that can be seeded from an encoded [`DocIteratorBlock`] and mutated via
 /// inserts and removals.
+///
+/// The [`DocFormat`] is selected on serialization to produce the most compact encoding.
 pub struct DocIteratorBlockMut {
-    doc_format: DocFormat,
     payload_format: PayloadFormat,
     /// Current entries mapping doc -> payload.
     entries: BTreeMap<DocId, Payload>,
@@ -968,10 +1211,9 @@ pub struct DocIteratorBlockMut {
 }
 
 impl DocIteratorBlockMut {
-    /// Create a new empty block that will be encoded with the given formats.
-    pub fn new(doc_format: DocFormat, payload_format: PayloadFormat) -> Self {
+    /// Create a new empty block that will be encoded with the given payload format.
+    pub fn new(payload_format: PayloadFormat) -> Self {
         Self {
-            doc_format,
             payload_format,
             entries: BTreeMap::new(),
             dirty: false,
@@ -988,7 +1230,6 @@ impl DocIteratorBlockMut {
         }
         block.error()?;
         Ok(Self {
-            doc_format: block.doc_format,
             payload_format: block.payload_format,
             entries,
             dirty: false,
@@ -1025,32 +1266,41 @@ impl DocIteratorBlockMut {
 
     /// Serialize the current state of the block into the layout read by [`DocIteratorBlock`].
     pub fn serialize(&self) -> Vec<u8> {
+        let doc_format = self.doc_format();
         let mut out = Vec::new();
         leb128::write::unsigned(&mut out, self.entries.len() as u64).unwrap();
-        out.push(self.doc_format.into());
+        out.push(doc_format.into());
         out.push(self.payload_format.into());
         let Some(&first_doc) = self.entries.keys().next() else {
             return out;
         };
         leb128::write::unsigned(&mut out, first_doc).unwrap();
 
-        if self.payload_format == PayloadFormat::None {
-            self.doc_format
-                .encode(first_doc, self.entries.keys().copied().skip(1), &mut out);
+        let docs = self.entries.keys().copied().skip(1);
+        if self.payload_format == PayloadFormat::None || doc_format == DocFormat::Range {
+            doc_format.encode(first_doc, docs, &mut out);
         } else {
-            let mut docs = Vec::new();
-            self.doc_format
-                .encode(first_doc, self.entries.keys().copied().skip(1), &mut docs);
-            leb128::write::unsigned(&mut out, docs.len() as u64).unwrap();
-            out.extend_from_slice(&docs);
-            self.payload_format
-                .encode(self.entries.values().copied(), &mut out);
+            let mut doc_data = Vec::new();
+            doc_format.encode(first_doc, docs, &mut doc_data);
+            leb128::write::unsigned(&mut out, doc_data.len() as u64).unwrap();
+            out.extend_from_slice(&doc_data);
         }
+        self.payload_format
+            .encode(self.entries.values().copied(), &mut out);
         out
     }
 
+    /// Return the doc format that [`Self::serialize`] will use for the current entries.
     pub fn doc_format(&self) -> DocFormat {
-        self.doc_format
+        match (
+            self.entries.first_key_value(),
+            self.entries.last_key_value(),
+        ) {
+            (Some((&first, _)), Some((&last, _))) => {
+                DocFormat::select(self.entries.len(), first, last)
+            }
+            _ => DocFormat::Range,
+        }
     }
 
     pub fn payload_format(&self) -> PayloadFormat {
@@ -1093,7 +1343,7 @@ mod test {
     }
 
     fn build(payload_format: PayloadFormat, entries: &[(DocId, Payload)]) -> DocIteratorBlockMut {
-        let mut block = DocIteratorBlockMut::new(DocFormat::LEB128, payload_format);
+        let mut block = DocIteratorBlockMut::new(payload_format);
         for &(d, p) in entries {
             block.insert(d, p);
         }
@@ -1105,7 +1355,7 @@ mod test {
     #[test]
     fn empty() {
         for pf in [PayloadFormat::None, PayloadFormat::LEB128] {
-            let data = DocIteratorBlockMut::new(DocFormat::LEB128, pf).serialize();
+            let data = DocIteratorBlockMut::new(pf).serialize();
             let mut it = DocIteratorBlock::new(&data).unwrap();
             assert!(it.is_empty());
             assert_eq!(it.doc(), DOC_ITER_SENTINEL);
@@ -1226,6 +1476,178 @@ mod test {
         }
         assert!(matches!(it.error(), Err(Error::Coding(_))));
         assert!(DocIteratorBlockMut::deserialize(truncated).is_err());
+    }
+
+    fn format_of(docs: impl IntoIterator<Item = DocId>) -> DocFormat {
+        let entries = docs.into_iter().map(|d| (d, 0)).collect::<Vec<_>>();
+        build(PayloadFormat::None, &entries).doc_format()
+    }
+
+    #[test]
+    fn doc_format_selection() {
+        assert_eq!(format_of([]), DocFormat::Range);
+        assert_eq!(format_of([7]), DocFormat::Range);
+        assert_eq!(format_of(10..20), DocFormat::Range);
+        assert_eq!(format_of((0..=200).step_by(2)), DocFormat::Bitmap);
+        // 88 bitmap bytes vs at least 100 delta bytes.
+        assert_eq!(format_of((0..=700).step_by(7)), DocFormat::Bitmap);
+        // 101 bitmap bytes vs at least 100 delta bytes.
+        assert_eq!(format_of((0..=800).step_by(8)), DocFormat::LEB128);
+        assert_eq!(
+            format_of(ENTRIES.iter().map(|&(d, _)| d)),
+            DocFormat::LEB128
+        );
+    }
+
+    /// Check iteration, deserialization, and seeking to every target over a block of `docs`.
+    fn check_block(docs: &[DocId], doc_format: DocFormat) {
+        for payload_format in [PayloadFormat::None, PayloadFormat::LEB128] {
+            let entries = docs
+                .iter()
+                .map(|&d| (d, (d % 5) << (d % 40)))
+                .collect::<Vec<_>>();
+            let block = build(payload_format, &entries);
+            assert_eq!(block.doc_format(), doc_format);
+            let data = block.serialize();
+            let expected = if payload_format == PayloadFormat::None {
+                entries.iter().map(|&(d, _)| (d, 0)).collect()
+            } else {
+                entries
+            };
+            let it = DocIteratorBlock::new(&data).unwrap();
+            assert_eq!(it.doc_format(), doc_format);
+            assert_eq!(it.len(), docs.len());
+            assert_eq!(collect(&data), expected);
+            assert_eq!(
+                DocIteratorBlockMut::deserialize(&data)
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>(),
+                expected
+            );
+
+            let entry = |i: usize| expected.get(i).copied().unwrap_or((DOC_ITER_SENTINEL, 0));
+            let first = docs[0];
+            let last = *docs.last().unwrap();
+            for target in first.saturating_sub(2)..=last + 130 {
+                let i = expected.partition_point(|&(d, _)| d < target);
+                let mut it = DocIteratorBlock::new(&data).unwrap();
+                assert_eq!(it.advance_to(target), entry(i).0, "target {target}");
+                assert_eq!(it.payload(), entry(i).1, "target {target}");
+                assert_eq!(it.advance(), entry(i + 1).0, "target {target}");
+                assert_eq!(it.payload(), entry(i + 1).1, "target {target}");
+                it.error().unwrap();
+            }
+
+            for stride in [1, 3, 17, 64, 65, 200] {
+                let mut it = DocIteratorBlock::new(&data).unwrap();
+                let mut target = first;
+                loop {
+                    let i = expected.partition_point(|&(d, _)| d < target);
+                    assert_eq!(it.advance_to(target), entry(i).0, "stride {stride}");
+                    // Skip some payload reads so that payloads are skipped over.
+                    if (target / stride).is_multiple_of(3) {
+                        assert_eq!(it.payload(), entry(i).1, "stride {stride}");
+                    }
+                    if i == expected.len() {
+                        break;
+                    }
+                    target += stride;
+                }
+                it.error().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn range_block() {
+        check_block(&[0], DocFormat::Range);
+        check_block(&[1 << 40], DocFormat::Range);
+        check_block(&(5..300).collect::<Vec<_>>(), DocFormat::Range);
+        check_block(
+            &((1 << 40)..(1 << 40) + 100).collect::<Vec<_>>(),
+            DocFormat::Range,
+        );
+    }
+
+    #[test]
+    fn bitmap_block() {
+        check_block(&(0..=200).step_by(2).collect::<Vec<_>>(), DocFormat::Bitmap);
+        check_block(
+            &(1_000_003..=1_000_703).step_by(7).collect::<Vec<_>>(),
+            DocFormat::Bitmap,
+        );
+        // Spans several empty words.
+        check_block(
+            &(0..64).chain(200..264).chain([1000]).collect::<Vec<_>>(),
+            DocFormat::Bitmap,
+        );
+        // Ends on a full word.
+        check_block(
+            &(3..67).chain(130..192).collect::<Vec<_>>(),
+            DocFormat::Bitmap,
+        );
+    }
+
+    #[test]
+    fn corrupt_range() {
+        let data = build(PayloadFormat::None, &[(5, 0), (6, 0)]).serialize();
+        assert_eq!(data, &[2, DocFormat::Range.into(), 0, 5]);
+        let mut trailing = data.clone();
+        trailing.push(0);
+        assert!(matches!(
+            DocIteratorBlock::new(&trailing),
+            Err(Error::Coding(_))
+        ));
+        let mut overflow = vec![2, DocFormat::Range.into(), 0];
+        leb128::write::unsigned(&mut overflow, DOC_ITER_SENTINEL - 1).unwrap();
+        assert!(matches!(
+            DocIteratorBlock::new(&overflow),
+            Err(Error::Coding(_))
+        ));
+
+        // Truncating into the payloads fails during iteration.
+        let data = build(PayloadFormat::LEB128, &[(5, 1), (6, 1 << 40)]).serialize();
+        let mut it = DocIteratorBlock::new(&data[..data.len() - 1]).unwrap();
+        assert_eq!(it.payload(), 1);
+        assert_eq!(it.advance(), 6);
+        assert_eq!(it.payload(), 0);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+    }
+
+    #[test]
+    fn corrupt_bitmap() {
+        let entries = (0..=200).step_by(2).map(|d| (d, 0)).collect::<Vec<_>>();
+        let data = build(PayloadFormat::None, &entries).serialize();
+        assert_eq!(data[1], u8::from(DocFormat::Bitmap));
+        DocIteratorBlock::new(&data).unwrap();
+
+        let mut wrong_count = data.clone();
+        wrong_count[0] += 1;
+        assert!(matches!(
+            DocIteratorBlock::new(&wrong_count),
+            Err(Error::Coding(_))
+        ));
+        let mut trailing_zero = data.clone();
+        trailing_zero.push(0);
+        assert!(matches!(
+            DocIteratorBlock::new(&trailing_zero),
+            Err(Error::Coding(_))
+        ));
+        let mut overflow = vec![2, DocFormat::Bitmap.into(), 0];
+        leb128::write::unsigned(&mut overflow, DOC_ITER_SENTINEL - 2).unwrap();
+        overflow.push(0b101);
+        assert!(matches!(
+            DocIteratorBlock::new(&overflow),
+            Err(Error::Coding(_))
+        ));
+        let mut empty = vec![1, DocFormat::Bitmap.into(), 0];
+        leb128::write::unsigned(&mut empty, 7).unwrap();
+        assert!(matches!(
+            DocIteratorBlock::new(&empty),
+            Err(Error::Coding(_))
+        ));
     }
 
     struct TermFixture {
@@ -1511,7 +1933,7 @@ mod test {
     }
 
     fn block_iter(docs: &[DocId]) -> Box<dyn DocIterator> {
-        let mut block = DocIteratorBlockMut::new(DocFormat::LEB128, PayloadFormat::LEB128);
+        let mut block = DocIteratorBlockMut::new(PayloadFormat::LEB128);
         for &d in docs {
             block.insert(d, 1);
         }
@@ -1598,7 +2020,7 @@ mod test {
 
     #[test]
     fn conjunction_error() {
-        let mut block = DocIteratorBlockMut::new(DocFormat::LEB128, PayloadFormat::LEB128);
+        let mut block = DocIteratorBlockMut::new(PayloadFormat::LEB128);
         block.insert(1, 1 << 40);
         let mut data = block.serialize();
         data.truncate(data.len() - 2);
@@ -1700,7 +2122,7 @@ mod test {
 
     #[test]
     fn disjunction_error() {
-        let mut block = DocIteratorBlockMut::new(DocFormat::LEB128, PayloadFormat::LEB128);
+        let mut block = DocIteratorBlockMut::new(PayloadFormat::LEB128);
         block.insert(3, 1 << 40);
         let mut data = block.serialize();
         data.truncate(data.len() - 2);

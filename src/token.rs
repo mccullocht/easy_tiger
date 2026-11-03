@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeMap, BinaryHeap},
 };
 
+use bitpacking::{BitPacker, BitPacker4x};
 use wt_mdb::{IndexCursorGuard, Transaction};
 
 #[derive(Debug, Clone)]
@@ -157,6 +158,80 @@ pub enum DocFormat {
     /// Bits are ordered least significant first within each byte. Bit 0 is always set and the
     /// last byte is never zero.
     Bitmap = 2,
+    /// Docs after the first are delta encoded in chunks of [`BITPACKED_CHUNK_LEN`] docs, each as
+    /// a [`BitPacker4x`] block with its own bit width.
+    ///
+    /// Each chunk is encoded as the bit width (u8) followed by the packed bytes. Only the last
+    /// chunk may hold fewer than [`BITPACKED_CHUNK_LEN`] docs; its packed bytes are truncated to
+    /// the length needed to hold the docs that are present (see [`bitpacked_len`]). Within a chunk
+    /// docs are packed as offsets from the doc before the chunk, so each chunk may span no more than
+    /// [`u32::MAX`].
+    BitPacked = 3,
+}
+
+/// Number of docs in each [`DocFormat::BitPacked`] chunk.
+const BITPACKED_CHUNK_LEN: usize = BitPacker4x::BLOCK_LEN;
+
+/// Return the number of bytes needed to hold the first `len` values of a [`BitPacker4x`] block
+/// packed with `num_bits`.
+///
+/// [`BitPacker4x`] interleaves values across four 32-bit lanes: value `i` is packed at position
+/// `i / 4` of lane `i % 4`, and the output is a sequence of 16 byte words each holding the next 32
+/// bits of every lane. The bytes needed are determined by the length of the longest lane.
+fn bitpacked_len(len: usize, num_bits: u8) -> usize {
+    (len.div_ceil(4) * usize::from(num_bits)).div_ceil(32) * 16
+}
+
+/// Split `docs` into [`DocFormat::BitPacked`] chunks and call `f` with a [`BitPacker4x`] block of
+/// offsets for each chunk and the number of docs in the chunk.
+///
+/// Offsets are relative to the doc before the chunk, beginning with `first`. The last chunk is
+/// padded with its last offset so that padding does not increase the bit width.
+///
+/// Returns false without visiting the remaining chunks if a chunk spans more than [`u32::MAX`].
+///
+/// *Panics* if `docs` are not strictly increasing and greater than `first`.
+fn bitpacked_chunks(
+    first: DocId,
+    docs: impl Iterator<Item = DocId>,
+    mut f: impl FnMut(&[u32; BITPACKED_CHUNK_LEN], usize),
+) -> bool {
+    let mut offsets = [0u32; BITPACKED_CHUNK_LEN];
+    let mut len = 0;
+    let mut base = first;
+    let mut prev = first;
+    for doc in docs {
+        assert!(doc > prev, "docs must be strictly increasing");
+        let Ok(offset) = u32::try_from(doc - base) else {
+            return false;
+        };
+        offsets[len] = offset;
+        len += 1;
+        prev = doc;
+        if len == BITPACKED_CHUNK_LEN {
+            f(&offsets, len);
+            base = doc;
+            len = 0;
+        }
+    }
+    if len > 0 {
+        let last = offsets[len - 1];
+        offsets[len..].fill(last);
+        f(&offsets, len);
+    }
+    true
+}
+
+/// Return the [`DocFormat::BitPacked`] encoded length of `docs`, or `None` if they cannot be
+/// encoded.
+fn bitpacked_encoded_len(first: DocId, docs: impl Iterator<Item = DocId>) -> Option<u64> {
+    let bitpacker = BitPacker4x::new();
+    let mut encoded_len = 0;
+    bitpacked_chunks(first, docs, |offsets, len| {
+        let num_bits = bitpacker.num_bits_sorted(0, offsets);
+        encoded_len += 1 + bitpacked_len(len, num_bits) as u64;
+    })
+    .then_some(encoded_len)
 }
 
 impl From<DocFormat> for u8 {
@@ -173,24 +248,52 @@ impl TryFrom<u8> for DocFormat {
             0 => Ok(DocFormat::LEB128),
             1 => Ok(DocFormat::Range),
             2 => Ok(DocFormat::Bitmap),
+            3 => Ok(DocFormat::BitPacked),
             _ => Err(Error::UnknownDocFormat(value)),
         }
     }
 }
 
 impl DocFormat {
-    /// Select a compact format for `len` strictly increasing docs from `first` to `last`.
+    /// Select a compact format for `len` strictly increasing docs from `first` to `last`. `docs`
+    /// are the docs after `first`.
     ///
-    /// Every [`DocFormat::LEB128`] delta is at least one byte, so [`DocFormat::Bitmap`] is selected
-    /// whenever it is no larger than that lower bound. This may miss some cases where the bitmap is
-    /// slightly smaller because many deltas need multiple bytes.
-    fn select(len: usize, first: DocId, last: DocId) -> Self {
+    /// The smallest encoding is selected, preferring [`DocFormat::Bitmap`] then
+    /// [`DocFormat::BitPacked`] on ties. Every [`DocFormat::LEB128`] delta is at least one byte, so
+    /// the exact [`DocFormat::LEB128`] length is only computed if neither of the other formats is
+    /// smaller than that lower bound.
+    fn select(
+        len: usize,
+        first: DocId,
+        last: DocId,
+        docs: impl Iterator<Item = DocId> + Clone,
+    ) -> Self {
         let len = len as u64;
         let span = last - first;
         if len == 0 || span == len - 1 {
-            DocFormat::Range
-        } else if span / 8 < len - 1 {
+            return DocFormat::Range;
+        }
+        let leb128_min_len = len - 1;
+        let bitmap_len = span / 8 + 1;
+        let bitpacked_len = bitpacked_encoded_len(first, docs.clone()).unwrap_or(u64::MAX);
+        if bitmap_len <= bitpacked_len.min(leb128_min_len) {
+            return DocFormat::Bitmap;
+        }
+        if bitpacked_len < leb128_min_len {
+            return DocFormat::BitPacked;
+        }
+        let mut prev = first;
+        let leb128_len = docs
+            .map(|doc| {
+                let delta = doc - prev;
+                prev = doc;
+                u64::from((u64::BITS - delta.leading_zeros()).div_ceil(7))
+            })
+            .sum::<u64>();
+        if bitmap_len <= bitpacked_len.min(leb128_len) {
             DocFormat::Bitmap
+        } else if bitpacked_len <= leb128_len {
+            DocFormat::BitPacked
         } else {
             DocFormat::LEB128
         }
@@ -201,7 +304,8 @@ impl DocFormat {
     ///
     /// `docs` must be strictly increasing and greater than `first`.
     ///
-    /// *Panics* if `docs` are not contiguous and the format is [`DocFormat::Range`].
+    /// *Panics* if `docs` are not contiguous and the format is [`DocFormat::Range`], or if a chunk
+    /// spans more than [`u32::MAX`] and the format is [`DocFormat::BitPacked`].
     fn encode(self, first: DocId, docs: impl Iterator<Item = DocId>, out: &mut Vec<u8>) {
         let mut prev = first;
         match self {
@@ -231,6 +335,17 @@ impl DocFormat {
                     out[i] |= 1 << (bit % 8);
                     prev = doc;
                 }
+            }
+            DocFormat::BitPacked => {
+                let bitpacker = BitPacker4x::new();
+                let mut packed = [0u8; BITPACKED_CHUNK_LEN * 4];
+                let encoded = bitpacked_chunks(first, docs, |offsets, len| {
+                    let num_bits = bitpacker.num_bits_sorted(0, offsets);
+                    bitpacker.compress_sorted(0, offsets, &mut packed, num_bits);
+                    out.push(num_bits);
+                    out.extend_from_slice(&packed[..bitpacked_len(len, num_bits)]);
+                });
+                assert!(encoded, "bitpacked chunk span must fit in u32");
             }
         }
     }
@@ -273,6 +388,49 @@ impl DocFormat {
                 Ok(Docs::Range(first))
             }
             DocFormat::Bitmap => BitmapDocs::new(first, len, data, offset).map(Docs::Bitmap),
+            DocFormat::BitPacked => {
+                let bitpacker = BitPacker4x::new();
+                let mut data = data;
+                // Each doc needs at least one bit; bound the allocation for corrupt counts.
+                let mut docs = Vec::with_capacity(len.min(data.len() * 8 + 1));
+                docs.push(first);
+                let mut offsets = [0u32; BITPACKED_CHUNK_LEN];
+                while docs.len() < len {
+                    let n = (len - docs.len()).min(BITPACKED_CHUNK_LEN);
+                    let (&num_bits, rest) = data.split_first().ok_or("truncated bitpacked docs")?;
+                    if num_bits == 0 || num_bits > 32 {
+                        return Err("invalid bitpacked num bits");
+                    }
+                    let (packed, rest) = rest
+                        .split_at_checked(bitpacked_len(n, num_bits))
+                        .ok_or("truncated bitpacked docs")?;
+                    data = rest;
+                    if n == BITPACKED_CHUNK_LEN {
+                        bitpacker.decompress_sorted(0, packed, &mut offsets, num_bits);
+                    } else {
+                        let mut block = [0u8; BITPACKED_CHUNK_LEN * 4];
+                        block[..packed.len()].copy_from_slice(packed);
+                        bitpacker.decompress_sorted(0, &block, &mut offsets, num_bits);
+                    }
+                    let offsets = &offsets[..n];
+                    // Deltas that overflow u32 wrap and appear as a decrease.
+                    if offsets[0] == 0 || !offsets.is_sorted_by(|a, b| a < b) {
+                        return Err("bitpacked docs not strictly increasing");
+                    }
+                    let base = *docs.last().unwrap();
+                    if base
+                        .checked_add(u64::from(offsets[n - 1]))
+                        .is_none_or(|last| last == DOC_ITER_SENTINEL)
+                    {
+                        return Err("bitpacked doc overflow");
+                    }
+                    docs.extend(offsets.iter().map(|&o| base + u64::from(o)));
+                }
+                if !data.is_empty() {
+                    return Err("unexpected bitpacked doc data");
+                }
+                Ok(Docs::List(docs))
+            }
         }
     }
 }
@@ -412,6 +570,15 @@ impl BitmapDocs {
 pub enum PayloadFormat {
     None = 0,
     LEB128 = 1,
+    /// Payloads are encoded in chunks of [`BITPACKED_CHUNK_LEN`] payloads, each as a
+    /// [`BitPacker4x`] block with its own bit width.
+    ///
+    /// Each chunk is encoded as the bit width (u8) followed by the packed bytes. Only the last
+    /// chunk may hold fewer than [`BITPACKED_CHUNK_LEN`] payloads; its packed bytes are truncated
+    /// to the length needed to hold the payloads that are present (see [`bitpacked_len`]).
+    ///
+    /// Only used if every payload fits in a u32.
+    BitPacked = 2,
 }
 
 impl From<PayloadFormat> for u8 {
@@ -427,13 +594,60 @@ impl TryFrom<u8> for PayloadFormat {
         match value {
             0 => Ok(PayloadFormat::None),
             1 => Ok(PayloadFormat::LEB128),
+            2 => Ok(PayloadFormat::BitPacked),
             _ => Err(Error::UnknownPayloadFormat(value)),
         }
     }
 }
 
 impl PayloadFormat {
+    /// Select a compact format for `payloads`.
+    ///
+    /// [`PayloadFormat::BitPacked`] is selected unless a payload does not fit in a u32 or
+    /// [`PayloadFormat::LEB128`] is smaller. Every [`PayloadFormat::LEB128`] payload is at least
+    /// one byte, so the exact [`PayloadFormat::LEB128`] length is only computed if the
+    /// [`PayloadFormat::BitPacked`] length is not smaller than that lower bound.
+    fn select(payloads: impl Iterator<Item = Payload> + Clone) -> Self {
+        let mut len = 0;
+        let mut encoded_len = 0;
+        let mut chunks = payloads.clone();
+        loop {
+            let mut chunk_len = 0;
+            let mut bits = 0;
+            for payload in chunks.by_ref().take(BITPACKED_CHUNK_LEN) {
+                bits |= payload;
+                chunk_len += 1;
+            }
+            if chunk_len == 0 {
+                break;
+            }
+            let Ok(bits) = u32::try_from(bits) else {
+                return PayloadFormat::LEB128;
+            };
+            let num_bits = (u32::BITS - bits.leading_zeros()) as u8;
+            encoded_len += 1 + bitpacked_len(chunk_len, num_bits);
+            len += chunk_len;
+            if chunk_len < BITPACKED_CHUNK_LEN {
+                break;
+            }
+        }
+        if encoded_len < len {
+            return PayloadFormat::BitPacked;
+        }
+        let leb128_len = payloads
+            .map(|p| (u64::BITS - p.leading_zeros()).div_ceil(7).max(1) as usize)
+            .sum::<usize>();
+        if encoded_len <= leb128_len {
+            PayloadFormat::BitPacked
+        } else {
+            PayloadFormat::LEB128
+        }
+    }
+
     /// Encode `payloads` to `out`.
+    ///
+    /// *Panics* if any payload does not fit in a u32 and the format is
+    /// [`PayloadFormat::BitPacked`].
     fn encode(self, payloads: impl Iterator<Item = Payload>, out: &mut Vec<u8>) {
         match self {
             PayloadFormat::None => {}
@@ -442,22 +656,55 @@ impl PayloadFormat {
                     leb128::write::unsigned(out, payload).unwrap();
                 }
             }
+            PayloadFormat::BitPacked => {
+                let bitpacker = BitPacker4x::new();
+                let mut payloads = payloads;
+                let mut chunk = [0u32; BITPACKED_CHUNK_LEN];
+                let mut packed = [0u8; BITPACKED_CHUNK_LEN * 4];
+                loop {
+                    let mut len = 0;
+                    for payload in payloads.by_ref().take(BITPACKED_CHUNK_LEN) {
+                        chunk[len] =
+                            u32::try_from(payload).expect("bitpacked payloads must fit in u32");
+                        len += 1;
+                    }
+                    if len == 0 {
+                        break;
+                    }
+                    // Zero padding does not increase the bit width.
+                    chunk[len..].fill(0);
+                    let num_bits = bitpacker.num_bits(&chunk);
+                    bitpacker.compress(&chunk, &mut packed, num_bits);
+                    out.push(num_bits);
+                    out.extend_from_slice(&packed[..bitpacked_len(len, num_bits)]);
+                    if len < BITPACKED_CHUNK_LEN {
+                        break;
+                    }
+                }
+            }
         }
     }
 
-    /// Decode the payload at rank `target` within the block.
+    /// Decode payloads so that the payload at rank `target` within the block is in `decoded`,
+    /// returning the rank of the first payload after those in `decoded`.
     ///
-    /// `data` begins at the payload at rank `rank` and is advanced past the `target` payload.
-    /// `target` must be at least `rank`.
+    /// `data` begins at the payload at rank `rank` and is advanced past the decoded payloads.
+    /// `target` must be at least `rank` and less than `len`, the number of payloads in the block.
+    /// For [`PayloadFormat::BitPacked`] `rank` must be the start of a chunk.
     fn decode_to(
         self,
         data: &mut &[u8],
         rank: usize,
         target: usize,
-    ) -> Result<Payload, &'static str> {
-        debug_assert!(rank <= target);
+        len: usize,
+        decoded: &mut DecodedPayloads,
+    ) -> Result<usize, &'static str> {
+        debug_assert!(rank <= target && target < len);
         match self {
-            PayloadFormat::None => Ok(0),
+            PayloadFormat::None => {
+                decoded.single = 0;
+                Ok(target + 1)
+            }
             PayloadFormat::LEB128 => {
                 // Skip intervening values by looking for terminal bytes rather than decoding.
                 for _ in rank..target {
@@ -467,8 +714,69 @@ impl PayloadFormat {
                         .ok_or("invalid payload")?;
                     *data = &data[end + 1..];
                 }
-                leb128::read::unsigned(data).map_err(|_| "invalid payload")
+                decoded.single = leb128::read::unsigned(data).map_err(|_| "invalid payload")?;
+                Ok(target + 1)
             }
+            PayloadFormat::BitPacked => {
+                debug_assert!(rank.is_multiple_of(BITPACKED_CHUNK_LEN));
+                let mut chunk_rank = rank;
+                loop {
+                    let n = (len - chunk_rank).min(BITPACKED_CHUNK_LEN);
+                    let (&num_bits, rest) = data.split_first().ok_or("truncated payloads")?;
+                    if num_bits > 32 {
+                        return Err("invalid bitpacked num bits");
+                    }
+                    let (packed, rest) = rest
+                        .split_at_checked(bitpacked_len(n, num_bits))
+                        .ok_or("truncated payloads")?;
+                    *data = rest;
+                    let next_rank = chunk_rank + n;
+                    if target < next_rank {
+                        if next_rank == len && !data.is_empty() {
+                            return Err("unexpected bitpacked payload data");
+                        }
+                        let chunk = &mut decoded.chunk;
+                        let bitpacker = BitPacker4x::new();
+                        if n == BITPACKED_CHUNK_LEN {
+                            bitpacker.decompress(packed, chunk, num_bits);
+                        } else {
+                            let mut block = [0u8; BITPACKED_CHUNK_LEN * 4];
+                            block[..packed.len()].copy_from_slice(packed);
+                            bitpacker.decompress(&block, chunk, num_bits);
+                        }
+                        return Ok(next_rank);
+                    }
+                    chunk_rank = next_rank;
+                }
+            }
+        }
+    }
+}
+
+/// Payloads most recently decoded by [`PayloadFormat::decode_to`].
+///
+/// Which field holds the decoded payloads depends on the [`PayloadFormat`].
+struct DecodedPayloads {
+    /// A single payload decoded from any format other than [`PayloadFormat::BitPacked`].
+    single: Payload,
+    /// A [`PayloadFormat::BitPacked`] chunk.
+    chunk: [u32; BITPACKED_CHUNK_LEN],
+}
+
+impl DecodedPayloads {
+    fn new() -> Self {
+        Self {
+            single: 0,
+            chunk: [0; BITPACKED_CHUNK_LEN],
+        }
+    }
+
+    /// Return the decoded payload at `rank` within the block, which was encoded with `format`.
+    fn get(&self, format: PayloadFormat, rank: usize) -> Payload {
+        if format == PayloadFormat::BitPacked {
+            self.chunk[rank % BITPACKED_CHUNK_LEN].into()
+        } else {
+            self.single
         }
     }
 }
@@ -483,8 +791,9 @@ impl PayloadFormat {
 /// * remaining docs encoded with [`DocFormat`]
 /// * payloads encoded with [`PayloadFormat`]
 ///
-/// [`DocFormat::LEB128`] docs are decoded eagerly on construction; other doc formats are read in
-/// place. Payloads are decoded lazily as they are read.
+/// [`DocFormat::LEB128`] and [`DocFormat::BitPacked`] docs are decoded eagerly on construction;
+/// other doc formats are read in place. Payloads are decoded lazily as they are read;
+/// [`PayloadFormat::BitPacked`] payloads are decoded a chunk at a time.
 pub struct DocIteratorBlock<'a> {
     doc_format: DocFormat,
     payload_format: PayloadFormat,
@@ -499,9 +808,11 @@ pub struct DocIteratorBlock<'a> {
     data: Cow<'a, [u8]>,
     /// Offset in `data` of the remaining undecoded payload bytes.
     payload_offset: usize,
-    /// Rank of the payload at the start of `payloads`.
+    /// Rank of the payload at `payload_offset`.
     next_payload_rank: usize,
-    payload: Payload,
+    /// Payloads decoded before `next_payload_rank`, including the current payload if it has been
+    /// decoded.
+    decoded_payloads: DecodedPayloads,
     error: Option<&'static str>,
 }
 
@@ -559,7 +870,7 @@ impl<'a> DocIteratorBlock<'a> {
             data: block,
             payload_offset,
             next_payload_rank: 0,
-            payload: 0,
+            decoded_payloads: DecodedPayloads::new(),
             error: None,
         })
     }
@@ -619,7 +930,7 @@ impl DocIteratorBlock<'static> {
             data: Cow::Borrowed(&[]),
             payload_offset: 0,
             next_payload_rank: 0,
-            payload: 0,
+            decoded_payloads: DecodedPayloads::new(),
             error: None,
         }
     }
@@ -636,14 +947,16 @@ impl DocIterator for DocIteratorBlock<'_> {
         }
         if self.next_payload_rank <= self.rank {
             let mut payloads = &self.data[self.payload_offset..];
-            match self
-                .payload_format
-                .decode_to(&mut payloads, self.next_payload_rank, self.rank)
-            {
-                Ok(p) => {
-                    self.payload = p;
+            match self.payload_format.decode_to(
+                &mut payloads,
+                self.next_payload_rank,
+                self.rank,
+                self.len,
+                &mut self.decoded_payloads,
+            ) {
+                Ok(next_rank) => {
                     self.payload_offset = self.data.len() - payloads.len();
-                    self.next_payload_rank = self.rank + 1;
+                    self.next_payload_rank = next_rank;
                 }
                 Err(e) => {
                     // Terminate iteration so the caller will check error().
@@ -653,7 +966,7 @@ impl DocIterator for DocIteratorBlock<'_> {
                 }
             }
         }
-        self.payload
+        self.decoded_payloads.get(self.payload_format, self.rank)
     }
 
     fn advance(&mut self) -> DocId {
@@ -1201,9 +1514,11 @@ fn read_u8(data: &mut &[u8]) -> Result<u8, Error> {
 /// A mutable doc block that can be seeded from an encoded [`DocIteratorBlock`] and mutated via
 /// inserts and removals.
 ///
-/// The [`DocFormat`] is selected on serialization to produce the most compact encoding.
+/// The [`DocFormat`] and [`PayloadFormat`] are selected on serialization to produce the most
+/// compact encoding.
 pub struct DocIteratorBlockMut {
-    payload_format: PayloadFormat,
+    /// If false, payloads are not serialized.
+    has_payloads: bool,
     /// Current entries mapping doc -> payload.
     entries: BTreeMap<DocId, Payload>,
     /// If true, block contents has been modified.
@@ -1211,10 +1526,10 @@ pub struct DocIteratorBlockMut {
 }
 
 impl DocIteratorBlockMut {
-    /// Create a new empty block that will be encoded with the given payload format.
-    pub fn new(payload_format: PayloadFormat) -> Self {
+    /// Create a new empty block. Payloads are only serialized if `has_payloads` is true.
+    pub fn new(has_payloads: bool) -> Self {
         Self {
-            payload_format,
+            has_payloads,
             entries: BTreeMap::new(),
             dirty: false,
         }
@@ -1230,7 +1545,7 @@ impl DocIteratorBlockMut {
         }
         block.error()?;
         Ok(Self {
-            payload_format: block.payload_format,
+            has_payloads: block.payload_format != PayloadFormat::None,
             entries,
             dirty: false,
         })
@@ -1248,7 +1563,7 @@ impl DocIteratorBlockMut {
 
     /// Insert or replace the entry for `doc`.
     ///
-    /// `payload` is not serialized if the payload format is [`PayloadFormat::None`].
+    /// `payload` is not serialized if the block does not have payloads.
     ///
     /// *Panics* if `doc` is [`DOC_ITER_SENTINEL`].
     pub fn insert(&mut self, doc: DocId, payload: Payload) {
@@ -1267,17 +1582,18 @@ impl DocIteratorBlockMut {
     /// Serialize the current state of the block into the layout read by [`DocIteratorBlock`].
     pub fn serialize(&self) -> Vec<u8> {
         let doc_format = self.doc_format();
+        let payload_format = self.payload_format();
         let mut out = Vec::new();
         leb128::write::unsigned(&mut out, self.entries.len() as u64).unwrap();
         out.push(doc_format.into());
-        out.push(self.payload_format.into());
+        out.push(payload_format.into());
         let Some(&first_doc) = self.entries.keys().next() else {
             return out;
         };
         leb128::write::unsigned(&mut out, first_doc).unwrap();
 
         let docs = self.entries.keys().copied().skip(1);
-        if self.payload_format == PayloadFormat::None || doc_format == DocFormat::Range {
+        if payload_format == PayloadFormat::None || doc_format == DocFormat::Range {
             doc_format.encode(first_doc, docs, &mut out);
         } else {
             let mut doc_data = Vec::new();
@@ -1285,8 +1601,7 @@ impl DocIteratorBlockMut {
             leb128::write::unsigned(&mut out, doc_data.len() as u64).unwrap();
             out.extend_from_slice(&doc_data);
         }
-        self.payload_format
-            .encode(self.entries.values().copied(), &mut out);
+        payload_format.encode(self.entries.values().copied(), &mut out);
         out
     }
 
@@ -1296,15 +1611,28 @@ impl DocIteratorBlockMut {
             self.entries.first_key_value(),
             self.entries.last_key_value(),
         ) {
-            (Some((&first, _)), Some((&last, _))) => {
-                DocFormat::select(self.entries.len(), first, last)
-            }
+            (Some((&first, _)), Some((&last, _))) => DocFormat::select(
+                self.entries.len(),
+                first,
+                last,
+                self.entries.keys().copied().skip(1),
+            ),
             _ => DocFormat::Range,
         }
     }
 
+    /// Return the payload format that [`Self::serialize`] will use for the current entries.
     pub fn payload_format(&self) -> PayloadFormat {
-        self.payload_format
+        if self.has_payloads {
+            PayloadFormat::select(self.entries.values().copied())
+        } else {
+            PayloadFormat::None
+        }
+    }
+
+    /// Return true if payloads are serialized.
+    pub fn has_payloads(&self) -> bool {
+        self.has_payloads
     }
 
     /// Return the number of entries in the block.
@@ -1342,8 +1670,8 @@ mod test {
         out
     }
 
-    fn build(payload_format: PayloadFormat, entries: &[(DocId, Payload)]) -> DocIteratorBlockMut {
-        let mut block = DocIteratorBlockMut::new(payload_format);
+    fn build(has_payloads: bool, entries: &[(DocId, Payload)]) -> DocIteratorBlockMut {
+        let mut block = DocIteratorBlockMut::new(has_payloads);
         for &(d, p) in entries {
             block.insert(d, p);
         }
@@ -1354,8 +1682,8 @@ mod test {
 
     #[test]
     fn empty() {
-        for pf in [PayloadFormat::None, PayloadFormat::LEB128] {
-            let data = DocIteratorBlockMut::new(pf).serialize();
+        for has_payloads in [false, true] {
+            let data = DocIteratorBlockMut::new(has_payloads).serialize();
             let mut it = DocIteratorBlock::new(&data).unwrap();
             assert!(it.is_empty());
             assert_eq!(it.doc(), DOC_ITER_SENTINEL);
@@ -1368,7 +1696,7 @@ mod test {
 
     #[test]
     fn roundtrip_payloads() {
-        let data = build(PayloadFormat::LEB128, ENTRIES).serialize();
+        let data = build(true, ENTRIES).serialize();
         assert_eq!(collect(&data), ENTRIES);
         let block = DocIteratorBlockMut::deserialize(&data).unwrap();
         assert_eq!(block.payload_format(), PayloadFormat::LEB128);
@@ -1378,7 +1706,7 @@ mod test {
 
     #[test]
     fn roundtrip_no_payloads() {
-        let data = build(PayloadFormat::None, ENTRIES).serialize();
+        let data = build(false, ENTRIES).serialize();
         let expected = ENTRIES.iter().map(|&(d, _)| (d, 0)).collect::<Vec<_>>();
         assert_eq!(collect(&data), expected);
         let block = DocIteratorBlockMut::deserialize(&data).unwrap();
@@ -1388,7 +1716,7 @@ mod test {
 
     #[test]
     fn sparse_payload_reads() {
-        let data = build(PayloadFormat::LEB128, ENTRIES).serialize();
+        let data = build(true, ENTRIES).serialize();
         let mut it = DocIteratorBlock::new(&data).unwrap();
         assert_eq!(it.advance_to(1), 3);
         assert_eq!(it.payload(), 1 << 40);
@@ -1403,7 +1731,7 @@ mod test {
 
     #[test]
     fn skip_multibyte_payload() {
-        let data = build(PayloadFormat::LEB128, ENTRIES).serialize();
+        let data = build(true, ENTRIES).serialize();
         let mut it = DocIteratorBlock::new(&data).unwrap();
         assert_eq!(it.advance_to(300), 300);
         assert_eq!(it.payload(), 2);
@@ -1412,7 +1740,7 @@ mod test {
 
     #[test]
     fn advance_to() {
-        let data = build(PayloadFormat::None, ENTRIES).serialize();
+        let data = build(false, ENTRIES).serialize();
         let mut it = DocIteratorBlock::new(&data).unwrap();
         assert_eq!(it.cost(), ENTRIES.len() as u64);
         assert_eq!(it.advance_to(0), 0);
@@ -1425,7 +1753,7 @@ mod test {
 
     #[test]
     fn mutate() {
-        let data = build(PayloadFormat::LEB128, ENTRIES).serialize();
+        let data = build(true, ENTRIES).serialize();
         let mut block = DocIteratorBlockMut::deserialize(&data).unwrap();
         assert_eq!(block.remove(1), None);
         assert!(!block.dirty());
@@ -1455,14 +1783,14 @@ mod test {
 
     #[test]
     fn truncated() {
-        let data = build(PayloadFormat::LEB128, ENTRIES).serialize();
+        let data = build(true, ENTRIES).serialize();
         // Truncating into the header fails at construction.
         assert!(matches!(
             DocIteratorBlock::new(&data[..2]),
             Err(Error::Coding(_))
         ));
         // Truncating into the docs fails at construction.
-        let no_payloads = build(PayloadFormat::None, ENTRIES).serialize();
+        let no_payloads = build(false, ENTRIES).serialize();
         assert!(matches!(
             DocIteratorBlock::new(&no_payloads[..no_payloads.len() - 1]),
             Err(Error::Coding(_))
@@ -1480,7 +1808,7 @@ mod test {
 
     fn format_of(docs: impl IntoIterator<Item = DocId>) -> DocFormat {
         let entries = docs.into_iter().map(|d| (d, 0)).collect::<Vec<_>>();
-        build(PayloadFormat::None, &entries).doc_format()
+        build(false, &entries).doc_format()
     }
 
     #[test]
@@ -1488,11 +1816,26 @@ mod test {
         assert_eq!(format_of([]), DocFormat::Range);
         assert_eq!(format_of([7]), DocFormat::Range);
         assert_eq!(format_of(10..20), DocFormat::Range);
+        // 26 bitmap bytes vs 33 bitpacked bytes.
         assert_eq!(format_of((0..=200).step_by(2)), DocFormat::Bitmap);
-        // 88 bitmap bytes vs at least 100 delta bytes.
-        assert_eq!(format_of((0..=700).step_by(7)), DocFormat::Bitmap);
-        // 101 bitmap bytes vs at least 100 delta bytes.
-        assert_eq!(format_of((0..=800).step_by(8)), DocFormat::LEB128);
+        // 38 bitmap bytes vs 33 bitpacked bytes.
+        assert_eq!(format_of((0..=300).step_by(3)), DocFormat::BitPacked);
+        // 88 bitmap bytes vs 49 bitpacked bytes vs 100 delta bytes.
+        assert_eq!(format_of((0..=700).step_by(7)), DocFormat::BitPacked);
+        // Multiple chunks: 263 bitmap bytes vs 131 bitpacked bytes vs at least 300 delta bytes.
+        assert_eq!(format_of((0..=2100).step_by(7)), DocFormat::BitPacked);
+        // Multiple chunks: 76 bitmap bytes vs 83 bitpacked bytes.
+        assert_eq!(format_of((0..=600).step_by(2)), DocFormat::Bitmap);
+        // One large delta: 209 bitpacked bytes vs 55 delta bytes.
+        assert_eq!(
+            format_of((0..100).step_by(2).chain([1 << 31])),
+            DocFormat::LEB128
+        );
+        // Each chunk spans no more than u32::MAX though the block does: 947 bitpacked bytes vs
+        // 1196 delta bytes.
+        assert_eq!(format_of((0..300).map(|d| d << 24)), DocFormat::BitPacked);
+        // Chunk span does not fit in u32.
+        assert_eq!(format_of((0..=300).map(|d| d << 33)), DocFormat::LEB128);
         assert_eq!(
             format_of(ENTRIES.iter().map(|&(d, _)| d)),
             DocFormat::LEB128
@@ -1501,21 +1844,33 @@ mod test {
 
     /// Check iteration, deserialization, and seeking to every target over a block of `docs`.
     fn check_block(docs: &[DocId], doc_format: DocFormat) {
-        for payload_format in [PayloadFormat::None, PayloadFormat::LEB128] {
+        // No payloads, payloads that may exceed a u32, and small payloads.
+        for variant in 0..3 {
+            let has_payloads = variant > 0;
             let entries = docs
                 .iter()
-                .map(|&d| (d, (d % 5) << (d % 40)))
+                .map(|&d| match variant {
+                    0 => (d, 0),
+                    1 => (d, (d % 5) << (d % 40)),
+                    _ => (d, d % 1000),
+                })
                 .collect::<Vec<_>>();
-            let block = build(payload_format, &entries);
+            let block = build(has_payloads, &entries);
             assert_eq!(block.doc_format(), doc_format);
+            let payload_format = block.payload_format();
+            // Ensure multi-chunk bitpacked payloads are exercised.
+            if variant == 2 && docs.len() > BITPACKED_CHUNK_LEN {
+                assert_eq!(payload_format, PayloadFormat::BitPacked);
+            }
             let data = block.serialize();
-            let expected = if payload_format == PayloadFormat::None {
-                entries.iter().map(|&(d, _)| (d, 0)).collect()
-            } else {
+            let expected = if has_payloads {
                 entries
+            } else {
+                entries.iter().map(|&(d, _)| (d, 0)).collect()
             };
             let it = DocIteratorBlock::new(&data).unwrap();
             assert_eq!(it.doc_format(), doc_format);
+            assert_eq!(it.payload_format(), payload_format);
             assert_eq!(it.len(), docs.len());
             assert_eq!(collect(&data), expected);
             assert_eq!(
@@ -1573,8 +1928,9 @@ mod test {
     #[test]
     fn bitmap_block() {
         check_block(&(0..=200).step_by(2).collect::<Vec<_>>(), DocFormat::Bitmap);
+        // Multiple bitpacked chunks.
         check_block(
-            &(1_000_003..=1_000_703).step_by(7).collect::<Vec<_>>(),
+            &(1_000_003..=1_000_603).step_by(2).collect::<Vec<_>>(),
             DocFormat::Bitmap,
         );
         // Spans several empty words.
@@ -1590,8 +1946,317 @@ mod test {
     }
 
     #[test]
+    fn bitpacked_block() {
+        check_block(
+            &(0..=700).step_by(7).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // The last doc is packed in a lane word past (num_bits * len) / 128 words.
+        check_block(
+            &(0..=1717).step_by(17).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // Full chunk with varying deltas, some of which need multiple LEB128 bytes.
+        check_block(
+            &(0..129).map(|i| (1 << 40) + i * i).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // Two full chunks.
+        check_block(
+            &(0..=1280).step_by(5).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // Chunks with different bit widths and a partial last chunk.
+        check_block(
+            &(0..=128)
+                .map(|i| i * 3)
+                .chain((1..=200).map(|i| 384 + i * 100))
+                .collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+    }
+
+    #[test]
+    fn bitpacked_codec() {
+        use rand::prelude::*;
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        for len in 1..=BITPACKED_CHUNK_LEN * 3 + 5 {
+            for num_bits in 1..=32u8 {
+                let first = rng.random_range(0..1 << 50);
+                let mut docs = vec![first];
+                let mut expected_len = 0;
+                for chunk_start in (0..len).step_by(BITPACKED_CHUNK_LEN) {
+                    let n = (len - chunk_start).min(BITPACKED_CHUNK_LEN);
+                    // One delta uses all num_bits; the rest keep the chunk span within a u32.
+                    let top = 1u64 << (num_bits - 1);
+                    let max_delta =
+                        ((1 << num_bits) - 1).min((u64::from(u32::MAX) - top) / n as u64);
+                    for i in 0..n {
+                        let delta = if i == n / 2 {
+                            top
+                        } else {
+                            rng.random_range(1..=max_delta)
+                        };
+                        docs.push(docs.last().unwrap() + delta);
+                    }
+                    expected_len += 1 + bitpacked_len(n, num_bits);
+                }
+                let context = format!("len {len} num_bits {num_bits}");
+                let mut data = vec![];
+                DocFormat::BitPacked.encode(first, docs[1..].iter().copied(), &mut data);
+                assert_eq!(data.len(), expected_len, "{context}");
+                assert_eq!(
+                    bitpacked_encoded_len(first, docs[1..].iter().copied()),
+                    Some(expected_len as u64),
+                    "{context}"
+                );
+                let Ok(Docs::List(decoded)) =
+                    DocFormat::BitPacked.decode(first, docs.len(), &data, 0)
+                else {
+                    panic!("decode failed {context}");
+                };
+                assert_eq!(decoded, docs, "{context}");
+            }
+        }
+    }
+
+    #[test]
+    fn corrupt_bitpacked() {
+        let entries = (0..=700).step_by(7).map(|d| (d, 0)).collect::<Vec<_>>();
+        let data = build(false, &entries).serialize();
+        assert_eq!(data[1], u8::from(DocFormat::BitPacked));
+        DocIteratorBlock::new(&data).unwrap();
+        // count (1 byte), formats (2 bytes), first doc (1 byte), num bits (1 byte).
+        assert_eq!(data[4], 3);
+
+        let check_err = |data: &[u8]| {
+            assert!(matches!(DocIteratorBlock::new(data), Err(Error::Coding(_))));
+        };
+        let mut trailing = data.clone();
+        trailing.push(0);
+        check_err(&trailing);
+        check_err(&data[..data.len() - 1]);
+        check_err(&data[..5]);
+        check_err(&data[..4]);
+        for num_bits in [0, 2, 4, 33] {
+            let mut bad = data.clone();
+            bad[4] = num_bits;
+            check_err(&bad);
+        }
+        // The extra doc is decoded from padding and repeats the last doc.
+        let mut wrong_count = data.clone();
+        wrong_count[0] += 1;
+        check_err(&wrong_count);
+        let mut single = vec![1, DocFormat::BitPacked.into(), 0, 7];
+        assert_eq!(collect(&single), &[(7, 0)]);
+        single.extend_from_slice(&[1; 17]);
+        check_err(&single);
+
+        // Docs must be strictly increasing.
+        let mut zeros = data.clone();
+        zeros[5..].fill(0);
+        check_err(&zeros);
+        // Deltas that overflow u32 wrap around.
+        let mut wrap = vec![3, DocFormat::BitPacked.into(), 0, 0, 32];
+        wrap.extend_from_slice(&[0xff; 16]);
+        check_err(&wrap);
+
+        // A single doc with offset 1 from `first`.
+        let offset_one = |first| {
+            let mut data = vec![2, DocFormat::BitPacked.into(), 0];
+            leb128::write::unsigned(&mut data, first).unwrap();
+            data.push(1);
+            data.extend_from_slice(&[1; 16]);
+            data
+        };
+        check_err(&offset_one(DOC_ITER_SENTINEL - 1));
+        assert_eq!(
+            collect(&offset_one(DOC_ITER_SENTINEL - 2)),
+            &[(DOC_ITER_SENTINEL - 2, 0), (DOC_ITER_SENTINEL - 1, 0)]
+        );
+
+        // Corrupt and truncate chunks after the first.
+        let entries = (0..=2100).step_by(7).map(|d| (d, 0)).collect::<Vec<_>>();
+        let data = build(false, &entries).serialize();
+        assert_eq!(data[2], u8::from(DocFormat::BitPacked));
+        DocIteratorBlock::new(&data).unwrap();
+        // count (2 bytes), formats (2 bytes), first doc (1 byte), first chunk (49 bytes).
+        assert_eq!(data[54], 3);
+        for num_bits in [0, 33] {
+            let mut bad = data.clone();
+            bad[54] = num_bits;
+            check_err(&bad);
+        }
+        check_err(&data[..55]);
+        check_err(&data[..data.len() - 1]);
+        let mut wrong_count = data.clone();
+        wrong_count[0] += 1;
+        check_err(&wrong_count);
+    }
+
+    fn payload_format_of(payloads: impl IntoIterator<Item = Payload>) -> PayloadFormat {
+        let entries = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(d, p)| (d as DocId, p))
+            .collect::<Vec<_>>();
+        let block = build(true, &entries);
+        let data = block.serialize();
+        assert_eq!(
+            DocIteratorBlock::new(&data).unwrap().payload_format(),
+            block.payload_format()
+        );
+        assert_eq!(collect(&data), entries);
+        block.payload_format()
+    }
+
+    #[test]
+    fn payload_format_selection() {
+        assert_eq!(build(false, ENTRIES).payload_format(), PayloadFormat::None);
+        assert_eq!(build(false, &[]).payload_format(), PayloadFormat::None);
+        // A payload does not fit in a u32.
+        assert_eq!(
+            payload_format_of(ENTRIES.iter().map(|&(_, p)| p)),
+            PayloadFormat::LEB128
+        );
+        assert_eq!(
+            payload_format_of((0..300).map(|d| if d == 150 { 1 << 32 } else { 0 })),
+            PayloadFormat::LEB128
+        );
+        // 3 bitpacked bytes vs at least 300 delta bytes.
+        assert_eq!(payload_format_of([0; 300]), PayloadFormat::BitPacked);
+        // 355 bitpacked bytes vs 472 LEB128 bytes.
+        assert_eq!(payload_format_of(0..300), PayloadFormat::BitPacked);
+        // 33 bitpacked bytes vs 32 LEB128 bytes.
+        assert_eq!(payload_format_of([127; 32]), PayloadFormat::LEB128);
+        // 33 bitpacked bytes vs 33 LEB128 bytes.
+        assert_eq!(
+            payload_format_of(std::iter::repeat_n(127, 31).chain([128])),
+            PayloadFormat::BitPacked
+        );
+        // 17 bitpacked bytes vs 7 LEB128 bytes.
+        assert_eq!(
+            payload_format_of([u32::MAX.into(), 0, 3]),
+            PayloadFormat::LEB128
+        );
+        // 513 bitpacked bytes vs 640 LEB128 bytes.
+        assert_eq!(
+            payload_format_of([u64::from(u32::MAX); 128]),
+            PayloadFormat::BitPacked
+        );
+
+        // The payload format is reselected after deserialization.
+        let mut block =
+            DocIteratorBlockMut::deserialize(&build(true, &[(0, 1 << 40), (1, 1)]).serialize())
+                .unwrap();
+        assert!(block.has_payloads());
+        assert_eq!(block.payload_format(), PayloadFormat::LEB128);
+        block.remove(0);
+        for d in 2..200 {
+            block.insert(d, d % 300);
+        }
+        assert_eq!(block.payload_format(), PayloadFormat::BitPacked);
+        let block = DocIteratorBlockMut::deserialize(&build(false, ENTRIES).serialize()).unwrap();
+        assert!(!block.has_payloads());
+    }
+
+    #[test]
+    fn bitpacked_payloads_zero() {
+        // Each chunk of zero payloads is encoded as a zero bit width with no packed bytes.
+        let entries = (0..300).map(|d| (d, 0)).collect::<Vec<_>>();
+        let data = build(true, &entries).serialize();
+        assert_eq!(&data[data.len() - 3..], &[0, 0, 0]);
+        assert_eq!(collect(&data), entries);
+    }
+
+    #[test]
+    fn bitpacked_payloads_codec() {
+        use rand::prelude::*;
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        for len in 1..=BITPACKED_CHUNK_LEN * 3 + 5 {
+            for num_bits in 0..=32u32 {
+                let max = (1u64 << num_bits) - 1;
+                let mut payloads = (0..len)
+                    .map(|_| rng.random_range(0..=max))
+                    .collect::<Vec<_>>();
+                // Every chunk uses exactly num_bits.
+                for p in payloads.iter_mut().step_by(BITPACKED_CHUNK_LEN) {
+                    *p = max;
+                }
+                let expected_len = (0..len)
+                    .step_by(BITPACKED_CHUNK_LEN)
+                    .map(|r| 1 + bitpacked_len((len - r).min(BITPACKED_CHUNK_LEN), num_bits as u8))
+                    .sum::<usize>();
+                let context = format!("len {len} num_bits {num_bits}");
+                let mut data = vec![];
+                PayloadFormat::BitPacked.encode(payloads.iter().copied(), &mut data);
+                assert_eq!(data.len(), expected_len, "{context}");
+
+                // Read every payload in order, and every 50th payload to skip chunks.
+                for step in [1, 50] {
+                    let mut remaining = data.as_slice();
+                    let mut next_rank = 0;
+                    let mut decoded = DecodedPayloads::new();
+                    for target in (0..len).step_by(step) {
+                        if next_rank <= target {
+                            next_rank = PayloadFormat::BitPacked
+                                .decode_to(&mut remaining, next_rank, target, len, &mut decoded)
+                                .unwrap();
+                        }
+                        assert_eq!(
+                            decoded.get(PayloadFormat::BitPacked, target),
+                            payloads[target],
+                            "{context}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn corrupt_bitpacked_payloads() {
+        let entries = (0..300).map(|d| (d, d)).collect::<Vec<_>>();
+        let data = build(true, &entries).serialize();
+        assert_eq!(data[3], u8::from(PayloadFormat::BitPacked));
+        assert_eq!(collect(&data), entries);
+        // count (2 bytes), formats (2 bytes), first doc (1 byte) then payloads; Range docs
+        // have no doc data.
+        assert_eq!(data[5], 7);
+
+        // Reading a payload in a corrupt chunk fails during iteration.
+        let check_err = |data: &[u8], rank: DocId| {
+            let mut it = DocIteratorBlock::new(data).unwrap();
+            assert_eq!(it.advance_to(rank), rank);
+            assert_eq!(it.payload(), 0);
+            assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+            assert!(matches!(it.error(), Err(Error::Coding(_))));
+        };
+        let mut bad = data.clone();
+        bad[5] = 33;
+        check_err(&bad, 0);
+        check_err(&data[..data.len() - 1], 299);
+        // Truncation is only detected when the truncated chunk is read.
+        let mut it = DocIteratorBlock::new(&data[..data.len() - 1]).unwrap();
+        assert_eq!(it.advance_to(255), 255);
+        assert_eq!(it.payload(), 255);
+        it.error().unwrap();
+        check_err(&data[..6 + 16 * 7], 128);
+        check_err(&data[..5], 0);
+
+        // Trailing data is only detected when the last chunk is read.
+        let mut trailing = data.clone();
+        trailing.push(0);
+        check_err(&trailing, 299);
+        let mut it = DocIteratorBlock::new(&trailing).unwrap();
+        assert_eq!(it.advance_to(255), 255);
+        assert_eq!(it.payload(), 255);
+        it.error().unwrap();
+    }
+
+    #[test]
     fn corrupt_range() {
-        let data = build(PayloadFormat::None, &[(5, 0), (6, 0)]).serialize();
+        let data = build(false, &[(5, 0), (6, 0)]).serialize();
         assert_eq!(data, &[2, DocFormat::Range.into(), 0, 5]);
         let mut trailing = data.clone();
         trailing.push(0);
@@ -1607,7 +2272,7 @@ mod test {
         ));
 
         // Truncating into the payloads fails during iteration.
-        let data = build(PayloadFormat::LEB128, &[(5, 1), (6, 1 << 40)]).serialize();
+        let data = build(true, &[(5, 1), (6, 1 << 40)]).serialize();
         let mut it = DocIteratorBlock::new(&data[..data.len() - 1]).unwrap();
         assert_eq!(it.payload(), 1);
         assert_eq!(it.advance(), 6);
@@ -1619,7 +2284,7 @@ mod test {
     #[test]
     fn corrupt_bitmap() {
         let entries = (0..=200).step_by(2).map(|d| (d, 0)).collect::<Vec<_>>();
-        let data = build(PayloadFormat::None, &entries).serialize();
+        let data = build(false, &entries).serialize();
         assert_eq!(data[1], u8::from(DocFormat::Bitmap));
         DocIteratorBlock::new(&data).unwrap();
 
@@ -1691,7 +2356,7 @@ mod test {
                     cursor
                         .set(
                             &doc_block_key(field, term, limit).unwrap(),
-                            &build(PayloadFormat::LEB128, entries).serialize(),
+                            &build(true, entries).serialize(),
                         )
                         .unwrap();
                 }
@@ -1933,7 +2598,7 @@ mod test {
     }
 
     fn block_iter(docs: &[DocId]) -> Box<dyn DocIterator> {
-        let mut block = DocIteratorBlockMut::new(PayloadFormat::LEB128);
+        let mut block = DocIteratorBlockMut::new(true);
         for &d in docs {
             block.insert(d, 1);
         }
@@ -2020,7 +2685,7 @@ mod test {
 
     #[test]
     fn conjunction_error() {
-        let mut block = DocIteratorBlockMut::new(PayloadFormat::LEB128);
+        let mut block = DocIteratorBlockMut::new(true);
         block.insert(1, 1 << 40);
         let mut data = block.serialize();
         data.truncate(data.len() - 2);
@@ -2122,7 +2787,7 @@ mod test {
 
     #[test]
     fn disjunction_error() {
-        let mut block = DocIteratorBlockMut::new(PayloadFormat::LEB128);
+        let mut block = DocIteratorBlockMut::new(true);
         block.insert(3, 1 << 40);
         let mut data = block.serialize();
         data.truncate(data.len() - 2);
@@ -2188,9 +2853,7 @@ mod test {
     }
 
     fn payload_iter(entries: &[(DocId, Payload)]) -> Box<dyn DocIterator> {
-        Box::new(
-            DocIteratorBlock::from_vec(build(PayloadFormat::LEB128, entries).serialize()).unwrap(),
-        )
+        Box::new(DocIteratorBlock::from_vec(build(true, entries).serialize()).unwrap())
     }
 
     fn collect_entries(it: &mut dyn DocIterator) -> Vec<(DocId, Payload)> {

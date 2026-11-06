@@ -1,5 +1,6 @@
 use std::{
     io,
+    ops::Range,
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc,
@@ -20,220 +21,229 @@ use crate::{neighbor_util::TopNeighbors, ui::progress_bar};
 
 use super::{ComputeNeighborsArgs, write_neighbors};
 
-/// WGSL compute shader for pairwise distance computation.
+/// WGSL compute shader for exact pairwise distance computation with on-GPU candidate filtering.
 ///
-/// The shader is instantiated at runtime from the templates below with `dims` and the similarity
-/// function baked into the source, since both are fixed for the whole run: loop bounds become
-/// compile-time constants the driver compiler can unroll, and the runtime similarity switch
-/// disappears. Every accumulation is carried out in f32 for precision.
+/// Vectors are uploaded as f16 with each row zero-padded to a multiple of `DIM_TILE` dims (zero
+/// padding changes neither dot product nor L2 distance) and read as `u32` f16 pairs, so the
+/// shader needs no `f16` support. All arithmetic is carried out in f32.
 ///
-/// Two variants are generated:
-///   - `SHADER_SCALAR` (odd dims): one thread per (query, doc) pair, scalar `array<f16>` loads,
-///     `enable f16`. Only used for dimensionality that cannot be read as whole `u32`s.
-///   - `SHADER_TILED` (even dims): GEMM-style workgroup tiling. f16 pairs are read as `u32`s and
-///     unpacked with `unpack2x16float`; each workgroup cooperatively stages tiles of query and
-///     doc rows into workgroup storage with linear, fully-coalesced loads, so every staged byte
-///     feeds 16 pair computations instead of one. Dims are processed in tiles, accumulating
-///     partial sums across tiles.
+/// Each 16x16 workgroup computes a 64 query x 64 doc block of distances; each thread owns a 4x4
+/// sub-block held in registers. Per stage of `DIM_TILE` dims the workgroup stages the block's
+/// query and doc rows into workgroup memory, converted to f32 once and transposed so that a
+/// thread reads its 4 query values and 4 doc values for one dim as two `vec4` loads that then
+/// feed 16 FMAs. The next stage's global loads are issued before the current stage's math so
+/// their latency is hidden.
+///
+/// Rather than writing the full distance matrix, a pair is only emitted when its distance is no
+/// greater than `thresholds[q]`, the current k-th smallest distance known for that query (an
+/// upper bound on the final k-th distance, so no true neighbor is ever dropped). Emitted pairs
+/// are appended to `candidates` through an atomic counter; the counter keeps counting past the
+/// buffer's capacity so the host can detect overflow and recompute that range.
 ///
 /// Similarity:
-///   0 = Euclidean (squared L2)
-///   1 = Dot product distance – assumes pre-normalized vectors: (-dot + 1) / 2
-///
-/// (Cosine is Dot over normalized vectors; normalize the inputs first.)
-///
-/// Output distances are written row-major as `distances[q * doc_count + d]`.
-const SHADER_SCALAR: &str = r#"
-enable f16;
-
+///   Euclidean: squared L2.
+///   Dot: (1 - dot) / 2; assumes pre-normalized vectors.
+const SHADER: &str = r#"
 struct Params {
     query_count: u32,
     doc_count: u32,
-    dimensions: u32,
     q_offset: u32,
     d_offset: u32,
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> query_vectors: array<f16>;
-@group(0) @binding(2) var<storage, read> doc_vectors: array<f16>;
-@group(0) @binding(3) var<storage, read_write> distances: array<f32>;
-
-// Baked in at runtime.
-const DIMS: u32 = __DIMS__u;
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let q = gid.x + params.q_offset;
-    let d = gid.y + params.d_offset;
-
-    if q >= params.query_count || d >= params.doc_count {
-        return;
-    }
-
-    let q_base = q * DIMS;
-    let d_base = d * DIMS;
-__BODY__
-    distances[q * params.doc_count + d] = result;
+struct Candidate {
+    query: u32,
+    doc: u32,
+    distance: f32,
 }
-"#;
 
-const SHADER_TILED: &str = r#"
-struct Params {
-    query_count: u32,
-    doc_count: u32,
-    dimensions: u32,
-    q_offset: u32,
-    d_offset: u32,
+struct Candidates {
+    count: atomic<u32>,
+    items: array<Candidate>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
 // Each u32 holds two f16s (little-endian: low half is the even element).
 @group(0) @binding(1) var<storage, read> query_vectors: array<u32>;
 @group(0) @binding(2) var<storage, read> doc_vectors: array<u32>;
-@group(0) @binding(3) var<storage, read_write> distances: array<f32>;
+@group(0) @binding(3) var<storage, read> thresholds: array<f32>;
+@group(0) @binding(4) var<storage, read_write> candidates: Candidates;
 
-// Baked in at runtime. DIMS is even in this variant, so every row is a whole number of u32s.
-// A tile of TILE u32s (= 2 * TILE dims) is staged in workgroup storage per iteration. Full tiles
-// have compile-time loop bounds so the driver compiler can unroll; only a partial final tile
-// (dims not a multiple of 2 * TILE) is masked.
-const DIMS: u32 = __DIMS__u;
-const HALF_DIMS: u32 = DIMS / 2u;
-const TILE: u32 = __TILE__u;
-const STRIDE: u32 = TILE + 1u; // +1 padding avoids LDS bank conflicts between rows
-const FULL_TILES: u32 = HALF_DIMS / TILE;
-const TAIL: u32 = HALF_DIMS % TILE;
+// u32s per (padded) row; baked in at runtime so loop bounds are compile-time constants.
+const ROW_U32: u32 = __ROW_U32__u;
+// Dims staged in workgroup memory per stage, and the matching number of u32s per row.
+const TK: u32 = __DIM_TILE__u;
+const TK_U32: u32 = TK / 2u;
+const STAGES: u32 = ROW_U32 / TK_U32;
+// Rows per workgroup block on each axis (16 threads x 4 rows per thread).
+const TQ: u32 = 64u;
+const TD: u32 = 64u;
+// vec4 stride between dims in the staged tiles: 16 vec4s (64 rows) + 1 to spread LDS banks.
+const S4: u32 = 17u;
 
-const QG: u32 = 16u; // query rows staged per workgroup
-const DG: u32 = 16u; // doc rows staged per workgroup
-const WG: u32 = 256u;
+// Staged tiles, transposed: element [k * S4 + g] holds rows 4g..4g+3 at dim k of the stage.
+var<workgroup> q_s: array<vec4<f32>, TK * S4>;
+var<workgroup> d_s: array<vec4<f32>, TK * S4>;
 
-var<workgroup> q_tile: array<u32, QG * STRIDE>;
-var<workgroup> d_tile: array<u32, DG * STRIDE>;
+// Load this thread's share of one stage: one u32 (2 dims) from each of 4 consecutive rows.
+// Rows past the end of the batch re-read the last valid row; their results are discarded.
+fn fetch_stage(stage: u32, staging_query: bool, row0: u32, last: u32, col: u32) -> vec4<u32> {
+    let off = stage * TK_U32 + col;
+    let r0 = min(row0, last) * ROW_U32 + off;
+    let r1 = min(row0 + 1u, last) * ROW_U32 + off;
+    let r2 = min(row0 + 2u, last) * ROW_U32 + off;
+    let r3 = min(row0 + 3u, last) * ROW_U32 + off;
+    if staging_query {
+        return vec4<u32>(query_vectors[r0], query_vectors[r1], query_vectors[r2], query_vectors[r3]);
+    }
+    return vec4<u32>(doc_vectors[r0], doc_vectors[r1], doc_vectors[r2], doc_vectors[r3]);
+}
 
-@compute @workgroup_size(QG, DG, 1)
+// Convert a fetched 4 row x 2 dim block to f32 and store it transposed (one vec4 per dim).
+fn store_stage(v: vec4<u32>, staging_query: bool, col: u32, rg: u32) {
+    let a = unpack2x16float(v.x);
+    let b = unpack2x16float(v.y);
+    let c = unpack2x16float(v.z);
+    let d = unpack2x16float(v.w);
+    let i0 = 2u * col * S4 + rg;
+    let i1 = i0 + S4;
+    if staging_query {
+        q_s[i0] = vec4<f32>(a.x, b.x, c.x, d.x);
+        q_s[i1] = vec4<f32>(a.y, b.y, c.y, d.y);
+    } else {
+        d_s[i0] = vec4<f32>(a.x, b.x, c.x, d.x);
+        d_s[i1] = vec4<f32>(a.y, b.y, c.y, d.y);
+    }
+}
+
+fn to_distance(acc: vec4<f32>) -> vec4<f32> {
+    return __DISTANCE__;
+}
+
+// Append each pair in a 1 query x 4 doc row that passes the query's threshold.
+fn emit_row(q: u32, d0: u32, acc: vec4<f32>) {
+    if q >= params.query_count {
+        return;
+    }
+    let threshold = thresholds[q];
+    let dist = to_distance(acc);
+    let capacity = arrayLength(&candidates.items);
+    for (var j = 0u; j < 4u; j++) {
+        let d = d0 + j;
+        if d < params.doc_count && dist[j] <= threshold {
+            let idx = atomicAdd(&candidates.count, 1u);
+            if idx < capacity {
+                candidates.items[idx] = Candidate(q, d, dist[j]);
+            }
+        }
+    }
+}
+
+@compute @workgroup_size(16, 16, 1)
 fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(local_invocation_id) lid3: vec3<u32>,
     @builtin(local_invocation_index) lid: u32,
     @builtin(workgroup_id) wid: vec3<u32>,
 ) {
-    let q = gid.x + params.q_offset;
-    let d = gid.y + params.d_offset;
-    // Rows staged past the end of the batch read their last valid row instead; every thread
-    // still participates in the cooperative load (there are no early returns past this point —
-    // the barriers require uniform control flow), and the clamped rows' outputs are discarded
-    // by the write guard below.
-    let q_last = params.q_offset + params.query_count - 1u;
-    let d_last = params.d_offset + params.doc_count - 1u;
-    let qt0 = wid.x * QG + params.q_offset;
-    let dt0 = wid.y * DG + params.d_offset;
+    let qx = lid3.x;
+    let dy = lid3.y;
+    let qt0 = params.q_offset + wid.x * TQ;
+    let dt0 = params.d_offset + wid.y * TD;
 
-    let qx = lid % QG;
-    let dy = lid / QG;
-    var acc = vec2<f32>(0.0);
+    // Staging assignment: threads 0..127 stage query rows and 128..255 stage doc rows (a
+    // wave-uniform split). Within each half, 8 consecutive threads read 8 consecutive u32s of
+    // the same row (coalesced), and each thread covers 4 consecutive rows.
+    let staging_query = lid < 128u;
+    let t = lid & 127u;
+    let col = t & 7u;
+    let rg = t >> 3u;
+    let row0 = select(dt0, qt0, staging_query) + rg * 4u;
+    let last = select(params.doc_count, params.query_count, staging_query) - 1u;
 
-    for (var t: u32 = 0u; t < FULL_TILES; t++) {
-        // Cooperatively stage the query/doc rows for this dims-tile: linear thread ids over
-        // (row, column) tiles give fully coalesced global reads.
-        for (var c = lid; c < QG * TILE; c += WG) {
-            let r = c / TILE;
-            let col = c - r * TILE;
-            let row = min(qt0 + r, q_last);
-            q_tile[r * STRIDE + col] = query_vectors[row * HALF_DIMS + t * TILE + col];
-        }
-        for (var c = lid; c < DG * TILE; c += WG) {
-            let r = c / TILE;
-            let col = c - r * TILE;
-            let row = min(dt0 + r, d_last);
-            d_tile[r * STRIDE + col] = doc_vectors[row * HALF_DIMS + t * TILE + col];
-        }
+    var acc0 = vec4<f32>(0.0);
+    var acc1 = vec4<f32>(0.0);
+    var acc2 = vec4<f32>(0.0);
+    var acc3 = vec4<f32>(0.0);
+
+    var next = fetch_stage(0u, staging_query, row0, last, col);
+    for (var s = 0u; s < STAGES; s++) {
         workgroupBarrier();
-
-        for (var i: u32 = 0u; i < TILE; i++) {
-            let pq = unpack2x16float(q_tile[qx * STRIDE + i]);
-            let pd = unpack2x16float(d_tile[dy * STRIDE + i]);
+        store_stage(next, staging_query, col, rg);
+        workgroupBarrier();
+        if s + 1u < STAGES {
+            next = fetch_stage(s + 1u, staging_query, row0, last, col);
+        }
+        for (var k = 0u; k < TK; k++) {
+            let a = q_s[k * S4 + qx];
+            let b = d_s[k * S4 + dy];
 __ACCUM__
         }
-        workgroupBarrier();
     }
 
-    if TAIL > 0u {
-        for (var c = lid; c < QG * TILE; c += WG) {
-            let r = c / TILE;
-            let col = c - r * TILE;
-            if col < TAIL {
-                let row = min(qt0 + r, q_last);
-                q_tile[r * STRIDE + col] =
-                    query_vectors[row * HALF_DIMS + FULL_TILES * TILE + col];
-            }
-        }
-        for (var c = lid; c < DG * TILE; c += WG) {
-            let r = c / TILE;
-            let col = c - r * TILE;
-            if col < TAIL {
-                let row = min(dt0 + r, d_last);
-                d_tile[r * STRIDE + col] =
-                    doc_vectors[row * HALF_DIMS + FULL_TILES * TILE + col];
-            }
-        }
-        workgroupBarrier();
-
-        for (var i: u32 = 0u; i < TAIL; i++) {
-            let pq = unpack2x16float(q_tile[qx * STRIDE + i]);
-            let pd = unpack2x16float(d_tile[dy * STRIDE + i]);
-__ACCUM__
-        }
-        workgroupBarrier();
-    }
-
-__RESULT__
-    if q < params.query_count && d < params.doc_count {
-        distances[q * params.doc_count + d] = result;
-    }
+    let q0 = qt0 + qx * 4u;
+    let d0 = dt0 + dy * 4u;
+    emit_row(q0, d0, acc0);
+    emit_row(q0 + 1u, d0, acc1);
+    emit_row(q0 + 2u, d0, acc2);
+    emit_row(q0 + 3u, d0, acc3);
 }
 "#;
 
-const EUCLID_SCALAR_BODY: &str = r#"
-    var acc: f32 = 0.0;
-    for (var i: u32 = 0u; i < DIMS; i++) {
-        let diff = f32(query_vectors[q_base + i]) - f32(doc_vectors[d_base + i]);
-        acc = fma(diff, diff, acc);
-    }
-    let result = acc;
-"#;
+const DOT_ACCUM: &str = r#"            acc0 = fma(vec4<f32>(a.x), b, acc0);
+            acc1 = fma(vec4<f32>(a.y), b, acc1);
+            acc2 = fma(vec4<f32>(a.z), b, acc2);
+            acc3 = fma(vec4<f32>(a.w), b, acc3);"#;
+const DOT_DISTANCE: &str = "(vec4<f32>(1.0) - acc) * 0.5";
 
-const DOT_SCALAR_BODY: &str = r#"
-    var acc: f32 = 0.0;
-    for (var i: u32 = 0u; i < DIMS; i++) {
-        acc = fma(f32(query_vectors[q_base + i]), f32(doc_vectors[d_base + i]), acc);
-    }
-    let result = (-acc + 1.0) / 2.0;
-"#;
+const EUCLID_ACCUM: &str = r#"            let e0 = vec4<f32>(a.x) - b;
+            let e1 = vec4<f32>(a.y) - b;
+            let e2 = vec4<f32>(a.z) - b;
+            let e3 = vec4<f32>(a.w) - b;
+            acc0 = fma(e0, e0, acc0);
+            acc1 = fma(e1, e1, acc1);
+            acc2 = fma(e2, e2, acc2);
+            acc3 = fma(e3, e3, acc3);"#;
+const EUCLID_DISTANCE: &str = "acc";
 
-const EUCLID_TILED_ACCUM: &str = "            acc += (pq - pd) * (pq - pd);";
-const EUCLID_TILED_RESULT: &str = "    let result = acc.x + acc.y;";
-const DOT_TILED_ACCUM: &str = "            acc += pq * pd;";
-const DOT_TILED_RESULT: &str = "    let result = (-acc.x - acc.y + 1.0) / 2.0;";
+/// Dims staged per stage in the shader. Rows are zero-padded to a multiple of this. With the
+/// 64 + 64 staged rows (padded to 17 vec4s per dim) this is 2 * 16 * 17 * 16 B = ~8.5 KiB of
+/// workgroup memory, small enough that several workgroups stay resident per core on hardware
+/// with 32 KiB of threadgroup memory.
+const DIM_TILE: usize = 16;
 
-/// Instantiate the shader templates for this run's dimensionality and similarity function.
-fn build_shader_source(dims: usize, similarity: VectorSimilarity) -> String {
-    let packed = dims.is_multiple_of(2);
-    let (template, body) = match (packed, similarity) {
-        (true, VectorSimilarity::Euclidean) => {
-            (SHADER_TILED, (EUCLID_TILED_ACCUM, EUCLID_TILED_RESULT))
-        }
-        (true, VectorSimilarity::Dot) => (SHADER_TILED, (DOT_TILED_ACCUM, DOT_TILED_RESULT)),
-        (false, VectorSimilarity::Euclidean) => (SHADER_SCALAR, (EUCLID_SCALAR_BODY, "")),
-        (false, VectorSimilarity::Dot) => (SHADER_SCALAR, (DOT_SCALAR_BODY, "")),
+/// Queries and docs covered by one workgroup.
+const WG_TILE_Q: usize = 64;
+const WG_TILE_D: usize = 64;
+
+/// Target (query, doc) pairs per batch. Each batch is one submission and one readback, and
+/// thresholds are refreshed between batches; this keeps batches large enough to amortize the
+/// per-submission cost without making threshold refreshes too infrequent.
+const TARGET_BATCH_PAIRS: usize = 1 << 29;
+
+/// Upper bound on scalar multiply-add operations (~query * doc * dims) issued by a single
+/// dispatch. Unbounded dispatches can run long enough to trip a driver watchdog (e.g. Windows
+/// TDR, ~2s), which kills the device. At even 1 TFLOPS a dispatch of this size finishes in
+/// ~35ms, well within the watchdog, while being large enough (16M pairs at 1024 dims) that each
+/// dispatch keeps the whole GPU busy; dispatches within a pass are separated by barriers since
+/// they all append to the candidate buffer, so small dispatches would leave the GPU draining.
+const MAX_DISPATCH_OPS: usize = 1 << 34;
+
+/// Lower bound on candidate buffer capacity.
+const MIN_CANDIDATE_CAPACITY: usize = 1 << 20;
+/// Upper bound on the candidate buffer size in bytes (there are three buffers this size).
+const MAX_CANDIDATE_BYTES: usize = 256 << 20;
+
+/// Instantiate the shader template for this run's row width and similarity function.
+fn build_shader_source(padded_dims: usize, similarity: VectorSimilarity) -> String {
+    let (accum, distance) = match similarity {
+        VectorSimilarity::Euclidean => (EUCLID_ACCUM, EUCLID_DISTANCE),
+        VectorSimilarity::Dot => (DOT_ACCUM, DOT_DISTANCE),
     };
-    template
-        .replace("__DIMS__", &dims.to_string())
-        .replace("__TILE__", &LDS_TILE.to_string())
-        // SHADER_SCALAR takes a whole loop body (including the result); SHADER_TILED takes
-        // separate accumulate and result expressions. Each template only contains its own tokens.
-        .replace("__BODY__", body.0)
-        .replace("__ACCUM__", body.0)
-        .replace("__RESULT__", body.1)
+    SHADER
+        .replace("__ROW_U32__", &(padded_dims / 2).to_string())
+        .replace("__DIM_TILE__", &DIM_TILE.to_string())
+        .replace("__ACCUM__", accum)
+        .replace("__DISTANCE__", distance)
 }
 
 /// Uniform buffer layout for the distance shader.
@@ -242,42 +252,33 @@ fn build_shader_source(dims: usize, similarity: VectorSimilarity) -> String {
 struct GpuParams {
     query_count: u32,
     doc_count: u32,
-    dimensions: u32,
     q_offset: u32,
     d_offset: u32,
 }
 
-const WG_Q: usize = 16;
-const WG_D: usize = 16;
+/// A candidate pair emitted by the shader. `query` and `doc` are relative to the batch start.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct Candidate {
+    query: u32,
+    doc: u32,
+    distance: f32,
+}
 
-/// u32s (f16 pairs) staged per dims-tile in `SHADER_TILED`. With 16 + 16 staged rows and the
-/// +1 row padding this keeps workgroup storage at (16 + 16) * (64 + 1) * 4 = ~8 KiB. Larger
-/// tiles (measured at 128, ~16 KiB) collapse occupancy on some hardware — on Apple GPUs 32 KiB
-/// of threadgroup memory means a single resident workgroup per core and the barriers fully
-/// serialize — so keep this small enough that several workgroups fit per core.
-const LDS_TILE: usize = 64;
-
-/// Upper bound on scalar multiply-add operations (~query * doc * dims) issued by a single
-/// dispatch. The memory-driven batch sizes below can otherwise produce single dispatches with
-/// hundreds of millions of threads, each running an O(dims) loop — long enough to trip a driver
-/// watchdog (e.g. Windows TDR), which kills the device ("device lost") well before the GPU is
-/// actually short on memory. Batching splits each batch into several dispatches bounded by this
-/// budget; the sub-dispatches are independent (disjoint output ranges) and are recorded into one
-/// command buffer per batch (see `prepare_batch`), so this bound applies per dispatch rather
-/// than per command buffer.
-const MAX_DISPATCH_OPS: usize = 1 << 30;
+/// Size of the candidate count header that precedes the candidates in the candidate buffer.
+const CANDIDATE_HEADER_BYTES: usize = std::mem::size_of::<u32>();
 
 /// Per-phase wall-clock totals across all batches, in microseconds. Phase attribution per batch
 /// cycle:
-///   - `upload`:   main thread copying vector bytes into queue staging (prepare)
-///   - `submit`:   main thread recording/submitting the sub-dispatches and result copy (prepare)
-///   - `wait`:     main thread blocked waiting for the batch's result copy (consume)
-///   - `accumulate`: rayon feeding staging distances into the top-k accumulators (consume)
+///   - `upload`:   main thread copying vector bytes and thresholds into queue staging
+///   - `submit`:   main thread recording/submitting the sub-dispatches and result copy
+///   - `wait`:     main thread blocked waiting for the batch's result copy
+///   - `accumulate`: rayon feeding candidates into the top-k accumulators
 ///
-/// In steady state the GPU should be busy for roughly max(compute, ...) of each cycle while the
-/// main thread's prepare of batch N+1 overlaps consume of batch N; a run where `submit` or
-/// `accumulate` approaches or exceeds the per-batch GPU time points at the pipeline bubbling on
-/// CPU work instead of GPU saturation.
+/// Batches are pipelined two-deep, so `accumulate` overlaps GPU work on the next batch; `wait`
+/// is the time the GPU is the bottleneck. `overflows` counts batches whose candidates did not
+/// fit and were recomputed in halves; a few are expected at the start of each query batch,
+/// before thresholds are established.
 #[derive(Default)]
 struct BatchTimings {
     upload_us: AtomicU64,
@@ -286,6 +287,8 @@ struct BatchTimings {
     accumulate_us: AtomicU64,
     batches: AtomicU64,
     sub_dispatches: AtomicU64,
+    candidates: AtomicU64,
+    overflows: AtomicU64,
 }
 
 impl BatchTimings {
@@ -296,20 +299,22 @@ impl BatchTimings {
         }
         let us = |v: &AtomicU64| v.load(Ordering::Relaxed) / batches;
         tracing::info!(
-            "{}: {} batches, {} sub-dispatches; per batch: upload {} ms, submit {} ms, wait {} ms, accumulate {} ms",
+            "{}: {} batches ({} overflowed), {} sub-dispatches; per batch: upload {} ms, submit {} ms, wait {} ms, accumulate {} ms, candidates {}",
             label,
             batches,
+            self.overflows.load(Ordering::Relaxed),
             self.sub_dispatches.load(Ordering::Relaxed),
             us(&self.upload_us) as f64 / 1e3,
             us(&self.submit_us) as f64 / 1e3,
             us(&self.wait_us) as f64 / 1e3,
             us(&self.accumulate_us) as f64 / 1e3,
+            self.candidates.load(Ordering::Relaxed) / batches,
         );
     }
 }
 
 /// A (query, doc) range scheduled for computation.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct BatchRange {
     q_start: usize,
     q_end: usize,
@@ -317,20 +322,51 @@ struct BatchRange {
     d_end: usize,
 }
 
+impl BatchRange {
+    fn queries(&self) -> Range<usize> {
+        self.q_start..self.q_end
+    }
+
+    fn docs(&self) -> Range<usize> {
+        self.d_start..self.d_end
+    }
+
+    fn pairs(&self) -> u64 {
+        (self.queries().len() * self.docs().len()) as u64
+    }
+
+    /// Split the doc range in half, or `None` if it covers a single doc.
+    fn split(&self) -> Option<(Self, Self)> {
+        let len = self.docs().len();
+        if len < 2 {
+            return None;
+        }
+        let mid = self.d_start + len / 2;
+        Some((
+            Self {
+                d_end: mid,
+                ..*self
+            },
+            Self {
+                d_start: mid,
+                ..*self
+            },
+        ))
+    }
+}
+
 /// A batch whose compute and result copy have been submitted to the GPU and which is awaiting
 /// CPU-side consumption. Batches are pipelined two-deep; `slot` selects which of the two staging
 /// buffers holds this batch's result copy.
-#[derive(Clone)]
 struct InFlight {
     slot: usize,
     /// Submission containing the copy into the staging buffer. Waiting on it also completes
     /// every earlier submission, but not the next batch's compute, which was submitted after.
     copy_submission: wgpu::SubmissionIndex,
-    copy_bytes: usize,
     batch: BatchRange,
 }
 
-/// GPU resources and per-batch scheduling shared by `prepare_batch`/`consume_batch`.
+/// GPU resources and per-batch scheduling.
 struct BatchRunner<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
@@ -339,65 +375,85 @@ struct BatchRunner<'a> {
     query_buffer: &'a wgpu::Buffer,
     doc_buffer: &'a wgpu::Buffer,
     params_buffer: &'a wgpu::Buffer,
-    distances_buffer: &'a wgpu::Buffer,
+    thresholds_buffer: &'a wgpu::Buffer,
+    candidates_buffer: &'a wgpu::Buffer,
     staging_buffers: &'a [wgpu::Buffer; 2],
-    dims: usize,
+    query_vectors: &'a DerefVectorStore<f16, Mmap>,
+    doc_vectors: &'a DerefVectorStore<f16, Mmap>,
+    results: &'a [TopNeighbors],
+    pb: &'a indicatif::ProgressBar,
+    padded_dims: usize,
+    candidate_capacity: usize,
     /// Sub-dispatch tile along the query/doc axes; computed once from `MAX_DISPATCH_OPS`.
     dispatch_q: usize,
     dispatch_d: usize,
     /// Stride between per-sub-dispatch param blocks: `GpuParams` padded up to
     /// `min_uniform_buffer_offset_alignment` for dynamic-offset binding.
     params_stride: usize,
-    /// Scratch for padding upload payloads when the byte length is not
-    /// COPY_BUFFER_ALIGNMENT-aligned (odd dims only).
+    /// Query range most recently uploaded to `query_buffer`, in queue order.
+    resident_queries: Option<Range<usize>>,
+    /// Scratch for padding rows when dims is not a multiple of `DIM_TILE`.
     upload_scratch: Vec<f16>,
     /// Scratch for the batch's per-sub-dispatch params, staged into `params_buffer` in one write.
     params_scratch: Vec<u8>,
+    thresholds_scratch: Vec<f32>,
     timings: &'a BatchTimings,
 }
 
 impl BatchRunner<'_> {
-    /// Upload the batch's vectors, submit its (watchdog-bounded) compute dispatches and the copy
-    /// of the results into staging buffer `slot`, and return the in-flight state. Only submits;
-    /// never waits, so the GPU keeps working while the caller consumes the previous batch.
-    fn prepare_batch(
-        &mut self,
-        batch: BatchRange,
-        slot: usize,
-        upload_query: bool,
-        query_vectors: &DerefVectorStore<f16, Mmap>,
-        doc_vectors: &DerefVectorStore<f16, Mmap>,
-    ) -> InFlight {
-        let current_q = batch.q_end - batch.q_start;
-        let current_d = batch.d_end - batch.d_start;
+    /// Upload the batch's vectors and its queries' current thresholds, submit its
+    /// (watchdog-bounded) compute dispatches and the copy of the candidates into staging buffer
+    /// `slot`, and return the in-flight state. Only submits; never waits, so the GPU keeps
+    /// working while the caller consumes the previous batch.
+    ///
+    /// All uploads are queue-ordered behind earlier submissions, so overwriting the shared
+    /// input buffers here never affects work that was already submitted.
+    fn submit(&mut self, batch: BatchRange, slot: usize) -> InFlight {
+        let current_q = batch.queries().len();
+        let current_d = batch.docs().len();
 
         let upload_start = Instant::now();
-        if upload_query {
-            write_vector_payload(
+        if self.resident_queries.as_ref() != Some(&batch.queries()) {
+            write_vectors(
                 self.queue,
                 self.query_buffer,
-                query_vectors.flat_slice(batch.q_start * self.dims, batch.q_end * self.dims),
+                self.query_vectors,
+                batch.queries(),
+                self.padded_dims,
                 &mut self.upload_scratch,
             );
+            self.resident_queries = Some(batch.queries());
         }
-        write_vector_payload(
+        write_vectors(
             self.queue,
             self.doc_buffer,
-            doc_vectors.flat_slice(batch.d_start * self.dims, batch.d_end * self.dims),
+            self.doc_vectors,
+            batch.docs(),
+            self.padded_dims,
             &mut self.upload_scratch,
+        );
+        // f64::MAX (no threshold yet) becomes +inf, which admits every pair.
+        self.thresholds_scratch.clear();
+        self.thresholds_scratch.extend(
+            self.results[batch.queries()]
+                .iter()
+                .map(|r| r.max_competitive_distance() as f32),
+        );
+        self.queue.write_buffer(
+            self.thresholds_buffer,
+            0,
+            bytemuck::cast_slice(&self.thresholds_scratch),
         );
         self.timings
             .upload_us
             .fetch_add(upload_start.elapsed().as_micros() as u64, Ordering::Relaxed);
 
-        // Split this memory-sized batch into smaller dispatches so no single dispatch runs long
-        // enough to trip a driver watchdog (see MAX_DISPATCH_OPS). Query/doc buffers already
-        // hold the full batch, so sub-dispatches just cover different (q, d) sub-ranges of it
-        // via q_offset/d_offset; they are independent (disjoint output ranges), so they are all
-        // recorded into a single compute pass. Per-sub-dispatch params are staged in one write
-        // and selected with dynamic uniform offsets, and the whole batch — compute plus result
-        // copy — is submitted as one command buffer: one wgpu submit costs on the order of a
-        // millisecond, enough to starve the GPU when issued per sub-dispatch.
+        // Split the batch into smaller dispatches so no single dispatch runs long enough to trip
+        // a driver watchdog (see MAX_DISPATCH_OPS). The sub-dispatches cover disjoint (q, d)
+        // sub-ranges of the batch via q_offset/d_offset and are all recorded into a single
+        // compute pass; per-sub-dispatch params are staged in one write and selected with
+        // dynamic uniform offsets. The whole batch (counter reset, compute, result copy) is one
+        // command buffer: one wgpu submit costs on the order of a millisecond.
         let submit_start = Instant::now();
 
         let sub_q = current_q.div_ceil(self.dispatch_q);
@@ -412,7 +468,6 @@ impl BatchRunner<'_> {
                 block.copy_from_slice(bytemuck::bytes_of(&GpuParams {
                     query_count: current_q as u32,
                     doc_count: current_d as u32,
-                    dimensions: self.dims as u32,
                     q_offset: (i * self.dispatch_q) as u32,
                     d_offset: (j * self.dispatch_d) as u32,
                 }));
@@ -421,12 +476,17 @@ impl BatchRunner<'_> {
         self.queue
             .write_buffer(self.params_buffer, 0, &self.params_scratch);
 
-        let copy_bytes = (current_q * current_d * std::mem::size_of::<f32>()) as u64;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("compute_encoder"),
             });
+        // Reset the candidate count; the candidates themselves need no clearing.
+        encoder.clear_buffer(
+            self.candidates_buffer,
+            0,
+            Some(CANDIDATE_HEADER_BYTES as u64),
+        );
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("distance_pass"),
@@ -445,22 +505,21 @@ impl BatchRunner<'_> {
                         &[((i * sub_d + j) * self.params_stride) as u32],
                     );
                     pass.dispatch_workgroups(
-                        (sq_end - sq_start).div_ceil(WG_Q) as u32,
-                        (sd_end - sd_start).div_ceil(WG_D) as u32,
+                        (sq_end - sq_start).div_ceil(WG_TILE_Q) as u32,
+                        (sd_end - sd_start).div_ceil(WG_TILE_D) as u32,
                         1,
                     );
                 }
             }
         }
 
-        // Copy the full batch of results to staging once all sub-dispatches have completed;
-        // commands in an encoder execute in order, so this runs after the pass above.
+        // Commands in an encoder execute in order, so this runs after the pass above.
         encoder.copy_buffer_to_buffer(
-            self.distances_buffer,
+            self.candidates_buffer,
             0,
             &self.staging_buffers[slot],
             0,
-            copy_bytes,
+            self.candidates_buffer.size(),
         );
         let copy_submission = self.queue.submit([encoder.finish()]);
 
@@ -474,27 +533,19 @@ impl BatchRunner<'_> {
         InFlight {
             slot,
             copy_submission,
-            copy_bytes: copy_bytes as usize,
             batch,
         }
     }
 
-    /// Wait for `inflight`'s result copy, feed the distances into the per-query top-k
-    /// accumulators, and release the staging slot. Blocks only on this batch's copy; the next
-    /// batch's compute (submitted before this call) runs concurrently.
-    fn consume_batch(
-        &self,
-        inflight: InFlight,
-        results: &[TopNeighbors],
-        pb: &indicatif::ProgressBar,
-    ) -> io::Result<()> {
+    /// Wait for `inflight` and feed its candidates into the top-k accumulators. Returns false
+    /// without adding anything if the candidates overflowed the buffer, in which case the
+    /// batch's range must be recomputed.
+    fn consume(&self, inflight: &InFlight) -> io::Result<bool> {
         let staging = &self.staging_buffers[inflight.slot];
         let (tx, rx) = mpsc::channel();
-        staging
-            .slice(..inflight.copy_bytes as u64)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                tx.send(result).unwrap();
-            });
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
         let wait_start = Instant::now();
         self.device
             .poll(wgpu::PollType::Wait {
@@ -510,41 +561,73 @@ impl BatchRunner<'_> {
             .fetch_add(wait_start.elapsed().as_micros() as u64, Ordering::Relaxed);
         self.timings.batches.fetch_add(1, Ordering::Relaxed);
 
-        // Feed GPU distances into the per-query TopNeighbors accumulators.
-        //
-        // The shader writes distances row-major as distances[q_local * current_d + d_local].
-        // Parallelize at row granularity: one rayon task per query row, with the inner loop over
-        // that row's distances kept serial.
         let accumulate_start = Instant::now();
-        {
-            let current_d = inflight.batch.d_end - inflight.batch.d_start;
+        let fits = {
             let mapped = staging
-                .slice(..inflight.copy_bytes as u64)
+                .slice(..)
                 .get_mapped_range()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            let distances: &[f32] = bytemuck::cast_slice(&mapped);
-            results[inflight.batch.q_start..inflight.batch.q_end]
-                .par_iter()
-                .zip(distances.par_chunks_exact(current_d))
-                .for_each(|(top, row)| {
-                    for (d_local, &dist) in row.iter().enumerate() {
-                        top.add(Neighbor::new(
-                            (inflight.batch.d_start + d_local) as i64,
-                            dist as f64,
-                        ));
-                    }
+            let count = u32::from_le_bytes(
+                mapped[..CANDIDATE_HEADER_BYTES].try_into().unwrap(),
+            ) as usize;
+            self.timings
+                .candidates
+                .fetch_add(count as u64, Ordering::Relaxed);
+            let fits = count <= self.candidate_capacity;
+            if fits {
+                let candidates: &[Candidate] = bytemuck::cast_slice(
+                    &mapped[CANDIDATE_HEADER_BYTES
+                        ..CANDIDATE_HEADER_BYTES + count * std::mem::size_of::<Candidate>()],
+                );
+                let batch = inflight.batch;
+                candidates.par_iter().with_min_len(4096).for_each(|c| {
+                    self.results[batch.q_start + c.query as usize].add(Neighbor::new(
+                        (batch.d_start + c.doc as usize) as i64,
+                        c.distance as f64,
+                    ));
                 });
-        }
+            }
+            fits
+        };
         staging.unmap();
         self.timings.accumulate_us.fetch_add(
             accumulate_start.elapsed().as_micros() as u64,
             Ordering::Relaxed,
         );
 
-        pb.inc(
-            ((inflight.batch.q_end - inflight.batch.q_start)
-                * (inflight.batch.d_end - inflight.batch.d_start)) as u64,
-        );
+        if fits {
+            self.pb.inc(inflight.batch.pairs());
+        } else {
+            self.timings.overflows.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(fits)
+    }
+
+    /// Consume `inflight`; if its candidates overflowed, recompute its range in halves.
+    ///
+    /// Candidates from an overflowed attempt are discarded entirely, so recomputing never adds
+    /// a pair twice. Each half is run synchronously against thresholds refreshed by everything
+    /// consumed so far, and split further if it still overflows. This terminates because a
+    /// single-doc range emits at most `q_batch <= candidate_capacity` candidates. Any batch
+    /// submitted after `inflight` is unaffected: recovery work is queued behind it and uses the
+    /// staging slot `inflight` just released.
+    fn finish(&mut self, inflight: InFlight) -> io::Result<()> {
+        if self.consume(&inflight)? {
+            return Ok(());
+        }
+        self.recompute_halves(inflight.batch, inflight.slot)
+    }
+
+    fn recompute_halves(&mut self, batch: BatchRange, slot: usize) -> io::Result<()> {
+        let (a, b) = batch.split().ok_or_else(|| {
+            io::Error::other("candidate buffer overflowed on a single-doc range")
+        })?;
+        for half in [a, b] {
+            let inflight = self.submit(half, slot);
+            if !self.consume(&inflight)? {
+                self.recompute_halves(half, slot)?;
+            }
+        }
         Ok(())
     }
 }
@@ -559,12 +642,6 @@ pub fn try_adapter() -> Option<wgpu::Adapter> {
         apply_limit_buckets: false,
     }))
     .ok()
-}
-
-/// Return true if `adapter` can run WGSL shaders that use the `f16` type, which this module
-/// requires since input vectors are stored as f16.
-pub fn supports_f16(adapter: &wgpu::Adapter) -> bool {
-    adapter.features().contains(wgpu::Features::SHADER_F16)
 }
 
 pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()> {
@@ -592,6 +669,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         ));
     }
     let dims = query_vectors.elem_stride();
+    let padded_dims = dims.next_multiple_of(DIM_TILE);
     let k = super::top_k(args);
 
     let info = adapter.get_info();
@@ -602,7 +680,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     let adapter_limits = adapter.limits();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("compute_neighbors"),
-        required_features: wgpu::Features::SHADER_F16,
+        required_features: wgpu::Features::empty(),
         required_limits: wgpu::Limits {
             max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
             max_buffer_size: adapter_limits.max_buffer_size,
@@ -614,46 +692,49 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     }))
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-    // Compute batch sizes from the limits actually granted by the device. Three buffers are
-    // constrained:
-    //   query buffer:    q_batch * dims * 2  <= max_buf_bytes
-    //   doc buffer:      d_batch * dims * 2  <= max_buf_bytes
-    //   distances buffer: q_batch * d_batch * 4 <= max_buf_bytes
-    //
-    // To maximise GPU utilisation we size batches symmetrically: q_batch ≈ d_batch ≈
-    // sqrt(max_pairs) so the distances buffer fills the allowed budget. Both vector buffers
-    // are also checked against max_vecs = max_buf_bytes / (dims * 2).
+    // Batch sizing. Every query in a batch is compared against all docs before the next query
+    // batch starts, so make query batches as large as the query buffer allows: one pass over
+    // the docs per query batch. Doc batches then target TARGET_BATCH_PAIRS pairs.
     let device_limits = device.limits();
     let max_buf_bytes = (device_limits.max_buffer_size as usize)
         .min(device_limits.max_storage_buffer_binding_size as usize);
-    let (q_batch, d_batch) = if query_limit == 0 || doc_limit == 0 {
-        (1, 1) // buffers are created but the processing loop won't execute
-    } else {
-        let max_vecs = max_buf_bytes / (dims * std::mem::size_of::<f16>());
-        let max_pairs = max_buf_bytes / std::mem::size_of::<f32>();
-        let sq = (max_pairs as f64).sqrt() as usize;
-        let q = sq.min(max_vecs).min(query_limit).max(1);
-        let d = (max_pairs / q).min(max_vecs).min(doc_limit).max(1);
-        (q, d)
-    };
+    let row_bytes = padded_dims * std::mem::size_of::<f16>();
+    let max_vecs = (max_buf_bytes / row_bytes).max(1);
+    let q_batch = query_limit.min(max_vecs).max(1);
+    let d_batch = (TARGET_BATCH_PAIRS / q_batch)
+        .clamp(1, max_vecs)
+        .min(doc_limit)
+        .max(1);
+
+    // Candidate capacity. Once thresholds are established a batch emits well under k
+    // candidates per query, so 4x that absorbs the early batches; anything larger overflows and
+    // is recomputed in halves. Capacity must be at least q_batch so that a single doc's
+    // candidates always fit, which guarantees recomputation terminates.
+    let candidate_capacity = (4 * q_batch * k)
+        .max(MIN_CANDIDATE_CAPACITY)
+        .min((MAX_CANDIDATE_BYTES.min(max_buf_bytes) - CANDIDATE_HEADER_BYTES) / std::mem::size_of::<Candidate>())
+        .max(q_batch);
     tracing::info!(
-        "batch sizes: q_batch={} d_batch={} (max_buf: {} MiB)",
+        "batch sizes: q_batch={} d_batch={} candidate_capacity={} (max_buf: {} MiB)",
         q_batch,
         d_batch,
+        candidate_capacity,
         max_buf_bytes / (1024 * 1024),
     );
 
     // --- Shader and pipeline ---
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("distance_shader"),
-        source: wgpu::ShaderSource::Wgsl(build_shader_source(dims, args.similarity).into()),
+        source: wgpu::ShaderSource::Wgsl(
+            build_shader_source(padded_dims, args.similarity).into(),
+        ),
     });
 
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("distance_bgl"),
         entries: &[
             // Params are bound with a dynamic offset: one buffer holds the per-sub-dispatch
-            // blocks for the whole batch (see prepare_batch).
+            // blocks for the whole batch (see BatchRunner::submit).
             bgl_entry(0, wgpu::BufferBindingType::Uniform, true),
             bgl_entry(
                 1,
@@ -667,6 +748,11 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
             ),
             bgl_entry(
                 3,
+                wgpu::BufferBindingType::Storage { read_only: true },
+                false,
+            ),
+            bgl_entry(
+                4,
                 wgpu::BufferBindingType::Storage { read_only: false },
                 false,
             ),
@@ -690,30 +776,36 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
 
     // --- Buffers ---
 
-    // Query and doc buffers are refilled each batch; both need COPY_DST. Sizes are rounded up to
-    // wgpu::COPY_BUFFER_ALIGNMENT (4 bytes) since f16 elements are only 2 bytes wide and
-    // write_buffer/copy_buffer_to_buffer require 4-byte aligned sizes; uploads from odd-dims
-    // inputs are padded via a scratch buffer to match.
+    // Query and doc buffers are refilled per batch. Rows are padded to a multiple of DIM_TILE
+    // f16s, so every upload is a multiple of wgpu::COPY_BUFFER_ALIGNMENT.
     let query_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("query_buffer"),
-        size: round_up_copy_alignment(q_batch * dims * std::mem::size_of::<f16>()) as u64,
+        size: (q_batch * row_bytes) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let doc_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("doc_buffer"),
-        size: round_up_copy_alignment(d_batch * dims * std::mem::size_of::<f16>()) as u64,
+        size: (d_batch * row_bytes) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let thresholds_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("thresholds_buffer"),
+        size: (q_batch * std::mem::size_of::<f32>()) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
-    // Sub-dispatch geometry (bounded by MAX_DISPATCH_OPS) and the params layout for one batch:
-    // one aligned block per sub-dispatch, selected in-shader via dynamic uniform offsets. All
-    // blocks for a batch are staged with a single write_buffer in prepare_batch.
-    let dispatch_pairs = (MAX_DISPATCH_OPS / dims).max(1);
-    let dispatch_side = (dispatch_pairs as f64).sqrt() as usize;
-    let dispatch_q = dispatch_side.min(q_batch).max(1);
-    let dispatch_d = dispatch_side.min(d_batch).max(1);
+    // Sub-dispatch geometry (bounded by MAX_DISPATCH_OPS), aligned to workgroup tiles so only
+    // the batch's last sub-dispatch on each axis has partial tiles. The params layout for one
+    // batch has one aligned block per sub-dispatch, selected in-shader via dynamic uniform
+    // offsets.
+    let dispatch_pairs = (MAX_DISPATCH_OPS / padded_dims).max(1);
+    let dispatch_side = ((dispatch_pairs as f64).sqrt() as usize / WG_TILE_Q * WG_TILE_Q)
+        .max(WG_TILE_Q);
+    let dispatch_q = dispatch_side.min(q_batch);
+    let dispatch_d = dispatch_side.min(d_batch);
     let params_align = device_limits.min_uniform_buffer_offset_alignment as usize;
     let params_stride = std::mem::size_of::<GpuParams>().div_ceil(params_align) * params_align;
     let max_subs = q_batch.div_ceil(dispatch_q) * d_batch.div_ceil(dispatch_d);
@@ -724,22 +816,25 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         mapped_at_creation: false,
     });
 
-    // Distances are computed on GPU then copied to staging buffers for CPU readback. Two staging
-    // buffers let readback of batch N overlap with compute of batch N+1: a MAP_READ buffer stays
-    // CPU-mapped for the whole consumption phase, so it cannot also receive the next batch's
-    // copy. The single shared distances_buffer is safe because the copy for batch N is submitted
-    // (and, by queue ordering, executes) before batch N+1's dispatches overwrite it.
-    let dist_buffer_size = (q_batch * d_batch * std::mem::size_of::<f32>()) as u64;
-    let distances_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("distances_buffer"),
-        size: dist_buffer_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+    // Candidates are appended on GPU then copied to staging buffers for CPU readback. Two
+    // staging buffers let readback of batch N overlap with compute of batch N+1: a MAP_READ
+    // buffer stays CPU-mapped for the whole consumption phase, so it cannot also receive the
+    // next batch's copy. The single shared candidates_buffer is safe because the copy for batch
+    // N executes (by queue ordering) before batch N+1 resets and overwrites it.
+    let candidates_size =
+        (CANDIDATE_HEADER_BYTES + candidate_capacity * std::mem::size_of::<Candidate>()) as u64;
+    let candidates_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("candidates_buffer"),
+        size: candidates_size,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let staging_buffers: [wgpu::Buffer; 2] = std::array::from_fn(|slot| {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&format!("staging_buffer_{slot}")),
-            size: dist_buffer_size,
+            size: candidates_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -769,10 +864,21 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: distances_buffer.as_entire_binding(),
+                resource: thresholds_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: candidates_buffer.as_entire_binding(),
             },
         ],
     });
+
+    // --- CPU-side top-k accumulators, one per query ---
+    let results: Vec<TopNeighbors> = (0..query_limit).map(|_| TopNeighbors::new(k)).collect();
+
+    // Progress is measured in (query, doc) pairs.
+    let pb = progress_bar(query_limit * doc_limit, "computing distances");
+    pb.enable_steady_tick(Duration::from_millis(1000));
 
     let timings = BatchTimings::default();
     let mut runner = BatchRunner {
@@ -783,29 +889,30 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         query_buffer: &query_buffer,
         doc_buffer: &doc_buffer,
         params_buffer: &params_buffer,
-        distances_buffer: &distances_buffer,
+        thresholds_buffer: &thresholds_buffer,
+        candidates_buffer: &candidates_buffer,
         staging_buffers: &staging_buffers,
-        dims,
+        query_vectors: &query_vectors,
+        doc_vectors: &doc_vectors,
+        results: &results,
+        pb: &pb,
+        padded_dims,
+        candidate_capacity,
         dispatch_q,
         dispatch_d,
         params_stride,
+        resident_queries: None,
         upload_scratch: Vec::new(),
         params_scratch: Vec::new(),
+        thresholds_scratch: Vec::with_capacity(q_batch),
         timings: &timings,
     };
 
-    // --- CPU-side top-k accumulators, one per query ---
-    let results: Vec<TopNeighbors> = (0..query_limit).map(|_| TopNeighbors::new(k)).collect();
-
-    // Progress is measured in (query, doc) pairs.
-    let pb = progress_bar(query_limit * doc_limit, "computing distances");
-    pb.enable_steady_tick(Duration::from_millis(1000));
-
     // --- Nested loop: outer over query batches, inner over doc batches ---
     //
-    // Batches are pipelined two-deep: each batch's upload and compute are submitted *before*
-    // waiting on the previous batch's result copy, so the GPU keeps working while the CPU reads
-    // back distances and updates the top-k accumulators.
+    // Batches are pipelined two-deep: each batch is submitted *before* waiting on the previous
+    // batch's results, so the GPU keeps working while the CPU reads back candidates and updates
+    // the top-k accumulators. The cost is that each batch's thresholds lag by one batch.
     let mut batches = (0..query_limit).step_by(q_batch).flat_map(move |q_start| {
         let q_end = (q_start + q_batch).min(query_limit);
         (0..doc_limit).step_by(d_batch).map(move |d_start| {
@@ -819,60 +926,46 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         })
     });
 
-    let Some(mut inflight) = batches
-        .next()
-        .map(|batch| runner.prepare_batch(batch, 0, true, &query_vectors, &doc_vectors))
-    else {
-        // Nothing to compute (empty inputs); skip straight to writing results.
-        return write_neighbors(args, results);
-    };
-
-    // The query buffer only changes when the q batch rolls over, so skip its re-upload within
-    // one q batch. (Safe to defer: batch N+1's upload is queue-ordered after batch N's compute.)
-    let mut prev_q_start = inflight.batch.q_start;
-    for batch in batches {
-        let upload_query = batch.q_start != prev_q_start;
-        prev_q_start = batch.q_start;
-        let slot = 1 - inflight.slot;
-        let next = runner.prepare_batch(batch, slot, upload_query, &query_vectors, &doc_vectors);
-        runner.consume_batch(inflight, &results, &pb)?;
-        inflight = next;
+    if let Some(first) = batches.next() {
+        let mut inflight = runner.submit(first, 0);
+        for batch in batches {
+            let next = runner.submit(batch, 1 - inflight.slot);
+            runner.finish(inflight)?;
+            inflight = next;
+        }
+        runner.finish(inflight)?;
     }
-    runner.consume_batch(inflight, &results, &pb)?;
 
     pb.finish();
 
     timings.report("batch phase timings");
 
     // --- Write output ---
+    drop(runner);
     write_neighbors(args, results)
 }
 
-/// Round `bytes` up to `wgpu::COPY_BUFFER_ALIGNMENT` (4 bytes), the minimum granularity for
-/// `write_buffer`/`copy_buffer_to_buffer` calls.
-fn round_up_copy_alignment(bytes: usize) -> usize {
-    bytes.div_ceil(wgpu::COPY_BUFFER_ALIGNMENT as usize) * wgpu::COPY_BUFFER_ALIGNMENT as usize
-}
-
-/// Upload `payload` (contiguous f16 elements) into `buffer` at offset 0. The payload is written
-/// straight from its backing storage; when its byte length is not a multiple of
-/// `wgpu::COPY_BUFFER_ALIGNMENT` (only possible for odd dims), it is first copied into `scratch`
-/// and padded with zeros. The padding elements sit past the last index any dispatch reads
-/// (bounded by `params.query_count`/`params.doc_count`), so they never affect results.
-fn write_vector_payload(
+/// Upload the vectors at `rows` of `store` into `buffer` at offset 0, each row zero-padded to
+/// `padded_dims` elements. When no padding is needed the rows are written straight from the
+/// store's backing memory.
+fn write_vectors(
     queue: &wgpu::Queue,
     buffer: &wgpu::Buffer,
-    payload: &[f16],
+    store: &DerefVectorStore<f16, Mmap>,
+    rows: Range<usize>,
+    padded_dims: usize,
     scratch: &mut Vec<f16>,
 ) {
-    let byte_len = std::mem::size_of_val(payload);
-    if byte_len.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT as usize) {
+    let dims = store.elem_stride();
+    if dims == padded_dims {
+        let payload = store.flat_slice(rows.start * dims, rows.end * dims);
         queue.write_buffer(buffer, 0, bytemuck::cast_slice(payload));
     } else {
         scratch.clear();
-        scratch.extend_from_slice(payload);
-        let padded_elems = round_up_copy_alignment(byte_len) / std::mem::size_of::<f16>();
-        scratch.resize(padded_elems, f16::default());
+        scratch.resize(rows.len() * padded_dims, f16::default());
+        for (dst, row) in scratch.chunks_exact_mut(padded_dims).zip(rows) {
+            dst[..dims].copy_from_slice(&store[row]);
+        }
         queue.write_buffer(buffer, 0, bytemuck::cast_slice(scratch));
     }
 }

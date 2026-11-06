@@ -21,6 +21,265 @@ use crate::{neighbor_util::TopNeighbors, ui::progress_bar};
 
 use super::{ComputeNeighborsArgs, write_neighbors};
 
+/// The distance kernel to run, chosen from the adapter's capabilities by [`Kernel::select`].
+///
+/// Both kernels compute exact distances and share the candidate-filtering protocol described on
+/// [`SIMT_SHADER`]: only pairs whose distance is no greater than the query's current threshold
+/// are appended to the candidate buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kernel {
+    /// f32 FMA kernel ([`SIMT_SHADER`]) that runs on any adapter. Vectors are uploaded row-major.
+    Simt,
+    /// Cooperative matrix kernel ([`COOP_SHADER`]) that runs on matrix units (e.g. AMD WMMA,
+    /// NVIDIA tensor cores): f16 x f16 products accumulated in f32. Vectors are uploaded in the
+    /// tiled layout described on [`write_vectors_tiled`]. Dot similarity only.
+    ///
+    /// `lanes` is the workgroup size: one subgroup of the adapter's largest subgroup size.
+    CoopMatrix { lanes: u32 },
+}
+
+impl Kernel {
+    /// Use the cooperative matrix kernel if the adapter supports 16x16x16 f16 x f16 -> f32
+    /// cooperative matrices and the similarity is dot product; otherwise the SIMT kernel.
+    fn select(adapter: &wgpu::Adapter, similarity: VectorSimilarity) -> Self {
+        let features = adapter.features();
+        let has_f16_coop = features.contains(COOP_FEATURES)
+            && adapter.cooperative_matrix_properties().iter().any(|p| {
+                p.m_size == 16
+                    && p.n_size == 16
+                    && p.k_size == 16
+                    && p.ab_type == wgpu::CooperativeScalarType::F16
+                    && p.cr_type == wgpu::CooperativeScalarType::F32
+            });
+        if has_f16_coop && similarity == VectorSimilarity::Dot {
+            Self::CoopMatrix {
+                lanes: adapter.get_info().subgroup_max_size,
+            }
+        } else {
+            Self::Simt
+        }
+    }
+
+    /// Queries and docs covered by one workgroup.
+    fn workgroup_tile(self) -> (usize, usize) {
+        match self {
+            Self::Simt => (64, 64),
+            Self::CoopMatrix { .. } => (COOP_TILE_Q, COOP_TILE_D),
+        }
+    }
+
+    /// Rows are zero-padded to a multiple of this many dims (zero padding changes neither dot
+    /// product nor L2 distance).
+    fn dim_multiple(self) -> usize {
+        match self {
+            Self::Simt => DIM_TILE,
+            // The shader consumes two 16-dim matrices per loop iteration.
+            Self::CoopMatrix { .. } => 2 * DIM_TILE,
+        }
+    }
+
+    fn required_features(self) -> wgpu::Features {
+        match self {
+            Self::Simt => wgpu::Features::empty(),
+            Self::CoopMatrix { .. } => COOP_FEATURES,
+        }
+    }
+
+    /// Instantiate this kernel's shader for this run's row width and similarity function.
+    fn shader_source(self, padded_dims: usize, similarity: VectorSimilarity) -> String {
+        match self {
+            Self::Simt => {
+                let (accum, distance) = match similarity {
+                    VectorSimilarity::Euclidean => (EUCLID_ACCUM, EUCLID_DISTANCE),
+                    VectorSimilarity::Dot => (DOT_ACCUM, DOT_DISTANCE),
+                };
+                SIMT_SHADER
+                    .replace("__ROW_U32__", &(padded_dims / 2).to_string())
+                    .replace("__DIM_TILE__", &DIM_TILE.to_string())
+                    .replace("__ACCUM__", accum)
+                    .replace("__DISTANCE__", distance)
+            }
+            Self::CoopMatrix { lanes } => {
+                assert_eq!(similarity, VectorSimilarity::Dot);
+                COOP_SHADER
+                    .replace("__ROW__", &padded_dims.to_string())
+                    .replace("__LANES__", &lanes.to_string())
+            }
+        }
+    }
+}
+
+/// Features needed by [`Kernel::CoopMatrix`].
+const COOP_FEATURES: wgpu::Features =
+    wgpu::Features::SHADER_F16.union(wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX);
+
+/// Queries and docs covered by one [`Kernel::CoopMatrix`] workgroup.
+const COOP_TILE_Q: usize = 32;
+const COOP_TILE_D: usize = 64;
+
+/// WGSL cooperative matrix shader for exact dot product distances with on-GPU candidate
+/// filtering; see [`SIMT_SHADER`] for the filtering protocol.
+///
+/// Each workgroup is one subgroup (`LANES` invocations) and computes a 32 query x 64 doc block
+/// of dot products as 2 x 4 16x16 f32 accumulator matrices, stepping through the dims 16 at a
+/// time: per step it loads 2 query (A) and 4 doc (B) 16x16 f16 matrices straight from global
+/// memory and issues 8 multiply-adds. Vectors are stored in the tiled layout described on
+/// [`write_vectors_tiled`], so each matrix load reads 512 contiguous bytes (4 cache lines)
+/// instead of 32 bytes from each of 16 rows; this is worth ~30% over row-major loads. Staging
+/// tiles through workgroup memory was measured to be slower on RDNA 3.5: matrix loads from
+/// workgroup memory are no cheaper, and the barriers cost occupancy.
+///
+/// Workgroups are visited in groups of `GROUP` query blocks (all doc blocks for one group of
+/// query blocks before the next) so that concurrently running workgroups share both their
+/// query and doc rows in cache.
+///
+/// If the driver runs the workgroup as several smaller subgroups, each subgroup redundantly
+/// computes the whole block; results are unaffected.
+///
+/// Rows past the end of the batch are still loaded (buffers are allocated to whole workgroup
+/// tiles) but their results are never emitted.
+const COOP_SHADER: &str = r#"
+enable f16;
+enable wgpu_cooperative_matrix;
+
+struct Params {
+    query_count: u32,
+    doc_count: u32,
+    q_offset: u32,
+    d_offset: u32,
+}
+
+struct Candidate {
+    query: u32,
+    doc: u32,
+    distance: f32,
+}
+
+struct Candidates {
+    count: atomic<u32>,
+    items: array<Candidate>,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> query_vectors: array<f16>;
+@group(0) @binding(2) var<storage, read> doc_vectors: array<f16>;
+@group(0) @binding(3) var<storage, read> thresholds: array<f32>;
+@group(0) @binding(4) var<storage, read_write> candidates: Candidates;
+
+// f16s per (padded) row; a block of 16 rows spans 16 * ROW f16s.
+const ROW: u32 = __ROW__u;
+const LANES: u32 = __LANES__u;
+const TQ: u32 = 32u;
+const TD: u32 = 64u;
+// Query blocks per scheduling group.
+const GROUP: u32 = 32u;
+// Row stride of the score tile; padded to spread workgroup memory banks.
+const CS: u32 = TD + 4u;
+
+var<workgroup> scores: array<f32, TQ * CS>;
+
+@compute @workgroup_size(LANES)
+fn main(
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+    @builtin(local_invocation_index) lid: u32,
+) {
+    // Map the linear workgroup index to (query block, doc block), GROUP query blocks at a time.
+    let linear = wid.y * nwg.x + wid.x;
+    let per_group = GROUP * nwg.y;
+    let first_q = (linear / per_group) * GROUP;
+    let group_size = min(nwg.x - first_q, GROUP);
+    let in_group = linear % per_group;
+    let q0 = params.q_offset + (first_q + in_group % group_size) * TQ;
+    let d0 = params.d_offset + (in_group / group_size) * TD;
+
+    // Offsets of the 16-row blocks; dims 16k..16k+15 of a block are at block + 256k.
+    let qa = q0 * ROW;
+    let qb = qa + 16u * ROW;
+    let da = d0 * ROW;
+    let db = da + 16u * ROW;
+    let dc = db + 16u * ROW;
+    let dd = dc + 16u * ROW;
+
+    var c00 = coop_mat16x16<f32, C>();
+    var c01 = coop_mat16x16<f32, C>();
+    var c02 = coop_mat16x16<f32, C>();
+    var c03 = coop_mat16x16<f32, C>();
+    var c10 = coop_mat16x16<f32, C>();
+    var c11 = coop_mat16x16<f32, C>();
+    var c12 = coop_mat16x16<f32, C>();
+    var c13 = coop_mat16x16<f32, C>();
+    // Two 16-dim steps per iteration (ROW is a multiple of 32): issuing both steps' loads
+    // before their multiply-adds gives the loads more time to land.
+    for (var k = 0u; k < 16u * ROW; k += 512u) {
+        // A is query rows x dims (row-major); B is dims x doc rows (column-major).
+        let a0 = coopLoadT<coop_mat16x16<f16, A>>(&query_vectors[qa + k], 16u);
+        let a1 = coopLoadT<coop_mat16x16<f16, A>>(&query_vectors[qb + k], 16u);
+        let b0 = coopLoad<coop_mat16x16<f16, B>>(&doc_vectors[da + k], 16u);
+        let b1 = coopLoad<coop_mat16x16<f16, B>>(&doc_vectors[db + k], 16u);
+        let b2 = coopLoad<coop_mat16x16<f16, B>>(&doc_vectors[dc + k], 16u);
+        let b3 = coopLoad<coop_mat16x16<f16, B>>(&doc_vectors[dd + k], 16u);
+        let k2 = k + 256u;
+        let a2 = coopLoadT<coop_mat16x16<f16, A>>(&query_vectors[qa + k2], 16u);
+        let a3 = coopLoadT<coop_mat16x16<f16, A>>(&query_vectors[qb + k2], 16u);
+        let b4 = coopLoad<coop_mat16x16<f16, B>>(&doc_vectors[da + k2], 16u);
+        let b5 = coopLoad<coop_mat16x16<f16, B>>(&doc_vectors[db + k2], 16u);
+        let b6 = coopLoad<coop_mat16x16<f16, B>>(&doc_vectors[dc + k2], 16u);
+        let b7 = coopLoad<coop_mat16x16<f16, B>>(&doc_vectors[dd + k2], 16u);
+        c00 = coopMultiplyAdd(a0, b0, c00);
+        c01 = coopMultiplyAdd(a0, b1, c01);
+        c02 = coopMultiplyAdd(a0, b2, c02);
+        c03 = coopMultiplyAdd(a0, b3, c03);
+        c10 = coopMultiplyAdd(a1, b0, c10);
+        c11 = coopMultiplyAdd(a1, b1, c11);
+        c12 = coopMultiplyAdd(a1, b2, c12);
+        c13 = coopMultiplyAdd(a1, b3, c13);
+        c00 = coopMultiplyAdd(a2, b4, c00);
+        c01 = coopMultiplyAdd(a2, b5, c01);
+        c02 = coopMultiplyAdd(a2, b6, c02);
+        c03 = coopMultiplyAdd(a2, b7, c03);
+        c10 = coopMultiplyAdd(a3, b4, c10);
+        c11 = coopMultiplyAdd(a3, b5, c11);
+        c12 = coopMultiplyAdd(a3, b6, c12);
+        c13 = coopMultiplyAdd(a3, b7, c13);
+    }
+
+    // Spill the dot products to workgroup memory (query-major) so each invocation can read
+    // individual values, then filter with one invocation per doc column.
+    coopStoreT(c00, &scores[0u], CS);
+    coopStoreT(c01, &scores[16u], CS);
+    coopStoreT(c02, &scores[32u], CS);
+    coopStoreT(c03, &scores[48u], CS);
+    coopStoreT(c10, &scores[16u * CS], CS);
+    coopStoreT(c11, &scores[16u * CS + 16u], CS);
+    coopStoreT(c12, &scores[16u * CS + 32u], CS);
+    coopStoreT(c13, &scores[16u * CS + 48u], CS);
+    workgroupBarrier();
+
+    let capacity = arrayLength(&candidates.items);
+    for (var col = lid; col < TD; col += LANES) {
+        let d = d0 + col;
+        if d >= params.doc_count {
+            break;
+        }
+        for (var r = 0u; r < TQ; r++) {
+            let q = q0 + r;
+            if q >= params.query_count {
+                break;
+            }
+            // Dot: (1 - dot) / 2; assumes pre-normalized vectors.
+            let dist = (1.0 - scores[r * CS + col]) * 0.5;
+            if dist <= thresholds[q] {
+                let idx = atomicAdd(&candidates.count, 1u);
+                if idx < capacity {
+                    candidates.items[idx] = Candidate(q, d, dist);
+                }
+            }
+        }
+    }
+}
+"#;
+
 /// WGSL compute shader for exact pairwise distance computation with on-GPU candidate filtering.
 ///
 /// Vectors are uploaded as f16 with each row zero-padded to a multiple of `DIM_TILE` dims (zero
@@ -43,7 +302,7 @@ use super::{ComputeNeighborsArgs, write_neighbors};
 /// Similarity:
 ///   Euclidean: squared L2.
 ///   Dot: (1 - dot) / 2; assumes pre-normalized vectors.
-const SHADER: &str = r#"
+const SIMT_SHADER: &str = r#"
 struct Params {
     query_count: u32,
     doc_count: u32,
@@ -205,15 +464,16 @@ const EUCLID_ACCUM: &str = r#"            let e0 = vec4<f32>(a.x) - b;
             acc3 = fma(e3, e3, acc3);"#;
 const EUCLID_DISTANCE: &str = "acc";
 
-/// Dims staged per stage in the shader. Rows are zero-padded to a multiple of this. With the
-/// 64 + 64 staged rows (padded to 17 vec4s per dim) this is 2 * 16 * 17 * 16 B = ~8.5 KiB of
-/// workgroup memory, small enough that several workgroups stay resident per core on hardware
-/// with 32 KiB of threadgroup memory.
+/// Dims staged per stage in the SIMT shader, and the cooperative matrix K dimension. Rows are
+/// zero-padded to a multiple of this. With the SIMT shader's 64 + 64 staged rows (padded to 17
+/// vec4s per dim) this is 2 * 16 * 17 * 16 B = ~8.5 KiB of workgroup memory, small enough that
+/// several workgroups stay resident per core on hardware with 32 KiB of threadgroup memory.
 const DIM_TILE: usize = 16;
 
-/// Queries and docs covered by one workgroup.
-const WG_TILE_Q: usize = 64;
-const WG_TILE_D: usize = 64;
+/// Vector buffers are allocated in multiples of this many rows, which covers any kernel's
+/// workgroup tile, so that the cooperative matrix kernel's loads past the last row of a batch
+/// stay in bounds.
+const ROW_ALLOC_MULTIPLE: usize = 64;
 
 /// Target (query, doc) pairs per batch. Each batch is one submission and one readback, and
 /// thresholds are refreshed between batches; this keeps batches large enough to amortize the
@@ -232,19 +492,6 @@ const MAX_DISPATCH_OPS: usize = 1 << 34;
 const MIN_CANDIDATE_CAPACITY: usize = 1 << 20;
 /// Upper bound on the candidate buffer size in bytes (there are three buffers this size).
 const MAX_CANDIDATE_BYTES: usize = 256 << 20;
-
-/// Instantiate the shader template for this run's row width and similarity function.
-fn build_shader_source(padded_dims: usize, similarity: VectorSimilarity) -> String {
-    let (accum, distance) = match similarity {
-        VectorSimilarity::Euclidean => (EUCLID_ACCUM, EUCLID_DISTANCE),
-        VectorSimilarity::Dot => (DOT_ACCUM, DOT_DISTANCE),
-    };
-    SHADER
-        .replace("__ROW_U32__", &(padded_dims / 2).to_string())
-        .replace("__DIM_TILE__", &DIM_TILE.to_string())
-        .replace("__ACCUM__", accum)
-        .replace("__DISTANCE__", distance)
-}
 
 /// Uniform buffer layout for the distance shader.
 #[repr(C)]
@@ -381,6 +628,7 @@ struct BatchRunner<'a> {
     query_vectors: &'a DerefVectorStore<f16, Mmap>,
     doc_vectors: &'a DerefVectorStore<f16, Mmap>,
     results: &'a [TopNeighbors],
+    kernel: Kernel,
     pb: &'a indicatif::ProgressBar,
     padded_dims: usize,
     candidate_capacity: usize,
@@ -414,24 +662,10 @@ impl BatchRunner<'_> {
 
         let upload_start = Instant::now();
         if self.resident_queries.as_ref() != Some(&batch.queries()) {
-            write_vectors(
-                self.queue,
-                self.query_buffer,
-                self.query_vectors,
-                batch.queries(),
-                self.padded_dims,
-                &mut self.upload_scratch,
-            );
+            self.write_vectors(self.query_buffer, self.query_vectors, batch.queries());
             self.resident_queries = Some(batch.queries());
         }
-        write_vectors(
-            self.queue,
-            self.doc_buffer,
-            self.doc_vectors,
-            batch.docs(),
-            self.padded_dims,
-            &mut self.upload_scratch,
-        );
+        self.write_vectors(self.doc_buffer, self.doc_vectors, batch.docs());
         // f64::MAX (no threshold yet) becomes +inf, which admits every pair.
         self.thresholds_scratch.clear();
         self.thresholds_scratch.extend(
@@ -493,6 +727,7 @@ impl BatchRunner<'_> {
                 timestamp_writes: None,
             });
             pass.set_pipeline(self.pipeline);
+            let (tile_q, tile_d) = self.kernel.workgroup_tile();
             for i in 0..sub_q {
                 for j in 0..sub_d {
                     let sq_start = i * self.dispatch_q;
@@ -505,8 +740,8 @@ impl BatchRunner<'_> {
                         &[((i * sub_d + j) * self.params_stride) as u32],
                     );
                     pass.dispatch_workgroups(
-                        (sq_end - sq_start).div_ceil(WG_TILE_Q) as u32,
-                        (sd_end - sd_start).div_ceil(WG_TILE_D) as u32,
+                        (sq_end - sq_start).div_ceil(tile_q) as u32,
+                        (sd_end - sd_start).div_ceil(tile_d) as u32,
                         1,
                     );
                 }
@@ -534,6 +769,33 @@ impl BatchRunner<'_> {
             slot,
             copy_submission,
             batch,
+        }
+    }
+
+    /// Upload the vectors at `rows` of `store` into `buffer` in the kernel's layout.
+    fn write_vectors(
+        &mut self,
+        buffer: &wgpu::Buffer,
+        store: &DerefVectorStore<f16, Mmap>,
+        rows: Range<usize>,
+    ) {
+        match self.kernel {
+            Kernel::Simt => write_vectors(
+                self.queue,
+                buffer,
+                store,
+                rows,
+                self.padded_dims,
+                &mut self.upload_scratch,
+            ),
+            Kernel::CoopMatrix { .. } => write_vectors_tiled(
+                self.queue,
+                buffer,
+                store,
+                rows,
+                self.padded_dims,
+                &mut self.upload_scratch,
+            ),
         }
     }
 
@@ -668,26 +930,38 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
             ),
         ));
     }
-    let dims = query_vectors.elem_stride();
-    let padded_dims = dims.next_multiple_of(DIM_TILE);
-    let k = super::top_k(args);
-
     let info = adapter.get_info();
-    tracing::info!("using GPU: {} ({:?})", info.name, info.backend);
+    let kernel = Kernel::select(&adapter, args.similarity);
+    let dims = query_vectors.elem_stride();
+    let padded_dims = dims.next_multiple_of(kernel.dim_multiple());
+    let k = super::top_k(args);
+    tracing::info!(
+        "using GPU: {} ({:?}), kernel {:?}",
+        info.name,
+        info.backend,
+        kernel
+    );
 
     // Request the maximum buffer limits the adapter supports so we can use the largest
     // possible batches on this hardware.
     let adapter_limits = adapter.limits();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("compute_neighbors"),
-        required_features: wgpu::Features::empty(),
+        required_features: kernel.required_features(),
         required_limits: wgpu::Limits {
             max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
             max_buffer_size: adapter_limits.max_buffer_size,
             ..wgpu::Limits::default()
         },
         memory_hints: wgpu::MemoryHints::Performance,
-        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        experimental_features: if kernel.required_features().intersects(COOP_FEATURES) {
+            // SAFETY: cooperative matrices are an experimental wgpu feature. The coop kernel
+            // only uses them as documented: subgroup-uniform loads, multiply-adds and stores of
+            // 16x16 matrices in configurations the adapter reports as supported.
+            unsafe { wgpu::ExperimentalFeatures::enabled() }
+        } else {
+            wgpu::ExperimentalFeatures::disabled()
+        },
         trace: wgpu::Trace::Off,
     }))
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
@@ -699,7 +973,8 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     let max_buf_bytes = (device_limits.max_buffer_size as usize)
         .min(device_limits.max_storage_buffer_binding_size as usize);
     let row_bytes = padded_dims * std::mem::size_of::<f16>();
-    let max_vecs = (max_buf_bytes / row_bytes).max(1);
+    let max_vecs = (max_buf_bytes / row_bytes / ROW_ALLOC_MULTIPLE * ROW_ALLOC_MULTIPLE)
+        .max(ROW_ALLOC_MULTIPLE);
     let q_batch = query_limit.min(max_vecs).max(1);
     let d_batch = (TARGET_BATCH_PAIRS / q_batch)
         .clamp(1, max_vecs)
@@ -726,7 +1001,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("distance_shader"),
         source: wgpu::ShaderSource::Wgsl(
-            build_shader_source(padded_dims, args.similarity).into(),
+            kernel.shader_source(padded_dims, args.similarity).into(),
         ),
     });
 
@@ -780,13 +1055,13 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     // f16s, so every upload is a multiple of wgpu::COPY_BUFFER_ALIGNMENT.
     let query_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("query_buffer"),
-        size: (q_batch * row_bytes) as u64,
+        size: (q_batch.next_multiple_of(ROW_ALLOC_MULTIPLE) * row_bytes) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let doc_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("doc_buffer"),
-        size: (d_batch * row_bytes) as u64,
+        size: (d_batch.next_multiple_of(ROW_ALLOC_MULTIPLE) * row_bytes) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -802,8 +1077,9 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     // batch has one aligned block per sub-dispatch, selected in-shader via dynamic uniform
     // offsets.
     let dispatch_pairs = (MAX_DISPATCH_OPS / padded_dims).max(1);
-    let dispatch_side = ((dispatch_pairs as f64).sqrt() as usize / WG_TILE_Q * WG_TILE_Q)
-        .max(WG_TILE_Q);
+    let dispatch_side = ((dispatch_pairs as f64).sqrt() as usize / ROW_ALLOC_MULTIPLE
+        * ROW_ALLOC_MULTIPLE)
+        .max(ROW_ALLOC_MULTIPLE);
     let dispatch_q = dispatch_side.min(q_batch);
     let dispatch_d = dispatch_side.min(d_batch);
     let params_align = device_limits.min_uniform_buffer_offset_alignment as usize;
@@ -895,6 +1171,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
         query_vectors: &query_vectors,
         doc_vectors: &doc_vectors,
         results: &results,
+        kernel,
         pb: &pb,
         padded_dims,
         candidate_capacity,
@@ -968,6 +1245,47 @@ fn write_vectors(
         }
         queue.write_buffer(buffer, 0, bytemuck::cast_slice(scratch));
     }
+}
+
+/// Upload the vectors at `rows` of `store` into `buffer` at offset 0 in the tiled layout read by
+/// [`COOP_SHADER`]: rows are grouped into blocks of 16 (the last zero-padded), and each block
+/// stores its 16 x 16-dim sub-blocks contiguously in dim order, each sub-block row-major. So
+/// element (row r, dim k) of a block is at `(k / 16) * 256 + r * 16 + k % 16`, and each 16x16
+/// cooperative matrix load reads 512 contiguous bytes. Rows are zero-padded to `padded_dims`.
+///
+/// Blocks are tiled into `scratch` in parallel, then uploaded with one write.
+fn write_vectors_tiled(
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    store: &DerefVectorStore<f16, Mmap>,
+    rows: Range<usize>,
+    padded_dims: usize,
+    scratch: &mut Vec<f16>,
+) {
+    const BLOCK_ROWS: usize = 16;
+    let dims = store.elem_stride();
+    let block_len = BLOCK_ROWS * padded_dims;
+    // Every element is overwritten below, so stale contents need no clearing.
+    scratch.resize(rows.len().div_ceil(BLOCK_ROWS) * block_len, f16::default());
+    scratch
+        .par_chunks_exact_mut(block_len)
+        .enumerate()
+        .for_each(|(b, tiled)| {
+            let first = rows.start + b * BLOCK_ROWS;
+            for r in 0..BLOCK_ROWS {
+                // Rows past the end of the batch are all padding.
+                let row = (first + r < rows.end).then(|| &store[first + r]);
+                for k in 0..padded_dims / DIM_TILE {
+                    let src = row.map_or(&[][..], |v| {
+                        &v[(k * DIM_TILE).min(dims)..((k + 1) * DIM_TILE).min(dims)]
+                    });
+                    let out = &mut tiled[k * BLOCK_ROWS * DIM_TILE + r * DIM_TILE..][..DIM_TILE];
+                    out[..src.len()].copy_from_slice(src);
+                    out[src.len()..].fill(f16::default());
+                }
+            }
+        });
+    queue.write_buffer(buffer, 0, bytemuck::cast_slice(scratch));
 }
 
 fn bgl_entry(

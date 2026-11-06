@@ -805,9 +805,11 @@ impl BatchRunner<'_> {
     fn consume(&self, inflight: &InFlight) -> io::Result<bool> {
         let staging = &self.staging_buffers[inflight.slot];
         let (tx, rx) = mpsc::channel();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-            tx.send(result).unwrap();
-        });
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                tx.send(result).unwrap();
+            });
         let wait_start = Instant::now();
         self.device
             .poll(wgpu::PollType::Wait {
@@ -829,9 +831,8 @@ impl BatchRunner<'_> {
                 .slice(..)
                 .get_mapped_range()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            let count = u32::from_le_bytes(
-                mapped[..CANDIDATE_HEADER_BYTES].try_into().unwrap(),
-            ) as usize;
+            let count =
+                u32::from_le_bytes(mapped[..CANDIDATE_HEADER_BYTES].try_into().unwrap()) as usize;
             self.timings
                 .candidates
                 .fetch_add(count as u64, Ordering::Relaxed);
@@ -881,9 +882,9 @@ impl BatchRunner<'_> {
     }
 
     fn recompute_halves(&mut self, batch: BatchRange, slot: usize) -> io::Result<()> {
-        let (a, b) = batch.split().ok_or_else(|| {
-            io::Error::other("candidate buffer overflowed on a single-doc range")
-        })?;
+        let (a, b) = batch
+            .split()
+            .ok_or_else(|| io::Error::other("candidate buffer overflowed on a single-doc range"))?;
         for half in [a, b] {
             let inflight = self.submit(half, slot);
             if !self.consume(&inflight)? {
@@ -987,7 +988,10 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     // candidates always fit, which guarantees recomputation terminates.
     let candidate_capacity = (4 * q_batch * k)
         .max(MIN_CANDIDATE_CAPACITY)
-        .min((MAX_CANDIDATE_BYTES.min(max_buf_bytes) - CANDIDATE_HEADER_BYTES) / std::mem::size_of::<Candidate>())
+        .min(
+            (MAX_CANDIDATE_BYTES.min(max_buf_bytes) - CANDIDATE_HEADER_BYTES)
+                / std::mem::size_of::<Candidate>(),
+        )
         .max(q_batch);
     tracing::info!(
         "batch sizes: q_batch={} d_batch={} candidate_capacity={} (max_buf: {} MiB)",
@@ -1000,9 +1004,7 @@ pub fn run(adapter: wgpu::Adapter, args: &ComputeNeighborsArgs) -> io::Result<()
     // --- Shader and pipeline ---
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("distance_shader"),
-        source: wgpu::ShaderSource::Wgsl(
-            kernel.shader_source(padded_dims, args.similarity).into(),
-        ),
+        source: wgpu::ShaderSource::Wgsl(kernel.shader_source(padded_dims, args.similarity).into()),
     });
 
     let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

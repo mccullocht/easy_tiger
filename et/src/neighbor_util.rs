@@ -146,6 +146,15 @@ impl TopNeighbors {
         }
     }
 
+    /// Upper bound on the distance of the N-th nearest neighbor, or `f64::MAX` if not yet known.
+    ///
+    /// Any neighbor added later with a distance (lower bound) above this value is discarded, so
+    /// callers may use it to filter candidates before adding them.
+    #[allow(dead_code)]
+    pub fn max_competitive_distance(&self) -> f64 {
+        f64::from_bits(self.max_dist.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     /// Extract the list of the top N neighbors.
     pub fn into_neighbors(self) -> Vec<Neighbor> {
         self.rep.into_inner().into_inner().unwrap().into_neighbors()

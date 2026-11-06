@@ -80,13 +80,7 @@ pub fn compute_neighbors(args: ComputeNeighborsArgs) -> io::Result<()> {
     if let Some(adapter) = gpu::try_adapter()
         && !args.force_cpu
     {
-        if gpu::supports_f16(&adapter) {
-            return gpu::run(adapter, &args);
-        }
-        tracing::warn!(
-            "GPU adapter {} does not support f16 shaders; falling back to CPU",
-            adapter.get_info().name
-        );
+        return gpu::run(adapter, &args);
     }
     cpu::run(&args)
 }

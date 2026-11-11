@@ -2,7 +2,6 @@
 
 use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 
-mod binary;
 pub mod float16;
 pub mod float32;
 mod kernels;
@@ -221,11 +220,6 @@ pub enum F32VectorCoding {
     F32,
     /// Little-endian IEEE f16 encoding.
     F16,
-    /// Single bit (sign bit) per dimension; positive or negative.
-    ///
-    /// This encoding is very compact and efficient for distance computation but also does not have
-    /// high fidelity with distances computed between raw vectors.
-    BinaryQuantized,
     /// Turbo LVQ; 1 bit primary vector.
     ///
     /// This encoding is optimized for cases where dimensionality is a multiple of 128.
@@ -260,7 +254,6 @@ impl F32VectorCoding {
         match self {
             Self::F32 => Box::new(float32::VectorCoder::new()),
             Self::F16 => Box::new(float16::VectorCoder::new()),
-            Self::BinaryQuantized => Box::new(binary::BinaryQuantizedVectorCoder),
             Self::TLVQ1 => Box::new(lvq::TurboPrimaryCoder::<1>::new()),
             Self::TLVQ2 => Box::new(lvq::TurboPrimaryCoder::<2>::new()),
             Self::TLVQ4 => Box::new(lvq::TurboPrimaryCoder::<4>::new()),
@@ -282,7 +275,6 @@ impl F32VectorCoding {
             (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance::default()),
             (Self::F16, Dot) => Box::new(float16::DotProductDistance::default()),
             (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance::default()),
-            (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
             (Self::TLVQ1, _) => Box::new(lvq::TurboPrimaryDistance::<1>::new(similarity)),
             (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryDistance::<2>::new(similarity)),
             (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryDistance::<4>::new(similarity)),
@@ -314,9 +306,6 @@ impl F32VectorCoding {
             }
             (F32VectorCoding::F16, VectorSimilarity::Euclidean) => {
                 Box::new(float16::EuclideanQueryDistance::new(query))
-            }
-            (F32VectorCoding::BinaryQuantized, _) => {
-                Box::new(binary::I1DotProductQueryDistance::new(query.as_ref()))
             }
             (F32VectorCoding::TLVQ1, _) => {
                 Box::new(lvq::TurboPrimaryQueryDistance1::new(similarity, query))
@@ -364,7 +353,6 @@ impl F32VectorCoding {
             (Euclidean, F32VectorCoding::F16) => {
                 quantized_qvd!(float16::EuclideanDistance::default(), query)
             }
-            (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
             (_, F32VectorCoding::TLVQ1) => {
                 quantized_qvd!(lvq::TurboPrimaryDistance::<1>::new(similarity), query)
             }
@@ -391,7 +379,6 @@ impl FromStr for F32VectorCoding {
         match s {
             "raw" | "raw-l2-norm" | "f32" => Ok(Self::F32),
             "f16" => Ok(Self::F16),
-            "binary" => Ok(Self::BinaryQuantized),
             "tlvq1" => Ok(Self::TLVQ1),
             "tlvq2" => Ok(Self::TLVQ2),
             "tlvq4" => Ok(Self::TLVQ4),
@@ -408,7 +395,6 @@ impl std::fmt::Display for F32VectorCoding {
         match self {
             Self::F32 => write!(f, "f32"),
             Self::F16 => write!(f, "f16"),
-            Self::BinaryQuantized => write!(f, "binary"),
             Self::TLVQ1 => write!(f, "tlvq1"),
             Self::TLVQ2 => write!(f, "tlvq2"),
             Self::TLVQ4 => write!(f, "tlvq4"),
@@ -703,9 +689,8 @@ mod degenerate_test {
     use crate::{F32VectorCoding, VectorSimilarity, float32::l2_normalize};
     use rand::{RngExt, SeedableRng, TryRng, rngs::SysRng};
 
-    const CODINGS: [F32VectorCoding; 8] = [
+    const CODINGS: [F32VectorCoding; 7] = [
         F32VectorCoding::F16,
-        F32VectorCoding::BinaryQuantized,
         F32VectorCoding::TLVQ1,
         F32VectorCoding::TLVQ2,
         F32VectorCoding::TLVQ4,
@@ -884,7 +869,6 @@ mod nonfinite_input_test {
         for coding in [
             F32VectorCoding::F32,
             F32VectorCoding::F16,
-            F32VectorCoding::BinaryQuantized,
             F32VectorCoding::TLVQ1,
             F32VectorCoding::TLVQ2,
             F32VectorCoding::TLVQ4,
@@ -901,11 +885,7 @@ mod nonfinite_input_test {
 
     #[test]
     fn empty_query_is_rejected() {
-        for coding in [
-            F32VectorCoding::BinaryQuantized,
-            F32VectorCoding::RaBitQ,
-            F32VectorCoding::QuIVer,
-        ] {
+        for coding in [F32VectorCoding::RaBitQ, F32VectorCoding::QuIVer] {
             assert_panics(&format!("{coding} empty query"), || {
                 coding.query_distance_asymmetric(VectorSimilarity::Dot, Vec::new())
             });

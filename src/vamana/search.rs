@@ -782,7 +782,7 @@ mod test {
             T: IntoIterator<Item = V>,
             V: Into<Vec<f32>>,
         {
-            let coder = F32VectorCoding::BinaryQuantized.coder();
+            let coder = F32VectorCoding::TLVQ8.coder();
             let mut rep = iter
                 .into_iter()
                 .map(|x| {
@@ -805,7 +805,7 @@ mod test {
             let config = GraphConfig {
                 dimensions: NonZero::new(rep.first().map(|v| v.vector.len()).unwrap_or(1)).unwrap(),
                 similarity: VectorSimilarity::Euclidean,
-                nav_format: F32VectorCoding::BinaryQuantized,
+                nav_format: F32VectorCoding::TLVQ8,
                 rerank_format: Some(F32VectorCoding::F32),
                 pruning: EdgePruningConfig::new(max_edges),
                 index_search_params: GraphSearchParams {
@@ -1042,14 +1042,16 @@ mod test {
             patience: None,
         });
         assert_eq!(
-            searcher
-                .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
-                .unwrap(),
+            normalize_scores(
+                searcher
+                    .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
+                    .unwrap()
+            ),
             vec![
-                Neighbor::new(0, 0.47999999940395355),
-                Neighbor::new(1, 0.47999999940395355),
-                Neighbor::new(4, 0.47999999940395355),
-                Neighbor::new(16, 0.47999999940395355),
+                Neighbor::new(1, 0.06813),
+                Neighbor::new(4, 0.06813),
+                Neighbor::new(16, 0.06813),
+                Neighbor::new(64, 0.06813),
             ]
         );
     }
@@ -1072,7 +1074,7 @@ mod test {
                 Neighbor::new(1, 0.06813),
                 Neighbor::new(4, 0.06813),
                 Neighbor::new(16, 0.06813),
-                Neighbor::new(0, 0.09),
+                Neighbor::new(64, 0.06813),
             ]
         );
     }
@@ -1088,14 +1090,16 @@ mod test {
             patience: None,
         });
         assert_eq!(
-            searcher
-                .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
-                .unwrap(),
+            normalize_scores(
+                searcher
+                    .search(&[-0.1, -0.1, -0.1, -0.1], &index.reader())
+                    .unwrap()
+            ),
             vec![
-                Neighbor::new(0, 0.47999999940395355),
-                Neighbor::new(1, 0.47999999940395355),
-                Neighbor::new(4, 0.47999999940395355),
-                Neighbor::new(16, 0.47999999940395355),
+                Neighbor::new(1, 0.06813),
+                Neighbor::new(4, 0.06813),
+                Neighbor::new(16, 0.06813),
+                Neighbor::new(64, 0.06813),
             ]
         );
     }

@@ -349,7 +349,70 @@ fn fill_vector_decode() {
         let encoded = coder.encode(&vector);
         let decoded = coder.decode(&encoded);
         assert_abs_diff_eq!(decoded.as_slice(), vector.as_ref());
+
+        // Distances between degenerate vectors must stay finite, not just decode.
+        for sim in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
+            let sd = coding.distance_symmetric(sim).distance(&encoded, &encoded);
+            assert!(
+                sd.is_finite(),
+                "{coding} {sim} self-distance not finite: {sd}"
+            );
+            let qd = coding
+                .query_distance_asymmetric(sim, vector.clone())
+                .distance(&encoded);
+            assert!(
+                qd.is_finite(),
+                "{coding} {sim} query distance not finite: {qd}"
+            );
+        }
     }
+}
+
+/// Degenerate inputs (zero / constant / one-hot) must encode identically enough on the scalar and
+/// SIMD paths -- the zero-range guards live in kernel-independent code, so the accelerated kernels
+/// must never diverge into a NaN.
+#[test]
+fn degenerate_simd_parity() {
+    fn check<const B: usize>(coding: F32VectorCoding) {
+        let scalar = TurboPrimaryCoder::<B>::with_kernel(Kernel::Scalar);
+        for k in Kernel::accelerated() {
+            let accel = TurboPrimaryCoder::<B>::with_kernel(k);
+            for dim in [8usize, 32, 65, 128, 129, 256] {
+                let mut one_hot = vec![0.0f32; dim];
+                one_hot[0] = 1.0;
+                let inputs = [
+                    ("zero", vec![0.0f32; dim]),
+                    ("const_pos", vec![0.37f32; dim]),
+                    ("const_neg", vec![-0.37f32; dim]),
+                    ("one_hot", one_hot),
+                ];
+                for (name, v) in inputs {
+                    let se = scalar.encode(&v);
+                    let ae = accel.encode(&v);
+                    let sd = scalar.decode(&se);
+                    let ad = accel.decode(&ae);
+                    assert!(
+                        sd.iter().chain(ad.iter()).all(|x| x.is_finite()),
+                        "B={B} k={k:?} dim={dim} {name}: non-finite decode"
+                    );
+                    assert_abs_diff_eq!(sd.as_slice(), ad.as_slice(), epsilon = 1e-4);
+
+                    for sim in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
+                        let d = coding.distance_symmetric(sim).distance(&se, &ae);
+                        assert!(
+                            d.is_finite(),
+                            "B={B} k={k:?} dim={dim} {name} {sim}: non-finite distance"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    check::<1>(F32VectorCoding::TLVQ1);
+    check::<2>(F32VectorCoding::TLVQ2);
+    check::<4>(F32VectorCoding::TLVQ4);
+    check::<8>(F32VectorCoding::TLVQ8);
 }
 
 macro_rules! lvq_coding_simd_test {

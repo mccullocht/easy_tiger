@@ -247,8 +247,7 @@ fn insert_internal<F: FnMut(i64) -> bool>(
     // The graph search prepares the query itself, so hand it the raw vector. For encoding we need
     // the centered form that matches every stored vector.
     let prepared: &[f32] =
-        &vectors::prepare_vector(vector, None, false, index.config().centroid.as_deref())
-            .expect("input vector must be finite");
+        &vectors::prepare_vector(vector, None, false, index.config().centroid.as_deref());
 
     let options = options.return_seen(true);
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
@@ -278,22 +277,10 @@ fn insert_internal<F: FnMut(i64) -> bool>(
     candidate_edges.truncate(selected_len);
 
     let mut nav_vectors = index.nav_vectors()?;
-    nav_vectors.set(
-        vertex_id,
-        nav_vectors
-            .new_coder()
-            .encode(prepared)
-            .expect("input vector must be finite"),
-    )?;
+    nav_vectors.set(vertex_id, nav_vectors.new_coder().encode(prepared))?;
     if let Some(vectors) = index.rerank_vectors() {
         let mut vectors = vectors?;
-        vectors.set(
-            vertex_id,
-            vectors
-                .new_coder()
-                .encode(prepared)
-                .expect("input vector must be finite"),
-        )?;
+        vectors.set(vertex_id, vectors.new_coder().encode(prepared))?;
     }
 
     let mut vertex_buf = VertexBuffer::new(index)?;

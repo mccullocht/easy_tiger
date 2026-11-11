@@ -83,12 +83,10 @@ impl Header {
 struct Coder<K: Kernel>(K);
 
 impl<K: Kernel> F32VectorCoder for Coder<K> {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) -> crate::Result<()> {
-        crate::check_finite_vector(vector)?;
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        crate::assert_finite_vector(vector);
         let tau = self.0.tau(vector);
-        if !tau.is_finite() {
-            return Err(crate::Error::NonFiniteMagnitude);
-        }
+        assert!(tau.is_finite(), "vector magnitude is not finite");
 
         let (header_bytes, vector_bytes) = Header::split_mut(out);
         let (weak_sum, strong_sum, strong_count) = self.0.quantize(vector, tau, vector_bytes);
@@ -108,11 +106,7 @@ impl<K: Kernel> F32VectorCoder for Coder<K> {
             },
             strong_count,
         };
-        if !(header.weak.is_finite() && header.strong.is_finite()) {
-            return Err(crate::Error::NonFiniteMagnitude);
-        }
         header.encode(header_bytes);
-        Ok(())
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -196,11 +190,9 @@ struct QueryDistance<K: Kernel> {
 }
 
 impl<K: Kernel> QueryDistance<K> {
-    pub fn new(kernel: K, query: &[f32]) -> crate::Result<Self> {
-        if query.is_empty() {
-            return Err(crate::Error::EmptyVector);
-        }
-        crate::check_finite_vector(query)?;
+    pub fn new(kernel: K, query: &[f32]) -> Self {
+        assert!(!query.is_empty(), "query vector is empty");
+        crate::assert_finite_vector(query);
         // `fold(0.0, f32::max)` both replaces the panic-on-empty `unwrap()` and avoids
         // `total_cmp` ranking a stray NaN as the maximum. A zero query gives a zero scale.
         let max = query.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
@@ -210,12 +202,12 @@ impl<K: Kernel> QueryDistance<K> {
             .map(|&d| quantize_i8(d, scale))
             .collect::<Vec<_>>();
         let magnitude = query.iter().map(|&d| d as i32 * d as i32).sum::<i32>();
-        Ok(Self {
+        Self {
             kernel,
             query,
             scale,
             magnitude,
-        })
+        }
     }
 }
 
@@ -302,21 +294,19 @@ pub(crate) fn new_scalar_symmetric_query_distance<'a>(
     Box::new(SymmetricalQueryDistance::new(scalar::Scalar, query))
 }
 
-pub fn new_asymmetric_distance(query: &[f32]) -> crate::Result<Box<dyn QueryVectorDistance>> {
+pub fn new_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
     #[cfg(target_arch = "aarch64")]
     if cpu_feature!("neon") && cpu_feature!("dotprod") {
-        return Ok(Box::new(QueryDistance::new(aarch64::Neon, query)?));
+        return Box::new(QueryDistance::new(aarch64::Neon, query));
     }
     #[cfg(target_arch = "x86_64")]
     if cpu_feature!("avx512f") && cpu_feature!("avx512vnni") && cpu_feature!("avx512bw") {
-        return Ok(Box::new(QueryDistance::new(x86_64::Avx512, query)?));
+        return Box::new(QueryDistance::new(x86_64::Avx512, query));
     }
-    Ok(Box::new(QueryDistance::new(scalar::Scalar, query)?))
+    Box::new(QueryDistance::new(scalar::Scalar, query))
 }
 
 #[cfg(test)]
-pub(crate) fn new_scalar_asymmetric_distance(
-    query: &[f32],
-) -> crate::Result<Box<dyn QueryVectorDistance>> {
-    Ok(Box::new(QueryDistance::new(scalar::Scalar, query)?))
+pub(crate) fn new_scalar_asymmetric_distance(query: &[f32]) -> Box<dyn QueryVectorDistance> {
+    Box::new(QueryDistance::new(scalar::Scalar, query))
 }

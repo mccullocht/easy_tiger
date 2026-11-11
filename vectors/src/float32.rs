@@ -119,11 +119,10 @@ impl F32VectorCoder for VectorCoder {
         dimensions * std::mem::size_of::<f32>()
     }
 
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) -> crate::Result<()> {
-        crate::check_finite_vector(vector)?;
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        crate::assert_finite_vector(vector);
         assert!(out.len() >= std::mem::size_of_val(vector));
         Self::encode_it(vector.iter().copied(), out);
-        Ok(())
     }
 
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {

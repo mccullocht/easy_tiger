@@ -65,10 +65,9 @@ impl VectorCoder {
 }
 
 impl F32VectorCoder for VectorCoder {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) -> crate::Result<()> {
-        crate::check_finite_vector(vector)?;
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        crate::assert_finite_vector(vector);
         self.convert_and_encode(vector, None, out);
-        Ok(())
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {

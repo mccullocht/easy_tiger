@@ -204,14 +204,11 @@ where
 
         for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
             v.convert_to_f32_slice(&mut vector_f32);
-            vectors::prepare_vector_in_place(&mut vector_f32, None, false, centroid.as_deref())
-                .expect("input vector must be finite");
+            vectors::prepare_vector_in_place(&mut vector_f32, None, false, centroid.as_deref());
             for (d, s) in vector_f32.iter().zip(sum.iter_mut()) {
                 *s += *d as f64;
             }
-            nav_coder
-                .encode_to(&vector_f32, &mut nav_vector)
-                .expect("input vector must be finite");
+            nav_coder.encode_to(&vector_f32, &mut nav_vector);
             if let Some(q) = quantized_vectors.as_mut() {
                 let start = i * nav_vector.len();
                 q[start..(start + nav_vector.len())].copy_from_slice(&nav_vector);
@@ -219,9 +216,7 @@ where
             nav_cursor.append(i as i64, &nav_vector)?;
 
             if let Some((coder, vector, cursor)) = rerank.as_mut() {
-                coder
-                    .encode_to(&vector_f32, vector)
-                    .expect("input vector must be finite");
+                coder.encode_to(&vector_f32, vector);
                 cursor.append(i as i64, vector)?;
             }
             progress(1);
@@ -245,8 +240,7 @@ where
             .rerank_table()
             .unwrap_or(self.index.nav_table())
             .new_coder()
-            .encode(&mean)
-            .expect("mean vector must be finite");
+            .encode(&mean);
         Ok(())
     }
 

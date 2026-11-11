@@ -6,8 +6,8 @@ use crate::{F32VectorCoder, QueryVectorDistance, VectorDistance};
 pub struct BinaryQuantizedVectorCoder;
 
 impl F32VectorCoder for BinaryQuantizedVectorCoder {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) -> crate::Result<()> {
-        crate::check_finite_vector(vector)?;
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        crate::assert_finite_vector(vector);
         for (c, o) in vector.chunks(8).zip(out.iter_mut()) {
             *o = c
                 .iter()
@@ -15,7 +15,6 @@ impl F32VectorCoder for BinaryQuantizedVectorCoder {
                 .filter_map(|(i, d)| if *d > 0.0 { Some(1u8 << i) } else { None })
                 .fold(0, |a, b| a | b)
         }
-        Ok(())
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -72,13 +71,11 @@ pub struct I1DotProductQueryDistance {
 }
 
 impl I1DotProductQueryDistance {
-    pub fn new(query: &[f32]) -> crate::Result<Self> {
+    pub fn new(query: &[f32]) -> Self {
         // TODO: this heavily overlaps with i8-scaled-uniform quantization. Figure out how to share
         // most of the implementation.
-        crate::check_finite_vector(query)?;
-        if query.is_empty() {
-            return Err(crate::Error::EmptyVector);
-        }
+        crate::assert_finite_vector(query);
+        assert!(!query.is_empty(), "query vector is empty");
         // `fold(0.0, f32::max)` replaces a `total_cmp`-based `unwrap()` that panicked on an empty
         // query and ranked a stray NaN as the maximum. A zero query gives a zero scale.
         let max_abs = query.iter().copied().map(f32::abs).fold(0.0f32, f32::max) as f64;
@@ -98,11 +95,11 @@ impl I1DotProductQueryDistance {
         // Map values in the i1 vector into i8 space assuming an l2 norm of 1.
         // This also assumes the same quantized_scale for the i1 vector.
         let i1_value = (((1.0 / query.len() as f64).sqrt() as f32) * scale).round() as i8;
-        Ok(Self {
+        Self {
             quantized,
             quantized_scale: inv_scale,
             i1_value,
-        })
+        }
     }
 
     #[allow(dead_code)]

@@ -490,18 +490,14 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         Self { k }
     }
 
-    fn encode_parts(k: Kernel, vector: &[f32]) -> crate::Result<(PrimaryVectorHeader, Vec<u8>)> {
+    fn encode_parts(k: Kernel, vector: &[f32]) -> (PrimaryVectorHeader, Vec<u8>) {
         let mut out = vec![0u8; packing::byte_len(vector.len(), B)];
-        let header = Self::encode_parts_to(k, vector, &mut out)?;
-        Ok((header, out))
+        let header = Self::encode_parts_to(k, vector, &mut out);
+        (header, out)
     }
 
-    fn encode_parts_to(
-        k: Kernel,
-        vector: &[f32],
-        out: &mut [u8],
-    ) -> crate::Result<PrimaryVectorHeader> {
-        crate::check_finite_vector(vector)?;
+    fn encode_parts_to(k: Kernel, vector: &[f32], out: &mut [u8]) -> PrimaryVectorHeader {
+        crate::assert_finite_vector(vector);
         let stats = VectorStats::new(k, vector);
         let mut header = PrimaryVectorHeader::new(stats);
         (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
@@ -532,25 +528,24 @@ impl<const B: usize> TurboPrimaryCoder<B> {
 
         // The only way a finite input reaches a non-finite header is a magnitude that overflows f32
         // when squared/summed; that vector cannot be quantized.
-        if !(header.l2_norm.is_finite()
-            && header.lower.is_finite()
-            && header.upper.is_finite()
-            && header.perpendicular_error_term.is_finite()
-            && header.parallel_error_term.is_finite())
-        {
-            return Err(crate::Error::NonFiniteMagnitude);
-        }
+        assert!(
+            header.l2_norm.is_finite()
+                && header.lower.is_finite()
+                && header.upper.is_finite()
+                && header.perpendicular_error_term.is_finite()
+                && header.parallel_error_term.is_finite(),
+            "vector magnitude is not finite: {header:?}"
+        );
 
-        Ok(header)
+        header
     }
 }
 
 impl<const B: usize> F32VectorCoder for TurboPrimaryCoder<B> {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) -> crate::Result<()> {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         let (header_bytes, vector_bytes) = PrimaryVectorHeader::split_output_buf(out).unwrap();
-        let header = Self::encode_parts_to(self.k, vector, vector_bytes)?;
+        let header = Self::encode_parts_to(self.k, vector, vector_bytes);
         header.serialize(header_bytes);
-        Ok(())
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -636,21 +631,21 @@ pub struct TurboPrimaryQueryDistance<const B: usize> {
 }
 
 impl<const B: usize> TurboPrimaryQueryDistance<B> {
-    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> crate::Result<Self> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
         let k = Kernel::default();
         let (header, query) =
-            TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(k, query.as_ref())?;
+            TurboPrimaryCoder::<PRIMARY_QUERY_BITS>::encode_parts(k, query.as_ref());
         let terms = VectorDecodeTerms::from_primary::<PRIMARY_QUERY_BITS>(header);
         let error_terms = ErrorBoundTerms::from_header(&header, query.len(), similarity);
 
-        Ok(Self {
+        Self {
             k,
             similarity,
             query,
             l2_norm_sq: header.l2_norm.powi(2),
             terms,
             error_terms,
-        })
+        }
     }
 
     #[inline(always)]
@@ -716,21 +711,21 @@ pub struct TurboPrimaryQueryDistance1 {
 }
 
 impl TurboPrimaryQueryDistance1 {
-    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> crate::Result<Self> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>) -> Self {
         let k = Kernel::default();
-        let (header, query) = TurboPrimaryCoder::<4>::encode_parts(k, query.as_ref())?;
+        let (header, query) = TurboPrimaryCoder::<4>::encode_parts(k, query.as_ref());
         let query = packing::bitplane_split4(&query);
         let terms = VectorDecodeTerms::from_primary::<4>(header);
         let error_terms = ErrorBoundTerms::from_header(&header, query.len() * 2, similarity);
 
-        Ok(Self {
+        Self {
             k,
             similarity,
             query,
             l2_norm_sq: header.l2_norm.powi(2),
             terms,
             error_terms,
-        })
+        }
     }
 
     #[inline(always)]

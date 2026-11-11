@@ -10,7 +10,7 @@ use crate::posting_block::PostingBlock;
 
 /// Search `cursor` exhaustively and return the `k` nearest neighbors by `distance_fn`.
 pub fn exhaustive_search(
-    mut cursor: RecordCursorGuard<'_>,
+    mut cursor: RecordCursorGuard,
     vector_len: usize,
     distance_fn: &dyn QueryVectorDistance,
     k: NonZero<usize>,

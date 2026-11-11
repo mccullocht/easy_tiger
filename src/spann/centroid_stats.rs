@@ -139,14 +139,14 @@ impl CentroidStats {
     }
 }
 
-pub struct CentroidAssignmentUpdater<'a> {
-    assignments_cursor: TypedCursorGuard<'a, i64, CentroidAssignment>,
-    stats: CentroidStatsCache<'a>,
+pub struct CentroidAssignmentUpdater {
+    assignments_cursor: TypedCursorGuard<i64, CentroidAssignment>,
+    stats: CentroidStatsCache,
 }
 
-impl<'a> CentroidAssignmentUpdater<'a> {
+impl CentroidAssignmentUpdater {
     /// Create a new updater for `index` using `session` for WT access.
-    pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
+    pub fn new(txn_idx: &TransactionIndex) -> Result<Self> {
         let assignments_cursor = txn_idx
             .transaction()
             .open_cursor::<i64, CentroidAssignment>(&txn_idx.index().table_names.centroids)?;
@@ -223,13 +223,13 @@ impl<'a> CentroidAssignmentUpdater<'a> {
     }
 }
 
-struct CentroidStatsCache<'a> {
-    cursor: TypedCursorGuard<'a, u32, CentroidCounts>,
+struct CentroidStatsCache {
+    cursor: TypedCursorGuard<u32, CentroidCounts>,
     cache: HashMap<u32, CentroidCounts>,
 }
 
-impl<'a> CentroidStatsCache<'a> {
-    fn new(cursor: TypedCursorGuard<'a, u32, CentroidCounts>) -> Self {
+impl CentroidStatsCache {
+    fn new(cursor: TypedCursorGuard<u32, CentroidCounts>) -> Self {
         Self {
             cursor,
             cache: HashMap::new(),

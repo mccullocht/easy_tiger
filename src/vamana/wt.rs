@@ -65,15 +65,15 @@ impl Iterator for Leb128EdgeIterator<'_> {
 }
 
 /// Implementation of `Graph` that reads from a WiredTiger `RecordCursor`.
-pub struct CursorGraph<'a>(RecordCursorGuard<'a>);
+pub struct CursorGraph(RecordCursorGuard);
 
-impl<'a> CursorGraph<'a> {
-    pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
+impl CursorGraph {
+    pub fn new(cursor: RecordCursorGuard) -> Self {
         Self(cursor)
     }
 }
 
-impl Graph for CursorGraph<'_> {
+impl Graph for CursorGraph {
     type EdgeIterator<'c>
         = Leb128EdgeIterator<'c>
     where
@@ -119,16 +119,16 @@ impl Graph for CursorGraph<'_> {
 }
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
-pub struct CursorVectorStore<'a> {
-    inner: RecordCursorGuard<'a>,
+pub struct CursorVectorStore {
+    inner: RecordCursorGuard,
     similarity: VectorSimilarity,
     format: F32VectorCoding,
     centroid: Option<Arc<[f32]>>,
 }
 
-impl<'a> CursorVectorStore<'a> {
+impl CursorVectorStore {
     pub fn new(
-        inner: RecordCursorGuard<'a>,
+        inner: RecordCursorGuard,
         similarity: VectorSimilarity,
         format: F32VectorCoding,
         centroid: Option<Arc<[f32]>>,
@@ -142,7 +142,7 @@ impl<'a> CursorVectorStore<'a> {
     }
 }
 
-impl GraphVectorStore for CursorVectorStore<'_> {
+impl GraphVectorStore for CursorVectorStore {
     fn similarity(&self) -> VectorSimilarity {
         self.similarity
     }
@@ -366,11 +366,11 @@ impl TransactionGraphVectorIndex {
 
 impl GraphVectorIndex for TransactionGraphVectorIndex {
     type Graph<'a>
-        = CursorGraph<'a>
+        = CursorGraph
     where
         Self: 'a;
     type VectorStore<'a>
-        = CursorVectorStore<'a>
+        = CursorVectorStore
     where
         Self: 'a;
 

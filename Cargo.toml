@@ -10,6 +10,9 @@ members = ["et", "vectors", "wt_mdb", "wt_sys"]
 ahash = "0.8.12"
 approx = "0.5.1"
 bindgen = "0.72.1"
+bitpacking = { version = "0.9.3", default-features = false, features = [
+    "bitpacker4x",
+] }
 bytemuck = "1.24.0"
 cc = "1.4.4"
 clap = { version = "4.6.6", features = ["derive"] }
@@ -42,6 +45,7 @@ wgpu = "30.0.1"
 
 [dependencies]
 ahash = { workspace = true }
+bitpacking = { workspace = true }
 bytemuck = { workspace = true }
 crossbeam-skiplist = { workspace = true }
 half = { workspace = true }
@@ -62,8 +66,13 @@ wt_mdb = { path = "./wt_mdb" }
 
 [dev-dependencies]
 approx = { workspace = true }
+criterion = { workspace = true }
 rand_xoshiro = { workspace = true }
 tempfile = { workspace = true }
+
+[[bench]]
+name = "token"
+harness = false
 
 [build-dependencies]
 cc = { workspace = true }

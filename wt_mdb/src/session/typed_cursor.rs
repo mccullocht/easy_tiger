@@ -4,6 +4,7 @@ use std::{
     ops::{Bound, Deref, DerefMut, RangeBounds},
     os::raw::c_void,
     range::Range,
+    rc::Rc,
 };
 
 use rustix::io::Errno;
@@ -72,20 +73,26 @@ fn wt_item_from_slice(s: &[u8]) -> WT_ITEM {
     }
 }
 
-pub struct TypedCursor<'a, K, V> {
+/// A cursor over a table with keys of type `K` and values of type `V`.
+///
+/// Cursors share ownership of the session belonging to the `Transaction` that created them. A
+/// cursor may outlive its `Transaction` but once that transaction has been committed, rolled
+/// back, or dropped any operation that positions the cursor will fail with `EINVAL`.
+pub struct TypedCursor<K, V> {
+    // inner must be closed before the session, so it is declared first.
     inner: InnerCursor,
-    session: &'a Session,
+    session: Rc<Session>,
     // TODO: consider using SmallVec for buffers. This will make the cursor larger but will require
     // zero allocations, particularly for small keys.
     key_buf: Vec<u8>,
     value_buf: Vec<u8>,
     supports_get_raw_kv: bool,
-    _km: PhantomData<&'a K>,
-    _vm: PhantomData<&'a V>,
+    _km: PhantomData<K>,
+    _vm: PhantomData<V>,
 }
 
-impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
-    pub(super) fn new(inner: InnerCursor, session: &'a Session) -> Result<Self> {
+impl<K: Formatted, V: Formatted> TypedCursor<K, V> {
+    pub(super) fn new(inner: InnerCursor, session: Rc<Session>) -> Result<Self> {
         if inner.key_format() == K::FORMAT && inner.value_format() == V::FORMAT {
             // We opt in certain uri types to this behavior. It is faster but not supported by all
             // cursor types -- in particular stats cursors do not support this call.
@@ -110,6 +117,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
 
     /// Set the contents of `record` in the collection.
     pub fn set(&mut self, key: K::Ref<'_>, value: V::Ref<'_>) -> Result<()> {
+        self.check_transaction_active()?;
         let key = format_to_buf!(key, K, self.key_buf)?;
         let value = format_to_buf!(value, V, self.value_buf)?;
         // safety: the memory passed to set_{key,value} need only be valid until a modifying
@@ -125,6 +133,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     ///
     /// This may return a `WiredTigerError::NotFound` if the key does not exist in the collection.
     pub fn remove(&mut self, key: K::Ref<'_>) -> Result<()> {
+        self.check_transaction_active()?;
         let key = format_to_buf!(key, K, self.key_buf)?;
         unsafe {
             wt_call!(void self.inner.0, set_key, &Item::from(key).0)?;
@@ -198,6 +207,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         if V::FORMAT.format_str() != "u" {
             return Err(Error::errno(Errno::NOTSUP));
         }
+        self.check_transaction_active()?;
         let key = format_to_buf!(key, K, self.key_buf)?;
         unsafe {
             wt_call!(void self.inner.0, set_key, &Item::from(key).0)?;
@@ -218,20 +228,26 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     /// continues to return `None` until the cursor is re-positioned.
     ///
     /// # Safety
-    /// If the cursor's parent session returns this record during a transaction and that transaction
-    /// is rolled back, we cannot guarantee that view value data is safe to access. Use
-    /// `Iterator.next()` to ensure safe access at the cost of a copy of the record value.
+    /// The returned data must not be accessed after the transaction that produced it has been
+    /// committed, rolled back, or dropped. Use `Iterator.next()` to ensure safe access at the cost
+    /// of a copy of the record value.
     pub unsafe fn next_unsafe(&mut self) -> Option<Result<(K::Ref<'_>, V::Ref<'_>)>> {
+        if let Err(e) = self.check_transaction_active() {
+            return Some(Err(e));
+        }
         map_not_found(unsafe { wt_call!(self.inner.0, next) }.and_then(|()| self.key_and_value()))
     }
 
     /// Seek to the for `key` and return any associated `RecordView` if present.
     ///
     /// # Safety
-    /// If the cursor's parent session returns this record during a transaction and that transaction
-    /// is rolled back, we cannot guarantee that view value data is safe to access. Use
-    /// `seek_exact()` to ensure safe access at the cost of a copy of the record value.
+    /// The returned data must not be accessed after the transaction that produced it has been
+    /// committed, rolled back, or dropped. Use `seek_exact()` to ensure safe access at the cost of
+    /// a copy of the record value.
     pub unsafe fn seek_exact_unsafe(&mut self, key: K::Ref<'_>) -> Option<Result<V::Ref<'_>>> {
+        if let Err(e) = self.check_transaction_active() {
+            return Some(Err(e));
+        }
         let key = match format_to_buf!(key, K, self.key_buf) {
             Ok(k) => k,
             Err(e) => return Some(Err(e)),
@@ -252,6 +268,9 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
 
     /// Return the largest key in the collection or `None` if the collection is empty.
     pub fn largest_key(&mut self) -> Option<Result<K>> {
+        if let Err(e) = self.check_transaction_active() {
+            return Some(Err(e));
+        }
         map_not_found(
             unsafe { wt_call!(self.inner.0, largest_key) }
                 .and_then(|()| self.key().map(|k| k.into())),
@@ -268,6 +287,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
         // * If the cursor is positioned this call will return EINVAL which is unintuitive.
         // * action=clear removes _both_ bounds and action=set checks any existing bounds for
         //   soundness so it makes more sense to start with a clean slate.
+        self.check_transaction_active()?;
         self.reset()?;
         self.set_bound(bounds.start_bound(), false)?;
         self.set_bound(bounds.end_bound(), true)
@@ -301,6 +321,18 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     /// Reset the cursor to an unpositioned state.
     pub fn reset(&mut self) -> Result<()> {
         unsafe { wt_call!(self.inner.0, reset) }
+    }
+
+    /// Return an error if the transaction this cursor was opened in has ended.
+    ///
+    /// Without this check operations would silently run in their own auto-commit transactions.
+    #[inline]
+    fn check_transaction_active(&self) -> Result<()> {
+        if self.session.transaction_active() {
+            Ok(())
+        } else {
+            Err(Error::errno(Errno::INVAL))
+        }
     }
 
     /// Return the current key. This assumes that we have just positioned the cursor
@@ -337,7 +369,7 @@ impl<'a, K: Formatted, V: Formatted> TypedCursor<'a, K, V> {
     }
 }
 
-impl<'a, K: Formatted, V: Formatted> Iterator for TypedCursor<'a, K, V> {
+impl<K: Formatted, V: Formatted> Iterator for TypedCursor<K, V> {
     type Item = Result<(K, V)>;
 
     /// Advance and return the next record.
@@ -348,29 +380,30 @@ impl<'a, K: Formatted, V: Formatted> Iterator for TypedCursor<'a, K, V> {
     }
 }
 
-pub struct TypedCursorGuard<'a, K, V>(ManuallyDrop<TypedCursor<'a, K, V>>);
+/// A [`TypedCursor`] that is returned to its session's cursor cache when dropped.
+pub struct TypedCursorGuard<K, V>(ManuallyDrop<TypedCursor<K, V>>);
 
-impl<'a, K, V> TypedCursorGuard<'a, K, V> {
-    pub fn new(cursor: TypedCursor<'a, K, V>) -> Self {
+impl<K, V> TypedCursorGuard<K, V> {
+    pub fn new(cursor: TypedCursor<K, V>) -> Self {
         Self(ManuallyDrop::new(cursor))
     }
 }
 
-impl<'a, K, V> Deref for TypedCursorGuard<'a, K, V> {
-    type Target = TypedCursor<'a, K, V>;
+impl<K, V> Deref for TypedCursorGuard<K, V> {
+    type Target = TypedCursor<K, V>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<'a, K, V> DerefMut for TypedCursorGuard<'a, K, V> {
+impl<K, V> DerefMut for TypedCursorGuard<K, V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<'a, K, V> Drop for TypedCursorGuard<'a, K, V> {
+impl<K, V> Drop for TypedCursorGuard<K, V> {
     fn drop(&mut self) {
         // Safety: we never intend to allow RecordCursorGuard to drop the value.
         let cursor = unsafe { ManuallyDrop::take(&mut self.0) };
@@ -378,7 +411,7 @@ impl<'a, K, V> Drop for TypedCursorGuard<'a, K, V> {
     }
 }
 
-impl<'a, K: Formatted, V: Formatted> Iterator for TypedCursorGuard<'a, K, V> {
+impl<K: Formatted, V: Formatted> Iterator for TypedCursorGuard<K, V> {
     type Item = Result<(K, V)>;
 
     fn next(&mut self) -> Option<Self::Item> {

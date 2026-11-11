@@ -371,17 +371,17 @@ pub struct SearchTrace {
     pub max_centroid_distance: Option<f64>,
 }
 
-struct SearchTraceState<'a> {
+struct SearchTraceState {
     ids: HashMap<i64, (usize, VectorTrace)>,
     centroids: HashMap<u32, Vec<i64>>,
     centroid_traces: HashMap<u32, CentroidTrace>,
-    centroid_stats: TypedCursorGuard<'a, u32, CentroidCounts>,
+    centroid_stats: TypedCursorGuard<u32, CentroidCounts>,
     head_trace: GraphSearchTrace,
     max_centroid_distance: Option<f64>,
 }
 
-impl<'a> SearchTraceState<'a> {
-    fn new(vectors: &[i64], index: &'a TransactionIndex) -> Result<Self> {
+impl SearchTraceState {
+    fn new(vectors: &[i64], index: &TransactionIndex) -> Result<Self> {
         let mut cursor = index.transaction().open_cursor::<i64, CentroidAssignment>(
             index.index().centroid_assignments_table_name(),
         )?;
@@ -569,7 +569,7 @@ impl Searcher {
         &mut self,
         query: &[f32],
         reader: &TransactionIndex,
-        posting_cursor: &mut TypedCursorGuard<'_, u32, Vec<u8>>,
+        posting_cursor: &mut TypedCursorGuard<u32, Vec<u8>>,
     ) -> Result<Vec<Neighbor>> {
         self.search_with_trace(query, reader, posting_cursor, None)
             .map(|x| x.0)
@@ -579,7 +579,7 @@ impl Searcher {
         &mut self,
         query: &[f32],
         reader: &TransactionIndex,
-        posting_cursor: &mut TypedCursorGuard<'_, u32, Vec<u8>>,
+        posting_cursor: &mut TypedCursorGuard<u32, Vec<u8>>,
         traced: Option<&[i64]>,
     ) -> Result<(Vec<Neighbor>, Option<SearchTrace>)> {
         self.stats = SearchStats::default();

@@ -14,14 +14,14 @@ use crate::vamana::{
 /// rebalance re-centering) must agree on the definition of a centroid vector: the head
 /// high-fidelity vector decoded to f32, with the head graph's shared centroid (if any)
 /// re-added to produce an absolute vector.
-pub struct CentroidVectorSource<'a> {
-    store: CursorVectorStore<'a>,
+pub struct CentroidVectorSource {
+    store: CursorVectorStore,
     coder: Box<dyn F32VectorCoder>,
 }
 
-impl<'a> CentroidVectorSource<'a> {
+impl CentroidVectorSource {
     /// Create a source reading centroid vectors from `head`.
-    pub fn new(head: &'a TransactionGraphVectorIndex) -> Result<Self> {
+    pub fn new(head: &TransactionGraphVectorIndex) -> Result<Self> {
         let store = head.high_fidelity_vectors()?;
         let coder = store.new_coder();
         Ok(Self { store, coder })

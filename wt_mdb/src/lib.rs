@@ -488,6 +488,72 @@ mod test {
         assert_eq!(read_cursor.next(), None);
     }
 
+    fn assert_cursor_inactive(cursor: &mut RecordCursorGuard) {
+        let inval = || Error::errno(Errno::INVAL);
+        assert_eq!(cursor.set(2, b"bar"), Err(inval()));
+        assert_eq!(cursor.remove(1), Err(inval()));
+        assert_eq!(cursor.next(), Some(Err(inval())));
+        assert_eq!(cursor.seek_exact(1), Some(Err(inval())));
+        assert_eq!(cursor.largest_key(), Some(Err(inval())));
+        assert_eq!(cursor.set_bounds(0..), Err(inval()));
+    }
+
+    #[test]
+    fn cursor_outlives_commit() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", None).unwrap();
+
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(1, b"foo"), Ok(()));
+        txn.commit(None).unwrap();
+        assert_cursor_inactive(&mut cursor);
+        drop(cursor);
+
+        // The write attempted after commit must not have been applied in an auto-commit txn.
+        let read_txn = conn.begin_transaction(None).unwrap();
+        let mut read_cursor = read_txn.open_record_cursor("test").unwrap();
+        assert_eq!(read_cursor.next(), Some(Ok((1, b"foo".to_vec()))));
+        assert_eq!(read_cursor.next(), None);
+    }
+
+    #[test]
+    fn cursor_outlives_rollback() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", None).unwrap();
+
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(1, b"foo"), Ok(()));
+        txn.rollback(None).unwrap();
+        assert_cursor_inactive(&mut cursor);
+        drop(cursor);
+
+        let read_txn = conn.begin_transaction(None).unwrap();
+        let mut read_cursor = read_txn.open_record_cursor("test").unwrap();
+        assert_eq!(read_cursor.next(), None);
+    }
+
+    #[test]
+    fn cursor_outlives_transaction_drop() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", None).unwrap();
+
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(1, b"foo"), Ok(()));
+        drop(txn);
+        assert_cursor_inactive(&mut cursor);
+        drop(cursor);
+
+        let read_txn = conn.begin_transaction(None).unwrap();
+        let mut read_cursor = read_txn.open_record_cursor("test").unwrap();
+        assert_eq!(read_cursor.next(), None);
+    }
+
     #[test]
     fn cursor_cache() {
         let tmpdir = tempfile::tempdir().unwrap();
@@ -672,7 +738,7 @@ mod test {
             }
         }
 
-        fn open_cursor(&self) -> Result<RecordCursorGuard<'_>> {
+        fn open_cursor(&self) -> Result<RecordCursorGuard> {
             self.txn.open_record_cursor(&self.table_name)
         }
     }

@@ -105,7 +105,7 @@ struct QueryTrace {
     recall: Option<f64>,
     stats: SearchStats,
     traces: Vec<VectorIdTrace>,
-    centroids: Vec<CentroidTrace>,
+    centroids: Option<Vec<CentroidTrace>>,
     max_centroid_distance: Option<f64>,
 }
 

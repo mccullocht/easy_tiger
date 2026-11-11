@@ -52,6 +52,13 @@ pub struct IndexConfig {
     /// raw_vectors rerank table always stores uncentered vectors.
     #[serde(default)]
     pub center_postings: bool,
+    /// If true, read rerank vectors during centroid splits to generate new centroids.
+    ///
+    /// Using higher fidelity vectors can result in much more accurate centroid generation that is
+    /// does a better job partitioning vectors and is less prone to split/merge repetition cycles.
+    /// It also costs more since we need perform a random read for each vector.
+    #[serde(default)]
+    pub split_rerank_vectors: bool,
     /// Seed for an orthogonal rotation applied to all vectors on ingress (both ingestion and
     /// search).
     ///
@@ -394,6 +401,7 @@ mod tests {
             max_centroid_len: 8,
             rerank_format: F32VectorCoding::F32,
             center_postings: true,
+            split_rerank_vectors: false,
             rotation_seed: None,
         };
         let json = serde_json::to_string(&config).unwrap();

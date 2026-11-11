@@ -802,7 +802,7 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
 }
 
 enum BulkLoadGraphVectorStore<'a> {
-    Cursor(CursorVectorStore<'a>),
+    Cursor(CursorVectorStore),
     Memory(
         &'a DerefVectorStore<u8, memmap2::Mmap>,
         VectorSimilarity,

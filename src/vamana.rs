@@ -302,20 +302,19 @@ impl EdgeSetDistanceComputer {
         edges: &[i64],
     ) -> Result<(Vec<Neighbor>, Self)> {
         let distance_fn = store.new_distance_function();
-        let mut hydrated = Vec::with_capacity(edges.len());
+        let mut neighbors_and_vectors = Vec::with_capacity(edges.len());
         for e in edges {
             let Some(vector) = store.get(*e).transpose()? else {
                 continue;
             };
-            hydrated.push((
+            neighbors_and_vectors.push((
                 Neighbor::new(*e, distance_fn.distance(vertex_vector, vector)),
                 vector.to_vec(),
             ));
         }
-        // Sort neighbors and vectors together so that neighbor indices address the computer.
-        hydrated.sort_unstable_by_key(|(n, _)| *n);
-        let (neighbors, vectors): (Vec<_>, Vec<_>) = hydrated.into_iter().unzip();
+        neighbors_and_vectors.sort_by_key(|t| t.0);
 
+        let (neighbors, vectors) = neighbors_and_vectors.into_iter().unzip();
         Ok((
             neighbors,
             Self {
@@ -347,10 +346,10 @@ fn select_pruned_edges(
     debug_assert!(edges.is_sorted());
 
     let mut selected = vec![0]; // we always keep the first node.
-    for i in 1..edges.len() {
+    for (i, e) in edges.iter().enumerate().skip(1) {
         if selected
             .iter()
-            .any(|&j| edges[j].distance / edge_distance_computer.distance(i, j) > config.alpha)
+            .any(|&j| e.distance / edge_distance_computer.distance(i, j) > config.alpha)
         {
             continue;
         }

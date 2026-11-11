@@ -34,7 +34,15 @@ pub fn centroid_stats(
     let txn_idx = TransactionIndex::new(&index, connection.begin_transaction(None)?);
     let stats = CentroidStats::from_index_stats(&txn_idx)?;
 
-    println!("Head contains {} centroids", stats.centroid_count());
+    println!(
+        "Head contains {} centroids (max {})",
+        stats.centroid_count(),
+        stats
+            .assignment_counts_iter()
+            .last()
+            .map(|x| x.0)
+            .unwrap_or(0)
+    );
     println!("{} tail posting entries", stats.vector_count());
     let max_value_power = max_value_power(&stats);
     println!("Assignments per centroid:");

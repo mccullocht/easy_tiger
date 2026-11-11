@@ -6,7 +6,9 @@ use std::{
     io,
     num::NonZero,
     ops::{Add, AddAssign},
+    range::RangeInclusive,
     str::FromStr,
+    sync::LazyLock,
 };
 
 use ahash::{HashMap, HashMapExt};
@@ -33,6 +35,10 @@ use crate::{
     },
 };
 
+static TRACE_EMIT_CENTROIDS: LazyLock<bool> = LazyLock::new(
+    || matches!(std::env::var("ET_SPANN_TRACE_EMIT_CENTROIDS"), Ok(s) if s.eq_ignore_ascii_case("true") || s == "1"),
+);
+
 /// The algorithm used to select centroids to search in the tail index.
 #[derive(Debug, Copy, Clone)]
 pub enum CentroidSelectorAlgorithm {
@@ -40,6 +46,16 @@ pub enum CentroidSelectorAlgorithm {
     TopN(usize),
     /// Select centroids from closest to farthest until we will score the request number of vectors.
     VectorCount(usize),
+    /// Select centroids by vector count with a distance ratio decay function to prune the set.
+    ///
+    /// This tracks the cumulative vector count at each step and uses the ratio between the first
+    /// and current centroids capped by a budget limit. This arrangement will prune more centroids
+    /// if the distance spread is large.
+    VectorCountDecay {
+        range: RangeInclusive<usize>,
+        budget: usize,
+        beta: f64,
+    },
 }
 
 impl FromStr for CentroidSelectorAlgorithm {
@@ -63,6 +79,53 @@ impl FromStr for CentroidSelectorAlgorithm {
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid number"))?;
                 Ok(Self::VectorCount(n))
             }
+            s if s.starts_with("vector_count_decay:") => {
+                let params = s.split(':').collect::<Vec<_>>();
+                if params.len() != 4 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "decay must have three : separated parameters",
+                    ));
+                }
+                let (lostr, histr) = params[1].split_once("..=").ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "budget must be a range (x..=y)",
+                    )
+                })?;
+                let lo = lostr.parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "lower bound must be an unsigned integer",
+                    )
+                })?;
+                let hi = histr.parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "upper bound must be an unsigned integer",
+                    )
+                })?;
+                if hi < lo {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "upper bound is below lower bound",
+                    ));
+                }
+                let budget = params[2].parse::<usize>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "budget must be an unsigned integer",
+                    )
+                })?;
+                let beta = params[3].parse::<f64>().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "beta must be a float")
+                })?;
+                Ok(Self::VectorCountDecay {
+                    range: (lo..=hi).into(),
+                    budget,
+                    beta,
+                })
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "unknown centroid selection algorithm",
@@ -76,6 +139,15 @@ impl std::fmt::Display for CentroidSelectorAlgorithm {
         match self {
             Self::TopN(n) => write!(f, "top_n:{}", n),
             Self::VectorCount(n) => write!(f, "vector_count:{}", n),
+            Self::VectorCountDecay {
+                range,
+                budget,
+                beta,
+            } => write!(
+                f,
+                "vector_count_decay:{}..={}:{budget}{beta}",
+                range.start, range.last
+            ),
         }
     }
 }
@@ -88,6 +160,17 @@ pub enum CentroidSelector {
     /// Select centroids until we will score the requested number of vectors, using statistics about
     /// the distribution of vectors across centroids.
     VectorCount { count: usize, stats: CentroidStats },
+    /// Select each centroid using a lower and upper bound on vector count plus a decay function
+    /// based on total vectors up to that point and a budget:
+    ///   cumulative_vectors * (dist / dist0)^beta <= budget.
+    /// dist0 is the distance to the first centroid with a non-zero distance. If no such centroid
+    /// exists, select everything.
+    VectorCountDecay {
+        range: RangeInclusive<usize>,
+        budget: usize,
+        beta: f64,
+        stats: CentroidStats,
+    },
 }
 
 impl CentroidSelector {
@@ -99,6 +182,19 @@ impl CentroidSelector {
             CentroidSelectorAlgorithm::VectorCount(n) => {
                 let stats = CentroidStats::from_index_stats(txn_idx)?;
                 Ok(Self::VectorCount { count: n, stats })
+            }
+            CentroidSelectorAlgorithm::VectorCountDecay {
+                range,
+                budget,
+                beta,
+            } => {
+                let stats = CentroidStats::from_index_stats(txn_idx)?;
+                Ok(Self::VectorCountDecay {
+                    range,
+                    budget,
+                    beta,
+                    stats,
+                })
             }
         }
     }
@@ -119,6 +215,39 @@ impl CentroidSelector {
                     selected += stats
                         .assignment_counts(c.vertex() as usize)
                         .map_or(0usize, |counts| counts.total() as usize);
+                }
+            }
+            Self::VectorCountDecay {
+                range,
+                budget,
+                beta,
+                stats,
+            } => {
+                let Some(d0) = candidates.iter().map(|n| n.distance()).find(|&d| d > 0.0) else {
+                    return candidates;
+                };
+                let budget = *budget as f64;
+                let mut selected = 0usize;
+                for (i, c) in candidates.iter().enumerate() {
+                    if selected >= range.last {
+                        // We've exceeded the maximum vectors selected, so break.
+                        candidates.truncate(i);
+                        break;
+                    }
+
+                    selected += stats
+                        .assignment_counts(c.vertex() as usize)
+                        .map_or(0, |counts| counts.total() as usize);
+                    if selected < range.start {
+                        // We have yet to select the minimum number of vectors so continue without
+                        // evaluating the decay function.
+                        continue;
+                    }
+
+                    if selected as f64 * (c.distance() / d0).powf(*beta) > budget {
+                        candidates.truncate(i);
+                        break;
+                    }
                 }
             }
         };
@@ -198,24 +327,25 @@ pub enum VectorTrace {
     PostingQueuePruned { distance: f64, error: f64 },
     /// The vector was reranked but ranked beyond the limit at the end.
     RerankPruned { rank: usize, distance: f64 },
-    /// The vector was found and returned at `rank` in the final result set. `rank_delta` is the
-    /// actual rank minus the expected rank recorded when the trace entry was created (its position
-    /// in the traced vector list); negative means it ranked better than expected.
-    Found { rank: usize, rank_delta: isize },
+    /// The vector was found and returned at `rank` in the final result set.
+    Found { rank: usize },
 }
 
 /// Information about a single centroid observed during a traced search.
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct CentroidTrace {
     /// The centroid's id.
+    #[serde(rename = "cid")]
     pub centroid_id: u32,
     /// The distance from the query to the centroid.
+    #[serde(rename = "dist")]
     pub distance: f64,
     /// The number of vectors assigned to this centroid.
+    #[serde(rename = "cnt")]
     pub num_vectors: usize,
-    /// Whether this centroid's postings were searched.
-    pub selected: bool,
     /// The number of traced vectors assigned to this centroid.
+    #[serde(rename = "tcnt")]
     pub num_traced_vectors: usize,
 }
 
@@ -234,23 +364,25 @@ pub struct SearchTrace {
     /// The trace for each requested vector, ordered by the vector's rank in the request.
     pub vectors: Vec<VectorIdTrace>,
     /// Information about every centroid observed by the head search, farthest to closest.
-    pub centroids: Vec<CentroidTrace>,
+    /// This is very large so it is only emitted if `ET_SPANN_TRACE_EMIT_CENTROIDS=true` is set in
+    /// the environment.
+    pub centroids: Option<Vec<CentroidTrace>>,
     /// Distance from the query to the farthest centroid whose postings were searched, or `None` if
     /// no centroids were selected.
     pub max_centroid_distance: Option<f64>,
 }
 
-struct SearchTraceState<'a> {
+struct SearchTraceState {
     ids: HashMap<i64, (usize, VectorTrace)>,
     centroids: HashMap<u32, Vec<i64>>,
     centroid_traces: HashMap<u32, CentroidTrace>,
-    centroid_stats: TypedCursorGuard<'a, u32, CentroidCounts>,
+    centroid_stats: TypedCursorGuard<u32, CentroidCounts>,
     head_trace: GraphSearchTrace,
     max_centroid_distance: Option<f64>,
 }
 
-impl<'a> SearchTraceState<'a> {
-    fn new(vectors: &[i64], index: &'a TransactionIndex) -> Result<Self> {
+impl SearchTraceState {
+    fn new(vectors: &[i64], index: &TransactionIndex) -> Result<Self> {
         let mut cursor = index.transaction().open_cursor::<i64, CentroidAssignment>(
             index.index().centroid_assignments_table_name(),
         )?;
@@ -310,7 +442,6 @@ impl<'a> SearchTraceState<'a> {
                     centroid_id: cid,
                     distance: n.distance(),
                     num_vectors,
-                    selected: false,
                     num_traced_vectors: self.centroids.get(&cid).map_or(0, Vec::len),
                 },
             );
@@ -323,9 +454,6 @@ impl<'a> SearchTraceState<'a> {
             .map(|n| n.distance())
             .fold(None, |m: Option<f64>, d| Some(m.map_or(d, |m| m.max(d))));
         for cid in centroids.iter().map(|n| n.vertex() as u32) {
-            if let Some(t) = self.centroid_traces.get_mut(&cid) {
-                t.selected = true;
-            }
             let Some(ids) = self.centroids.get(&cid) else {
                 continue;
             };
@@ -347,15 +475,11 @@ impl<'a> SearchTraceState<'a> {
 
     fn observe_rerank(&mut self, results: &[Neighbor], limit: usize) {
         for (i, r) in results.iter().enumerate() {
-            let Some((expected_rank, trace)) = self.ids.get_mut(&r.vertex()) else {
+            let Some((_, trace)) = self.ids.get_mut(&r.vertex()) else {
                 continue;
             };
-            let rank_delta = i as isize - *expected_rank as isize;
             *trace = if i < limit {
-                VectorTrace::Found {
-                    rank: i,
-                    rank_delta,
-                }
+                VectorTrace::Found { rank: i }
             } else {
                 VectorTrace::RerankPruned {
                     rank: i,
@@ -369,13 +493,10 @@ impl<'a> SearchTraceState<'a> {
     /// when rerank is skipped and the posting-scored results are returned directly.
     fn observe_results(&mut self, results: &[Neighbor]) {
         for (i, r) in results.iter().enumerate() {
-            let Some((expected_rank, trace)) = self.ids.get_mut(&r.vertex()) else {
+            let Some((_, trace)) = self.ids.get_mut(&r.vertex()) else {
                 continue;
             };
-            *trace = VectorTrace::Found {
-                rank: i,
-                rank_delta: i as isize - *expected_rank as isize,
-            };
+            *trace = VectorTrace::Found { rank: i };
         }
     }
 
@@ -412,7 +533,13 @@ impl<'a> SearchTraceState<'a> {
         // We don't emit this unconditionally because if we do it makes up 80% of the output.
         SearchTrace {
             vectors,
-            centroids: vec![],
+            centroids: if *TRACE_EMIT_CENTROIDS {
+                let mut centroids = self.centroid_traces.into_values().collect::<Vec<_>>();
+                centroids.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
+                Some(centroids)
+            } else {
+                None
+            },
             max_centroid_distance: self.max_centroid_distance,
         }
     }
@@ -443,7 +570,7 @@ impl Searcher {
         &mut self,
         query: &[f32],
         reader: &TransactionIndex,
-        posting_cursor: &mut TypedCursorGuard<'_, u32, Vec<u8>>,
+        posting_cursor: &mut TypedCursorGuard<u32, Vec<u8>>,
     ) -> Result<Vec<Neighbor>> {
         self.search_with_trace(query, reader, posting_cursor, None)
             .map(|x| x.0)
@@ -453,7 +580,7 @@ impl Searcher {
         &mut self,
         query: &[f32],
         reader: &TransactionIndex,
-        posting_cursor: &mut TypedCursorGuard<'_, u32, Vec<u8>>,
+        posting_cursor: &mut TypedCursorGuard<u32, Vec<u8>>,
         traced: Option<&[i64]>,
     ) -> Result<(Vec<Neighbor>, Option<SearchTrace>)> {
         self.stats = SearchStats::default();
@@ -855,6 +982,7 @@ mod tests {
                 max_centroid_len: 12,
                 rerank_format: F32VectorCoding::F32,
                 center_postings,
+                split_rerank_vectors: false,
                 rotation_seed: None,
             };
             let index = Arc::new(TableIndex::init_index(

@@ -76,7 +76,7 @@ pub fn repair(vertex_id: i64, index: &impl GraphVectorIndex) -> Result<()> {
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
     let (candidates, _) = searcher.search_with_options(
         &query,
-        GraphSearchOptions::default().return_seen(true),
+        GraphSearchOptions::with_filter(|id| id != vertex_id).return_seen(true),
         index,
     )?;
 
@@ -253,6 +253,10 @@ fn insert_internal<F: FnMut(i64) -> bool>(
     let mut searcher = GraphSearcher::new(index.config().index_search_params);
     let (mut candidate_edges, _) = searcher.search_with_options(vector, options, index)?;
     let mut graph = index.graph()?;
+    // TODO: the candidate set could be empty if there is a filter. The current state works in
+    // SPANN because we will filter out rebalance source vertices and the new vertices should be
+    // searched going forward, but there needs to be a better plan here. Evaluate removing the
+    // source filter entirely in this case.
     if candidate_edges.is_empty() {
         graph.set_entry_point(vertex_id)?;
     }
@@ -415,6 +419,15 @@ fn wolverine_repair_edges(
                     && dist_fn.distance(cvec, rvec) < dist_fn.distance(&vertex_vector, rvec)
             })
             .collect::<Vec<_>>();
+        // If the deleted vertex was closer to rid than any of its peers there are no one hop
+        // candidates, and so no two hop candidates either. Fall back to linking all peers to rid
+        // so that rid is not disconnected from the graph.
+        if one_hop_candidates.is_empty() {
+            for (cid, _, _) in one_hop_pool.iter().filter(|(cid, _, _)| *cid != *rid) {
+                repair_edges.insert((*cid, *rid));
+            }
+            continue;
+        }
         // Insert all one hop candidates in the seen and repair set.
         for (cid, _, _) in one_hop_candidates.iter() {
             seen.insert(*cid);

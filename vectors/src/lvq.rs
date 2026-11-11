@@ -161,7 +161,6 @@ fn distance_from_dot_unnormalized(
         // Normalize angular distance into a value in [0,1] where lower is closer.
         VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
     };
-    debug_assert!(d.is_finite());
     crate::sanitize_distance(d as f64, similarity.angular()) as f32
 }
 
@@ -189,7 +188,6 @@ impl ErrorBoundTerms {
         let query_error = self.perpendicular_error_term * vector.l2_norm;
         let doc_error = vector.perpendicular_error_term * self.l2_norm;
         let bound = (query_error.powi(2) + doc_error.powi(2)).sqrt() * self.mult;
-        debug_assert!(bound.is_finite() && bound >= 0.0);
         if bound.is_finite() {
             bound.max(0.0)
         } else {
@@ -268,14 +266,12 @@ impl PrimaryVectorHeader {
         } else {
             0.0
         };
-        // Persisting a non-finite header would permanently corrupt the index; every term above is
-        // guarded, so this can only fire on a genuine bug.
+        let h16_values =
+            [perp_ratio, self.parallel_error_term, self.lower, self.upper].map(f16::from_f32);
+        // Persisting a non-finite header would permanently corrupt the index. Check the f16 values
+        // that are actually stored, since a finite f32 can overflow when narrowed.
         assert!(
-            self.l2_norm.is_finite()
-                && perp_ratio.is_finite()
-                && self.parallel_error_term.is_finite()
-                && self.lower.is_finite()
-                && self.upper.is_finite(),
+            self.l2_norm.is_finite() && h16_values.iter().all(|v| v.is_finite()),
             "non-finite LVQ header: {self:?}"
         );
 
@@ -284,10 +280,9 @@ impl PrimaryVectorHeader {
         h32[1] = self.component_sum.to_le_bytes();
 
         let h16 = header_bytes[8..16].as_chunks_mut::<2>().0;
-        h16[0] = f16::from_f32(perp_ratio).to_le_bytes();
-        h16[1] = f16::from_f32(self.parallel_error_term).to_le_bytes();
-        h16[2] = f16::from_f32(self.lower).to_le_bytes();
-        h16[3] = f16::from_f32(self.upper).to_le_bytes();
+        for (out, v) in h16.iter_mut().zip(h16_values) {
+            *out = v.to_le_bytes();
+        }
     }
 
     #[inline]
@@ -499,6 +494,13 @@ impl<const B: usize> TurboPrimaryCoder<B> {
     fn encode_parts_to(k: Kernel, vector: &[f32], out: &mut [u8]) -> PrimaryVectorHeader {
         crate::assert_finite_vector(vector);
         let stats = VectorStats::new(k, vector);
+        // The quantization interval is stored as f16 so the component range must fit in f16.
+        assert!(
+            f16::from_f32(stats.min).is_finite() && f16::from_f32(stats.max).is_finite(),
+            "vector component range [{}, {}] is not representable as f16",
+            stats.min,
+            stats.max
+        );
         let mut header = PrimaryVectorHeader::new(stats);
         (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
 

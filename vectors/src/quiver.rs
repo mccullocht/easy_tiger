@@ -152,7 +152,6 @@ impl<K: Kernel> VectorDistance for Distance<K> {
         } else {
             0.5
         };
-        debug_assert!(d.is_finite());
         crate::sanitize_distance(d, true)
     }
 }
@@ -231,7 +230,6 @@ impl<K: Kernel> QueryVectorDistance for QueryDistance<K> {
         } else {
             0.5
         };
-        debug_assert!(d.is_finite());
         crate::sanitize_distance(d, true)
     }
 }

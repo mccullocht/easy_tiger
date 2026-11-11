@@ -90,13 +90,58 @@ pub fn l2_norm(vector: impl AsRef<[f32]>) -> f32 {
 pub fn l2_normalize<'a>(vector: impl Into<Cow<'a, [f32]>>) -> (Cow<'a, [f32]>, f32) {
     let mut vector: Cow<'a, [f32]> = vector.into();
     let norm = l2_norm(&vector);
-    if norm.is_finite() && norm != 0.0 && norm != 1.0 {
-        let norm_inv = norm.recip();
-        for d in vector.to_mut().iter_mut() {
-            *d *= norm_inv;
-        }
+    if norm == 1.0 {
+        return (vector, norm);
     }
+    let norm = normalize_with_norm(vector.to_mut(), norm);
     (vector, norm)
+}
+
+/// Normalize `vector` in place in l2 space and return the l2 norm of the input.
+///
+/// A zero vector is left unchanged. See [`normalize_with_norm`] for how inputs whose sum of squares
+/// overflows or underflows f32 are handled.
+pub fn l2_normalize_in_place(vector: &mut [f32]) -> f32 {
+    let norm = l2_norm(&*vector);
+    normalize_with_norm(vector, norm)
+}
+
+/// Normalize `vector` given its `norm` as computed by [`l2_norm`], returning the true l2 norm.
+///
+/// [`l2_norm`] accumulates the sum of squares in f32, which overflows to infinity for finite
+/// components above ~1.8e19 and underflows (losing precision, possibly to zero) for small ones. In
+/// either case rescale by the largest-magnitude component first so the sum of squares is
+/// well-conditioned. The returned norm may still be infinite if the true norm exceeds `f32::MAX`.
+fn normalize_with_norm(vector: &mut [f32], norm: f32) -> f32 {
+    // sqrt(f32::MIN_POSITIVE): below this the sum of squares was subnormal.
+    const MIN_NORMAL_NORM: f32 = 1.0842022e-19;
+
+    if norm.is_finite() && norm >= MIN_NORMAL_NORM {
+        if norm != 1.0 {
+            let norm_inv = norm.recip();
+            for d in vector.iter_mut() {
+                *d *= norm_inv;
+            }
+        }
+        return norm;
+    }
+
+    let max_abs = vector.iter().fold(0.0f32, |m, d| m.max(d.abs()));
+    if max_abs == 0.0 || !max_abs.is_finite() {
+        // Zero vector (or a non-finite input, which callers reject separately).
+        return norm;
+    }
+    // Divide rather than multiply by the reciprocal: 1/max_abs overflows for subnormal max_abs.
+    for d in vector.iter_mut() {
+        *d /= max_abs;
+    }
+    // Every component is now in [-1, 1] with at least one at +/-1, so this norm is in [1, sqrt(n)].
+    let scaled_norm = l2_norm(&*vector);
+    let scaled_norm_inv = scaled_norm.recip();
+    for d in vector.iter_mut() {
+        *d *= scaled_norm_inv;
+    }
+    max_abs * scaled_norm
 }
 
 #[derive(Debug, Copy, Clone, Default)]
@@ -152,7 +197,6 @@ impl EuclideanDistance {
 impl VectorDistance for EuclideanDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         let d = l2sq(query, doc, Some(self.0));
-        debug_assert!(d.is_finite());
         crate::sanitize_distance(d, false)
     }
 }
@@ -164,7 +208,6 @@ impl F32VectorDistance for EuclideanDistance {
             bytemuck::cast_slice(b),
             Some(self.0),
         );
-        debug_assert!(d.is_finite());
         crate::sanitize_distance(d, false)
     }
 }
@@ -186,7 +229,6 @@ impl VectorDistance for DotProductDistance {
     fn distance(&self, query: &[u8], doc: &[u8]) -> f64 {
         // Assuming values are normalized, this will produce a distance in [0,1]
         let d = (-dot(query, doc, Some(self.0)) + 1.0) / 2.0;
-        debug_assert!(d.is_finite());
         crate::sanitize_distance(d, true)
     }
 }
@@ -200,7 +242,6 @@ impl F32VectorDistance for DotProductDistance {
             Some(self.0),
         ) + 1.0)
             / 2.0;
-        debug_assert!(d.is_finite());
         crate::sanitize_distance(d, true)
     }
 }

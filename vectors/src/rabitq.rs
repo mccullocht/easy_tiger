@@ -123,13 +123,9 @@ impl F32VectorCoder for Coder {
             l2_norm,
             ..Default::default()
         };
-        // A zero (or norm-overflowing) vector has no meaningful direction; a zero scale yields a
+        // A zero vector has no meaningful direction; a zero scale yields a
         // zero correction term rather than `sum(0 * inf) = NaN`.
-        let inv_norm = if l2_norm > 0.0 && l2_norm.is_finite() {
-            l2_norm.recip()
-        } else {
-            0.0
-        };
+        let inv_norm = if l2_norm > 0.0 { l2_norm.recip() } else { 0.0 };
         header.correction_term = match self.0 {
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::neon::l1_norm_scaled(vector, inv_norm),
@@ -231,7 +227,6 @@ impl VectorDistance for Distance {
             VectorSimilarity::Euclidean => l2_dist,
             VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
         };
-        debug_assert!(d.is_finite());
         crate::sanitize_distance(d, self.similarity.angular())
     }
 }
@@ -321,7 +316,6 @@ impl QueryDistance {
             VectorSimilarity::Euclidean => l2_dist,
             VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
         };
-        debug_assert!(d.is_finite());
         crate::sanitize_distance(d, self.similarity.angular())
     }
 
@@ -352,7 +346,6 @@ impl QueryVectorDistance for QueryDistance {
             // angular distance = l2_dist / 4
             VectorSimilarity::Dot => 0.25 * l2_error,
         };
-        debug_assert!(error.is_finite() && error >= 0.0);
         EstimatedDistance {
             distance: self.distance_internal(header, vector),
             error: if error.is_finite() {

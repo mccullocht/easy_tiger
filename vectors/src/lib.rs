@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 pub use half::f16;
 
-use crate::{float32::l2_norm, rotate::Rotator};
+use crate::rotate::Rotator;
 
 /// Panic if any component of `vector` is `NaN` or infinite.
 #[inline]
@@ -71,13 +71,7 @@ pub fn prepare_vector_in_place(
     }
 
     if l2_normalize {
-        let norm = l2_norm(&*vector);
-        if norm.is_finite() && norm != 0.0 && norm != 1.0 {
-            let norm_inv = norm.recip();
-            for d in vector.iter_mut() {
-                *d *= norm_inv;
-            }
-        }
+        float32::l2_normalize_in_place(vector);
     }
 
     if let Some(center) = center {
@@ -883,6 +877,33 @@ mod nonfinite_input_test {
         }
     }
 
+    /// Finite components that overflow f16 must be rejected by codecs that store f16 values rather
+    /// than silently persisted as infinity.
+    #[test]
+    fn f16_overflow_is_rejected() {
+        let mut big = vec![0.5f32; 128];
+        big[3] = 70000.0;
+        big[7] = -35000.0;
+        for coding in [
+            F32VectorCoding::F16,
+            F32VectorCoding::TLVQ1,
+            F32VectorCoding::TLVQ2,
+            F32VectorCoding::TLVQ4,
+            F32VectorCoding::TLVQ8,
+        ] {
+            assert_panics(&format!("{coding} encode"), || coding.coder().encode(&big));
+        }
+
+        // The largest finite f16 must still encode.
+        let mut edge = vec![0.5f32; 128];
+        edge[0] = f16::MAX.to_f32();
+        edge[1] = -f16::MAX.to_f32();
+        let decoded = F32VectorCoding::F16
+            .coder()
+            .decode(&F32VectorCoding::F16.coder().encode(&edge));
+        assert_eq!(decoded, edge);
+    }
+
     #[test]
     fn empty_query_is_rejected() {
         for coding in [F32VectorCoding::RaBitQ, F32VectorCoding::QuIVer] {
@@ -901,6 +922,30 @@ mod prepare_test {
         f16, float32::l2_norm, prepare_vector, prepare_vector_from_f16, prepare_vector_in_place,
         rotate::Rotator,
     };
+
+    /// Components whose sum of squares overflows or underflows f32 must still normalize to unit
+    /// length rather than being returned unnormalized.
+    #[test]
+    fn normalize_extreme_magnitudes() {
+        for (label, value) in [("huge", 1e20f32), ("tiny", 1e-30), ("subnormal", 1e-39)] {
+            let mut v = vec![value; 128];
+            v[5] = -value;
+            let p = prepare_vector(&v, None, true, None);
+            assert_abs_diff_eq!(l2_norm(&p), 1.0, epsilon = 1e-5);
+            assert_abs_diff_eq!(p[0], 128f32.sqrt().recip(), epsilon = 1e-6);
+            assert!(p[5] < 0.0, "{label}: sign lost");
+
+            let (n, norm) = crate::float32::l2_normalize(v.as_slice());
+            assert_eq!(n.as_ref(), p.as_slice(), "{label}");
+            assert_abs_diff_eq!(norm / (value * 128f32.sqrt()), 1.0, epsilon = 1e-5);
+        }
+
+        // Zero vectors are left as-is.
+        assert_eq!(
+            prepare_vector(vec![0.0f32; 8], None, true, None),
+            vec![0.0; 8]
+        );
+    }
 
     fn manual(
         vector: &[f32],

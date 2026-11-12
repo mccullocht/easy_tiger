@@ -185,32 +185,32 @@ tlvq_coder_test!(
     TurboPrimaryCoder::<8>,
     PrimaryVectorHeader {
         l2_norm: 2.5226507,
-        perpendicular_error_term: 0.0075108674,
-        parallel_error_term: -0.00057935715,
-        lower: -0.9199219,
-        upper: 0.9116211,
-        component_sum: 2875,
+        perpendicular_error_term: 0.007866924,
+        parallel_error_term: -0.0015544891,
+        lower: -0.92089844,
+        upper: 0.91308594,
+        component_sum: 2876,
     },
     [
-        -0.9199219,
-        -0.05801932,
-        0.6602328,
-        0.6674153,
-        0.57404256,
-        0.43039212,
-        0.64586776,
-        -0.0005591512,
-        -0.20166975,
-        -0.43151042,
-        0.73205805,
-        -0.70444626,
-        -0.27349496,
-        0.5381299,
-        -0.73317635,
-        0.43757465,
-        0.91162103,
-        0.6961454,
-        0.20055145
+        -0.92089844,
+        -0.05784695,
+        0.66136265,
+        0.6685547,
+        0.5750575,
+        0.43121555,
+        0.64697844,
+        -0.00031018257,
+        -0.20168886,
+        -0.42464384,
+        0.7332836,
+        -0.7051356,
+        -0.27360982,
+        0.539097,
+        -0.73390394,
+        0.43840766,
+        0.913086,
+        0.6973231,
+        0.20106849
     ]
 );
 
@@ -532,5 +532,52 @@ fn bitplane_split4_roundtrip() {
         let split = bitplane_split4(&packed);
         assert_eq!(split.len(), dimensions.div_ceil(8) * 4);
         assert_eq!(bitplane_join4(&split, dimensions), dims, "dim {dimensions}");
+    }
+}
+
+/// TLVQ8 uses the min/max interval with no optimization, so re-encoding a decoded vector must
+/// reproduce the same interval and codes, i.e. encode(decode(encode(x))) == encode(x) apart from
+/// the norm and error terms, which describe the input vector rather than the codes.
+#[test]
+fn tlvq8_encode_roundtrip() {
+    let seed = SysRng.try_next_u64().unwrap();
+    println!("SEED {seed:#016x}");
+    let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+    for k in Kernel::CANDIDATES
+        .iter()
+        .copied()
+        .filter(|k| k.is_available())
+    {
+        let coder = TurboPrimaryCoder::<8>::with_kernel(k);
+        for i in 0..1024 {
+            let dim = rng.random_range(1..=1024);
+            // Gaussian components, like real embeddings. Interval optimization
+            // shrinks the interval inside [min, max] for this distribution, which is what made
+            // the roundtrip lossy.
+            let vector = l2_normalize(
+                (0..dim)
+                    .map(|_| {
+                        // Box-Muller transform.
+                        let u1 = rng.random_range(f32::EPSILON..1.0f32);
+                        let u2 = rng.random_range(0.0..1.0f32);
+                        (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .0;
+
+            let encoded = coder.encode(&vector);
+            let decoded = coder.decode(&encoded);
+            let reencoded = coder.encode(&decoded);
+
+            let (header, codes) = PrimaryVectorHeader::deserialize(&encoded).unwrap();
+            let (reheader, recodes) = PrimaryVectorHeader::deserialize(&reencoded).unwrap();
+            let ctx = format!("kernel {k:?} index {i} dim {dim}");
+            assert_eq!(header.lower, reheader.lower, "{ctx}");
+            assert_eq!(header.upper, reheader.upper, "{ctx}");
+            assert_eq!(header.component_sum, reheader.component_sum, "{ctx}");
+            assert_eq!(codes, recodes, "{ctx}");
+            assert_eq!(decoded, coder.decode(&reencoded), "{ctx}");
+        }
     }
 }

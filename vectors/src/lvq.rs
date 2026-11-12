@@ -3,7 +3,7 @@
 //! This has been modified in the same way as Optimized Scalar Quantization in Lucene where the
 //! lower and upper bounds are selected by a grid search over the vector taking into account
 //! anisotropic loss instead of simply taking min/max values. This grid search is more important
-//! at lower bit rates.
+//! at lower bit rates; at 8 bits the search is skipped and the min/max interval is used.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -134,6 +134,10 @@ fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize
     // `VectorEncodeTerms`/`VectorDecodeTerms` guard the resulting zero delta.
     let (lower, upper) = if stats.min >= stats.max {
         (stats.min, stats.min)
+    } else if bits >= 8 {
+        // At 8 bits the optimized interval barely improves on min/max but is expensive to compute,
+        // and interval optimization makes encoding unstable across round trips.
+        (stats.min, stats.max)
     } else {
         match k {
             Kernel::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),

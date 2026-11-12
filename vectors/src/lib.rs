@@ -2,7 +2,6 @@
 
 use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 
-mod binary;
 pub mod float16;
 pub mod float32;
 mod kernels;
@@ -17,42 +16,32 @@ use serde::{Deserialize, Serialize};
 
 pub use half::f16;
 
-use crate::{float32::l2_norm, rotate::Rotator};
+use crate::rotate::Rotator;
 
-/// Prepare `vector` in place for further processing, typically either encoding or as input to an
-/// asymmetric distance function.
-///
-/// There are three optional operations that may be performed in order:
-/// 1. Rotate the vector. Requires that the dimensionality of the rotator and vector are the same.
-/// 2. L2 normalize the vector. This is recommended for angular distance.
-/// 3. Compute the residual of `vector` against `center`. Requires that the dimensionality of
-///    `vector` and `center` are the same.
-///
-/// This method mutates the vector in place.
-pub fn prepare_vector_in_place(
-    vector: &mut [f32],
-    rotator: Option<&Rotator>,
-    l2_normalize: bool,
-    center: Option<&[f32]>,
-) {
-    if let Some(rotator) = rotator {
-        rotator.rotate(vector);
+/// Panic if any component of `vector` is `NaN` or infinite.
+#[inline]
+#[track_caller]
+pub(crate) fn assert_finite_vector(vector: &[f32]) {
+    if let Some(index) = vector.iter().position(|v| !v.is_finite()) {
+        panic!(
+            "non-finite vector component at index {index}: {}",
+            vector[index]
+        );
     }
+}
 
-    if l2_normalize {
-        let norm = l2_norm(&*vector);
-        if norm != 0.0 && norm != 1.0 {
-            let norm_inv = norm.recip();
-            for d in vector.iter_mut() {
-                *d *= norm_inv;
-            }
-        }
-    }
-
-    if let Some(center) = center {
-        for (d, c) in vector.iter_mut().zip(center.iter()) {
-            *d -= *c;
-        }
+/// Coerce a non-finite distance to a finite fallback.
+///
+/// Angular distances are bounded to `[0, 1]` so the fallback is `1.0` (the worst match); euclidean
+/// distance is unbounded so the fallback is [`f64::MAX`]. Finite inputs pass through unchanged.
+#[inline]
+pub(crate) fn sanitize_distance(distance: f64, angular: bool) -> f64 {
+    if distance.is_finite() {
+        distance
+    } else if angular {
+        1.0
+    } else {
+        f64::MAX
     }
 }
 
@@ -65,7 +54,52 @@ pub fn prepare_vector_in_place(
 /// 3. Compute the residual of `vector` against `center`. Requires that the dimensionality of
 ///    `vector` and `center` are the same.
 ///
+/// This method mutates the vector in place.
+///
+/// *Panics* if the input contains a `NaN` or infinite component, or if preparation overflows a
+/// component to non-finite.
+pub fn prepare_vector_in_place(
+    vector: &mut [f32],
+    rotator: Option<&Rotator>,
+    l2_normalize: bool,
+    center: Option<&[f32]>,
+) {
+    assert_finite_vector(vector);
+
+    if let Some(rotator) = rotator {
+        rotator.rotate(vector);
+    }
+
+    if l2_normalize {
+        float32::l2_normalize_in_place(vector);
+    }
+
+    if let Some(center) = center {
+        for (d, c) in vector.iter_mut().zip(center.iter()) {
+            *d -= *c;
+        }
+    }
+
+    // The input was already validated finite; a non-finite component here means an intermediate
+    // overflowed (e.g. `inf + -inf` in the rotation butterfly, or a huge-magnitude residual).
+    assert!(
+        vector.iter().all(|v| v.is_finite()),
+        "vector magnitude is not finite after preparation"
+    );
+}
+
+/// Prepare `vector` in place for further processing, typically either encoding or as input to an
+/// asymmetric distance function.
+///
+/// There are three optional operations that may be performed in order:
+/// 1. Rotate the vector. Requires that the dimensionality of the rotator and vector are the same.
+/// 2. L2 normalize the vector. This is recommended for angular distance.
+/// 3. Compute the residual of `vector` against `center`. Requires that the dimensionality of
+///    `vector` and `center` are the same.
+///
 /// This method returns a copy of the vector after mutation.
+///
+/// *Panics* under the same conditions as [`prepare_vector_in_place`].
 pub fn prepare_vector(
     vector: impl AsRef<[f32]>,
     rotator: Option<&Rotator>,
@@ -180,11 +214,6 @@ pub enum F32VectorCoding {
     F32,
     /// Little-endian IEEE f16 encoding.
     F16,
-    /// Single bit (sign bit) per dimension; positive or negative.
-    ///
-    /// This encoding is very compact and efficient for distance computation but also does not have
-    /// high fidelity with distances computed between raw vectors.
-    BinaryQuantized,
     /// Turbo LVQ; 1 bit primary vector.
     ///
     /// This encoding is optimized for cases where dimensionality is a multiple of 128.
@@ -219,7 +248,6 @@ impl F32VectorCoding {
         match self {
             Self::F32 => Box::new(float32::VectorCoder::new()),
             Self::F16 => Box::new(float16::VectorCoder::new()),
-            Self::BinaryQuantized => Box::new(binary::BinaryQuantizedVectorCoder),
             Self::TLVQ1 => Box::new(lvq::TurboPrimaryCoder::<1>::new()),
             Self::TLVQ2 => Box::new(lvq::TurboPrimaryCoder::<2>::new()),
             Self::TLVQ4 => Box::new(lvq::TurboPrimaryCoder::<4>::new()),
@@ -241,7 +269,6 @@ impl F32VectorCoding {
             (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance::default()),
             (Self::F16, Dot) => Box::new(float16::DotProductDistance::default()),
             (Self::F16, Euclidean) => Box::new(float16::EuclideanDistance::default()),
-            (Self::BinaryQuantized, _) => Box::new(binary::HammingDistance),
             (Self::TLVQ1, _) => Box::new(lvq::TurboPrimaryDistance::<1>::new(similarity)),
             (Self::TLVQ2, _) => Box::new(lvq::TurboPrimaryDistance::<2>::new(similarity)),
             (Self::TLVQ4, _) => Box::new(lvq::TurboPrimaryDistance::<4>::new(similarity)),
@@ -256,45 +283,38 @@ impl F32VectorCoding {
     ///
     /// The query must be prepared the same way the stored vectors were (normalization and, if the
     /// stored vectors were centered, the same centering) -- typically via [`prepare_vector`].
+    ///
+    /// *Panics* if `query` contains a non-finite component, or is empty for codecs that require a
+    /// non-empty query.
     pub fn query_distance_asymmetric<'a>(
         &self,
         similarity: VectorSimilarity,
         query: impl Into<Cow<'a, [f32]>>,
     ) -> Box<dyn QueryVectorDistance + 'a> {
+        let query = query.into();
+        assert_finite_vector(query.as_ref());
         match (*self, similarity) {
-            (F32VectorCoding::F32, _) => {
-                float32::new_query_vector_distance(similarity, query.into())
-            }
+            (F32VectorCoding::F32, _) => float32::new_query_vector_distance(similarity, query),
             (F32VectorCoding::F16, VectorSimilarity::Dot) => {
-                Box::new(float16::DotProductQueryDistance::new(query.into()))
+                Box::new(float16::DotProductQueryDistance::new(query))
             }
             (F32VectorCoding::F16, VectorSimilarity::Euclidean) => {
-                Box::new(float16::EuclideanQueryDistance::new(query.into()))
+                Box::new(float16::EuclideanQueryDistance::new(query))
             }
-            (F32VectorCoding::BinaryQuantized, _) => Box::new(
-                binary::I1DotProductQueryDistance::new(query.into().as_ref()),
-            ),
-            (F32VectorCoding::TLVQ1, _) => Box::new(lvq::TurboPrimaryQueryDistance1::new(
-                similarity,
-                query.into(),
-            )),
-            (F32VectorCoding::TLVQ2, _) => Box::new(lvq::TurboPrimaryQueryDistance::<2>::new(
-                similarity,
-                query.into(),
-            )),
-            (F32VectorCoding::TLVQ4, _) => Box::new(lvq::TurboPrimaryQueryDistance::<4>::new(
-                similarity,
-                query.into(),
-            )),
-            (F32VectorCoding::TLVQ8, _) => Box::new(lvq::TurboPrimaryQueryDistance::<8>::new(
-                similarity,
-                query.into(),
-            )),
-            (Self::RaBitQ, _) => Box::new(rabitq::QueryDistance::new(
-                similarity,
-                query.into().as_ref(),
-            )),
-            (Self::QuIVer, _) => quiver::new_asymmetric_distance(query.into().as_ref()),
+            (F32VectorCoding::TLVQ1, _) => {
+                Box::new(lvq::TurboPrimaryQueryDistance1::new(similarity, query))
+            }
+            (F32VectorCoding::TLVQ2, _) => {
+                Box::new(lvq::TurboPrimaryQueryDistance::<2>::new(similarity, query))
+            }
+            (F32VectorCoding::TLVQ4, _) => {
+                Box::new(lvq::TurboPrimaryQueryDistance::<4>::new(similarity, query))
+            }
+            (F32VectorCoding::TLVQ8, _) => {
+                Box::new(lvq::TurboPrimaryQueryDistance::<8>::new(similarity, query))
+            }
+            (Self::RaBitQ, _) => Box::new(rabitq::QueryDistance::new(similarity, query.as_ref())),
+            (Self::QuIVer, _) => quiver::new_asymmetric_distance(query.as_ref()),
         }
     }
 
@@ -327,7 +347,6 @@ impl F32VectorCoding {
             (Euclidean, F32VectorCoding::F16) => {
                 quantized_qvd!(float16::EuclideanDistance::default(), query)
             }
-            (_, F32VectorCoding::BinaryQuantized) => quantized_qvd!(binary::HammingDistance, query),
             (_, F32VectorCoding::TLVQ1) => {
                 quantized_qvd!(lvq::TurboPrimaryDistance::<1>::new(similarity), query)
             }
@@ -354,7 +373,6 @@ impl FromStr for F32VectorCoding {
         match s {
             "raw" | "raw-l2-norm" | "f32" => Ok(Self::F32),
             "f16" => Ok(Self::F16),
-            "binary" => Ok(Self::BinaryQuantized),
             "tlvq1" => Ok(Self::TLVQ1),
             "tlvq2" => Ok(Self::TLVQ2),
             "tlvq4" => Ok(Self::TLVQ4),
@@ -371,7 +389,6 @@ impl std::fmt::Display for F32VectorCoding {
         match self {
             Self::F32 => write!(f, "f32"),
             Self::F16 => write!(f, "f16"),
-            Self::BinaryQuantized => write!(f, "binary"),
             Self::TLVQ1 => write!(f, "tlvq1"),
             Self::TLVQ2 => write!(f, "tlvq2"),
             Self::TLVQ4 => write!(f, "tlvq4"),
@@ -385,6 +402,9 @@ impl std::fmt::Display for F32VectorCoding {
 /// Encode an f32 vector into byte stream, possibly quantizing the vector in the process.
 pub trait F32VectorCoder: Send + Sync {
     /// Encode the input vector and return the encoded byte buffer.
+    ///
+    /// *Panics* if `vector` contains a `NaN` or infinite component, or if its magnitude cannot be
+    /// represented.
     fn encode(&self, vector: &[f32]) -> Vec<u8> {
         let mut out = vec![0; self.byte_len(vector.len())];
         self.encode_to(vector, &mut out);
@@ -393,7 +413,8 @@ pub trait F32VectorCoder: Send + Sync {
 
     /// Encode `vector` and write to `out`.
     ///
-    /// *Panics* if `out.len() < self.byte_len(vector.len())`.
+    /// *Panics* if `out.len() < self.byte_len(vector.len())`. Also panics for a
+    /// non-finite input; see [`Self::encode`].
     fn encode_to(&self, vector: &[f32], out: &mut [u8]);
 
     /// Return the number of bytes required to encode a vector of length `dimensions`.
@@ -654,6 +675,245 @@ mod test {
     distance_test!(tlvq8_l2_dist, Euclidean, TLVQ8, 0.01);
 }
 
+/// Degenerate-but-finite inputs (zero vector, constant vector, ...) must be corrected, never
+/// rejected: they have to round-trip to a finite decode and produce finite, in-range distances
+/// through every coder and every distance entry point.
+#[cfg(test)]
+mod degenerate_test {
+    use crate::{F32VectorCoding, VectorSimilarity, float32::l2_normalize};
+    use rand::{RngExt, SeedableRng, TryRng, rngs::SysRng};
+
+    const CODINGS: [F32VectorCoding; 7] = [
+        F32VectorCoding::F16,
+        F32VectorCoding::TLVQ1,
+        F32VectorCoding::TLVQ2,
+        F32VectorCoding::TLVQ4,
+        F32VectorCoding::TLVQ8,
+        F32VectorCoding::RaBitQ,
+        F32VectorCoding::QuIVer,
+    ];
+
+    fn random_unit(rng: &mut rand_xoshiro::Xoshiro256PlusPlus, dim: usize) -> Vec<f32> {
+        let v = (0..dim)
+            .map(|_| rng.random_range(-1.0f32..=1.0))
+            .collect::<Vec<_>>();
+        l2_normalize(v).0.into_owned()
+    }
+
+    /// A labelled set of degenerate inputs of length `dim`. These are deliberately left
+    /// un-normalized -- that is the condition under test.
+    fn degenerates(dim: usize) -> Vec<(&'static str, Vec<f32>)> {
+        let mut one_hot = vec![0.0f32; dim];
+        one_hot[0] = 1.0;
+        vec![
+            ("zero", vec![0.0; dim]),
+            ("const_pos", vec![0.37; dim]),
+            ("const_neg", vec![-0.37; dim]),
+            ("tiny", vec![1e-30; dim]),
+            ("one_hot", one_hot),
+            (
+                "alternating",
+                (0..dim)
+                    .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+                    .collect(),
+            ),
+        ]
+    }
+
+    fn check_finite(label: &str, distance: f64, angular: bool) {
+        assert!(
+            distance.is_finite(),
+            "{label}: distance is not finite ({distance})"
+        );
+        if angular {
+            assert!(
+                (-1e-6..=1.0 + 1e-6).contains(&distance),
+                "{label}: angular distance out of [0,1]: {distance}"
+            );
+        }
+    }
+
+    /// Run `a` and `b` through every distance entry point for `coding`/`sim` and assert the result
+    /// is finite. `angular` results are additionally checked to be in range -- but only when both
+    /// inputs are unit vectors, since the transform assumes that.
+    fn assert_all_finite(
+        coding: F32VectorCoding,
+        sim: VectorSimilarity,
+        label: &str,
+        a: &[f32],
+        b: &[f32],
+        check_range: bool,
+    ) {
+        let coder = coding.coder();
+        let angular = sim.angular() && check_range;
+        let ea = coder.encode(a);
+        let eb = coder.encode(b);
+
+        let sym = coding.distance_symmetric(sim);
+        check_finite(
+            &format!("{label} sym(a,b)"),
+            sym.distance(&ea, &eb),
+            angular,
+        );
+        check_finite(
+            &format!("{label} sym(b,a)"),
+            sym.distance(&eb, &ea),
+            angular,
+        );
+
+        let asym = coding.query_distance_asymmetric(sim, a.to_vec());
+        check_finite(&format!("{label} asym(a->b)"), asym.distance(&eb), angular);
+        let est = asym.estimated_distance(&eb);
+        check_finite(&format!("{label} asym-est(a->b)"), est.distance, angular);
+        assert!(
+            est.error.is_finite() && est.error >= 0.0,
+            "{label}: estimated_distance error bound is bad: {}",
+            est.error
+        );
+
+        let qsym = coding.query_distance_symmetric(sim, ea.clone());
+        check_finite(&format!("{label} qsym(a->b)"), qsym.distance(&eb), angular);
+    }
+
+    #[test]
+    fn degenerate_pairs_are_finite() {
+        let seed = SysRng.try_next_u64().unwrap();
+        println!("SEED {seed:#016x}");
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+
+        for dim in [8usize, 65, 128, 256] {
+            let normal = random_unit(&mut rng, dim);
+            let degens = degenerates(dim);
+            for coding in CODINGS {
+                for sim in VectorSimilarity::all() {
+                    for (na, a) in &degens {
+                        // degenerate vs normal, both orders
+                        let label = format!("{coding} {sim} dim={dim} {na}<->normal");
+                        assert_all_finite(coding, sim, &label, a, &normal, false);
+                        assert_all_finite(coding, sim, &label, &normal, a, false);
+                        // degenerate vs every degenerate (incl. itself)
+                        for (nb, b) in &degens {
+                            let label = format!("{coding} {sim} dim={dim} {na}<->{nb}");
+                            assert_all_finite(coding, sim, &label, a, b, false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The user's seed case: a zero vector compared against normal unit vectors under Dot
+    /// similarity must yield a finite, in-range distance from every coder.
+    #[test]
+    fn zero_vector_dot_is_finite() {
+        let seed = SysRng.try_next_u64().unwrap();
+        println!("SEED {seed:#016x}");
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+
+        for dim in [8usize, 65, 128, 256] {
+            let zero = vec![0.0f32; dim];
+            for coding in CODINGS {
+                for _ in 0..32 {
+                    let normal = random_unit(&mut rng, dim);
+                    let label = format!("{coding} dim={dim} zero<->unit");
+                    assert_all_finite(coding, VectorSimilarity::Dot, &label, &zero, &normal, true);
+                    assert_all_finite(coding, VectorSimilarity::Dot, &label, &normal, &zero, true);
+                }
+            }
+        }
+    }
+}
+
+/// Non-finite input components (NaN / +-inf) are a contract violation: the crate panics at its
+/// preparation/encode boundary rather than persisting silently corrupt codes.
+#[cfg(test)]
+mod nonfinite_input_test {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use crate::{F32VectorCoding, VectorSimilarity, f16, prepare_vector, prepare_vector_from_f16};
+
+    fn assert_panics<R>(label: &str, f: impl FnOnce() -> R) {
+        assert!(
+            catch_unwind(AssertUnwindSafe(f)).is_err(),
+            "{label} did not panic"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite vector component at index 1")]
+    fn prepare_vector_rejects_nan() {
+        prepare_vector([1.0f32, f32::NAN, 2.0, 3.0], None, false, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite vector component at index 1")]
+    fn prepare_vector_rejects_inf() {
+        prepare_vector([1.0f32, f32::INFINITY, 2.0, 3.0], None, true, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-finite vector component at index 1")]
+    fn prepare_vector_from_f16_rejects_nan() {
+        prepare_vector_from_f16([f16::from_f32(1.0), f16::NAN], None, false, None);
+    }
+
+    #[test]
+    fn every_coder_rejects_nan() {
+        let bad = [0.1f32, 0.2, f32::NAN, 0.3, 0.4, 0.5, 0.6, 0.7];
+        for coding in [
+            F32VectorCoding::F32,
+            F32VectorCoding::F16,
+            F32VectorCoding::TLVQ1,
+            F32VectorCoding::TLVQ2,
+            F32VectorCoding::TLVQ4,
+            F32VectorCoding::TLVQ8,
+            F32VectorCoding::RaBitQ,
+            F32VectorCoding::QuIVer,
+        ] {
+            assert_panics(&format!("{coding} encode"), || coding.coder().encode(&bad));
+            assert_panics(&format!("{coding} query_distance_asymmetric"), || {
+                coding.query_distance_asymmetric(VectorSimilarity::Dot, bad.to_vec())
+            });
+        }
+    }
+
+    /// Finite components that overflow f16 must be rejected by codecs that store f16 values rather
+    /// than silently persisted as infinity.
+    #[test]
+    fn f16_overflow_is_rejected() {
+        let mut big = vec![0.5f32; 128];
+        big[3] = 70000.0;
+        big[7] = -35000.0;
+        for coding in [
+            F32VectorCoding::F16,
+            F32VectorCoding::TLVQ1,
+            F32VectorCoding::TLVQ2,
+            F32VectorCoding::TLVQ4,
+            F32VectorCoding::TLVQ8,
+        ] {
+            assert_panics(&format!("{coding} encode"), || coding.coder().encode(&big));
+        }
+
+        // The largest finite f16 must still encode.
+        let mut edge = vec![0.5f32; 128];
+        edge[0] = f16::MAX.to_f32();
+        edge[1] = -f16::MAX.to_f32();
+        let decoded = F32VectorCoding::F16
+            .coder()
+            .decode(&F32VectorCoding::F16.coder().encode(&edge));
+        assert_eq!(decoded, edge);
+    }
+
+    #[test]
+    fn empty_query_is_rejected() {
+        for coding in [F32VectorCoding::RaBitQ, F32VectorCoding::QuIVer] {
+            assert_panics(&format!("{coding} empty query"), || {
+                coding.query_distance_asymmetric(VectorSimilarity::Dot, Vec::new())
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod prepare_test {
     use approx::assert_abs_diff_eq;
@@ -662,6 +922,30 @@ mod prepare_test {
         f16, float32::l2_norm, prepare_vector, prepare_vector_from_f16, prepare_vector_in_place,
         rotate::Rotator,
     };
+
+    /// Components whose sum of squares overflows or underflows f32 must still normalize to unit
+    /// length rather than being returned unnormalized.
+    #[test]
+    fn normalize_extreme_magnitudes() {
+        for (label, value) in [("huge", 1e20f32), ("tiny", 1e-30), ("subnormal", 1e-39)] {
+            let mut v = vec![value; 128];
+            v[5] = -value;
+            let p = prepare_vector(&v, None, true, None);
+            assert_abs_diff_eq!(l2_norm(&p), 1.0, epsilon = 1e-5);
+            assert_abs_diff_eq!(p[0], 128f32.sqrt().recip(), epsilon = 1e-6);
+            assert!(p[5] < 0.0, "{label}: sign lost");
+
+            let (n, norm) = crate::float32::l2_normalize(v.as_slice());
+            assert_eq!(n.as_ref(), p.as_slice(), "{label}");
+            assert_abs_diff_eq!(norm / (value * 128f32.sqrt()), 1.0, epsilon = 1e-5);
+        }
+
+        // Zero vectors are left as-is.
+        assert_eq!(
+            prepare_vector(vec![0.0f32; 8], None, true, None),
+            vec![0.0; 8]
+        );
+    }
 
     fn manual(
         vector: &[f32],

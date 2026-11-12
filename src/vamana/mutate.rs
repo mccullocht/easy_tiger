@@ -578,7 +578,7 @@ mod tests {
                     GraphConfig {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
-                        nav_format: F32VectorCoding::BinaryQuantized,
+                        nav_format: F32VectorCoding::TLVQ8,
                         rerank_format: Some(F32VectorCoding::F32),
                         pruning: EdgePruningConfig::new(NonZero::new(4).unwrap()),
                         index_search_params: Self::search_params(),
@@ -885,7 +885,7 @@ mod tests {
                     GraphConfig {
                         dimensions: NonZero::new(2).unwrap(),
                         similarity: VectorSimilarity::Euclidean,
-                        nav_format: F32VectorCoding::BinaryQuantized,
+                        nav_format: F32VectorCoding::TLVQ8,
                         rerank_format: Some(F32VectorCoding::F32),
                         pruning: EdgePruningConfig::new(NonZero::new(4).unwrap()),
                         index_search_params: Self::search_params(),

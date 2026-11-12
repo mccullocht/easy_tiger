@@ -311,3 +311,58 @@ fn encode_handles_simd_chunk_boundary_tails() {
         }
     }
 }
+
+/// A constant vector has every `|d| == tau`, so no component is classified `strong` and the naive
+/// `strong_sum / strong_count` is `0.0 / 0.0 = NaN`. The zero vector hits the same path. Both must
+/// encode to a finite header and produce finite distances.
+#[test]
+fn degenerate_inputs_are_finite() {
+    let mut rng = seeded_rng();
+    let coder = new_coder();
+
+    let mut one_hot = vec![0.0f32; BASE_DIMENSIONS];
+    one_hot[0] = 1.0;
+    let degens: [(&str, Vec<f32>); 4] = [
+        ("zero", vec![0.0f32; BASE_DIMENSIONS]),
+        ("const_pos", vec![0.3f32; BASE_DIMENSIONS]),
+        ("const_neg", vec![-0.3f32; BASE_DIMENSIONS]),
+        ("one_hot", one_hot),
+    ];
+
+    for (name, v) in &degens {
+        let encoded = coder.encode(v);
+        let (header, _) = Header::split_and_decode(&encoded);
+        assert!(
+            header.weak.is_finite() && header.strong.is_finite(),
+            "{name}: non-finite header weak={} strong={}",
+            header.weak,
+            header.strong
+        );
+
+        let mut decoded = vec![0.0f32; BASE_DIMENSIONS];
+        coder.decode_to(&encoded, &mut decoded);
+        assert!(
+            decoded.iter().all(|d| d.is_finite()),
+            "{name}: non-finite decode"
+        );
+
+        let normal = random_unit_vector(&mut rng, BASE_DIMENSIONS);
+        let en = encode_vector(&normal);
+
+        let sd = new_symmetric_distance().distance(&encoded, &en);
+        assert!(sd.is_finite(), "{name}: symmetric distance {sd}");
+        assert!(
+            (-1e-6..=1.0 + 1e-6).contains(&sd),
+            "{name}: symmetric distance out of range {sd}"
+        );
+
+        // degenerate as the asymmetric query, and as the doc
+        let ad = new_asymmetric_distance(v).distance(&en);
+        assert!(ad.is_finite(), "{name}: asymmetric distance (query) {ad}");
+        let ad = new_asymmetric_distance(&normal).distance(&encoded);
+        assert!(ad.is_finite(), "{name}: asymmetric distance (doc) {ad}");
+
+        let qd = new_symmetric_query_distance(Cow::Owned(encoded.clone())).distance(&en);
+        assert!(qd.is_finite(), "{name}: symmetric query distance {qd}");
+    }
+}

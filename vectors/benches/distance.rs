@@ -137,7 +137,6 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
     // scalar transform of a dot product to calculate distance. For these we only compute dot
     // product similarity since other types are unlikely to vary all that much.
     let encodings = [
-        F32VectorCoding::BinaryQuantized,
         F32VectorCoding::RaBitQ,
         F32VectorCoding::QuIVer,
         F32VectorCoding::TLVQ1,

@@ -3,7 +3,7 @@
 //! This has been modified in the same way as Optimized Scalar Quantization in Lucene where the
 //! lower and upper bounds are selected by a grid search over the vector taking into account
 //! anisotropic loss instead of simply taking min/max values. This grid search is more important
-//! at lower bit rates.
+//! at lower bit rates; at 8 bits the search is skipped and the min/max interval is used.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -128,10 +128,16 @@ impl VectorStats {
 }
 
 fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
-    // There are several spots in the optimization routine where we may divide by the input range
-    // and if that range is zero then it produces NaNs.
-    let (lower, upper) = if stats.min == stats.max {
-        (stats.min, stats.min + f32::MIN_POSITIVE)
+    // The optimization routine divides by the input range in several places and its `clamp(min, max)`
+    // calls panic when `min > max`, so only enter it with a strictly positive, finite range. A
+    // zero-range interval collapses to a point; every component then quantizes to the same code and
+    // `VectorEncodeTerms`/`VectorDecodeTerms` guard the resulting zero delta.
+    let (lower, upper) = if stats.min >= stats.max {
+        (stats.min, stats.min)
+    } else if bits >= 8 {
+        // At 8 bits the optimized interval barely improves on min/max but is expensive to compute,
+        // and interval optimization makes encoding unstable across round trips.
+        (stats.min, stats.max)
     } else {
         match k {
             Kernel::Scalar => scalar::optimize_interval_scalar(vector, stats, bits),
@@ -143,17 +149,7 @@ fn optimize_interval(k: Kernel, vector: &[f32], stats: &VectorStats, bits: usize
     };
     // The interval bounds are stored as f16, so round them here to keep the values used to
     // quantize the vector consistent with the values a caller sees when decoding it.
-    let (lower, upper) = (f16::from_f32(lower).to_f32(), f16::from_f32(upper).to_f32());
-    // If the range collapsed to zero (a constant or near-constant vector whose bounds round to
-    // the same f16) the quantization scale delta is 0 and both the quantized bytes and the
-    // header's norm-normalized error terms come out as NaN. Give any collapsed width a minimum
-    // that stays visible in f16 and scales with the magnitude of the vector.
-    if upper <= lower {
-        let width = stats.min.abs() * 1e-3 + 1e-3;
-        (lower, f16::from_f32(lower + width).to_f32())
-    } else {
-        (lower, upper)
-    }
+    (f16::from_f32(lower).to_f32(), f16::from_f32(upper).to_f32())
 }
 
 /// Transform the unnormalized dot product of two vectors into an appropriate distance for the
@@ -164,11 +160,12 @@ fn distance_from_dot_unnormalized(
     l2_norms_sq: (f32, f32),
 ) -> f32 {
     let l2_dist = l2_norms_sq.0 + l2_norms_sq.1 - (2.0 * dot_unnormalized);
-    match similarity {
+    let d = match similarity {
         VectorSimilarity::Euclidean => l2_dist.max(0.0),
         // Normalize angular distance into a value in [0,1] where lower is closer.
         VectorSimilarity::Dot => (0.25 * l2_dist).clamp(0.0, 1.0),
-    }
+    };
+    crate::sanitize_distance(d as f64, similarity.angular()) as f32
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -194,7 +191,12 @@ impl ErrorBoundTerms {
     fn error_bound<const B: usize>(&self, vector: &TurboPrimaryVector<B>) -> f32 {
         let query_error = self.perpendicular_error_term * vector.l2_norm;
         let doc_error = vector.perpendicular_error_term * self.l2_norm;
-        (query_error.powi(2) + doc_error.powi(2)).sqrt() * self.mult
+        let bound = (query_error.powi(2) + doc_error.powi(2)).sqrt() * self.mult;
+        if bound.is_finite() {
+            bound.max(0.0)
+        } else {
+            0.0
+        }
     }
 }
 
@@ -262,22 +264,29 @@ impl PrimaryVectorHeader {
 
     #[inline]
     fn serialize(&self, header_bytes: &mut [u8]) {
+        // `deserialize` multiplies this ratio back by `l2_norm`, so a zero norm round-trips as 0.
+        let perp_ratio = if self.l2_norm > 0.0 {
+            self.perpendicular_error_term / self.l2_norm
+        } else {
+            0.0
+        };
+        let h16_values =
+            [perp_ratio, self.parallel_error_term, self.lower, self.upper].map(f16::from_f32);
+        // Persisting a non-finite header would permanently corrupt the index. Check the f16 values
+        // that are actually stored, since a finite f32 can overflow when narrowed.
+        assert!(
+            self.l2_norm.is_finite() && h16_values.iter().all(|v| v.is_finite()),
+            "non-finite LVQ header: {self:?}"
+        );
+
         let h32 = header_bytes[..8].as_chunks_mut::<4>().0;
         h32[0] = self.l2_norm.to_le_bytes();
         h32[1] = self.component_sum.to_le_bytes();
 
         let h16 = header_bytes[8..16].as_chunks_mut::<2>().0;
-        // The zero vector has l2_norm 0; avoid the division by zero that would turn the stored
-        // perpendicular error term into NaN.
-        let perpendicular_error = if self.l2_norm == 0.0 {
-            0.0
-        } else {
-            self.perpendicular_error_term / self.l2_norm
-        };
-        h16[0] = f16::from_f32(perpendicular_error).to_le_bytes();
-        h16[1] = f16::from_f32(self.parallel_error_term).to_le_bytes();
-        h16[2] = f16::from_f32(self.lower).to_le_bytes();
-        h16[3] = f16::from_f32(self.upper).to_le_bytes();
+        for (out, v) in h16.iter_mut().zip(h16_values) {
+            *out = v.to_le_bytes();
+        }
     }
 
     #[inline]
@@ -348,9 +357,17 @@ struct VectorDecodeTerms {
 
 impl VectorDecodeTerms {
     fn from_primary<const B: usize>(header: PrimaryVectorHeader) -> Self {
+        // Mirror the zero-range guard in `VectorEncodeTerms::from_primary`: a collapsed interval
+        // decodes every component back to `lower`.
+        let range = header.upper - header.lower;
+        let delta = if range > 0.0 {
+            range / ((1 << B) - 1) as f32
+        } else {
+            0.0
+        };
         Self {
             lower: header.lower,
-            delta: (header.upper - header.lower) / ((1 << B) - 1) as f32,
+            delta,
             component_sum: header.component_sum,
             parallel_error_term: header.parallel_error_term,
         }
@@ -479,24 +496,15 @@ impl<const B: usize> TurboPrimaryCoder<B> {
     }
 
     fn encode_parts_to(k: Kernel, vector: &[f32], out: &mut [u8]) -> PrimaryVectorHeader {
+        crate::assert_finite_vector(vector);
         let stats = VectorStats::new(k, vector);
-        // The zero vector cannot be turbo-quantized. The interval optimizer guards `min == max`
-        // by nudging `upper` to `f32::MIN_POSITIVE`, but that f16-rounds back to 0, so the
-        // quantization scale delta is 0 and both the quantized bytes and the header's
-        // norm-normalized error terms come out as NaN. Encode it canonically as an all-zero
-        // vector instead: its dot product with any other vector is 0, so a zero query against a
-        // document yields the document's own squared norm and a zero document yields distance 0.
-        if stats.l2_norm_sq == 0.0 {
-            out.fill(0);
-            return PrimaryVectorHeader {
-                l2_norm: 0.0,
-                component_sum: 0,
-                perpendicular_error_term: 0.0,
-                parallel_error_term: 0.0,
-                lower: 0.0,
-                upper: 0.0,
-            };
-        }
+        // The quantization interval is stored as f16 so the component range must fit in f16.
+        assert!(
+            f16::from_f32(stats.min).is_finite() && f16::from_f32(stats.max).is_finite(),
+            "vector component range [{}, {}] is not representable as f16",
+            stats.min,
+            stats.max
+        );
         let mut header = PrimaryVectorHeader::new(stats);
         (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
 
@@ -511,16 +519,29 @@ impl<const B: usize> TurboPrimaryCoder<B> {
             },
         };
         header.component_sum = quant_stats.primary_component_sum;
+        // A zero-norm (zero) vector has no error terms; guard the division and the sqrt domain
+        // (fp cancellation can also drive `perp_error_sq` slightly negative for finite inputs).
+        let inv_norm_sq = if stats.l2_norm_sq > 0.0 {
+            stats.l2_norm_sq.recip()
+        } else {
+            0.0
+        };
         let perp_error_sq = (quant_stats.residual_error_sq
-            - (quant_stats.residual_ip.powi(2) / stats.l2_norm_sq))
+            - quant_stats.residual_ip.powi(2) * inv_norm_sq)
             .max(0.0);
         header.perpendicular_error_term = perp_error_sq.sqrt();
-        // Guard against 0/0 and NaN from near-constant or zero vectors.
-        header.parallel_error_term = if stats.l2_norm_sq == 0.0 {
-            0.0
-        } else {
-            quant_stats.residual_ip / stats.l2_norm_sq
-        };
+        header.parallel_error_term = quant_stats.residual_ip * inv_norm_sq;
+
+        // The only way a finite input reaches a non-finite header is a magnitude that overflows f32
+        // when squared/summed; that vector cannot be quantized.
+        assert!(
+            header.l2_norm.is_finite()
+                && header.lower.is_finite()
+                && header.upper.is_finite()
+                && header.perpendicular_error_term.is_finite()
+                && header.parallel_error_term.is_finite(),
+            "vector magnitude is not finite: {header:?}"
+        );
 
         header
     }
@@ -775,8 +796,15 @@ struct VectorEncodeTerms {
 
 impl VectorEncodeTerms {
     fn from_primary<const B: usize>(primary: &PrimaryVectorHeader) -> Self {
-        let delta_inv = ((1 << B) - 1) as f32 / (primary.upper - primary.lower);
-        let delta = (primary.upper - primary.lower) / ((1 << B) - 1) as f32;
+        // A zero-range interval (zero or constant input vector) would make `delta_inv` infinite and
+        // `0 * inf` NaN in the quantizer; collapse both to zero so every component encodes to code 0.
+        let levels = ((1 << B) - 1) as f32;
+        let range = primary.upper - primary.lower;
+        let (delta, delta_inv) = if range > 0.0 {
+            (range / levels, levels / range)
+        } else {
+            (0.0, 0.0)
+        };
         Self {
             lower: primary.lower,
             upper: primary.upper,

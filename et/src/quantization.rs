@@ -11,7 +11,7 @@ use easy_tiger::input::{DerefVectorStore, SubsetViewVectorStore, VectorStore};
 use half::slice::HalfFloatSliceExt;
 use indicatif::ProgressIterator;
 use memmap2::Mmap;
-use vectors::f16;
+use vectors::{f16, rotate::Rotator};
 
 use distance_loss::{DistanceLossArgs, distance_loss};
 use loss::{LossArgs, loss};
@@ -64,6 +64,25 @@ fn cmd(cmd: Command, vectors: &(impl VectorStore<Elem = f16> + Send + Sync)) -> 
         Command::DistanceLoss(args) => distance_loss(args, vectors),
         Command::Recall(args) => recall(args, vectors),
         Command::Rotate(args) => rotate(args, vectors),
+    }
+}
+
+/// Default seed for [`RotationArgs::rotation_seed`].
+const DEFAULT_ROTATION_SEED: u64 = 11500348935374314158;
+
+/// Arguments controlling the orthogonal rotation applied to vectors before quantization.
+#[derive(Args)]
+pub struct RotationArgs {
+    /// Seed for an orthogonal rotation applied to all vectors before quantizing and/or comparing
+    /// distances. Set to 0 to disable rotation.
+    #[arg(long, default_value_t = DEFAULT_ROTATION_SEED)]
+    rotation_seed: u64,
+}
+
+impl RotationArgs {
+    /// Returns a rotator for vectors of `dims` dimensions, or `None` if rotation is disabled.
+    fn rotator(&self, dims: usize) -> Option<Rotator> {
+        (self.rotation_seed != 0).then(|| Rotator::new(dims, self.rotation_seed))
     }
 }
 

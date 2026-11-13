@@ -12,7 +12,7 @@ use memmap2::Mmap;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use tdigests::TDigest;
-use vectors::{F32VectorCoding, VectorSimilarity, f16, rotate::Rotator};
+use vectors::{F32VectorCoding, VectorSimilarity, f16};
 
 #[derive(Args)]
 pub struct QuantizationRecallArgs {
@@ -23,14 +23,13 @@ pub struct QuantizationRecallArgs {
     /// If set, only process this many input queries.
     #[arg(long)]
     query_limit: Option<usize>,
-    /// If true, quantize the query before scoring.
-    ///
-    /// Some format implement f32 x quantized scoring which is more accurate but slower.
+    /// If set, quantize queries before scoring, bypassing any f32 x quantized distance
+    /// implementation. f32 x quantized scoring is typically more accurate but slower.
     #[arg(long, default_value_t = false)]
     quantize_query: bool,
 
-    /// Vector coding to test.
-    #[arg(long)]
+    /// Vector coding to evaluate.
+    #[arg(short, long)]
     format: F32VectorCoding,
     /// Similarity function to use.
     #[arg(long)]
@@ -73,10 +72,8 @@ pub struct QuantizationRecallArgs {
     #[arg(long, default_value_t = 0x7774_7370414E4E)]
     seed: u64,
 
-    /// If set, rotate all query and doc vectors using this seed before quantizing and/or
-    /// comparing distances.
-    #[arg(long)]
-    rotation_seed: Option<u64>,
+    #[command(flatten)]
+    rotation: super::RotationArgs,
 }
 
 pub fn recall(
@@ -105,9 +102,7 @@ pub fn recall(
         "must provide recall args",
     ))?;
 
-    let rotator = args
-        .rotation_seed
-        .map(|seed| Rotator::new(doc_vectors.elem_stride(), seed));
+    let rotator = args.rotation.rotator(doc_vectors.elem_stride());
 
     // Centers are computed over unrotated vectors and rotated afterward. Rotation is orthogonal so
     // this is equivalent to computing centers over rotated vectors.

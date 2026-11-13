@@ -275,7 +275,7 @@ impl F32VectorCoding {
             Self::TLVQ8 => Box::new(lvq::TurboPrimaryCoder::<8>::new()),
             Self::RaBitQ => Box::new(rabitq::Coder::new()),
             Self::QuIVer => quiver::new_coder(),
-            Self::TurboQuantM1 => Box::new(turbo_quant::MSECoder::<1, 2>::new(
+            Self::TurboQuantM1 => Box::new(turbo_quant::MSE1Coder::new(
                 &turbo_quant::codebook::CENTROIDS_1,
             )),
             Self::TurboQuantM2 => Box::new(turbo_quant::MSECoder::<2, 4>::new(
@@ -356,7 +356,7 @@ impl F32VectorCoding {
             }
             (Self::RaBitQ, _) => Box::new(rabitq::QueryDistance::new(similarity, query.as_ref())),
             (Self::QuIVer, _) => quiver::new_asymmetric_distance(query.as_ref()),
-            (Self::TurboQuantM1, _) => Box::new(turbo_quant::MSEQueryDistance::<1, 2>::new(
+            (Self::TurboQuantM1, _) => Box::new(turbo_quant::MSE1QueryDistance::new(
                 similarity,
                 query,
                 &turbo_quant::codebook::CENTROIDS_1,

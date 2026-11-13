@@ -1,8 +1,8 @@
 //! Wrap WT routines to pack and unpack values store in a table.
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_void};
 
-use crate::{make_result, Error, Result};
+use crate::{Error, Result, make_result};
 
 /// A validated WiredTiger format string.
 ///
@@ -160,7 +160,7 @@ impl Formatted for CString {
     #[inline(always)]
     fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
         CStr::from_bytes_with_nul(packed)
-            .map_err(|_| Error::WiredTiger(crate::WiredTigerError::Generic))
+            .map_err(|_| Error::wired_tiger(crate::WiredTigerError::Generic))
     }
 }
 

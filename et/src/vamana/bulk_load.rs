@@ -1,4 +1,4 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf, sync::Arc};
+use std::{io, num::NonZero, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
@@ -9,23 +9,21 @@ use easy_tiger::{
         wt::TableGraphVectorIndex,
     },
 };
-use vectors::{F32VectorCoding, VectorSimilarity};
+use vectors::{F32VectorCoding, VectorSimilarity, f16};
 use wt_mdb::Connection;
 
 use crate::{
     ui::progress_bar,
-    vamana::{EdgePruningArgs, drop_index::drop_index},
+    vamana::{EdgePruningArgs, EdgeTypeArg, drop_index::drop_index},
     wt_stats::WiredTigerConnectionStats,
 };
 
 #[derive(Args)]
 pub struct BulkLoadArgs {
-    /// Path to the input vectors to bulk ingest.
+    /// Path to f16 vectors to bulk ingest, in BigANN format: an 8 byte `<len,dim>` header
+    /// followed by little-endian f16 vector data.
     #[arg(short, long)]
-    f32_vectors: PathBuf,
-    /// Number of dimensions in input vectors.
-    #[arg(short, long)]
-    dimensions: NonZero<usize>,
+    vectors: PathBuf,
     /// Similarity function to use for vector scoring.
     #[arg(long)]
     similarity: VectorSimilarity,
@@ -68,6 +66,10 @@ pub struct BulkLoadArgs {
     #[command(flatten)]
     pruning: EdgePruningArgs,
 
+    /// Whether the graph maintains directed or undirected edges.
+    #[arg(long, value_enum, default_value_t = EdgeTypeArg::Undirected)]
+    edge_type: EdgeTypeArg,
+
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value = "false")]
     drop_tables: bool,
@@ -75,6 +77,11 @@ pub struct BulkLoadArgs {
     /// Limit the number of input vectors. Useful for testing.
     #[arg(short, long)]
     limit: Option<usize>,
+
+    /// If set, compute a mean vector from the input dataset and use it as a centering offset
+    /// during quantization and distance computation.
+    #[arg(long, default_value_t = false)]
+    center: bool,
 }
 
 pub fn bulk_load(
@@ -82,13 +89,35 @@ pub fn bulk_load(
     index_name: &str,
     args: BulkLoadArgs,
 ) -> io::Result<()> {
-    let f32_vectors = DerefVectorStore::new(
-        unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
-        args.dimensions,
-    )?;
+    let vectors: DerefVectorStore<f16, _> = DerefVectorStore::from_file(args.vectors)?;
+    let dimensions = NonZero::new(vectors.elem_stride()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "input vectors have no dimensions",
+        )
+    })?;
+
+    let num_vectors = vectors.len();
+    let limit = args.limit.unwrap_or(num_vectors);
+
+    let centroid = if args.center {
+        // Mean of the input vectors, subtracted from each vector at ingest as the quantization
+        // center. Callers that want normalized vectors are expected to provide them already
+        // normalized, in which case this is the mean of the normalized vectors.
+        let mut sum = vec![0.0f64; dimensions.get()];
+        for v in vectors.iter().take(limit) {
+            for (s, x) in sum.iter_mut().zip(v.iter()) {
+                *s += x.to_f64();
+            }
+        }
+        let n = limit as f64;
+        Some(sum.iter().map(|s| (s / n) as f32).collect::<Vec<f32>>())
+    } else {
+        None
+    };
 
     let config = GraphConfig {
-        dimensions: args.dimensions,
+        dimensions,
         similarity: args.similarity,
         nav_format: args.nav_format,
         rerank_format: args.rerank_format,
@@ -104,18 +133,18 @@ pub fn bulk_load(
                 patience_count: c,
             }),
         },
+        centroid,
+        edge_type: args.edge_type.into(),
     };
     if args.drop_tables {
         drop_index(connection.clone(), index_name)?;
     }
     let index = TableGraphVectorIndex::from_init(config, index_name)?;
 
-    let num_vectors = f32_vectors.len();
-    let limit = args.limit.unwrap_or(num_vectors);
     let mut builder = BulkLoadBuilder::new(
         connection.clone(),
         index,
-        f32_vectors,
+        vectors,
         Options {
             memory_quantized_vectors: args.memory_quantized_vectors,
         },

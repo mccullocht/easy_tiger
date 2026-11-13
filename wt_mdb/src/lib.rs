@@ -15,11 +15,13 @@ pub mod transaction;
 use rustix::io::Errno;
 use wt_sys::wiredtiger_strerror;
 
-use std::ffi::{c_char, CStr};
+use std::backtrace::Backtrace;
+use std::ffi::{CStr, c_char};
 use std::io;
 use std::io::ErrorKind;
 use std::num::NonZero;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// WiredTiger specific error codes.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -79,38 +81,84 @@ impl From<WiredTigerError> for ErrorKind {
     }
 }
 
-/// An Error, either WiredTiger-specific or POSIX.
+/// The kind of a WiredTiger [`Error`], either WiredTiger-specific or POSIX.
 // TODO: use rustix::io::Errno instead of Posix
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum Error {
+pub enum Kind {
     WiredTiger(WiredTigerError),
     Errno(Errno),
 }
 
+/// An Error, either WiredTiger-specific or POSIX, with a backtrace captured at the point
+/// the error was created.
+#[derive(Clone, Debug)]
+pub struct Error {
+    kind: Kind,
+    backtrace: Arc<Backtrace>,
+}
+
 impl Error {
+    fn new(kind: Kind) -> Self {
+        Error {
+            kind,
+            backtrace: Arc::new(Backtrace::capture()),
+        }
+    }
+
+    /// Construct a WiredTiger-specific error.
+    pub fn wired_tiger(kind: WiredTigerError) -> Self {
+        Self::new(Kind::WiredTiger(kind))
+    }
+
+    /// Construct a POSIX errno error.
+    pub fn errno(errno: Errno) -> Self {
+        Self::new(Kind::Errno(errno))
+    }
+
     fn generic_error() -> Self {
-        Error::WiredTiger(WiredTigerError::Generic)
+        Self::wired_tiger(WiredTigerError::Generic)
     }
 
     /// Return a WiredTiger `NotFound` error.
     pub fn not_found_error() -> Self {
-        Error::WiredTiger(WiredTigerError::NotFound)
+        Self::wired_tiger(WiredTigerError::NotFound)
+    }
+
+    /// Return the kind of this error.
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// Return the backtrace captured when this error was created.
+    ///
+    /// Only populated if backtrace capture is enabled, e.g. by setting `RUST_BACKTRACE=1`.
+    pub fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
     }
 }
 
+impl PartialEq for Error {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+impl Eq for Error {}
+
 impl From<NonZero<i32>> for Error {
     fn from(value: NonZero<i32>) -> Self {
-        WiredTigerError::try_from_code(value.get())
-            .map(Error::WiredTiger)
-            .unwrap_or_else(|| Error::Errno(Errno::from_raw_os_error(value.get())))
+        let kind = WiredTigerError::try_from_code(value.get())
+            .map(Kind::WiredTiger)
+            .unwrap_or_else(|| Kind::Errno(Errno::from_raw_os_error(value.get())));
+        Self::new(kind)
     }
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::WiredTiger(w) => write!(f, "WT {w}"),
-            Self::Errno(p) => write!(f, "errno {p}"),
+        match self.kind {
+            Kind::WiredTiger(w) => write!(f, "WT {w}"),
+            Kind::Errno(p) => write!(f, "errno {p}"),
         }
     }
 }
@@ -119,9 +167,9 @@ impl std::error::Error for Error {}
 
 impl From<Error> for std::io::Error {
     fn from(value: Error) -> Self {
-        match &value {
-            Error::WiredTiger(wt) => io::Error::new((*wt).into(), value),
-            Error::Errno(errno) => io::Error::from(*errno),
+        match value.kind {
+            Kind::WiredTiger(wt) => io::Error::new(wt.into(), value),
+            Kind::Errno(errno) => io::Error::from(errno),
         }
     }
 }
@@ -129,9 +177,10 @@ impl From<Error> for std::io::Error {
 pub use connection::{BulkLoadCursor, Connection};
 pub use session::{
     IndexCursor, IndexCursorGuard, RecordCursor, RecordCursorGuard, StatCursor, TypedCursor,
-    TypedCursorGuard,
+    TypedCursorGuard, ValueDelta,
 };
 pub use transaction::Transaction;
+pub use wt_sys::WT_MODIFY;
 pub type Result<T> = std::result::Result<T, Error>;
 
 fn make_result<T>(code: i32, value: T) -> Result<T> {
@@ -250,12 +299,12 @@ mod test {
     use tempfile::TempDir;
 
     use crate::{
+        Error, RecordCursorGuard, Result, Statistics, Transaction, ValueDelta, WiredTigerError,
         connection::{
             Connection, CreateOptions, CreateOptionsBuilder, QueryGlobalTimestampType,
             SetGlobalTimestampType,
         },
         session::{Formatted, QueryTransactionTimestampType, SetTransactionTimestampType},
-        Error, RecordCursorGuard, Result, Statistics, Transaction, WiredTigerError,
     };
 
     fn conn_options() -> Option<crate::connection::Options> {
@@ -341,7 +390,7 @@ mod test {
         assert_eq!(cursor.next(), None);
         assert_eq!(
             cursor.remove(13),
-            Err(Error::WiredTiger(WiredTigerError::NotFound))
+            Err(Error::wired_tiger(WiredTigerError::NotFound))
         );
     }
 
@@ -359,7 +408,7 @@ mod test {
         assert_eq!(cursor.next(), None);
         assert_eq!(
             cursor.remove(&b"c".as_slice()),
-            Err(Error::WiredTiger(WiredTigerError::NotFound))
+            Err(Error::wired_tiger(WiredTigerError::NotFound))
         );
     }
 
@@ -439,6 +488,72 @@ mod test {
         assert_eq!(read_cursor.next(), None);
     }
 
+    fn assert_cursor_inactive(cursor: &mut RecordCursorGuard) {
+        let inval = || Error::errno(Errno::INVAL);
+        assert_eq!(cursor.set(2, b"bar"), Err(inval()));
+        assert_eq!(cursor.remove(1), Err(inval()));
+        assert_eq!(cursor.next(), Some(Err(inval())));
+        assert_eq!(cursor.seek_exact(1), Some(Err(inval())));
+        assert_eq!(cursor.largest_key(), Some(Err(inval())));
+        assert_eq!(cursor.set_bounds(0..), Err(inval()));
+    }
+
+    #[test]
+    fn cursor_outlives_commit() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", None).unwrap();
+
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(1, b"foo"), Ok(()));
+        txn.commit(None).unwrap();
+        assert_cursor_inactive(&mut cursor);
+        drop(cursor);
+
+        // The write attempted after commit must not have been applied in an auto-commit txn.
+        let read_txn = conn.begin_transaction(None).unwrap();
+        let mut read_cursor = read_txn.open_record_cursor("test").unwrap();
+        assert_eq!(read_cursor.next(), Some(Ok((1, b"foo".to_vec()))));
+        assert_eq!(read_cursor.next(), None);
+    }
+
+    #[test]
+    fn cursor_outlives_rollback() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", None).unwrap();
+
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(1, b"foo"), Ok(()));
+        txn.rollback(None).unwrap();
+        assert_cursor_inactive(&mut cursor);
+        drop(cursor);
+
+        let read_txn = conn.begin_transaction(None).unwrap();
+        let mut read_cursor = read_txn.open_record_cursor("test").unwrap();
+        assert_eq!(read_cursor.next(), None);
+    }
+
+    #[test]
+    fn cursor_outlives_transaction_drop() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", None).unwrap();
+
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
+        assert_eq!(cursor.set(1, b"foo"), Ok(()));
+        drop(txn);
+        assert_cursor_inactive(&mut cursor);
+        drop(cursor);
+
+        let read_txn = conn.begin_transaction(None).unwrap();
+        let mut read_cursor = read_txn.open_record_cursor("test").unwrap();
+        assert_eq!(read_cursor.next(), None);
+    }
+
     #[test]
     fn cursor_cache() {
         let tmpdir = tempfile::tempdir().unwrap();
@@ -494,7 +609,7 @@ mod test {
         txn.commit(None).unwrap();
         assert_eq!(
             conn.bulk_load::<i64, Vec<u8>, _>("test", None, [(7, b"foo".to_vec())].into_iter()),
-            Err(Error::Errno(Errno::BUSY))
+            Err(Error::errno(Errno::BUSY))
         );
     }
 
@@ -509,7 +624,7 @@ mod test {
                 None,
                 [(11, b"bar".to_vec()), (7, b"foo".to_vec())].into_iter()
             ),
-            Err(Error::Errno(Errno::INVAL))
+            Err(Error::errno(Errno::INVAL))
         );
     }
 
@@ -623,7 +738,7 @@ mod test {
             }
         }
 
-        fn open_cursor(&self) -> Result<RecordCursorGuard<'_>> {
+        fn open_cursor(&self) -> Result<RecordCursorGuard> {
             self.txn.open_record_cursor(&self.table_name)
         }
     }
@@ -708,7 +823,7 @@ mod test {
         let data = cursor_bounds_test_data();
         let fixture = RecordTableFixture::with_data("test", &data);
         let mut cursor = fixture.open_cursor().unwrap();
-        assert_eq!(cursor.set_bounds(1..-1), Err(Error::Errno(Errno::INVAL)));
+        assert_eq!(cursor.set_bounds(1..-1), Err(Error::errno(Errno::INVAL)));
     }
 
     #[test]
@@ -832,10 +947,102 @@ mod test {
 
     #[test]
     fn io_error() {
-        let err = Error::WiredTiger(WiredTigerError::NotFound);
+        let err = Error::wired_tiger(WiredTigerError::NotFound);
         assert_eq!(
-            std::io::Error::from(err).to_string(),
+            std::io::Error::from(err.clone()).to_string(),
             std::io::Error::new(ErrorKind::NotFound, err).to_string()
+        );
+    }
+
+    #[test]
+    fn index_modify_replace() -> Result<()> {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", index_table_options()).unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_index_cursor("test").unwrap();
+        cursor.set(&b"key".as_slice(), &b"hello world".as_slice())?;
+        cursor.modify(
+            &b"key".as_slice(),
+            &[ValueDelta::Replace {
+                range: (6..11).into(),
+                data: b"rust",
+            }],
+        )?;
+        assert_eq!(
+            cursor.seek_exact(&b"key".as_slice()),
+            Some(Ok(b"hello rust".to_vec()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn record_modify_replace() -> Result<()> {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", None).unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_record_cursor("test").unwrap();
+        cursor.set(1, b"hello world")?;
+        cursor.modify(
+            1,
+            &[ValueDelta::Replace {
+                range: (6..11).into(),
+                data: b"rust",
+            }],
+        )?;
+        assert_eq!(cursor.seek_exact(1), Some(Ok(b"hello rust".to_vec())));
+        Ok(())
+    }
+
+    #[test]
+    fn index_modify_insert() -> Result<()> {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", index_table_options()).unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_index_cursor("test").unwrap();
+        cursor.set(&b"key".as_slice(), &b"hello".as_slice())?;
+        cursor.modify(
+            &b"key".as_slice(),
+            &[ValueDelta::Insert {
+                data: b" world",
+                offset: 5,
+            }],
+        )?;
+        assert_eq!(
+            cursor.seek_exact(&b"key".as_slice()),
+            Some(Ok(b"hello world".to_vec()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn index_modify_delete() -> Result<()> {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", index_table_options()).unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_index_cursor("test").unwrap();
+        cursor.set(&b"key".as_slice(), &b"hello world".as_slice())?;
+        cursor.modify(&b"key".as_slice(), &[ValueDelta::Delete((5..11).into())])?;
+        assert_eq!(
+            cursor.seek_exact(&b"key".as_slice()),
+            Some(Ok(b"hello".to_vec()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn modify_wrong_format() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(tmpdir.path().to_str().unwrap(), conn_options()).unwrap();
+        conn.create_table("test", None).unwrap();
+        let txn = conn.begin_transaction(None).unwrap();
+        let mut cursor = txn.open_metadata_cursor().unwrap();
+        assert_eq!(
+            cursor.modify(c"table:test", &[]),
+            Err(Error::errno(Errno::NOTSUP))
         );
     }
 }

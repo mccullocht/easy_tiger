@@ -1,10 +1,10 @@
 [package]
 name = "wt_sys"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 
 [build-dependencies]
-bindgen = "0.72.1"
-cmake = "0.1.51"
+bindgen = { workspace = true }
+cmake = { workspace = true }

@@ -1,10 +1,10 @@
 use crate::{
-    make_result,
+    ConfigurationString, Error, Result, Statistics, make_result,
     session::{
-        table_uri, BeginTransactionOptions, FormatString, Formatted, InnerCursor, Item, Session,
+        BeginTransactionOptions, FormatString, Formatted, InnerCursor, Item, Session, table_uri,
     },
     transaction::Transaction,
-    wt_call, ConfigurationString, Error, Result, Statistics,
+    wt_call,
 };
 use std::{
     ffi::{CStr, CString},
@@ -15,7 +15,7 @@ use std::{
 };
 
 use tracing::error;
-use wt_sys::{wiredtiger_open, WT_CONNECTION, WT_SESSION};
+use wt_sys::{WT_CONNECTION, WT_SESSION, wiredtiger_open};
 
 /// Global timestamp types that may be written by application code.
 pub enum SetGlobalTimestampType {
@@ -157,6 +157,8 @@ pub struct CreateOptionsBuilder {
     key_format: FormatString,
     value_format: FormatString,
     app_metadata: Option<String>,
+    leaf_page_max: Option<u32>,
+    leaf_value_max: Option<u32>,
 }
 
 impl Default for CreateOptionsBuilder {
@@ -165,6 +167,8 @@ impl Default for CreateOptionsBuilder {
             key_format: FormatString::new(c"q"),
             value_format: FormatString::new(c"u"),
             app_metadata: None,
+            leaf_page_max: None,
+            leaf_value_max: None,
         }
     }
 }
@@ -191,6 +195,21 @@ impl CreateOptionsBuilder {
         self.app_metadata = Some(metadata.to_owned());
         self
     }
+
+    /// Maximum size of leaf pages in bytes. Values exceeding half this size (or `leaf_value_max`
+    /// if set) are stored as overflow items and are not cached by WiredTiger.
+    pub fn leaf_page_max(mut self, bytes: u32) -> Self {
+        self.leaf_page_max = Some(bytes);
+        self
+    }
+
+    /// Maximum value size in bytes before a value is stored as an overflow item.
+    /// Defaults to half of `leaf_page_max`. Set equal to `leaf_page_max` to allow a single
+    /// value to occupy an entire page.
+    pub fn leaf_value_max(mut self, bytes: u32) -> Self {
+        self.leaf_value_max = Some(bytes);
+        self
+    }
 }
 
 /// Options when creating a table, column group, index, or file in WiredTiger.
@@ -211,6 +230,12 @@ impl From<CreateOptionsBuilder> for CreateOptions {
         ];
         if let Some(metadata) = value.app_metadata {
             parts.push(format!("app_metadata={metadata}"));
+        }
+        if let Some(v) = value.leaf_page_max {
+            parts.push(format!("leaf_page_max={v}"));
+        }
+        if let Some(v) = value.leaf_value_max {
+            parts.push(format!("leaf_value_max={v}"));
         }
         Self(CString::new(parts.join(",")).expect("no nulls"))
     }

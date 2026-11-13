@@ -1,7 +1,7 @@
 use std::{num::NonZero, sync::Arc};
 
 use clap::Args;
-use wt_mdb::{connection::OptionsBuilder, Connection, Result, Statistics};
+use wt_mdb::{Connection, Result, Statistics, connection::OptionsBuilder};
 
 #[derive(Args)]
 pub struct WiredTigerArgs {
@@ -26,8 +26,7 @@ impl WiredTigerArgs {
         let mut connection_options = OptionsBuilder::default()
             .cache_size_mb(self.wiredtiger_cache_size_mb)
             .statistics(Statistics::Fast)
-            .checkpoint_log_size(128 << 20)
-            .log(true);
+            .checkpoint_wait_seconds(5);
         if self.wiredtiger_create_db {
             connection_options = connection_options.create();
         }

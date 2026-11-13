@@ -1,28 +1,22 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 use tracing::error;
 
 use wt_mdb::{
-    session::{FormatString, Formatted},
     Error, Result, Transaction, TypedCursorGuard,
+    session::{FormatString, Formatted},
 };
 
-use crate::spann::{
-    CentroidAssignment, CentroidAssignmentRef, CentroidAssignmentType, PostingKey, TableIndex,
-    TransactionIndex,
-};
+use crate::spann::{CentroidAssignment, TableIndex, TransactionIndex};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CentroidCounts {
-    /// Number of vectors whose primary assigned centroid is this centroid.
+    /// Number of vectors assigned to this centroid.
     pub primary: u32,
-    /// Number of vectors whose secondary+ assigned centroid is this centroid.
-    pub secondary: u32,
 }
 
 impl CentroidCounts {
-    /// Sum of primary and secondary assignments.
     pub fn total(&self) -> u32 {
-        self.primary + self.secondary
+        self.primary
     }
 }
 
@@ -36,17 +30,14 @@ impl Formatted for CentroidCounts {
     }
 
     fn pack(value: Self::Ref<'_>, packed: &mut Vec<u8>) -> Result<()> {
-        packed.resize(8, 0);
-        let packed_entries = packed.as_chunks_mut::<4>().0;
-        packed_entries[0] = value.primary.to_le_bytes();
-        packed_entries[1] = value.secondary.to_le_bytes();
+        packed.resize(4, 0);
+        packed.copy_from_slice(&value.primary.to_le_bytes());
         Ok(())
     }
 
     fn unpack<'b>(packed: &'b [u8]) -> Result<Self::Ref<'b>> {
         Ok(Self {
             primary: u32::from_le_bytes(packed[0..4].try_into().unwrap()),
-            secondary: u32::from_le_bytes(packed[4..8].try_into().unwrap()),
         })
     }
 }
@@ -67,22 +58,13 @@ impl CentroidStats {
         let centroid_len = head_cursor.largest_key().unwrap_or(Ok(0))? as usize + 1;
 
         let mut counts: Vec<Option<CentroidCounts>> = vec![None; centroid_len];
-        let centroid_cursor = txn.open_cursor::<i64, Vec<u8>>(&index.table_names.centroids)?;
+        let centroid_cursor =
+            txn.open_cursor::<i64, CentroidAssignment>(&index.table_names.centroids)?;
         for r in centroid_cursor {
-            let centroid_bytes = r.map(|(_, c)| c)?;
-            let mut centroid_it = centroid_bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| u32::from_le_bytes(*b));
-            if let Some(primary_id) = centroid_it.next() {
-                counts[primary_id as usize].get_or_insert_default().primary += 1;
-                for secondary_id in centroid_it {
-                    counts[secondary_id as usize]
-                        .get_or_insert_default()
-                        .secondary += 1;
-                }
-            }
+            let (_, a) = r?;
+            counts[a.primary_id as usize]
+                .get_or_insert_default()
+                .primary += 1;
         }
 
         // Some centroids may have no assignments; ensure they are represented in case the caller is
@@ -137,14 +119,9 @@ impl CentroidStats {
         *self.0.get(centroid_id).unwrap_or(&None)
     }
 
-    /// Iterate over a list of centroid identifiers and the number of primary assigned vectors for each.
+    /// Iterate over a list of centroid identifiers and the number of assigned vectors for each.
     pub fn primary_assignment_counts_iter(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
         self.counts_iter().map(|(i, c)| (i, c.primary))
-    }
-
-    /// Iterate over a list of centroid identifiers and the number of secondary assigned vectors for each.
-    pub fn secondary_assignment_counts_iter(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
-        self.counts_iter().map(|(i, c)| (i, c.secondary))
     }
 
     /// Iterate over counts for all centroids with at least one assignment.
@@ -158,24 +135,18 @@ impl CentroidStats {
     /// Iterate over available centroid ids. The returned iterator is effectively unbounded (up to
     /// `u32::MAX`) so callers should `take()` this iterator to mint the number of ids they need.
     pub fn available_centroid_ids(&self) -> impl Iterator<Item = usize> + '_ {
-        self.0
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.is_none())
-            .map(|(i, _)| i)
-            .chain(self.0.len()..)
+        self.0.len()..
     }
 }
 
-pub struct CentroidAssignmentUpdater<'a> {
-    assignments_cursor: TypedCursorGuard<'a, i64, CentroidAssignment>,
-    stats: CentroidStatsCache<'a>,
-    replica_count: usize,
+pub struct CentroidAssignmentUpdater {
+    assignments_cursor: TypedCursorGuard<i64, CentroidAssignment>,
+    stats: CentroidStatsCache,
 }
 
-impl<'a> CentroidAssignmentUpdater<'a> {
+impl CentroidAssignmentUpdater {
     /// Create a new updater for `index` using `session` for WT access.
-    pub fn new(txn_idx: &'a TransactionIndex) -> Result<Self> {
+    pub fn new(txn_idx: &TransactionIndex) -> Result<Self> {
         let assignments_cursor = txn_idx
             .transaction()
             .open_cursor::<i64, CentroidAssignment>(&txn_idx.index().table_names.centroids)?;
@@ -187,20 +158,7 @@ impl<'a> CentroidAssignmentUpdater<'a> {
         Ok(Self {
             assignments_cursor,
             stats,
-            replica_count: txn_idx.index().config().replica_count,
         })
-    }
-
-    /// Returns true if `key` is for the primary assigned for `record_id`.
-    pub fn is_primary(&mut self, key: PostingKey) -> Result<bool> {
-        if self.replica_count <= 1 {
-            Ok(true)
-        } else {
-            self.assignments_cursor
-                .seek_exact(key.record_id)
-                .map(|r| r.map(|a| a.primary_id == key.centroid_id))
-                .unwrap_or(Ok(false))
-        }
     }
 
     /// Read the assignments for `record_id`.
@@ -211,15 +169,13 @@ impl<'a> CentroidAssignmentUpdater<'a> {
     /// Insert centroid assignments for a new record.
     ///
     /// Returns a DuplicateKey error if the record already exists.
-    pub fn insert(&mut self, record_id: i64, assignments: CentroidAssignmentRef<'_>) -> Result<()> {
+    pub fn insert(&mut self, record_id: i64, assignment: CentroidAssignment) -> Result<()> {
         if let Some(_existing_assignment) = self.assignments_cursor.seek_exact(record_id) {
             error!("attempted to insert duplicate record id {}", record_id);
-            return Err(Error::WiredTiger(wt_mdb::WiredTigerError::DuplicateKey));
+            return Err(Error::wired_tiger(wt_mdb::WiredTigerError::DuplicateKey));
         }
-        self.assignments_cursor.set(record_id, assignments)?;
-        for (assignment_type, centroid_id) in assignments.iter() {
-            self.stats.increment_count(centroid_id, assignment_type)?;
-        }
+        self.assignments_cursor.set(record_id, assignment)?;
+        self.stats.increment_count(assignment.primary_id)?;
         Ok(())
     }
 
@@ -230,10 +186,8 @@ impl<'a> CentroidAssignmentUpdater<'a> {
         let existing_assignment = self
             .assignments_cursor
             .seek_exact(record_id)
-            .unwrap_or(Err(Error::not_found_error()))?;
-        for (assignment_type, centroid_id) in existing_assignment.iter() {
-            self.stats.decrement_count(centroid_id, assignment_type)?;
-        }
+            .unwrap_or_else(|| Err(Error::not_found_error()))?;
+        self.stats.decrement_count(existing_assignment.primary_id)?;
         self.assignments_cursor.remove(record_id)?;
         Ok(existing_assignment)
     }
@@ -244,68 +198,55 @@ impl<'a> CentroidAssignmentUpdater<'a> {
     pub fn update(
         &mut self,
         record_id: i64,
-        assignments: CentroidAssignmentRef<'_>,
+        assignment: CentroidAssignment,
     ) -> Result<CentroidAssignment> {
         let existing_assignment = self
             .assignments_cursor
             .seek_exact(record_id)
-            .unwrap_or(Err(Error::not_found_error()))?;
-        for (assignment_type, centroid_id) in existing_assignment.iter() {
-            self.stats.decrement_count(centroid_id, assignment_type)?;
-        }
-        for (assignment_type, centroid_id) in assignments.iter() {
-            self.stats.increment_count(centroid_id, assignment_type)?;
-        }
+            .unwrap_or_else(|| Err(Error::not_found_error()))?;
+        self.stats.decrement_count(existing_assignment.primary_id)?;
+        self.stats.increment_count(assignment.primary_id)?;
         self.assignments_cursor
-            .set(record_id, assignments)
+            .set(record_id, assignment)
             .map(|()| existing_assignment)
     }
 
+    /// Return the number of vectors for `centroid_id`, or 0 if the centroid isn't found.
+    pub fn centroid_len(&mut self, centroid_id: u32) -> Result<u32> {
+        self.stats.count(centroid_id)
+    }
+
     /// Flush buffered stats updates back to the database.
-    ///
-    /// Dropping the updater will also flush any buffered updates, but prefer this method to allow
-    /// observation of any errors.
+    /// This must be called in order to push updates into the database.
     pub fn flush(&mut self) -> Result<()> {
         self.stats.flush()
     }
 }
 
-impl Drop for CentroidAssignmentUpdater<'_> {
-    fn drop(&mut self) {
-        if let Err(e) = self.flush() {
-            error!("Error flushing centroid assignment stats: {e}")
-        }
-    }
-}
-
-struct CentroidStatsCache<'a> {
-    cursor: TypedCursorGuard<'a, u32, CentroidCounts>,
+struct CentroidStatsCache {
+    cursor: TypedCursorGuard<u32, CentroidCounts>,
     cache: HashMap<u32, CentroidCounts>,
 }
 
-impl<'a> CentroidStatsCache<'a> {
-    fn new(cursor: TypedCursorGuard<'a, u32, CentroidCounts>) -> Self {
+impl CentroidStatsCache {
+    fn new(cursor: TypedCursorGuard<u32, CentroidCounts>) -> Self {
         Self {
             cursor,
             cache: HashMap::new(),
         }
     }
 
-    fn increment_count(&mut self, id: u32, ctype: CentroidAssignmentType) -> Result<()> {
-        let counts = self.get_counts(id)?;
-        match ctype {
-            CentroidAssignmentType::Primary => counts.primary += 1,
-            CentroidAssignmentType::Secondary => counts.secondary += 1,
-        };
+    fn count(&mut self, id: u32) -> Result<u32> {
+        self.get_counts(id).map(|c| c.primary)
+    }
+
+    fn increment_count(&mut self, id: u32) -> Result<()> {
+        self.get_counts(id)?.primary += 1;
         Ok(())
     }
 
-    fn decrement_count(&mut self, id: u32, ctype: CentroidAssignmentType) -> Result<()> {
-        let counts = self.get_counts(id)?;
-        match ctype {
-            CentroidAssignmentType::Primary => counts.primary -= 1,
-            CentroidAssignmentType::Secondary => counts.secondary -= 1,
-        };
+    fn decrement_count(&mut self, id: u32) -> Result<()> {
+        self.get_counts(id)?.primary -= 1;
         Ok(())
     }
 

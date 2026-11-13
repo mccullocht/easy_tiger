@@ -2,6 +2,10 @@
 //!
 //! These are based on the optimal quantization of a standard normal distribution symmetric around
 //! 0. These will be scaled by 1/sqrt(D) at runtime.
+
+#![allow(clippy::excessive_precision)]
+
+#[allow(clippy::approx_constant)]
 pub const CENTROIDS_1: [f32; 2] = [-1.12837917, 1.12837917];
 pub const CENTROIDS_2: [f32; 4] = [-1.510418, -0.452780, 0.452780, 1.510418];
 pub const CENTROIDS_3: [f32; 8] = [

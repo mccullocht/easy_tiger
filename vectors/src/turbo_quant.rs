@@ -2,46 +2,49 @@
 //!
 //! This uses separate implementations for MSE optimization (L2/Euclidean distance) and angular
 //! (dot product) distance.
+//!
+//! TurboQuant assumes that inputs have been randomly rotated so that each coordinate of the unit
+//! normalized vector is approximately N(0, 1/D). Rotation is the caller's responsibility, typically
+//! via [`crate::prepare_vector`].
 
 // TODO: optimize vector comparison using lookup tables.
 
 pub mod codebook;
 mod packing;
 
-use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity, rotate::Rotator};
+use std::borrow::Cow;
+
+use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
 
 pub struct MSECoder<const B: usize, const N: usize> {
-    dim: usize,
-    rotator: Rotator,
+    /// Unscaled codebook; scaled by `1/sqrt(D)` for each input vector.
     codebook: [f32; N],
 }
 
 impl<const B: usize, const N: usize> MSECoder<B, N> {
-    pub fn new(dim: usize, seed: u64, codebook: &[f32; N]) -> Self {
+    pub fn new(codebook: &[f32; N]) -> Self {
         Self {
-            dim,
-            rotator: Rotator::new(dim, seed),
-            codebook: codebook::scale(codebook, dim),
+            codebook: *codebook,
         }
     }
 }
 
 impl<const B: usize, const N: usize> F32VectorCoder for MSECoder<B, N> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        assert_eq!(vector.len(), self.dim);
+        crate::assert_finite_vector(vector);
         let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        assert!(norm.is_finite(), "vector magnitude is not finite");
         out[..4].copy_from_slice(&norm.to_le_bytes());
 
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
-        let normalized: Vec<f32> = vector.iter().map(|&x| x * inv_norm).collect();
-        let transformed = self.rotator.forward(&normalized);
+        let codebook = codebook::scale(&self.codebook, vector.len());
 
         let bits = &mut out[4..];
         bits.fill(0);
         packing::pack::<B>(
-            transformed
+            vector
                 .iter()
-                .map(|v| codebook::select_code(&self.codebook, *v)),
+                .map(|v| codebook::select_code(&codebook, *v * inv_norm)),
             bits,
         );
     }
@@ -54,12 +57,11 @@ impl<const B: usize, const N: usize> F32VectorCoder for MSECoder<B, N> {
         let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
         let bits = &encoded[4..];
 
-        let quantized: Vec<f32> = packing::unpack::<B>(bits)
-            .map(|i| self.codebook[i as usize])
-            .collect();
-        let inverted = self.rotator.backward(&quantized);
-        for (o, v) in out.iter_mut().zip(inverted.iter()) {
-            *o = v * norm;
+        // NB: the original dimensionality is not stored, so if D * B is not a multiple of 8 the
+        // codebook scale is computed from the padded dimension count and will be slightly off.
+        let codebook = codebook::scale(&self.codebook, self.dimensions(encoded.len()));
+        for (o, i) in out.iter_mut().zip(packing::unpack::<B>(bits)) {
+            *o = codebook[i as usize] * norm;
         }
     }
 
@@ -70,8 +72,8 @@ impl<const B: usize, const N: usize> F32VectorCoder for MSECoder<B, N> {
 
 pub struct MSEQueryDistance<const B: usize, const N: usize> {
     similarity: VectorSimilarity,
-    /// The query vector after l2 normalization and rotation. This places the query in the
-    /// same space as the quantized vectors which makes computation cheaper.
+    /// The query vector after l2 normalization. Callers are expected to have rotated the query in
+    /// the same way as the quantized vectors.
     rquery: Vec<f32>,
     /// L2 norm of the input vector before transform.
     norm: f32,
@@ -113,20 +115,14 @@ fn inner_product_bias<const N: usize>(codebook: &[f32; N]) -> f32 {
 }
 
 impl<const B: usize, const N: usize> MSEQueryDistance<B, N> {
-    pub fn new(
-        similarity: VectorSimilarity,
-        mut query: Vec<f32>,
-        seed: u64,
-        codebook: &[f32; N],
-    ) -> Self {
-        let norm = query.iter().map(|&x| x * x).sum::<f32>().sqrt();
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>, codebook: &[f32; N]) -> Self {
+        let mut rquery = query.into_owned();
+        let norm = rquery.iter().map(|&x| x * x).sum::<f32>().sqrt();
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
-        for d in query.iter_mut() {
-            *d = *d * inv_norm
+        for d in rquery.iter_mut() {
+            *d *= inv_norm
         }
 
-        let rotator = Rotator::new(query.len(), seed);
-        let rquery = rotator.forward(&query);
         let euclidean_scale = 2.0 / inner_product_bias(codebook);
         let codebook = codebook::scale(codebook, rquery.len());
         Self {
@@ -152,14 +148,15 @@ impl<const B: usize, const N: usize> QueryVectorDistance for MSEQueryDistance<B,
             .zip(packing::unpack::<B>(bits))
             .map(|(&q, d)| q * self.codebook[d as usize])
             .sum();
-        match self.similarity {
+        let d = match self.similarity {
             VectorSimilarity::Euclidean => {
                 (self.norm * self.norm + norm * norm
                     - self.euclidean_scale * self.norm * norm * dot) as f64
             }
             // The query and the doc were already normalized so the dot product is sufficient.
-            VectorSimilarity::Cosine | VectorSimilarity::Dot => dot.mul_add(-0.5, 0.5).into(),
-        }
+            VectorSimilarity::Dot => dot.mul_add(-0.5, 0.5).into(),
+        };
+        crate::sanitize_distance(d, self.similarity.angular())
     }
 }
 
@@ -175,8 +172,6 @@ mod tests {
         -0.273, 0.539, -0.731, 0.436, 0.913, 0.694, 0.202,
     ];
 
-    const MSE_SEED: u64 = 42;
-
     macro_rules! mse_tests {
         ($mod_name:ident, $B:literal, $N:literal, $centroids:expr) => {
             mod $mod_name {
@@ -184,20 +179,19 @@ mod tests {
 
                 use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
 
-                use super::{MSE_SEED, TEST_VECTOR, codebook};
+                use super::{TEST_VECTOR, codebook};
                 use crate::turbo_quant::{MSECoder, MSEQueryDistance};
 
                 const DIM: usize = TEST_VECTOR.len();
 
                 fn coder() -> MSECoder<$B, $N> {
-                    MSECoder::<$B, $N>::new(DIM, MSE_SEED, $centroids)
+                    MSECoder::<$B, $N>::new($centroids)
                 }
 
                 fn query_distance(similarity: VectorSimilarity) -> MSEQueryDistance<$B, $N> {
                     MSEQueryDistance::<$B, $N>::new(
                         similarity,
-                        TEST_VECTOR.to_vec(),
-                        MSE_SEED,
+                        TEST_VECTOR.as_slice().into(),
                         $centroids,
                     )
                 }
@@ -241,14 +235,6 @@ mod tests {
                         dist < norm_sq * 0.5,
                         "euclidean self-distance {dist} too large (norm_sq={norm_sq})"
                     );
-                }
-
-                // Cosine distance from a normalized vector to itself should be near 0.
-                #[test]
-                fn cosine_self_distance() {
-                    let encoded = coder().encode(&TEST_VECTOR);
-                    let dist = query_distance(VectorSimilarity::Cosine).distance(&encoded);
-                    assert!(dist < 0.1, "cosine self-distance {dist} too large");
                 }
 
                 // Dot distance from a normalized vector to itself should be near 0.

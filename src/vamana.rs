@@ -6,7 +6,7 @@ pub mod mutate;
 pub mod search;
 pub mod wt;
 
-use std::{collections::BTreeSet, num::NonZero};
+use std::num::NonZero;
 
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -51,37 +51,37 @@ pub struct PatienceParams {
 pub struct EdgePruningConfig {
     /// Number of edges to keep for each vertex.
     pub max_edges: NonZero<usize>,
-    /// Maximum alpha value to use for edge pruning.
+    /// Alpha value to use for edge pruning.
     ///
     /// Larger values result in retain longer edges while still saying below `max_edges`.
     ///
     /// Must be >= 1.0. Default value is 1.2.
-    pub max_alpha: f64,
-    /// Alpha value scaling factor.
-    ///
-    /// This is the rate at which we scale from an alpha value of 1.0 up to `max_alpha`. Slowly
-    /// scaling up the alpha value gives preference to shorter edges, but may result in more
-    /// iterations in pruning.
-    ///
-    /// Must be >= 1.0. Default value is 1.2.
-    pub alpha_scale: f64,
+    pub alpha: f64,
 }
 
 impl EdgePruningConfig {
-    pub const DEFAULT_MAX_ALPHA: f64 = 1.2;
-    pub const DEFAULT_ALPHA_SCALE: f64 = 1.2;
+    pub const DEFAULT_ALPHA: f64 = 1.2;
 
     pub fn new(max_edges: NonZero<usize>) -> Self {
         Self {
             max_edges,
-            max_alpha: Self::DEFAULT_MAX_ALPHA,
-            alpha_scale: Self::DEFAULT_ALPHA_SCALE,
+            alpha: Self::DEFAULT_ALPHA,
         }
     }
 }
 
+/// Whether the graph maintains directed or undirected edges.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum EdgeType {
+    /// Every edge A→B has a corresponding back edge B→A.
+    #[default]
+    Undirected,
+    /// Edges are one-way; no back edge is required.
+    Directed,
+}
+
 /// Configuration describing graph shape and construction. Used to read and mutate the graph.
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphConfig {
     /// Number of vector dimensions.
     pub dimensions: NonZero<usize>,
@@ -110,6 +110,14 @@ pub struct GraphConfig {
     ///
     /// This dictates the set of candidate edges provided to pruning.
     pub index_search_params: GraphSearchParams,
+    /// Optional center vector used for quantization.
+    ///
+    /// When present, this centroid is subtracted from vectors before encoding and is passed to all
+    /// distance computation functions to apply the appropriate correction terms.
+    pub centroid: Option<Vec<f32>>,
+    /// Whether this graph maintains directed or undirected edges.
+    #[serde(default)]
+    pub edge_type: EdgeType,
 }
 
 /// `GraphVectorIndex` is used to generate objects for graph navigation and mutation.
@@ -203,14 +211,19 @@ pub trait GraphVectorStore {
     /// Return the format that vectors in the store are encoded in.
     fn format(&self) -> F32VectorCoding;
 
+    /// Return the center vector that stored vectors were made residual against before encoding, if
+    /// any. Callers preparing a vector for this store (or a query against it) must apply the same
+    /// centering via [`vectors::prepare_vector`].
+    fn centroid(&self) -> Option<&[f32]>;
+
     /// Create a new distance function that operates over vectors on this table.
     fn new_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.format().new_vector_distance(self.similarity())
+        self.format().distance_symmetric(self.similarity())
     }
 
     /// Create a new coder for vectors of this type.
     fn new_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.format().new_coder(self.similarity())
+        self.format().coder()
     }
 
     /// Return the contents of the vector at vertex, or `None` if the vertex is unknown.
@@ -248,7 +261,7 @@ impl EdgeSetDistanceComputer {
             Self::from_store_and_edges(
                 &mut reader
                     .rerank_vectors()
-                    .unwrap_or(Err(Error::Errno(Errno::NOTSUP)))?,
+                    .unwrap_or_else(|| Err(Error::errno(Errno::NOTSUP)))?,
                 edges,
             )
         } else {
@@ -265,7 +278,7 @@ impl EdgeSetDistanceComputer {
             .map(|n| {
                 store
                     .get(n.vertex())
-                    .unwrap_or(Err(Error::not_found_error()))
+                    .unwrap_or_else(|| Err(Error::not_found_error()))
                     .map(|v| v.to_vec())
             })
             .collect::<Result<Vec<_>>>()?;
@@ -274,6 +287,41 @@ impl EdgeSetDistanceComputer {
             distance_fn,
             vectors,
         })
+    }
+
+    /// Produce an edge set computer from a list of unhydrated edges in a directed graph.
+    /// This will fetch the vector for each of the edge and compare it to the vertex vector.
+    /// Any missing vectors are dropped -- this may happen as deletes are not guaranteed to be
+    /// removed from the graph.
+    ///
+    /// Returns a list of neighbors with their distance relative to `vertex_vector` as well as a
+    /// computer.
+    pub(crate) fn from_directed_edges(
+        vertex_vector: &[u8],
+        store: &mut impl GraphVectorStore,
+        edges: &[i64],
+    ) -> Result<(Vec<Neighbor>, Self)> {
+        let distance_fn = store.new_distance_function();
+        let mut neighbors_and_vectors = Vec::with_capacity(edges.len());
+        for e in edges {
+            let Some(vector) = store.get(*e).transpose()? else {
+                continue;
+            };
+            neighbors_and_vectors.push((
+                Neighbor::new(*e, distance_fn.distance(vertex_vector, vector)),
+                vector.to_vec(),
+            ));
+        }
+        neighbors_and_vectors.sort_by_key(|t| t.0);
+
+        let (neighbors, vectors) = neighbors_and_vectors.into_iter().unzip();
+        Ok((
+            neighbors,
+            Self {
+                distance_fn,
+                vectors,
+            },
+        ))
     }
 
     pub fn distance(&self, i: usize, j: usize) -> f64 {
@@ -290,39 +338,26 @@ fn select_pruned_edges(
     edges: &[Neighbor],
     config: &EdgePruningConfig,
     edge_distance_computer: EdgeSetDistanceComputer,
-) -> BTreeSet<usize> {
+) -> Vec<usize> {
     if edges.is_empty() {
-        return BTreeSet::new();
+        return Vec::new();
     }
 
     debug_assert!(edges.is_sorted());
 
-    // TODO: replace with a fixed length bitset
-    let mut selected = BTreeSet::new();
-    selected.insert(0); // we always keep the first node.
-    let mut alpha = 1.0;
-    while alpha <= config.max_alpha {
-        for i in 1..edges.len() {
-            if selected.contains(&i)
-                || selected
-                    .iter()
-                    .take_while(|&&j| j < i)
-                    .any(|&j| edges[j].distance / edge_distance_computer.distance(i, j) > alpha)
-            {
-                continue;
-            }
-
-            selected.insert(i);
-            if selected.len() >= config.max_edges.get() {
-                break;
-            }
+    let mut selected = vec![0]; // we always keep the first node.
+    for (i, e) in edges.iter().enumerate().skip(1) {
+        if selected
+            .iter()
+            .any(|&j| e.distance / edge_distance_computer.distance(i, j) > config.alpha)
+        {
+            continue;
         }
 
+        selected.push(i);
         if selected.len() >= config.max_edges.get() {
             break;
         }
-
-        alpha *= config.alpha_scale;
     }
 
     selected

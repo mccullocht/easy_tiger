@@ -3,8 +3,8 @@
 A DiskANN/Vamana implementation using WiredTiger as the storage layer.
 
 The vector index is modeled as two tables parallel to an existing collection, where one table
-contains the raw float vector and graph edges and the other contains quantized vectors -- binary
-quantized vectors in our case. This structure should allow us to serve larger than memory indices
+contains the raw float vector and graph edges and the other contains quantized vectors (e.g. TLVQ
+or RaBitQ). This structure should allow us to serve larger than memory indices
 efficiently and with relatively low latency. See the [design](docs/design.md) for more details.
 
 This implementation will build the WiredTiger library and provides a crude Rust wrapper around

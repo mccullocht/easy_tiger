@@ -9,10 +9,10 @@ use std::{ffi::CString, io, sync::Arc};
 use rustix::io::Errno;
 use vectors::{F32VectorCoder, F32VectorCoding, VectorDistance, VectorSimilarity};
 use wt_mdb::{
+    Connection, Error, RecordCursorGuard, Result, Transaction,
     config::{ConfigItem, ConfigParser},
     connection::{CreateOptionsBuilder, DropOptions},
     session::{CommitTransactionOptions, RollbackTransactionOptions},
-    Connection, Error, RecordCursorGuard, Result, Transaction,
 };
 
 use crate::vamana::{Graph, GraphConfig, GraphVectorIndex, GraphVectorStore};
@@ -32,7 +32,7 @@ fn read_app_metadata_internal(txn: &Transaction, table_name: &str) -> Result<Str
     {
         Ok(app_metadata.to_owned())
     } else {
-        Err(Error::Errno(Errno::INVAL))
+        Err(Error::errno(Errno::INVAL))
     }
 }
 
@@ -65,15 +65,15 @@ impl Iterator for Leb128EdgeIterator<'_> {
 }
 
 /// Implementation of `Graph` that reads from a WiredTiger `RecordCursor`.
-pub struct CursorGraph<'a>(RecordCursorGuard<'a>);
+pub struct CursorGraph(RecordCursorGuard);
 
-impl<'a> CursorGraph<'a> {
-    pub fn new(cursor: RecordCursorGuard<'a>) -> Self {
+impl CursorGraph {
+    pub fn new(cursor: RecordCursorGuard) -> Self {
         Self(cursor)
     }
 }
 
-impl Graph for CursorGraph<'_> {
+impl Graph for CursorGraph {
     type EdgeIterator<'c>
         = Leb128EdgeIterator<'c>
     where
@@ -107,7 +107,7 @@ impl Graph for CursorGraph<'_> {
 
     fn remove_vertex(&mut self, vertex_id: i64) -> Result<Vec<i64>> {
         self.edges(vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))
+            .unwrap_or_else(|| Err(Error::not_found_error()))
             .map(|e| e.collect::<Vec<_>>())
             .and_then(|e| self.0.remove(vertex_id).map(|_| e))
     }
@@ -119,33 +119,40 @@ impl Graph for CursorGraph<'_> {
 }
 
 /// Implementation of NavVectorStore that reads from a WiredTiger `RecordCursor`.
-pub struct CursorVectorStore<'a> {
-    inner: RecordCursorGuard<'a>,
+pub struct CursorVectorStore {
+    inner: RecordCursorGuard,
     similarity: VectorSimilarity,
     format: F32VectorCoding,
+    centroid: Option<Arc<[f32]>>,
 }
 
-impl<'a> CursorVectorStore<'a> {
+impl CursorVectorStore {
     pub fn new(
-        inner: RecordCursorGuard<'a>,
+        inner: RecordCursorGuard,
         similarity: VectorSimilarity,
         format: F32VectorCoding,
+        centroid: Option<Arc<[f32]>>,
     ) -> Self {
         Self {
             inner,
             similarity,
             format,
+            centroid,
         }
     }
 }
 
-impl GraphVectorStore for CursorVectorStore<'_> {
+impl GraphVectorStore for CursorVectorStore {
     fn similarity(&self) -> VectorSimilarity {
         self.similarity
     }
 
     fn format(&self) -> F32VectorCoding {
         self.format
+    }
+
+    fn centroid(&self) -> Option<&[f32]> {
+        self.centroid.as_deref()
     }
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
@@ -160,7 +167,7 @@ impl GraphVectorStore for CursorVectorStore<'_> {
         let vector = self
             .inner
             .seek_exact(vertex_id)
-            .unwrap_or(Err(Error::not_found_error()))?;
+            .unwrap_or_else(|| Err(Error::not_found_error()))?;
         self.inner.remove(vertex_id).map(|()| vector)
     }
 }
@@ -170,6 +177,7 @@ pub struct GraphVectorTable {
     table_name: String,
     format: F32VectorCoding,
     similarity: VectorSimilarity,
+    centroid: Option<Arc<[f32]>>,
 }
 
 impl GraphVectorTable {
@@ -181,12 +189,16 @@ impl GraphVectorTable {
         self.format
     }
 
+    pub fn centroid(&self) -> Option<&[f32]> {
+        self.centroid.as_deref()
+    }
+
     pub fn new_coder(&self) -> Box<dyn F32VectorCoder> {
-        self.format.new_coder(self.similarity)
+        self.format.coder()
     }
 
     pub fn new_distance_function(&self) -> Box<dyn VectorDistance> {
-        self.format.new_vector_distance(self.similarity)
+        self.format.distance_symmetric(self.similarity)
     }
 }
 
@@ -228,19 +240,22 @@ impl TableGraphVectorIndex {
         rerank_table_name: String,
     ) -> io::Result<Self> {
         if config.index_search_params.num_rerank > 0 && config.rerank_format.is_none() {
-            return Err(Error::Errno(Errno::NOTSUP).into());
+            return Err(Error::errno(Errno::NOTSUP).into());
         }
+        let centroid: Option<Arc<[f32]>> = config.centroid.as_deref().map(Arc::from);
         Ok(Self {
             graph_table_name,
             nav_table: GraphVectorTable {
                 table_name: nav_table_name,
                 format: config.nav_format,
                 similarity: config.similarity,
+                centroid: centroid.clone(),
             },
             rerank_table: config.rerank_format.map(|f| GraphVectorTable {
                 table_name: rerank_table_name,
                 format: f,
                 similarity: config.similarity,
+                centroid: centroid.clone(),
             }),
             config,
         })
@@ -351,11 +366,11 @@ impl TransactionGraphVectorIndex {
 
 impl GraphVectorIndex for TransactionGraphVectorIndex {
     type Graph<'a>
-        = CursorGraph<'a>
+        = CursorGraph
     where
         Self: 'a;
     type VectorStore<'a>
-        = CursorVectorStore<'a>
+        = CursorVectorStore
     where
         Self: 'a;
 
@@ -371,19 +386,25 @@ impl GraphVectorIndex for TransactionGraphVectorIndex {
     }
 
     fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
+        let nav = self.index.nav_table();
         Ok(CursorVectorStore::new(
-            self.transaction
-                .open_record_cursor(self.index.nav_table().name())?,
+            self.transaction.open_record_cursor(nav.name())?,
             self.index.config.similarity,
-            self.index.config().nav_format,
+            nav.format(),
+            nav.centroid().map(Arc::from),
         ))
     }
 
     fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
         self.index.rerank_table().map(|t| {
-            self.transaction
-                .open_record_cursor(t.name())
-                .map(|c| CursorVectorStore::new(c, self.index.config().similarity, t.format()))
+            self.transaction.open_record_cursor(t.name()).map(|c| {
+                CursorVectorStore::new(
+                    c,
+                    self.index.config().similarity,
+                    t.format(),
+                    t.centroid().map(Arc::from),
+                )
+            })
         })
     }
 }

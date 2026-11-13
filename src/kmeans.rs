@@ -7,7 +7,7 @@ use rand::seq::index;
 use rand::{distr::weighted::WeightedIndex, prelude::*};
 use rayon::prelude::*;
 use tracing::warn;
-use vectors::{EuclideanDistance, F32VectorDistance};
+use vectors::{F32VectorDistance, float32::EuclideanDistance};
 
 use crate::input::{SubsetViewVectorStore, VecVectorStore, VectorStore};
 
@@ -155,7 +155,7 @@ mod bp {
 
     use rand::{distr::weighted::WeightedIndex, prelude::*};
     use rayon::prelude::*;
-    use vectors::{EuclideanDistance, F32VectorDistance};
+    use vectors::{F32VectorDistance, float32::EuclideanDistance};
 
     use crate::input::{VecVectorStore, VectorStore};
 
@@ -530,7 +530,7 @@ fn hkmeans_group(
             }
         };
 
-        for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors.into_iter()) {
+        for (centroid, subset) in iter_centroids.iter().zip(centroid_vectors) {
             if subset.len() <= *params.cluster_size.end() {
                 centroids.push(centroid);
                 progress(subset.len() as u64);

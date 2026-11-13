@@ -2,7 +2,7 @@ use std::{io, num::NonZero, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
-    spann::{IndexConfig, ReplicaSelectionAlgorithm, TableIndex},
+    spann::{IndexConfig, TableIndex},
     vamana::{
         GraphConfig, GraphSearchParams, PatienceParams, mutate::insert_vector,
         wt::TransactionGraphVectorIndex,
@@ -11,7 +11,7 @@ use easy_tiger::{
 use vectors::{F32VectorCoding, VectorSimilarity};
 use wt_mdb::{Connection, connection::DropOptionsBuilder};
 
-use crate::vamana::EdgePruningArgs;
+use crate::vamana::{EdgePruningArgs, EdgeTypeArg};
 
 #[derive(Args)]
 pub struct InitIndexArgs {
@@ -44,6 +44,10 @@ pub struct InitIndexArgs {
     #[command(flatten)]
     pruning: EdgePruningArgs,
 
+    /// Whether the head graph maintains directed or undirected edges.
+    #[arg(long, value_enum, default_value_t = EdgeTypeArg::Undirected)]
+    head_edge_type: EdgeTypeArg,
+
     /// Minimum number of vectors that should map to each head centroid.
     #[arg(long, default_value_t = 192)]
     head_min_centroid_len: usize,
@@ -53,7 +57,6 @@ pub struct InitIndexArgs {
     head_max_centroid_len: usize,
 
     /// Number of edge candidates when searching head table for centroid ids during insertion.
-    /// This should be at least as many as --replica-count
     #[arg(long)]
     head_edge_candidates: Option<usize>,
     /// Number of vectors to re-rank when searching head table for centroid ids during insertion.
@@ -73,21 +76,26 @@ pub struct InitIndexArgs {
     #[arg(long)]
     head_patience_saturation_count: Option<usize>,
 
-    /// Maximum number of replica centroids to assign each vector to.
-    #[arg(long, default_value_t = NonZero::new(1).unwrap())]
-    replica_count: NonZero<usize>,
-
-    /// Replica selection algorithm to use.
-    #[arg(long, default_value_t = ReplicaSelectionAlgorithm::SOAR)]
-    replica_selection: ReplicaSelectionAlgorithm,
-
     /// Quantizer to use for vectors written to centroid posting lists.
     #[arg(long)]
     posting_coder: F32VectorCoding,
 
-    /// Format to use for a rerank table. May be omitted.
+    /// Format to use for a rerank table.
     #[arg(long)]
-    rerank_format: Option<F32VectorCoding>,
+    rerank_format: F32VectorCoding,
+
+    /// If true, read rerank vectors during centroid splits to generate new centroids.
+    ///
+    /// Using higher fidelity vectors can result in much more accurate centroid generation that is
+    /// does a better job partitioning vectors and is less prone to split/merge repetition cycles.
+    /// It also costs more since we need perform a random read for each vector.
+    #[arg(long, default_value_t = false)]
+    split_rerank_vectors: bool,
+
+    /// If set, apply an orthogonal rotation seeded with this value to every vector on ingress
+    /// (both ingestion and search). Must remain fixed for the life of the index.
+    #[arg(long)]
+    rotation_seed: Option<u64>,
 
     /// If true, drop any WiredTiger tables with the same name before bulk upload.
     #[arg(long, default_value_t = false)]
@@ -127,14 +135,14 @@ pub fn init_index(
                 patience_count: c,
             }),
         },
+        centroid: None,
+        edge_type: args.head_edge_type.into(),
     };
     let beam_width = args
         .head_edge_candidates
         .map(|v| NonZero::new(v).unwrap())
         .unwrap_or(args.edge_candidates);
     let spann_config = IndexConfig {
-        replica_count: args.replica_count.get(),
-        replica_selection: args.replica_selection,
         min_centroid_len: args.head_min_centroid_len,
         max_centroid_len: args.head_max_centroid_len,
         head_search_params: GraphSearchParams {
@@ -147,6 +155,8 @@ pub fn init_index(
         },
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,
+        split_rerank_vectors: args.split_rerank_vectors,
+        rotation_seed: args.rotation_seed,
     };
     let index = Arc::new(TableIndex::init_index(
         &connection,
@@ -161,7 +171,7 @@ pub fn init_index(
     );
     // Insert a dummy vector into the head index to provide somewhere for the first insert to go.
     // This vector is not a good vector (particularly for angular distance metrics) but it will
-    // disappear as soon as we need to split the initial centroid.
+    // be replaced as soon as we need to split the initial centroid.
     insert_vector(&vec![0.0f32; args.dimensions.get()], &head_index)?;
     head_index.commit(None)?;
 

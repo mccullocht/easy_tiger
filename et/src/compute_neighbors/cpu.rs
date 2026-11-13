@@ -1,39 +1,42 @@
-use std::{
-    fs::File,
-    io::{self, BufWriter, Write},
-};
+use std::io;
 
 use easy_tiger::{
-    input::{DerefVectorStore, VectorStore},
     Neighbor,
+    input::{DerefVectorStore, VectorStore},
 };
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
+use vectors::f16;
 
 use crate::neighbor_util::TopNeighbors;
 
-use super::ComputeNeighborsArgs;
+use super::{ComputeNeighborsArgs, write_neighbors};
 
 pub fn run(args: &ComputeNeighborsArgs) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(&args.query_vectors)?)? },
-        args.dimensions,
-    )?;
+    let query_vectors: DerefVectorStore<f16, Mmap> =
+        DerefVectorStore::from_file(&args.query_vectors)?;
     let query_limit = args.query_limit.unwrap_or(query_vectors.len());
-    let doc_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(&args.doc_vectors)?)? },
-        args.dimensions,
-    )?;
+    let doc_vectors: DerefVectorStore<f16, Mmap> = DerefVectorStore::from_file(&args.doc_vectors)?;
     let doc_limit = args
         .doc_limit
         .unwrap_or(doc_vectors.len())
         .min(doc_vectors.len());
+    if query_vectors.elem_stride() != doc_vectors.elem_stride() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "query and doc vectors must have the same dimensionality ({} vs {})",
+                query_vectors.elem_stride(),
+                doc_vectors.elem_stride()
+            ),
+        ));
+    }
 
-    let distance_fn = args.similarity.new_distance_function();
-    let k = args.neighbors_len.get();
+    let distance_fn = args.similarity.distance_f16();
+    let top_k = super::top_k(args);
     let mut results = Vec::with_capacity(query_limit);
-    results.resize_with(query_limit, || TopNeighbors::new(args.neighbors_len.get()));
+    results.resize_with(query_limit, || TopNeighbors::new(top_k));
     (0..doc_limit)
         .into_par_iter()
         .progress_count(doc_limit as u64)
@@ -41,17 +44,10 @@ pub fn run(args: &ComputeNeighborsArgs) -> io::Result<()> {
             for q in 0..query_limit {
                 results[q].add(Neighbor::new(
                     d as i64,
-                    distance_fn.distance_f32(&query_vectors[q], &doc_vectors[d]),
+                    distance_fn.distance_f16(&query_vectors[q], &doc_vectors[d]),
                 ));
             }
         });
 
-    let mut writer = BufWriter::new(File::create(&args.neighbors)?);
-    for neighbors in results.into_iter().map(|r| r.into_neighbors()) {
-        for n in neighbors.into_iter().take(k) {
-            writer.write_all(&<[u8; 16]>::from(n))?;
-        }
-    }
-
-    Ok(())
+    write_neighbors(args, results)
 }

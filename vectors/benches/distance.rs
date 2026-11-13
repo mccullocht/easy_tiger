@@ -1,6 +1,6 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use half::f16;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use vectors::{F32VectorCoding, VectorSimilarity};
 
 const DIMENSIONS: usize = 2048;
@@ -29,10 +29,10 @@ pub fn float32_benchmarks(c: &mut Criterion) {
         bytes: (a.len() * std::mem::size_of::<f32>()) as u64,
     });
     for sim in VectorSimilarity::all() {
-        let coder = F32VectorCoding::F32.new_coder(sim);
+        let coder = F32VectorCoding::F32.coder();
         let x = coder.encode(&a);
         let y = coder.encode(&b);
-        let dist = F32VectorCoding::F32.new_vector_distance(sim);
+        let dist = F32VectorCoding::F32.distance_symmetric(sim);
         group.bench_function(sim.to_string(), |b| {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
         });
@@ -45,7 +45,7 @@ pub fn float32_benchmarks(c: &mut Criterion) {
         bytes: (a.len() * std::mem::size_of::<f32>() * BULK_VECTORS) as u64,
     });
     for sim in VectorSimilarity::all() {
-        let coder = F32VectorCoding::F32.new_coder(sim);
+        let coder = F32VectorCoding::F32.coder();
         let x = coder.encode(&a);
         let y = coder.encode(&b);
         let mut bulk_docs_storage = vec![];
@@ -55,7 +55,7 @@ pub fn float32_benchmarks(c: &mut Criterion) {
             .map(|x| x.as_slice())
             .collect::<Vec<_>>();
         let mut bulk_out = vec![0.0; BULK_VECTORS];
-        let dist = F32VectorCoding::F32.new_vector_distance(sim);
+        let dist = F32VectorCoding::F32.distance_symmetric(sim);
         group.bench_function(sim.to_string(), |b| {
             b.iter(|| {
                 std::hint::black_box({
@@ -77,15 +77,15 @@ pub fn float16_benchmarks(c: &mut Criterion) {
     });
 
     for sim in VectorSimilarity::all() {
-        let coder = F32VectorCoding::F16.new_coder(sim);
+        let coder = F32VectorCoding::F16.coder();
         let x = coder.encode(&a);
         let y = coder.encode(&b);
-        let dist = F32VectorCoding::F16.new_vector_distance(sim);
+        let dist = F32VectorCoding::F16.distance_symmetric(sim);
         group.bench_function(&format!("doc/{sim}"), |b| {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
         });
 
-        let query_dist = F32VectorCoding::F16.query_vector_distance_f32(&a, sim);
+        let query_dist = F32VectorCoding::F16.query_distance_asymmetric(sim, &a);
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| std::hint::black_box(query_dist.distance(&y)))
         });
@@ -99,7 +99,7 @@ pub fn float16_benchmarks(c: &mut Criterion) {
     });
 
     for sim in VectorSimilarity::all() {
-        let coder = F32VectorCoding::F16.new_coder(sim);
+        let coder = F32VectorCoding::F16.coder();
         let x = coder.encode(&a);
         let y = coder.encode(&b);
         let mut bulk_docs_storage = vec![];
@@ -110,7 +110,7 @@ pub fn float16_benchmarks(c: &mut Criterion) {
             .collect::<Vec<_>>();
         let mut bulk_out = vec![0.0; BULK_VECTORS];
 
-        let dist = F32VectorCoding::F16.new_vector_distance(sim);
+        let dist = F32VectorCoding::F16.distance_symmetric(sim);
         group.bench_function(&format!("doc/{sim}"), |b| {
             b.iter(|| {
                 std::hint::black_box({
@@ -120,7 +120,7 @@ pub fn float16_benchmarks(c: &mut Criterion) {
             })
         });
 
-        let query_dist = F32VectorCoding::F16.query_vector_distance_f32(&a, sim);
+        let query_dist = F32VectorCoding::F16.query_distance_asymmetric(sim, &a);
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| {
                 std::hint::black_box({
@@ -137,21 +137,18 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
     // scalar transform of a dot product to calculate distance. For these we only compute dot
     // product similarity since other types are unlikely to vary all that much.
     let encodings = [
-        F32VectorCoding::BinaryQuantized,
+        F32VectorCoding::RaBitQ,
+        F32VectorCoding::QuIVer,
         F32VectorCoding::TLVQ1,
         F32VectorCoding::TLVQ2,
         F32VectorCoding::TLVQ4,
         F32VectorCoding::TLVQ8,
-        F32VectorCoding::TLVQ1x8,
-        F32VectorCoding::TLVQ2x8,
-        F32VectorCoding::TLVQ4x8,
-        F32VectorCoding::TLVQ8x8,
     ];
     let sim = VectorSimilarity::Dot;
     let (a, b) = generate_test_vectors(DIMENSIONS);
 
     for encoding in encodings {
-        let coder = encoding.new_coder(sim);
+        let coder = encoding.coder();
         let x = coder.encode(&a);
         let y = coder.encode(&b);
 
@@ -160,12 +157,12 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
             elements: 1,
             bytes: x.len() as u64,
         });
-        let dist = encoding.new_vector_distance(sim);
+        let dist = encoding.distance_symmetric(sim);
         group.bench_function(&format!("doc/{sim}"), |b| {
             b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
         });
 
-        let query_dist = encoding.query_vector_distance_f32(&a, sim);
+        let query_dist = encoding.query_distance_asymmetric(sim, &a);
         group.bench_function(&format!("query/{sim}"), |b| {
             b.iter(|| std::hint::black_box(query_dist.distance(&y)))
         });

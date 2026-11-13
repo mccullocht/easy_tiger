@@ -1,21 +1,23 @@
-use std::{fs::File, io, num::NonZero, path::PathBuf};
+use std::{io, path::PathBuf};
 
 use crate::{neighbor_util::TopNeighbors, recall::RecallComputer, ui::progress_bar};
 use clap::Args;
 use easy_tiger::{
-    Neighbor,
     input::{DerefVectorStore, SubsetViewVectorStore, VecVectorStore, VectorStore},
     kmeans::{Params, kmeans},
 };
+use half::slice::HalfFloatSliceExt;
 use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rand::SeedableRng;
 use rayon::prelude::*;
-use vectors::{F32VectorCoding, VectorSimilarity};
+use tdigests::TDigest;
+use vectors::{F32VectorCoding, VectorSimilarity, f16, rotate::Rotator};
 
 #[derive(Args)]
-pub struct RecallArgs {
-    /// Little-endian f32 vectors as a flat file where each vector has --dimensions
+pub struct QuantizationRecallArgs {
+    /// Query vectors: f16 vectors in BigANN format (an 8 byte `<len,dim>` header followed by
+    /// little-endian f16 vector data).
     #[arg(long)]
     query_vectors: PathBuf,
     /// If set, only process this many input queries.
@@ -44,6 +46,13 @@ pub struct RecallArgs {
     #[arg(long, default_value_t = 1.0)]
     k_mult: f64,
 
+    /// Z-Score applied to error bounds.
+    ///
+    /// Higher values increase confidence that recall will be accurate at the cost of higher rerank
+    /// depth.
+    #[arg(long, default_value_t = 1.0)]
+    z_score: f64,
+
     /// Number of centers to compute and use.
     ///
     /// If 0, the data set will be uncentered.
@@ -63,26 +72,46 @@ pub struct RecallArgs {
     /// Use a fixed value for repeatability.
     #[arg(long, default_value_t = 0x7774_7370414E4E)]
     seed: u64,
+
+    /// If set, rotate all query and doc vectors using this seed before quantizing and/or
+    /// comparing distances.
+    #[arg(long)]
+    rotation_seed: Option<u64>,
 }
 
 pub fn recall(
-    args: RecallArgs,
-    doc_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    args: QuantizationRecallArgs,
+    doc_vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
-    let query_vectors: DerefVectorStore<f32, Mmap> = DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
-        NonZero::new(doc_vectors.elem_stride()).unwrap(),
-    )?;
+    let query_vectors: DerefVectorStore<f16, Mmap> =
+        DerefVectorStore::from_file(args.query_vectors)?;
+    if query_vectors.elem_stride() != doc_vectors.elem_stride() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "query and doc vectors must have the same dimensionality ({} vs {})",
+                query_vectors.elem_stride(),
+                doc_vectors.elem_stride()
+            ),
+        ));
+    }
     let query_limit = args
         .query_limit
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
 
-    let recall_computer = RecallComputer::from_args(args.recall, args.similarity)?.ok_or(
-        io::Error::new(io::ErrorKind::InvalidInput, "must provide recall args"),
-    )?;
+    let recall_computer = RecallComputer::from_args(args.recall)?.ok_or(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "must provide recall args",
+    ))?;
 
-    let centers = match args.centers {
+    let rotator = args
+        .rotation_seed
+        .map(|seed| Rotator::new(doc_vectors.elem_stride(), seed));
+
+    // Centers are computed over unrotated vectors and rotated afterward. Rotation is orthogonal so
+    // this is equivalent to computing centers over rotated vectors.
+    let mut centers = match args.centers {
         0 => None,
         1 => {
             let vectors = SubsetViewVectorStore::new(doc_vectors, (0..doc_vectors.len()).collect());
@@ -105,8 +134,15 @@ pub fn recall(
                 args.centers,
                 sample_vectors.len()
             );
+            let mut widened_sample =
+                VecVectorStore::with_capacity(doc_vectors.elem_stride(), sample_vectors.len());
+            let mut buf = vec![0.0f32; doc_vectors.elem_stride()];
+            for v in sample_vectors.iter() {
+                v.convert_to_f32_slice(&mut buf);
+                widened_sample.push(&buf);
+            }
             let centers = kmeans(
-                &sample_vectors,
+                &widened_sample,
                 args.centers,
                 &Params {
                     iters: 100,
@@ -118,44 +154,33 @@ pub fn recall(
             Some(centers.unwrap_or_else(|e| e))
         }
     };
+    if let (Some(r), Some(cs)) = (rotator.as_ref(), centers.as_mut()) {
+        for c in cs.iter_mut() {
+            r.rotate(c);
+        }
+    }
 
-    let coder = args
-        .format
-        .coder(args.similarity, doc_vectors.elem_stride());
+    let coder = args.format.coder();
+    let num_centers = centers.as_ref().map_or(1, |cs| cs.len());
+
     let query_scorers = (0..query_limit)
         .into_par_iter()
-        .map(|i| match centers.as_ref() {
-            None => {
-                let qdist = if args.quantize_query {
-                    args.format.query_vector_distance_indexing(
-                        coder.encode(&query_vectors[i]),
-                        args.similarity,
-                    )
-                } else {
-                    args.format
-                        .query_vector_distance_f32(query_vectors[i].to_vec(), args.similarity)
-                };
-                vec![qdist]
-            }
-            Some(centers) => centers
-                .iter()
-                .map(|c| {
-                    let centered = query_vectors[i]
-                        .iter()
-                        .zip(c.iter())
-                        .map(|(q, c)| q - c)
-                        .collect::<Vec<_>>();
+        .map(|i| {
+            let query =
+                vectors::prepare_vector_from_f16(&query_vectors[i], rotator.as_ref(), false, None);
+            (0..num_centers)
+                .map(|ci| {
+                    let center = centers.as_ref().map(|cs| cs[ci].as_ref());
+                    let query = vectors::prepare_vector(&query, None, false, center);
                     if args.quantize_query {
-                        args.format.query_vector_distance_indexing(
-                            coder.encode(&centered),
-                            args.similarity,
-                        )
+                        args.format
+                            .query_distance_symmetric(args.similarity, coder.encode(&query))
                     } else {
                         args.format
-                            .query_vector_distance_f32(centered, args.similarity)
+                            .query_distance_asymmetric(args.similarity, query)
                     }
                 })
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
 
@@ -163,51 +188,44 @@ pub fn recall(
     let result_len = (k as f64 * args.k_mult) as usize;
     let mut query_k = Vec::with_capacity(query_limit);
     query_k.resize_with(query_limit, || TopNeighbors::new(result_len));
-    let (total_scored, total_competitive) = (0..doc_vectors.len())
+    (0..doc_vectors.len())
         .into_par_iter()
         .progress_with(progress_bar(doc_vectors.len(), "scoring"))
-        .map(|d| {
-            let center = select_center_for_doc(&doc_vectors[d], centers.as_ref(), args.similarity);
-            let doc = if let Some(centers) = centers.as_ref() {
-                coder.encode(
-                    &doc_vectors[d]
-                        .iter()
-                        .zip(centers[center].iter())
-                        .map(|(d, c)| d - c)
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                coder.encode(&doc_vectors[d])
-            };
-            let mut total_scored = 0;
-            let mut total_competitive = 0;
+        .for_each(|d| {
+            let doc_f32 =
+                vectors::prepare_vector_from_f16(&doc_vectors[d], rotator.as_ref(), false, None);
+            let center_idx = select_center_for_doc(&doc_f32, centers.as_ref(), args.similarity);
+            let center = centers.as_ref().map(|cs| cs[center_idx].as_ref());
+            let doc = coder.encode(&vectors::prepare_vector(&doc_f32, None, false, center));
             for (q, s) in query_scorers.iter().enumerate() {
-                let max_distance = query_k[q].max_distance();
-                if let Some(distance) = s[center].distance_with_bound(&doc, max_distance) {
-                    query_k[q].add(Neighbor::new(d as i64, distance));
-                    total_competitive += 1;
-                }
-                total_scored += 1;
+                let mut estimate = s[center_idx].estimated_distance(&doc);
+                estimate.error *= args.z_score;
+                query_k[q].add_estimate(d as i64, estimate);
             }
-            (total_scored, total_competitive)
-        })
-        .reduce(|| (0usize, 0usize), |a, b| (a.0 + b.0, a.1 + b.1));
+        });
 
-    let sum_recall = query_k
+    let mut depth = Vec::with_capacity(query_k.len());
+    let recall_values = query_k
         .into_iter()
         .enumerate()
-        .map(|(i, r)| recall_computer.compute_recall(i, &r.into_neighbors()))
-        .sum::<f64>();
+        .map(|(i, r)| {
+            let mut results = r.into_neighbors();
+            depth.push(results.len() as f64);
+            results.truncate(k);
+            recall_computer.compute_recall(i, &results)
+        })
+        .collect::<Vec<_>>();
+    println!("{}", recall_computer.summarize(&recall_values));
+    let mean_depth = depth.iter().copied().sum::<f64>() / depth.len() as f64;
+    let digest = TDigest::from_values(depth);
     println!(
-        "{}: {:.6}",
-        recall_computer.label(),
-        sum_recall / query_limit as f64
-    );
-    println!(
-        "scored: {} competitive: {} ratio: {:.6}",
-        total_scored,
-        total_competitive,
-        total_competitive as f64 / total_scored as f64
+        "Queue depth mean {mean_depth:<6.1} p50 {:<6.1} p75 {:<6.1} p90 {:<6.1} p95 {:<6.1} p99 {:<6.1} p99.9 {:<6.1}",
+        digest.estimate_quantile(0.5),
+        digest.estimate_quantile(0.75),
+        digest.estimate_quantile(0.9),
+        digest.estimate_quantile(0.95),
+        digest.estimate_quantile(0.99),
+        digest.estimate_quantile(0.999)
     );
 
     Ok(())
@@ -222,7 +240,7 @@ fn select_center_for_doc(
         if centers.len() == 1 {
             0
         } else {
-            let dist = similarity.new_distance_function();
+            let dist = similarity.distance_f32();
             centers
                 .iter()
                 .enumerate()

@@ -1,41 +1,41 @@
-use std::{collections::HashSet, fs::File, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, io, num::NonZero, ops::Range, path::PathBuf, sync::Arc};
 
 use clap::Args;
 use easy_tiger::{
+    Neighbor,
     input::{DerefVectorStore, VectorStore},
     spann::{
-        CentroidAssignment, PostingKey, TableIndex, TransactionIndex,
+        CentroidAssignment, TableIndex, TransactionIndex,
         centroid_stats::{CentroidAssignmentUpdater, CentroidStats},
-        rebalance::{BalanceSummary, RebalanceStats, merge_centroid, split_centroid},
+        postings::BlockPostingsMut,
+        rebalance::{BalanceSummary, RebalanceStats},
     },
-    vamana::search::GraphSearcher,
+    vamana::search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions},
 };
 use indicatif::{ParallelProgressIterator, ProgressBar};
-use rand::{Rng, SeedableRng};
-use rand_xoshiro::Xoshiro256PlusPlus;
+use rand::SeedableRng;
 use rayon::prelude::*;
-use vectors::F32VectorCoder;
-use wt_mdb::{
-    Connection, Result,
-    session::{BeginTransactionOptions, CommitTransactionOptions, Formatted},
-    timestamp::{MontonicTimestampClock, TimestampClock},
-};
+use vectors::{F32VectorCoder, f16};
+use wt_mdb::{Connection, Error, Result};
 
-use crate::ui::progress_bar;
+use crate::{ui::progress_bar, wt_stats::WiredTigerWriteStats};
 
 #[derive(Args)]
 pub struct InsertVectorsArgs {
-    /// Path to the input vectors to insert.
+    /// Path to the input vectors to insert, in BigANN format: an 8 byte `<len,dim>` header
+    /// followed by little-endian f16 vector data.
     #[arg(short, long)]
-    f32_vectors: PathBuf,
+    vectors: PathBuf,
 
     /// Index of the first vector to insert.
     #[arg(long, default_value_t = 0)]
     start: usize,
 
     /// Number of vectors to insert.
+    ///
+    /// If unspecified, all vectors in the input file (from `start`) are inserted.
     #[arg(short, long)]
-    count: NonZero<usize>,
+    count: Option<NonZero<usize>>,
 
     /// Number of vectors to insert in each transaction batch.
     #[arg(long, default_value_t = NonZero::new(256).unwrap())]
@@ -55,88 +55,183 @@ pub fn insert_vectors(
     let index = Arc::new(TableIndex::from_db(&connection, index_name)?);
 
     // Map the input vectors.
-    let f32_vectors = DerefVectorStore::new(
-        unsafe { memmap2::Mmap::map(&File::open(args.f32_vectors)?)? },
-        index.head_config().config().dimensions,
-    )?;
+    let vectors: DerefVectorStore<f16, _> = DerefVectorStore::from_file(args.vectors)?;
+    let index_dimensions = index.head_config().config().dimensions.get();
+    if vectors.elem_stride() != index_dimensions {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "input vectors have dimensionality {} but index expects {}",
+                vectors.elem_stride(),
+                index_dimensions
+            ),
+        ));
+    }
     // Advise random access since we might be jumping around (though sequentially in patches).
     // Actually, we are iterating sequentially, so Sequential is probably better for the main loop,
     // but the `SubsetView` might complicate things if we use it.
     // For now, let's stick with simple iteration.
-    f32_vectors.data().advise(memmap2::Advice::Sequential)?;
+    vectors.data().advise(memmap2::Advice::Sequential)?;
 
-    let end = args.start + args.count.get();
-    if end > f32_vectors.len() {
+    let count = args
+        .count
+        .map(NonZero::get)
+        .unwrap_or_else(|| vectors.len().saturating_sub(args.start));
+    let end = args.start + count;
+    if end > vectors.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
                 "requested range {}..{} exceeds vector file length {}",
                 args.start,
                 end,
-                f32_vectors.len()
+                vectors.len()
             ),
         ));
     }
 
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(args.seed);
-
     let posting_format = index.config().posting_coder;
-    let similarity = index.head_config().config().similarity;
-    let posting_coder = posting_format.new_coder(similarity);
-    let rerank_coder = index
-        .config()
-        .rerank_format
-        .map(|f| f.new_coder(similarity));
+    let posting_coder = posting_format.coder();
+    let rerank_coder = index.config().rerank_format.coder();
 
     let batch_size = args.batch_size.get();
-    let main_progress = progress_bar(args.count.get(), "inserting vectors");
+    let main_progress = progress_bar(count, "inserting vectors");
 
-    let timestamp = MontonicTimestampClock::try_from(connection.as_ref())?;
-    let mut rebalance_stats = RebalanceStats::default();
+    let wt_stats_before = WiredTigerWriteStats::try_from(&connection)?;
+
     let mut batches: usize = 0;
     let mut total_batch_unique_centroids: usize = 0;
-    // Advance timestamps every ~4k vectors to keep checkpoint sizes manageable.
-    let ts_interval = 4096 / batch_size * batch_size;
+    let mut rebalance_stats = RebalanceStats::default();
+    let mut rebalance_iters = 0;
+    let mut search_stats = GraphSearchStats::default();
+    let mut insert_time = std::time::Duration::ZERO;
+    let mut rebalance_time = std::time::Duration::ZERO;
+    let mut prepare_time = std::time::Duration::ZERO;
+    let mut apply_time = std::time::Duration::ZERO;
 
     for batch_start in (args.start..end).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(end);
 
-        total_batch_unique_centroids += insert_batch(
+        let insert_start = std::time::Instant::now();
+        let batch_result = insert_batch(
             &index,
             &connection,
-            &timestamp,
-            &f32_vectors,
+            &vectors,
             batch_start..batch_end,
             posting_coder.as_ref(),
-            rerank_coder.as_ref().map(|c| c.as_ref()),
+            rerank_coder.as_ref(),
             &main_progress,
         )?;
+        insert_time += insert_start.elapsed();
+        total_batch_unique_centroids += batch_result.unique_centroids;
+        search_stats += batch_result.search_stats;
+        prepare_time += batch_result.prepare_time;
+        apply_time += batch_result.apply_time;
         batches += 1;
 
-        rebalance_stats += rebalance(&index, &connection, &timestamp, &mut rng, &main_progress)?;
-
-        // Periodically advance global timestamps to reduce checkpoint size and cache pressure.
-        if batch_end % ts_interval == 0 {
-            let ts = timestamp.current();
-            connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Stable, ts)?;
-            connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Oldest, ts)?;
-        }
+        main_progress.set_message("rebalancing index");
+        let rebalance_start = std::time::Instant::now();
+        let (s, iters) = rebalance(&index, &connection, args.seed)?;
+        rebalance_time += rebalance_start.elapsed();
+        rebalance_stats += s;
+        rebalance_iters += iters;
+        main_progress.set_message("inserting vectors");
     }
 
-    let ts = timestamp.current();
-    connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Stable, ts)?;
-    connection.set_timestamp(wt_mdb::connection::SetGlobalTimestampType::Oldest, ts)?;
-
-    main_progress.set_message("inserting vectors");
     main_progress.finish();
-
+    let queries = count as f64;
+    let total_time = insert_time + rebalance_time;
+    println!("Wall time:");
+    println!(
+        "  Insert:           {:10.2} s ({:5.1}%)",
+        insert_time.as_secs_f64(),
+        if total_time.is_zero() {
+            0.0
+        } else {
+            insert_time.as_secs_f64() / total_time.as_secs_f64() * 100.0
+        }
+    );
+    println!(
+        "    Prepare:        {:10.2} s ({:5.1}%)",
+        prepare_time.as_secs_f64(),
+        if total_time.is_zero() {
+            0.0
+        } else {
+            prepare_time.as_secs_f64() / total_time.as_secs_f64() * 100.0
+        }
+    );
+    println!(
+        "    Apply:          {:10.2} s ({:5.1}%)",
+        apply_time.as_secs_f64(),
+        if total_time.is_zero() {
+            0.0
+        } else {
+            apply_time.as_secs_f64() / total_time.as_secs_f64() * 100.0
+        }
+    );
+    println!(
+        "  Rebalance:        {:10.2} s ({:5.1}%)",
+        rebalance_time.as_secs_f64(),
+        if total_time.is_zero() {
+            0.0
+        } else {
+            rebalance_time.as_secs_f64() / total_time.as_secs_f64() * 100.0
+        }
+    );
+    let pd = rebalance_stats.phase_durations;
+    let phase = |label: &str, d: std::time::Duration| {
+        println!(
+            "    {:<16}{:10.2} s ({:5.1}%)",
+            label,
+            d.as_secs_f64(),
+            if total_time.is_zero() {
+                0.0
+            } else {
+                d.as_secs_f64() / total_time.as_secs_f64() * 100.0
+            }
+        );
+    };
+    phase("Partition:", pd.split_update_head);
+    phase("Insert:", pd.insert_split_centroids);
+    phase("Reassign:", pd.posting_reassignments);
+    phase("Apply Reassign:", pd.apply_posting_reassignments);
+    phase("Remove:", pd.remove_merge_sources);
+    phase("Nearby Find:", pd.select_nearby_centroids);
+    phase("Nearby Select:", pd.compute_nearby_reassignments);
+    phase("Nearby Apply:", pd.apply_nearby_reassignments);
     println!("Batches:        {:10}", batches);
     if batches > 0 {
         println!(
-            "  Avg Unique:        {:10.1}",
+            "  Avg Unique:   {:10.1}",
             total_batch_unique_centroids as f64 / batches as f64
         );
+        println!(
+            "  Avg Balance:  {:10.1}",
+            rebalance_iters as f64 / batches as f64
+        );
     }
+    println!("Insert Search:");
+    println!("  Total:        {:10}", queries);
+    println!(
+        "  Candidates:   {:10.1}",
+        search_stats.candidates as f64 / queries
+    );
+    println!(
+        "  Cand added:   {:10.1}",
+        search_stats.candidates_added as f64 / queries
+    );
+    println!(
+        "  Visited:      {:10.1}",
+        search_stats.visited as f64 / queries
+    );
+    println!(
+        "  Filtered:     {:10.1}",
+        search_stats.filtered as f64 / queries
+    );
+    println!(
+        "  Skipped:      {:10.1}",
+        search_stats.skipped as f64 / queries
+    );
     println!("Merged:         {:10}", rebalance_stats.merged);
     if rebalance_stats.merged > 0 {
         println!(
@@ -158,10 +253,6 @@ pub fn insert_vectors(
             "  Searches:     {:10}",
             rebalance_stats.split_stats.searches
         );
-        println!(
-            "  Avg unique:   {:10.1}",
-            rebalance_stats.split_stats.unique_centroids as f64 / rebalance_stats.split as f64
-        );
         println!("Nearby:");
         println!(
             "  Seen:         {:10}",
@@ -172,23 +263,120 @@ pub fn insert_vectors(
             rebalance_stats.split_stats.nearby_moved
         );
     }
+    let rebalance_searches =
+        (rebalance_stats.merge_stats.moved_vectors + rebalance_stats.split_stats.searches) as f64;
+    if rebalance_searches > 0.0 {
+        let s = rebalance_stats.search_stats;
+        println!("Rebalance Search:");
+        println!("  Total:        {:10}", rebalance_searches);
+        println!(
+            "  Candidates:   {:10.1}",
+            s.candidates as f64 / rebalance_searches
+        );
+        println!(
+            "  Cand added:   {:10.1}",
+            s.candidates_added as f64 / rebalance_searches
+        );
+        println!(
+            "  Visited:      {:10.1}",
+            s.visited as f64 / rebalance_searches
+        );
+        println!(
+            "  Filtered:     {:10.1}",
+            s.filtered as f64 / rebalance_searches
+        );
+        println!(
+            "  Skipped:      {:10.1}",
+            s.skipped as f64 / rebalance_searches
+        );
+    }
+
+    let wt_stats = WiredTigerWriteStats::try_from(&connection)? - wt_stats_before;
+    println!("WiredTiger Stats");
+    println!("  Log:          {:10} MB", wt_stats.log_bytes / (1 << 20));
+    println!("  Data:         {:10} MB", wt_stats.data_bytes / (1 << 20));
+    println!(
+        "  Insert:       {:10} MB",
+        wt_stats.insert_bytes / (1 << 20)
+    );
+    println!(
+        "  Update:       {:10} MB",
+        wt_stats.update_bytes / (1 << 20)
+    );
+    println!(
+        "  Remove:       {:10} MB",
+        wt_stats.remove_bytes / (1 << 20)
+    );
+    println!(
+        "  Modify in:    {:10} MB",
+        wt_stats.modify_bytes / (1 << 20)
+    );
+    println!(
+        "  Modify out:   {:10} MB",
+        wt_stats.modify_bytes_touch / (1 << 20)
+    );
+    println!("  CC conflict:  {:10}", wt_stats.txn_update_conflicts);
 
     Ok(())
+}
+
+/// A single insert
+#[derive(Debug, Clone)]
+struct InsertRecord {
+    record_id: i64,
+    assignment: CentroidAssignment,
+    posting_vector: Vec<u8>,
+    rerank_vector: Vec<u8>,
+    stats: GraphSearchStats,
+}
+
+/// Batch of vectors for insertion complete with encoded vectors and assignments.
+#[derive(Debug, Default, Clone)]
+struct PreparedInsertBatch {
+    postings: HashMap<CentroidAssignment, Vec<InsertRecord>>,
+    stats: GraphSearchStats,
+}
+
+impl PreparedInsertBatch {
+    fn add(&mut self, record: InsertRecord) {
+        self.stats += record.stats;
+        self.postings
+            .entry(record.assignment)
+            .or_default()
+            .push(record);
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.stats += other.stats;
+        for (c, p) in other.postings {
+            self.postings.entry(c).or_default().extend(p.into_iter())
+        }
+    }
+}
+
+/// Result of inserting a single batch of vectors.
+struct InsertBatchResult {
+    unique_centroids: usize,
+    search_stats: GraphSearchStats,
+    /// Time spent producing the prepared batch (search + encoding).
+    prepare_time: std::time::Duration,
+    /// Time spent applying the prepared batch to the index.
+    apply_time: std::time::Duration,
 }
 
 fn insert_batch(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
-    timestamp: &impl TimestampClock,
-    f32_vectors: &(impl VectorStore<Elem = f32> + Send + Sync),
+    vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
     batch: Range<usize>,
     posting_coder: &dyn F32VectorCoder,
-    rerank_coder: Option<&dyn F32VectorCoder>,
+    rerank_coder: &dyn F32VectorCoder,
     progress: &ProgressBar,
-) -> Result<usize> {
+) -> Result<InsertBatchResult> {
     progress.set_message("inserting vectors");
 
-    let vector_state = batch
+    let prepare_start = std::time::Instant::now();
+    let mut prepared_batch = batch
         .clone()
         .into_par_iter()
         .progress_with(progress.clone())
@@ -197,130 +385,133 @@ fn insert_batch(
                 let txn_idx = TransactionIndex::new(
                     index,
                     connection
-                        .begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(
-                            timestamp.current(),
-                        )))
+                        .begin_transaction(None)
                         .expect("begin transaction"),
                 );
-                let searcher = GraphSearcher::new(index.config().head_search_params);
-                (txn_idx, searcher)
+                let params = index.config().head_search_params;
+                let result_scratch: Vec<Neighbor> = Vec::with_capacity(params.beam_width.get());
+                let searcher = GraphSearcher::new(params);
+                (txn_idx, searcher, result_scratch)
             },
-            |(txn_idx, searcher), i| {
-                let vector = &f32_vectors[i];
+            |(txn_idx, searcher, result_scratch), i| {
+                // Apply the configured ingress rotation before searching the head and encoding
+                // the posting/rerank vectors so stored vectors and queries share a space.
+                let vector: Vec<f32> = vectors::prepare_vector_from_f16(
+                    &vectors[i],
+                    index.rotator(),
+                    index.head_config().config().similarity.angular(),
+                    None,
+                );
+                let vector: &[f32] = &vector;
 
                 // Search for centroid
-                let candidates = searcher.search(vector, txn_idx.head())?;
+                let (mut candidates, _) = searcher.search_with_options(
+                    vector,
+                    GraphSearchOptions::default()
+                        .with_result_scratch(std::mem::take(result_scratch)),
+                    txn_idx.head(),
+                )?;
                 assert!(!candidates.is_empty());
-
-                // TODO: implement replica selection
                 let centroid_id = candidates[0].vertex() as u32;
-                Ok((
-                    i,
-                    CentroidAssignment::new(centroid_id, &[]),
-                    posting_coder.encode(vector),
-                    rerank_coder.map(|c| c.encode(vector)),
-                ))
+                std::mem::swap(result_scratch, &mut candidates); // return scratch
+
+                Ok::<_, Error>(InsertRecord {
+                    record_id: i as i64,
+                    assignment: CentroidAssignment::new(centroid_id),
+                    posting_vector: posting_coder.encode(vector),
+                    rerank_vector: rerank_coder.encode(vector),
+                    stats: searcher.stats(),
+                })
             },
         )
-        .collect::<Result<Vec<_>>>()?;
-
-    let unique_centroids = vector_state
-        .iter()
-        .filter_map(|(_, a, _, _)| a.iter().next().map(|(_, id)| id))
-        .collect::<HashSet<_>>()
-        .len();
-
-    let txn_idx = TransactionIndex::new(
-        index,
-        connection.begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(
-            timestamp.current(),
-        )))?,
-    );
-    progress.set_message("writing postings");
-    let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
-    let mut posting_cursor = txn_idx
-        .transaction()
-        .open_cursor::<PostingKey, Vec<u8>>(index.postings_table_name())?;
-    let mut rerank_cursor = if rerank_coder.is_some() {
-        Some(
-            txn_idx
-                .transaction()
-                .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?,
+        .try_fold(
+            || PreparedInsertBatch::default(),
+            |mut b, r| {
+                b.add(r?);
+                Ok::<_, Error>(b)
+            },
         )
-    } else {
-        None
-    };
+        .try_reduce(
+            || PreparedInsertBatch::default(),
+            |mut a, b| {
+                a.merge(b);
+                Ok(a)
+            },
+        )?;
 
-    for (i, assignment, posting_vector, rerank_vector) in vector_state.into_iter() {
-        assignment_updater.insert(i as i64, assignment.to_formatted_ref())?;
+    let prepare_time = prepare_start.elapsed();
 
-        for (_, centroid_id) in assignment.iter() {
-            let key = PostingKey {
-                centroid_id,
-                record_id: i as i64,
-            };
-            posting_cursor.set(key, &posting_vector)?;
-        }
+    let unique_centroids = prepared_batch.postings.len();
+    let search_stats = prepared_batch.stats;
 
-        if let Some((cursor, vector)) = rerank_cursor.as_mut().zip(rerank_vector) {
-            cursor.set(i as i64, &vector)?;
-        }
-    }
+    let apply_start = std::time::Instant::now();
+    std::mem::take(&mut prepared_batch.postings)
+        .into_par_iter()
+        .try_for_each(|(centroid, postings)| {
+            let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
+            let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
+            let mut postings_mut = BlockPostingsMut::new(
+                txn_idx
+                    .transaction()
+                    .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?,
+                index.posting_vector_len(),
+            );
+            let mut rerank_cursor = txn_idx
+                .transaction()
+                .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?;
 
-    assignment_updater.flush()?;
-    drop(assignment_updater);
-    drop(posting_cursor);
-    drop(rerank_cursor);
-    txn_idx.commit(Some(CommitTransactionOptions::with_commit_timestamp(
-        timestamp.next(),
-    )))?;
-    Ok(unique_centroids)
+            for r in postings {
+                assignment_updater.insert(r.record_id, centroid)?;
+                postings_mut.insert(centroid.primary_id, r.record_id, &r.posting_vector)?;
+                rerank_cursor.set(r.record_id, &r.rerank_vector)?;
+            }
+
+            postings_mut.flush()?;
+            assignment_updater.flush()?;
+            drop(assignment_updater);
+            drop(postings_mut);
+            drop(rerank_cursor);
+
+            txn_idx.commit(None)
+        })?;
+    let apply_time = apply_start.elapsed();
+
+    Ok(InsertBatchResult {
+        unique_centroids,
+        search_stats,
+        prepare_time,
+        apply_time,
+    })
 }
 
 fn rebalance(
     index: &Arc<TableIndex>,
     connection: &Arc<Connection>,
-    timestamp: &impl TimestampClock,
-    rng: &mut impl Rng,
-    progress: &ProgressBar,
-) -> Result<RebalanceStats> {
-    let mut iter = 1;
+    rng_seed: u64,
+) -> Result<(RebalanceStats, usize)> {
     let mut rebalance_stats = RebalanceStats::default();
+    let mut iters = 0;
     loop {
         // Need a new transaction for rebalancing steps
-        let txn_idx = TransactionIndex::new(
-            index,
-            connection.begin_transaction(Some(BeginTransactionOptions::with_read_timestamp(
-                timestamp.current(),
-            )))?,
-        );
+        let txn_idx = TransactionIndex::new(index, connection.begin_transaction(None)?);
 
         let stats = CentroidStats::from_index_stats(&txn_idx)?;
         let summary = BalanceSummary::new(&stats, index.config().centroid_len_range());
 
-        match (summary.below_exemplar(), summary.above_exemplar()) {
-            (Some((to_merge, len)), _) if summary.total_clusters() > 1 => {
-                progress.set_message(format!("merge {to_merge} of {len} ({iter})"));
-                rebalance_stats += merge_centroid(&txn_idx, to_merge, len)?;
-            }
-            (_, Some((to_split, len))) => {
-                progress.set_message(format!("split {to_split} of {len} ({iter})"));
-                // TODO: split_centroid should allow splitting into multiple centroids.
-                // This requires allocating an arbitrary number of ids and accommodating these
-                // additional ids in the split of the centroid and updating of nearby centroids.
-                let mut it = stats.available_centroid_ids();
-                let target_centroid_ids = (it.next().unwrap(), it.next().unwrap());
-                rebalance_stats +=
-                    split_centroid(&txn_idx, to_split, target_centroid_ids, len, rng)?;
-            }
-            _ => break,
+        if summary
+            .below_exemplar()
+            .or(summary.above_exemplar())
+            .is_some()
+        {
+            rebalance_stats +=
+                easy_tiger::spann::rebalance::parallel_rebalance(connection, index, &|| {
+                    rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(rng_seed)
+                })?;
+            iters += 1;
+        } else {
+            break;
         }
-
-        txn_idx.commit(Some(CommitTransactionOptions::with_commit_timestamp(
-            timestamp.next(),
-        )))?;
-        iter += 1;
     }
 
-    Ok(rebalance_stats)
+    Ok((rebalance_stats, iters))
 }

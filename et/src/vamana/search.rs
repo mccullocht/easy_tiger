@@ -1,5 +1,4 @@
 use std::{
-    fs::File,
     io::{self},
     num::NonZero,
     ops::Add,
@@ -13,11 +12,13 @@ use easy_tiger::{
     input::{DerefVectorStore, VectorStore},
     vamana::{
         GraphSearchParams, PatienceParams,
-        search::{GraphSearchStats, GraphSearcher},
+        search::{GraphSearchStats, GraphSearcher, Options as GraphSearchOptions, VertexIdTrace},
         wt::{TableGraphVectorIndex, TransactionGraphVectorIndex},
     },
 };
-use memmap2::Mmap;
+use serde::Serialize;
+use tracing::warn;
+use vectors::f16;
 use wt_mdb::Connection;
 
 use crate::{
@@ -28,7 +29,8 @@ use crate::{
 
 #[derive(Args)]
 pub struct SearchArgs {
-    /// Path to numpy formatted little-endian float vectors.
+    /// Path to f16 query vectors in BigANN format: an 8 byte `<len,dim>` header followed by
+    /// little-endian f16 vector data.
     #[arg(short, long)]
     query_vectors: PathBuf,
     /// Number candidates in the search list.
@@ -61,18 +63,40 @@ pub struct SearchArgs {
     #[command(flatten)]
     recall: RecallArgs,
 
+    /// Trace the search for the golden neighbors of each query, writing one JSON object per
+    /// query to stdout. Requires --neighbors and --recall-k to be set; the top --recall-k
+    /// neighbors from the golden file are used as the traced vectors.
+    #[arg(long)]
+    trace: bool,
+
     #[arg(long, default_value = "1")]
     warmup_iters: usize,
     #[arg(long, default_value = "2")]
     test_iters: usize,
 }
 
+/// A single query's search trace, packaged for output.
+#[derive(Serialize)]
+struct QueryTrace {
+    query_index: usize,
+    recall: Option<f64>,
+    stats: GraphSearchStats,
+    traces: Vec<VertexIdTrace>,
+}
+
 pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -> io::Result<()> {
     let index = Arc::new(TableGraphVectorIndex::from_db(&connection, index_name)?);
-    let query_vectors = easy_tiger::input::DerefVectorStore::new(
-        unsafe { Mmap::map(&File::open(args.query_vectors)?)? },
-        index.config().dimensions,
-    )?;
+    let query_vectors: DerefVectorStore<f16, _> = DerefVectorStore::from_file(args.query_vectors)?;
+    if query_vectors.elem_stride() != index.config().dimensions.get() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "query vectors have {} dimensions but index expects {}",
+                query_vectors.elem_stride(),
+                index.config().dimensions.get()
+            ),
+        ));
+    }
     let limit = std::cmp::min(
         query_vectors.len(),
         args.limit.unwrap_or(query_vectors.len()),
@@ -87,9 +111,9 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
         num_rerank: args.rerank_budget.unwrap_or_else(|| args.candidates.get()),
         patience,
     };
-    let recall_computer = RecallComputer::from_args(args.recall, index.config().similarity)?;
+    let recall_computer = RecallComputer::from_args(args.recall)?;
     if let Some(computer) = recall_computer.as_ref() {
-        if computer.neighbors_len() != query_vectors.len() {
+        if computer.neighbors_len() < limit {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -100,6 +124,12 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             ));
         }
     }
+    let trace = if args.trace && recall_computer.is_none() {
+        warn!("--trace has no effect without --neighbors and --recall-k");
+        false
+    } else {
+        args.trace
+    };
 
     if args.warmup_iters > 0 {
         search_phase(
@@ -112,6 +142,7 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             &connection,
             search_params,
             recall_computer.as_ref(),
+            false,
         )?;
     }
 
@@ -126,7 +157,12 @@ pub fn search(connection: Arc<Connection>, index_name: &str, args: SearchArgs) -
             &connection,
             search_params,
             recall_computer.as_ref(),
+            trace,
         )?;
+
+        if trace {
+            return Ok(());
+        }
 
         println!(
             "queries {} avg duration {:0.6}s max duration {:0.6}s  avg candidates {:.2} avg added {:.2} avg visited {:.2} avg filtered {:.2}",
@@ -163,11 +199,12 @@ fn search_phase<Q: Send + Sync>(
     iters: usize,
     limit: usize,
     record_limit: i64,
-    query_vectors: &DerefVectorStore<f32, Q>,
+    query_vectors: &DerefVectorStore<f16, Q>,
     index: &Arc<TableGraphVectorIndex>,
     connection: &Arc<Connection>,
     search_params: GraphSearchParams,
     recall_computer: Option<&RecallComputer>,
+    trace: bool,
 ) -> io::Result<AggregateSearchStats> {
     let query_indices = (0..limit).cycle().take(iters * limit).collect::<Vec<_>>();
     let progress = progress_bar(query_indices.len(), name);
@@ -179,7 +216,13 @@ fn search_phase<Q: Send + Sync>(
             .into_iter()
             .progress_with(progress.clone())
             .map(|index| {
-                searcher.query(index, &query_vectors[index], record_limit, recall_computer)
+                searcher.query(
+                    index,
+                    &query_vectors[index],
+                    record_limit,
+                    recall_computer,
+                    trace,
+                )
             })
             .reduce(|a, b| match (a, b) {
                 (Ok(a), Ok(b)) => Ok(a + b),
@@ -196,8 +239,13 @@ fn search_phase<Q: Send + Sync>(
             .map_init(
                 || SearcherState::new(index, connection, search_params).unwrap(),
                 |searcher, index| {
-                    let stats =
-                        searcher.query(index, &query_vectors[index], record_limit, recall_computer);
+                    let stats = searcher.query(
+                        index,
+                        &query_vectors[index],
+                        record_limit,
+                        recall_computer,
+                        trace,
+                    );
                     progress.inc(1);
                     stats
                 },
@@ -213,6 +261,7 @@ struct SearcherState {
     connection: Arc<Connection>,
     index: Arc<TableGraphVectorIndex>,
     searcher: GraphSearcher,
+    query_buf: Vec<f32>,
 }
 
 impl SearcherState {
@@ -225,30 +274,53 @@ impl SearcherState {
             connection: Arc::clone(connection),
             index: Arc::clone(index),
             searcher: GraphSearcher::new(search_params),
+            query_buf: vec![0.0f32; index.config().dimensions.get()],
         })
     }
 
     fn query(
         &mut self,
         index: usize,
-        query: &[f32],
+        query: &[f16],
         record_limit: i64,
         recall_computer: Option<&RecallComputer>,
+        trace: bool,
     ) -> io::Result<AggregateSearchStats> {
         let reader = TransactionGraphVectorIndex::new(
             Arc::clone(&self.index),
             self.connection.begin_transaction(None)?,
         );
+        for (o, x) in self.query_buf.iter_mut().zip(query.iter()) {
+            *o = x.to_f32();
+        }
+        let traced_vectors = if trace {
+            recall_computer.map(|r| r.traced_vector_ids(index))
+        } else {
+            None
+        };
         let start = Instant::now();
-        let results = self
-            .searcher
-            .search_with_filter(query, |i| i < record_limit, &reader)?;
+        let (results, trace) = self.searcher.search_with_options(
+            &self.query_buf,
+            GraphSearchOptions::with_filter(|i| i < record_limit)
+                .with_trace(traced_vectors.iter().flatten().copied()),
+            &reader,
+        )?;
         let duration = Instant::now() - start;
-        Ok(AggregateSearchStats::new(
-            duration,
-            self.searcher.stats(),
-            recall_computer.map(|r| r.compute_recall(index, &results)),
-        ))
+        let stats = self.searcher.stats();
+        let recall = recall_computer.map(|r| r.compute_recall(index, &results));
+        if let Some(trace) = trace {
+            let query_trace = QueryTrace {
+                query_index: index,
+                recall,
+                stats,
+                traces: trace.vectors,
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&query_trace).expect("QueryTrace is serializable")
+            );
+        }
+        Ok(AggregateSearchStats::new(duration, stats, recall))
     }
 }
 

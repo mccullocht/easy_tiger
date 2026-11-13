@@ -7,7 +7,7 @@ use std::{ffi::CString, os::raw::c_char, ptr::NonNull};
 use tracing::error;
 use wt_sys::{WT_CONFIG_ITEM, WT_CONFIG_PARSER};
 
-use crate::{make_result, map_not_found, wt_call, Error, Result};
+use crate::{Error, Result, make_result, map_not_found, wt_call};
 
 /// A parser for WiredTiger config strings.
 ///

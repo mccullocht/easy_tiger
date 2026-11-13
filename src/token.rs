@@ -1,0 +1,3001 @@
+//! Abstraction for token indexing.
+
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BinaryHeap},
+};
+
+use bitpacking::{BitPacker, BitPacker4x};
+use wt_mdb::{IndexCursorGuard, Transaction};
+
+#[derive(Debug, Clone)]
+pub enum Error {
+    UnknownDocFormat(u8),
+    UnknownPayloadFormat(u8),
+    InvalidFieldName(String),
+    Coding(&'static str),
+    WiredTiger(wt_mdb::Error),
+}
+
+impl From<wt_mdb::Error> for Error {
+    fn from(value: wt_mdb::Error) -> Self {
+        Self::WiredTiger(value)
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownDocFormat(t) => write!(f, "UnknownDocFormat({t})"),
+            Self::UnknownPayloadFormat(t) => write!(f, "UnknownPayloadFormat({t})"),
+            Self::InvalidFieldName(n) => write!(f, "InvalidFieldName({n:?})"),
+            Self::Coding(s) => write!(f, "Coding({s})"),
+            Self::WiredTiger(e) => write!(f, "WiredTiger({e})"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub type DocId = u64;
+pub type Payload = u64;
+
+/// Sentinel value returned at the end of iteration.
+pub const DOC_ITER_SENTINEL: DocId = u64::MAX;
+
+/// An iterator over a set of documents.
+///
+/// Each iterator could represent a single term list or some compound operation: conjunction,
+/// disjunction, negation, or positional operations like phrases.
+///
+/// [`DocIterator`]s begin positioned at the first matching document. Callers can iterate using
+/// [`DocIterator::advance`] or skip forward using [`DocIterator::advance_to`], and read any
+/// associated payload value with each hit. If an error occurs during iteration the iterator will
+/// be advanced to the end of the list ([`DOC_ITER_SENTINEL`]) and the error will be exposed via
+/// the [`DocIterator::error`] method.
+pub trait DocIterator {
+    /// Return the current doc, or [`DOC_ITER_SENTINEL`] if there are no more docs.
+    fn doc(&mut self) -> DocId;
+    /// Return the payload value for the current doc, or `0` if `doc()` is the sentinel value.
+    fn payload(&mut self) -> Payload;
+
+    /// Advance to the next document and returns its id.
+    ///
+    /// Returns [`DOC_ITER_SENTINEL`] if there are no more docs.
+    /// It is legal to `advance()` after the sentinel value is returned; further calls should also
+    /// return the sentinel value.
+    fn advance(&mut self) -> DocId;
+    /// Advance to the next document at or after `target` and return its id.
+    ///
+    /// Returns [`DOC_ITER_SENTINEL`] if there are no more docs.
+    ///
+    /// If the iterator is position before `target` its positional will remain unchanged.
+    /// It is legal to `advance_to()` after the sentinel value is returned; further calls should
+    /// also return the sentinel value.
+    fn advance_to(&mut self, target: DocId) -> DocId;
+
+    /// Cost of this iterator, proportional to hit count and cost of access.
+    fn cost(&self) -> u64;
+
+    /// Any errors that occurred while decoding underlying data for this iterator.
+    ///
+    /// Call this when the sentinel value is returned.
+    fn error(&self) -> Result<(), Error>;
+}
+
+impl<T: DocIterator + ?Sized> DocIterator for Box<T> {
+    fn doc(&mut self) -> DocId {
+        (**self).doc()
+    }
+
+    fn payload(&mut self) -> Payload {
+        (**self).payload()
+    }
+
+    fn advance(&mut self) -> DocId {
+        (**self).advance()
+    }
+
+    fn advance_to(&mut self, target: DocId) -> DocId {
+        (**self).advance_to(target)
+    }
+
+    fn cost(&self) -> u64 {
+        (**self).cost()
+    }
+
+    fn error(&self) -> Result<(), Error> {
+        (**self).error()
+    }
+}
+
+/// Construct a key for a posting block given a field name, key, and the last possible docid that
+/// can appear in the block.
+///
+/// Keys are `field ':' escape(posting_key) 0x00 0x00 limit_be`, where `escape` replaces each 0x00
+/// with 0x00 0xff. This preserves lexicographic order of posting keys and ensures that no key for
+/// one posting falls within the range of another. `field` may not contain ':'.
+///
+/// It is recommended to use [`DOC_ITER_SENTINEL`] as the limit for short posting lists as it makes
+/// them easy to find -- seeking to a target docid will always return that block.
+pub fn doc_block_key(
+    field: &str,
+    posting_key: &[u8],
+    limit_docid: DocId,
+) -> Result<Vec<u8>, Error> {
+    let mut key = doc_block_prefix(field, posting_key)?;
+    key.extend_from_slice(&limit_docid.to_be_bytes());
+    Ok(key)
+}
+
+/// Construct a prefix that matches all of the blocks for a term posting.
+pub fn doc_block_prefix(field: &str, posting_key: &[u8]) -> Result<Vec<u8>, Error> {
+    if field.contains(':') {
+        return Err(Error::InvalidFieldName(field.to_owned()));
+    }
+    let mut key = Vec::with_capacity(field.len() + posting_key.len() + 11);
+    key.extend_from_slice(field.as_bytes());
+    key.push(b':');
+    for &b in posting_key {
+        key.push(b);
+        if b == 0 {
+            key.push(0xff);
+        }
+    }
+    key.extend_from_slice(&[0, 0]);
+    Ok(key)
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DocFormat {
+    /// Each doc after the first is encoded as an unsigned LEB128 delta from the previous doc.
+    LEB128 = 0,
+    /// Docs are contiguous starting at the first doc; no doc data is stored.
+    Range = 1,
+    /// Docs are encoded as a bitmap where bit `i` is set if `first_doc + i` is present.
+    ///
+    /// Bits are ordered least significant first within each byte. Bit 0 is always set and the
+    /// last byte is never zero.
+    Bitmap = 2,
+    /// Docs after the first are delta encoded in chunks of [`BITPACKED_CHUNK_LEN`] docs, each as
+    /// a [`BitPacker4x`] block with its own bit width.
+    ///
+    /// Each chunk is encoded as the bit width (u8) followed by the packed bytes. Only the last
+    /// chunk may hold fewer than [`BITPACKED_CHUNK_LEN`] docs; its packed bytes are truncated to
+    /// the length needed to hold the docs that are present (see [`bitpacked_len`]). Within a chunk
+    /// docs are packed as offsets from the doc before the chunk, so each chunk may span no more than
+    /// [`u32::MAX`].
+    BitPacked = 3,
+}
+
+/// Number of docs in each [`DocFormat::BitPacked`] chunk.
+const BITPACKED_CHUNK_LEN: usize = BitPacker4x::BLOCK_LEN;
+
+/// Return the number of bytes needed to hold the first `len` values of a [`BitPacker4x`] block
+/// packed with `num_bits`.
+///
+/// [`BitPacker4x`] interleaves values across four 32-bit lanes: value `i` is packed at position
+/// `i / 4` of lane `i % 4`, and the output is a sequence of 16 byte words each holding the next 32
+/// bits of every lane. The bytes needed are determined by the length of the longest lane.
+fn bitpacked_len(len: usize, num_bits: u8) -> usize {
+    (len.div_ceil(4) * usize::from(num_bits)).div_ceil(32) * 16
+}
+
+/// Split `docs` into [`DocFormat::BitPacked`] chunks and call `f` with a [`BitPacker4x`] block of
+/// offsets for each chunk and the number of docs in the chunk.
+///
+/// Offsets are relative to the doc before the chunk, beginning with `first`. The last chunk is
+/// padded with its last offset so that padding does not increase the bit width.
+///
+/// Returns false without visiting the remaining chunks if a chunk spans more than [`u32::MAX`].
+///
+/// *Panics* if `docs` are not strictly increasing and greater than `first`.
+fn bitpacked_chunks(
+    first: DocId,
+    docs: impl Iterator<Item = DocId>,
+    mut f: impl FnMut(&[u32; BITPACKED_CHUNK_LEN], usize),
+) -> bool {
+    let mut offsets = [0u32; BITPACKED_CHUNK_LEN];
+    let mut len = 0;
+    let mut base = first;
+    let mut prev = first;
+    for doc in docs {
+        assert!(doc > prev, "docs must be strictly increasing");
+        let Ok(offset) = u32::try_from(doc - base) else {
+            return false;
+        };
+        offsets[len] = offset;
+        len += 1;
+        prev = doc;
+        if len == BITPACKED_CHUNK_LEN {
+            f(&offsets, len);
+            base = doc;
+            len = 0;
+        }
+    }
+    if len > 0 {
+        let last = offsets[len - 1];
+        offsets[len..].fill(last);
+        f(&offsets, len);
+    }
+    true
+}
+
+/// Return the [`DocFormat::BitPacked`] encoded length of `docs`, or `None` if they cannot be
+/// encoded.
+fn bitpacked_encoded_len(first: DocId, docs: impl Iterator<Item = DocId>) -> Option<u64> {
+    let bitpacker = BitPacker4x::new();
+    let mut encoded_len = 0;
+    bitpacked_chunks(first, docs, |offsets, len| {
+        let num_bits = bitpacker.num_bits_sorted(0, offsets);
+        encoded_len += 1 + bitpacked_len(len, num_bits) as u64;
+    })
+    .then_some(encoded_len)
+}
+
+impl From<DocFormat> for u8 {
+    fn from(value: DocFormat) -> Self {
+        value as u8
+    }
+}
+
+impl TryFrom<u8> for DocFormat {
+    type Error = Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(DocFormat::LEB128),
+            1 => Ok(DocFormat::Range),
+            2 => Ok(DocFormat::Bitmap),
+            3 => Ok(DocFormat::BitPacked),
+            _ => Err(Error::UnknownDocFormat(value)),
+        }
+    }
+}
+
+impl DocFormat {
+    /// Select a compact format for `len` strictly increasing docs from `first` to `last`. `docs`
+    /// are the docs after `first`.
+    ///
+    /// The smallest encoding is selected, preferring [`DocFormat::Bitmap`] then
+    /// [`DocFormat::BitPacked`] on ties. Every [`DocFormat::LEB128`] delta is at least one byte, so
+    /// the exact [`DocFormat::LEB128`] length is only computed if neither of the other formats is
+    /// smaller than that lower bound.
+    fn select(
+        len: usize,
+        first: DocId,
+        last: DocId,
+        docs: impl Iterator<Item = DocId> + Clone,
+    ) -> Self {
+        let len = len as u64;
+        let span = last - first;
+        if len == 0 || span == len - 1 {
+            return DocFormat::Range;
+        }
+        let leb128_min_len = len - 1;
+        let bitmap_len = span / 8 + 1;
+        let bitpacked_len = bitpacked_encoded_len(first, docs.clone()).unwrap_or(u64::MAX);
+        if bitmap_len <= bitpacked_len.min(leb128_min_len) {
+            return DocFormat::Bitmap;
+        }
+        if bitpacked_len < leb128_min_len {
+            return DocFormat::BitPacked;
+        }
+        let mut prev = first;
+        let leb128_len = docs
+            .map(|doc| {
+                let delta = doc - prev;
+                prev = doc;
+                u64::from((u64::BITS - delta.leading_zeros()).div_ceil(7))
+            })
+            .sum::<u64>();
+        if bitmap_len <= bitpacked_len.min(leb128_len) {
+            DocFormat::Bitmap
+        } else if bitpacked_len <= leb128_len {
+            DocFormat::BitPacked
+        } else {
+            DocFormat::LEB128
+        }
+    }
+
+    /// Encode `docs` to `out`. `first` is the first doc in the block and is not included in
+    /// `docs`.
+    ///
+    /// `docs` must be strictly increasing and greater than `first`.
+    ///
+    /// *Panics* if `docs` are not contiguous and the format is [`DocFormat::Range`], or if a chunk
+    /// spans more than [`u32::MAX`] and the format is [`DocFormat::BitPacked`].
+    fn encode(self, first: DocId, docs: impl Iterator<Item = DocId>, out: &mut Vec<u8>) {
+        let mut prev = first;
+        match self {
+            DocFormat::LEB128 => {
+                for doc in docs {
+                    assert!(doc > prev, "docs must be strictly increasing");
+                    leb128::write::unsigned(out, doc - prev).unwrap();
+                    prev = doc;
+                }
+            }
+            DocFormat::Range => {
+                for doc in docs {
+                    debug_assert_eq!(doc, prev + 1, "docs must be contiguous");
+                    prev = doc;
+                }
+            }
+            DocFormat::Bitmap => {
+                let start = out.len();
+                out.push(1);
+                for doc in docs {
+                    assert!(doc > prev, "docs must be strictly increasing");
+                    let bit = doc - first;
+                    let i = start + usize::try_from(bit / 8).unwrap();
+                    if i >= out.len() {
+                        out.resize(i + 1, 0);
+                    }
+                    out[i] |= 1 << (bit % 8);
+                    prev = doc;
+                }
+            }
+            DocFormat::BitPacked => {
+                let bitpacker = BitPacker4x::new();
+                let mut packed = [0u8; BITPACKED_CHUNK_LEN * 4];
+                let encoded = bitpacked_chunks(first, docs, |offsets, len| {
+                    let num_bits = bitpacker.num_bits_sorted(0, offsets);
+                    bitpacker.compress_sorted(0, offsets, &mut packed, num_bits);
+                    out.push(num_bits);
+                    out.extend_from_slice(&packed[..bitpacked_len(len, num_bits)]);
+                });
+                assert!(encoded, "bitpacked chunk span must fit in u32");
+            }
+        }
+    }
+
+    /// Decode `len` docs from `data` beginning with `first`.
+    ///
+    /// `offset` is the position of `data` within the block.
+    fn decode(
+        self,
+        first: DocId,
+        len: usize,
+        data: &[u8],
+        offset: usize,
+    ) -> Result<Docs, &'static str> {
+        let last_rank = u64::try_from(len - 1).map_err(|_| "entry count overflow")?;
+        match self {
+            DocFormat::LEB128 => {
+                let mut data = data;
+                let mut docs = Vec::with_capacity(len.min(data.len() + 1));
+                docs.push(first);
+                let mut prev = first;
+                for _ in 1..len {
+                    let delta =
+                        leb128::read::unsigned(&mut data).map_err(|_| "invalid doc delta")?;
+                    prev = prev.checked_add(delta).ok_or("doc delta overflow")?;
+                    docs.push(prev);
+                }
+                Ok(Docs::List(docs))
+            }
+            DocFormat::Range => {
+                if !data.is_empty() {
+                    return Err("unexpected range doc data");
+                }
+                if first
+                    .checked_add(last_rank)
+                    .is_none_or(|last| last == DOC_ITER_SENTINEL)
+                {
+                    return Err("doc range overflow");
+                }
+                Ok(Docs::Range(first))
+            }
+            DocFormat::Bitmap => BitmapDocs::new(first, len, data, offset).map(Docs::Bitmap),
+            DocFormat::BitPacked => {
+                let bitpacker = BitPacker4x::new();
+                let mut data = data;
+                // Each doc needs at least one bit; bound the allocation for corrupt counts.
+                let mut docs = Vec::with_capacity(len.min(data.len() * 8 + 1));
+                docs.push(first);
+                let mut offsets = [0u32; BITPACKED_CHUNK_LEN];
+                while docs.len() < len {
+                    let n = (len - docs.len()).min(BITPACKED_CHUNK_LEN);
+                    let (&num_bits, rest) = data.split_first().ok_or("truncated bitpacked docs")?;
+                    if num_bits == 0 || num_bits > 32 {
+                        return Err("invalid bitpacked num bits");
+                    }
+                    let (packed, rest) = rest
+                        .split_at_checked(bitpacked_len(n, num_bits))
+                        .ok_or("truncated bitpacked docs")?;
+                    data = rest;
+                    if n == BITPACKED_CHUNK_LEN {
+                        bitpacker.decompress_sorted(0, packed, &mut offsets, num_bits);
+                    } else {
+                        let mut block = [0u8; BITPACKED_CHUNK_LEN * 4];
+                        block[..packed.len()].copy_from_slice(packed);
+                        bitpacker.decompress_sorted(0, &block, &mut offsets, num_bits);
+                    }
+                    let offsets = &offsets[..n];
+                    // Deltas that overflow u32 wrap and appear as a decrease.
+                    if offsets[0] == 0 || !offsets.is_sorted_by(|a, b| a < b) {
+                        return Err("bitpacked docs not strictly increasing");
+                    }
+                    let base = *docs.last().unwrap();
+                    if base
+                        .checked_add(u64::from(offsets[n - 1]))
+                        .is_none_or(|last| last == DOC_ITER_SENTINEL)
+                    {
+                        return Err("bitpacked doc overflow");
+                    }
+                    docs.extend(offsets.iter().map(|&o| base + u64::from(o)));
+                }
+                if !data.is_empty() {
+                    return Err("unexpected bitpacked doc data");
+                }
+                Ok(Docs::List(docs))
+            }
+        }
+    }
+}
+
+/// Decoded representation of the docs in a [`DocIteratorBlock`].
+enum Docs {
+    /// Fully decoded docs.
+    List(Vec<DocId>),
+    /// Contiguous docs beginning with the contained doc.
+    Range(DocId),
+    Bitmap(BitmapDocs),
+}
+
+/// Cursor over a [`DocFormat::Bitmap`] encoded set of docs, read in place from the block data.
+struct BitmapDocs {
+    /// Doc represented by bit 0.
+    base: DocId,
+    /// Offset of the bitmap within the block data.
+    offset: usize,
+    /// Length of the bitmap in bytes.
+    len: usize,
+    /// Index of the word containing the current doc.
+    word_index: usize,
+    /// Bits of the word at `word_index` at or after the current doc.
+    word: u64,
+}
+
+impl BitmapDocs {
+    /// Create a cursor over `bitmap` positioned on the first doc. `bitmap` must contain exactly
+    /// `count` docs and is located at `offset` within the block data.
+    fn new(base: DocId, count: usize, bitmap: &[u8], offset: usize) -> Result<Self, &'static str> {
+        let (Some(&first_byte), Some(&last_byte)) = (bitmap.first(), bitmap.last()) else {
+            return Err("empty doc bitmap");
+        };
+        if first_byte & 1 == 0 || last_byte == 0 {
+            return Err("non-canonical doc bitmap");
+        }
+        let (bc, br) = bitmap.as_chunks::<8>();
+        let bitmap_count = bc
+            .iter()
+            .map(|w| u64::from_ne_bytes(*w).count_ones() as usize)
+            .chain(br.iter().map(|b| b.count_ones() as usize))
+            .sum::<usize>();
+        if bitmap_count != count {
+            return Err("doc bitmap count mismatch");
+        }
+        let last_bit = (bitmap.len() as u64 - 1) * 8 + u64::from(7 - last_byte.leading_zeros());
+        if base
+            .checked_add(last_bit)
+            .is_none_or(|last| last == DOC_ITER_SENTINEL)
+        {
+            return Err("doc bitmap overflow");
+        }
+        let mut docs = Self {
+            base,
+            offset,
+            len: bitmap.len(),
+            word_index: 0,
+            word: 0,
+        };
+        docs.word = docs.load(bitmap, 0);
+        Ok(docs)
+    }
+
+    fn num_words(&self) -> usize {
+        self.len.div_ceil(8)
+    }
+
+    /// Return the bitmap within the block `data`.
+    fn bitmap<'a>(&self, data: &'a [u8]) -> &'a [u8] {
+        &data[self.offset..self.offset + self.len]
+    }
+
+    /// Load word `i` of `bitmap`, zero padding a trailing partial word.
+    fn load(&self, bitmap: &[u8], i: usize) -> u64 {
+        let start = i * 8;
+        match bitmap.get(start..start + 8) {
+            Some(b) => u64::from_le_bytes(b.try_into().unwrap()),
+            None => {
+                let mut buf = [0u8; 8];
+                let rest = &bitmap[start..];
+                buf[..rest.len()].copy_from_slice(rest);
+                u64::from_le_bytes(buf)
+            }
+        }
+    }
+
+    /// Return the current doc. Only valid if the cursor is not exhausted.
+    fn doc(&self) -> DocId {
+        self.base + (self.word_index * 64) as u64 + u64::from(self.word.trailing_zeros())
+    }
+
+    /// Advance to the next doc in block `data`.
+    fn advance(&mut self, data: &[u8]) {
+        self.word &= self.word.wrapping_sub(1);
+        self.skip_empty(self.bitmap(data));
+    }
+
+    /// Advance to the first doc at or after `target` in block `data` and return the number of
+    /// docs skipped. `target` must be greater than the current doc.
+    ///
+    /// If there is no such doc this returns the number of docs remaining.
+    fn advance_to(&mut self, data: &[u8], target: DocId) -> usize {
+        let bitmap = self.bitmap(data);
+        let bit = target - self.base;
+        let target_word = usize::try_from(bit / 64).map_or(usize::MAX, |w| w.min(self.num_words()));
+        let mut skipped = 0;
+        if target_word > self.word_index {
+            skipped += self.word.count_ones() as usize;
+            skipped += (self.word_index + 1..target_word)
+                .map(|i| self.load(bitmap, i).count_ones() as usize)
+                .sum::<usize>();
+            if target_word == self.num_words() {
+                return skipped;
+            }
+            self.word_index = target_word;
+            self.word = self.load(bitmap, target_word);
+        }
+        let masked = self.word & (u64::MAX << (bit % 64));
+        skipped += (self.word ^ masked).count_ones() as usize;
+        self.word = masked;
+        self.skip_empty(bitmap);
+        skipped
+    }
+
+    /// Advance past any empty words, stopping at the last word.
+    fn skip_empty(&mut self, bitmap: &[u8]) {
+        while self.word == 0 && self.word_index + 1 < self.num_words() {
+            self.word_index += 1;
+            self.word = self.load(bitmap, self.word_index);
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PayloadFormat {
+    None = 0,
+    LEB128 = 1,
+    /// Payloads are encoded in chunks of [`BITPACKED_CHUNK_LEN`] payloads, each as a
+    /// [`BitPacker4x`] block with its own bit width.
+    ///
+    /// Each chunk is encoded as the bit width (u8) followed by the packed bytes. Only the last
+    /// chunk may hold fewer than [`BITPACKED_CHUNK_LEN`] payloads; its packed bytes are truncated
+    /// to the length needed to hold the payloads that are present (see [`bitpacked_len`]).
+    ///
+    /// Only used if every payload fits in a u32.
+    BitPacked = 2,
+}
+
+impl From<PayloadFormat> for u8 {
+    fn from(value: PayloadFormat) -> Self {
+        value as u8
+    }
+}
+
+impl TryFrom<u8> for PayloadFormat {
+    type Error = Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(PayloadFormat::None),
+            1 => Ok(PayloadFormat::LEB128),
+            2 => Ok(PayloadFormat::BitPacked),
+            _ => Err(Error::UnknownPayloadFormat(value)),
+        }
+    }
+}
+
+impl PayloadFormat {
+    /// Select a compact format for `payloads`.
+    ///
+    /// [`PayloadFormat::BitPacked`] is selected unless a payload does not fit in a u32 or
+    /// [`PayloadFormat::LEB128`] is smaller. Every [`PayloadFormat::LEB128`] payload is at least
+    /// one byte, so the exact [`PayloadFormat::LEB128`] length is only computed if the
+    /// [`PayloadFormat::BitPacked`] length is not smaller than that lower bound.
+    fn select(payloads: impl Iterator<Item = Payload> + Clone) -> Self {
+        let mut len = 0;
+        let mut encoded_len = 0;
+        let mut chunks = payloads.clone();
+        loop {
+            let mut chunk_len = 0;
+            let mut bits = 0;
+            for payload in chunks.by_ref().take(BITPACKED_CHUNK_LEN) {
+                bits |= payload;
+                chunk_len += 1;
+            }
+            if chunk_len == 0 {
+                break;
+            }
+            let Ok(bits) = u32::try_from(bits) else {
+                return PayloadFormat::LEB128;
+            };
+            let num_bits = (u32::BITS - bits.leading_zeros()) as u8;
+            encoded_len += 1 + bitpacked_len(chunk_len, num_bits);
+            len += chunk_len;
+            if chunk_len < BITPACKED_CHUNK_LEN {
+                break;
+            }
+        }
+        if encoded_len < len {
+            return PayloadFormat::BitPacked;
+        }
+        let leb128_len = payloads
+            .map(|p| (u64::BITS - p.leading_zeros()).div_ceil(7).max(1) as usize)
+            .sum::<usize>();
+        if encoded_len <= leb128_len {
+            PayloadFormat::BitPacked
+        } else {
+            PayloadFormat::LEB128
+        }
+    }
+
+    /// Encode `payloads` to `out`.
+    ///
+    /// *Panics* if any payload does not fit in a u32 and the format is
+    /// [`PayloadFormat::BitPacked`].
+    fn encode(self, payloads: impl Iterator<Item = Payload>, out: &mut Vec<u8>) {
+        match self {
+            PayloadFormat::None => {}
+            PayloadFormat::LEB128 => {
+                for payload in payloads {
+                    leb128::write::unsigned(out, payload).unwrap();
+                }
+            }
+            PayloadFormat::BitPacked => {
+                let bitpacker = BitPacker4x::new();
+                let mut payloads = payloads;
+                let mut chunk = [0u32; BITPACKED_CHUNK_LEN];
+                let mut packed = [0u8; BITPACKED_CHUNK_LEN * 4];
+                loop {
+                    let mut len = 0;
+                    for payload in payloads.by_ref().take(BITPACKED_CHUNK_LEN) {
+                        chunk[len] =
+                            u32::try_from(payload).expect("bitpacked payloads must fit in u32");
+                        len += 1;
+                    }
+                    if len == 0 {
+                        break;
+                    }
+                    // Zero padding does not increase the bit width.
+                    chunk[len..].fill(0);
+                    let num_bits = bitpacker.num_bits(&chunk);
+                    bitpacker.compress(&chunk, &mut packed, num_bits);
+                    out.push(num_bits);
+                    out.extend_from_slice(&packed[..bitpacked_len(len, num_bits)]);
+                    if len < BITPACKED_CHUNK_LEN {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Decode payloads so that the payload at rank `target` within the block is in `decoded`,
+    /// returning the rank of the first payload after those in `decoded`.
+    ///
+    /// `data` begins at the payload at rank `rank` and is advanced past the decoded payloads.
+    /// `target` must be at least `rank` and less than `len`, the number of payloads in the block.
+    /// For [`PayloadFormat::BitPacked`] `rank` must be the start of a chunk.
+    fn decode_to(
+        self,
+        data: &mut &[u8],
+        rank: usize,
+        target: usize,
+        len: usize,
+        decoded: &mut DecodedPayloads,
+    ) -> Result<usize, &'static str> {
+        debug_assert!(rank <= target && target < len);
+        match self {
+            PayloadFormat::None => {
+                decoded.single = 0;
+                Ok(target + 1)
+            }
+            PayloadFormat::LEB128 => {
+                // Skip intervening values by looking for terminal bytes rather than decoding.
+                for _ in rank..target {
+                    let end = data
+                        .iter()
+                        .position(|b| b & 0x80 == 0)
+                        .ok_or("invalid payload")?;
+                    *data = &data[end + 1..];
+                }
+                decoded.single = leb128::read::unsigned(data).map_err(|_| "invalid payload")?;
+                Ok(target + 1)
+            }
+            PayloadFormat::BitPacked => {
+                debug_assert!(rank.is_multiple_of(BITPACKED_CHUNK_LEN));
+                let mut chunk_rank = rank;
+                loop {
+                    let n = (len - chunk_rank).min(BITPACKED_CHUNK_LEN);
+                    let (&num_bits, rest) = data.split_first().ok_or("truncated payloads")?;
+                    if num_bits > 32 {
+                        return Err("invalid bitpacked num bits");
+                    }
+                    let (packed, rest) = rest
+                        .split_at_checked(bitpacked_len(n, num_bits))
+                        .ok_or("truncated payloads")?;
+                    *data = rest;
+                    let next_rank = chunk_rank + n;
+                    if target < next_rank {
+                        if next_rank == len && !data.is_empty() {
+                            return Err("unexpected bitpacked payload data");
+                        }
+                        let chunk = &mut decoded.chunk;
+                        let bitpacker = BitPacker4x::new();
+                        if n == BITPACKED_CHUNK_LEN {
+                            bitpacker.decompress(packed, chunk, num_bits);
+                        } else {
+                            let mut block = [0u8; BITPACKED_CHUNK_LEN * 4];
+                            block[..packed.len()].copy_from_slice(packed);
+                            bitpacker.decompress(&block, chunk, num_bits);
+                        }
+                        return Ok(next_rank);
+                    }
+                    chunk_rank = next_rank;
+                }
+            }
+        }
+    }
+}
+
+/// Payloads most recently decoded by [`PayloadFormat::decode_to`].
+///
+/// Which field holds the decoded payloads depends on the [`PayloadFormat`].
+struct DecodedPayloads {
+    /// A single payload decoded from any format other than [`PayloadFormat::BitPacked`].
+    single: Payload,
+    /// A [`PayloadFormat::BitPacked`] chunk.
+    chunk: [u32; BITPACKED_CHUNK_LEN],
+}
+
+impl DecodedPayloads {
+    fn new() -> Self {
+        Self {
+            single: 0,
+            chunk: [0; BITPACKED_CHUNK_LEN],
+        }
+    }
+
+    /// Return the decoded payload at `rank` within the block, which was encoded with `format`.
+    fn get(&self, format: PayloadFormat, rank: usize) -> Payload {
+        if format == PayloadFormat::BitPacked {
+            self.chunk[rank % BITPACKED_CHUNK_LEN].into()
+        } else {
+            self.single
+        }
+    }
+}
+
+/// Block format:
+/// * number of entries (unsigned LEB128)
+/// * doc format (u8)
+/// * payload format (u8)
+/// * first docid (unsigned LEB128); omitted if there are no entries.
+/// * docs len (unsigned LEB128); omitted if there are no entries, payload format is `None`, or doc
+///   format is [`DocFormat::Range`].
+/// * remaining docs encoded with [`DocFormat`]
+/// * payloads encoded with [`PayloadFormat`]
+///
+/// [`DocFormat::LEB128`] and [`DocFormat::BitPacked`] docs are decoded eagerly on construction;
+/// other doc formats are read in place. Payloads are decoded lazily as they are read;
+/// [`PayloadFormat::BitPacked`] payloads are decoded a chunk at a time.
+pub struct DocIteratorBlock<'a> {
+    doc_format: DocFormat,
+    payload_format: PayloadFormat,
+    docs: Docs,
+    /// Number of entries in the block.
+    len: usize,
+    /// Rank of the current doc in the block, or `len` if exhausted.
+    rank: usize,
+    /// Current doc, or [`DOC_ITER_SENTINEL`] if exhausted.
+    doc: DocId,
+    /// Encoded block data.
+    data: Cow<'a, [u8]>,
+    /// Offset in `data` of the remaining undecoded payload bytes.
+    payload_offset: usize,
+    /// Rank of the payload at `payload_offset`.
+    next_payload_rank: usize,
+    /// Payloads decoded before `next_payload_rank`, including the current payload if it has been
+    /// decoded.
+    decoded_payloads: DecodedPayloads,
+    error: Option<&'static str>,
+}
+
+impl<'a> DocIteratorBlock<'a> {
+    /// Create a new iterator over the encoded block `data`, positioned on the first doc.
+    ///
+    /// Returns an error if the block header or docs are malformed.
+    pub fn new(data: &'a [u8]) -> Result<Self, Error> {
+        Self::from_cow(data.into())
+    }
+
+    fn from_cow(block: Cow<'a, [u8]>) -> Result<Self, Error> {
+        let mut data: &[u8] = &block;
+        let len = usize::try_from(
+            leb128::read::unsigned(&mut data).map_err(|_| Error::Coding("invalid entry count"))?,
+        )
+        .map_err(|_| Error::Coding("entry count overflow"))?;
+        let doc_format = DocFormat::try_from(read_u8(&mut data)?)?;
+        let payload_format = PayloadFormat::try_from(read_u8(&mut data)?)?;
+
+        let mut docs = Docs::List(Vec::new());
+        let mut doc = DOC_ITER_SENTINEL;
+        let mut payloads = &data[data.len()..];
+        if len > 0 {
+            let first_doc = leb128::read::unsigned(&mut data)
+                .map_err(|_| Error::Coding("invalid first doc"))?;
+            let doc_data = if payload_format == PayloadFormat::None {
+                data
+            } else if doc_format == DocFormat::Range {
+                payloads = data;
+                &data[..0]
+            } else {
+                let docs_len = leb128::read::unsigned(&mut data)
+                    .map_err(|_| Error::Coding("invalid docs len"))?;
+                let (doc_data, payload_data) = data
+                    .split_at_checked(usize::try_from(docs_len).unwrap_or(usize::MAX))
+                    .ok_or(Error::Coding("docs len exceeds block len"))?;
+                payloads = payload_data;
+                doc_data
+            };
+            docs = doc_format
+                .decode(first_doc, len, doc_data, block.len() - data.len())
+                .map_err(Error::Coding)?;
+            doc = first_doc;
+        }
+
+        let payload_offset = block.len() - payloads.len();
+        Ok(Self {
+            doc_format,
+            payload_format,
+            docs,
+            len,
+            rank: 0,
+            doc,
+            data: block,
+            payload_offset,
+            next_payload_rank: 0,
+            decoded_payloads: DecodedPayloads::new(),
+            error: None,
+        })
+    }
+
+    pub fn doc_format(&self) -> DocFormat {
+        self.doc_format
+    }
+
+    pub fn payload_format(&self) -> PayloadFormat {
+        self.payload_format
+    }
+
+    /// Return the number of entries in the block.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Position on the doc at `rank`, or exhaust the iterator if `rank` is at least `len`.
+    ///
+    /// A [`Docs::Bitmap`] cursor must already be positioned on the doc at `rank`.
+    fn seek_rank(&mut self, rank: usize) -> DocId {
+        self.rank = rank.min(self.len);
+        self.doc = if self.rank == self.len {
+            DOC_ITER_SENTINEL
+        } else {
+            match &self.docs {
+                Docs::List(docs) => docs[self.rank],
+                Docs::Range(first) => first + self.rank as u64,
+                Docs::Bitmap(bitmap) => bitmap.doc(),
+            }
+        };
+        self.doc
+    }
+}
+
+impl DocIteratorBlock<'static> {
+    /// Create a new iterator over the encoded block `data`, positioned on the first doc.
+    ///
+    /// Returns an error if the block header or docs are malformed.
+    pub fn from_vec(data: Vec<u8>) -> Result<Self, Error> {
+        Self::from_cow(data.into())
+    }
+
+    /// Create an iterator with no entries.
+    fn empty() -> Self {
+        Self {
+            doc_format: DocFormat::Range,
+            payload_format: PayloadFormat::None,
+            docs: Docs::Range(DOC_ITER_SENTINEL),
+            len: 0,
+            rank: 0,
+            doc: DOC_ITER_SENTINEL,
+            data: Cow::Borrowed(&[]),
+            payload_offset: 0,
+            next_payload_rank: 0,
+            decoded_payloads: DecodedPayloads::new(),
+            error: None,
+        }
+    }
+}
+
+impl DocIterator for DocIteratorBlock<'_> {
+    fn doc(&mut self) -> DocId {
+        self.doc
+    }
+
+    fn payload(&mut self) -> Payload {
+        if self.rank >= self.len || self.payload_format == PayloadFormat::None {
+            return 0;
+        }
+        if self.next_payload_rank <= self.rank {
+            let mut payloads = &self.data[self.payload_offset..];
+            match self.payload_format.decode_to(
+                &mut payloads,
+                self.next_payload_rank,
+                self.rank,
+                self.len,
+                &mut self.decoded_payloads,
+            ) {
+                Ok(next_rank) => {
+                    self.payload_offset = self.data.len() - payloads.len();
+                    self.next_payload_rank = next_rank;
+                }
+                Err(e) => {
+                    // Terminate iteration so the caller will check error().
+                    self.error = Some(e);
+                    self.seek_rank(self.len);
+                    return 0;
+                }
+            }
+        }
+        self.decoded_payloads.get(self.payload_format, self.rank)
+    }
+
+    fn advance(&mut self) -> DocId {
+        if self.rank >= self.len {
+            return DOC_ITER_SENTINEL;
+        }
+        if let Docs::Bitmap(bitmap) = &mut self.docs {
+            bitmap.advance(&self.data);
+        }
+        self.seek_rank(self.rank + 1)
+    }
+
+    fn advance_to(&mut self, target: DocId) -> DocId {
+        // This also handles the exhausted case as no target is greater than the sentinel.
+        if target <= self.doc {
+            return self.doc;
+        }
+        let rank = match &mut self.docs {
+            Docs::List(docs) => self.rank + docs[self.rank..].partition_point(|&d| d < target),
+            // target > doc >= first so this cannot underflow.
+            Docs::Range(first) => usize::try_from(target - *first).unwrap_or(usize::MAX),
+            Docs::Bitmap(bitmap) => self.rank + bitmap.advance_to(&self.data, target),
+        };
+        self.seek_rank(rank)
+    }
+
+    fn cost(&self) -> u64 {
+        self.len as u64
+    }
+
+    fn error(&self) -> Result<(), Error> {
+        self.error.map_or(Ok(()), |e| Err(Error::Coding(e)))
+    }
+}
+
+/// Iterates over all of the docs for a term by reading the sequence of [`DocIteratorBlock`]s
+/// stored under keys produced by [`doc_block_key`].
+///
+/// Blocks are read in key order so block limit docids must be non-negative.
+pub struct TermDocIterator {
+    cursor: IndexCursorGuard,
+    /// Key prefix shared by all blocks in the posting.
+    prefix_len: usize,
+    /// Upper bound key for all blocks in the posting.
+    upper_bound: Vec<u8>,
+    block: DocIteratorBlock<'static>,
+    /// Limit docid for `block`; no doc after this value will appear in `block`.
+    block_limit: DocId,
+    cost: u64,
+    error: Option<Error>,
+}
+
+impl TermDocIterator {
+    /// Create a new iterator over the blocks for `term` in `field` in `table_name`, positioned on
+    /// the first doc.
+    ///
+    /// `cost` is returned by [`DocIterator::cost`].
+    pub fn new(
+        txn: &Transaction,
+        table_name: &str,
+        field: &str,
+        term: &[u8],
+        cost: u64,
+    ) -> Result<Self, Error> {
+        let mut cursor = txn.open_index_cursor(table_name)?;
+        let mut upper_bound = doc_block_prefix(field, term)?;
+        let prefix_len = upper_bound.len();
+        upper_bound.extend_from_slice(&[0xff; 8]);
+        cursor.set_bounds(&upper_bound[..prefix_len]..=upper_bound.as_slice())?;
+        let mut it = Self {
+            cursor,
+            prefix_len,
+            upper_bound,
+            block: DocIteratorBlock::empty(),
+            block_limit: 0,
+            cost,
+            error: None,
+        };
+        it.load_next_block(0)?;
+        it.settle(0);
+        it.error()?;
+        Ok(it)
+    }
+
+    /// Read the next block from the cursor, or an empty block if there are no more blocks.
+    ///
+    /// If the next block ends before `target` it is not loaded and this returns false.
+    fn load_next_block(&mut self, target: DocId) -> Result<bool, Error> {
+        // Safety: the value is copied before the cursor is repositioned.
+        let Some((key, value)) = unsafe { self.cursor.next_unsafe() }.transpose()? else {
+            self.block = DocIteratorBlock::empty();
+            self.block_limit = DOC_ITER_SENTINEL;
+            return Ok(true);
+        };
+        let limit = key
+            .get(self.prefix_len..)
+            .and_then(|b| <[u8; 8]>::try_from(b).ok())
+            .map(u64::from_be_bytes)
+            .ok_or(Error::Coding("invalid doc block key"))?;
+        if limit < target {
+            return Ok(false);
+        }
+        self.block = DocIteratorBlock::from_vec(value.to_vec())?;
+        self.block_limit = limit;
+        Ok(true)
+    }
+
+    /// Load the first block that may contain `target`, seeking if the next block does not.
+    fn load_block_for(&mut self, target: DocId) -> Result<(), Error> {
+        if !self.load_next_block(target)? {
+            let mut lower_bound = self.upper_bound[..self.prefix_len].to_vec();
+            lower_bound.extend_from_slice(&target.to_be_bytes());
+            self.cursor
+                .set_bounds(lower_bound.as_slice()..=self.upper_bound.as_slice())?;
+            self.load_next_block(0)?;
+        }
+        Ok(())
+    }
+
+    /// Advance to the first doc at or after `target`, loading blocks as needed.
+    ///
+    /// Maintains the invariant that `block` is only exhausted if the iterator is exhausted.
+    fn settle(&mut self, target: DocId) -> DocId {
+        loop {
+            let doc = self.block.advance_to(target);
+            if doc != DOC_ITER_SENTINEL || self.block_limit == DOC_ITER_SENTINEL {
+                return doc;
+            }
+            if let Err(e) = self
+                .block
+                .error()
+                .and_then(|()| self.load_block_for(target))
+            {
+                self.error = Some(e);
+                self.block = DocIteratorBlock::empty();
+                self.block_limit = DOC_ITER_SENTINEL;
+                return DOC_ITER_SENTINEL;
+            }
+        }
+    }
+}
+
+impl DocIterator for TermDocIterator {
+    fn doc(&mut self) -> DocId {
+        self.block.doc()
+    }
+
+    fn payload(&mut self) -> Payload {
+        self.block.payload()
+    }
+
+    fn advance(&mut self) -> DocId {
+        self.block.advance();
+        self.settle(0)
+    }
+
+    fn advance_to(&mut self, target: DocId) -> DocId {
+        self.settle(target)
+    }
+
+    fn cost(&self) -> u64 {
+        self.cost
+    }
+
+    fn error(&self) -> Result<(), Error> {
+        match &self.error {
+            Some(e) => Err(e.clone()),
+            None => self.block.error(),
+        }
+    }
+}
+
+/// Yields only the docs that appear in every input iterator.
+///
+/// The two cheapest inputs lead iteration, advancing against each other until they agree on a doc.
+/// The remaining inputs are only advanced to docs that both leads agree on, in ascending cost
+/// order.
+pub struct ConjunctionDocIterator<'a> {
+    lead1: Box<dyn DocIterator + 'a>,
+    lead2: Box<dyn DocIterator + 'a>,
+    /// Remaining iterators in ascending cost order.
+    others: Vec<Box<dyn DocIterator + 'a>>,
+    doc: DocId,
+}
+
+impl<'a> ConjunctionDocIterator<'a> {
+    /// Create a new iterator over the intersection of `first`, `second`, and `rest`, positioned on
+    /// the first matching doc.
+    pub fn new(
+        first: Box<dyn DocIterator + 'a>,
+        second: Box<dyn DocIterator + 'a>,
+        rest: Vec<Box<dyn DocIterator + 'a>>,
+    ) -> Self {
+        let mut others = rest;
+        others.push(first);
+        others.push(second);
+        others.sort_by_key(|it| it.cost());
+        let mut others = others.into_iter();
+        let mut it = Self {
+            lead1: others.next().unwrap(),
+            lead2: others.next().unwrap(),
+            others: others.collect(),
+            doc: 0,
+        };
+        let target = it.lead1.doc();
+        it.do_next(target);
+        it
+    }
+
+    /// Find the first doc at or after `doc` that matches all iterators, where `doc` is the
+    /// current doc of `lead1`.
+    fn do_next(&mut self, mut doc: DocId) -> DocId {
+        'advance_leads: while doc != DOC_ITER_SENTINEL {
+            let next2 = advance_if_behind(&mut *self.lead2, doc);
+            if next2 != doc {
+                doc = self.lead1.advance_to(next2);
+                if doc != next2 {
+                    continue;
+                }
+            }
+
+            for other in self.others.iter_mut() {
+                let next = advance_if_behind(&mut **other, doc);
+                if next != doc {
+                    doc = self.lead1.advance_to(next);
+                    continue 'advance_leads;
+                }
+            }
+            break;
+        }
+        self.doc = doc;
+        doc
+    }
+}
+
+/// Advance `it` to `target` if it is positioned before `target` and return its current doc.
+fn advance_if_behind(it: &mut dyn DocIterator, target: DocId) -> DocId {
+    let doc = it.doc();
+    if doc < target {
+        it.advance_to(target)
+    } else {
+        doc
+    }
+}
+
+impl DocIterator for ConjunctionDocIterator<'_> {
+    fn doc(&mut self) -> DocId {
+        self.doc
+    }
+
+    fn payload(&mut self) -> Payload {
+        0
+    }
+
+    fn advance(&mut self) -> DocId {
+        let doc = self.lead1.advance();
+        self.do_next(doc)
+    }
+
+    fn advance_to(&mut self, target: DocId) -> DocId {
+        if target <= self.doc {
+            return self.doc;
+        }
+        let doc = self.lead1.advance_to(target);
+        self.do_next(doc)
+    }
+
+    fn cost(&self) -> u64 {
+        self.lead1.cost()
+    }
+
+    fn error(&self) -> Result<(), Error> {
+        self.lead1.error()?;
+        self.lead2.error()?;
+        self.others.iter().try_for_each(|it| it.error())
+    }
+}
+
+/// Yields the docs that appear in any input iterator.
+///
+/// Inputs are kept in a min-heap ordered by their current doc. Iteration terminates early if any
+/// input fails.
+pub struct DisjunctionDocIterator<'a> {
+    heap: BinaryHeap<DisjunctionEntry<'a>>,
+    doc: DocId,
+    cost: u64,
+}
+
+/// An input to [`DisjunctionDocIterator`] ordered so that the lowest doc is at the top of the heap.
+struct DisjunctionEntry<'a> {
+    doc: DocId,
+    it: Box<dyn DocIterator + 'a>,
+}
+
+impl DisjunctionEntry<'_> {
+    /// Set the current doc to `doc` and return false if the input failed.
+    fn update(&mut self, doc: DocId) -> bool {
+        self.doc = doc;
+        doc != DOC_ITER_SENTINEL || self.it.error().is_ok()
+    }
+}
+
+impl PartialEq for DisjunctionEntry<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.doc == other.doc
+    }
+}
+
+impl Eq for DisjunctionEntry<'_> {}
+
+impl PartialOrd for DisjunctionEntry<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DisjunctionEntry<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.doc.cmp(&self.doc)
+    }
+}
+
+impl<'a> DisjunctionDocIterator<'a> {
+    /// Create a new iterator over the union of `iters`, positioned on the first matching doc.
+    pub fn new(iters: Vec<Box<dyn DocIterator + 'a>>) -> Self {
+        let cost = iters
+            .iter()
+            .map(|it| it.cost())
+            .fold(0, u64::saturating_add);
+        let mut failed = false;
+        let heap = iters
+            .into_iter()
+            .map(|mut it| {
+                let doc = it.doc();
+                let mut entry = DisjunctionEntry { doc: 0, it };
+                failed |= !entry.update(doc);
+                entry
+            })
+            .collect();
+        let mut it = Self {
+            heap,
+            doc: DOC_ITER_SENTINEL,
+            cost,
+        };
+        if !failed {
+            it.settle();
+        }
+        it
+    }
+
+    /// Position on the lowest doc among all inputs.
+    fn settle(&mut self) -> DocId {
+        self.doc = self.heap.peek().map_or(DOC_ITER_SENTINEL, |e| e.doc);
+        self.doc
+    }
+}
+
+impl DocIterator for DisjunctionDocIterator<'_> {
+    fn doc(&mut self) -> DocId {
+        self.doc
+    }
+
+    fn payload(&mut self) -> Payload {
+        0
+    }
+
+    fn advance(&mut self) -> DocId {
+        if self.doc == DOC_ITER_SENTINEL {
+            return DOC_ITER_SENTINEL;
+        }
+        while let Some(mut top) = self.heap.peek_mut()
+            && top.doc == self.doc
+        {
+            let next = top.it.advance();
+            if !top.update(next) {
+                drop(top);
+                self.doc = DOC_ITER_SENTINEL;
+                return DOC_ITER_SENTINEL;
+            }
+        }
+        self.settle()
+    }
+
+    fn advance_to(&mut self, target: DocId) -> DocId {
+        if target <= self.doc {
+            return self.doc;
+        }
+        while let Some(mut top) = self.heap.peek_mut()
+            && top.doc < target
+        {
+            let next = top.it.advance_to(target);
+            if !top.update(next) {
+                drop(top);
+                self.doc = DOC_ITER_SENTINEL;
+                return DOC_ITER_SENTINEL;
+            }
+        }
+        self.settle()
+    }
+
+    fn cost(&self) -> u64 {
+        self.cost
+    }
+
+    fn error(&self) -> Result<(), Error> {
+        self.heap.iter().try_for_each(|e| e.it.error())
+    }
+}
+
+/// Yields at most one doc from `input` for each centroid.
+///
+/// `assignments` is a centroid mapping posting containing a hit for each doc with a vector, where
+/// the payload is the id of the centroid that vector is assigned to. Docs from `input` that do not
+/// appear in `assignments` are skipped, as are docs assigned to a centroid that has already been
+/// yielded. The payload for each doc is its centroid id.
+///
+/// Iteration ends early once every centroid has been yielded.
+pub struct CentroidParentFilterDocIterator<'a> {
+    input: Box<dyn DocIterator + 'a>,
+    assignments: Box<dyn DocIterator + 'a>,
+    /// Bitmap of centroid ids that have already been yielded.
+    seen: Vec<u64>,
+    /// Number of centroids that have not yet been yielded.
+    unseen: u32,
+    doc: DocId,
+    centroid: u64,
+    error: Option<Error>,
+}
+
+impl<'a> CentroidParentFilterDocIterator<'a> {
+    /// Create a new iterator over `input` filtered by centroid assignments in `assignments`,
+    /// positioned on the first matching doc.
+    ///
+    /// All centroid ids in `assignments` must be no greater than `max_centroid_id`.
+    /// `num_centroids` is the number of distinct centroid ids that may appear in `assignments`;
+    /// if it is too small some centroids will not be yielded.
+    pub fn new(
+        input: Box<dyn DocIterator + 'a>,
+        assignments: Box<dyn DocIterator + 'a>,
+        max_centroid_id: u32,
+        num_centroids: u32,
+    ) -> Self {
+        let mut it = Self {
+            input,
+            assignments,
+            seen: vec![0; max_centroid_id as usize / 64 + 1],
+            unseen: num_centroids,
+            doc: 0,
+            centroid: 0,
+            error: None,
+        };
+        let target = it.input.doc();
+        it.do_next(target);
+        it
+    }
+
+    /// Find the first doc at or after `doc` with an unseen centroid, where `doc` is the current
+    /// doc of `input`.
+    fn do_next(&mut self, mut doc: DocId) -> DocId {
+        self.centroid = 0;
+        while doc != DOC_ITER_SENTINEL {
+            if self.unseen == 0 {
+                // Every centroid has been yielded so no remaining doc can match.
+                doc = DOC_ITER_SENTINEL;
+                break;
+            }
+            let assigned = advance_if_behind(&mut *self.assignments, doc);
+            if assigned != doc {
+                // No assignment for doc; skip to the next doc that has one.
+                doc = self.input.advance_to(assigned);
+                continue;
+            }
+
+            let centroid = self.assignments.payload();
+            if self.assignments.doc() != doc {
+                // Reading the payload failed and terminated assignments; error() will report it.
+                doc = DOC_ITER_SENTINEL;
+                break;
+            }
+            let Some(word) = self.seen.get_mut((centroid / 64) as usize) else {
+                self.error = Some(Error::Coding("centroid id exceeds max_centroid_id"));
+                doc = DOC_ITER_SENTINEL;
+                break;
+            };
+            let mask = 1u64 << (centroid % 64);
+            if *word & mask == 0 {
+                *word |= mask;
+                self.unseen -= 1;
+                self.centroid = centroid;
+                break;
+            }
+            doc = self.input.advance();
+        }
+        self.doc = doc;
+        doc
+    }
+}
+
+impl DocIterator for CentroidParentFilterDocIterator<'_> {
+    fn doc(&mut self) -> DocId {
+        self.doc
+    }
+
+    fn payload(&mut self) -> Payload {
+        self.centroid
+    }
+
+    fn advance(&mut self) -> DocId {
+        if self.doc == DOC_ITER_SENTINEL {
+            return DOC_ITER_SENTINEL;
+        }
+        let doc = self.input.advance();
+        self.do_next(doc)
+    }
+
+    fn advance_to(&mut self, target: DocId) -> DocId {
+        if target <= self.doc {
+            return self.doc;
+        }
+        let doc = self.input.advance_to(target);
+        self.do_next(doc)
+    }
+
+    fn cost(&self) -> u64 {
+        self.input.cost()
+    }
+
+    fn error(&self) -> Result<(), Error> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        self.input.error()?;
+        self.assignments.error()
+    }
+}
+
+fn read_u8(data: &mut &[u8]) -> Result<u8, Error> {
+    let (b, rest) = data
+        .split_first()
+        .ok_or(Error::Coding("unexpected end of block"))?;
+    *data = rest;
+    Ok(*b)
+}
+
+/// A mutable doc block that can be seeded from an encoded [`DocIteratorBlock`] and mutated via
+/// inserts and removals.
+///
+/// The [`DocFormat`] and [`PayloadFormat`] are selected on serialization to produce the most
+/// compact encoding.
+pub struct DocIteratorBlockMut {
+    /// If false, payloads are not serialized.
+    has_payloads: bool,
+    /// Current entries mapping doc -> payload.
+    entries: BTreeMap<DocId, Payload>,
+    /// If true, block contents has been modified.
+    dirty: bool,
+}
+
+impl DocIteratorBlockMut {
+    /// Create a new empty block. Payloads are only serialized if `has_payloads` is true.
+    pub fn new(has_payloads: bool) -> Self {
+        Self {
+            has_payloads,
+            entries: BTreeMap::new(),
+            dirty: false,
+        }
+    }
+
+    /// Create a mutable block pre-populated with the contents of an encoded block.
+    pub fn deserialize(data: &[u8]) -> Result<Self, Error> {
+        let mut block = DocIteratorBlock::new(data)?;
+        let mut entries = BTreeMap::new();
+        while block.doc() != DOC_ITER_SENTINEL {
+            entries.insert(block.doc(), block.payload());
+            block.advance();
+        }
+        block.error()?;
+        Ok(Self {
+            has_payloads: block.payload_format != PayloadFormat::None,
+            entries,
+            dirty: false,
+        })
+    }
+
+    /// Return an iterator over the current (doc, payload) entries in the block.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (DocId, Payload)> {
+        self.entries.iter().map(|(&d, &p)| (d, p))
+    }
+
+    /// Lookup the payload for `doc`, returning `None` if not found.
+    pub fn lookup(&self, doc: DocId) -> Option<u64> {
+        self.entries.get(&doc).copied()
+    }
+
+    /// Insert or replace the entry for `doc`.
+    ///
+    /// `payload` is not serialized if the block does not have payloads.
+    ///
+    /// *Panics* if `doc` is [`DOC_ITER_SENTINEL`].
+    pub fn insert(&mut self, doc: DocId, payload: Payload) {
+        assert_ne!(doc, DOC_ITER_SENTINEL);
+        self.dirty = true;
+        self.entries.insert(doc, payload);
+    }
+
+    /// Remove the entry for `doc`, returning its payload if it was present.
+    pub fn remove(&mut self, doc: DocId) -> Option<Payload> {
+        let result = self.entries.remove(&doc);
+        self.dirty |= result.is_some();
+        result
+    }
+
+    /// Serialize the current state of the block into the layout read by [`DocIteratorBlock`].
+    pub fn serialize(&self) -> Vec<u8> {
+        let doc_format = self.doc_format();
+        let payload_format = self.payload_format();
+        let mut out = Vec::new();
+        leb128::write::unsigned(&mut out, self.entries.len() as u64).unwrap();
+        out.push(doc_format.into());
+        out.push(payload_format.into());
+        let Some(&first_doc) = self.entries.keys().next() else {
+            return out;
+        };
+        leb128::write::unsigned(&mut out, first_doc).unwrap();
+
+        let docs = self.entries.keys().copied().skip(1);
+        if payload_format == PayloadFormat::None || doc_format == DocFormat::Range {
+            doc_format.encode(first_doc, docs, &mut out);
+        } else {
+            let mut doc_data = Vec::new();
+            doc_format.encode(first_doc, docs, &mut doc_data);
+            leb128::write::unsigned(&mut out, doc_data.len() as u64).unwrap();
+            out.extend_from_slice(&doc_data);
+        }
+        payload_format.encode(self.entries.values().copied(), &mut out);
+        out
+    }
+
+    /// Return the doc format that [`Self::serialize`] will use for the current entries.
+    pub fn doc_format(&self) -> DocFormat {
+        match (
+            self.entries.first_key_value(),
+            self.entries.last_key_value(),
+        ) {
+            (Some((&first, _)), Some((&last, _))) => DocFormat::select(
+                self.entries.len(),
+                first,
+                last,
+                self.entries.keys().copied().skip(1),
+            ),
+            _ => DocFormat::Range,
+        }
+    }
+
+    /// Return the payload format that [`Self::serialize`] will use for the current entries.
+    pub fn payload_format(&self) -> PayloadFormat {
+        if self.has_payloads {
+            PayloadFormat::select(self.entries.values().copied())
+        } else {
+            PayloadFormat::None
+        }
+    }
+
+    /// Return true if payloads are serialized.
+    pub fn has_payloads(&self) -> bool {
+        self.has_payloads
+    }
+
+    /// Return the number of entries in the block.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Return true if the block has been modified.
+    pub fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Mark this block as dirty.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn collect(data: &[u8]) -> Vec<(DocId, Payload)> {
+        let mut it = DocIteratorBlock::new(data).unwrap();
+        let mut out = vec![];
+        while it.doc() != DOC_ITER_SENTINEL {
+            out.push((it.doc(), it.payload()));
+            it.advance();
+        }
+        it.error().unwrap();
+        out
+    }
+
+    fn build(has_payloads: bool, entries: &[(DocId, Payload)]) -> DocIteratorBlockMut {
+        let mut block = DocIteratorBlockMut::new(has_payloads);
+        for &(d, p) in entries {
+            block.insert(d, p);
+        }
+        block
+    }
+
+    const ENTRIES: &[(DocId, Payload)] = &[(0, 0), (3, 1 << 40), (300, 2), (1 << 50, 9)];
+
+    #[test]
+    fn empty() {
+        for has_payloads in [false, true] {
+            let data = DocIteratorBlockMut::new(has_payloads).serialize();
+            let mut it = DocIteratorBlock::new(&data).unwrap();
+            assert!(it.is_empty());
+            assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+            assert_eq!(it.payload(), 0);
+            assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+            assert_eq!(it.advance_to(7), DOC_ITER_SENTINEL);
+            it.error().unwrap();
+        }
+    }
+
+    #[test]
+    fn roundtrip_payloads() {
+        let data = build(true, ENTRIES).serialize();
+        assert_eq!(collect(&data), ENTRIES);
+        let block = DocIteratorBlockMut::deserialize(&data).unwrap();
+        assert_eq!(block.payload_format(), PayloadFormat::LEB128);
+        assert!(!block.dirty());
+        assert_eq!(block.iter().collect::<Vec<_>>(), ENTRIES);
+    }
+
+    #[test]
+    fn roundtrip_no_payloads() {
+        let data = build(false, ENTRIES).serialize();
+        let expected = ENTRIES.iter().map(|&(d, _)| (d, 0)).collect::<Vec<_>>();
+        assert_eq!(collect(&data), expected);
+        let block = DocIteratorBlockMut::deserialize(&data).unwrap();
+        assert_eq!(block.payload_format(), PayloadFormat::None);
+        assert_eq!(block.iter().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn sparse_payload_reads() {
+        let data = build(true, ENTRIES).serialize();
+        let mut it = DocIteratorBlock::new(&data).unwrap();
+        assert_eq!(it.advance_to(1), 3);
+        assert_eq!(it.payload(), 1 << 40);
+        assert_eq!(it.payload(), 1 << 40);
+        assert_eq!(it.advance_to(1 << 50), 1 << 50);
+        assert_eq!(it.payload(), 9);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.payload(), 0);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn skip_multibyte_payload() {
+        let data = build(true, ENTRIES).serialize();
+        let mut it = DocIteratorBlock::new(&data).unwrap();
+        assert_eq!(it.advance_to(300), 300);
+        assert_eq!(it.payload(), 2);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn advance_to() {
+        let data = build(false, ENTRIES).serialize();
+        let mut it = DocIteratorBlock::new(&data).unwrap();
+        assert_eq!(it.cost(), ENTRIES.len() as u64);
+        assert_eq!(it.advance_to(0), 0);
+        assert_eq!(it.advance_to(0), 0);
+        assert_eq!(it.advance_to(4), 300);
+        assert_eq!(it.advance_to(301), 1 << 50);
+        assert_eq!(it.advance_to((1 << 50) + 1), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(0), DOC_ITER_SENTINEL);
+    }
+
+    #[test]
+    fn mutate() {
+        let data = build(true, ENTRIES).serialize();
+        let mut block = DocIteratorBlockMut::deserialize(&data).unwrap();
+        assert_eq!(block.remove(1), None);
+        assert!(!block.dirty());
+        assert_eq!(block.remove(300), Some(2));
+        assert!(block.dirty());
+        block.insert(3, 4);
+        block.insert(100, 5);
+        assert_eq!(block.lookup(3), Some(4));
+        assert_eq!(block.len(), 4);
+        assert_eq!(
+            collect(&block.serialize()),
+            &[(0, 0), (3, 4), (100, 5), (1 << 50, 9)]
+        );
+    }
+
+    #[test]
+    fn unknown_formats() {
+        assert!(matches!(
+            DocIteratorBlock::new(&[0, 9, 0]),
+            Err(Error::UnknownDocFormat(9))
+        ));
+        assert!(matches!(
+            DocIteratorBlock::new(&[0, 0, 9]),
+            Err(Error::UnknownPayloadFormat(9))
+        ));
+    }
+
+    #[test]
+    fn truncated() {
+        let data = build(true, ENTRIES).serialize();
+        // Truncating into the header fails at construction.
+        assert!(matches!(
+            DocIteratorBlock::new(&data[..2]),
+            Err(Error::Coding(_))
+        ));
+        // Truncating into the docs fails at construction.
+        let no_payloads = build(false, ENTRIES).serialize();
+        assert!(matches!(
+            DocIteratorBlock::new(&no_payloads[..no_payloads.len() - 1]),
+            Err(Error::Coding(_))
+        ));
+        // Truncating into the payloads fails during iteration.
+        let truncated = &data[..data.len() - 2];
+        let mut it = DocIteratorBlock::new(truncated).unwrap();
+        while it.doc() != DOC_ITER_SENTINEL {
+            it.payload();
+            it.advance();
+        }
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+        assert!(DocIteratorBlockMut::deserialize(truncated).is_err());
+    }
+
+    fn format_of(docs: impl IntoIterator<Item = DocId>) -> DocFormat {
+        let entries = docs.into_iter().map(|d| (d, 0)).collect::<Vec<_>>();
+        build(false, &entries).doc_format()
+    }
+
+    #[test]
+    fn doc_format_selection() {
+        assert_eq!(format_of([]), DocFormat::Range);
+        assert_eq!(format_of([7]), DocFormat::Range);
+        assert_eq!(format_of(10..20), DocFormat::Range);
+        // 26 bitmap bytes vs 33 bitpacked bytes.
+        assert_eq!(format_of((0..=200).step_by(2)), DocFormat::Bitmap);
+        // 38 bitmap bytes vs 33 bitpacked bytes.
+        assert_eq!(format_of((0..=300).step_by(3)), DocFormat::BitPacked);
+        // 88 bitmap bytes vs 49 bitpacked bytes vs 100 delta bytes.
+        assert_eq!(format_of((0..=700).step_by(7)), DocFormat::BitPacked);
+        // Multiple chunks: 263 bitmap bytes vs 131 bitpacked bytes vs at least 300 delta bytes.
+        assert_eq!(format_of((0..=2100).step_by(7)), DocFormat::BitPacked);
+        // Multiple chunks: 76 bitmap bytes vs 83 bitpacked bytes.
+        assert_eq!(format_of((0..=600).step_by(2)), DocFormat::Bitmap);
+        // One large delta: 209 bitpacked bytes vs 55 delta bytes.
+        assert_eq!(
+            format_of((0..100).step_by(2).chain([1 << 31])),
+            DocFormat::LEB128
+        );
+        // Each chunk spans no more than u32::MAX though the block does: 947 bitpacked bytes vs
+        // 1196 delta bytes.
+        assert_eq!(format_of((0..300).map(|d| d << 24)), DocFormat::BitPacked);
+        // Chunk span does not fit in u32.
+        assert_eq!(format_of((0..=300).map(|d| d << 33)), DocFormat::LEB128);
+        assert_eq!(
+            format_of(ENTRIES.iter().map(|&(d, _)| d)),
+            DocFormat::LEB128
+        );
+    }
+
+    /// Check iteration, deserialization, and seeking to every target over a block of `docs`.
+    fn check_block(docs: &[DocId], doc_format: DocFormat) {
+        // No payloads, payloads that may exceed a u32, and small payloads.
+        for variant in 0..3 {
+            let has_payloads = variant > 0;
+            let entries = docs
+                .iter()
+                .map(|&d| match variant {
+                    0 => (d, 0),
+                    1 => (d, (d % 5) << (d % 40)),
+                    _ => (d, d % 1000),
+                })
+                .collect::<Vec<_>>();
+            let block = build(has_payloads, &entries);
+            assert_eq!(block.doc_format(), doc_format);
+            let payload_format = block.payload_format();
+            // Ensure multi-chunk bitpacked payloads are exercised.
+            if variant == 2 && docs.len() > BITPACKED_CHUNK_LEN {
+                assert_eq!(payload_format, PayloadFormat::BitPacked);
+            }
+            let data = block.serialize();
+            let expected = if has_payloads {
+                entries
+            } else {
+                entries.iter().map(|&(d, _)| (d, 0)).collect()
+            };
+            let it = DocIteratorBlock::new(&data).unwrap();
+            assert_eq!(it.doc_format(), doc_format);
+            assert_eq!(it.payload_format(), payload_format);
+            assert_eq!(it.len(), docs.len());
+            assert_eq!(collect(&data), expected);
+            assert_eq!(
+                DocIteratorBlockMut::deserialize(&data)
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>(),
+                expected
+            );
+
+            let entry = |i: usize| expected.get(i).copied().unwrap_or((DOC_ITER_SENTINEL, 0));
+            let first = docs[0];
+            let last = *docs.last().unwrap();
+            for target in first.saturating_sub(2)..=last + 130 {
+                let i = expected.partition_point(|&(d, _)| d < target);
+                let mut it = DocIteratorBlock::new(&data).unwrap();
+                assert_eq!(it.advance_to(target), entry(i).0, "target {target}");
+                assert_eq!(it.payload(), entry(i).1, "target {target}");
+                assert_eq!(it.advance(), entry(i + 1).0, "target {target}");
+                assert_eq!(it.payload(), entry(i + 1).1, "target {target}");
+                it.error().unwrap();
+            }
+
+            for stride in [1, 3, 17, 64, 65, 200] {
+                let mut it = DocIteratorBlock::new(&data).unwrap();
+                let mut target = first;
+                loop {
+                    let i = expected.partition_point(|&(d, _)| d < target);
+                    assert_eq!(it.advance_to(target), entry(i).0, "stride {stride}");
+                    // Skip some payload reads so that payloads are skipped over.
+                    if (target / stride).is_multiple_of(3) {
+                        assert_eq!(it.payload(), entry(i).1, "stride {stride}");
+                    }
+                    if i == expected.len() {
+                        break;
+                    }
+                    target += stride;
+                }
+                it.error().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn range_block() {
+        check_block(&[0], DocFormat::Range);
+        check_block(&[1 << 40], DocFormat::Range);
+        check_block(&(5..300).collect::<Vec<_>>(), DocFormat::Range);
+        check_block(
+            &((1 << 40)..(1 << 40) + 100).collect::<Vec<_>>(),
+            DocFormat::Range,
+        );
+    }
+
+    #[test]
+    fn bitmap_block() {
+        check_block(&(0..=200).step_by(2).collect::<Vec<_>>(), DocFormat::Bitmap);
+        // Multiple bitpacked chunks.
+        check_block(
+            &(1_000_003..=1_000_603).step_by(2).collect::<Vec<_>>(),
+            DocFormat::Bitmap,
+        );
+        // Spans several empty words.
+        check_block(
+            &(0..64).chain(200..264).chain([1000]).collect::<Vec<_>>(),
+            DocFormat::Bitmap,
+        );
+        // Ends on a full word.
+        check_block(
+            &(3..67).chain(130..192).collect::<Vec<_>>(),
+            DocFormat::Bitmap,
+        );
+    }
+
+    #[test]
+    fn bitpacked_block() {
+        check_block(
+            &(0..=700).step_by(7).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // The last doc is packed in a lane word past (num_bits * len) / 128 words.
+        check_block(
+            &(0..=1717).step_by(17).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // Full chunk with varying deltas, some of which need multiple LEB128 bytes.
+        check_block(
+            &(0..129).map(|i| (1 << 40) + i * i).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // Two full chunks.
+        check_block(
+            &(0..=1280).step_by(5).collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+        // Chunks with different bit widths and a partial last chunk.
+        check_block(
+            &(0..=128)
+                .map(|i| i * 3)
+                .chain((1..=200).map(|i| 384 + i * 100))
+                .collect::<Vec<_>>(),
+            DocFormat::BitPacked,
+        );
+    }
+
+    #[test]
+    fn bitpacked_codec() {
+        use rand::prelude::*;
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        for len in 1..=BITPACKED_CHUNK_LEN * 3 + 5 {
+            for num_bits in 1..=32u8 {
+                let first = rng.random_range(0..1 << 50);
+                let mut docs = vec![first];
+                let mut expected_len = 0;
+                for chunk_start in (0..len).step_by(BITPACKED_CHUNK_LEN) {
+                    let n = (len - chunk_start).min(BITPACKED_CHUNK_LEN);
+                    // One delta uses all num_bits; the rest keep the chunk span within a u32.
+                    let top = 1u64 << (num_bits - 1);
+                    let max_delta =
+                        ((1 << num_bits) - 1).min((u64::from(u32::MAX) - top) / n as u64);
+                    for i in 0..n {
+                        let delta = if i == n / 2 {
+                            top
+                        } else {
+                            rng.random_range(1..=max_delta)
+                        };
+                        docs.push(docs.last().unwrap() + delta);
+                    }
+                    expected_len += 1 + bitpacked_len(n, num_bits);
+                }
+                let context = format!("len {len} num_bits {num_bits}");
+                let mut data = vec![];
+                DocFormat::BitPacked.encode(first, docs[1..].iter().copied(), &mut data);
+                assert_eq!(data.len(), expected_len, "{context}");
+                assert_eq!(
+                    bitpacked_encoded_len(first, docs[1..].iter().copied()),
+                    Some(expected_len as u64),
+                    "{context}"
+                );
+                let Ok(Docs::List(decoded)) =
+                    DocFormat::BitPacked.decode(first, docs.len(), &data, 0)
+                else {
+                    panic!("decode failed {context}");
+                };
+                assert_eq!(decoded, docs, "{context}");
+            }
+        }
+    }
+
+    #[test]
+    fn corrupt_bitpacked() {
+        let entries = (0..=700).step_by(7).map(|d| (d, 0)).collect::<Vec<_>>();
+        let data = build(false, &entries).serialize();
+        assert_eq!(data[1], u8::from(DocFormat::BitPacked));
+        DocIteratorBlock::new(&data).unwrap();
+        // count (1 byte), formats (2 bytes), first doc (1 byte), num bits (1 byte).
+        assert_eq!(data[4], 3);
+
+        let check_err = |data: &[u8]| {
+            assert!(matches!(DocIteratorBlock::new(data), Err(Error::Coding(_))));
+        };
+        let mut trailing = data.clone();
+        trailing.push(0);
+        check_err(&trailing);
+        check_err(&data[..data.len() - 1]);
+        check_err(&data[..5]);
+        check_err(&data[..4]);
+        for num_bits in [0, 2, 4, 33] {
+            let mut bad = data.clone();
+            bad[4] = num_bits;
+            check_err(&bad);
+        }
+        // The extra doc is decoded from padding and repeats the last doc.
+        let mut wrong_count = data.clone();
+        wrong_count[0] += 1;
+        check_err(&wrong_count);
+        let mut single = vec![1, DocFormat::BitPacked.into(), 0, 7];
+        assert_eq!(collect(&single), &[(7, 0)]);
+        single.extend_from_slice(&[1; 17]);
+        check_err(&single);
+
+        // Docs must be strictly increasing.
+        let mut zeros = data.clone();
+        zeros[5..].fill(0);
+        check_err(&zeros);
+        // Deltas that overflow u32 wrap around.
+        let mut wrap = vec![3, DocFormat::BitPacked.into(), 0, 0, 32];
+        wrap.extend_from_slice(&[0xff; 16]);
+        check_err(&wrap);
+
+        // A single doc with offset 1 from `first`.
+        let offset_one = |first| {
+            let mut data = vec![2, DocFormat::BitPacked.into(), 0];
+            leb128::write::unsigned(&mut data, first).unwrap();
+            data.push(1);
+            data.extend_from_slice(&[1; 16]);
+            data
+        };
+        check_err(&offset_one(DOC_ITER_SENTINEL - 1));
+        assert_eq!(
+            collect(&offset_one(DOC_ITER_SENTINEL - 2)),
+            &[(DOC_ITER_SENTINEL - 2, 0), (DOC_ITER_SENTINEL - 1, 0)]
+        );
+
+        // Corrupt and truncate chunks after the first.
+        let entries = (0..=2100).step_by(7).map(|d| (d, 0)).collect::<Vec<_>>();
+        let data = build(false, &entries).serialize();
+        assert_eq!(data[2], u8::from(DocFormat::BitPacked));
+        DocIteratorBlock::new(&data).unwrap();
+        // count (2 bytes), formats (2 bytes), first doc (1 byte), first chunk (49 bytes).
+        assert_eq!(data[54], 3);
+        for num_bits in [0, 33] {
+            let mut bad = data.clone();
+            bad[54] = num_bits;
+            check_err(&bad);
+        }
+        check_err(&data[..55]);
+        check_err(&data[..data.len() - 1]);
+        let mut wrong_count = data.clone();
+        wrong_count[0] += 1;
+        check_err(&wrong_count);
+    }
+
+    fn payload_format_of(payloads: impl IntoIterator<Item = Payload>) -> PayloadFormat {
+        let entries = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(d, p)| (d as DocId, p))
+            .collect::<Vec<_>>();
+        let block = build(true, &entries);
+        let data = block.serialize();
+        assert_eq!(
+            DocIteratorBlock::new(&data).unwrap().payload_format(),
+            block.payload_format()
+        );
+        assert_eq!(collect(&data), entries);
+        block.payload_format()
+    }
+
+    #[test]
+    fn payload_format_selection() {
+        assert_eq!(build(false, ENTRIES).payload_format(), PayloadFormat::None);
+        assert_eq!(build(false, &[]).payload_format(), PayloadFormat::None);
+        // A payload does not fit in a u32.
+        assert_eq!(
+            payload_format_of(ENTRIES.iter().map(|&(_, p)| p)),
+            PayloadFormat::LEB128
+        );
+        assert_eq!(
+            payload_format_of((0..300).map(|d| if d == 150 { 1 << 32 } else { 0 })),
+            PayloadFormat::LEB128
+        );
+        // 3 bitpacked bytes vs at least 300 delta bytes.
+        assert_eq!(payload_format_of([0; 300]), PayloadFormat::BitPacked);
+        // 355 bitpacked bytes vs 472 LEB128 bytes.
+        assert_eq!(payload_format_of(0..300), PayloadFormat::BitPacked);
+        // 33 bitpacked bytes vs 32 LEB128 bytes.
+        assert_eq!(payload_format_of([127; 32]), PayloadFormat::LEB128);
+        // 33 bitpacked bytes vs 33 LEB128 bytes.
+        assert_eq!(
+            payload_format_of(std::iter::repeat_n(127, 31).chain([128])),
+            PayloadFormat::BitPacked
+        );
+        // 17 bitpacked bytes vs 7 LEB128 bytes.
+        assert_eq!(
+            payload_format_of([u32::MAX.into(), 0, 3]),
+            PayloadFormat::LEB128
+        );
+        // 513 bitpacked bytes vs 640 LEB128 bytes.
+        assert_eq!(
+            payload_format_of([u64::from(u32::MAX); 128]),
+            PayloadFormat::BitPacked
+        );
+
+        // The payload format is reselected after deserialization.
+        let mut block =
+            DocIteratorBlockMut::deserialize(&build(true, &[(0, 1 << 40), (1, 1)]).serialize())
+                .unwrap();
+        assert!(block.has_payloads());
+        assert_eq!(block.payload_format(), PayloadFormat::LEB128);
+        block.remove(0);
+        for d in 2..200 {
+            block.insert(d, d % 300);
+        }
+        assert_eq!(block.payload_format(), PayloadFormat::BitPacked);
+        let block = DocIteratorBlockMut::deserialize(&build(false, ENTRIES).serialize()).unwrap();
+        assert!(!block.has_payloads());
+    }
+
+    #[test]
+    fn bitpacked_payloads_zero() {
+        // Each chunk of zero payloads is encoded as a zero bit width with no packed bytes.
+        let entries = (0..300).map(|d| (d, 0)).collect::<Vec<_>>();
+        let data = build(true, &entries).serialize();
+        assert_eq!(&data[data.len() - 3..], &[0, 0, 0]);
+        assert_eq!(collect(&data), entries);
+    }
+
+    #[test]
+    fn bitpacked_payloads_codec() {
+        use rand::prelude::*;
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        for len in 1..=BITPACKED_CHUNK_LEN * 3 + 5 {
+            for num_bits in 0..=32u32 {
+                let max = (1u64 << num_bits) - 1;
+                let mut payloads = (0..len)
+                    .map(|_| rng.random_range(0..=max))
+                    .collect::<Vec<_>>();
+                // Every chunk uses exactly num_bits.
+                for p in payloads.iter_mut().step_by(BITPACKED_CHUNK_LEN) {
+                    *p = max;
+                }
+                let expected_len = (0..len)
+                    .step_by(BITPACKED_CHUNK_LEN)
+                    .map(|r| 1 + bitpacked_len((len - r).min(BITPACKED_CHUNK_LEN), num_bits as u8))
+                    .sum::<usize>();
+                let context = format!("len {len} num_bits {num_bits}");
+                let mut data = vec![];
+                PayloadFormat::BitPacked.encode(payloads.iter().copied(), &mut data);
+                assert_eq!(data.len(), expected_len, "{context}");
+
+                // Read every payload in order, and every 50th payload to skip chunks.
+                for step in [1, 50] {
+                    let mut remaining = data.as_slice();
+                    let mut next_rank = 0;
+                    let mut decoded = DecodedPayloads::new();
+                    for target in (0..len).step_by(step) {
+                        if next_rank <= target {
+                            next_rank = PayloadFormat::BitPacked
+                                .decode_to(&mut remaining, next_rank, target, len, &mut decoded)
+                                .unwrap();
+                        }
+                        assert_eq!(
+                            decoded.get(PayloadFormat::BitPacked, target),
+                            payloads[target],
+                            "{context}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn corrupt_bitpacked_payloads() {
+        let entries = (0..300).map(|d| (d, d)).collect::<Vec<_>>();
+        let data = build(true, &entries).serialize();
+        assert_eq!(data[3], u8::from(PayloadFormat::BitPacked));
+        assert_eq!(collect(&data), entries);
+        // count (2 bytes), formats (2 bytes), first doc (1 byte) then payloads; Range docs
+        // have no doc data.
+        assert_eq!(data[5], 7);
+
+        // Reading a payload in a corrupt chunk fails during iteration.
+        let check_err = |data: &[u8], rank: DocId| {
+            let mut it = DocIteratorBlock::new(data).unwrap();
+            assert_eq!(it.advance_to(rank), rank);
+            assert_eq!(it.payload(), 0);
+            assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+            assert!(matches!(it.error(), Err(Error::Coding(_))));
+        };
+        let mut bad = data.clone();
+        bad[5] = 33;
+        check_err(&bad, 0);
+        check_err(&data[..data.len() - 1], 299);
+        // Truncation is only detected when the truncated chunk is read.
+        let mut it = DocIteratorBlock::new(&data[..data.len() - 1]).unwrap();
+        assert_eq!(it.advance_to(255), 255);
+        assert_eq!(it.payload(), 255);
+        it.error().unwrap();
+        check_err(&data[..6 + 16 * 7], 128);
+        check_err(&data[..5], 0);
+
+        // Trailing data is only detected when the last chunk is read.
+        let mut trailing = data.clone();
+        trailing.push(0);
+        check_err(&trailing, 299);
+        let mut it = DocIteratorBlock::new(&trailing).unwrap();
+        assert_eq!(it.advance_to(255), 255);
+        assert_eq!(it.payload(), 255);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn corrupt_range() {
+        let data = build(false, &[(5, 0), (6, 0)]).serialize();
+        assert_eq!(data, &[2, DocFormat::Range.into(), 0, 5]);
+        let mut trailing = data.clone();
+        trailing.push(0);
+        assert!(matches!(
+            DocIteratorBlock::new(&trailing),
+            Err(Error::Coding(_))
+        ));
+        let mut overflow = vec![2, DocFormat::Range.into(), 0];
+        leb128::write::unsigned(&mut overflow, DOC_ITER_SENTINEL - 1).unwrap();
+        assert!(matches!(
+            DocIteratorBlock::new(&overflow),
+            Err(Error::Coding(_))
+        ));
+
+        // Truncating into the payloads fails during iteration.
+        let data = build(true, &[(5, 1), (6, 1 << 40)]).serialize();
+        let mut it = DocIteratorBlock::new(&data[..data.len() - 1]).unwrap();
+        assert_eq!(it.payload(), 1);
+        assert_eq!(it.advance(), 6);
+        assert_eq!(it.payload(), 0);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+    }
+
+    #[test]
+    fn corrupt_bitmap() {
+        let entries = (0..=200).step_by(2).map(|d| (d, 0)).collect::<Vec<_>>();
+        let data = build(false, &entries).serialize();
+        assert_eq!(data[1], u8::from(DocFormat::Bitmap));
+        DocIteratorBlock::new(&data).unwrap();
+
+        let mut wrong_count = data.clone();
+        wrong_count[0] += 1;
+        assert!(matches!(
+            DocIteratorBlock::new(&wrong_count),
+            Err(Error::Coding(_))
+        ));
+        let mut trailing_zero = data.clone();
+        trailing_zero.push(0);
+        assert!(matches!(
+            DocIteratorBlock::new(&trailing_zero),
+            Err(Error::Coding(_))
+        ));
+        let mut overflow = vec![2, DocFormat::Bitmap.into(), 0];
+        leb128::write::unsigned(&mut overflow, DOC_ITER_SENTINEL - 2).unwrap();
+        overflow.push(0b101);
+        assert!(matches!(
+            DocIteratorBlock::new(&overflow),
+            Err(Error::Coding(_))
+        ));
+        let mut empty = vec![1, DocFormat::Bitmap.into(), 0];
+        leb128::write::unsigned(&mut empty, 7).unwrap();
+        assert!(matches!(
+            DocIteratorBlock::new(&empty),
+            Err(Error::Coding(_))
+        ));
+    }
+
+    struct TermFixture {
+        // Must be dropped before `_dir`.
+        conn: std::sync::Arc<wt_mdb::Connection>,
+        _dir: tempfile::TempDir,
+    }
+
+    const TABLE: &str = "postings";
+
+    /// (field, term, limit_docid, entries)
+    type TestBlock<'a> = (&'a str, &'a [u8], DocId, &'a [(DocId, Payload)]);
+
+    impl TermFixture {
+        /// Create a table containing `blocks`.
+        fn new(blocks: &[TestBlock<'_>]) -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let conn = wt_mdb::Connection::open(
+                dir.path().to_str().unwrap(),
+                Some(
+                    wt_mdb::connection::OptionsBuilder::default()
+                        .create()
+                        .into(),
+                ),
+            )
+            .unwrap();
+            conn.create_table(
+                TABLE,
+                Some(
+                    wt_mdb::connection::CreateOptionsBuilder::default()
+                        .key_format::<Vec<u8>>()
+                        .value_format::<Vec<u8>>()
+                        .into(),
+                ),
+            )
+            .unwrap();
+            let txn = conn.begin_transaction(None).unwrap();
+            {
+                let mut cursor = txn.open_index_cursor(TABLE).unwrap();
+                for &(field, term, limit, entries) in blocks {
+                    cursor
+                        .set(
+                            &doc_block_key(field, term, limit).unwrap(),
+                            &build(true, entries).serialize(),
+                        )
+                        .unwrap();
+                }
+            }
+            txn.commit(None).unwrap();
+            Self { conn, _dir: dir }
+        }
+
+        fn txn(&self) -> Transaction {
+            self.conn.begin_transaction(None).unwrap()
+        }
+    }
+
+    fn multi_block_fixture() -> TermFixture {
+        TermFixture::new(&[
+            ("f", b"a", 99, &[(1, 10), (5, 50), (50, 500)]),
+            ("f", b"a", 199, &[(150, 1500)]),
+            ("f", b"a", 299, &[]),
+            ("f", b"a", 399, &[(300, 3000)]),
+            ("f", b"a", DOC_ITER_SENTINEL, &[(400, 4000), (1000, 10000)]),
+            // Neighboring keys that should not be visited.
+            ("f", b"", DOC_ITER_SENTINEL, &[(2, 2)]),
+            ("f", b"ab", DOC_ITER_SENTINEL, &[(3, 3)]),
+            ("g", b"a", DOC_ITER_SENTINEL, &[(4, 4)]),
+            ("f", b"a:b", DOC_ITER_SENTINEL, &[(5, 5)]),
+            ("f", b"a:\0\0\0\0\0\0\0\x01", DOC_ITER_SENTINEL, &[(6, 6)]),
+            ("f", b"a\0", DOC_ITER_SENTINEL, &[(7, 7)]),
+            ("f", b"a\0\xff\xff\xff\xff\xff\xff\xff\xff", 99, &[(8, 8)]),
+            ("f", b"\0", DOC_ITER_SENTINEL, &[(9, 9)]),
+        ])
+    }
+
+    const MULTI_BLOCK_ENTRIES: &[(DocId, Payload)] = &[
+        (1, 10),
+        (5, 50),
+        (50, 500),
+        (150, 1500),
+        (300, 3000),
+        (400, 4000),
+        (1000, 10000),
+    ];
+
+    #[test]
+    fn term_iterate() {
+        let fixture = multi_block_fixture();
+        let txn = fixture.txn();
+        let mut it = TermDocIterator::new(&txn, TABLE, "f", b"a", 7).unwrap();
+        assert_eq!(it.cost(), 7);
+        let mut out = vec![];
+        while it.doc() != DOC_ITER_SENTINEL {
+            out.push((it.doc(), it.payload()));
+            it.advance();
+        }
+        it.error().unwrap();
+        assert_eq!(out, MULTI_BLOCK_ENTRIES);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.payload(), 0);
+    }
+
+    #[test]
+    fn term_advance_to() {
+        let fixture = multi_block_fixture();
+        let txn = fixture.txn();
+        let mut it = TermDocIterator::new(&txn, TABLE, "f", b"a", 7).unwrap();
+        // Within the current block.
+        assert_eq!(it.advance_to(5), 5);
+        assert_eq!(it.payload(), 50);
+        // Past the end of the current block into the next block.
+        assert_eq!(it.advance_to(100), 150);
+        assert_eq!(it.payload(), 1500);
+        // Into the range of the empty block.
+        assert_eq!(it.advance_to(250), 300);
+        assert_eq!(it.payload(), 3000);
+        // Doc in the current block is not before target.
+        assert_eq!(it.advance_to(200), 300);
+        assert_eq!(it.advance(), 400);
+        assert_eq!(it.advance_to(1001), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+
+        // Skip past multiple blocks with a seek.
+        let mut it = TermDocIterator::new(&txn, TABLE, "f", b"a", 7).unwrap();
+        assert_eq!(it.advance_to(400), 400);
+        assert_eq!(it.payload(), 4000);
+        assert_eq!(it.advance(), 1000);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn term_missing() {
+        let fixture = multi_block_fixture();
+        let txn = fixture.txn();
+        let mut it = TermDocIterator::new(&txn, TABLE, "f", b"b", 0).unwrap();
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert_eq!(it.cost(), 0);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(10), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn term_neighbors() {
+        let fixture = multi_block_fixture();
+        let txn = fixture.txn();
+        for (field, term, doc) in [
+            ("f", b"".as_slice(), 2),
+            ("f", b"ab", 3),
+            ("g", b"a", 4),
+            ("f", b"a:b", 5),
+            ("f", b"a:\0\0\0\0\0\0\0\x01", 6),
+            ("f", b"a\0", 7),
+            ("f", b"a\0\xff\xff\xff\xff\xff\xff\xff\xff", 8),
+            ("f", b"\0", 9),
+        ] {
+            let mut it = TermDocIterator::new(&txn, TABLE, field, term, 1).unwrap();
+            assert_eq!(it.doc(), doc, "term {term:?}");
+            assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+            it.error().unwrap();
+        }
+    }
+
+    #[test]
+    fn term_invalid_field_name() {
+        let fixture = multi_block_fixture();
+        let txn = fixture.txn();
+        assert!(matches!(
+            TermDocIterator::new(&txn, TABLE, "f:a", b"b", 1),
+            Err(Error::InvalidFieldName(n)) if n == "f:a"
+        ));
+    }
+
+    const KEY_TEST_TERMS: &[&[u8]] = &[
+        b"",
+        b"\0",
+        b"\0\0",
+        b"\0\x01",
+        b"\0\xff",
+        b"\x01",
+        b":",
+        b"a",
+        b"a\0",
+        b"a\0\0",
+        b"a\0\xff",
+        b"a\0\xff\xff\xff\xff\xff\xff\xff\xff",
+        b"a\x01",
+        b"a:",
+        b"a:\0\0\0\0\0\0\0\x01",
+        b"a:b",
+        b"ab",
+        b"a\xff",
+        b"\xff",
+        b"\xff\0",
+    ];
+
+    const KEY_TEST_LIMITS: &[DocId] = &[0, 1, 0xff, 1 << 56, DOC_ITER_SENTINEL];
+
+    #[test]
+    fn doc_block_key_escapes_term() {
+        assert_eq!(
+            doc_block_key("f", b"a\0b", 0x0102).unwrap(),
+            b"f:a\0\xffb\0\0\0\0\0\0\0\0\x01\x02"
+        );
+        assert_eq!(doc_block_prefix("f", b"").unwrap(), b"f:\0\0");
+        assert_eq!(
+            doc_block_prefix("f", b"\0\0").unwrap(),
+            b"f:\0\xff\0\xff\0\0"
+        );
+    }
+
+    #[test]
+    fn doc_block_key_invalid_field_name() {
+        for field in [":", "f:", ":f", "f:g"] {
+            assert!(matches!(
+                doc_block_key(field, b"a", 0),
+                Err(Error::InvalidFieldName(n)) if n == field
+            ));
+            assert!(matches!(
+                doc_block_prefix(field, b"a"),
+                Err(Error::InvalidFieldName(n)) if n == field
+            ));
+        }
+    }
+
+    #[test]
+    fn doc_block_key_ranges_disjoint() {
+        for &t1 in KEY_TEST_TERMS {
+            let prefix = doc_block_prefix("f", t1).unwrap();
+            let mut upper = prefix.clone();
+            upper.extend_from_slice(&[0xff; 8]);
+            for &t2 in KEY_TEST_TERMS.iter().filter(|&&t| t != t1) {
+                for &limit in KEY_TEST_LIMITS {
+                    let key = doc_block_key("f", t2, limit).unwrap();
+                    assert!(
+                        !(prefix.as_slice()..=upper.as_slice()).contains(&key.as_slice()),
+                        "key for {t2:?} limit {limit} in range of {t1:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn doc_block_key_order() {
+        let mut terms = KEY_TEST_TERMS.to_vec();
+        terms.sort();
+        let keys = terms
+            .iter()
+            .flat_map(|t| {
+                KEY_TEST_LIMITS
+                    .iter()
+                    .map(|&l| doc_block_key("f", t, l).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert!(keys.is_sorted());
+    }
+
+    #[test]
+    fn term_corrupt_block() {
+        let fixture = TermFixture::new(&[
+            ("f", b"a", 99, &[(1, 10)]),
+            ("f", b"a", DOC_ITER_SENTINEL, &[(100, 1000)]),
+        ]);
+        {
+            let txn = fixture.txn();
+            txn.open_index_cursor(TABLE)
+                .unwrap()
+                .set(
+                    &doc_block_key("f", b"a", DOC_ITER_SENTINEL).unwrap(),
+                    &[1, 0, 9],
+                )
+                .unwrap();
+            txn.commit(None).unwrap();
+        }
+        let txn = fixture.txn();
+        let mut it = TermDocIterator::new(&txn, TABLE, "f", b"a", 7).unwrap();
+        assert_eq!(it.doc(), 1);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::UnknownPayloadFormat(9))));
+    }
+
+    fn block_iter(docs: &[DocId]) -> Box<dyn DocIterator> {
+        let mut block = DocIteratorBlockMut::new(true);
+        for &d in docs {
+            block.insert(d, 1);
+        }
+        Box::new(DocIteratorBlock::from_vec(block.serialize()).unwrap())
+    }
+
+    fn collect_docs(it: &mut dyn DocIterator) -> Vec<DocId> {
+        let mut out = vec![];
+        while it.doc() != DOC_ITER_SENTINEL {
+            assert_eq!(it.payload(), 0);
+            out.push(it.doc());
+            it.advance();
+        }
+        it.error().unwrap();
+        out
+    }
+
+    #[test]
+    fn conjunction() {
+        let mut it = ConjunctionDocIterator::new(
+            block_iter(&[1, 2, 5, 8, 13, 21, 34]),
+            block_iter(&[2, 3, 5, 13, 21, 22]),
+            vec![block_iter(&[0, 2, 4, 5, 6, 13, 21, 100])],
+        );
+        assert_eq!(it.cost(), 6);
+        assert_eq!(collect_docs(&mut it), vec![2, 5, 13, 21]);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+    }
+
+    #[test]
+    fn conjunction_advance_to() {
+        let mut it = ConjunctionDocIterator::new(
+            block_iter(&[1, 2, 5, 8, 13, 21, 34]),
+            block_iter(&[2, 3, 5, 13, 21, 22]),
+            vec![],
+        );
+        assert_eq!(it.doc(), 2);
+        assert_eq!(it.advance_to(2), 2);
+        assert_eq!(it.advance_to(6), 13);
+        assert_eq!(it.advance_to(13), 13);
+        assert_eq!(it.advance_to(14), 21);
+        assert_eq!(it.advance_to(22), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(100), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn conjunction_disjoint() {
+        let mut it =
+            ConjunctionDocIterator::new(block_iter(&[1, 3, 5]), block_iter(&[2, 4, 6]), vec![]);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+
+        let mut it = ConjunctionDocIterator::new(block_iter(&[1, 3, 5]), block_iter(&[]), vec![]);
+        assert_eq!(it.cost(), 0);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn conjunction_random() {
+        use rand::prelude::*;
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        for _ in 0..100 {
+            let num_iters = rng.random_range(2..6);
+            let doc_lists: Vec<Vec<DocId>> = (0..num_iters)
+                .map(|_| {
+                    let density = rng.random_range(0.1..0.9);
+                    (0..500).filter(|_| rng.random_bool(density)).collect()
+                })
+                .collect();
+            let expected: Vec<DocId> = doc_lists[0]
+                .iter()
+                .copied()
+                .filter(|d| doc_lists[1..].iter().all(|l| l.contains(d)))
+                .collect();
+            let mut iters = doc_lists.iter().map(|l| block_iter(l));
+            let first = iters.next().unwrap();
+            let second = iters.next().unwrap();
+            let mut it = ConjunctionDocIterator::new(first, second, iters.collect());
+            assert_eq!(collect_docs(&mut it), expected);
+        }
+    }
+
+    #[test]
+    fn conjunction_error() {
+        let mut block = DocIteratorBlockMut::new(true);
+        block.insert(1, 1 << 40);
+        let mut data = block.serialize();
+        data.truncate(data.len() - 2);
+        // Reading the truncated payload terminates the input with an error.
+        let mut failed = DocIteratorBlock::from_vec(data).unwrap();
+        failed.payload();
+        let mut it = ConjunctionDocIterator::new(
+            block_iter(&[1, 2]),
+            block_iter(&[1, 2, 3]),
+            vec![Box::new(failed)],
+        );
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+    }
+
+    #[test]
+    fn disjunction() {
+        let mut it = DisjunctionDocIterator::new(vec![
+            block_iter(&[1, 2, 5, 8]),
+            block_iter(&[2, 3, 5, 13]),
+            block_iter(&[0, 5, 100]),
+        ]);
+        assert_eq!(it.cost(), 11);
+        assert_eq!(collect_docs(&mut it), vec![0, 1, 2, 3, 5, 8, 13, 100]);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+    }
+
+    #[test]
+    fn disjunction_advance_to() {
+        let mut it =
+            DisjunctionDocIterator::new(vec![block_iter(&[1, 5, 8, 21]), block_iter(&[2, 5, 13])]);
+        assert_eq!(it.doc(), 1);
+        assert_eq!(it.advance_to(1), 1);
+        assert_eq!(it.advance_to(3), 5);
+        assert_eq!(it.advance_to(5), 5);
+        assert_eq!(it.advance(), 8);
+        assert_eq!(it.advance_to(9), 13);
+        assert_eq!(it.advance_to(22), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(100), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn disjunction_empty() {
+        let mut it = DisjunctionDocIterator::new(vec![]);
+        assert_eq!(it.cost(), 0);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+
+        let mut it = DisjunctionDocIterator::new(vec![block_iter(&[]), block_iter(&[])]);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(1), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn disjunction_random() {
+        use rand::prelude::*;
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        for _ in 0..100 {
+            let num_iters = rng.random_range(1..6);
+            let doc_lists: Vec<Vec<DocId>> = (0..num_iters)
+                .map(|_| {
+                    let density = rng.random_range(0.01..0.5);
+                    (0..500).filter(|_| rng.random_bool(density)).collect()
+                })
+                .collect();
+            let expected: Vec<DocId> = doc_lists
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let mut it =
+                DisjunctionDocIterator::new(doc_lists.iter().map(|l| block_iter(l)).collect());
+            assert_eq!(collect_docs(&mut it), expected);
+
+            let mut it =
+                DisjunctionDocIterator::new(doc_lists.iter().map(|l| block_iter(l)).collect());
+            let mut target = 0;
+            loop {
+                target += rng.random_range(1..20);
+                let want = expected
+                    .iter()
+                    .copied()
+                    .find(|&d| d >= target)
+                    .unwrap_or(DOC_ITER_SENTINEL);
+                assert_eq!(it.advance_to(target), want);
+                if want == DOC_ITER_SENTINEL {
+                    break;
+                }
+                target = want;
+            }
+            it.error().unwrap();
+        }
+    }
+
+    #[test]
+    fn disjunction_error() {
+        let mut block = DocIteratorBlockMut::new(true);
+        block.insert(3, 1 << 40);
+        let mut data = block.serialize();
+        data.truncate(data.len() - 2);
+        let failed = || {
+            // Reading the truncated payload terminates the input with an error.
+            let mut it = DocIteratorBlock::from_vec(data.clone()).unwrap();
+            it.payload();
+            Box::new(it)
+        };
+
+        // Input failed before construction.
+        let mut it = DisjunctionDocIterator::new(vec![block_iter(&[1, 2]), failed()]);
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+
+        // Input fails during iteration, before other inputs are exhausted.
+        let mut it = DisjunctionDocIterator::new(vec![
+            block_iter(&[1, 2, 5]),
+            Box::new(FailingDocIterator(block_iter(&[3]))),
+        ]);
+        assert_eq!(it.doc(), 1);
+        assert_eq!(it.advance(), 2);
+        assert_eq!(it.advance(), 3);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+
+        let mut it = DisjunctionDocIterator::new(vec![
+            block_iter(&[1, 2, 5]),
+            Box::new(FailingDocIterator(block_iter(&[3]))),
+        ]);
+        assert_eq!(it.advance_to(4), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+    }
+
+    /// Wraps an iterator and reports an error once it is exhausted.
+    struct FailingDocIterator(Box<dyn DocIterator>);
+
+    impl DocIterator for FailingDocIterator {
+        fn doc(&mut self) -> DocId {
+            self.0.doc()
+        }
+
+        fn payload(&mut self) -> Payload {
+            self.0.payload()
+        }
+
+        fn advance(&mut self) -> DocId {
+            self.0.advance()
+        }
+
+        fn advance_to(&mut self, target: DocId) -> DocId {
+            self.0.advance_to(target)
+        }
+
+        fn cost(&self) -> u64 {
+            self.0.cost()
+        }
+
+        fn error(&self) -> Result<(), Error> {
+            Err(Error::Coding("failed"))
+        }
+    }
+
+    fn payload_iter(entries: &[(DocId, Payload)]) -> Box<dyn DocIterator> {
+        Box::new(DocIteratorBlock::from_vec(build(true, entries).serialize()).unwrap())
+    }
+
+    fn collect_entries(it: &mut dyn DocIterator) -> Vec<(DocId, Payload)> {
+        let mut out = vec![];
+        while it.doc() != DOC_ITER_SENTINEL {
+            out.push((it.doc(), it.payload()));
+            it.advance();
+        }
+        it.error().unwrap();
+        out
+    }
+
+    const ASSIGNMENTS: &[(DocId, Payload)] = &[
+        (1, 0),
+        (2, 70),
+        (3, 0),
+        (5, 3),
+        (6, 70),
+        (8, 3),
+        (9, 127),
+        (10, 1),
+    ];
+
+    #[test]
+    fn centroid_parent_filter() {
+        let mut it = CentroidParentFilterDocIterator::new(
+            block_iter(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+            payload_iter(ASSIGNMENTS),
+            127,
+            128,
+        );
+        assert_eq!(it.cost(), 12);
+        assert_eq!(
+            collect_entries(&mut it),
+            vec![(1, 0), (2, 70), (5, 3), (9, 127), (10, 1)]
+        );
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.payload(), 0);
+    }
+
+    #[test]
+    fn centroid_parent_filter_early_termination() {
+        let input = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        // num_centroids matches the number of distinct centroids in ASSIGNMENTS.
+        let mut it = CentroidParentFilterDocIterator::new(
+            block_iter(&input),
+            payload_iter(ASSIGNMENTS),
+            127,
+            5,
+        );
+        assert_eq!(
+            collect_entries(&mut it),
+            vec![(1, 0), (2, 70), (5, 3), (9, 127), (10, 1)]
+        );
+
+        // Stops once num_centroids have been yielded.
+        let mut it = CentroidParentFilterDocIterator::new(
+            block_iter(&input),
+            payload_iter(ASSIGNMENTS),
+            127,
+            2,
+        );
+        assert_eq!(collect_entries(&mut it), vec![(1, 0), (2, 70)]);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(100), DOC_ITER_SENTINEL);
+
+        let mut it = CentroidParentFilterDocIterator::new(
+            block_iter(&input),
+            payload_iter(ASSIGNMENTS),
+            127,
+            0,
+        );
+        assert_eq!(it.doc(), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn centroid_parent_filter_advance_to() {
+        let mut it = CentroidParentFilterDocIterator::new(
+            block_iter(&[1, 3, 4, 6, 8, 9, 10]),
+            payload_iter(ASSIGNMENTS),
+            127,
+            128,
+        );
+        assert_eq!(it.doc(), 1);
+        assert_eq!(it.advance_to(1), 1);
+        // 4 is unassigned so the next doc is 6.
+        assert_eq!(it.advance_to(4), 6);
+        assert_eq!(it.payload(), 70);
+        // Skipped docs do not mark their centroid as seen.
+        assert_eq!(it.advance_to(7), 8);
+        assert_eq!(it.payload(), 3);
+        assert_eq!(it.advance_to(11), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance_to(100), DOC_ITER_SENTINEL);
+        it.error().unwrap();
+    }
+
+    #[test]
+    fn centroid_parent_filter_random() {
+        use rand::prelude::*;
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5eed);
+        for _ in 0..100 {
+            let max_centroid_id = rng.random_range(0..200u32);
+            let mut assignments = vec![];
+            for d in 0..500 {
+                if rng.random_bool(0.7) {
+                    assignments.push((d, rng.random_range(0..=max_centroid_id) as u64));
+                }
+            }
+            let num_centroids = assignments
+                .iter()
+                .map(|&(_, c)| c)
+                .collect::<std::collections::HashSet<_>>()
+                .len() as u32;
+            let input: Vec<DocId> = (0..500).filter(|_| rng.random_bool(0.5)).collect();
+            let mut seen = std::collections::HashSet::new();
+            let expected: Vec<(DocId, Payload)> = input
+                .iter()
+                .filter_map(|d| assignments.iter().find(|(a, _)| a == d).copied())
+                .filter(|&(_, c)| seen.insert(c))
+                .collect();
+            let mut it = CentroidParentFilterDocIterator::new(
+                block_iter(&input),
+                payload_iter(&assignments),
+                max_centroid_id,
+                num_centroids,
+            );
+            assert_eq!(collect_entries(&mut it), expected);
+        }
+    }
+
+    #[test]
+    fn centroid_parent_filter_out_of_range() {
+        let mut it = CentroidParentFilterDocIterator::new(
+            block_iter(&[1, 2, 3]),
+            payload_iter(&[(1, 0), (2, 64), (3, 1)]),
+            63,
+            64,
+        );
+        assert_eq!(it.doc(), 1);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert_eq!(it.advance(), DOC_ITER_SENTINEL);
+        assert!(matches!(it.error(), Err(Error::Coding(_))));
+    }
+}

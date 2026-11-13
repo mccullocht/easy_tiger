@@ -6,7 +6,7 @@
 //! around vector access and graph edge state.
 //!
 //! Caveats:
-//! * Only `numpy` little-endian formatted `f32` vectors are accepted.
+//! * Only `f16` vectors are accepted as input.
 //! * Row keys are assigned densely beginning at zero.
 use core::f64;
 use std::{
@@ -14,29 +14,30 @@ use std::{
     num::NonZero,
     ops::Range,
     sync::{
-        atomic::{self, AtomicI64},
         Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        atomic::{self, AtomicI64},
     },
 };
 
 use crossbeam_skiplist::SkipSet;
+use half::slice::HalfFloatSliceExt;
 use memmap2::{Mmap, MmapMut};
 use rayon::prelude::*;
 use rustix::io::Errno;
 use thread_local::ThreadLocal;
 use tracing::warn;
-use vectors::{F32VectorCoding, VectorSimilarity};
-use wt_mdb::{connection::CreateOptionsBuilder, Connection, Error, Result, Transaction};
+use vectors::{F32VectorCoding, VectorSimilarity, f16};
+use wt_mdb::{Connection, Error, Result, Transaction, connection::CreateOptionsBuilder};
 
 use crate::{
+    Neighbor,
     input::{DerefVectorStore, VectorStore},
     vamana::search::GraphSearcher,
-    vamana::wt::{encode_graph_vertex, CursorVectorStore, TableGraphVectorIndex, ENTRY_POINT_KEY},
+    vamana::wt::{CursorVectorStore, ENTRY_POINT_KEY, TableGraphVectorIndex, encode_graph_vertex},
     vamana::{
-        prune_edges, select_pruned_edges, EdgeSetDistanceComputer, Graph, GraphConfig,
-        GraphVectorIndex, GraphVectorStore,
+        EdgeSetDistanceComputer, EdgeType, Graph, GraphConfig, GraphVectorIndex, GraphVectorStore,
+        prune_edges, select_pruned_edges,
     },
-    Neighbor,
 };
 
 /// Stats for the built graph.
@@ -104,7 +105,7 @@ pub struct BulkLoadBuilder<D> {
 
 impl<D> BulkLoadBuilder<D>
 where
-    D: VectorStore<Elem = f32> + Send + Sync,
+    D: VectorStore<Elem = f16> + Send + Sync,
 {
     /// Create a new bulk graph builder with the passed vector set and configuration.
     /// `limit` limits the number of vectors processed to less than the full set.
@@ -176,9 +177,11 @@ where
     /// Load nav and rerank vectors into tables.
     fn load_vectors<P: Fn(u64)>(&mut self, progress: P) -> Result<()> {
         let dim = self.index.config().dimensions.get();
+        let centroid = self.index.config().centroid.clone();
         let nav_coder = self.index.nav_table().new_coder();
         let mut nav_vector = vec![0u8; nav_coder.byte_len(dim)];
         let mut sum = vec![0.0; dim];
+        let mut vector_f32 = vec![0.0f32; dim];
         let mut quantized_vectors = if self.options.memory_quantized_vectors {
             Some(MmapMut::map_anon(nav_coder.byte_len(dim) * self.vectors.len()).unwrap())
         } else {
@@ -200,10 +203,12 @@ where
         };
 
         for (i, v) in self.vectors.iter().enumerate().take(self.limit) {
-            for (i, o) in v.iter().zip(sum.iter_mut()) {
-                *o += *i as f64;
+            v.convert_to_f32_slice(&mut vector_f32);
+            vectors::prepare_vector_in_place(&mut vector_f32, None, false, centroid.as_deref());
+            for (d, s) in vector_f32.iter().zip(sum.iter_mut()) {
+                *s += *d as f64;
             }
-            nav_coder.encode_to(v, &mut nav_vector);
+            nav_coder.encode_to(&vector_f32, &mut nav_vector);
             if let Some(q) = quantized_vectors.as_mut() {
                 let start = i * nav_vector.len();
                 q[start..(start + nav_vector.len())].copy_from_slice(&nav_vector);
@@ -211,20 +216,22 @@ where
             nav_cursor.append(i as i64, &nav_vector)?;
 
             if let Some((coder, vector, cursor)) = rerank.as_mut() {
-                coder.encode_to(v, vector);
+                coder.encode_to(&vector_f32, vector);
                 cursor.append(i as i64, vector)?;
             }
             progress(1);
         }
 
         self.quantized_vectors = quantized_vectors.map(|m| {
-            DerefVectorStore::new(
+            DerefVectorStore::with_stride(
                 m.make_read_only().unwrap(),
                 NonZero::new(nav_coder.byte_len(dim)).unwrap(),
             )
             .unwrap()
         });
-        let centroid = sum
+        // `sum` accumulated the already-prepared vectors, so this mean is the entry-point
+        // reference in the same (prepared) space as every stored vector.
+        let mean = sum
             .into_iter()
             .map(|s| (s / self.limit as f64) as f32)
             .collect::<Vec<_>>();
@@ -233,14 +240,14 @@ where
             .rerank_table()
             .unwrap_or(self.index.nav_table())
             .new_coder()
-            .encode(&centroid);
+            .encode(&mean);
         Ok(())
     }
 
     fn insert_all<P: Fn(u64) + Send + Sync>(&self, progress: P) -> Result<()> {
-        // apply_mu is used to ensure that only one thread is mutating the graph at a time so we can maintain
-        // the "undirected graph" invariant. apply_mu contains the entry point vertex id and score against the
-        // centroid, we may update this if we find a closer point then reflect it back into entry_vertex.
+        // apply_mu stores the vertex closest to the centroid and its distance for use as an entry
+        // point. When building an undirected graph this Mutex is also used to ensure that only one
+        // thread is mutating the graph at a time.
         let distance_fn = self.index.high_fidelity_table().new_distance_function();
         let apply_mu = {
             let txn = self.connection.begin_transaction(None)?;
@@ -293,47 +300,14 @@ where
                     distance_fn.distance(&self.centroid, vectors.get(v as i64).unwrap()?)
                 };
 
-                // Add each edge to this vertex and a reciprocal edge to make the graph
-                // undirected. If an edge does not fit on either vertex, save it for later.
-                // We will prune any vertices in this state, but put together the pruned edge
-                // list outside of `apply_mu` to maximize concurrency.
-                loop {
-                    let mut entry_point = apply_mu.lock().unwrap();
-
-                    edges.retain(|&e| {
-                        let (mut iv, mut ev) = self.lock_edge(v, e.vertex() as usize);
-                        if iv.len() == iv.capacity() || ev.len() == ev.capacity() {
-                            true
-                        } else {
-                            // Another concurrent search may have added this edge already, so skip
-                            // it if that is the case.
-                            if !iv.contains(&e) {
-                                iv.push(e);
-                            }
-                            let backedge = Neighbor::new(v as i64, e.distance());
-                            if !ev.contains(&backedge) {
-                                ev.push(backedge);
-                            }
-                            false
-                        }
-                    });
-
-                    if edges.is_empty() {
-                        if centroid_distance < entry_point.1 {
-                            entry_point.0 = v as i64;
-                            entry_point.1 = centroid_distance;
-                            self.entry_vertex.store(v as i64, atomic::Ordering::SeqCst);
-                        }
-                        break;
+                match self.index.config().edge_type {
+                    EdgeType::Undirected => {
+                        self.insert_undirected(v, centroid_distance, &apply_mu, edges, &reader)?
                     }
-
-                    drop(entry_point);
-                    // Any edge still in the list is overful, so prune it.
-                    self.prune_and_apply(v, &mut reader, &apply_mu)?;
-                    for e in edges.iter() {
-                        self.prune_and_apply(e.vertex() as usize, &mut reader, &apply_mu)?;
+                    EdgeType::Directed => {
+                        self.insert_directed(v, edges, &reader, centroid_distance, &apply_mu)?
                     }
-                }
+                };
 
                 in_flight.remove(&v);
                 progress(1);
@@ -346,14 +320,25 @@ where
     ///
     /// This may prune edges and/or ensure graph connectivity.
     fn cleanup<P: Fn(u64) + Send + Sync>(&self, progress: P) -> Result<()> {
-        // synchronize application of changes to the graph.
-        // this is necessary to ensure the graph remains undirected.
-        let apply_mu = Mutex::new(());
-
         (0..self.limit).into_par_iter().try_for_each(|v| {
             let txn = self.connection.begin_transaction(None)?;
-            let mut reader = BulkLoadGraphVectorIndexReader(self, &txn);
-            self.prune_and_apply(v, &mut reader, &apply_mu)?;
+            let reader = BulkLoadGraphVectorIndexReader(self, &txn);
+            match self.index.config().edge_type {
+                EdgeType::Undirected => {
+                    // Synchronize application of changes to keep graph undirected.
+                    let apply_mu = Mutex::new(());
+                    self.prune_and_apply_undirected(v, &reader, &apply_mu)?
+                }
+                EdgeType::Directed => {
+                    let mut vertex = self.graph[v].write().unwrap();
+                    if vertex.len() > self.index.config().pruning.max_edges.get() {
+                        vertex.sort_unstable();
+                        let computer = EdgeSetDistanceComputer::new(&reader, &vertex)?;
+                        let keep = prune_edges(&mut vertex, &self.index.config().pruning, computer);
+                        vertex.truncate(keep);
+                    }
+                }
+            }
             progress(1);
             Ok::<_, wt_mdb::Error>(())
         })
@@ -464,10 +449,18 @@ where
         edges: &mut Vec<Neighbor>,
     ) -> Result<()> {
         let vertex_vector = vector_store.get(vertex_id as i64).unwrap()?.to_vec();
-        let vertex_dist_fn = vector_format
-            .query_vector_distance_indexing(&vertex_vector, self.index.config().similarity);
+        let vertex_dist_fn =
+            vector_format.query_distance_symmetric(self.index.config().similarity, &vertex_vector);
         let limit = self.index.config().index_search_params.beam_width.get();
         for in_flight_vertex in in_flight.filter(|v| *v != vertex_id) {
+            // Skip vertices already in edges: the graph search may have found this vertex
+            // while it was concurrently being inserted, producing a different distance than
+            // the symmetric distance computed here. Since Neighbor equality is (vertex, distance),
+            // binary_search below would not find the existing entry and would insert a duplicate.
+            if edges.iter().any(|n| n.vertex() == in_flight_vertex as i64) {
+                continue;
+            }
+
             let in_flight_vertex_vector = vector_store.get(in_flight_vertex as i64).unwrap()?;
             let n = Neighbor::new(
                 in_flight_vertex as i64,
@@ -489,10 +482,65 @@ where
         Ok(())
     }
 
-    fn prune_and_apply<T>(
+    fn insert_undirected(
         &self,
         vertex: usize,
-        reader: &mut BulkLoadGraphVectorIndexReader<'_, '_, D>,
+        centroid_distance: f64,
+        apply_mu: &Mutex<(i64, f64)>,
+        mut edges: Vec<Neighbor>,
+        reader: &impl GraphVectorIndex,
+    ) -> Result<()> {
+        // Add each edge to this vertex and a reciprocal edge to make the graph
+        // undirected. If an edge does not fit on either vertex, save it for later.
+        // We will prune any vertices in this state, but put together the pruned edge
+        // list outside of `apply_mu` to maximize concurrency.
+        loop {
+            let mut entry_point = apply_mu.lock().unwrap();
+
+            edges.retain(|&e| {
+                let (mut iv, mut ev) = self.lock_edge(vertex, e.vertex() as usize);
+                if iv.len() == iv.capacity() || ev.len() == ev.capacity() {
+                    true
+                } else {
+                    // Another concurrent insertion may have added this edge already, so
+                    // skip it if that is the case. Compare by vertex id only: the same
+                    // vertex can appear with different distances (e.g. asymmetric vs
+                    // symmetric distance), and Neighbor equality includes distance.
+                    if !iv.iter().any(|n| n.vertex() == e.vertex()) {
+                        iv.push(e);
+                    }
+                    let backedge = Neighbor::new(vertex as i64, e.distance());
+                    if !ev.iter().any(|n| n.vertex() == vertex as i64) {
+                        ev.push(backedge);
+                    }
+                    false
+                }
+            });
+
+            if edges.is_empty() {
+                if centroid_distance < entry_point.1 {
+                    entry_point.0 = vertex as i64;
+                    entry_point.1 = centroid_distance;
+                    self.entry_vertex
+                        .store(vertex as i64, atomic::Ordering::SeqCst);
+                }
+                break;
+            }
+
+            drop(entry_point);
+            // Any edge still in the list is overful, so prune it.
+            self.prune_and_apply_undirected(vertex, reader, apply_mu)?;
+            for e in edges.iter() {
+                self.prune_and_apply_undirected(e.vertex() as usize, reader, apply_mu)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prune_and_apply_undirected<T>(
+        &self,
+        vertex: usize,
+        reader: &impl GraphVectorIndex,
         apply_mu: &Mutex<T>,
     ) -> Result<()> {
         // Get the set of edges to prune while only holding a read lock on the vertex.
@@ -562,11 +610,72 @@ where
             (self.graph[vertex0].write().unwrap(), g1)
         }
     }
+
+    fn insert_directed(
+        &self,
+        vertex: usize,
+        mut edges: Vec<Neighbor>,
+        reader: &impl GraphVectorIndex,
+        centroid_distance: f64,
+        entry_point: &Mutex<(i64, f64)>,
+    ) -> Result<()> {
+        let computer = EdgeSetDistanceComputer::new(reader, &edges)?;
+        let keep = prune_edges(&mut edges, &self.index.config().pruning, computer);
+        edges.truncate(keep);
+        // Note that we have to add the edges -- concurrent threads may have already inserted back
+        // edges to vertex.
+        self.add_edges_directed(vertex, &edges, reader)?;
+
+        // Insert back links to vertex.
+        for e in edges {
+            self.add_edges_directed(
+                e.vertex() as usize,
+                &[Neighbor::new(vertex as i64, e.distance())],
+                reader,
+            )?;
+        }
+
+        // Update entry point if we are closer.
+        {
+            let mut ep = entry_point.lock().unwrap();
+            if centroid_distance < ep.1 {
+                ep.0 = vertex as i64;
+                ep.1 = centroid_distance;
+                self.entry_vertex
+                    .store(vertex as i64, atomic::Ordering::SeqCst);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn add_edges_directed(
+        &self,
+        vertex: usize,
+        edges: &[Neighbor],
+        reader: &impl GraphVectorIndex,
+    ) -> Result<()> {
+        let mut vertex = self.graph[vertex].write().unwrap();
+        for e in edges {
+            // Skip any attempts to duplicate insert.
+            if vertex.iter().any(|f| f.vertex() == e.vertex()) {
+                continue;
+            }
+            vertex.push(*e);
+            if vertex.len() == vertex.capacity() {
+                vertex.sort_unstable();
+                let computer = EdgeSetDistanceComputer::new(reader, &vertex)?;
+                let keep = prune_edges(&mut vertex, &self.index.config().pruning, computer);
+                vertex.truncate(keep);
+            }
+        }
+        Ok(())
+    }
 }
 
 struct BulkLoadGraphVectorIndexReader<'a, 'b, D: Send>(&'a BulkLoadBuilder<D>, &'b Transaction);
 
-impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
+impl<D: VectorStore<Elem = f16> + Send + Sync> GraphVectorIndex
     for BulkLoadGraphVectorIndexReader<'_, '_, D>
 {
     type Graph<'b>
@@ -587,28 +696,34 @@ impl<D: VectorStore<Elem = f32> + Send + Sync> GraphVectorIndex
     }
 
     fn nav_vectors(&self) -> Result<Self::VectorStore<'_>> {
+        let centroid: Option<Arc<[f32]>> = self.config().centroid.as_deref().map(Arc::from);
         if let Some(s) = self.0.quantized_vectors.as_ref() {
             Ok(BulkLoadGraphVectorStore::Memory(
                 s,
                 self.config().similarity,
                 self.config().nav_format,
+                centroid,
             ))
         } else {
             Ok(BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
                 self.1.open_record_cursor(self.0.index.nav_table().name())?,
                 self.config().similarity,
                 self.config().nav_format,
+                centroid,
             )))
         }
     }
 
     fn rerank_vectors(&self) -> Option<Result<Self::VectorStore<'_>>> {
         self.0.index.rerank_table().map(|t| {
+            let centroid: Option<Arc<[f32]>> =
+                self.0.index.config().centroid.as_deref().map(Arc::from);
             self.1.open_record_cursor(t.name()).map(|c| {
                 BulkLoadGraphVectorStore::Cursor(CursorVectorStore::new(
                     c,
                     self.0.index.config().similarity,
                     t.format(),
+                    centroid,
                 ))
             })
         })
@@ -625,11 +740,7 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
 
     fn entry_point(&mut self) -> Option<Result<i64>> {
         let vertex = self.0.entry_vertex.load(atomic::Ordering::Relaxed);
-        if vertex >= 0 {
-            Some(Ok(vertex))
-        } else {
-            None
-        }
+        if vertex >= 0 { Some(Ok(vertex)) } else { None }
     }
 
     fn edges(&mut self, vertex_id: i64) -> Option<Result<Self::EdgeIterator<'_>>> {
@@ -647,23 +758,23 @@ impl<D: Send + Sync> Graph for BulkLoadBuilderGraph<'_, D> {
     }
 
     fn set_entry_point(&mut self, _: i64) -> Result<()> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 
     fn remove_entry_point(&mut self) -> Result<()> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 
     fn set_edges(&mut self, _: i64, _: impl Into<Vec<i64>>) -> Result<()> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 
     fn remove_vertex(&mut self, _: i64) -> Result<Vec<i64>> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 
     fn next_available_vertex_id(&mut self) -> Result<i64> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 }
 
@@ -691,11 +802,12 @@ impl Iterator for BulkNodeEdgesIterator<'_> {
 }
 
 enum BulkLoadGraphVectorStore<'a> {
-    Cursor(CursorVectorStore<'a>),
+    Cursor(CursorVectorStore),
     Memory(
         &'a DerefVectorStore<u8, memmap2::Mmap>,
         VectorSimilarity,
         F32VectorCoding,
+        Option<Arc<[f32]>>,
     ),
 }
 
@@ -703,21 +815,28 @@ impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
     fn format(&self) -> F32VectorCoding {
         match self {
             Self::Cursor(c) => c.format(),
-            Self::Memory(_, _, f) => *f,
+            Self::Memory(_, _, f, _) => *f,
         }
     }
 
     fn similarity(&self) -> VectorSimilarity {
         match self {
             Self::Cursor(c) => c.similarity(),
-            Self::Memory(_, s, _) => *s,
+            Self::Memory(_, s, _, _) => *s,
+        }
+    }
+
+    fn centroid(&self) -> Option<&[f32]> {
+        match self {
+            Self::Cursor(c) => c.centroid(),
+            Self::Memory(_, _, _, c) => c.as_deref(),
         }
     }
 
     fn get(&mut self, vertex_id: i64) -> Option<Result<&[u8]>> {
         match self {
             Self::Cursor(c) => c.get(vertex_id),
-            Self::Memory(m, _, _) => {
+            Self::Memory(m, _, _, _) => {
                 if vertex_id >= 0 && (vertex_id as usize) < m.len() {
                     Some(Ok(&m[vertex_id as usize]))
                 } else {
@@ -728,10 +847,10 @@ impl GraphVectorStore for BulkLoadGraphVectorStore<'_> {
     }
 
     fn set(&mut self, _: i64, _: impl AsRef<[u8]>) -> Result<()> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 
     fn remove(&mut self, _: i64) -> Result<Vec<u8>> {
-        Err(Error::Errno(Errno::NOTSUP))
+        Err(Error::errno(Errno::NOTSUP))
     }
 }

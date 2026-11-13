@@ -14,7 +14,6 @@ bitpacking = { version = "0.9.3", default-features = false, features = [
     "bitpacker4x",
 ] }
 bytemuck = "1.24.0"
-cc = "1.4.4"
 clap = { version = "4.6.6", features = ["derive"] }
 cmake = "0.1.58"
 criterion = "0.8.2"
@@ -73,9 +72,6 @@ tempfile = { workspace = true }
 [[bench]]
 name = "token"
 harness = false
-
-[build-dependencies]
-cc = { workspace = true }
 
 [profile.release]
 debug = "line-tables-only"

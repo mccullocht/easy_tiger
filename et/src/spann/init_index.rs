@@ -84,6 +84,11 @@ pub struct InitIndexArgs {
     #[arg(long)]
     rerank_format: F32VectorCoding,
 
+    /// Store posting vectors as residuals against their assigned centroid (v - c).
+    /// Queries are adjusted per centroid; the rerank table is unaffected.
+    #[arg(long, default_value_t = false)]
+    center_postings: bool,
+
     /// If true, read rerank vectors during centroid splits to generate new centroids.
     ///
     /// Using higher fidelity vectors can result in much more accurate centroid generation that is
@@ -155,6 +160,7 @@ pub fn init_index(
         },
         posting_coder: args.posting_coder,
         rerank_format: args.rerank_format,
+        center_postings: args.center_postings,
         split_rerank_vectors: args.split_rerank_vectors,
         rotation_seed: args.rotation_seed,
     };

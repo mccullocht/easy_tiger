@@ -813,3 +813,63 @@ impl VectorEncodeTerms {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn constant_vector_no_nan() {
+        // Regression: constant, near-constant (components differing at the ulp), and zero vectors
+        // must encode/decode and produce finite distances. These have a degenerate quantization
+        // interval (min == max, or a range that f16 collapses to zero) which used to yield a zero
+        // delta and NaN header terms -- reachable in SPANN rebalance via a zero residual/self-query.
+        let v0 = [-0.02f32; 8];
+        let v1 = [
+            -0.0200001f32,
+            -0.02,
+            -0.0200001,
+            -0.02,
+            -0.0200001,
+            -0.02,
+            -0.0200001,
+            -0.02,
+        ];
+        let zero = [0.0f32; 8];
+        for v in [&v0[..], &v1[..], &zero[..]] {
+            for bits in [1usize, 2, 4, 8] {
+                let coding = match bits {
+                    1 => crate::F32VectorCoding::TLVQ1,
+                    2 => crate::F32VectorCoding::TLVQ2,
+                    4 => crate::F32VectorCoding::TLVQ4,
+                    _ => crate::F32VectorCoding::TLVQ8,
+                };
+                let coder = coding.coder();
+                let mut bytes = vec![0u8; coder.byte_len(8)];
+                coder.encode_to(v, &mut bytes);
+                let mut out = vec![0f32; 8];
+                coder.decode_to(&bytes, &mut out);
+                for (i, x) in out.iter().enumerate() {
+                    assert!(
+                        x.is_finite(),
+                        "TLVQ{bits} decode of {v:?} produced non-finite [{i}] = {x}"
+                    );
+                }
+                let queries = [
+                    vec![0.0f32; 8],
+                    vec![
+                        -0.965f32, -0.035, -0.965, -0.035, -0.965, -0.035, -0.965, -0.035,
+                    ],
+                ];
+                for query in queries {
+                    let label = format!("{query:?}");
+                    let q =
+                        coding.query_distance_asymmetric(crate::VectorSimilarity::Euclidean, query);
+                    let d = q.distance(&bytes);
+                    assert!(
+                        d.is_finite(),
+                        "TLVQ{bits}: distance from {label} to {v:?} is non-finite: {d}"
+                    );
+                }
+            }
+        }
+    }
+}

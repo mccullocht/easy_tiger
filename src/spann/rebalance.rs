@@ -273,8 +273,8 @@ mod parallel {
         sync::Arc,
     };
     use tracing::warn;
-    use vectors::QueryVectorDistance;
-    use wt_mdb::{Connection, Error, Result};
+    use vectors::{F32VectorCoder, QueryVectorDistance, prepare_vector};
+    use wt_mdb::{Connection, Error, Result, TypedCursorGuard};
 
     use crate::{
         input::{VecVectorStore, VectorStore},
@@ -282,6 +282,7 @@ mod parallel {
         spann::{
             CentroidAssignment, TableIndex, TransactionIndex,
             centroid_stats::{CentroidAssignmentUpdater, CentroidCounts, CentroidStats},
+            centroids::CentroidVectorSource,
             postings::BlockPostingsMut,
             rebalance::{MergeStats, RebalanceStats, SplitStats},
         },
@@ -330,6 +331,9 @@ mod parallel {
         pub new: u32,
         /// High fidelity head vector for `source` before it is overwritten by the split.
         pub old_source_vector: Vec<u8>,
+        /// Absolute f32 vector for `source` before it is overwritten by the split. Only set when
+        /// the index centers postings, in which case source postings are residuals against it.
+        pub old_source_center: Option<Vec<f32>>,
         /// The two component centroids.
         pub centroids: VecVectorStore<f32>,
     }
@@ -364,16 +368,80 @@ mod parallel {
         Ok(encoded_centroid_distance(txn_idx, centroid))
     }
 
+    /// Return a distance function for scoring centered postings against an absolute `centroid`.
+    ///
+    /// Centered postings are stored as residuals (`v - c_center`) against `posting_center`, so the
+    /// query scoring them against `centroid` is `centroid - c_center`:
+    /// `|r - (c_target - c_center)| = |v - c_target|`. When `centroid == posting_center` the query
+    /// is the zero vector and the distance is the residual norm, i.e. the posting's distance to
+    /// its own centroid.
+    fn centered_centroid_distance(
+        txn_idx: &TransactionIndex,
+        centroid: &[f32],
+        posting_center: &[f32],
+    ) -> Box<dyn QueryVectorDistance> {
+        let similarity = txn_idx.index().head_config().config().similarity;
+        let query = centroid
+            .iter()
+            .zip(posting_center.iter())
+            .map(|(t, s)| t - s)
+            .collect::<Vec<_>>();
+        txn_idx
+            .index()
+            .config()
+            .posting_coder
+            .query_distance_asymmetric(similarity, query)
+    }
+
+    /// State for re-encoding postings as residuals against a target centroid. Present when the
+    /// index centers postings: moves recompute residuals from the rerank table and reencode
+    /// postings rather than copying source posting bytes.
+    struct PostingUpdaterCenteringState {
+        raw_vectors: TypedCursorGuard<i64, Vec<u8>>,
+        rerank_coder: Box<dyn F32VectorCoder>,
+        posting_coder: Box<dyn F32VectorCoder>,
+        centroids: CentroidVectorSource,
+    }
+
+    impl PostingUpdaterCenteringState {
+        /// Fetch the raw posting for `record_id` and reencode it centered against `centroid_id`.
+        /// Returns a NotFound error if either of `record_id` or `centroid_id` cannot be found.
+        fn encode(&mut self, centroid_id: u32, record_id: i64) -> Result<Vec<u8>> {
+            let raw = self
+                .raw_vectors
+                .seek_exact(record_id)
+                .unwrap_or_else(|| Err(Error::not_found_error()))?;
+            let vector = self.rerank_coder.decode(&raw);
+            let centroid = self.centroids.centroid_vector(centroid_id)?;
+            let residual = prepare_vector(&vector, None, false, Some(&centroid));
+            Ok(self.posting_coder.encode(&residual))
+        }
+    }
+
     struct PostingUpdater {
         postings: BlockPostingsMut,
         assignments: CentroidAssignmentUpdater,
+        centering: Option<PostingUpdaterCenteringState>,
     }
 
     impl PostingUpdater {
         pub fn new(txn_idx: &TransactionIndex) -> Result<Self> {
+            let center_postings = txn_idx.index().config().center_postings;
             Ok(Self {
                 postings: BlockPostingsMut::from_txn(txn_idx)?,
                 assignments: CentroidAssignmentUpdater::new(txn_idx)?,
+                centering: if center_postings {
+                    Some(PostingUpdaterCenteringState {
+                        raw_vectors: txn_idx.transaction().open_cursor::<i64, Vec<u8>>(
+                            txn_idx.index().raw_vectors_table_name(),
+                        )?,
+                        rerank_coder: txn_idx.index().config().rerank_format.coder(),
+                        posting_coder: txn_idx.index().config().posting_coder.coder(),
+                        centroids: CentroidVectorSource::new(txn_idx.head())?,
+                    })
+                } else {
+                    None
+                },
             })
         }
 
@@ -381,12 +449,19 @@ mod parallel {
             self.postings.read_centroid(centroid_id)
         }
 
+        /// Move a posting from `source` to `target`. If postings are centered the posting is
+        /// re-encoded against `target`; this is also valid when `source == target`.
         pub fn move_posting(&mut self, record_id: i64, source: u32, target: u32) -> Result<()> {
             let old = self
                 .assignments
                 .update(record_id, CentroidAssignment::new(target))?;
             assert_eq!(old.primary_id, source);
-            let v = self.postings.remove(source, record_id)?.unwrap().to_vec();
+            let removed = self.postings.remove(source, record_id)?;
+            let v = if let Some(c) = self.centering.as_mut() {
+                c.encode(target, record_id)?
+            } else {
+                removed.expect("posting present in source").to_vec()
+            };
             self.postings.insert(target, record_id, &v)
         }
 
@@ -445,6 +520,17 @@ mod parallel {
                     )
                 },
                 |txn_idx, (s, n)| {
+                    // Fetch the source centroid vector before seeking the posting cursor:
+                    // reading it performs WT operations that would invalidate data borrowed
+                    // from the posting cursor below.
+                    let old_source_center = txn_idx
+                        .index()
+                        .config()
+                        .center_postings
+                        .then(|| CentroidVectorSource::new(txn_idx.head()))
+                        .transpose()?
+                        .map(|mut source| source.centroid_vector(s))
+                        .transpose()?;
                     let mut posting_cursor = txn_idx
                         .transaction()
                         .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
@@ -457,7 +543,8 @@ mod parallel {
                         PostingBlock::new(raw_posting, txn_idx.index().posting_vector_len())
                             .expect("valid posting block");
                     let mut rng = rng_supplier();
-                    let posting_vectors = extract_posting_vectors(txn_idx, &block)?;
+                    let posting_vectors =
+                        extract_posting_vectors(txn_idx, &block, old_source_center.as_deref())?;
                     let mut centroids = partition_postings(txn_idx, s, &posting_vectors, &mut rng);
 
                     let old_source_vector = txn_idx
@@ -480,6 +567,7 @@ mod parallel {
                         source: s,
                         new: n,
                         old_source_vector,
+                        old_source_center,
                         centroids,
                     }))
                 },
@@ -488,9 +576,14 @@ mod parallel {
             .collect()
     }
 
+    /// Extract f32 vectors from `block` for clustering.
+    ///
+    /// If `source_center` is set postings are centered residuals against it; it is re-added so
+    /// that clustering runs on absolute vectors and new centroids land in absolute space.
     fn extract_posting_vectors(
         txn_idx: &TransactionIndex,
         block: &PostingBlock<'_>,
+        source_center: Option<&[f32]>,
     ) -> Result<VecVectorStore<f32>> {
         let len = block.len();
         let mut scratch_vector =
@@ -512,6 +605,11 @@ mod parallel {
             let coder = txn_idx.index().config().posting_coder.coder();
             for v in block.iter().map(|x| x.1) {
                 coder.decode_to(v, &mut scratch_vector);
+                if let Some(source_center) = source_center {
+                    for (d, c) in scratch_vector.iter_mut().zip(source_center.iter()) {
+                        *d += c;
+                    }
+                }
                 clustering_vectors.push(&scratch_vector);
             }
         }
@@ -601,7 +699,9 @@ mod parallel {
 
     /// Generate a list of all posting moves out of ops assuming an updated head index.
     ///
-    /// Vectors that remain in a split source centroid are not listed.
+    /// Vectors that remain in a split source centroid are not listed unless postings are centered,
+    /// in which case they are listed with `source == target` so that they are re-encoded against
+    /// the updated source centroid vector.
     pub fn posting_reassignments(
         connection: &Arc<Connection>,
         index: &Arc<TableIndex>,
@@ -658,9 +758,29 @@ mod parallel {
                             };
                             // The source has been overwritten in the head index, use the vector
                             // captured before the split.
-                            let s_distfn = encoded_centroid_distance(txn, &split.old_source_vector);
-                            let t0_distfn = centroid_distance(txn, split.source)?;
-                            let t1_distfn = centroid_distance(txn, split.new)?;
+                            let (s_distfn, t0_distfn, t1_distfn) =
+                                if let Some(center) = split.old_source_center.as_deref() {
+                                    let mut centroids = CentroidVectorSource::new(txn.head())?;
+                                    (
+                                        centered_centroid_distance(txn, center, center),
+                                        centered_centroid_distance(
+                                            txn,
+                                            &centroids.centroid_vector(split.source)?,
+                                            center,
+                                        ),
+                                        centered_centroid_distance(
+                                            txn,
+                                            &centroids.centroid_vector(split.new)?,
+                                            center,
+                                        ),
+                                    )
+                                } else {
+                                    (
+                                        encoded_centroid_distance(txn, &split.old_source_vector),
+                                        centroid_distance(txn, split.source)?,
+                                        centroid_distance(txn, split.new)?,
+                                    )
+                                };
                             let postings = block
                                 .iter()
                                 .map(|(id, v)| {
@@ -735,12 +855,28 @@ mod parallel {
                 |(txn, searcher, result_scratch), (source, postings, _)| {
                     let mut m = vec![];
                     let mut s = GraphSearchStats::default();
+                    // When postings are centered, Target::Query carries residual bytes; re-add
+                    // the source centroid to produce an absolute head-search query. Split sources
+                    // have been overwritten so use the vector captured before the split.
+                    let source_centroid = if !index.config().center_postings {
+                        None
+                    } else if let Some(split) = splits.get(&source) {
+                        split.old_source_center.clone()
+                    } else {
+                        Some(CentroidVectorSource::new(txn.head())?.centroid_vector(source)?)
+                    };
                     for (vector_id, target) in postings {
                         let centroid = match target {
                             Target::Centroid(c) => c,
                             Target::Query(q) => {
+                                let mut query = coder.decode(&q);
+                                if let Some(source_centroid) = source_centroid.as_ref() {
+                                    for (d, c) in query.iter_mut().zip(source_centroid.iter()) {
+                                        *d += c;
+                                    }
+                                }
                                 let (mut candidates, _) = searcher.search_with_options(
-                                    &coder.decode(&q),
+                                    &query,
                                     GraphSearchOptions::with_filter(|i| {
                                         !filter.contains(&(i as u32))
                                     })
@@ -754,8 +890,9 @@ mod parallel {
                                 centroid
                             }
                         };
-                        // The vector remains in the (split) source centroid.
-                        if centroid == source {
+                        // The vector remains in the (split) source centroid. Centered postings
+                        // must still be moved to re-encode them against the new source vector.
+                        if centroid == source && !index.config().center_postings {
                             continue;
                         }
                         m.push(PostingMove {
@@ -908,11 +1045,31 @@ mod parallel {
                 |txn, (nearby, targets)| {
                     let mut updater = PostingUpdater::new(txn)?;
                     let postings = updater.read_centroid(*nearby)?;
-                    let nearby_distfn = centroid_distance(txn, *nearby)?;
-                    let targets_distfn = targets
-                        .iter()
-                        .map(|c| centroid_distance(txn, *c))
-                        .collect::<Result<Vec<_>>>()?;
+                    let (nearby_distfn, targets_distfn) = if txn.index().config().center_postings {
+                        // Postings in nearby are residuals against the current nearby centroid.
+                        let mut centroids = CentroidVectorSource::new(txn.head())?;
+                        let center = centroids.centroid_vector(*nearby)?;
+                        let targets_distfn = targets
+                            .iter()
+                            .map(|c| {
+                                Ok(centered_centroid_distance(
+                                    txn,
+                                    &centroids.centroid_vector(*c)?,
+                                    &center,
+                                ))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        (
+                            centered_centroid_distance(txn, &center, &center),
+                            targets_distfn,
+                        )
+                    } else {
+                        let targets_distfn = targets
+                            .iter()
+                            .map(|c| centroid_distance(txn, *c))
+                            .collect::<Result<Vec<_>>>()?;
+                        (centroid_distance(txn, *nearby)?, targets_distfn)
+                    };
                     let moves = postings
                         .iter()
                         .filter_map(|(id, v)| {
@@ -969,6 +1126,361 @@ mod parallel {
         }
         updater.flush()?;
         txn_idx.commit(None)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::{num::NonZero, sync::Arc};
+
+        use super::*;
+        use crate::{
+            input::VectorStore,
+            spann::IndexConfig,
+            vamana::{
+                EdgePruningConfig, EdgeType, GraphConfig, GraphSearchParams, mutate::insert_vector,
+                search::GraphSearcher,
+            },
+        };
+        use rand_xoshiro::rand_core::SeedableRng;
+        use vectors::{F32VectorCoding, VectorSimilarity};
+        use wt_mdb::connection::OptionsBuilder;
+
+        /// Check `centered_centroid_distance` against brute-force distance computed from
+        /// the rerank vector and absolute centroid vectors, on a tiny centered index
+        /// mid-rebalance (split centroids present, source posting intact).
+        ///
+        /// The centered residual identity `|c_target - c_source - (v - c_source)| = |v - c_target|`
+        /// must hold in every configuration. For TLVQ codings the Dot distance is a scaled L2
+        /// (`0.25 * |q - v|^2`), which is translation-invariant, so Dot + centering works; the
+        /// F32 float32 Dot distance (`(-q.v + 1)/2`) is not and is deliberately not asserted here.
+        #[test]
+        fn factory_distance_matches_ground_truth() -> std::io::Result<()> {
+            for (dot, shared_centroid, head_rerank, posting_coder, dim) in [
+                (false, false, None, F32VectorCoding::F32, 2),
+                (false, true, None, F32VectorCoding::F32, 2),
+                (
+                    false,
+                    false,
+                    Some(F32VectorCoding::TLVQ4),
+                    F32VectorCoding::F32,
+                    8,
+                ),
+                // Dot + TLVQ is the supported Dot configuration for centered postings.
+                (true, true, None, F32VectorCoding::TLVQ8, 8),
+                (true, false, None, F32VectorCoding::TLVQ4, 8),
+                (
+                    true,
+                    true,
+                    Some(F32VectorCoding::TLVQ4),
+                    F32VectorCoding::TLVQ4,
+                    8,
+                ),
+                (true, false, None, F32VectorCoding::TLVQ1, 8),
+                // The zero-vector self query is emitted for TLVQ postings regardless of
+                // similarity; check whether Euclidean + TLVQ is affected too.
+                (false, false, None, F32VectorCoding::TLVQ4, 8),
+            ] {
+                let mismatches =
+                    check_factory(dot, shared_centroid, head_rerank, posting_coder, dim)?;
+                assert_eq!(
+                    mismatches, 0,
+                    "{mismatches} postings had mismatched factory distances \
+                     (dot={dot}, shared_centroid={shared_centroid}, head_rerank={head_rerank:?}, \
+                     posting_coder={posting_coder:?})"
+                );
+            }
+            Ok(())
+        }
+
+        fn check_factory(
+            dot: bool,
+            shared_centroid: bool,
+            head_rerank: Option<F32VectorCoding>,
+            posting_coder: F32VectorCoding,
+            dim: usize,
+        ) -> std::io::Result<usize> {
+            // Embed the 2D bimodal pattern into `dim` by alternating the components; geometry is
+            // preserved and TLVQ gets a dimension it is happy with.
+            let expand = |pair: [f32; 2]| -> Vec<f32> { (0..dim).map(|i| pair[i % 2]).collect() };
+            let dir = tempfile::TempDir::new().unwrap();
+            let conn = Connection::open(
+                dir.path().to_str().unwrap(),
+                Some(OptionsBuilder::default().create().into()),
+            )?;
+            let search_params = GraphSearchParams {
+                beam_width: NonZero::new(4).unwrap(),
+                num_rerank: 0,
+                patience: None,
+            };
+            let head_config = GraphConfig {
+                dimensions: NonZero::new(dim).unwrap(),
+                similarity: if dot {
+                    VectorSimilarity::Dot
+                } else {
+                    VectorSimilarity::Euclidean
+                },
+                nav_format: F32VectorCoding::F32,
+                rerank_format: head_rerank,
+                pruning: EdgePruningConfig::new(NonZero::new(2).unwrap()),
+                index_search_params: search_params,
+                centroid: shared_centroid.then(|| expand([0.3, -0.1])),
+                edge_type: EdgeType::Undirected,
+            };
+            let spann_config = IndexConfig {
+                head_search_params: search_params,
+                posting_coder,
+                min_centroid_len: 4,
+                max_centroid_len: 12,
+                rerank_format: F32VectorCoding::F32,
+                center_postings: true,
+                split_rerank_vectors: false,
+                rotation_seed: None,
+            };
+            let index = Arc::new(TableIndex::init_index(
+                &conn,
+                "diag",
+                head_config,
+                spann_config,
+            )?);
+
+            // Single seed centroid at the mean of a bimodal cluster, so every data vector
+            // assigns to it and the centre-of-mass postings are genuinely nearer to it than to
+            // either split mode (they should require a head search at move time). For Dot the
+            // centroid lives in unit space, so normalize it like the data vectors.
+            let mut seed = expand([1.0, 0.0]);
+            if dot {
+                let norm = seed.iter().map(|x| (x * x) as f64).sum::<f64>().sqrt() as f32;
+                for d in seed.iter_mut() {
+                    *d /= norm;
+                }
+            }
+            {
+                let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+                insert_vector(&seed, txn_idx.head())?;
+                txn_idx.commit(None)?;
+            }
+            // 20 vectors: 8 near each mode (0,0) / (2,0) and 4 straddling the mean (1,0).
+            let mut pairs: Vec<[f32; 2]> = Vec::with_capacity(20);
+            for i in 0..8 {
+                let d = i as f32 * 0.01;
+                pairs.push([0.0 + d, 0.0 - d]);
+                pairs.push([2.0 - d, 2.0 * d]);
+            }
+            pairs.push([1.0, 0.0]);
+            pairs.push([1.0, 0.05]);
+            pairs.push([0.98, -0.02]);
+            pairs.push([1.03, 0.01]);
+            let mut vectors = VecVectorStore::with_capacity(dim, pairs.len());
+            for pair in pairs {
+                let mut v = expand(pair);
+                if dot {
+                    let norm = v.iter().map(|x| (x * x) as f64).sum::<f64>().sqrt() as f32;
+                    if norm > 0.0 {
+                        for d in v.iter_mut() {
+                            *d /= norm;
+                        }
+                    }
+                }
+                vectors.push(&v);
+            }
+            {
+                let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+                let mut assignment_updater = CentroidAssignmentUpdater::new(&txn_idx)?;
+                let mut postings = BlockPostingsMut::from_txn(&txn_idx)?;
+                let mut rerank_cursor = txn_idx
+                    .transaction()
+                    .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?;
+                let mut centroid_source = CentroidVectorSource::new(txn_idx.head())?;
+                let posting_coder = index.new_posting_coder();
+                let rerank_coder = index.config().rerank_format.coder();
+                let mut searcher = GraphSearcher::new(search_params);
+                for (record_id, vector) in vectors.iter().enumerate() {
+                    let candidates = searcher.search(vector, txn_idx.head())?;
+                    let centroid_id = candidates[0].vertex() as u32;
+                    assignment_updater
+                        .insert(record_id as i64, CentroidAssignment::new(centroid_id))?;
+                    let centroid = centroid_source.centroid_vector(centroid_id)?;
+                    let posting = prepare_vector(vector, None, false, Some(&centroid));
+                    postings.insert(
+                        centroid_id,
+                        record_id as i64,
+                        &posting_coder.encode(&posting),
+                    )?;
+                    rerank_cursor.set(record_id as i64, &rerank_coder.encode(vector))?;
+                }
+                postings.flush()?;
+                assignment_updater.flush()?;
+                drop(centroid_source);
+                drop(rerank_cursor);
+                drop(postings);
+                drop(assignment_updater);
+                txn_idx.commit(None)?;
+            }
+
+            // One split op: 16 > max(12).
+            let ops = {
+                let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+                let stats = CentroidStats::from_index_stats(&txn_idx)?;
+                let ops = get_rebalance_ops(&stats, index.config().centroid_len_range());
+                txn_idx.commit(None)?;
+                ops
+            };
+            assert_eq!(ops.len(), 1, "expected exactly one split op, got {ops:?}");
+            // The source id is retained for one component (t0) and a new id allocated for the
+            // other (t1).
+            let RebalanceOp::Split(s, t1) = ops[0] else {
+                panic!("expected a split op");
+            };
+            let t0 = s;
+            let split_centroids = generate_split_centroids(&conn, &index, &ops, &|| {
+                rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(1)
+            })?;
+            // Source postings are residuals against the source vector from before the split.
+            let c_s = split_centroids[0]
+                .old_source_center
+                .clone()
+                .expect("centered index captures the old source center");
+            insert_split_centroids(&conn, &index, &ops, &split_centroids)?;
+
+            // What the actual rebalance split assignment produces. Centered postings that remain
+            // in the source are listed as moves with source == target.
+            let (moves, rebalance_stats) =
+                posting_reassignments(&conn, &index, &ops, &split_centroids)?;
+            let in_target = |t: u32| {
+                moves
+                    .iter()
+                    .filter(|m| m.source == s && m.target == t)
+                    .count()
+            };
+
+            // Direct centered distance vs. ground truth.
+            let txn_idx = TransactionIndex::new(&index, conn.begin_transaction(None)?);
+            let mut centroid_source = CentroidVectorSource::new(txn_idx.head())?;
+            let (c_t0, c_t1) = (
+                centroid_source.centroid_vector(t0)?,
+                centroid_source.centroid_vector(t1)?,
+            );
+            let sdf = centered_centroid_distance(&txn_idx, &c_s, &c_s);
+            let t0df = centered_centroid_distance(&txn_idx, &c_t0, &c_s);
+            let t1df = centered_centroid_distance(&txn_idx, &c_t1, &c_s);
+            let mut rerank_cursor = txn_idx
+                .transaction()
+                .open_cursor::<i64, Vec<u8>>(index.raw_vectors_table_name())?;
+            let rerank_coder = index.config().rerank_format.coder();
+            let raw_block = {
+                let mut pc = txn_idx
+                    .transaction()
+                    .open_cursor::<u32, Vec<u8>>(index.postings_table_name())?;
+                pc.seek_exact(s).unwrap().expect("source posting block")
+            };
+            let block = PostingBlock::new(&raw_block, index.posting_vector_len()).expect("block");
+            let squared = |a: &[f32], b: &[f32]| -> f64 {
+                a.iter()
+                    .zip(b)
+                    .map(|(x, y)| (*x as f64 - *y as f64).powi(2))
+                    .sum()
+            };
+            let mut mismatches = 0;
+            // record -> target centroid for source records, from the real rebalance assignment.
+            let assigned: HashMap<i64, u32> = moves
+                .iter()
+                .filter(|m| m.source == s)
+                .map(|m| (m.record_id, m.target))
+                .collect();
+            let mut assignment_mismatches = 0;
+            // TLVQ's Dot distance is 0.25 * |q - v|^2 (translation-invariant); the F32 float32
+            // cosine distance is not, so Dot + centering is only asserted for the TLVQ codings.
+            let factor = if dot { 0.25 } else { 1.0 };
+            for (record_id, encoded) in block.iter() {
+                let rr =
+                    rerank_coder.decode(&rerank_cursor.seek_exact(record_id).unwrap().unwrap());
+                let (g_s, g_t0, g_t1) = (
+                    factor * squared(&rr, &c_s),
+                    factor * squared(&rr, &c_t0),
+                    factor * squared(&rr, &c_t1),
+                );
+                let (m_s, m_t0, m_t1) = (
+                    sdf.distance(encoded),
+                    t0df.distance(encoded),
+                    t1df.distance(encoded),
+                );
+                // F32 postings reproduce the identity exactly; TLVQ postings within quantization
+                // tolerance. The absolute floor matters for near-zero distances (a posting sitting
+                // on a centroid) where TLVQ's relative noise can be large.
+                let (rel, floor) = if posting_coder == F32VectorCoding::F32 {
+                    (1e-6, 1e-3)
+                } else {
+                    (0.15, 1e-2)
+                };
+                let close = |a: f64, b: f64| (a - b).abs() <= rel * a.abs().max(b.abs()) + floor;
+                if !(close(m_s, g_s) && close(m_t0, g_t0) && close(m_t1, g_t1)) {
+                    mismatches += 1;
+                    let mut scratch = vec![0f32; dim];
+                    index.new_posting_coder().decode_to(encoded, &mut scratch);
+                    println!(
+                        "record {record_id}: factory=({m_s:.4},{m_t0:.4},{m_t1:.4}) \
+                         ground=({g_s:.4},{g_t0:.4},{g_t1:.4}) decoded_posting={scratch:?}"
+                    );
+                }
+                // A posting should be reassigned to whichever of t0/t1 it is truly nearer to.
+                if squared(&rr, &c_t0) <= squared(&rr, &c_t1) {
+                    if assigned.get(&record_id) != Some(&t0) {
+                        assignment_mismatches += 1;
+                        println!(
+                            "record {record_id}: nearer to t0 but assigned to {:?}",
+                            assigned.get(&record_id)
+                        );
+                    }
+                } else if assigned.get(&record_id) != Some(&t1) {
+                    assignment_mismatches += 1;
+                    println!(
+                        "record {record_id}: nearer to t1 but assigned to {:?}",
+                        assigned.get(&record_id)
+                    );
+                }
+            }
+            // A split target receiving all postings (with the other empty) is exactly the
+            // degenerate assignment the user observed; flag it loudly.
+            let (t0_count, t1_count) = (in_target(t0), in_target(t1));
+            let searches = rebalance_stats.split_stats.searches;
+            println!(
+                "  split distribution (dot={dot}, shared_centroid={shared_centroid}, \
+                 posting={posting_coder:?}): t0={t0_count} t1={t1_count} searched={searches}"
+            );
+            assert!(
+                t0_count > 0 && t1_count > 0,
+                "split assigned all postings to one of the two targets: t0={t0_count} t1={t1_count}"
+            );
+            // The centre-of-mass postings are genuinely nearer the source centroid than to either
+            // split target, so the rebalance must head-search them (not assign them blindly). For
+            // F32 the count is exact; TLVQ quantization just needs at least one search to show the
+            // self-distance is discriminating rather than a constant.
+            if posting_coder == F32VectorCoding::F32 {
+                assert!(
+                    (4..=6).contains(&searches),
+                    "expected the straddling postings to require a head search, got {searches}"
+                );
+            } else {
+                assert!(
+                    searches >= 1,
+                    "expected the straddling postings to require a head search, got {searches}"
+                );
+            }
+            assert!(
+                mismatches == 0,
+                "{mismatches} postings had mismatched factory distances"
+            );
+            // Lossy TLVQ postings can flip the split-target decision for borderline postings
+            // relative to exact brute-force; the distribution and search assertions above still
+            // guard against degenerate behavior for them.
+            if posting_coder == F32VectorCoding::F32 {
+                assert!(
+                    assignment_mismatches == 0,
+                    "{assignment_mismatches} postings assigned to the wrong split target"
+                );
+            }
+            Ok(mismatches)
+        }
     }
 }
 
@@ -1130,6 +1642,7 @@ mod tests {
                         min_centroid_len: MIN_CENTROID_LEN,
                         max_centroid_len: MAX_CENTROID_LEN,
                         rerank_format: F32VectorCoding::F32,
+                        center_postings: false,
                         split_rerank_vectors: false,
                         rotation_seed: None,
                     },

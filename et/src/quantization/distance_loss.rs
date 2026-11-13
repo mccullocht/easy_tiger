@@ -7,7 +7,7 @@ use indicatif::ParallelProgressIterator;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use smallvec::smallvec;
-use vectors::{EstimatedDistance, F32VectorCoding, VectorSimilarity, f16, rotate::Rotator};
+use vectors::{EstimatedDistance, F32VectorCoding, VectorSimilarity, f16};
 
 use crate::ui::progress_bar;
 
@@ -19,32 +19,27 @@ pub struct DistanceLossArgs {
     /// little-endian f16 vector data).
     #[arg(long)]
     query_vectors: PathBuf,
-    /// If true, quantize queries before computing loss, bypassing any f32 x quantized query
-    /// vector distance implementation.
-    #[arg(long)]
-    quantize_query: bool,
-    /// Limit on the number of queries. If unset, use all input queries.
+    /// If set, only process this many input queries.
     #[arg(long)]
     query_limit: Option<usize>,
+    /// If set, quantize queries before scoring, bypassing any f32 x quantized distance
+    /// implementation. f32 x quantized scoring is typically more accurate but slower.
+    #[arg(long, default_value_t = false)]
+    quantize_query: bool,
 
+    /// Vector coding to evaluate.
+    #[arg(short, long)]
+    format: F32VectorCoding,
     /// Similarity function to use.
     #[arg(long)]
     similarity: VectorSimilarity,
-    /// Format to compare against f32 distance.
-    #[arg(long)]
-    format: F32VectorCoding,
 
-    /// If set, compute the center of the dataset and apply before computing distances.
+    /// If set, compute the center of the dataset and apply before quantizing.
     #[arg(long, default_value_t = false)]
     center: bool,
 
-    /// If set, rotate vectors before quantization.
-    #[arg(long, default_value_t = false)]
-    rotate: bool,
-
-    /// Seed for rotation.
-    #[arg(long, default_value_t = 11500348935374314158)]
-    rotate_seed: u64,
+    #[command(flatten)]
+    rotation: super::RotationArgs,
 }
 
 pub fn distance_loss(
@@ -68,11 +63,7 @@ pub fn distance_loss(
         .unwrap_or(query_vectors.len())
         .min(query_vectors.len());
 
-    let rotator = if args.rotate {
-        Some(Rotator::new(vectors.elem_stride(), args.rotate_seed))
-    } else {
-        None
-    };
+    let rotator = args.rotation.rotator(vectors.elem_stride());
     let center = if args.center {
         let mut center = super::compute_center(vectors);
         if let Some(r) = rotator.as_ref() {

@@ -10,20 +10,28 @@ use crate::ui::progress_bar;
 
 #[derive(Args)]
 pub struct LossArgs {
-    /// Target format to measure the quantization loss of.
+    /// Vector coding to evaluate.
     #[arg(short, long)]
     format: F32VectorCoding,
     /// If set, compute the center of the dataset and apply before quantizing.
     #[arg(long, default_value_t = false)]
     center: bool,
+
+    #[command(flatten)]
+    rotation: super::RotationArgs,
 }
 
 pub fn loss(
     args: LossArgs,
     vectors: &(impl VectorStore<Elem = f16> + Send + Sync),
 ) -> io::Result<()> {
+    let rotator = args.rotation.rotator(vectors.elem_stride());
     let mean = if args.center {
-        Some(super::compute_center(vectors))
+        let mut mean = super::compute_center(vectors);
+        if let Some(r) = rotator.as_ref() {
+            r.rotate(&mut mean);
+        }
+        Some(mean)
     } else {
         None
     };
@@ -33,7 +41,12 @@ pub fn loss(
         .into_par_iter()
         .progress_with(progress_bar(vectors.len(), "loss"))
         .map(|i| {
-            let v = vectors::prepare_vector_from_f16(&vectors[i], None, false, mean.as_deref());
+            let v = vectors::prepare_vector_from_f16(
+                &vectors[i],
+                rotator.as_ref(),
+                false,
+                mean.as_deref(),
+            );
             let encoded = coder.encode(&v);
             let q = coder.decode(&encoded);
             let (abs_error, sq_error, sq_magnitude) = v

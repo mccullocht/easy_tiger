@@ -728,4 +728,29 @@ mod test {
             }
         }
     }
+
+    /// Every available kernel must pack and decode identically to the scalar kernel, including
+    /// dimensions with no full 128 dimension block and partial final blocks of 121-127 dimensions.
+    #[test]
+    fn kernels_match_scalar() {
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5ca1a7);
+        for dim in [1, 7, 8, 19, 64, 121, 127, 128, 129, 250, 255, 256, 300] {
+            let v = gauss_vec(&mut rng, dim);
+            let mut expected_bits = vec![0u8; dim.div_ceil(8)];
+            let expected_neg = Kernel::Scalar.quantize_and_pack(&v, &mut expected_bits);
+            let mut expected_decoded = vec![0.0f32; dim];
+            Kernel::Scalar.decode(&expected_bits, 0.5, &mut expected_decoded);
+
+            for k in Kernel::CANDIDATES.iter().copied().filter(Kernel::is_available) {
+                let mut bits = vec![0u8; dim.div_ceil(8)];
+                let neg = k.quantize_and_pack(&v, &mut bits);
+                assert_eq!(neg, expected_neg, "{k:?} dim={dim} negative count");
+                assert_eq!(bits, expected_bits, "{k:?} dim={dim} packed bits");
+
+                let mut decoded = vec![f32::NAN; dim];
+                k.decode(&expected_bits, 0.5, &mut decoded);
+                assert_eq!(decoded, expected_decoded, "{k:?} dim={dim} decoded");
+            }
+        }
+    }
 }

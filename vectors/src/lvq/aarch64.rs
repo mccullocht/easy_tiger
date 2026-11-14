@@ -70,6 +70,31 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     }
 }
 
+pub fn partial_stats(vector: &[f32]) -> (f32, f32, f32) {
+    let (head, tail) = vector.as_chunks::<4>();
+    let (vl2_norm_sq, vmin, vmax) = head.iter().map(|c| unsafe { vld1q_f32(c.as_ptr()) }).fold(
+        unsafe {
+            (
+                vdupq_n_f32(0.0),
+                vdupq_n_f32(f32::MAX),
+                vdupq_n_f32(f32::MIN),
+            )
+        },
+        |(l2_norm_sq, min, max), c| unsafe {
+            (
+                vfmaq_f32(l2_norm_sq, c, c),
+                vminq_f32(min, c),
+                vmaxq_f32(max, c),
+            )
+        },
+    );
+
+    tail.iter().fold(
+        unsafe { (vaddvq_f32(vl2_norm_sq), vminvq_f32(vmin), vmaxvq_f32(vmax)) },
+        |(l2_norm_sq, min, max), &x| (x.mul_add(x, l2_norm_sq), x.min(min), x.max(max)),
+    )
+}
+
 fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f32 {
     let (means2, m2) = unsafe {
         let means0 = vcvt_f64_f32(vget_low_f32(means));

@@ -205,7 +205,7 @@ impl ErrorBoundTerms {
 /// Along with the bit configuration this carries enough metadata to transform a quantized vector
 /// value stream back to an f32 representation or compute angular or l2 distance from another
 /// vector.
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
 #[repr(C)]
 struct PrimaryVectorHeader {
     /// L2 norm (magnitude) of the (possibly centered) vector.
@@ -497,16 +497,36 @@ impl<const B: usize> TurboPrimaryCoder<B> {
 
     fn encode_parts_to(k: Kernel, vector: &[f32], out: &mut [u8]) -> PrimaryVectorHeader {
         crate::assert_finite_vector(vector);
-        let stats = VectorStats::new(k, vector);
-        // The quantization interval is stored as f16 so the component range must fit in f16.
-        assert!(
-            f16::from_f32(stats.min).is_finite() && f16::from_f32(stats.max).is_finite(),
-            "vector component range [{}, {}] is not representable as f16",
-            stats.min,
-            stats.max
-        );
-        let mut header = PrimaryVectorHeader::new(stats);
-        (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
+
+        let mut header = if B == 8 {
+            let (l2_norm_sq, lower, upper) = match k {
+                #[cfg(target_arch = "aarch64")]
+                Kernel::Neon => aarch64::partial_stats(vector),
+                _ => vector
+                    .iter()
+                    .fold((0.0f32, f32::MAX, f32::MIN), |(n, l, u), &x| {
+                        (x.mul_add(x, n), l.min(x), u.max(x))
+                    }),
+            };
+            PrimaryVectorHeader {
+                l2_norm: l2_norm_sq.sqrt(),
+                lower,
+                upper,
+                ..Default::default()
+            }
+        } else {
+            let stats = VectorStats::new(k, vector);
+            // The quantization interval is stored as f16 so the component range must fit in f16.
+            assert!(
+                f16::from_f32(stats.min).is_finite() && f16::from_f32(stats.max).is_finite(),
+                "vector component range [{}, {}] is not representable as f16",
+                stats.min,
+                stats.max
+            );
+            let mut header = PrimaryVectorHeader::new(stats);
+            (header.lower, header.upper) = optimize_interval(k, vector, &stats, B);
+            header
+        };
 
         let terms = VectorEncodeTerms::from_primary::<B>(&header);
         let quant_stats = match k {
@@ -521,8 +541,8 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         header.component_sum = quant_stats.primary_component_sum;
         // A zero-norm (zero) vector has no error terms; guard the division and the sqrt domain
         // (fp cancellation can also drive `perp_error_sq` slightly negative for finite inputs).
-        let inv_norm_sq = if stats.l2_norm_sq > 0.0 {
-            stats.l2_norm_sq.recip()
+        let inv_norm_sq = if header.l2_norm > 0.0 {
+            header.l2_norm.powi(2).recip()
         } else {
             0.0
         };

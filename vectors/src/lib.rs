@@ -10,6 +10,7 @@ mod packing;
 mod quiver;
 mod rabitq;
 pub mod rotate;
+mod turbo_quant;
 
 use half::slice::HalfFloatSliceExt;
 use serde::{Deserialize, Serialize};
@@ -234,6 +235,26 @@ pub enum F32VectorCoding {
     RaBitQ,
     /// QuIVer; 2 bit binary quantization with sign + magnitude.
     QuIVer,
+    /// TurboQuantMSE with 1 bit per dimension.
+    ///
+    /// Inputs should be randomly rotated before encoding (see [`prepare_vector`]).
+    TurboQuantM1,
+    /// TurboQuantMSE with 2 bits per dimension.
+    ///
+    /// Inputs should be randomly rotated before encoding (see [`prepare_vector`]).
+    TurboQuantM2,
+    /// TurboQuantMSE with 3 bits per dimension.
+    ///
+    /// Inputs should be randomly rotated before encoding (see [`prepare_vector`]).
+    TurboQuantM3,
+    /// TurboQuantMSE with 4 bits per dimension.
+    ///
+    /// Inputs should be randomly rotated before encoding (see [`prepare_vector`]).
+    TurboQuantM4,
+    /// TurboQuantMSE with 8 bits per dimension.
+    ///
+    /// Inputs should be randomly rotated before encoding (see [`prepare_vector`]).
+    TurboQuantM8,
 }
 
 impl F32VectorCoding {
@@ -254,6 +275,21 @@ impl F32VectorCoding {
             Self::TLVQ8 => Box::new(lvq::TurboPrimaryCoder::<8>::new()),
             Self::RaBitQ => Box::new(rabitq::Coder::new()),
             Self::QuIVer => quiver::new_coder(),
+            Self::TurboQuantM1 => Box::new(turbo_quant::MSE1Coder::new(
+                &turbo_quant::codebook::CENTROIDS_1,
+            )),
+            Self::TurboQuantM2 => Box::new(turbo_quant::MSECoder::<2, 4>::new(
+                &turbo_quant::codebook::CENTROIDS_2,
+            )),
+            Self::TurboQuantM3 => Box::new(turbo_quant::MSECoder::<3, 8>::new(
+                &turbo_quant::codebook::CENTROIDS_3,
+            )),
+            Self::TurboQuantM4 => Box::new(turbo_quant::MSECoder::<4, 16>::new(
+                &turbo_quant::codebook::CENTROIDS_4,
+            )),
+            Self::TurboQuantM8 => Box::new(turbo_quant::MSECoder::<8, 256>::new(
+                &turbo_quant::codebook::CENTROIDS_8,
+            )),
         }
     }
 
@@ -275,6 +311,21 @@ impl F32VectorCoding {
             (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryDistance::<8>::new(similarity)),
             (Self::RaBitQ, _) => Box::new(rabitq::Distance::new(similarity)),
             (Self::QuIVer, _) => quiver::new_symmetric_distance(),
+            (Self::TurboQuantM1, _) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (Self::TurboQuantM2, _) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (Self::TurboQuantM3, _) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (Self::TurboQuantM4, _) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (Self::TurboQuantM8, _) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
         }
     }
 
@@ -315,6 +366,31 @@ impl F32VectorCoding {
             }
             (Self::RaBitQ, _) => Box::new(rabitq::QueryDistance::new(similarity, query.as_ref())),
             (Self::QuIVer, _) => quiver::new_asymmetric_distance(query.as_ref()),
+            (Self::TurboQuantM1, _) => Box::new(turbo_quant::MSE1QueryDistance::new(
+                similarity,
+                query,
+                &turbo_quant::codebook::CENTROIDS_1,
+            )),
+            (Self::TurboQuantM2, _) => Box::new(turbo_quant::MSEQueryDistance::<2, 4>::new(
+                similarity,
+                query,
+                &turbo_quant::codebook::CENTROIDS_2,
+            )),
+            (Self::TurboQuantM3, _) => Box::new(turbo_quant::MSEQueryDistance::<3, 8>::new(
+                similarity,
+                query,
+                &turbo_quant::codebook::CENTROIDS_3,
+            )),
+            (Self::TurboQuantM4, _) => Box::new(turbo_quant::MSEQueryDistance::<4, 16>::new(
+                similarity,
+                query,
+                &turbo_quant::codebook::CENTROIDS_4,
+            )),
+            (Self::TurboQuantM8, _) => Box::new(turbo_quant::MSEQueryDistance::<8, 256>::new(
+                similarity,
+                query,
+                &turbo_quant::codebook::CENTROIDS_8,
+            )),
         }
     }
 
@@ -361,6 +437,21 @@ impl F32VectorCoding {
             }
             (_, Self::RaBitQ) => quantized_qvd!(rabitq::Distance::new(similarity), query),
             (_, Self::QuIVer) => quiver::new_symmetric_query_distance(query.into()),
+            (_, Self::TurboQuantM1) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (_, Self::TurboQuantM2) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (_, Self::TurboQuantM3) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (_, Self::TurboQuantM4) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (_, Self::TurboQuantM8) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
         }
     }
 }
@@ -379,6 +470,11 @@ impl FromStr for F32VectorCoding {
             "tlvq8" => Ok(Self::TLVQ8),
             "RaBitQ" => Ok(Self::RaBitQ),
             "QuIVer" => Ok(Self::QuIVer),
+            "tqm1" => Ok(Self::TurboQuantM1),
+            "tqm2" => Ok(Self::TurboQuantM2),
+            "tqm3" => Ok(Self::TurboQuantM3),
+            "tqm4" => Ok(Self::TurboQuantM4),
+            "tqm8" => Ok(Self::TurboQuantM8),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -395,6 +491,11 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TLVQ8 => write!(f, "tlvq8"),
             Self::RaBitQ => write!(f, "RaBitQ"),
             Self::QuIVer => write!(f, "QuIVer"),
+            Self::TurboQuantM1 => write!(f, "tqm1"),
+            Self::TurboQuantM2 => write!(f, "tqm2"),
+            Self::TurboQuantM3 => write!(f, "tqm3"),
+            Self::TurboQuantM4 => write!(f, "tqm4"),
+            Self::TurboQuantM8 => write!(f, "tqm8"),
         }
     }
 }

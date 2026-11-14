@@ -33,11 +33,7 @@ pub mod avx512 {
             _mm512_reduce_add_epi32(csum) as u32
         };
 
-        if vhead.is_empty() {
-            csum
-        } else {
-            csum + crate::rabitq::scalar::quantize_and_pack(vtail, otail)
-        }
+        csum + crate::rabitq::scalar::quantize_and_pack(vtail, otail)
     }
 
     #[target_feature(enable = "avx512f")]
@@ -70,8 +66,11 @@ pub mod avx512 {
     #[target_feature(enable = "avx512f")]
     #[inline]
     pub unsafe fn decode(v: &[u8], magnitude: f32, out: &mut [f32]) {
-        let (vhead, vtail) = v.as_chunks::<16>();
+        // Split the input by the number of full 128 dimension output blocks; if the final block is
+        // partial it may still occupy 16 bytes of input but must be decoded as tail.
         let (ohead, otail) = out.as_chunks_mut::<128>();
+        let (vhead, vtail) = v.split_at(ohead.len() * 16);
+        let vhead = vhead.as_chunks::<16>().0;
 
         unsafe {
             let mag = _mm512_set1_ps(magnitude);

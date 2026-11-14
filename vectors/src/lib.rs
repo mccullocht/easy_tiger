@@ -311,11 +311,21 @@ impl F32VectorCoding {
             (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryDistance::<8>::new(similarity)),
             (Self::RaBitQ, _) => Box::new(rabitq::Distance::new(similarity)),
             (Self::QuIVer, _) => quiver::new_symmetric_distance(),
-            (Self::TurboQuantM1, _) => todo!(),
-            (Self::TurboQuantM2, _) => todo!(),
-            (Self::TurboQuantM3, _) => todo!(),
-            (Self::TurboQuantM4, _) => todo!(),
-            (Self::TurboQuantM8, _) => todo!(),
+            (Self::TurboQuantM1, _) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (Self::TurboQuantM2, _) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (Self::TurboQuantM3, _) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (Self::TurboQuantM4, _) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (Self::TurboQuantM8, _) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
         }
     }
 
@@ -427,11 +437,21 @@ impl F32VectorCoding {
             }
             (_, Self::RaBitQ) => quantized_qvd!(rabitq::Distance::new(similarity), query),
             (_, Self::QuIVer) => quiver::new_symmetric_query_distance(query.into()),
-            (_, Self::TurboQuantM1) => todo!(),
-            (_, Self::TurboQuantM2) => todo!(),
-            (_, Self::TurboQuantM3) => todo!(),
-            (_, Self::TurboQuantM4) => todo!(),
-            (_, Self::TurboQuantM8) => todo!(),
+            (_, Self::TurboQuantM1) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (_, Self::TurboQuantM2) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (_, Self::TurboQuantM3) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (_, Self::TurboQuantM4) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
+            (_, Self::TurboQuantM8) => {
+                unimplemented!("TurboQuant doesn't implement symmetric distance")
+            }
         }
     }
 }

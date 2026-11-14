@@ -741,7 +741,11 @@ mod test {
             let mut expected_decoded = vec![0.0f32; dim];
             Kernel::Scalar.decode(&expected_bits, 0.5, &mut expected_decoded);
 
-            for k in Kernel::CANDIDATES.iter().copied().filter(Kernel::is_available) {
+            for k in Kernel::CANDIDATES
+                .iter()
+                .copied()
+                .filter(Kernel::is_available)
+            {
                 let mut bits = vec![0u8; dim.div_ceil(8)];
                 let neg = k.quantize_and_pack(&v, &mut bits);
                 assert_eq!(neg, expected_neg, "{k:?} dim={dim} negative count");

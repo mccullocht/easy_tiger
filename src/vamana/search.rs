@@ -372,7 +372,8 @@ impl GraphSearcher {
         let nav_query = reader
             .config()
             .nav_format
-            .query_distance_symmetric(reader.config().similarity, &nav_query_rep);
+            .query_distance_symmetric(reader.config().similarity, &nav_query_rep)
+            .expect("supports symmetric distance");
 
         let rerank_query = if self.params.num_rerank > 0 {
             if let Some(vectors) = reader.rerank_vectors() {
@@ -384,7 +385,8 @@ impl GraphSearcher {
                 Some(
                     vectors
                         .format()
-                        .query_distance_symmetric(vectors.similarity(), query),
+                        .query_distance_symmetric(vectors.similarity(), query)
+                        .expect("supports symmetric distance"),
                 )
             } else {
                 None

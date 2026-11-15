@@ -345,7 +345,9 @@ mod parallel {
         let head_format = head_config.high_fidelity_table().format();
         let posting_format = txn_idx.index().config().posting_coder;
         if head_format == posting_format {
-            posting_format.query_distance_symmetric(similarity, centroid.to_vec())
+            posting_format
+                .query_distance_symmetric(similarity, centroid.to_vec())
+                .expect("supports symmetric distance")
         } else {
             posting_format
                 .query_distance_asymmetric(similarity, head_format.coder().decode(centroid))

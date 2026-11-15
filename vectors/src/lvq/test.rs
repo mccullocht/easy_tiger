@@ -280,12 +280,16 @@ fn check_lvq_centered_distance(
     let abs_epsilon = (ea + eb) * (ea + eb + 2.0 * f32_dist.abs().sqrt());
 
     // doc-doc symmetric distance
-    let sym = format.distance_symmetric(sim).distance(&enc_a, &enc_b);
+    let sym = format
+        .distance_symmetric(sim)
+        .expect("supports symmetric distance")
+        .distance(&enc_a, &enc_b);
     assert_abs_diff_eq!(f32_dist, sym, epsilon = abs_epsilon);
 
     // encoded-query vs doc distance
     let qd = format
         .query_distance_symmetric(sim, enc_a.as_slice())
+        .expect("supports symmetric distance")
         .distance(&enc_b);
     assert_abs_diff_eq!(f32_dist, qd, epsilon = abs_epsilon);
 
@@ -352,7 +356,10 @@ fn fill_vector_decode() {
 
         // Distances between degenerate vectors must stay finite, not just decode.
         for sim in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
-            let sd = coding.distance_symmetric(sim).distance(&encoded, &encoded);
+            let sd = coding
+                .distance_symmetric(sim)
+                .expect("supports symmetric distance")
+                .distance(&encoded, &encoded);
             assert!(
                 sd.is_finite(),
                 "{coding} {sim} self-distance not finite: {sd}"
@@ -398,7 +405,10 @@ fn degenerate_simd_parity() {
                     assert_abs_diff_eq!(sd.as_slice(), ad.as_slice(), epsilon = 1e-4);
 
                     for sim in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
-                        let d = coding.distance_symmetric(sim).distance(&se, &ae);
+                        let d = coding
+                            .distance_symmetric(sim)
+                            .expect("supports symmetric distance")
+                            .distance(&se, &ae);
                         assert!(
                             d.is_finite(),
                             "B={B} k={k:?} dim={dim} {name} {sim}: non-finite distance"

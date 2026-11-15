@@ -261,10 +261,15 @@ impl F32VectorCoding {
     ///
     /// If the encoded vectors were centered before encoding, distance is unaffected: centering is a
     /// shared translation that cancels in every metric that reduces to a difference of vectors.
-    pub fn distance_symmetric(&self, similarity: VectorSimilarity) -> Box<dyn VectorDistance> {
+    ///
+    /// Returns `None` if this coding does not support symmetric distance.
+    pub fn distance_symmetric(
+        &self,
+        similarity: VectorSimilarity,
+    ) -> Option<Box<dyn VectorDistance>> {
         use VectorSimilarity::{Dot, Euclidean};
 
-        match (self, similarity) {
+        let dist: Box<dyn VectorDistance> = match (self, similarity) {
             (Self::F32, Dot) => Box::new(float32::DotProductDistance::default()),
             (Self::F32, Euclidean) => Box::new(float32::EuclideanDistance::default()),
             (Self::F16, Dot) => Box::new(float16::DotProductDistance::default()),
@@ -275,7 +280,8 @@ impl F32VectorCoding {
             (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryDistance::<8>::new(similarity)),
             (Self::RaBitQ, _) => Box::new(rabitq::Distance::new(similarity)),
             (Self::QuIVer, _) => quiver::new_symmetric_distance(),
-        }
+        };
+        Some(dist)
     }
 
     /// Create a new [`QueryVectorDistance`] that computes distance between a fixed float query and
@@ -323,18 +329,20 @@ impl F32VectorCoding {
     ///
     /// If `center` is present then it will be accounted for in the distance calculation assuming
     /// all input vectors _also_ use the same center value.
+    ///
+    /// Returns `None` if this coding does not support symmetric distance.
     pub fn query_distance_symmetric<'a>(
         &self,
         similarity: VectorSimilarity,
         query: impl Into<Cow<'a, [u8]>>,
-    ) -> Box<dyn QueryVectorDistance + 'a> {
+    ) -> Option<Box<dyn QueryVectorDistance + 'a>> {
         use VectorSimilarity::{Dot, Euclidean};
         macro_rules! quantized_qvd {
             ($dist_fn:expr, $query:ident) => {
                 Box::new(QuantizedQueryVectorDistance::new($dist_fn, $query))
             };
         }
-        match (similarity, *self) {
+        let dist: Box<dyn QueryVectorDistance + 'a> = match (similarity, *self) {
             (Dot, F32VectorCoding::F32) => {
                 quantized_qvd!(float32::DotProductDistance::default(), query)
             }
@@ -361,7 +369,8 @@ impl F32VectorCoding {
             }
             (_, Self::RaBitQ) => quantized_qvd!(rabitq::Distance::new(similarity), query),
             (_, Self::QuIVer) => quiver::new_symmetric_query_distance(query.into()),
-        }
+        };
+        Some(dist)
     }
 }
 
@@ -609,7 +618,9 @@ mod test {
             f32_dist_fn.distance(bytemuck::cast_slice(&a.rvec), bytemuck::cast_slice(&b.rvec));
         assert_float_near!(rf32_dist, ru8_dist, 0.0001, index);
 
-        let dist_fn = format.distance_symmetric(similarity);
+        let dist_fn = format
+            .distance_symmetric(similarity)
+            .expect("supports symmetric distance");
         let qdist = dist_fn.distance(&a.qvec, &b.qvec);
         assert_float_near!(rf32_dist, qdist, threshold, index);
     }
@@ -749,7 +760,9 @@ mod degenerate_test {
         let ea = coder.encode(a);
         let eb = coder.encode(b);
 
-        let sym = coding.distance_symmetric(sim);
+        let sym = coding
+            .distance_symmetric(sim)
+            .expect("supports symmetric distance");
         check_finite(
             &format!("{label} sym(a,b)"),
             sym.distance(&ea, &eb),
@@ -771,7 +784,9 @@ mod degenerate_test {
             est.error
         );
 
-        let qsym = coding.query_distance_symmetric(sim, ea.clone());
+        let qsym = coding
+            .query_distance_symmetric(sim, ea.clone())
+            .expect("supports symmetric distance");
         check_finite(&format!("{label} qsym(a->b)"), qsym.distance(&eb), angular);
     }
 

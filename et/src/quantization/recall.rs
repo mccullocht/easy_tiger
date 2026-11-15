@@ -170,6 +170,7 @@ pub fn recall(
                     if args.quantize_query {
                         args.format
                             .query_distance_symmetric(args.similarity, coder.encode(&query))
+                            .expect("supports symmetric distance")
                     } else {
                         args.format
                             .query_distance_asymmetric(args.similarity, query)

@@ -122,7 +122,7 @@ impl VectorStats {
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::neon::full_stats(value),
             #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe { x86_64::compute_vector_stats_avx512(value) },
+            Kernel::Avx512 => unsafe { x86_64::avx512::full_stats(value) },
         }
     }
 
@@ -139,8 +139,8 @@ impl VectorStats {
             Kernel::Scalar => scalar::partial_stats(vector),
             #[cfg(target_arch = "aarch64")]
             Kernel::Neon => aarch64::neon::partial_stats(vector),
-            #[cfg(target_arch = "x86_64")] // XXX
-            Kernel::Avx512 => scalar::partial_stats(vector),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe { x86_64::avx512::partial_stats(vector) },
         }
     }
 }

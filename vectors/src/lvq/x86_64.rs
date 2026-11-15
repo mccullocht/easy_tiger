@@ -1,19 +1,14 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::arch::x86_64::{
-    __m128i, __m512, __m512i, _MM_FROUND_NO_EXC, _MM_FROUND_TRUNC, _mm_add_pd, _mm_add_ps,
-    _mm_cvtps_pd, _mm_cvtsd_f64, _mm_fmadd_pd, _mm_fmadd_ps, _mm_hadd_pd, _mm_hsub_pd,
-    _mm_lddqu_si128, _mm_movehl_ps, _mm_mul_pd, _mm_mul_ps, _mm_set1_epi64x, _mm_set1_pd,
-    _mm_set1_ps, _mm_storeu_si128, _mm_sub_pd, _mm_sub_ps, _mm256_add_ps, _mm256_castps256_ps128,
-    _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set1_ps,
-    _mm256_sub_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_si512, _mm512_broadcast_i32x4,
-    _mm512_castps512_ps256, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi8, _mm512_cvtepu32_ps,
-    _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32,
-    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8, _mm512_loadu_ps,
-    _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_epi64,
-    _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps, _mm512_mullo_epi32,
-    _mm512_or_si512, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
-    _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set_epi32,
+    __m128i, __m512, __m512i, _MM_FROUND_NO_EXC, _MM_FROUND_TRUNC, _mm_lddqu_si128,
+    _mm_set1_epi64x, _mm_storeu_si128, _mm256_cvtepu8_epi16, _mm512_add_epi32, _mm512_add_ps,
+    _mm512_and_si512, _mm512_broadcast_i32x4, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi8,
+    _mm512_cvtepu32_ps, _mm512_cvtps_epu32, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32,
+    _mm512_fmadd_ps, _mm512_loadu_epi8, _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_sub_ps,
+    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps,
+    _mm512_min_ps, _mm512_mul_ps, _mm512_mullo_epi32, _mm512_or_si512, _mm512_popcnt_epi32,
+    _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_roundscale_ps, _mm512_set_epi32,
     _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_i64x2,
     _mm512_sll_epi32, _mm512_srli_epi32, _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps,
     _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
@@ -35,117 +30,165 @@ unsafe fn mm512_round_nonnegative_ties_away_zero_ps(v: __m512) -> __m512 {
     )
 }
 
-#[target_feature(enable = "avx512f,avx,fma,avx512dq")]
-pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
-    let mut minv = _mm512_set1_ps(f32::MAX);
-    let mut maxv = _mm512_set1_ps(f32::MIN);
-    let mut meanv = _mm512_set1_ps(0.0);
-    let mut variancev = _mm512_set1_ps(0.0);
-    let mut dotv = _mm512_set1_ps(0.0);
-    let (head, tail) = vector.as_chunks::<16>();
-    for (i, c) in head.iter().enumerate() {
-        let x = _mm512_loadu_ps(c.as_ptr());
-        minv = _mm512_min_ps(minv, x);
-        maxv = _mm512_max_ps(maxv, x);
-        let delta = _mm512_sub_ps(x, meanv);
-        meanv = _mm512_add_ps(meanv, _mm512_div_ps(delta, _mm512_set1_ps((i + 1) as f32)));
-        let delta2 = _mm512_sub_ps(x, meanv);
-        variancev = _mm512_fmadd_ps(delta, delta2, variancev);
-        dotv = _mm512_fmadd_ps(x, x, dotv);
-    }
-
-    let base = head.len() * 16;
-    let mut min = _mm512_reduce_min_ps(minv);
-    let mut max = _mm512_reduce_max_ps(maxv);
-    let mut mean = _mm512_reduce_add_ps(meanv) / 16.0;
-    let mut variance = {
-        let (means_8, m2_8) = {
-            let means = (
-                _mm512_castps512_ps256(meanv),
-                _mm512_extractf32x8_ps(meanv, 1),
-            );
-            let m2s = (
-                _mm512_castps512_ps256(variancev),
-                _mm512_extractf32x8_ps(variancev, 1),
-            );
-
-            let mean = _mm256_mul_ps(_mm256_add_ps(means.0, means.1), _mm256_set1_ps(0.5));
-            let delta = _mm256_sub_ps(means.0, means.1);
-            let delta_sq = _mm256_mul_ps(delta, delta);
-            let m2 = _mm256_fmadd_ps(
-                delta_sq,
-                _mm256_set1_ps(base as f32 / 32.0),
-                _mm256_add_ps(m2s.0, m2s.1),
-            );
-
-            (mean, m2)
-        };
-
-        let (means_4, m2_4) = {
-            let means = (
-                _mm256_castps256_ps128(means_8),
-                _mm256_extractf32x4_ps(means_8, 1),
-            );
-            let m2s = (
-                _mm256_castps256_ps128(m2_8),
-                _mm256_extractf32x4_ps(m2_8, 1),
-            );
-
-            let mean = _mm_mul_ps(_mm_add_ps(means.0, means.1), _mm_set1_ps(0.5));
-            let delta = _mm_sub_ps(means.0, means.1);
-            let delta_sq = _mm_mul_ps(delta, delta);
-            let m2 = _mm_fmadd_ps(
-                delta_sq,
-                _mm_set1_ps(base as f32 / 16.0),
-                _mm_add_ps(m2s.0, m2s.1),
-            );
-
-            (mean, m2)
-        };
-
-        let (means_2, m2_2) = {
-            let means0 = _mm_cvtps_pd(means_4);
-            let means1 = _mm_cvtps_pd(_mm_movehl_ps(means_4, means_4));
-            let var0 = _mm_cvtps_pd(m2_4);
-            let var1 = _mm_cvtps_pd(_mm_movehl_ps(m2_4, m2_4));
-
-            let mean = _mm_mul_pd(_mm_add_pd(means0, means1), _mm_set1_pd(0.5));
-            let delta = _mm_sub_pd(means0, means1);
-            let delta_sq = _mm_mul_pd(delta, delta);
-            let m2 = _mm_fmadd_pd(
-                delta_sq,
-                _mm_set1_pd(base as f64 / 8.0),
-                _mm_add_pd(var0, var1),
-            );
-
-            (mean, m2)
-        };
-
-        let delta = _mm_hsub_pd(means_2, means_2);
-        let delta_sq = _mm_mul_pd(delta, delta);
-        _mm_cvtsd_f64(_mm_fmadd_pd(
-            delta_sq,
-            _mm_set1_pd(base as f64 / 4.0),
-            _mm_hadd_pd(m2_2, m2_2),
-        )) as f32
+pub mod avx512 {
+    use std::arch::x86_64::{
+        _mm_add_pd, _mm_add_ps, _mm_cvtps_pd, _mm_cvtsd_f64, _mm_fmadd_pd, _mm_fmadd_ps,
+        _mm_hadd_pd, _mm_hsub_pd, _mm_movehl_ps, _mm_mul_pd, _mm_mul_ps, _mm_set1_pd, _mm_set1_ps,
+        _mm_sub_pd, _mm_sub_ps, _mm256_add_ps, _mm256_castps256_ps128, _mm256_extractf32x4_ps,
+        _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_sub_ps, _mm512_add_ps,
+        _mm512_castps512_ps256, _mm512_div_ps, _mm512_extractf32x8_ps, _mm512_fmadd_ps,
+        _mm512_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_reduce_add_ps, _mm512_reduce_max_ps,
+        _mm512_reduce_min_ps, _mm512_set1_ps, _mm512_sub_ps,
     };
-    let mut dot = _mm512_reduce_add_ps(dotv);
 
-    for (i, x) in tail.iter().enumerate() {
-        min = x.min(min);
-        max = x.max(max);
-        let delta = *x - mean;
-        mean += delta / (base + i + 1) as f32;
-        variance += delta * (x - mean);
-        dot += x * x;
+    use crate::lvq::VectorStats;
+
+    #[target_feature(enable = "avx512f,avx,fma,avx512dq")]
+    pub unsafe fn full_stats(vector: &[f32]) -> VectorStats {
+        let mut minv = _mm512_set1_ps(f32::MAX);
+        let mut maxv = _mm512_set1_ps(f32::MIN);
+        let mut meanv = _mm512_set1_ps(0.0);
+        let mut variancev = _mm512_set1_ps(0.0);
+        let mut dotv = _mm512_set1_ps(0.0);
+        let (head, tail) = vector.as_chunks::<16>();
+        for (i, c) in head.iter().enumerate() {
+            let x = _mm512_loadu_ps(c.as_ptr());
+            minv = _mm512_min_ps(minv, x);
+            maxv = _mm512_max_ps(maxv, x);
+            let delta = _mm512_sub_ps(x, meanv);
+            meanv = _mm512_add_ps(meanv, _mm512_div_ps(delta, _mm512_set1_ps((i + 1) as f32)));
+            let delta2 = _mm512_sub_ps(x, meanv);
+            variancev = _mm512_fmadd_ps(delta, delta2, variancev);
+            dotv = _mm512_fmadd_ps(x, x, dotv);
+        }
+
+        let base = head.len() * 16;
+        let mut min = _mm512_reduce_min_ps(minv);
+        let mut max = _mm512_reduce_max_ps(maxv);
+        let mut mean = _mm512_reduce_add_ps(meanv) / 16.0;
+        let mut variance = {
+            let (means_8, m2_8) = {
+                let means = (
+                    _mm512_castps512_ps256(meanv),
+                    _mm512_extractf32x8_ps(meanv, 1),
+                );
+                let m2s = (
+                    _mm512_castps512_ps256(variancev),
+                    _mm512_extractf32x8_ps(variancev, 1),
+                );
+
+                let mean = _mm256_mul_ps(_mm256_add_ps(means.0, means.1), _mm256_set1_ps(0.5));
+                let delta = _mm256_sub_ps(means.0, means.1);
+                let delta_sq = _mm256_mul_ps(delta, delta);
+                let m2 = _mm256_fmadd_ps(
+                    delta_sq,
+                    _mm256_set1_ps(base as f32 / 32.0),
+                    _mm256_add_ps(m2s.0, m2s.1),
+                );
+
+                (mean, m2)
+            };
+
+            let (means_4, m2_4) = {
+                let means = (
+                    _mm256_castps256_ps128(means_8),
+                    _mm256_extractf32x4_ps(means_8, 1),
+                );
+                let m2s = (
+                    _mm256_castps256_ps128(m2_8),
+                    _mm256_extractf32x4_ps(m2_8, 1),
+                );
+
+                let mean = _mm_mul_ps(_mm_add_ps(means.0, means.1), _mm_set1_ps(0.5));
+                let delta = _mm_sub_ps(means.0, means.1);
+                let delta_sq = _mm_mul_ps(delta, delta);
+                let m2 = _mm_fmadd_ps(
+                    delta_sq,
+                    _mm_set1_ps(base as f32 / 16.0),
+                    _mm_add_ps(m2s.0, m2s.1),
+                );
+
+                (mean, m2)
+            };
+
+            let (means_2, m2_2) = {
+                let means0 = _mm_cvtps_pd(means_4);
+                let means1 = _mm_cvtps_pd(_mm_movehl_ps(means_4, means_4));
+                let var0 = _mm_cvtps_pd(m2_4);
+                let var1 = _mm_cvtps_pd(_mm_movehl_ps(m2_4, m2_4));
+
+                let mean = _mm_mul_pd(_mm_add_pd(means0, means1), _mm_set1_pd(0.5));
+                let delta = _mm_sub_pd(means0, means1);
+                let delta_sq = _mm_mul_pd(delta, delta);
+                let m2 = _mm_fmadd_pd(
+                    delta_sq,
+                    _mm_set1_pd(base as f64 / 8.0),
+                    _mm_add_pd(var0, var1),
+                );
+
+                (mean, m2)
+            };
+
+            let delta = _mm_hsub_pd(means_2, means_2);
+            let delta_sq = _mm_mul_pd(delta, delta);
+            _mm_cvtsd_f64(_mm_fmadd_pd(
+                delta_sq,
+                _mm_set1_pd(base as f64 / 4.0),
+                _mm_hadd_pd(m2_2, m2_2),
+            )) as f32
+        };
+        let mut dot = _mm512_reduce_add_ps(dotv);
+
+        for (i, x) in tail.iter().enumerate() {
+            min = x.min(min);
+            max = x.max(max);
+            let delta = *x - mean;
+            mean += delta / (base + i + 1) as f32;
+            variance += delta * (x - mean);
+            dot += x * x;
+        }
+
+        VectorStats {
+            min,
+            max,
+            mean,
+            std_dev: (variance / vector.len() as f32).sqrt(),
+            l2_norm_sq: dot,
+        }
     }
 
-    VectorStats {
-        min,
-        max,
-        mean,
-        std_dev: (variance / vector.len() as f32).sqrt(),
-        l2_norm_sq: dot,
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn partial_stats(vector: &[f32]) -> VectorStats {
+        let (head, tail) = vector.as_chunks::<16>();
+        let (vdot, vmin, vmax) = head.iter().map(|x| _mm512_loadu_ps(x.as_ptr())).fold(
+            (
+                _mm512_set1_ps(0.0),
+                _mm512_set1_ps(f32::MAX),
+                _mm512_set1_ps(f32::MIN),
+            ),
+            |(dot, min, max), x| {
+                (
+                    _mm512_fmadd_ps(x, x, dot),
+                    _mm512_min_ps(x, min),
+                    _mm512_max_ps(x, max),
+                )
+            },
+        );
+
+        let (dot, min, max) = tail.iter().fold(
+            (
+                _mm512_reduce_add_ps(vdot),
+                _mm512_reduce_min_ps(vmin),
+                _mm512_reduce_max_ps(vmax),
+            ),
+            |(dot, min, max), &x| (x.mul_add(x, dot), x.min(min), x.max(max)),
+        );
+        VectorStats {
+            l2_norm_sq: dot,
+            min,
+            max,
+            ..Default::default()
+        }
     }
 }
 

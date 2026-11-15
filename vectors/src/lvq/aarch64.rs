@@ -3,14 +3,12 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::arch::aarch64::{
-    float32x4_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32,
-    vaddq_f64, vaddq_u16, vaddq_u32, vaddvq_f32, vaddvq_u32, vandq_u8, vandq_u32, vcntq_u8,
-    vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdotq_u32,
-    vdupq_n_f32, vdupq_n_f64, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64,
-    vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vld1q_u8_x4,
-    vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8,
-    vqtbl1q_u8, vqtbl4q_u8, vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8,
-    vshrq_n_u8, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
+    float32x4_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_u16,
+    vaddq_u32, vaddvq_f32, vaddvq_u32, vandq_u8, vandq_u32, vcntq_u8, vcvtaq_u32_f32,
+    vcvtq_f32_u32, vdivq_f32, vdotq_u32, vdupq_n_f32, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16,
+    vdupq_n_u32, vfmaq_f32, vld1q_f32, vld1q_u8, vld1q_u8_x4, vmaxq_f32, vminq_f32, vmulq_f32,
+    vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8, vreinterpretq_u8_u32, vreinterpretq_u32_u8,
+    vrndaq_f32, vshlq_u8, vshrq_n_u8, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32,
 };
 
 use crate::lvq::{TurboPrimaryVector, VectorEncodeTerms, scalar};
@@ -18,106 +16,123 @@ use crate::packing::{self, TURBO_BLOCK_SIZE};
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats};
 
-pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
-    let tail_split = vector.len() & !3;
-    let (min, max, mean, mean_sq, dot) = if tail_split > 0 {
-        unsafe {
-            let mut min = vdupq_n_f32(f32::MAX);
-            let mut max = vdupq_n_f32(f32::MIN);
-            let mut mean = vdupq_n_f32(0.0);
-            let mut mean_sq = vdupq_n_f32(0.0);
-            let mut dot = vdupq_n_f32(0.0);
-            for i in (0..tail_split).step_by(4) {
-                let x = vld1q_f32(vector.as_ptr().add(i));
-                min = vminq_f32(min, x);
-                max = vmaxq_f32(max, x);
-                let delta = vsubq_f32(x, mean);
-                mean = vaddq_f32(mean, vdivq_f32(delta, vdupq_n_f32(((i / 4) + 1) as f32)));
-                let delta2 = vsubq_f32(x, mean);
-                mean_sq = vfmaq_f32(mean_sq, delta, delta2);
-                dot = vfmaq_f32(dot, x, x);
+pub mod neon {
+    use std::arch::aarch64::{
+        float32x4_t, vaddq_f32, vaddq_f64, vaddvq_f32, vcvt_f64_f32, vcvt_high_f64_f32, vdivq_f32,
+        vdupq_n_f32, vdupq_n_f64, vextq_f64, vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64,
+        vld1q_f32, vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmulq_f64, vsubq_f32, vsubq_f64,
+    };
+
+    use crate::lvq::VectorStats;
+
+    pub fn full_stats(vector: &[f32]) -> VectorStats {
+        let tail_split = vector.len() & !3;
+        let (min, max, mean, mean_sq, dot) = if tail_split > 0 {
+            unsafe {
+                let mut min = vdupq_n_f32(f32::MAX);
+                let mut max = vdupq_n_f32(f32::MIN);
+                let mut mean = vdupq_n_f32(0.0);
+                let mut mean_sq = vdupq_n_f32(0.0);
+                let mut dot = vdupq_n_f32(0.0);
+                for i in (0..tail_split).step_by(4) {
+                    let x = vld1q_f32(vector.as_ptr().add(i));
+                    min = vminq_f32(min, x);
+                    max = vmaxq_f32(max, x);
+                    let delta = vsubq_f32(x, mean);
+                    mean = vaddq_f32(mean, vdivq_f32(delta, vdupq_n_f32(((i / 4) + 1) as f32)));
+                    let delta2 = vsubq_f32(x, mean);
+                    mean_sq = vfmaq_f32(mean_sq, delta, delta2);
+                    dot = vfmaq_f32(dot, x, x);
+                }
+
+                (
+                    vminvq_f32(min),
+                    vmaxvq_f32(max),
+                    vaddvq_f32(mean) / 4.0,
+                    reduce_variance(mean, mean_sq, tail_split),
+                    vaddvq_f32(dot),
+                )
             }
-
-            (
-                vminvq_f32(min),
-                vmaxvq_f32(max),
-                vaddvq_f32(mean) / 4.0,
-                reduce_variance(mean, mean_sq, tail_split),
-                vaddvq_f32(dot),
-            )
+        } else {
+            (f32::MAX, f32::MIN, 0.0, 0.0, 0.0)
+        };
+        let (min, max, mean, mean_sq, dot) =
+            vector.iter().copied().enumerate().skip(tail_split).fold(
+                (min, max, mean, mean_sq, dot),
+                |mut stats, (i, x)| {
+                    stats.0 = x.min(stats.0);
+                    stats.1 = x.max(stats.1);
+                    stats.4 += x * x;
+                    let delta = x - stats.2;
+                    stats.2 += delta / (i + 1) as f32;
+                    stats.3 += delta * (x - stats.2);
+                    stats
+                },
+            );
+        VectorStats {
+            min,
+            max,
+            mean,
+            std_dev: (mean_sq / vector.len() as f32).sqrt(),
+            l2_norm_sq: dot,
         }
-    } else {
-        (f32::MAX, f32::MIN, 0.0, 0.0, 0.0)
-    };
-    let (min, max, mean, mean_sq, dot) = vector.iter().copied().enumerate().skip(tail_split).fold(
-        (min, max, mean, mean_sq, dot),
-        |mut stats, (i, x)| {
-            stats.0 = x.min(stats.0);
-            stats.1 = x.max(stats.1);
-            stats.4 += x * x;
-            let delta = x - stats.2;
-            stats.2 += delta / (i + 1) as f32;
-            stats.3 += delta * (x - stats.2);
-            stats
-        },
-    );
-    VectorStats {
-        min,
-        max,
-        mean,
-        std_dev: (mean_sq / vector.len() as f32).sqrt(),
-        l2_norm_sq: dot,
     }
-}
 
-pub fn partial_stats(vector: &[f32]) -> (f32, f32, f32) {
-    let (head, tail) = vector.as_chunks::<4>();
-    let (vl2_norm_sq, vmin, vmax) = head.iter().map(|c| unsafe { vld1q_f32(c.as_ptr()) }).fold(
+    fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f32 {
+        let (means2, m2) = unsafe {
+            let means0 = vcvt_f64_f32(vget_low_f32(means));
+            let means1 = vcvt_high_f64_f32(means);
+            let var0 = vcvt_f64_f32(vget_low_f32(m2));
+            let var1 = vcvt_high_f64_f32(m2);
+
+            let mean = vmulq_f64(vaddq_f64(means0, means1), vdupq_n_f64(0.5));
+
+            let delta = vsubq_f64(means0, means1);
+            let delta_sq = vmulq_f64(delta, delta);
+            let weight = vdupq_n_f64(n as f64 / 8.0);
+            let m2 = vfmaq_f64(vaddq_f64(var0, var1), delta_sq, weight);
+
+            (mean, m2)
+        };
+
         unsafe {
-            (
-                vdupq_n_f32(0.0),
-                vdupq_n_f32(f32::MAX),
-                vdupq_n_f32(f32::MIN),
-            )
-        },
-        |(l2_norm_sq, min, max), c| unsafe {
-            (
-                vfmaq_f32(l2_norm_sq, c, c),
-                vminq_f32(min, c),
-                vmaxq_f32(max, c),
-            )
-        },
-    );
+            let delta = vsubq_f64(means2, vextq_f64::<1>(means2, means2));
+            let delta_sq = vmulq_f64(delta, delta);
+            let weight = vdupq_n_f64(n as f64 / 4.0);
+            let m2 = vfmaq_f64(vaddq_f64(m2, vextq_f64::<1>(m2, m2)), delta_sq, weight);
+            vgetq_lane_f64::<0>(m2) as f32
+        }
+    }
 
-    tail.iter().fold(
-        unsafe { (vaddvq_f32(vl2_norm_sq), vminvq_f32(vmin), vmaxvq_f32(vmax)) },
-        |(l2_norm_sq, min, max), &x| (x.mul_add(x, l2_norm_sq), x.min(min), x.max(max)),
-    )
-}
+    pub fn partial_stats(vector: &[f32]) -> VectorStats {
+        let (head, tail) = vector.as_chunks::<4>();
+        let (vl2_norm_sq, vmin, vmax) = head.iter().map(|c| unsafe { vld1q_f32(c.as_ptr()) }).fold(
+            unsafe {
+                (
+                    vdupq_n_f32(0.0),
+                    vdupq_n_f32(f32::MAX),
+                    vdupq_n_f32(f32::MIN),
+                )
+            },
+            |(l2_norm_sq, min, max), c| unsafe {
+                (
+                    vfmaq_f32(l2_norm_sq, c, c),
+                    vminq_f32(min, c),
+                    vmaxq_f32(max, c),
+                )
+            },
+        );
 
-fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f32 {
-    let (means2, m2) = unsafe {
-        let means0 = vcvt_f64_f32(vget_low_f32(means));
-        let means1 = vcvt_high_f64_f32(means);
-        let var0 = vcvt_f64_f32(vget_low_f32(m2));
-        let var1 = vcvt_high_f64_f32(m2);
-
-        let mean = vmulq_f64(vaddq_f64(means0, means1), vdupq_n_f64(0.5));
-
-        let delta = vsubq_f64(means0, means1);
-        let delta_sq = vmulq_f64(delta, delta);
-        let weight = vdupq_n_f64(n as f64 / 8.0);
-        let m2 = vfmaq_f64(vaddq_f64(var0, var1), delta_sq, weight);
-
-        (mean, m2)
-    };
-
-    unsafe {
-        let delta = vsubq_f64(means2, vextq_f64::<1>(means2, means2));
-        let delta_sq = vmulq_f64(delta, delta);
-        let weight = vdupq_n_f64(n as f64 / 4.0);
-        let m2 = vfmaq_f64(vaddq_f64(m2, vextq_f64::<1>(m2, m2)), delta_sq, weight);
-        vgetq_lane_f64::<0>(m2) as f32
+        let (l2_norm_sq, min, max) = tail.iter().fold(
+            unsafe { (vaddvq_f32(vl2_norm_sq), vminvq_f32(vmin), vmaxvq_f32(vmax)) },
+            |(l2_norm_sq, min, max), &x| (x.mul_add(x, l2_norm_sq), x.min(min), x.max(max)),
+        );
+        VectorStats {
+            l2_norm_sq,
+            min,
+            max,
+            ..Default::default()
+        }
     }
 }
 
@@ -894,8 +909,8 @@ mod test {
             0.9628870565403511,
             -0.5074461455585713,
         ];
-        let scalar_stats = crate::lvq::scalar::compute_vector_stats(&vector);
-        let aarch64_stats = super::compute_vector_stats(&vector);
+        let scalar_stats = crate::lvq::scalar::full_stats(&vector);
+        let aarch64_stats = super::neon::full_stats(&vector);
         assert_eq!(scalar_stats.min, aarch64_stats.min);
         assert_eq!(scalar_stats.max, aarch64_stats.max);
         assert_abs_diff_eq!(scalar_stats.mean, aarch64_stats.mean, epsilon = 0.00001);
@@ -914,8 +929,8 @@ mod test {
     #[test]
     fn compute_vector_stats1() {
         let vector = [-0.30671382, 0.76678455, 0.21469967, -0.5214135];
-        let scalar_stats = crate::lvq::scalar::compute_vector_stats(&vector);
-        let aarch64_stats = super::compute_vector_stats(&vector);
+        let scalar_stats = crate::lvq::scalar::full_stats(&vector);
+        let aarch64_stats = super::neon::full_stats(&vector);
         assert_eq!(scalar_stats.min, aarch64_stats.min);
         assert_eq!(scalar_stats.max, aarch64_stats.max);
         assert_abs_diff_eq!(scalar_stats.mean, aarch64_stats.mean, epsilon = 0.00001);

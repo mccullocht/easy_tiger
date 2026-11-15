@@ -101,11 +101,11 @@ impl Default for Kernel {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct VectorStats {
+    l2_norm_sq: f32,
     min: f32,
     max: f32,
     mean: f32,
     std_dev: f32,
-    l2_norm_sq: f32,
 }
 
 impl VectorStats {
@@ -118,11 +118,29 @@ impl VectorStats {
         }
 
         match k {
-            Kernel::Scalar => scalar::compute_vector_stats(value),
+            Kernel::Scalar => scalar::full_stats(value),
             #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::compute_vector_stats(value),
+            Kernel::Neon => aarch64::neon::full_stats(value),
             #[cfg(target_arch = "x86_64")]
             Kernel::Avx512 => unsafe { x86_64::compute_vector_stats_avx512(value) },
+        }
+    }
+
+    /// Computes partial stats, omitting the mean and std_dev values.
+    fn partial(k: Kernel, vector: &[f32]) -> Self {
+        if vector.is_empty() {
+            return VectorStats {
+                l2_norm_sq: 1.0,
+                ..Default::default()
+            };
+        }
+
+        match k {
+            Kernel::Scalar => scalar::partial_stats(vector),
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::neon::partial_stats(vector),
+            #[cfg(target_arch = "x86_64")] // XXX
+            Kernel::Avx512 => scalar::partial_stats(vector),
         }
     }
 }
@@ -499,21 +517,17 @@ impl<const B: usize> TurboPrimaryCoder<B> {
         crate::assert_finite_vector(vector);
 
         let mut header = if B == 8 {
-            let (l2_norm_sq, lower, upper) = match k {
-                #[cfg(target_arch = "aarch64")]
-                Kernel::Neon => aarch64::partial_stats(vector),
-                _ => vector
-                    .iter()
-                    .fold((0.0f32, f32::MAX, f32::MIN), |(n, l, u), &x| {
-                        (x.mul_add(x, n), l.min(x), u.max(x))
-                    }),
-            };
-            PrimaryVectorHeader {
-                l2_norm: l2_norm_sq.sqrt(),
-                lower,
-                upper,
-                ..Default::default()
-            }
+            let mut stats = VectorStats::partial(k, vector);
+            // XXX streamline some of this, it's very silly right now.
+            assert!(
+                f16::from_f32(stats.min).is_finite() && f16::from_f32(stats.max).is_finite(),
+                "vector component range [{}, {}] is not representable as f16",
+                stats.min,
+                stats.max
+            );
+            stats.min = f16::from_f32(stats.min).to_f32();
+            stats.max = f16::from_f32(stats.max).to_f32();
+            PrimaryVectorHeader::new(stats)
         } else {
             let stats = VectorStats::new(k, vector);
             // The quantization interval is stored as f16 so the component range must fit in f16.

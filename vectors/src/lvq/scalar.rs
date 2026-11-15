@@ -1,13 +1,11 @@
 //! Scalar implementations of lvq routines suitable for use on any platform.
 
-#![allow(dead_code)]
-
 use super::{
     LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, TurboPrimaryVector, VectorEncodeTerms, VectorStats,
 };
 use crate::packing::{TurboPacker, TurboUnpacker};
 
-pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
+pub fn full_stats(vector: &[f32]) -> VectorStats {
     let (min, max, mean, variance, dot) = vector.iter().copied().enumerate().fold(
         (f32::MAX, f32::MIN, 0.0, 0.0, 0.0),
         |mut stats, (i, x)| {
@@ -26,6 +24,20 @@ pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
         mean,
         std_dev: (variance / vector.len() as f32).sqrt(),
         l2_norm_sq: dot,
+    }
+}
+
+pub fn partial_stats(vector: &[f32]) -> VectorStats {
+    let (l2_norm_sq, min, max) = vector
+        .iter()
+        .fold((0.0f32, f32::MAX, f32::MIN), |(n, l, u), &x| {
+            (x.mul_add(x, n), l.min(x), u.max(x))
+        });
+    VectorStats {
+        l2_norm_sq,
+        min,
+        max,
+        ..Default::default()
     }
 }
 

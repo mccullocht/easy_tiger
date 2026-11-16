@@ -8,15 +8,14 @@ use std::arch::x86_64::{
     _mm256_cvtepu8_epi16, _mm256_extractf32x4_ps, _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set1_ps,
     _mm256_sub_ps, _mm512_add_epi32, _mm512_add_ps, _mm512_and_si512, _mm512_broadcast_i32x4,
     _mm512_castps512_ps256, _mm512_cvtepi16_epi32, _mm512_cvtepi32_epi8, _mm512_cvtepu32_ps,
-    _mm512_cvtps_epu32, _mm512_div_ps, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32,
-    _mm512_extractf32x8_ps, _mm512_fmadd_ps, _mm512_loadu_epi8, _mm512_loadu_ps,
-    _mm512_mask_mul_ps, _mm512_mask_sub_ps, _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_epi64,
-    _mm512_maskz_loadu_ps, _mm512_max_ps, _mm512_min_ps, _mm512_mul_ps, _mm512_mullo_epi32,
-    _mm512_or_si512, _mm512_popcnt_epi32, _mm512_reduce_add_epi32, _mm512_reduce_add_ps,
-    _mm512_reduce_max_ps, _mm512_reduce_min_ps, _mm512_roundscale_ps, _mm512_set_epi32,
-    _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32, _mm512_set1_ps, _mm512_shuffle_i64x2,
-    _mm512_sll_epi32, _mm512_srli_epi32, _mm512_srli_epi64, _mm512_srlv_epi64, _mm512_storeu_ps,
-    _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
+    _mm512_cvtps_epu32, _mm512_dpbusd_epi32, _mm512_dpwssd_epi32, _mm512_extractf32x8_ps,
+    _mm512_fmadd_ps, _mm512_loadu_epi8, _mm512_loadu_ps, _mm512_mask_mul_ps, _mm512_mask_sub_ps,
+    _mm512_maskz_loadu_epi8, _mm512_maskz_loadu_epi64, _mm512_maskz_loadu_ps, _mm512_max_ps,
+    _mm512_min_ps, _mm512_mul_ps, _mm512_mullo_epi32, _mm512_or_si512, _mm512_popcnt_epi32,
+    _mm512_reduce_add_epi32, _mm512_reduce_add_ps, _mm512_reduce_max_ps, _mm512_reduce_min_ps,
+    _mm512_roundscale_ps, _mm512_set_epi32, _mm512_set_epi64, _mm512_set1_epi8, _mm512_set1_epi32,
+    _mm512_set1_ps, _mm512_shuffle_i64x2, _mm512_sll_epi32, _mm512_srli_epi32, _mm512_srli_epi64,
+    _mm512_srlv_epi64, _mm512_storeu_ps, _mm512_sub_ps, _mm512_unpackhi_epi8, _mm512_unpacklo_epi8,
 };
 
 use crate::lvq::{TurboPrimaryVector, VectorEncodeTerms};
@@ -35,102 +34,213 @@ unsafe fn mm512_round_nonnegative_ties_away_zero_ps(v: __m512) -> __m512 {
     )
 }
 
+/// Accumulate one 16-lane group into a Welford state plus the min/max/dot accumulators.
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn accumulate_stats16(
+    x: __m512,
+    n_inv: __m512,
+    mean: &mut __m512,
+    m2: &mut __m512,
+    dot: &mut __m512,
+    min: &mut __m512,
+    max: &mut __m512,
+) {
+    *min = _mm512_min_ps(*min, x);
+    *max = _mm512_max_ps(*max, x);
+    let delta = _mm512_sub_ps(x, *mean);
+    *mean = _mm512_fmadd_ps(delta, n_inv, *mean);
+    let delta2 = _mm512_sub_ps(x, *mean);
+    *m2 = _mm512_fmadd_ps(delta, delta2, *m2);
+    *dot = _mm512_fmadd_ps(x, x, *dot);
+}
+
+/// Reduce the 16 lanes of one Welford state, whose lanes each hold `base / 16` elements, to the
+/// combined sum of squared deviations.
+#[target_feature(enable = "avx512f,avx,fma,avx512dq")]
+#[inline]
+unsafe fn reduce_variance_avx512(meanv: __m512, variancev: __m512, base: usize) -> f32 {
+    let (means_8, m2_8) = {
+        let means = (
+            _mm512_castps512_ps256(meanv),
+            _mm512_extractf32x8_ps(meanv, 1),
+        );
+        let m2s = (
+            _mm512_castps512_ps256(variancev),
+            _mm512_extractf32x8_ps(variancev, 1),
+        );
+
+        let mean = _mm256_mul_ps(_mm256_add_ps(means.0, means.1), _mm256_set1_ps(0.5));
+        let delta = _mm256_sub_ps(means.0, means.1);
+        let delta_sq = _mm256_mul_ps(delta, delta);
+        let m2 = _mm256_fmadd_ps(
+            delta_sq,
+            _mm256_set1_ps(base as f32 / 32.0),
+            _mm256_add_ps(m2s.0, m2s.1),
+        );
+
+        (mean, m2)
+    };
+
+    let (means_4, m2_4) = {
+        let means = (
+            _mm256_castps256_ps128(means_8),
+            _mm256_extractf32x4_ps(means_8, 1),
+        );
+        let m2s = (
+            _mm256_castps256_ps128(m2_8),
+            _mm256_extractf32x4_ps(m2_8, 1),
+        );
+
+        let mean = _mm_mul_ps(_mm_add_ps(means.0, means.1), _mm_set1_ps(0.5));
+        let delta = _mm_sub_ps(means.0, means.1);
+        let delta_sq = _mm_mul_ps(delta, delta);
+        let m2 = _mm_fmadd_ps(
+            delta_sq,
+            _mm_set1_ps(base as f32 / 16.0),
+            _mm_add_ps(m2s.0, m2s.1),
+        );
+
+        (mean, m2)
+    };
+
+    let (means_2, m2_2) = {
+        let means0 = _mm_cvtps_pd(means_4);
+        let means1 = _mm_cvtps_pd(_mm_movehl_ps(means_4, means_4));
+        let var0 = _mm_cvtps_pd(m2_4);
+        let var1 = _mm_cvtps_pd(_mm_movehl_ps(m2_4, m2_4));
+
+        let mean = _mm_mul_pd(_mm_add_pd(means0, means1), _mm_set1_pd(0.5));
+        let delta = _mm_sub_pd(means0, means1);
+        let delta_sq = _mm_mul_pd(delta, delta);
+        let m2 = _mm_fmadd_pd(
+            delta_sq,
+            _mm_set1_pd(base as f64 / 8.0),
+            _mm_add_pd(var0, var1),
+        );
+
+        (mean, m2)
+    };
+
+    let delta = _mm_hsub_pd(means_2, means_2);
+    let delta_sq = _mm_mul_pd(delta, delta);
+    _mm_cvtsd_f64(_mm_fmadd_pd(
+        delta_sq,
+        _mm_set1_pd(base as f64 / 4.0),
+        _mm_hadd_pd(m2_2, m2_2),
+    )) as f32
+}
+
 #[target_feature(enable = "avx512f,avx,fma,avx512dq")]
 pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
-    let mut minv = _mm512_set1_ps(f32::MAX);
-    let mut maxv = _mm512_set1_ps(f32::MIN);
-    let mut meanv = _mm512_set1_ps(0.0);
-    let mut variancev = _mm512_set1_ps(0.0);
-    let mut dotv = _mm512_set1_ps(0.0);
     let (head, tail) = vector.as_chunks::<16>();
-    for (i, c) in head.iter().enumerate() {
-        let x = _mm512_loadu_ps(c.as_ptr());
-        minv = _mm512_min_ps(minv, x);
-        maxv = _mm512_max_ps(maxv, x);
-        let delta = _mm512_sub_ps(x, meanv);
-        meanv = _mm512_add_ps(meanv, _mm512_div_ps(delta, _mm512_set1_ps((i + 1) as f32)));
-        let delta2 = _mm512_sub_ps(x, meanv);
-        variancev = _mm512_fmadd_ps(delta, delta2, variancev);
-        dotv = _mm512_fmadd_ps(x, x, dotv);
+    let chunks = head.len();
+    let unrolled = chunks & !3;
+
+    // Four independent Welford states, each covering one 16-lane chunk per iteration. This
+    // exposes four times the instruction-level parallelism and lets the per-iteration
+    // division be replaced by a shared reciprocal.
+    let mut means = [_mm512_set1_ps(0.0); 4];
+    let mut m2s = [_mm512_set1_ps(0.0); 4];
+    let mut dots = [_mm512_set1_ps(0.0); 4];
+    let mut mins = [_mm512_set1_ps(f32::MAX); 4];
+    let mut maxs = [_mm512_set1_ps(f32::MIN); 4];
+
+    // Number of elements seen so far by each lane of every state.
+    let mut n = 0usize;
+    for i in (0..unrolled).step_by(4) {
+        n += 1;
+        let n_inv = _mm512_set1_ps((n as f32).recip());
+        let ptr = head.as_ptr().add(i).cast::<f32>();
+        accumulate_stats16(
+            _mm512_loadu_ps(ptr),
+            n_inv,
+            &mut means[0],
+            &mut m2s[0],
+            &mut dots[0],
+            &mut mins[0],
+            &mut maxs[0],
+        );
+        accumulate_stats16(
+            _mm512_loadu_ps(ptr.add(16)),
+            n_inv,
+            &mut means[1],
+            &mut m2s[1],
+            &mut dots[1],
+            &mut mins[1],
+            &mut maxs[1],
+        );
+        accumulate_stats16(
+            _mm512_loadu_ps(ptr.add(32)),
+            n_inv,
+            &mut means[2],
+            &mut m2s[2],
+            &mut dots[2],
+            &mut mins[2],
+            &mut maxs[2],
+        );
+        accumulate_stats16(
+            _mm512_loadu_ps(ptr.add(48)),
+            n_inv,
+            &mut means[3],
+            &mut m2s[3],
+            &mut dots[3],
+            &mut mins[3],
+            &mut maxs[3],
+        );
     }
 
-    let base = head.len() * 16;
-    let mut min = _mm512_reduce_min_ps(minv);
-    let mut max = _mm512_reduce_max_ps(maxv);
-    let mut mean = _mm512_reduce_add_ps(meanv) / 16.0;
-    let mut variance = {
-        let (means_8, m2_8) = {
-            let means = (
-                _mm512_castps512_ps256(meanv),
-                _mm512_extractf32x8_ps(meanv, 1),
+    // A final chunk for each state when the number of chunks is not a multiple of four.
+    let extra = chunks - unrolled;
+    if extra > 0 {
+        let n_inv = _mm512_set1_ps(((n + 1) as f32).recip());
+        for s in 0..extra {
+            let ptr = head.as_ptr().add(unrolled + s).cast::<f32>();
+            accumulate_stats16(
+                _mm512_loadu_ps(ptr),
+                n_inv,
+                &mut means[s],
+                &mut m2s[s],
+                &mut dots[s],
+                &mut mins[s],
+                &mut maxs[s],
             );
-            let m2s = (
-                _mm512_castps512_ps256(variancev),
-                _mm512_extractf32x8_ps(variancev, 1),
-            );
+        }
+    }
 
-            let mean = _mm256_mul_ps(_mm256_add_ps(means.0, means.1), _mm256_set1_ps(0.5));
-            let delta = _mm256_sub_ps(means.0, means.1);
-            let delta_sq = _mm256_mul_ps(delta, delta);
-            let m2 = _mm256_fmadd_ps(
-                delta_sq,
-                _mm256_set1_ps(base as f32 / 32.0),
-                _mm256_add_ps(m2s.0, m2s.1),
-            );
+    // Merge the four Welford states using the standard parallel variance combination formula.
+    let mut total_n = 0.0f64;
+    let mut merged_mean = 0.0f64;
+    let mut merged_m2 = 0.0f64;
+    let mut min = f32::MAX;
+    let mut max = f32::MIN;
+    let mut dot = 0.0f32;
+    for s in 0..4 {
+        let count = n + usize::from(s < extra);
+        if count == 0 {
+            continue;
+        }
+        let state_n = (16 * count) as f64;
+        let state_mean = (_mm512_reduce_add_ps(means[s]) / 16.0) as f64;
+        let state_m2 = reduce_variance_avx512(means[s], m2s[s], 16 * count) as f64;
+        if total_n == 0.0 {
+            merged_mean = state_mean;
+            merged_m2 = state_m2;
+        } else {
+            let delta = state_mean - merged_mean;
+            let new_n = total_n + state_n;
+            merged_m2 += state_m2 + delta * delta * total_n * state_n / new_n;
+            merged_mean += delta * state_n / new_n;
+        }
+        total_n += state_n;
+        min = min.min(_mm512_reduce_min_ps(mins[s]));
+        max = max.max(_mm512_reduce_max_ps(maxs[s]));
+        dot += _mm512_reduce_add_ps(dots[s]);
+    }
 
-            (mean, m2)
-        };
-
-        let (means_4, m2_4) = {
-            let means = (
-                _mm256_castps256_ps128(means_8),
-                _mm256_extractf32x4_ps(means_8, 1),
-            );
-            let m2s = (
-                _mm256_castps256_ps128(m2_8),
-                _mm256_extractf32x4_ps(m2_8, 1),
-            );
-
-            let mean = _mm_mul_ps(_mm_add_ps(means.0, means.1), _mm_set1_ps(0.5));
-            let delta = _mm_sub_ps(means.0, means.1);
-            let delta_sq = _mm_mul_ps(delta, delta);
-            let m2 = _mm_fmadd_ps(
-                delta_sq,
-                _mm_set1_ps(base as f32 / 16.0),
-                _mm_add_ps(m2s.0, m2s.1),
-            );
-
-            (mean, m2)
-        };
-
-        let (means_2, m2_2) = {
-            let means0 = _mm_cvtps_pd(means_4);
-            let means1 = _mm_cvtps_pd(_mm_movehl_ps(means_4, means_4));
-            let var0 = _mm_cvtps_pd(m2_4);
-            let var1 = _mm_cvtps_pd(_mm_movehl_ps(m2_4, m2_4));
-
-            let mean = _mm_mul_pd(_mm_add_pd(means0, means1), _mm_set1_pd(0.5));
-            let delta = _mm_sub_pd(means0, means1);
-            let delta_sq = _mm_mul_pd(delta, delta);
-            let m2 = _mm_fmadd_pd(
-                delta_sq,
-                _mm_set1_pd(base as f64 / 8.0),
-                _mm_add_pd(var0, var1),
-            );
-
-            (mean, m2)
-        };
-
-        let delta = _mm_hsub_pd(means_2, means_2);
-        let delta_sq = _mm_mul_pd(delta, delta);
-        _mm_cvtsd_f64(_mm_fmadd_pd(
-            delta_sq,
-            _mm_set1_pd(base as f64 / 4.0),
-            _mm_hadd_pd(m2_2, m2_2),
-        )) as f32
-    };
-    let mut dot = _mm512_reduce_add_ps(dotv);
-
+    let base = chunks * 16;
+    let mut mean = merged_mean as f32;
+    let mut variance = merged_m2 as f32;
     for (i, x) in tail.iter().enumerate() {
         min = x.min(min);
         max = x.max(max);
@@ -147,6 +257,47 @@ pub unsafe fn compute_vector_stats_avx512(vector: &[f32]) -> VectorStats {
         std_dev: (variance / vector.len() as f32).sqrt(),
         l2_norm_sq: dot,
     }
+}
+
+/// The interval being evaluated by the AVX-512 coordinate-descent pass, splatted across lanes.
+#[derive(Clone, Copy)]
+struct GridTermsAvx512 {
+    lower: __m512,
+    upper: __m512,
+    step_inv: __m512,
+}
+
+/// Accumulate the integer grid indices and weighted sums for one 16-lane group of the
+/// coordinate-descent pass of interval optimization.
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn accumulate_grid16(
+    x: __m512,
+    terms: GridTermsAvx512,
+    ksum: &mut __m512,
+    ksq: &mut __m512,
+    xsum: &mut __m512,
+    xk: &mut __m512,
+) {
+    let clamped = _mm512_min_ps(_mm512_max_ps(x, terms.lower), terms.upper);
+    let k = mm512_round_nonnegative_ties_away_zero_ps(_mm512_mul_ps(
+        _mm512_sub_ps(clamped, terms.lower),
+        terms.step_inv,
+    ));
+    *ksum = _mm512_add_ps(*ksum, k);
+    *ksq = _mm512_fmadd_ps(k, k, *ksq);
+    *xsum = _mm512_add_ps(*xsum, x);
+    *xk = _mm512_fmadd_ps(x, k, *xk);
+}
+
+/// Sum the four unrolled 16-lane accumulators of the coordinate-descent pass.
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn reduce_add4_avx512(a: [__m512; 4]) -> f32 {
+    _mm512_reduce_add_ps(_mm512_add_ps(
+        _mm512_add_ps(a[0], a[1]),
+        _mm512_add_ps(a[2], a[3]),
+    ))
 }
 
 #[target_feature(enable = "avx512f")]
@@ -166,38 +317,103 @@ pub unsafe fn optimize_interval_avx512(
 
     let points_incl = ((1 << bits) - 1) as f32;
     for _ in 0..5 {
-        let lowerv = _mm512_set1_ps(lower);
-        let upperv = _mm512_set1_ps(upper);
-        let step_inv = _mm512_set1_ps(points_incl / (upper - lower));
-        let points_incl_inv = _mm512_set1_ps(1.0 / points_incl);
-        // calculate the grid points for coordinate descent.
-        let mut daav = _mm512_set1_ps(0.0);
-        let mut dabv = _mm512_set1_ps(0.0);
-        let mut dbbv = _mm512_set1_ps(0.0);
-        let mut daxv = _mm512_set1_ps(0.0);
-        let mut dbxv = _mm512_set1_ps(0.0);
-        for c in vector.chunks(16) {
-            let mask = u16::MAX >> (16 - c.len());
-            let xv = _mm512_maskz_loadu_ps(mask, c.as_ptr());
-            let mut xq = _mm512_max_ps(xv, lowerv);
-            xq = _mm512_min_ps(xq, upperv);
-            xq = _mm512_sub_ps(xq, lowerv);
-            xq = _mm512_mul_ps(xq, step_inv);
-            xq = mm512_round_nonnegative_ties_away_zero_ps(xq);
-            let s = _mm512_mask_mul_ps(_mm512_set1_ps(0.0), mask, xq, points_incl_inv);
-            let s1 = _mm512_mask_sub_ps(_mm512_set1_ps(0.0), mask, _mm512_set1_ps(1.0), s);
-            daav = _mm512_fmadd_ps(s1, s1, daav);
-            dabv = _mm512_fmadd_ps(s1, s, dabv);
-            dbbv = _mm512_fmadd_ps(s, s, dbbv);
-            daxv = _mm512_fmadd_ps(xv, s1, daxv);
-            dbxv = _mm512_fmadd_ps(xv, s, dbxv);
+        let terms = GridTermsAvx512 {
+            lower: _mm512_set1_ps(lower),
+            upper: _mm512_set1_ps(upper),
+            step_inv: _mm512_set1_ps(points_incl / (upper - lower)),
+        };
+        // Calculate the grid points for coordinate descent. Accumulating the integer grid
+        // index `k` (rather than `s = k / points_incl`) keeps the heavily accumulated sums
+        // exact and removes the per-group division from the inner loop.
+        let full = vector.len() / 16;
+        let rem = vector.len() % 16;
+        let unrolled = full & !3;
+        let mut ksums = [_mm512_set1_ps(0.0); 4];
+        let mut ksqs = [_mm512_set1_ps(0.0); 4];
+        let mut xsums = [_mm512_set1_ps(0.0); 4];
+        let mut xks = [_mm512_set1_ps(0.0); 4];
+
+        for i in (0..unrolled).step_by(4) {
+            let ptr = vector.as_ptr().add(i * 16);
+            accumulate_grid16(
+                _mm512_loadu_ps(ptr),
+                terms,
+                &mut ksums[0],
+                &mut ksqs[0],
+                &mut xsums[0],
+                &mut xks[0],
+            );
+            accumulate_grid16(
+                _mm512_loadu_ps(ptr.add(16)),
+                terms,
+                &mut ksums[1],
+                &mut ksqs[1],
+                &mut xsums[1],
+                &mut xks[1],
+            );
+            accumulate_grid16(
+                _mm512_loadu_ps(ptr.add(32)),
+                terms,
+                &mut ksums[2],
+                &mut ksqs[2],
+                &mut xsums[2],
+                &mut xks[2],
+            );
+            accumulate_grid16(
+                _mm512_loadu_ps(ptr.add(48)),
+                terms,
+                &mut ksums[3],
+                &mut ksqs[3],
+                &mut xsums[3],
+                &mut xks[3],
+            );
         }
 
-        let daa = _mm512_reduce_add_ps(daav);
-        let dab = _mm512_reduce_add_ps(dabv);
-        let dbb = _mm512_reduce_add_ps(dbbv);
-        let dax = _mm512_reduce_add_ps(daxv);
-        let dbx = _mm512_reduce_add_ps(dbxv);
+        let extra = full - unrolled;
+        for s in 0..extra {
+            let ptr = vector.as_ptr().add((unrolled + s) * 16);
+            accumulate_grid16(
+                _mm512_loadu_ps(ptr),
+                terms,
+                &mut ksums[s],
+                &mut ksqs[s],
+                &mut xsums[s],
+                &mut xks[s],
+            );
+        }
+
+        if rem > 0 {
+            let mask = u16::MAX >> (16 - rem);
+            let x = _mm512_maskz_loadu_ps(mask, vector.as_ptr().add(full * 16));
+            let clamped = _mm512_min_ps(_mm512_max_ps(x, terms.lower), terms.upper);
+            let k = mm512_round_nonnegative_ties_away_zero_ps(_mm512_mul_ps(
+                _mm512_sub_ps(clamped, terms.lower),
+                terms.step_inv,
+            ));
+            // Clear the inactive lanes so they do not contribute to the sums.
+            let k = _mm512_mask_mul_ps(_mm512_set1_ps(0.0), mask, k, _mm512_set1_ps(1.0));
+            ksums[0] = _mm512_add_ps(ksums[0], k);
+            ksqs[0] = _mm512_fmadd_ps(k, k, ksqs[0]);
+            xsums[0] = _mm512_add_ps(xsums[0], x);
+            xks[0] = _mm512_fmadd_ps(x, k, xks[0]);
+        }
+
+        let ssum = reduce_add4_avx512(ksums) / points_incl;
+        let ssq = reduce_add4_avx512(ksqs) / (points_incl * points_incl);
+        let xsum = reduce_add4_avx512(xsums);
+        let xk = reduce_add4_avx512(xks) / points_incl;
+
+        // Recover the original accumulators from the exact integer sums:
+        // daa = sum (1-s)^2 = n - 2*sum s + sum s^2
+        // dab = sum s(1-s) = sum s - sum s^2
+        // dbb = sum s^2
+        // dax = sum x(1-s) = sum x - sum x*s
+        // dbx = sum x*s
+        let daa = vector.len() as f32 - 2.0 * ssum + ssq;
+        let dab = ssum - ssq;
+        let dbb = ssq;
+        let dax = xsum - xk;
+        let dbx = xk;
 
         let m0 = scale * dax * dax + LAMBDA * daa;
         let m1 = scale * dax * dbx + LAMBDA * dab;
@@ -231,6 +447,29 @@ pub unsafe fn optimize_interval_avx512(
     (lower, upper)
 }
 
+/// Accumulate the error terms for one 16-lane group of the loss computation.
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn accumulate_loss16(
+    xi: __m512,
+    av: __m512,
+    bv: __m512,
+    stepv: __m512,
+    step_invv: __m512,
+    xe: &mut __m512,
+    e: &mut __m512,
+) {
+    let mut xiq = _mm512_max_ps(xi, av);
+    xiq = _mm512_min_ps(xiq, bv);
+    xiq = _mm512_sub_ps(xiq, av);
+    xiq = _mm512_mul_ps(xiq, step_invv);
+    xiq = mm512_round_nonnegative_ties_away_zero_ps(xiq);
+    xiq = _mm512_fmadd_ps(stepv, xiq, av);
+    let diff = _mm512_sub_ps(xi, xiq);
+    *xe = _mm512_fmadd_ps(xi, diff, *xe);
+    *e = _mm512_fmadd_ps(diff, diff, *e);
+}
+
 #[target_feature(enable = "avx512f,avx512vbmi2")]
 unsafe fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {
     let a: f64 = interval.0.into();
@@ -242,11 +481,71 @@ unsafe fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits:
     let bv = _mm512_set1_ps(b as f32);
     let stepv = _mm512_set1_ps(step as f32);
     let step_invv = _mm512_set1_ps(step_inv as f32);
-    let mut xev = _mm512_set1_ps(0.0);
-    let mut ev = _mm512_set1_ps(0.0);
-    for c in vector.chunks(16) {
-        let mask = u16::MAX >> (16 - c.len());
-        let xi = _mm512_maskz_loadu_ps(mask, c.as_ptr());
+
+    // Unroll the main loop over four independent 16-lane groups so that the two
+    // loop-carried FMA chains (xe and e) no longer serialize the iterations.
+    let full = vector.len() / 16;
+    let rem = vector.len() % 16;
+    let unrolled = full & !3;
+    let mut xev = [_mm512_set1_ps(0.0); 4];
+    let mut ev = [_mm512_set1_ps(0.0); 4];
+    for i in (0..unrolled).step_by(4) {
+        let ptr = vector.as_ptr().add(i * 16);
+        accumulate_loss16(
+            _mm512_loadu_ps(ptr),
+            av,
+            bv,
+            stepv,
+            step_invv,
+            &mut xev[0],
+            &mut ev[0],
+        );
+        accumulate_loss16(
+            _mm512_loadu_ps(ptr.add(16)),
+            av,
+            bv,
+            stepv,
+            step_invv,
+            &mut xev[1],
+            &mut ev[1],
+        );
+        accumulate_loss16(
+            _mm512_loadu_ps(ptr.add(32)),
+            av,
+            bv,
+            stepv,
+            step_invv,
+            &mut xev[2],
+            &mut ev[2],
+        );
+        accumulate_loss16(
+            _mm512_loadu_ps(ptr.add(48)),
+            av,
+            bv,
+            stepv,
+            step_invv,
+            &mut xev[3],
+            &mut ev[3],
+        );
+    }
+
+    let extra = full - unrolled;
+    for s in 0..extra {
+        let ptr = vector.as_ptr().add((unrolled + s) * 16);
+        accumulate_loss16(
+            _mm512_loadu_ps(ptr),
+            av,
+            bv,
+            stepv,
+            step_invv,
+            &mut xev[s],
+            &mut ev[s],
+        );
+    }
+
+    if rem > 0 {
+        let mask = u16::MAX >> (16 - rem);
+        let xi = _mm512_maskz_loadu_ps(mask, vector.as_ptr().add(full * 16));
         let mut xiq = _mm512_max_ps(xi, av);
         xiq = _mm512_min_ps(xiq, bv);
         xiq = _mm512_sub_ps(xiq, av);
@@ -254,12 +553,12 @@ unsafe fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits:
         xiq = mm512_round_nonnegative_ties_away_zero_ps(xiq);
         xiq = _mm512_fmadd_ps(stepv, xiq, av);
         let diff = _mm512_mask_sub_ps(_mm512_set1_ps(0.0), mask, xi, xiq);
-        xev = _mm512_fmadd_ps(xi, diff, xev);
-        ev = _mm512_fmadd_ps(diff, diff, ev);
+        xev[0] = _mm512_fmadd_ps(xi, diff, xev[0]);
+        ev[0] = _mm512_fmadd_ps(diff, diff, ev[0]);
     }
 
-    let xe = _mm512_reduce_add_ps(xev) as f64;
-    let e = _mm512_reduce_add_ps(ev) as f64;
+    let xe = reduce_add4_avx512(xev) as f64;
+    let e = reduce_add4_avx512(ev) as f64;
     (1.0 - LAMBDA as f64) * xe * xe / norm_sq + LAMBDA as f64 * e
 }
 
@@ -671,6 +970,80 @@ mod test {
                 unsafe { super::query4_doc1_bitplane_dot_avx512(&query, &doc) },
                 crate::lvq::scalar::query4_doc1_bitplane_dot(&query, &doc),
                 "dims={dims}"
+            );
+        }
+    }
+
+    /// True when the AVX-512 features used by the statistics and loss kernels are available.
+    fn avx512_available() -> bool {
+        std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512dq")
+            && std::arch::is_x86_feature_detected!("avx512vbmi2")
+            && std::arch::is_x86_feature_detected!("avx")
+            && std::arch::is_x86_feature_detected!("fma")
+    }
+
+    #[test]
+    fn compute_vector_stats_simd() {
+        if !avx512_available() {
+            return;
+        }
+        // Cover multiples of 4 and 16 plus every possible remainder.
+        for dim in [
+            1usize, 2, 3, 4, 5, 7, 8, 9, 12, 15, 16, 17, 19, 20, 23, 28, 31, 32, 33, 47, 63, 64,
+            65, 127, 128, 129, 255, 256, 1024,
+        ] {
+            let vector = (0..dim)
+                .map(|i| {
+                    let x = ((i as f32 * 12.9898).sin() * 43_758.547).fract();
+                    2.0 * x - 1.0
+                })
+                .collect::<Vec<_>>();
+            let scalar_stats = crate::lvq::scalar::compute_vector_stats(&vector);
+            let simd_stats = unsafe { super::compute_vector_stats_avx512(&vector) };
+            assert_eq!(scalar_stats.min, simd_stats.min, "dim={dim}");
+            assert_eq!(scalar_stats.max, simd_stats.max, "dim={dim}");
+            assert!(
+                (scalar_stats.mean - simd_stats.mean).abs() <= 1e-5,
+                "dim={dim}: scalar mean {} vs simd mean {}",
+                scalar_stats.mean,
+                simd_stats.mean
+            );
+            assert!(
+                (scalar_stats.std_dev - simd_stats.std_dev).abs() <= 1e-5,
+                "dim={dim}: scalar std {} vs simd std {}",
+                scalar_stats.std_dev,
+                simd_stats.std_dev
+            );
+            assert!(
+                (scalar_stats.l2_norm_sq - simd_stats.l2_norm_sq).abs()
+                    <= 1e-5 * scalar_stats.l2_norm_sq.abs().max(1.0),
+                "dim={dim}: scalar l2 {} vs simd l2 {}",
+                scalar_stats.l2_norm_sq,
+                simd_stats.l2_norm_sq
+            );
+        }
+    }
+
+    #[test]
+    fn compute_loss_simd() {
+        if !avx512_available() {
+            return;
+        }
+        // Cover multiples of 16 plus every possible remainder.
+        for dim in [
+            1usize, 3, 4, 7, 8, 12, 15, 16, 17, 19, 20, 28, 31, 32, 33, 63, 64, 1024,
+        ] {
+            let vector = (0..dim)
+                .map(|i| ((i as f32) * 0.618_034).sin() + 0.3)
+                .collect::<Vec<_>>();
+            let norm_sq = vector.iter().map(|x| (x * x) as f64).sum::<f64>();
+            let interval = (-0.25f32, 0.75f32);
+            let scalar_loss = crate::lvq::scalar::compute_loss(&vector, interval, norm_sq, 4);
+            let simd_loss = unsafe { super::compute_loss(&vector, interval, norm_sq, 4) };
+            assert!(
+                (scalar_loss - simd_loss).abs() <= 1e-5 * scalar_loss.abs().max(1.0),
+                "dim={dim}: scalar loss {scalar_loss} vs simd loss {simd_loss}"
             );
         }
     }

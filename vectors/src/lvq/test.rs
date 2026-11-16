@@ -395,7 +395,15 @@ fn degenerate_simd_parity() {
                         sd.iter().chain(ad.iter()).all(|x| x.is_finite()),
                         "B={B} k={k:?} dim={dim} {name}: non-finite decode"
                     );
-                    assert_abs_diff_eq!(sd.as_slice(), ad.as_slice(), epsilon = 1e-4);
+                    let max_diff = sd
+                        .iter()
+                        .zip(ad.iter())
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0f32, f32::max);
+                    assert!(
+                        max_diff <= 1e-4,
+                        "B={B} k={k:?} dim={dim} {name}: max diff {max_diff}"
+                    );
 
                     for sim in [VectorSimilarity::Dot, VectorSimilarity::Euclidean] {
                         let d = coding.distance_symmetric(sim).distance(&se, &ae);

@@ -96,6 +96,33 @@ fn reduce_variance(means: float32x4_t, m2: float32x4_t, n: usize) -> f32 {
     }
 }
 
+/// The interval being evaluated by the coordinate-descent pass, splatted across lanes.
+#[derive(Clone, Copy)]
+struct GridTerms {
+    lower: float32x4_t,
+    upper: float32x4_t,
+    step_inv: float32x4_t,
+}
+
+/// Accumulate the integer grid indices and weighted sums for one 4-lane group of the
+/// coordinate-descent pass of interval optimization.
+#[inline(always)]
+unsafe fn accumulate_grid4(
+    xi: float32x4_t,
+    terms: GridTerms,
+    ksum: &mut float32x4_t,
+    ksq: &mut float32x4_t,
+    xsum: &mut float32x4_t,
+    xk: &mut float32x4_t,
+) {
+    let clamped = vminq_f32(vmaxq_f32(xi, terms.lower), terms.upper);
+    let k = vrndaq_f32(vmulq_f32(vsubq_f32(clamped, terms.lower), terms.step_inv));
+    *ksum = vaddq_f32(*ksum, k);
+    *ksq = vfmaq_f32(*ksq, k, k);
+    *xsum = vaddq_f32(*xsum, xi);
+    *xk = vfmaq_f32(*xk, xi, k);
+}
+
 pub fn optimize_interval_neon(vector: &[f32], stats: &VectorStats, bits: usize) -> (f32, f32) {
     let norm_sq: f64 = stats.l2_norm_sq.into();
     let mut loss = compute_loss(vector, (stats.min, stats.max), norm_sq, bits);
@@ -109,39 +136,73 @@ pub fn optimize_interval_neon(vector: &[f32], stats: &VectorStats, bits: usize) 
     let points_incl = ((1 << bits) - 1) as f32;
     for _ in 0..5 {
         let step_inv = points_incl / (upper - lower);
-        // calculate the grid points for coordinate descent.
+        // Calculate the grid points for coordinate descent. Accumulating the integer grid
+        // index `k` (rather than `s = k / points_incl`) keeps the heavily accumulated sums
+        // exact and removes the per-group division from the inner loop.
         let tail_split = vector.len() & !3;
+        let unrolled_split = vector.len() & !7;
         let (mut daa, mut dab, mut dbb, mut dax, mut dbx) = if tail_split > 0 {
             unsafe {
-                let lower = vdupq_n_f32(lower);
-                let upper = vdupq_n_f32(upper);
-                let step_inv = vdupq_n_f32(step_inv);
-                let mut daa = vdupq_n_f32(0.0);
-                let mut dab = vdupq_n_f32(0.0);
-                let mut dbb = vdupq_n_f32(0.0);
-                let mut dax = vdupq_n_f32(0.0);
-                let mut dbx = vdupq_n_f32(0.0);
-                for i in (0..tail_split).step_by(4) {
-                    let xi = vld1q_f32(vector.as_ptr().add(i));
-                    let k = vrndaq_f32(vmulq_f32(
-                        vsubq_f32(vminq_f32(vmaxq_f32(xi, lower), upper), lower),
-                        step_inv,
-                    ));
-                    let s = vdivq_f32(k, vdupq_n_f32(points_incl));
-                    let si = vsubq_f32(vdupq_n_f32(1.0), s);
-                    daa = vfmaq_f32(daa, si, si);
-                    dab = vfmaq_f32(dab, si, s);
-                    dbb = vfmaq_f32(dbb, s, s);
-                    dax = vfmaq_f32(dax, xi, si);
-                    dbx = vfmaq_f32(dbx, xi, s);
+                let terms = GridTerms {
+                    lower: vdupq_n_f32(lower),
+                    upper: vdupq_n_f32(upper),
+                    step_inv: vdupq_n_f32(step_inv),
+                };
+                let mut ksum0 = vdupq_n_f32(0.0);
+                let mut ksum1 = vdupq_n_f32(0.0);
+                let mut ksq0 = vdupq_n_f32(0.0);
+                let mut ksq1 = vdupq_n_f32(0.0);
+                let mut xsum0 = vdupq_n_f32(0.0);
+                let mut xsum1 = vdupq_n_f32(0.0);
+                let mut xk0 = vdupq_n_f32(0.0);
+                let mut xk1 = vdupq_n_f32(0.0);
+                for i in (0..unrolled_split).step_by(8) {
+                    let ptr = vector.as_ptr().add(i);
+                    accumulate_grid4(
+                        vld1q_f32(ptr),
+                        terms,
+                        &mut ksum0,
+                        &mut ksq0,
+                        &mut xsum0,
+                        &mut xk0,
+                    );
+                    accumulate_grid4(
+                        vld1q_f32(ptr.add(4)),
+                        terms,
+                        &mut ksum1,
+                        &mut ksq1,
+                        &mut xsum1,
+                        &mut xk1,
+                    );
+                }
+                if unrolled_split < tail_split {
+                    accumulate_grid4(
+                        vld1q_f32(vector.as_ptr().add(unrolled_split)),
+                        terms,
+                        &mut ksum0,
+                        &mut ksq0,
+                        &mut xsum0,
+                        &mut xk0,
+                    );
                 }
 
+                let ssum = vaddvq_f32(vaddq_f32(ksum0, ksum1)) / points_incl;
+                let ssq = vaddvq_f32(vaddq_f32(ksq0, ksq1)) / (points_incl * points_incl);
+                let xsum = vaddvq_f32(vaddq_f32(xsum0, xsum1));
+                let xk = vaddvq_f32(vaddq_f32(xk0, xk1)) / points_incl;
+
+                // Recover the original accumulators from the exact integer sums:
+                // daa = sum (1-s)^2 = n - 2*sum s + sum s^2
+                // dab = sum s(1-s) = sum s - sum s^2
+                // dbb = sum s^2
+                // dax = sum x(1-s) = sum x - sum x*s
+                // dbx = sum x*s
                 (
-                    vaddvq_f32(daa),
-                    vaddvq_f32(dab),
-                    vaddvq_f32(dbb),
-                    vaddvq_f32(dax),
-                    vaddvq_f32(dbx),
+                    tail_split as f32 - 2.0 * ssum + ssq,
+                    ssum - ssq,
+                    ssq,
+                    xsum - xk,
+                    xk,
                 )
             }
         } else {
@@ -183,33 +244,98 @@ pub fn optimize_interval_neon(vector: &[f32], stats: &VectorStats, bits: usize) 
     (lower, upper)
 }
 
+/// Accumulate the error terms for one 4-lane group of the loss computation.
+#[inline(always)]
+unsafe fn accumulate_loss4(
+    xi: float32x4_t,
+    a: float32x4_t,
+    b: float32x4_t,
+    step: float32x4_t,
+    step_inv: float32x4_t,
+    xe: &mut float32x4_t,
+    e: &mut float32x4_t,
+) {
+    let mut xiq = vmaxq_f32(xi, a);
+    xiq = vminq_f32(xiq, b);
+    xiq = vsubq_f32(xiq, a);
+    xiq = vmulq_f32(xiq, step_inv);
+    xiq = vrndaq_f32(xiq);
+    xiq = vfmaq_f32(a, xiq, step);
+    let diff = vsubq_f32(xi, xiq);
+    *xe = vfmaq_f32(*xe, xi, diff);
+    *e = vfmaq_f32(*e, diff, diff);
+}
+
 fn compute_loss(vector: &[f32], interval: (f32, f32), norm_sq: f64, bits: usize) -> f64 {
     let a = interval.0;
     let b = interval.1;
     let step = (b - a) / ((1 << bits) - 1) as f32;
     let step_inv = step.recip();
 
+    // Unroll the main loop over four independent 4-lane groups so that the two
+    // loop-carried FMA chains (xe and e) no longer serialize the iterations.
     let tail_split = vector.len() & !3;
+    let unrolled_split = vector.len() & !15;
     let (mut xe, mut e) = if tail_split > 0 {
         unsafe {
             let a = vdupq_n_f32(a);
             let b = vdupq_n_f32(b);
             let step = vdupq_n_f32(step);
             let step_inv = vdupq_n_f32(step_inv);
-            let mut xe = vdupq_n_f32(0.0);
-            let mut e = vdupq_n_f32(0.0);
-            for i in (0..tail_split).step_by(4) {
-                let xi = vld1q_f32(vector.as_ptr().add(i));
-                let mut xiq = vmaxq_f32(xi, a);
-                xiq = vminq_f32(xiq, b);
-                xiq = vsubq_f32(xiq, a);
-                xiq = vmulq_f32(xiq, step_inv);
-                xiq = vrndaq_f32(xiq);
-                xiq = vfmaq_f32(a, xiq, step);
-                let diff = vsubq_f32(xi, xiq);
-                xe = vfmaq_f32(xe, xi, diff);
-                e = vfmaq_f32(e, diff, diff);
+            let mut xe0 = vdupq_n_f32(0.0);
+            let mut xe1 = vdupq_n_f32(0.0);
+            let mut xe2 = vdupq_n_f32(0.0);
+            let mut xe3 = vdupq_n_f32(0.0);
+            let mut e0 = vdupq_n_f32(0.0);
+            let mut e1 = vdupq_n_f32(0.0);
+            let mut e2 = vdupq_n_f32(0.0);
+            let mut e3 = vdupq_n_f32(0.0);
+            for i in (0..unrolled_split).step_by(16) {
+                let ptr = vector.as_ptr().add(i);
+                accumulate_loss4(vld1q_f32(ptr), a, b, step, step_inv, &mut xe0, &mut e0);
+                accumulate_loss4(
+                    vld1q_f32(ptr.add(4)),
+                    a,
+                    b,
+                    step,
+                    step_inv,
+                    &mut xe1,
+                    &mut e1,
+                );
+                accumulate_loss4(
+                    vld1q_f32(ptr.add(8)),
+                    a,
+                    b,
+                    step,
+                    step_inv,
+                    &mut xe2,
+                    &mut e2,
+                );
+                accumulate_loss4(
+                    vld1q_f32(ptr.add(12)),
+                    a,
+                    b,
+                    step,
+                    step_inv,
+                    &mut xe3,
+                    &mut e3,
+                );
             }
+            if unrolled_split < tail_split {
+                for i in (unrolled_split..tail_split).step_by(4) {
+                    accumulate_loss4(
+                        vld1q_f32(vector.as_ptr().add(i)),
+                        a,
+                        b,
+                        step,
+                        step_inv,
+                        &mut xe0,
+                        &mut e0,
+                    );
+                }
+            }
+            let xe = vaddq_f32(vaddq_f32(xe0, xe1), vaddq_f32(xe2, xe3));
+            let e = vaddq_f32(vaddq_f32(e0, e1), vaddq_f32(e2, e3));
             (vaddvq_f32(xe), vaddvq_f32(e))
         }
     } else {
@@ -829,6 +955,26 @@ mod test {
     use approx::assert_abs_diff_eq;
 
     use crate::packing;
+
+    #[test]
+    fn compute_loss_simd() {
+        // Cover multiples of 16 plus every possible 4-lane remainder.
+        for dim in [
+            1usize, 3, 4, 7, 8, 12, 15, 16, 17, 19, 20, 28, 31, 32, 33, 63, 64, 1024,
+        ] {
+            let vector = (0..dim)
+                .map(|i| ((i as f32) * 0.61803398875).sin() + 0.3)
+                .collect::<Vec<_>>();
+            let norm_sq = vector.iter().map(|x| (x * x) as f64).sum::<f64>();
+            let interval = (-0.25f32, 0.75f32);
+            let scalar_loss = crate::lvq::scalar::compute_loss(&vector, interval, norm_sq, 4);
+            let simd_loss = super::compute_loss(&vector, interval, norm_sq, 4);
+            assert!(
+                (scalar_loss - simd_loss).abs() <= 1e-5 * scalar_loss.abs().max(1.0),
+                "dim={dim}: scalar loss {scalar_loss} vs simd loss {simd_loss}"
+            );
+        }
+    }
 
     #[test]
     fn query4_doc1_bitplane_dot() {

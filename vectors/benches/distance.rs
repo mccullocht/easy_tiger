@@ -1,13 +1,15 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use half::f16;
 use rand::{RngExt, SeedableRng};
-use vectors::{F32VectorCoding, VectorSimilarity};
+use vectors::rotate::{Kernel, Rotator};
+use vectors::{F32VectorCoding, VectorSimilarity, prepare_vector};
 
+const SEED: u64 = 0x455A_5469676572;
 const DIMENSIONS: usize = 2048;
 const BULK_VECTORS: usize = 16;
 
 fn generate_test_vectors(dim: usize) -> (Vec<f32>, Vec<f32>) {
-    let mut rng = rand_xoshiro::Xoroshiro128PlusPlus::seed_from_u64(0x455A_5469676572);
+    let mut rng = rand_xoshiro::Xoroshiro128PlusPlus::seed_from_u64(SEED);
     let a = (&mut rng)
         .random_iter::<f32>()
         .by_ref()
@@ -209,10 +211,66 @@ pub fn quantized_normalized_benchmarks(c: &mut Criterion) {
     }
 }
 
+fn turbo_quant_benchmarks(c: &mut Criterion) {
+    // TurboQuant requires inputs to be randomly rotated before encoding, and only supports
+    // asymmetric (query) distance. There is no symmetric "doc" distance to benchmark.
+    let rotator = Rotator::with_kernel(DIMENSIONS, SEED, Kernel::default());
+    let formats = [
+        F32VectorCoding::TurboQuantM1,
+        F32VectorCoding::TurboQuantM2,
+        F32VectorCoding::TurboQuantM3,
+        F32VectorCoding::TurboQuantM4,
+        F32VectorCoding::TurboQuantM8,
+    ];
+
+    for encoding in formats {
+        for sim in VectorSimilarity::all() {
+            let (a, b) = generate_test_vectors(DIMENSIONS);
+            let a = prepare_vector(a, Some(&rotator), sim.angular(), None);
+            let b = prepare_vector(b, Some(&rotator), sim.angular(), None);
+
+            let coder = encoding.coder();
+            let y = coder.encode(&b);
+            let query_dist = encoding.query_distance_asymmetric(sim, &a);
+
+            let mut group = c.benchmark_group(format!("{encoding}/distance"));
+            group.throughput(Throughput::ElementsAndBytes {
+                elements: 1,
+                bytes: y.len() as u64,
+            });
+            group.bench_function(format!("query/{sim}"), |b| {
+                b.iter(|| std::hint::black_box(query_dist.distance(&y)))
+            });
+            drop(group);
+
+            let mut group = c.benchmark_group(format!("{encoding}/bulk_distance"));
+            group.throughput(Throughput::ElementsAndBytes {
+                elements: BULK_VECTORS as u64,
+                bytes: (y.len() * BULK_VECTORS) as u64,
+            });
+            let bulk_docs_storage = vec![y.clone(); BULK_VECTORS];
+            let bulk_docs = bulk_docs_storage
+                .iter()
+                .map(|x| x.as_slice())
+                .collect::<Vec<_>>();
+            let mut bulk_out = vec![0.0; BULK_VECTORS];
+            group.bench_function(format!("query/{sim}"), |b| {
+                b.iter(|| {
+                    std::hint::black_box({
+                        query_dist.bulk_distance(&bulk_docs, &mut bulk_out);
+                        bulk_out[0]
+                    })
+                })
+            });
+        }
+    }
+}
+
 criterion_group!(
     benches,
     float32_benchmarks,
     float16_benchmarks,
     quantized_normalized_benchmarks,
+    turbo_quant_benchmarks,
 );
 criterion_main!(benches);

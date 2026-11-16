@@ -5,12 +5,12 @@
 use std::arch::aarch64::{
     float32x4_t, uint8x16_t, uint8x16x4_t, uint32x4_t, vaddlvq_u8, vaddlvq_u16, vaddq_f32,
     vaddq_f64, vaddq_u16, vaddq_u32, vaddvq_f32, vaddvq_u32, vandq_u8, vandq_u32, vcntq_u8,
-    vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdivq_f32, vdotq_u32,
-    vdupq_n_f32, vdupq_n_f64, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64,
-    vfmaq_f32, vfmaq_f64, vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vld1q_u8_x4,
-    vmaxq_f32, vmaxvq_f32, vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8,
-    vqtbl1q_u8, vqtbl4q_u8, vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8,
-    vshrq_n_u8, vshrq_n_u32, vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
+    vcvt_f64_f32, vcvt_high_f64_f32, vcvtaq_u32_f32, vcvtq_f32_u32, vdotq_u32, vdupq_n_f32,
+    vdupq_n_f64, vdupq_n_s8, vdupq_n_u8, vdupq_n_u16, vdupq_n_u32, vextq_f64, vfmaq_f32, vfmaq_f64,
+    vget_low_f32, vgetq_lane_f64, vld1q_f32, vld1q_u8, vld1q_u8_x4, vmaxq_f32, vmaxvq_f32,
+    vminq_f32, vminvq_f32, vmulq_f32, vmulq_f64, vorrq_u8, vpaddlq_u8, vqtbl1q_u8, vqtbl4q_u8,
+    vreinterpretq_u8_u32, vreinterpretq_u32_u8, vrndaq_f32, vshlq_u8, vshrq_n_u8, vshrq_n_u32,
+    vst1q_f32, vst1q_u8, vsubq_f32, vsubq_f64,
 };
 
 use crate::lvq::{TurboPrimaryVector, VectorEncodeTerms, scalar};
@@ -18,33 +18,108 @@ use crate::packing::{self, TURBO_BLOCK_SIZE};
 
 use super::{LAMBDA, MINIMUM_MSE_GRID, QuantizationStats, VectorStats};
 
+/// Accumulate one 4-lane group into a Welford state plus the min/max/dot accumulators.
+#[inline(always)]
+unsafe fn accumulate_stats4(
+    x: float32x4_t,
+    n_inv: float32x4_t,
+    mean: &mut float32x4_t,
+    m2: &mut float32x4_t,
+    dot: &mut float32x4_t,
+    min: &mut float32x4_t,
+    max: &mut float32x4_t,
+) {
+    *min = vminq_f32(*min, x);
+    *max = vmaxq_f32(*max, x);
+    let delta = vsubq_f32(x, *mean);
+    *mean = vfmaq_f32(*mean, delta, n_inv);
+    let delta2 = vsubq_f32(x, *mean);
+    *m2 = vfmaq_f32(*m2, delta, delta2);
+    *dot = vfmaq_f32(*dot, x, x);
+}
+
 pub fn compute_vector_stats(vector: &[f32]) -> VectorStats {
     let tail_split = vector.len() & !3;
+    let unrolled_split = vector.len() & !15;
     let (min, max, mean, mean_sq, dot) = if tail_split > 0 {
         unsafe {
-            let mut min = vdupq_n_f32(f32::MAX);
-            let mut max = vdupq_n_f32(f32::MIN);
-            let mut mean = vdupq_n_f32(0.0);
-            let mut mean_sq = vdupq_n_f32(0.0);
-            let mut dot = vdupq_n_f32(0.0);
-            for i in (0..tail_split).step_by(4) {
-                let x = vld1q_f32(vector.as_ptr().add(i));
-                min = vminq_f32(min, x);
-                max = vmaxq_f32(max, x);
-                let delta = vsubq_f32(x, mean);
-                mean = vaddq_f32(mean, vdivq_f32(delta, vdupq_n_f32(((i / 4) + 1) as f32)));
-                let delta2 = vsubq_f32(x, mean);
-                mean_sq = vfmaq_f32(mean_sq, delta, delta2);
-                dot = vfmaq_f32(dot, x, x);
+            // Four independent Welford states, each covering one 4-lane group per
+            // iteration. This exposes four times the instruction-level parallelism and
+            // lets the per-iteration division be replaced by a shared reciprocal.
+            let mut means = [vdupq_n_f32(0.0); 4];
+            let mut m2s = [vdupq_n_f32(0.0); 4];
+            let mut dots = [vdupq_n_f32(0.0); 4];
+            let mut mins = [vdupq_n_f32(f32::MAX); 4];
+            let mut maxs = [vdupq_n_f32(f32::MIN); 4];
+
+            // Number of elements seen so far by each lane of every state.
+            let mut n = 0usize;
+            for i in (0..unrolled_split).step_by(16) {
+                n += 1;
+                let n_inv = vdupq_n_f32((n as f32).recip());
+                let ptr = vector.as_ptr().add(i);
+                for s in 0..4 {
+                    accumulate_stats4(
+                        vld1q_f32(ptr.add(s * 4)),
+                        n_inv,
+                        &mut means[s],
+                        &mut m2s[s],
+                        &mut dots[s],
+                        &mut mins[s],
+                        &mut maxs[s],
+                    );
+                }
             }
 
-            (
-                vminvq_f32(min),
-                vmaxvq_f32(max),
-                vaddvq_f32(mean) / 4.0,
-                reduce_variance(mean, mean_sq, tail_split),
-                vaddvq_f32(dot),
-            )
+            // A final group for each state when the length is not a multiple of 16.
+            let extra = (tail_split - unrolled_split) / 4;
+            if extra > 0 {
+                let n_inv = vdupq_n_f32(((n + 1) as f32).recip());
+                for s in 0..extra {
+                    accumulate_stats4(
+                        vld1q_f32(vector.as_ptr().add(unrolled_split + s * 4)),
+                        n_inv,
+                        &mut means[s],
+                        &mut m2s[s],
+                        &mut dots[s],
+                        &mut mins[s],
+                        &mut maxs[s],
+                    );
+                }
+            }
+
+            // Merge the four Welford states using the standard parallel variance
+            // combination formula.
+            let mut total_n = 0.0f64;
+            let mut merged_mean = 0.0f64;
+            let mut merged_m2 = 0.0f64;
+            let mut min = f32::MAX;
+            let mut max = f32::MIN;
+            let mut dot = 0.0f32;
+            for s in 0..4 {
+                let count = n + usize::from(s < extra);
+                if count == 0 {
+                    continue;
+                }
+                let state_n = (4 * count) as f64;
+                let state_mean = (vaddvq_f32(means[s]) as f64) / 4.0;
+                let state_m2 = reduce_variance(means[s], m2s[s], 4 * count) as f64;
+                if total_n == 0.0 {
+                    merged_mean = state_mean;
+                    merged_m2 = state_m2;
+                } else {
+                    let delta = state_mean - merged_mean;
+                    let new_n = total_n + state_n;
+                    merged_m2 += state_m2 + delta * delta * total_n * state_n / new_n;
+                    merged_mean += delta * state_n / new_n;
+                }
+                total_n += state_n;
+                min = min.min(vminvq_f32(mins[s]));
+                max = max.max(vmaxvq_f32(maxs[s]));
+                dot += vaddvq_f32(dots[s]);
+            }
+
+            (min, max, merged_mean as f32, merged_m2 as f32, dot)
         }
     } else {
         (f32::MAX, f32::MIN, 0.0, 0.0, 0.0)
@@ -957,13 +1032,42 @@ mod test {
     use crate::packing;
 
     #[test]
+    fn compute_vector_stats_simd() {
+        // Cover multiples of 4 and 16 plus every possible remainder.
+        for dim in [
+            1usize, 2, 3, 4, 5, 7, 8, 9, 12, 15, 16, 17, 19, 20, 23, 28, 31, 32, 33, 47, 63, 64,
+            65, 127, 128, 129, 255, 256, 1024,
+        ] {
+            let vector = (0..dim)
+                .map(|i| {
+                    let x = ((i as f32 * 12.9898).sin() * 43_758.547).fract();
+                    2.0 * x - 1.0
+                })
+                .collect::<Vec<_>>();
+            let scalar_stats = crate::lvq::scalar::compute_vector_stats(&vector);
+            let simd_stats = super::compute_vector_stats(&vector);
+            assert_eq!(scalar_stats.min, simd_stats.min, "dim={dim}");
+            assert_eq!(scalar_stats.max, simd_stats.max, "dim={dim}");
+            assert_abs_diff_eq!(scalar_stats.mean, simd_stats.mean, epsilon = 1e-5);
+            assert_abs_diff_eq!(scalar_stats.std_dev, simd_stats.std_dev, epsilon = 1e-5);
+            assert!(
+                (scalar_stats.l2_norm_sq - simd_stats.l2_norm_sq).abs()
+                    <= 1e-5 * scalar_stats.l2_norm_sq.abs().max(1.0),
+                "dim={dim}: scalar l2 {} vs simd l2 {}",
+                scalar_stats.l2_norm_sq,
+                simd_stats.l2_norm_sq
+            );
+        }
+    }
+
+    #[test]
     fn compute_loss_simd() {
         // Cover multiples of 16 plus every possible 4-lane remainder.
         for dim in [
             1usize, 3, 4, 7, 8, 12, 15, 16, 17, 19, 20, 28, 31, 32, 33, 63, 64, 1024,
         ] {
             let vector = (0..dim)
-                .map(|i| ((i as f32) * 0.61803398875).sin() + 0.3)
+                .map(|i| ((i as f32) * 0.618_034).sin() + 0.3)
                 .collect::<Vec<_>>();
             let norm_sq = vector.iter().map(|x| (x * x) as f64).sum::<f64>();
             let interval = (-0.25f32, 0.75f32);

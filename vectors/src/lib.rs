@@ -18,15 +18,43 @@ pub use half::f16;
 
 use crate::rotate::Rotator;
 
+/// Returns true if every component of `vector` is finite (neither `NaN` nor infinite).
+///
+/// This is deliberately a branchless reduction over the whole slice rather than a
+/// short-circuiting `all`/`position` loop: a loop that exits at the first non-finite component is
+/// not vectorized by LLVM, whereas this fold becomes a Neon or AVX-512 loop that integer-compares
+/// the exponent fields of a whole SIMD register at a time. Callers treat a `false` result as
+/// exceptional and rescan for the offending index only in that case.
+#[inline]
+pub(crate) fn all_finite(vector: &[f32]) -> bool {
+    !vector.iter().fold(false, |acc, &v| acc | !v.is_finite())
+}
+
+/// Panic reporting the first non-finite component of `vector`.
+///
+/// Kept out of line: this only runs after [`all_finite`] reports a problem, where the scalar scan
+/// for the index is acceptable.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn panic_non_finite(vector: &[f32]) -> ! {
+    match vector.iter().position(|v| !v.is_finite()) {
+        Some(index) => panic!(
+            "non-finite vector component at index {index}: {}",
+            vector[index]
+        ),
+        // Cannot normally happen: `all_finite` only reports a problem when a component is
+        // non-finite. Keep panicking rather than silently accepting the vector.
+        None => panic!("non-finite vector component"),
+    }
+}
+
 /// Panic if any component of `vector` is `NaN` or infinite.
 #[inline]
 #[track_caller]
 pub(crate) fn assert_finite_vector(vector: &[f32]) {
-    if let Some(index) = vector.iter().position(|v| !v.is_finite()) {
-        panic!(
-            "non-finite vector component at index {index}: {}",
-            vector[index]
-        );
+    if !all_finite(vector) {
+        panic_non_finite(vector);
     }
 }
 
@@ -83,7 +111,7 @@ pub fn prepare_vector_in_place(
     // The input was already validated finite; a non-finite component here means an intermediate
     // overflowed (e.g. `inf + -inf` in the rotation butterfly, or a huge-magnitude residual).
     assert!(
-        vector.iter().all(|v| v.is_finite()),
+        all_finite(vector),
         "vector magnitude is not finite after preparation"
     );
 }

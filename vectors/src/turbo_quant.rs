@@ -7,13 +7,16 @@
 //! normalized vector is approximately N(0, 1/D). Rotation is the caller's responsibility, typically
 //! via [`crate::prepare_vector`].
 
-// TODO: optimize vector comparison using lookup tables.
-
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
 pub mod codebook;
+mod scalar;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 use std::borrow::Cow;
 
-use crate::packing::{TurboPacker, TurboUnpacker};
+use crate::packing::{TURBO_BLOCK_SIZE, TurboPacker, TurboUnpacker, block_dim};
 use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity, float32, rabitq};
 
 pub struct MSECoder<const B: usize, const N: usize> {
@@ -146,6 +149,191 @@ impl<const B: usize, const N: usize> QueryVectorDistance for MSEQueryDistance<B,
             .zip(TurboUnpacker::<B>::new(bits))
             .map(|(&q, d)| q * self.codebook[d as usize])
             .sum();
+        mse_distance(self.similarity, self.norm, norm, dot, self.euclidean_scale)
+    }
+}
+
+/// Kernels for computing the inner product of an i8 query and a turbo packed doc decoded through an
+/// i8 lookup table.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum Kernel {
+    Scalar,
+    #[cfg(target_arch = "aarch64")]
+    Neon,
+    #[cfg(target_arch = "x86_64")]
+    Avx512,
+}
+
+impl Kernel {
+    const CANDIDATES: &'static [Self] = &[
+        #[cfg(target_arch = "aarch64")]
+        Self::Neon,
+        #[cfg(target_arch = "x86_64")]
+        Self::Avx512,
+        Self::Scalar,
+    ];
+
+    fn is_available(&self) -> bool {
+        match self {
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => std::arch::is_aarch64_feature_detected!("dotprod"),
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 => {
+                use std::arch::is_x86_feature_detected as cpu_feature;
+                cpu_feature!("avx512f") && cpu_feature!("avx512bw") && cpu_feature!("avx512vnni")
+            }
+            Self::Scalar => true,
+        }
+    }
+
+    /// Compute `Σ query[i] * table[doc[i]]` where `doc` is a turbo packed `B` bit vector.
+    ///
+    /// `query_sum` must be the sum of all entries in `query`. Any doc dimensions beyond the end of
+    /// `query` (padding) are ignored.
+    ///
+    /// # Panics
+    /// If `query` is shorter than the number of dimensions covered by full blocks in `doc`.
+    fn lut_dot<const B: usize>(
+        self,
+        query: &[i8],
+        query_sum: i32,
+        table: &[i8; 16],
+        doc: &[u8],
+    ) -> i32 {
+        const { assert!(B == 2 || B == 4, "lut_dot only supports 2 or 4 bits") };
+        assert!(
+            doc.len() / TURBO_BLOCK_SIZE * block_dim(B) <= query.len(),
+            "doc has more dimensions than query"
+        );
+        let _ = query_sum;
+        match self {
+            Self::Scalar => scalar::lut_dot::<B>(query, table, 0, doc),
+            // SAFETY: feature availability was checked when the kernel was selected and query
+            // length was checked above.
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => unsafe {
+                if B == 2 {
+                    aarch64::lut_dot2(query, table, doc)
+                } else {
+                    aarch64::lut_dot4(query, table, doc)
+                }
+            },
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 => unsafe {
+                if B == 2 {
+                    x86_64::lut_dot2(query, query_sum, table, doc)
+                } else {
+                    x86_64::lut_dot4(query, query_sum, table, doc)
+                }
+            },
+        }
+    }
+}
+
+impl Default for Kernel {
+    fn default() -> Self {
+        Self::CANDIDATES
+            .iter()
+            .copied()
+            .find(Self::is_available)
+            .expect("scalar is always available")
+    }
+}
+
+/// Query distance for [`MSECoder`] with 2 or 4 bits per dimension.
+///
+/// Both the normalized query and the codebook are quantized to i8. Each doc code is decoded
+/// through a 16 entry table lookup into the quantized codebook and multiplied against the query
+/// with an integer dot product, then the result is scaled back into float space.
+///
+/// Quantizing the codebook adds error that is small relative to the quantization error of the
+/// codebook itself (~0.006 vs ~0.1 RMS at 4 bits).
+pub struct MSELutQueryDistance<const B: usize, const N: usize> {
+    similarity: VectorSimilarity,
+    kernel: Kernel,
+    /// The l2 normalized query quantized to i8.
+    query: Vec<i8>,
+    /// Sum of all entries in `query`.
+    query_sum: i32,
+    /// Codebook quantized to i8, padded to 16 entries.
+    table: [i8; 16],
+    /// L2 norm of the input vector before transform.
+    norm: f32,
+    /// Scales the integer dot product back to the inner product of the normalized query and the
+    /// quantized normalized doc: `1 / (query_scale * codebook_scale * sqrt(D))`.
+    dot_scale: f32,
+    /// See [`MSEQueryDistance::euclidean_scale`].
+    euclidean_scale: f32,
+}
+
+impl<const B: usize, const N: usize> MSELutQueryDistance<B, N> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>, codebook: &[f32; N]) -> Self {
+        Self::with_kernel(Kernel::default(), similarity, query, codebook)
+    }
+
+    fn with_kernel(
+        kernel: Kernel,
+        similarity: VectorSimilarity,
+        query: Cow<'_, [f32]>,
+        codebook: &[f32; N],
+    ) -> Self {
+        const {
+            assert!(
+                B == 2 || B == 4,
+                "lut query distance only supports 2 or 4 bits"
+            );
+            assert!(N == 1 << B, "codebook must have 2^B entries");
+        };
+
+        let (query, norm) = float32::l2_normalize(query);
+        let qmax = query.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        let qscale = if qmax > 0.0 { 127.0 / qmax } else { 0.0 };
+        let dim = query.len();
+        // The final full block of an encoded doc may contain padding codes if D * B is not a
+        // multiple of the block size. Zero pad the query to cover every packed code so that SIMD
+        // kernels can consume full blocks; zero entries do not contribute to the inner product.
+        let padded_dim = crate::packing::byte_len(dim, B) * 8 / B;
+        let query = query
+            .iter()
+            .map(|&x| (x * qscale).round() as i8)
+            .chain(std::iter::repeat_n(0, padded_dim - dim))
+            .collect::<Vec<_>>();
+        let query_sum = query.iter().map(|&x| x as i32).sum();
+
+        let cmax = codebook.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        assert!(cmax > 0.0 && cmax.is_finite(), "invalid codebook");
+        let cscale = 127.0 / cmax;
+        let mut table = [0i8; 16];
+        for (t, &c) in table.iter_mut().zip(codebook) {
+            *t = (c * cscale).round() as i8;
+        }
+
+        let dot_scale = if qscale > 0.0 {
+            1.0 / (qscale * cscale * (dim as f32).sqrt())
+        } else {
+            0.0
+        };
+        Self {
+            similarity,
+            kernel,
+            query,
+            query_sum,
+            table,
+            norm,
+            dot_scale,
+            euclidean_scale: 2.0 / inner_product_bias(codebook),
+        }
+    }
+}
+
+impl<const B: usize, const N: usize> QueryVectorDistance for MSELutQueryDistance<B, N> {
+    fn distance(&self, encoded: &[u8]) -> f64 {
+        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let bits = &encoded[4..];
+        let dot = self
+            .kernel
+            .lut_dot::<B>(&self.query, self.query_sum, &self.table, bits) as f32
+            * self.dot_scale;
         mse_distance(self.similarity, self.norm, norm, dot, self.euclidean_scale)
     }
 }
@@ -306,7 +494,7 @@ mod tests {
                 use super::{TEST_VECTOR, codebook};
                 #[allow(unused_imports)]
                 use crate::turbo_quant::{
-                    MSE1Coder, MSE1QueryDistance, MSECoder, MSEQueryDistance,
+                    MSE1Coder, MSE1QueryDistance, MSECoder, MSELutQueryDistance, MSEQueryDistance,
                 };
 
                 const DIM: usize = TEST_VECTOR.len();
@@ -525,7 +713,156 @@ mod tests {
         }
     }
 
-    mse_tests!(mse2, 2, &codebook::CENTROIDS_2, MSECoder<2, 4>, MSEQueryDistance<2, 4>, 4);
-    mse_tests!(mse4, 4, &codebook::CENTROIDS_4, MSECoder<4, 16>, MSEQueryDistance<4, 16>, 4);
+    mse_tests!(mse2, 2, &codebook::CENTROIDS_2, MSECoder<2, 4>, MSELutQueryDistance<2, 4>, 4);
+    mse_tests!(mse4, 4, &codebook::CENTROIDS_4, MSECoder<4, 16>, MSELutQueryDistance<4, 16>, 4);
+    mse_tests!(mse2_float, 2, &codebook::CENTROIDS_2, MSECoder<2, 4>, MSEQueryDistance<2, 4>, 4);
+    mse_tests!(mse4_float, 4, &codebook::CENTROIDS_4, MSECoder<4, 16>, MSEQueryDistance<4, 16>, 4);
+
+    mod lut {
+        use rand::{RngExt, SeedableRng};
+
+        use crate::packing::byte_len;
+        use crate::turbo_quant::{
+            Kernel, MSECoder, MSELutQueryDistance, MSEQueryDistance, codebook,
+        };
+        use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
+
+        fn kernels() -> impl Iterator<Item = Kernel> {
+            Kernel::CANDIDATES
+                .iter()
+                .copied()
+                .filter(|k| *k != Kernel::Scalar && k.is_available())
+        }
+
+        fn kernel_matches_scalar<const B: usize>(seed: u64) {
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(seed);
+            // Lengths cover empty, tail only, odd and even block counts, and block + tail.
+            let dims = (0..=260).chain([511, 512, 1000, 1024, 1031]);
+            for dim in dims {
+                // Use extreme query values to exercise any intermediate overflow.
+                // Queries are padded to cover every packed code; see MSELutQueryDistance.
+                let query = (0..byte_len(dim, B) * 8 / B)
+                    .map(|_| rng.random_range(i8::MIN..=i8::MAX))
+                    .collect::<Vec<_>>();
+                let query_sum = query.iter().map(|&x| x as i32).sum::<i32>();
+                let table: [i8; 16] = std::array::from_fn(|_| rng.random_range(i8::MIN..=i8::MAX));
+                // Codes beyond 2^B entries can't be produced by the packer, so mask them out.
+                let mut table = table;
+                table[(1 << B)..].fill(0);
+                let doc = (0..byte_len(dim, B))
+                    .map(|_| rng.random::<u8>())
+                    .collect::<Vec<_>>();
+                let expected = Kernel::Scalar.lut_dot::<B>(&query, query_sum, &table, &doc);
+                for k in kernels() {
+                    assert_eq!(
+                        k.lut_dot::<B>(&query, query_sum, &table, &doc),
+                        expected,
+                        "{k:?} B={B} dim={dim}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn kernel_matches_scalar2() {
+            kernel_matches_scalar::<2>(0x1a2);
+        }
+
+        #[test]
+        fn kernel_matches_scalar4() {
+            kernel_matches_scalar::<4>(0x1a4);
+        }
+
+        // Scalar LUT dot against a simple reference over the packed codes.
+        #[test]
+        fn scalar_matches_reference() {
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5ca1);
+            for dim in [1, 15, 64, 100, 300] {
+                let query = (0..dim)
+                    .map(|_| rng.random_range(-127i8..=127))
+                    .collect::<Vec<_>>();
+                let codes = (0..dim)
+                    .map(|_| rng.random_range(0u8..16))
+                    .collect::<Vec<_>>();
+                let table: [i8; 16] = std::array::from_fn(|i| (i as i32 * 16 - 120) as i8);
+                let mut doc = vec![0u8; byte_len(dim, 4)];
+                let mut packer = crate::packing::TurboPacker::<4>::new(&mut doc);
+                for &c in &codes {
+                    packer.push(c);
+                }
+                let expected = query
+                    .iter()
+                    .zip(&codes)
+                    .map(|(&q, &c)| q as i32 * table[c as usize] as i32)
+                    .sum::<i32>();
+                let query_sum = query.iter().map(|&x| x as i32).sum::<i32>();
+                assert_eq!(
+                    Kernel::Scalar.lut_dot::<4>(&query, query_sum, &table, &doc),
+                    expected
+                );
+            }
+        }
+
+        // The i8 LUT distance should closely track the float codebook distance.
+        fn matches_float<const B: usize, const N: usize>(codebook: &[f32; N]) {
+            const DIM: usize = 300;
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xf10a7);
+            let coder = MSECoder::<B, N>::new(codebook);
+            let mut random_vector = || {
+                let v: Vec<f32> = (0..DIM).map(|_| rng.random_range(-1.0f32..1.0)).collect();
+                crate::prepare_vector(v, None, true, None)
+            };
+            for _ in 0..16 {
+                let q = random_vector();
+                let encoded = coder.encode(&random_vector());
+                for similarity in VectorSimilarity::all() {
+                    let expected =
+                        MSEQueryDistance::<B, N>::new(similarity, q.as_slice().into(), codebook)
+                            .distance(&encoded);
+                    for k in Kernel::CANDIDATES
+                        .iter()
+                        .copied()
+                        .filter(Kernel::is_available)
+                    {
+                        let actual = MSELutQueryDistance::<B, N>::with_kernel(
+                            k,
+                            similarity,
+                            q.as_slice().into(),
+                            codebook,
+                        )
+                        .distance(&encoded);
+                        assert!(
+                            (actual - expected).abs() < 0.01,
+                            "{k:?} {similarity:?} B={B}: actual={actual} expected={expected}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn matches_float2() {
+            matches_float::<2, 4>(&codebook::CENTROIDS_2);
+        }
+
+        #[test]
+        fn matches_float4() {
+            matches_float::<4, 16>(&codebook::CENTROIDS_4);
+        }
+
+        #[test]
+        fn zero_query() {
+            let coder = MSECoder::<4, 16>::new(&codebook::CENTROIDS_4);
+            let encoded = coder.encode(&[0.5f32; 40]);
+            let q = vec![0.0f32; 40];
+            let d = MSELutQueryDistance::<4, 16>::new(
+                VectorSimilarity::Euclidean,
+                q.into(),
+                &codebook::CENTROIDS_4,
+            )
+            .distance(&encoded);
+            assert!(d.is_finite(), "{d}");
+        }
+    }
     mse_tests!(mse8, 8, &codebook::CENTROIDS_8, MSECoder<8, 256>, MSEQueryDistance<8, 256>, 4);
 }

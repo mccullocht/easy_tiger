@@ -19,7 +19,7 @@ use crate::{
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum Kernel {
+pub(crate) enum Kernel {
     Scalar,
     #[cfg(target_arch = "aarch64")]
     Neon,
@@ -48,6 +48,55 @@ impl Kernel {
                     && cpu_feature!("avx512vpopcntdq")
             }
             Self::Scalar => true,
+        }
+    }
+}
+
+impl Kernel {
+    /// Pack the sign bit of each component of `v` into `out` in turbo format (1 if negative).
+    ///
+    /// Returns the number of set bits (negative components).
+    pub(crate) fn quantize_and_pack(self, v: &[f32], out: &mut [u8]) -> u32 {
+        match self {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::neon::quantize_and_pack(v, out),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe { x86_64::avx512::quantize_and_pack(v, out) },
+            Kernel::Scalar => scalar::quantize_and_pack(v, out),
+        }
+    }
+
+    /// Decode turbo packed sign bits into `out`, where each component is `±magnitude`.
+    pub(crate) fn decode(self, v: &[u8], magnitude: f32, out: &mut [f32]) {
+        match self {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::neon::decode(v, magnitude, out),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe { x86_64::avx512::decode(v, magnitude, out) },
+            Kernel::Scalar => scalar::decode(v, magnitude, out),
+        }
+    }
+
+    fn l1_norm_scaled(self, v: &[f32], scale: f32) -> f32 {
+        match self {
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => aarch64::neon::l1_norm_scaled(v, scale),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe { x86_64::avx512::l1_norm_scaled(v, scale) },
+            Kernel::Scalar => scalar::l1_norm_scaled(v, scale),
+        }
+    }
+
+    /// Unsigned inner product of a bitplane split 4-bit query and a 1-bit turbo packed doc.
+    fn turbo_4x1_inner_product(self, query: &[u8], doc: &[u8]) -> u32 {
+        match self {
+            Kernel::Scalar => crate::kernels::scalar::turbo_4x1_inner_product(query, doc),
+            #[cfg(target_arch = "aarch64")]
+            Kernel::Neon => crate::kernels::aarch64::neon::turbo_4x1_inner_product(query, doc),
+            #[cfg(target_arch = "x86_64")]
+            Kernel::Avx512 => unsafe {
+                crate::kernels::x86_64::avx512::turbo_4x1_inner_product(query, doc)
+            },
         }
     }
 }
@@ -126,22 +175,10 @@ impl F32VectorCoder for Coder {
         // A zero vector has no meaningful direction; a zero scale yields a
         // zero correction term rather than `sum(0 * inf) = NaN`.
         let inv_norm = if l2_norm > 0.0 { l2_norm.recip() } else { 0.0 };
-        header.correction_term = match self.0 {
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::neon::l1_norm_scaled(vector, inv_norm),
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe { x86_64::avx512::l1_norm_scaled(vector, inv_norm) },
-            Kernel::Scalar => scalar::l1_norm_scaled(vector, inv_norm),
-        };
+        header.correction_term = self.0.l1_norm_scaled(vector, inv_norm);
 
         let (hbytes, vbytes) = Header::split_mut(out);
-        header.component_sum = match self.0 {
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::neon::quantize_and_pack(vector, vbytes),
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe { x86_64::avx512::quantize_and_pack(vector, vbytes) },
-            Kernel::Scalar => scalar::quantize_and_pack(vector, vbytes),
-        };
+        header.component_sum = self.0.quantize_and_pack(vector, vbytes);
         header.encode(hbytes);
     }
 
@@ -152,15 +189,7 @@ impl F32VectorCoder for Coder {
     fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
         let (_, vector) = Header::decode(encoded);
         let magnitude = 1.0 / (out.len() as f32).sqrt();
-        match self.0 {
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => aarch64::neon::decode(vector, magnitude, out),
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe {
-                x86_64::avx512::decode(vector, magnitude, out);
-            },
-            Kernel::Scalar => scalar::decode(vector, magnitude, out),
-        };
+        self.0.decode(vector, magnitude, out);
     }
 
     fn dimensions(&self, byte_len: usize) -> usize {
@@ -231,22 +260,23 @@ impl VectorDistance for Distance {
     }
 }
 
-pub struct QueryDistance {
+/// A unit normalized query quantized to 4 bits for comparison against 1-bit sign codes.
+///
+/// Query components are quantized with randomized rounding onto 16 evenly spaced values in
+/// `[lower, upper]` and stored as bitplanes so that the inner product against a sign code reduces to
+/// four AND + popcount passes.
+pub(crate) struct Query4 {
     k: Kernel,
-    similarity: VectorSimilarity,
     query: Vec<u8>,
-    l2_norm: f32,
     lower: f32,
     delta: f32,
     component_sum: u32,
     dim_sqrt: f64,
 }
 
-impl QueryDistance {
-    pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
-        assert!(!query.is_empty(), "query vector is empty");
-        crate::assert_finite_vector(query);
-        let (query, l2_norm) = float32::l2_normalize(query);
+impl Query4 {
+    /// Quantize `query`, which callers are expected to have l2 normalized.
+    pub(crate) fn new(query: &[f32]) -> Self {
         let dim_sqrt = (query.len() as f64).sqrt();
         let (lower, upper) = query
             .iter()
@@ -274,9 +304,7 @@ impl QueryDistance {
         }
         Self {
             k: Kernel::default(),
-            similarity,
             query: crate::packing::bitplane_split4(&query4),
-            l2_norm,
             lower,
             delta,
             component_sum,
@@ -284,23 +312,43 @@ impl QueryDistance {
         }
     }
 
+    /// Estimate the inner product of the query and a sign code where each component is `±1/√D`.
+    ///
+    /// `doc` is packed by [`Kernel::quantize_and_pack`] and `doc_component_sum` is its return value.
+    #[inline]
+    pub(crate) fn dot(&self, doc_component_sum: u32, doc: &[u8]) -> f64 {
+        let ip_uint = self.k.turbo_4x1_inner_product(&self.query, doc);
+        // Each query component is `lower + delta * u` and each doc component `(1 - 2b) / √D`.
+        self.dim_sqrt * self.lower as f64
+            - 2.0 * self.lower as f64 * doc_component_sum as f64 / self.dim_sqrt
+            + self.delta as f64 * self.component_sum as f64 / self.dim_sqrt
+            - 2.0 * self.delta as f64 * ip_uint as f64 / self.dim_sqrt
+    }
+}
+
+pub struct QueryDistance {
+    similarity: VectorSimilarity,
+    query: Query4,
+    l2_norm: f32,
+    dim_sqrt: f64,
+}
+
+impl QueryDistance {
+    pub fn new(similarity: VectorSimilarity, query: &[f32]) -> Self {
+        assert!(!query.is_empty(), "query vector is empty");
+        crate::assert_finite_vector(query);
+        let (query, l2_norm) = float32::l2_normalize(query);
+        Self {
+            similarity,
+            query: Query4::new(&query),
+            l2_norm,
+            dim_sqrt: (query.len() as f64).sqrt(),
+        }
+    }
+
     #[inline]
     fn ip(&self, header: Header, doc: &[u8]) -> f64 {
-        let ip_uint = match self.k {
-            Kernel::Scalar => crate::kernels::scalar::turbo_4x1_inner_product(&self.query, doc),
-            #[cfg(target_arch = "aarch64")]
-            Kernel::Neon => {
-                crate::kernels::aarch64::neon::turbo_4x1_inner_product(&self.query, doc)
-            }
-            #[cfg(target_arch = "x86_64")]
-            Kernel::Avx512 => unsafe {
-                crate::kernels::x86_64::avx512::turbo_4x1_inner_product(&self.query, doc)
-            },
-        };
-        let ip = self.dim_sqrt * self.lower as f64
-            - 2.0 * self.lower as f64 * header.component_sum as f64 / self.dim_sqrt
-            + self.delta as f64 * self.component_sum as f64 / self.dim_sqrt
-            - 2.0 * self.delta as f64 * ip_uint as f64 / self.dim_sqrt;
+        let ip = self.query.dot(header.component_sum, doc);
         // A zero correction term (zero doc vector) carries no directional information.
         let ct = header.correction_term as f64;
         if ct != 0.0 { ip / ct } else { 0.0 }
@@ -677,6 +725,35 @@ mod test {
                     mae < raw_mae * 0.75,
                     "bin {i} mae {mae} vs raw hamming mae {raw_mae}"
                 );
+            }
+        }
+    }
+
+    /// Every available kernel must pack and decode identically to the scalar kernel, including
+    /// dimensions with no full 128 dimension block and partial final blocks of 121-127 dimensions.
+    #[test]
+    fn kernels_match_scalar() {
+        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x5ca1a7);
+        for dim in [1, 7, 8, 19, 64, 121, 127, 128, 129, 250, 255, 256, 300] {
+            let v = gauss_vec(&mut rng, dim);
+            let mut expected_bits = vec![0u8; dim.div_ceil(8)];
+            let expected_neg = Kernel::Scalar.quantize_and_pack(&v, &mut expected_bits);
+            let mut expected_decoded = vec![0.0f32; dim];
+            Kernel::Scalar.decode(&expected_bits, 0.5, &mut expected_decoded);
+
+            for k in Kernel::CANDIDATES
+                .iter()
+                .copied()
+                .filter(Kernel::is_available)
+            {
+                let mut bits = vec![0u8; dim.div_ceil(8)];
+                let neg = k.quantize_and_pack(&v, &mut bits);
+                assert_eq!(neg, expected_neg, "{k:?} dim={dim} negative count");
+                assert_eq!(bits, expected_bits, "{k:?} dim={dim} packed bits");
+
+                let mut decoded = vec![f32::NAN; dim];
+                k.decode(&expected_bits, 0.5, &mut decoded);
+                assert_eq!(decoded, expected_decoded, "{k:?} dim={dim} decoded");
             }
         }
     }

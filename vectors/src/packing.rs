@@ -1,4 +1,4 @@
-//! Turbo packing format shared by the LVQ, QuIVer, and RaBitQ quantizers.
+//! Turbo packing format shared by the LVQ, QuIVer, RaBitQ, and TurboQuant quantizers.
 
 use std::iter::FusedIterator;
 

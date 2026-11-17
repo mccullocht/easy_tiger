@@ -74,8 +74,11 @@ pub mod neon {
 
     #[inline]
     pub fn decode(v: &[u8], magnitude: f32, out: &mut [f32]) {
-        let (vhead, vtail) = v.as_chunks::<16>();
+        // Split the input by the number of full 128 dimension output blocks; if the final block is
+        // partial it may still occupy 16 bytes of input but must be decoded as tail.
         let (ohead, otail) = out.as_chunks_mut::<128>();
+        let (vhead, vtail) = v.split_at(ohead.len() * 16);
+        let vhead = vhead.as_chunks::<16>().0;
 
         let mag = unsafe { vdupq_n_u32(magnitude.to_bits()) };
         let s =

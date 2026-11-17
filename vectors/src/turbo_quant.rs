@@ -143,14 +143,42 @@ impl<const B: usize, const N: usize> QueryVectorDistance for MSEQueryDistance<B,
         // dot estimates A·⟨q̂, db̂⟩ where A = E[Q(z)·z] < 1 for MSE-optimal codebooks.
         // ‖q − db‖² = ‖q‖² + ‖db‖² − 2·‖q‖·‖db‖·⟨q̂, db̂⟩
         //            ≈ ‖q‖² + ‖db‖² − (2/A)·‖q‖·‖db‖·dot
-        let dot: f32 = self
-            .rquery
-            .iter()
-            .zip(TurboUnpacker::<B>::new(bits))
-            .map(|(&q, d)| q * self.codebook[d as usize])
-            .sum();
+        let dot = if B == 8 {
+            dot8(&self.rquery, &self.codebook, bits)
+        } else {
+            self.rquery
+                .iter()
+                .zip(TurboUnpacker::<B>::new(bits))
+                .map(|(&q, d)| q * self.codebook[d as usize])
+                .sum()
+        };
         mse_distance(self.similarity, self.norm, norm, dot, self.euclidean_scale)
     }
+}
+
+/// Inner product of `query` and an 8-bit turbo packed doc decoded through `codebook`.
+///
+/// With 8 bits per dimension turbo packing is the identity, so each byte is the code for the
+/// corresponding dimension. Multiple independent accumulators break the loop carried dependency
+/// on the sum; the table lookups themselves remain scalar loads.
+#[inline]
+fn dot8<const N: usize>(query: &[f32], codebook: &[f32; N], codes: &[u8]) -> f32 {
+    const LANES: usize = 8;
+    let len = query.len().min(codes.len());
+    let (qc, qr) = query[..len].as_chunks::<LANES>();
+    let (cc, cr) = codes[..len].as_chunks::<LANES>();
+    let mut acc = [0.0f32; LANES];
+    for (q, c) in qc.iter().zip(cc) {
+        for i in 0..LANES {
+            acc[i] += q[i] * codebook[c[i] as usize];
+        }
+    }
+    let tail = qr
+        .iter()
+        .zip(cr)
+        .map(|(&q, &c)| q * codebook[c as usize])
+        .sum::<f32>();
+    acc.iter().sum::<f32>() + tail
 }
 
 /// Kernels for computing the inner product of an i8 query and a turbo packed doc decoded through an
@@ -848,6 +876,31 @@ mod tests {
         #[test]
         fn matches_float4() {
             matches_float::<4, 16>(&codebook::CENTROIDS_4);
+        }
+
+        // The 8-bit fast path should match decoding through the generic turbo unpacker.
+        #[test]
+        fn dot8_matches_unpacker() {
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xd078);
+            let codebook = codebook::scale(&codebook::CENTROIDS_8, 300);
+            for dim in (0..=40).chain([255, 300, 1031]) {
+                let query = (0..dim)
+                    .map(|_| rng.random_range(-1.0f32..1.0))
+                    .collect::<Vec<_>>();
+                let doc = (0..byte_len(dim, 8))
+                    .map(|_| rng.random::<u8>())
+                    .collect::<Vec<_>>();
+                let expected = query
+                    .iter()
+                    .zip(crate::packing::TurboUnpacker::<8>::new(&doc))
+                    .map(|(&q, c)| q * codebook[c as usize])
+                    .sum::<f32>();
+                let actual = crate::turbo_quant::dot8(&query, &codebook, &doc);
+                assert!(
+                    (actual - expected).abs() <= 1e-5 * (dim as f32).max(1.0),
+                    "dim={dim} actual={actual} expected={expected}"
+                );
+            }
         }
 
         #[test]

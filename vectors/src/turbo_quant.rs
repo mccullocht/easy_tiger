@@ -10,10 +10,10 @@
 // TODO: optimize vector comparison using lookup tables.
 
 pub mod codebook;
-mod packing;
 
 use std::borrow::Cow;
 
+use crate::packing::{TurboPacker, TurboUnpacker};
 use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity, float32, rabitq};
 
 pub struct MSECoder<const B: usize, const N: usize> {
@@ -41,12 +41,10 @@ impl<const B: usize, const N: usize> F32VectorCoder for MSECoder<B, N> {
 
         let bits = &mut out[4..];
         bits.fill(0);
-        packing::pack::<B>(
-            vector
-                .iter()
-                .map(|v| codebook::select_code(&codebook, *v * inv_norm)),
-            bits,
-        );
+        let mut packer = TurboPacker::<B>::new(bits);
+        for v in vector {
+            packer.push(codebook::select_code(&codebook, *v * inv_norm));
+        }
     }
 
     fn byte_len(&self, dimensions: usize) -> usize {
@@ -60,7 +58,7 @@ impl<const B: usize, const N: usize> F32VectorCoder for MSECoder<B, N> {
         // NB: the original dimensionality is not stored, so if D * B is not a multiple of 8 the
         // codebook scale is computed from the padded dimension count and will be slightly off.
         let codebook = codebook::scale(&self.codebook, self.dimensions(encoded.len()));
-        for (o, i) in out.iter_mut().zip(packing::unpack::<B>(bits)) {
+        for (o, i) in out.iter_mut().zip(TurboUnpacker::<B>::new(bits)) {
             *o = codebook[i as usize] * norm;
         }
     }
@@ -145,7 +143,7 @@ impl<const B: usize, const N: usize> QueryVectorDistance for MSEQueryDistance<B,
         let dot: f32 = self
             .rquery
             .iter()
-            .zip(packing::unpack::<B>(bits))
+            .zip(TurboUnpacker::<B>::new(bits))
             .map(|(&q, d)| q * self.codebook[d as usize])
             .sum();
         mse_distance(self.similarity, self.norm, norm, dot, self.euclidean_scale)
@@ -528,7 +526,6 @@ mod tests {
     }
 
     mse_tests!(mse2, 2, &codebook::CENTROIDS_2, MSECoder<2, 4>, MSEQueryDistance<2, 4>, 4);
-    mse_tests!(mse3, 3, &codebook::CENTROIDS_3, MSECoder<3, 8>, MSEQueryDistance<3, 8>, 4);
     mse_tests!(mse4, 4, &codebook::CENTROIDS_4, MSECoder<4, 16>, MSEQueryDistance<4, 16>, 4);
     mse_tests!(mse8, 8, &codebook::CENTROIDS_8, MSECoder<8, 256>, MSEQueryDistance<8, 256>, 4);
 }

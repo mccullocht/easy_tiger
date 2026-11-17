@@ -439,7 +439,6 @@ mod tests {
             for coding in [
                 F32VectorCoding::TurboQuantM1,
                 F32VectorCoding::TurboQuantM2,
-                F32VectorCoding::TurboQuantM3,
                 F32VectorCoding::TurboQuantM4,
                 F32VectorCoding::TurboQuantM8,
             ] {

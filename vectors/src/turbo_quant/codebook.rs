@@ -8,6 +8,7 @@
 #[allow(clippy::approx_constant)]
 pub const CENTROIDS_1: [f32; 2] = [-0.79788456, 0.79788456];
 pub const CENTROIDS_2: [f32; 4] = [-1.510418, -0.452780, 0.452780, 1.510418];
+#[allow(dead_code)] // Kept for the 3-bit-per-dimension codec, though no coding uses it today.
 pub const CENTROIDS_3: [f32; 8] = [
     -2.151946, -1.343909, -0.756005, -0.245094, 0.245094, 0.756005, 1.343909, 2.151946,
 ];

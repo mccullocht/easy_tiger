@@ -243,10 +243,6 @@ pub enum F32VectorCoding {
     ///
     /// Inputs should be randomly rotated before encoding (see [`prepare_vector`]).
     TurboQuantM2,
-    /// TurboQuantMSE with 3 bits per dimension.
-    ///
-    /// Inputs should be randomly rotated before encoding (see [`prepare_vector`]).
-    TurboQuantM3,
     /// TurboQuantMSE with 4 bits per dimension.
     ///
     /// Inputs should be randomly rotated before encoding (see [`prepare_vector`]).
@@ -280,9 +276,6 @@ impl F32VectorCoding {
             )),
             Self::TurboQuantM2 => Box::new(turbo_quant::MSECoder::<2, 4>::new(
                 &turbo_quant::codebook::CENTROIDS_2,
-            )),
-            Self::TurboQuantM3 => Box::new(turbo_quant::MSECoder::<3, 8>::new(
-                &turbo_quant::codebook::CENTROIDS_3,
             )),
             Self::TurboQuantM4 => Box::new(turbo_quant::MSECoder::<4, 16>::new(
                 &turbo_quant::codebook::CENTROIDS_4,
@@ -318,7 +311,6 @@ impl F32VectorCoding {
             (Self::QuIVer, _) => quiver::new_symmetric_distance(),
             (Self::TurboQuantM1, _)
             | (Self::TurboQuantM2, _)
-            | (Self::TurboQuantM3, _)
             | (Self::TurboQuantM4, _)
             | (Self::TurboQuantM8, _) => return None,
         };
@@ -371,11 +363,6 @@ impl F32VectorCoding {
                 similarity,
                 query,
                 &turbo_quant::codebook::CENTROIDS_2,
-            )),
-            (Self::TurboQuantM3, _) => Box::new(turbo_quant::MSEQueryDistance::<3, 8>::new(
-                similarity,
-                query,
-                &turbo_quant::codebook::CENTROIDS_3,
             )),
             (Self::TurboQuantM4, _) => Box::new(turbo_quant::MSEQueryDistance::<4, 16>::new(
                 similarity,
@@ -437,7 +424,6 @@ impl F32VectorCoding {
             (_, Self::QuIVer) => quiver::new_symmetric_query_distance(query.into()),
             (_, Self::TurboQuantM1)
             | (_, Self::TurboQuantM2)
-            | (_, Self::TurboQuantM3)
             | (_, Self::TurboQuantM4)
             | (_, Self::TurboQuantM8) => return None,
         };
@@ -461,7 +447,6 @@ impl FromStr for F32VectorCoding {
             "QuIVer" => Ok(Self::QuIVer),
             "tqm1" => Ok(Self::TurboQuantM1),
             "tqm2" => Ok(Self::TurboQuantM2),
-            "tqm3" => Ok(Self::TurboQuantM3),
             "tqm4" => Ok(Self::TurboQuantM4),
             "tqm8" => Ok(Self::TurboQuantM8),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
@@ -482,7 +467,6 @@ impl std::fmt::Display for F32VectorCoding {
             Self::QuIVer => write!(f, "QuIVer"),
             Self::TurboQuantM1 => write!(f, "tqm1"),
             Self::TurboQuantM2 => write!(f, "tqm2"),
-            Self::TurboQuantM3 => write!(f, "tqm3"),
             Self::TurboQuantM4 => write!(f, "tqm4"),
             Self::TurboQuantM8 => write!(f, "tqm8"),
         }

@@ -218,7 +218,6 @@ fn turbo_quant_benchmarks(c: &mut Criterion) {
     let formats = [
         F32VectorCoding::TurboQuantM1,
         F32VectorCoding::TurboQuantM2,
-        F32VectorCoding::TurboQuantM3,
         F32VectorCoding::TurboQuantM4,
         F32VectorCoding::TurboQuantM8,
     ];

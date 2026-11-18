@@ -2,6 +2,7 @@
 
 use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 
+mod codebooks;
 pub mod float16;
 pub mod float32;
 mod kernels;

@@ -13,6 +13,7 @@ pub mod codebook;
 
 use std::borrow::Cow;
 
+use crate::codebooks::Codebook;
 use crate::packing::{TurboPacker, TurboUnpacker};
 use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity, float32, rabitq};
 
@@ -60,6 +61,56 @@ impl<const B: usize, const N: usize> F32VectorCoder for MSECoder<B, N> {
         let codebook = codebook::scale(&self.codebook, self.dimensions(encoded.len()));
         for (o, i) in out.iter_mut().zip(TurboUnpacker::<B>::new(bits)) {
             *o = codebook[i as usize] * norm;
+        }
+    }
+
+    fn dimensions(&self, byte_len: usize) -> usize {
+        ((byte_len - std::mem::size_of::<f32>()) * 8).div_ceil(B)
+    }
+}
+
+pub struct MSECoderC<const B: usize, C: 'static> {
+    codebook: &'static C,
+}
+
+impl<const B: usize, C: Codebook> MSECoderC<B, C> {
+    pub fn new(codebook: &'static C) -> Self {
+        Self { codebook }
+    }
+}
+
+impl<const B: usize, C: Codebook> F32VectorCoder for MSECoderC<B, C> {
+    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
+        crate::assert_finite_vector(vector);
+        let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        assert!(norm.is_finite(), "vector magnitude is not finite");
+        out[..4].copy_from_slice(&norm.to_le_bytes());
+
+        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
+        // XXX not sure if this is all right.
+        let scale = inv_norm * (vector.len() as f32).sqrt();
+
+        let bits = &mut out[4..];
+        bits.fill(0);
+        let mut packer = TurboPacker::<B>::new(bits);
+        for &v in vector {
+            packer.push(self.codebook.encode(v * scale));
+        }
+    }
+
+    fn byte_len(&self, dimensions: usize) -> usize {
+        std::mem::size_of::<f32>() + (dimensions * B).div_ceil(8)
+    }
+
+    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
+        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
+        let bits = &encoded[4..];
+
+        // NB: the original dimensionality is not stored, so if D * B is not a multiple of 8 the
+        // codebook scale is computed from the padded dimension count and will be slightly off.
+        let scale = norm * (self.dimensions(encoded.len()) as f32).sqrt();
+        for (o, i) in out.iter_mut().zip(TurboUnpacker::<B>::new(bits)) {
+            *o = self.codebook.decode(i) * scale;
         }
     }
 

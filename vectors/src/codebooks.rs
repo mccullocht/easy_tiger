@@ -14,7 +14,7 @@ const fn encode_thresholds<const N: usize>(decode: &[f32; N]) -> [f32; N] {
 }
 
 fn select_code<const N: usize>(encode: &[f32; N], v: f32) -> u8 {
-    encode.iter().map(|&x| u8::from(x > v)).sum()
+    encode.iter().map(|&x| u8::from(x < v)).sum()
 }
 
 macro_rules! declare_codebook {

@@ -108,7 +108,7 @@ impl<const B: usize, C: Codebook> F32VectorCoder for MSECoderC<B, C> {
 
         // NB: the original dimensionality is not stored, so if D * B is not a multiple of 8 the
         // codebook scale is computed from the padded dimension count and will be slightly off.
-        let scale = norm * (self.dimensions(encoded.len()) as f32).sqrt();
+        let scale = norm / (self.dimensions(encoded.len()) as f32).sqrt();
         for (o, i) in out.iter_mut().zip(TurboUnpacker::<B>::new(bits)) {
             *o = self.codebook.decode(i) * scale;
         }
@@ -347,8 +347,21 @@ mod tests {
         -0.273, 0.539, -0.731, 0.436, 0.913, 0.694, 0.202,
     ];
 
+    // `$centroids` is passed to the query distance and, unless `coder_codebook` is specified, to
+    // the coder.
     macro_rules! mse_tests {
         ($mod_name:ident, $B:literal, $centroids:expr, $coder:ty, $query_distance:ty, $header_len:literal) => {
+            mse_tests!(
+                $mod_name,
+                $B,
+                $centroids,
+                $coder,
+                $query_distance,
+                $header_len,
+                coder_codebook = $centroids
+            );
+        };
+        ($mod_name:ident, $B:literal, $centroids:expr, $coder:ty, $query_distance:ty, $header_len:literal, coder_codebook = $coder_codebook:expr) => {
             mod $mod_name {
                 use approx::assert_abs_diff_eq;
 
@@ -356,14 +369,19 @@ mod tests {
 
                 use super::{TEST_VECTOR, codebook};
                 #[allow(unused_imports)]
+                use crate::codebooks::{
+                    CODEBOOK1, CODEBOOK2, CODEBOOK4, CODEBOOK8, Codebook1, Codebook2, Codebook4,
+                    Codebook8,
+                };
+                #[allow(unused_imports)]
                 use crate::turbo_quant::{
-                    MSE1Coder, MSE1QueryDistance, MSECoder, MSEQueryDistance,
+                    MSE1Coder, MSE1QueryDistance, MSECoder, MSECoderC, MSEQueryDistance,
                 };
 
                 const DIM: usize = TEST_VECTOR.len();
 
                 fn coder() -> $coder {
-                    <$coder>::new($centroids)
+                    <$coder>::new($coder_codebook)
                 }
 
                 fn query_distance(similarity: VectorSimilarity) -> $query_distance {
@@ -579,4 +597,115 @@ mod tests {
     mse_tests!(mse2, 2, &codebook::CENTROIDS_2, MSECoder<2, 4>, MSEQueryDistance<2, 4>, 4);
     mse_tests!(mse4, 4, &codebook::CENTROIDS_4, MSECoder<4, 16>, MSEQueryDistance<4, 16>, 4);
     mse_tests!(mse8, 8, &codebook::CENTROIDS_8, MSECoder<8, 256>, MSEQueryDistance<8, 256>, 4);
+
+    mse_tests!(
+        msec1,
+        1,
+        &codebook::CENTROIDS_1,
+        MSECoderC<1, Codebook1>,
+        MSEQueryDistance<1, 2>,
+        4,
+        coder_codebook = &CODEBOOK1
+    );
+    mse_tests!(
+        msec2,
+        2,
+        &codebook::CENTROIDS_2,
+        MSECoderC<2, Codebook2>,
+        MSEQueryDistance<2, 4>,
+        4,
+        coder_codebook = &CODEBOOK2
+    );
+    mse_tests!(
+        msec4,
+        4,
+        &codebook::CENTROIDS_4,
+        MSECoderC<4, Codebook4>,
+        MSEQueryDistance<4, 16>,
+        4,
+        coder_codebook = &CODEBOOK4
+    );
+    mse_tests!(
+        msec8,
+        8,
+        &codebook::CENTROIDS_8,
+        MSECoderC<8, Codebook8>,
+        MSEQueryDistance<8, 256>,
+        4,
+        coder_codebook = &CODEBOOK8
+    );
+
+    // MSECoderC should produce the same encoding as MSECoder with the equivalent codebook.
+    mod msec_matches_mse {
+        use approx::assert_abs_diff_eq;
+        use rand::{RngExt, SeedableRng};
+
+        use crate::F32VectorCoder;
+        use crate::codebooks::{CODEBOOK1, CODEBOOK2, CODEBOOK4, CODEBOOK8};
+        use crate::turbo_quant::{MSECoder, MSECoderC, codebook};
+
+        // Long enough to cover several SIMD blocks with a remainder; a multiple of 8 so that the
+        // dimension count recovered when decoding is exact for all bit widths.
+        const DIM: usize = 296;
+
+        fn check(expected_coder: &impl F32VectorCoder, actual_coder: &impl F32VectorCoder) {
+            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x3c0de);
+            for _ in 0..16 {
+                let v = (0..DIM)
+                    .map(|_| rng.random_range(-1.0f32..1.0))
+                    .collect::<Vec<_>>();
+                let expected = expected_coder.encode(&v);
+                let actual = actual_coder.encode(&v);
+                assert_eq!(actual.len(), expected.len());
+                assert_eq!(actual_coder.byte_len(DIM), expected_coder.byte_len(DIM));
+                assert_eq!(
+                    actual_coder.dimensions(actual.len()),
+                    expected_coder.dimensions(expected.len())
+                );
+                assert_eq!(actual, expected);
+
+                let mut expected_decoded = vec![0.0f32; DIM];
+                expected_coder.decode_to(&expected, &mut expected_decoded);
+                let mut actual_decoded = vec![0.0f32; DIM];
+                actual_coder.decode_to(&actual, &mut actual_decoded);
+                assert_abs_diff_eq!(
+                    actual_decoded.as_slice(),
+                    expected_decoded.as_slice(),
+                    epsilon = 1e-6
+                );
+            }
+        }
+
+        #[test]
+        fn msec1() {
+            check(
+                &MSECoder::<1, 2>::new(&codebook::CENTROIDS_1),
+                &MSECoderC::<1, _>::new(&CODEBOOK1),
+            );
+        }
+
+        #[test]
+        fn msec2() {
+            check(
+                &MSECoder::<2, 4>::new(&codebook::CENTROIDS_2),
+                &MSECoderC::<2, _>::new(&CODEBOOK2),
+            );
+        }
+
+        #[test]
+        fn msec4() {
+            check(
+                &MSECoder::<4, 16>::new(&codebook::CENTROIDS_4),
+                &MSECoderC::<4, _>::new(&CODEBOOK4),
+            );
+        }
+
+        #[test]
+        fn msec8() {
+            check(
+                &MSECoder::<8, 256>::new(&codebook::CENTROIDS_8),
+                &MSECoderC::<8, _>::new(&CODEBOOK8),
+            );
+        }
+    }
 }

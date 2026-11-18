@@ -62,27 +62,174 @@ pub fn scale<const N: usize>(codebook: &[f32; N], dim: usize) -> [f32; N] {
     scaled
 }
 
-/// Select the closest code (index) from codebook for value.
-// TODO: thresholding would improve selection speed.
-pub fn select_code<const N: usize>(codebook: &[f32; N], value: f32) -> u8 {
-    if N == 2 {
-        return if value > 0.0 { 1 } else { 0 };
+/// Compute decision thresholds for selecting codes from `codebook`.
+///
+/// Entry `i` is the midpoint between `codebook[i]` and `codebook[i + 1]`; any value above this
+/// midpoint is closer to `codebook[i + 1]`. The final entry is padding set to `f32::INFINITY` so
+/// that the thresholds may be stored in a power of two sized array.
+///
+/// Thresholds scale linearly with the codebook so they may be computed from the unscaled codebook
+/// and compared against values scaled by `sqrt(dim)`.
+pub fn thresholds<const N: usize>(codebook: &[f32; N]) -> [f32; N] {
+    let mut thresholds = [f32::INFINITY; N];
+    for (t, c) in thresholds.iter_mut().zip(codebook.windows(2)) {
+        *t = (c[0] + c[1]) * 0.5;
+    }
+    thresholds
+}
+
+/// Select the closest code (index) for `value` given decision `thresholds` from [`thresholds`].
+///
+/// The selected code is the number of thresholds strictly less than `value`, so values exactly on
+/// a midpoint select the lower code.
+///
+/// Small codebooks count the thresholds exceeded, which vectorizes well across values. Larger
+/// codebooks use a branchless binary search; independent calls have no data dependency on one
+/// another so the CPU can overlap the searches for several values.
+#[inline(always)]
+pub fn select_code<const N: usize>(thresholds: &[f32; N], value: f32) -> u8 {
+    const { assert!(N.is_power_of_two() && N <= 256) };
+    if N <= 16 {
+        return thresholds[..N - 1]
+            .iter()
+            .map(|&t| u8::from(value > t))
+            .sum();
+    }
+    let mut base = 0usize;
+    let mut half = N / 2;
+    while half > 0 {
+        // base + half - 1 < N - 1, so the padding entry is never read.
+        base += half * usize::from(value > thresholds[base + half - 1]);
+        half /= 2;
+    }
+    base as u8
+}
+
+/// Select codes for each of `values` scaled by `scale`, writing them to `codes`.
+///
+/// This produces the same result as calling [`select_code`] on each scaled value. Large codebooks
+/// are searched in three stages:
+/// 1. Count against every `N / COARSE` threshold to choose a bucket. This vectorizes across values.
+/// 2. Binary search within the bucket down to `LINEAR` candidate thresholds.
+/// 3. Count against the remaining `LINEAR` thresholds, which vectorizes within each value.
+#[inline(always)]
+pub fn select_codes<const N: usize>(
+    thresholds: &[f32; N],
+    values: &[f32],
+    scale: f32,
+    codes: &mut [u8],
+) {
+    const COARSE: usize = 16;
+    const LINEAR: usize = 8;
+
+    if N <= 16 {
+        for (c, v) in codes.iter_mut().zip(values) {
+            *c = select_code(thresholds, *v * scale);
+        }
+        return;
     }
 
-    let c = match codebook.binary_search_by(|c| c.total_cmp(&value)) {
-        Ok(i) => i,
-        Err(i) => {
-            // i is the first entry greater than value
-            if i == 0 {
-                0 // value is smaller than the minimum codebook value
-            } else if i == N {
-                N - 1 // value is larger than the maximum codebook value
-            } else {
-                let lo = value - codebook[i - 1];
-                let hi = codebook[i] - value;
-                if lo <= hi { i - 1 } else { i }
+    const { assert!(N <= 16 || N / COARSE >= LINEAR) };
+    let bucket = N / COARSE;
+    let coarse: [f32; COARSE - 1] = std::array::from_fn(|k| thresholds[bucket * (k + 1) - 1]);
+    for (c, v) in codes.iter_mut().zip(values) {
+        let v = *v * scale;
+        *c = coarse.iter().map(|&t| u8::from(v > t)).sum::<u8>() * bucket as u8;
+    }
+    for (c, v) in codes.iter_mut().zip(values) {
+        let v = *v * scale;
+        let mut base = *c as usize;
+        // Invariant: thresholds[base - 1] < v <= thresholds[base + len - 1] (or the padding).
+        let mut len = bucket;
+        while len > LINEAR {
+            len /= 2;
+            base += len * usize::from(v > thresholds[base + len - 1]);
+        }
+        // v never exceeds the last of these thresholds, so counting all LINEAR is safe and keeps a
+        // fixed power of two width.
+        let row: &[f32; LINEAR] = thresholds[base..base + LINEAR].try_into().unwrap();
+        base += row.iter().map(|&t| usize::from(v > t)).sum::<usize>();
+        *c = base as u8;
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Reference implementation: the index of the nearest codebook entry, preferring the lower
+    /// index on ties.
+    fn nearest<const N: usize>(codebook: &[f32; N], value: f32) -> u8 {
+        let mut best = 0;
+        for (i, &c) in codebook.iter().enumerate() {
+            if (value - c).abs() < (value - codebook[best]).abs() {
+                best = i;
             }
         }
-    };
-    c as u8
+        best as u8
+    }
+
+    fn check<const N: usize>(codebook: &[f32; N]) {
+        let thresholds = thresholds(codebook);
+        let lo = codebook[0] * 1.5;
+        let hi = codebook[N - 1] * 1.5;
+        let steps = 100_000;
+        for i in 0..=steps {
+            let v = lo + (hi - lo) * (i as f32 / steps as f32);
+            assert_eq!(
+                select_code(&thresholds, v),
+                nearest(codebook, v),
+                "value={v}"
+            );
+        }
+        for (i, &c) in codebook.iter().enumerate() {
+            assert_eq!(select_code(&thresholds, c) as usize, i);
+        }
+        // Values on a threshold select the lower code; anything above selects the upper code.
+        for (i, &t) in thresholds[..N - 1].iter().enumerate() {
+            assert_eq!(select_code(&thresholds, t) as usize, i, "threshold={t}");
+            assert_eq!(
+                select_code(&thresholds, t.next_up()) as usize,
+                i + 1,
+                "threshold={t}"
+            );
+        }
+        let values = (0..=steps)
+            .map(|i| lo + (hi - lo) * (i as f32 / steps as f32))
+            .chain(codebook.iter().copied())
+            .chain(thresholds[..N - 1].iter().flat_map(|&t| [t, t.next_up()]))
+            .collect::<Vec<_>>();
+        let mut codes = vec![0u8; values.len()];
+        select_codes(&thresholds, &values, 1.0, &mut codes);
+        for (&v, &c) in values.iter().zip(&codes) {
+            assert_eq!(c, select_code(&thresholds, v), "value={v}");
+        }
+        assert_eq!(select_code(&thresholds, f32::NEG_INFINITY), 0);
+        assert_eq!(select_code(&thresholds, f32::INFINITY) as usize, N - 1);
+    }
+
+    #[test]
+    fn select_code_1() {
+        check(&CENTROIDS_1);
+    }
+
+    #[test]
+    fn select_code_2() {
+        check(&CENTROIDS_2);
+    }
+
+    #[test]
+    fn select_code_3() {
+        check(&CENTROIDS_3);
+    }
+
+    #[test]
+    fn select_code_4() {
+        check(&CENTROIDS_4);
+    }
+
+    #[test]
+    fn select_code_8() {
+        check(&CENTROIDS_8);
+    }
 }

@@ -22,12 +22,16 @@ use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity, float32, rabi
 pub struct MSECoder<const B: usize, const N: usize> {
     /// Unscaled codebook; scaled by `1/sqrt(D)` for each input vector.
     codebook: [f32; N],
+    /// Unscaled decision thresholds for `codebook`. Rather than scaling these by `1/sqrt(D)`,
+    /// input values are scaled by `sqrt(D)` when encoding.
+    thresholds: [f32; N],
 }
 
 impl<const B: usize, const N: usize> MSECoder<B, N> {
     pub fn new(codebook: &[f32; N]) -> Self {
         Self {
             codebook: *codebook,
+            thresholds: codebook::thresholds(codebook),
         }
     }
 }
@@ -35,18 +39,37 @@ impl<const B: usize, const N: usize> MSECoder<B, N> {
 impl<const B: usize, const N: usize> F32VectorCoder for MSECoder<B, N> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         crate::assert_finite_vector(vector);
-        let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let norm = float32::l2_norm(vector);
         assert!(norm.is_finite(), "vector magnitude is not finite");
         out[..4].copy_from_slice(&norm.to_le_bytes());
 
-        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
-        let codebook = codebook::scale(&self.codebook, vector.len());
+        // Normalize and scale by sqrt(D) in one step so values may be compared against the
+        // unscaled thresholds.
+        let scale = if norm > 0.0 {
+            (vector.len() as f32).sqrt() / norm
+        } else {
+            0.0
+        };
 
         let bits = &mut out[4..];
         bits.fill(0);
-        let mut packer = TurboPacker::<B>::new(bits);
-        for v in vector {
-            packer.push(codebook::select_code(&codebook, *v * inv_norm));
+        // Select all the codes for a block before packing them so that selection and packing
+        // may each be vectorized. Each byte j of a block holds codes j, j + 16, j + 32, ...
+        let (blocks, tail) = bits.as_chunks_mut::<TURBO_BLOCK_SIZE>();
+        let per_block = TURBO_BLOCK_SIZE * 8 / B;
+        let mut codes = [0u8; TURBO_BLOCK_SIZE * 8];
+        for (block, values) in blocks.iter_mut().zip(vector.chunks(per_block)) {
+            codebook::select_codes(&self.thresholds, values, scale, &mut codes);
+            codes[values.len()..per_block].fill(0);
+            for (j, b) in block.iter_mut().enumerate() {
+                *b = (0..8 / B).fold(0, |acc, k| {
+                    acc | (codes[j + k * TURBO_BLOCK_SIZE] << (k * B))
+                });
+            }
+        }
+        let mut packer = TurboPacker::<B>::new(tail);
+        for v in vector.iter().skip(blocks.len() * per_block) {
+            packer.push(codebook::select_code(&self.thresholds, *v * scale));
         }
     }
 

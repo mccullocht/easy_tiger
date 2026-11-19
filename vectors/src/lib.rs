@@ -356,22 +356,22 @@ impl F32VectorCoding {
             (Self::TurboQuantM1, _) => Box::new(turbo_quant::MSE1QueryDistance::new(
                 similarity,
                 query,
-                &turbo_quant::codebook::CENTROIDS_1,
+                &codebooks::CODEBOOK1,
             )),
-            (Self::TurboQuantM2, _) => Box::new(turbo_quant::MSEQueryDistance::<2, 4>::new(
+            (Self::TurboQuantM2, _) => Box::new(turbo_quant::MSEQueryDistance::<2, _>::new(
                 similarity,
                 query,
-                &turbo_quant::codebook::CENTROIDS_2,
+                &codebooks::CODEBOOK2,
             )),
-            (Self::TurboQuantM4, _) => Box::new(turbo_quant::MSEQueryDistance::<4, 16>::new(
+            (Self::TurboQuantM4, _) => Box::new(turbo_quant::MSEQueryDistance::<4, _>::new(
                 similarity,
                 query,
-                &turbo_quant::codebook::CENTROIDS_4,
+                &codebooks::CODEBOOK4,
             )),
-            (Self::TurboQuantM8, _) => Box::new(turbo_quant::MSEQueryDistance::<8, 256>::new(
+            (Self::TurboQuantM8, _) => Box::new(turbo_quant::MSEQueryDistance::<8, _>::new(
                 similarity,
                 query,
-                &turbo_quant::codebook::CENTROIDS_8,
+                &codebooks::CODEBOOK8,
             )),
         }
     }

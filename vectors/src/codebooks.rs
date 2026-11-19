@@ -1,3 +1,10 @@
+//! Codebooks for different bit rates based on Gaussian component distributions.
+//!
+//! This is useful for quantizers that expect preconditioned outputs like those that come out of
+//! [`crate::Rotator`].
+
+#![allow(clippy::excessive_precision)]
+
 pub trait Codebook: Send + Sync {
     fn encode(&self, v: f32) -> u8;
     fn decode(&self, c: u8) -> f32;
@@ -35,7 +42,7 @@ macro_rules! declare_codebook {
                 }
                 Self {
                     encode: encode_thresholds(&decode),
-                    decode: decode,
+                    decode,
                 }
             }
         }

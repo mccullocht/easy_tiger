@@ -9,8 +9,6 @@
 
 // TODO: optimize vector comparison using lookup tables.
 
-pub mod codebook;
-
 use std::borrow::Cow;
 
 use crate::codebooks::{Codebook, Codebook1};
@@ -66,25 +64,27 @@ impl<const B: usize, C: Codebook> F32VectorCoder for MSECoder<B, C> {
     }
 }
 
-pub struct MSEQueryDistance<const B: usize, const N: usize> {
+pub struct MSEQueryDistance<const B: usize, C: 'static> {
     similarity: VectorSimilarity,
     /// The query vector after l2 normalization. Callers are expected to have rotated the query in
     /// the same way as the quantized vectors.
     rquery: Vec<f32>,
     /// L2 norm of the input vector before transform.
     norm: f32,
-    /// Codebook used to decode quantized vectors for comparison.
-    codebook: [f32; N],
+    /// Unscaled codebook used to decode quantized vectors for comparison.
+    codebook: &'static C,
+    /// `1/sqrt(D)`, the scale applied to codebook entries to match the normalized query.
+    codebook_scale: f32,
     /// `2 / A` where `A = E[Q(z)·z]` for `z ~ N(0,1)` with this codebook. Corrects for the
     /// inner product bias introduced by MSE-optimal quantizers in the Euclidean distance formula.
     euclidean_scale: f32,
 }
 
-/// Computes `A = E[Q(z)·z]` for `z ~ N(0,1)` using the given (unscaled) codebook.
+/// Computes `A = E[Q(z)·z]` for `z ~ N(0,1)` using the given (unscaled) `B` bit codebook.
 ///
 /// MSE-optimal quantizers are biased for inner product estimation: `⟨q, Q(x)⟩ ≈ A·⟨q, x⟩`
 /// where `A < 1`. The Euclidean correction factor is `2/A`.
-fn inner_product_bias<const N: usize>(codebook: &[f32; N]) -> f32 {
+fn inner_product_bias<const B: usize, C: Codebook>(codebook: &C) -> f32 {
     let inv_sqrt_2pi = (0.5f32 / std::f32::consts::PI).sqrt();
     let normal_pdf = |x: f32| -> f32 {
         if x.is_infinite() {
@@ -93,25 +93,28 @@ fn inner_product_bias<const N: usize>(codebook: &[f32; N]) -> f32 {
             inv_sqrt_2pi * (-x * x * 0.5).exp()
         }
     };
+    let n = 1usize << B;
+    let centroid = |k: usize| codebook.decode(k as u8);
     let mut a = 0.0f32;
-    for (k, &c) in codebook.iter().enumerate() {
+    for k in 0..n {
+        let c = centroid(k);
         let t_prev = if k == 0 {
             f32::NEG_INFINITY
         } else {
-            (codebook[k - 1] + c) * 0.5
+            (centroid(k - 1) + c) * 0.5
         };
-        let t_next = if k == N - 1 {
+        let t_next = if k == n - 1 {
             f32::INFINITY
         } else {
-            (c + codebook[k + 1]) * 0.5
+            (c + centroid(k + 1)) * 0.5
         };
         a += c * (normal_pdf(t_prev) - normal_pdf(t_next));
     }
     a
 }
 
-impl<const B: usize, const N: usize> MSEQueryDistance<B, N> {
-    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>, codebook: &[f32; N]) -> Self {
+impl<const B: usize, C: Codebook> MSEQueryDistance<B, C> {
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>, codebook: &'static C) -> Self {
         let mut rquery = query.into_owned();
         let norm = rquery.iter().map(|&x| x * x).sum::<f32>().sqrt();
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
@@ -119,31 +122,32 @@ impl<const B: usize, const N: usize> MSEQueryDistance<B, N> {
             *d *= inv_norm
         }
 
-        let euclidean_scale = 2.0 / inner_product_bias(codebook);
-        let codebook = codebook::scale(codebook, rquery.len());
+        let codebook_scale = 1.0 / (rquery.len() as f32).sqrt();
         Self {
             similarity,
             rquery,
             norm,
             codebook,
-            euclidean_scale,
+            codebook_scale,
+            euclidean_scale: 2.0 / inner_product_bias::<B, C>(codebook),
         }
     }
 }
 
-impl<const B: usize, const N: usize> QueryVectorDistance for MSEQueryDistance<B, N> {
+impl<const B: usize, C: Codebook> QueryVectorDistance for MSEQueryDistance<B, C> {
     fn distance(&self, encoded: &[u8]) -> f64 {
         let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
         let bits = &encoded[4..];
         // dot estimates A·⟨q̂, db̂⟩ where A = E[Q(z)·z] < 1 for MSE-optimal codebooks.
         // ‖q − db‖² = ‖q‖² + ‖db‖² − 2·‖q‖·‖db‖·⟨q̂, db̂⟩
         //            ≈ ‖q‖² + ‖db‖² − (2/A)·‖q‖·‖db‖·dot
-        let dot: f32 = self
+        let dot = self
             .rquery
             .iter()
             .zip(TurboUnpacker::<B>::new(bits))
-            .map(|(&q, d)| q * self.codebook[d as usize])
-            .sum();
+            .map(|(&q, d)| q * self.codebook.decode(d))
+            .sum::<f32>()
+            * self.codebook_scale;
         mse_distance(self.similarity, self.norm, norm, dot, self.euclidean_scale)
     }
 }
@@ -253,18 +257,14 @@ pub struct MSE1QueryDistance {
 }
 
 impl MSE1QueryDistance {
-    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>, codebook: &[f32; 2]) -> Self {
-        assert_eq!(
-            codebook[0], -codebook[1],
-            "1-bit codebook must be symmetric"
-        );
+    pub fn new(similarity: VectorSimilarity, query: Cow<'_, [f32]>, codebook: &Codebook1) -> Self {
         let (query, norm) = float32::l2_normalize(query);
         Self {
             similarity,
             query: rabitq::Query4::new(&query),
             norm,
-            centroid: codebook[1],
-            euclidean_scale: 2.0 / inner_product_bias(codebook),
+            centroid: codebook.decode(1),
+            euclidean_scale: 2.0 / inner_product_bias::<1, _>(codebook),
         }
     }
 }
@@ -280,8 +280,6 @@ impl QueryVectorDistance for MSE1QueryDistance {
 
 #[cfg(test)]
 mod tests {
-    use super::codebook;
-
     // This test vector contains randomly generated numbers in [-1,1] but is not l2 normalized.
     // It has 19 elements -- long enough to trigger SIMD optimizations but with some remainder to
     // test scalar tail paths.
@@ -290,27 +288,14 @@ mod tests {
         -0.273, 0.539, -0.731, 0.436, 0.913, 0.694, 0.202,
     ];
 
-    // `$centroids` is passed to the query distance and, unless `coder_codebook` is specified, to
-    // the coder.
     macro_rules! mse_tests {
-        ($mod_name:ident, $B:literal, $centroids:expr, $coder:ty, $query_distance:ty, $header_len:literal) => {
-            mse_tests!(
-                $mod_name,
-                $B,
-                $centroids,
-                $coder,
-                $query_distance,
-                $header_len,
-                coder_codebook = $centroids
-            );
-        };
-        ($mod_name:ident, $B:literal, $centroids:expr, $coder:ty, $query_distance:ty, $header_len:literal, coder_codebook = $coder_codebook:expr) => {
+        ($mod_name:ident, $B:literal, $codebook:expr, $coder:ty, $query_distance:ty, $header_len:literal) => {
             mod $mod_name {
                 use approx::assert_abs_diff_eq;
 
                 use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
 
-                use super::{TEST_VECTOR, codebook};
+                use super::TEST_VECTOR;
                 #[allow(unused_imports)]
                 use crate::codebooks::{
                     CODEBOOK1, CODEBOOK2, CODEBOOK4, CODEBOOK8, Codebook1, Codebook2, Codebook4,
@@ -324,11 +309,11 @@ mod tests {
                 const DIM: usize = TEST_VECTOR.len();
 
                 fn coder() -> $coder {
-                    <$coder>::new($coder_codebook)
+                    <$coder>::new($codebook)
                 }
 
                 fn query_distance(similarity: VectorSimilarity) -> $query_distance {
-                    <$query_distance>::new(similarity, TEST_VECTOR.as_slice().into(), $centroids)
+                    <$query_distance>::new(similarity, TEST_VECTOR.as_slice().into(), $codebook)
                 }
 
                 #[test]
@@ -404,15 +389,7 @@ mod tests {
         };
     }
 
-    mse_tests!(
-        mse1,
-        1,
-        &codebook::CENTROIDS_1,
-        MSE1Coder,
-        MSE1QueryDistance,
-        8,
-        coder_codebook = &CODEBOOK1
-    );
+    mse_tests!(mse1, 1, &CODEBOOK1, MSE1Coder, MSE1QueryDistance, 8);
 
     // Dot distance on centered vectors should still estimate the angular distance between the
     // original unit vectors, as centering is a translation that cancels in l2 distance.
@@ -479,10 +456,9 @@ mod tests {
         use approx::assert_abs_diff_eq;
         use rand::{RngExt, SeedableRng};
 
-        use crate::turbo_quant::{
-            MSE1Coder, MSE1QueryDistance, codebook::CENTROIDS_1, inner_product_bias,
-        };
-        use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity, codebooks};
+        use crate::codebooks::{CODEBOOK1, Codebook};
+        use crate::turbo_quant::{MSE1Coder, MSE1QueryDistance, inner_product_bias};
+        use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
 
         // Long enough to cover several SIMD blocks with a remainder.
         const DIM: usize = 300;
@@ -494,11 +470,11 @@ mod tests {
         #[test]
         fn decode_matches_scalar() {
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x7a11);
-            let coder = MSE1Coder::new(&codebooks::CODEBOOK1);
+            let coder = MSE1Coder::new(&CODEBOOK1);
             for _ in 0..16 {
                 let v = random_vector(&mut rng);
                 let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let magnitude = CENTROIDS_1[1] / (DIM as f32).sqrt() * norm;
+                let magnitude = CODEBOOK1.decode(1) / (DIM as f32).sqrt() * norm;
                 let expected = v
                     .iter()
                     .map(|&x| if x < 0.0 { -magnitude } else { magnitude })
@@ -517,7 +493,7 @@ mod tests {
         #[test]
         fn query_distance_matches_float() {
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xd07);
-            let coder = MSE1Coder::new(&codebooks::CODEBOOK1);
+            let coder = MSE1Coder::new(&CODEBOOK1);
             for _ in 0..16 {
                 let q = crate::prepare_vector(random_vector(&mut rng), None, true, None);
                 let d = crate::prepare_vector(random_vector(&mut rng), None, true, None);
@@ -528,10 +504,10 @@ mod tests {
                 let dnorm = decoded.iter().map(|x| x * x).sum::<f32>().sqrt();
                 // ⟨q̂, Q(d̂)⟩ / A where Q(d̂) has components ±c/√D.
                 let dot = q.iter().zip(&decoded).map(|(a, b)| a * b).sum::<f32>() / qnorm
-                    * (CENTROIDS_1[1] / dnorm)
-                    / inner_product_bias(&CENTROIDS_1);
+                    * (CODEBOOK1.decode(1) / dnorm)
+                    / inner_product_bias::<1, _>(&CODEBOOK1);
 
-                let qd = MSE1QueryDistance::new(VectorSimilarity::Dot, q.into(), &CENTROIDS_1);
+                let qd = MSE1QueryDistance::new(VectorSimilarity::Dot, q.into(), &CODEBOOK1);
                 let expected = dot.mul_add(-0.5, 0.5) as f64;
                 assert_abs_diff_eq!(qd.distance(&encoded), expected, epsilon = 0.01);
             }
@@ -541,37 +517,33 @@ mod tests {
     mse_tests!(
         mse1_generic,
         1,
-        &codebook::CENTROIDS_1,
+        &CODEBOOK1,
         MSECoder<1, Codebook1>,
-        MSEQueryDistance<1, 2>,
-        4,
-        coder_codebook = &CODEBOOK1
+        MSEQueryDistance<1, Codebook1>,
+        4
     );
     mse_tests!(
         mse2,
         2,
-        &codebook::CENTROIDS_2,
+        &CODEBOOK2,
         MSECoder<2, Codebook2>,
-        MSEQueryDistance<2, 4>,
-        4,
-        coder_codebook = &CODEBOOK2
+        MSEQueryDistance<2, Codebook2>,
+        4
     );
     mse_tests!(
         mse4,
         4,
-        &codebook::CENTROIDS_4,
+        &CODEBOOK4,
         MSECoder<4, Codebook4>,
-        MSEQueryDistance<4, 16>,
-        4,
-        coder_codebook = &CODEBOOK4
+        MSEQueryDistance<4, Codebook4>,
+        4
     );
     mse_tests!(
         mse8,
         8,
-        &codebook::CENTROIDS_8,
+        &CODEBOOK8,
         MSECoder<8, Codebook8>,
-        MSEQueryDistance<8, 256>,
-        4,
-        coder_codebook = &CODEBOOK8
+        MSEQueryDistance<8, Codebook8>,
+        4
     );
 }

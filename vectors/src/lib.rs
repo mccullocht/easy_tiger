@@ -272,18 +272,16 @@ impl F32VectorCoding {
             Self::TLVQ8 => Box::new(lvq::TurboPrimaryCoder::<8>::new()),
             Self::RaBitQ => Box::new(rabitq::Coder::new()),
             Self::QuIVer => quiver::new_coder(),
-            Self::TurboQuantM1 => Box::new(turbo_quant::MSE1Coder::new(
-                &turbo_quant::codebook::CENTROIDS_1,
-            )),
-            Self::TurboQuantM2 => Box::new(turbo_quant::MSECoder::<2, 4>::new(
-                &turbo_quant::codebook::CENTROIDS_2,
-            )),
-            Self::TurboQuantM4 => Box::new(turbo_quant::MSECoder::<4, 16>::new(
-                &turbo_quant::codebook::CENTROIDS_4,
-            )),
-            Self::TurboQuantM8 => Box::new(turbo_quant::MSECoder::<8, 256>::new(
-                &turbo_quant::codebook::CENTROIDS_8,
-            )),
+            Self::TurboQuantM1 => Box::new(turbo_quant::MSE1Coder::new(&codebooks::CODEBOOK1)),
+            Self::TurboQuantM2 => {
+                Box::new(turbo_quant::MSECoder::<2, _>::new(&codebooks::CODEBOOK2))
+            }
+            Self::TurboQuantM4 => {
+                Box::new(turbo_quant::MSECoder::<4, _>::new(&codebooks::CODEBOOK4))
+            }
+            Self::TurboQuantM8 => {
+                Box::new(turbo_quant::MSECoder::<8, _>::new(&codebooks::CODEBOOK8))
+            }
         }
     }
 

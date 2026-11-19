@@ -115,6 +115,7 @@ impl Codebook for Codebook8 {
 
 pub const CODEBOOK1: Codebook1 = Codebook1::new();
 pub const CODEBOOK2: Codebook2 = Codebook2::new();
+#[allow(dead_code)]
 pub const CODEBOOK3: Codebook3 = Codebook3::new();
 pub const CODEBOOK4: Codebook4 = Codebook4::new();
 pub const CODEBOOK8: Codebook8 = Codebook8::new();

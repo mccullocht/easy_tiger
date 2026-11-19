@@ -61,28 +61,3 @@ pub fn scale<const N: usize>(codebook: &[f32; N], dim: usize) -> [f32; N] {
     }
     scaled
 }
-
-/// Select the closest code (index) from codebook for value.
-// TODO: thresholding would improve selection speed.
-pub fn select_code<const N: usize>(codebook: &[f32; N], value: f32) -> u8 {
-    if N == 2 {
-        return if value > 0.0 { 1 } else { 0 };
-    }
-
-    let c = match codebook.binary_search_by(|c| c.total_cmp(&value)) {
-        Ok(i) => i,
-        Err(i) => {
-            // i is the first entry greater than value
-            if i == 0 {
-                0 // value is smaller than the minimum codebook value
-            } else if i == N {
-                N - 1 // value is larger than the maximum codebook value
-            } else {
-                let lo = value - codebook[i - 1];
-                let hi = codebook[i] - value;
-                if lo <= hi { i - 1 } else { i }
-            }
-        }
-    };
-    c as u8
-}

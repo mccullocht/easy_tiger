@@ -13,73 +13,21 @@ pub mod codebook;
 
 use std::borrow::Cow;
 
-use crate::codebooks::Codebook;
+use crate::codebooks::{Codebook, Codebook1};
 use crate::packing::{TurboPacker, TurboUnpacker};
 use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity, float32, rabitq};
 
-pub struct MSECoder<const B: usize, const N: usize> {
-    /// Unscaled codebook; scaled by `1/sqrt(D)` for each input vector.
-    codebook: [f32; N],
-}
-
-impl<const B: usize, const N: usize> MSECoder<B, N> {
-    pub fn new(codebook: &[f32; N]) -> Self {
-        Self {
-            codebook: *codebook,
-        }
-    }
-}
-
-impl<const B: usize, const N: usize> F32VectorCoder for MSECoder<B, N> {
-    fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
-        crate::assert_finite_vector(vector);
-        let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
-        assert!(norm.is_finite(), "vector magnitude is not finite");
-        out[..4].copy_from_slice(&norm.to_le_bytes());
-
-        let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
-        let codebook = codebook::scale(&self.codebook, vector.len());
-
-        let bits = &mut out[4..];
-        bits.fill(0);
-        let mut packer = TurboPacker::<B>::new(bits);
-        for v in vector {
-            packer.push(codebook::select_code(&codebook, *v * inv_norm));
-        }
-    }
-
-    fn byte_len(&self, dimensions: usize) -> usize {
-        std::mem::size_of::<f32>() + (dimensions * B).div_ceil(8)
-    }
-
-    fn decode_to(&self, encoded: &[u8], out: &mut [f32]) {
-        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
-        let bits = &encoded[4..];
-
-        // NB: the original dimensionality is not stored, so if D * B is not a multiple of 8 the
-        // codebook scale is computed from the padded dimension count and will be slightly off.
-        let codebook = codebook::scale(&self.codebook, self.dimensions(encoded.len()));
-        for (o, i) in out.iter_mut().zip(TurboUnpacker::<B>::new(bits)) {
-            *o = codebook[i as usize] * norm;
-        }
-    }
-
-    fn dimensions(&self, byte_len: usize) -> usize {
-        ((byte_len - std::mem::size_of::<f32>()) * 8).div_ceil(B)
-    }
-}
-
-pub struct MSECoderC<const B: usize, C: 'static> {
+pub struct MSECoder<const B: usize, C: 'static> {
     codebook: &'static C,
 }
 
-impl<const B: usize, C: Codebook> MSECoderC<B, C> {
+impl<const B: usize, C: Codebook> MSECoder<B, C> {
     pub fn new(codebook: &'static C) -> Self {
         Self { codebook }
     }
 }
 
-impl<const B: usize, C: Codebook> F32VectorCoder for MSECoderC<B, C> {
+impl<const B: usize, C: Codebook> F32VectorCoder for MSECoder<B, C> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         crate::assert_finite_vector(vector);
         let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
@@ -87,7 +35,6 @@ impl<const B: usize, C: Codebook> F32VectorCoder for MSECoderC<B, C> {
         out[..4].copy_from_slice(&norm.to_le_bytes());
 
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 0.0 };
-        // XXX not sure if this is all right.
         let scale = inv_norm * (vector.len() as f32).sqrt();
 
         let bits = &mut out[4..];
@@ -243,14 +190,10 @@ pub struct MSE1Coder {
 impl MSE1Coder {
     const HEADER_LEN: usize = 8;
 
-    pub fn new(codebook: &[f32; 2]) -> Self {
-        assert_eq!(
-            codebook[0], -codebook[1],
-            "1-bit codebook must be symmetric"
-        );
+    pub fn new(codebook: &Codebook1) -> Self {
         Self {
             k: rabitq::Kernel::default(),
-            centroid: codebook[1],
+            centroid: codebook.decode(1),
         }
     }
 
@@ -375,7 +318,7 @@ mod tests {
                 };
                 #[allow(unused_imports)]
                 use crate::turbo_quant::{
-                    MSE1Coder, MSE1QueryDistance, MSECoder, MSECoderC, MSEQueryDistance,
+                    MSE1Coder, MSE1QueryDistance, MSECoder, MSEQueryDistance,
                 };
 
                 const DIM: usize = TEST_VECTOR.len();
@@ -467,7 +410,8 @@ mod tests {
         &codebook::CENTROIDS_1,
         MSE1Coder,
         MSE1QueryDistance,
-        8
+        8,
+        coder_codebook = &CODEBOOK1
     );
 
     // Dot distance on centered vectors should still estimate the angular distance between the
@@ -538,7 +482,7 @@ mod tests {
         use crate::turbo_quant::{
             MSE1Coder, MSE1QueryDistance, codebook::CENTROIDS_1, inner_product_bias,
         };
-        use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity};
+        use crate::{F32VectorCoder, QueryVectorDistance, VectorSimilarity, codebooks};
 
         // Long enough to cover several SIMD blocks with a remainder.
         const DIM: usize = 300;
@@ -550,7 +494,7 @@ mod tests {
         #[test]
         fn decode_matches_scalar() {
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x7a11);
-            let coder = MSE1Coder::new(&CENTROIDS_1);
+            let coder = MSE1Coder::new(&codebooks::CODEBOOK1);
             for _ in 0..16 {
                 let v = random_vector(&mut rng);
                 let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -573,7 +517,7 @@ mod tests {
         #[test]
         fn query_distance_matches_float() {
             let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0xd07);
-            let coder = MSE1Coder::new(&CENTROIDS_1);
+            let coder = MSE1Coder::new(&codebooks::CODEBOOK1);
             for _ in 0..16 {
                 let q = crate::prepare_vector(random_vector(&mut rng), None, true, None);
                 let d = crate::prepare_vector(random_vector(&mut rng), None, true, None);
@@ -594,118 +538,40 @@ mod tests {
         }
     }
 
-    mse_tests!(mse2, 2, &codebook::CENTROIDS_2, MSECoder<2, 4>, MSEQueryDistance<2, 4>, 4);
-    mse_tests!(mse4, 4, &codebook::CENTROIDS_4, MSECoder<4, 16>, MSEQueryDistance<4, 16>, 4);
-    mse_tests!(mse8, 8, &codebook::CENTROIDS_8, MSECoder<8, 256>, MSEQueryDistance<8, 256>, 4);
-
     mse_tests!(
-        msec1,
+        mse1_generic,
         1,
         &codebook::CENTROIDS_1,
-        MSECoderC<1, Codebook1>,
+        MSECoder<1, Codebook1>,
         MSEQueryDistance<1, 2>,
         4,
         coder_codebook = &CODEBOOK1
     );
     mse_tests!(
-        msec2,
+        mse2,
         2,
         &codebook::CENTROIDS_2,
-        MSECoderC<2, Codebook2>,
+        MSECoder<2, Codebook2>,
         MSEQueryDistance<2, 4>,
         4,
         coder_codebook = &CODEBOOK2
     );
     mse_tests!(
-        msec4,
+        mse4,
         4,
         &codebook::CENTROIDS_4,
-        MSECoderC<4, Codebook4>,
+        MSECoder<4, Codebook4>,
         MSEQueryDistance<4, 16>,
         4,
         coder_codebook = &CODEBOOK4
     );
     mse_tests!(
-        msec8,
+        mse8,
         8,
         &codebook::CENTROIDS_8,
-        MSECoderC<8, Codebook8>,
+        MSECoder<8, Codebook8>,
         MSEQueryDistance<8, 256>,
         4,
         coder_codebook = &CODEBOOK8
     );
-
-    // MSECoderC should produce the same encoding as MSECoder with the equivalent codebook.
-    mod msec_matches_mse {
-        use approx::assert_abs_diff_eq;
-        use rand::{RngExt, SeedableRng};
-
-        use crate::F32VectorCoder;
-        use crate::codebooks::{CODEBOOK1, CODEBOOK2, CODEBOOK4, CODEBOOK8};
-        use crate::turbo_quant::{MSECoder, MSECoderC, codebook};
-
-        // Long enough to cover several SIMD blocks with a remainder; a multiple of 8 so that the
-        // dimension count recovered when decoding is exact for all bit widths.
-        const DIM: usize = 296;
-
-        fn check(expected_coder: &impl F32VectorCoder, actual_coder: &impl F32VectorCoder) {
-            let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0x3c0de);
-            for _ in 0..16 {
-                let v = (0..DIM)
-                    .map(|_| rng.random_range(-1.0f32..1.0))
-                    .collect::<Vec<_>>();
-                let expected = expected_coder.encode(&v);
-                let actual = actual_coder.encode(&v);
-                assert_eq!(actual.len(), expected.len());
-                assert_eq!(actual_coder.byte_len(DIM), expected_coder.byte_len(DIM));
-                assert_eq!(
-                    actual_coder.dimensions(actual.len()),
-                    expected_coder.dimensions(expected.len())
-                );
-                assert_eq!(actual, expected);
-
-                let mut expected_decoded = vec![0.0f32; DIM];
-                expected_coder.decode_to(&expected, &mut expected_decoded);
-                let mut actual_decoded = vec![0.0f32; DIM];
-                actual_coder.decode_to(&actual, &mut actual_decoded);
-                assert_abs_diff_eq!(
-                    actual_decoded.as_slice(),
-                    expected_decoded.as_slice(),
-                    epsilon = 1e-6
-                );
-            }
-        }
-
-        #[test]
-        fn msec1() {
-            check(
-                &MSECoder::<1, 2>::new(&codebook::CENTROIDS_1),
-                &MSECoderC::<1, _>::new(&CODEBOOK1),
-            );
-        }
-
-        #[test]
-        fn msec2() {
-            check(
-                &MSECoder::<2, 4>::new(&codebook::CENTROIDS_2),
-                &MSECoderC::<2, _>::new(&CODEBOOK2),
-            );
-        }
-
-        #[test]
-        fn msec4() {
-            check(
-                &MSECoder::<4, 16>::new(&codebook::CENTROIDS_4),
-                &MSECoderC::<4, _>::new(&CODEBOOK4),
-            );
-        }
-
-        #[test]
-        fn msec8() {
-            check(
-                &MSECoder::<8, 256>::new(&codebook::CENTROIDS_8),
-                &MSECoderC::<8, _>::new(&CODEBOOK8),
-            );
-        }
-    }
 }

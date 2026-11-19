@@ -5,6 +5,7 @@ use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 mod codebooks;
 pub mod float16;
 pub mod float32;
+mod int8;
 mod kernels;
 mod lvq;
 mod packing;
@@ -129,6 +130,28 @@ pub fn prepare_vector_from_f16(
     center: Option<&[f32]>,
 ) -> Vec<f32> {
     let mut out = vector.as_ref().to_f32_vec();
+    prepare_vector_in_place(&mut out, rotator, l2_normalize, center);
+    out
+}
+
+/// Prepare `vector` in place for further processing, typically either encoding or as input to an
+/// asymmetric distance function.
+///
+/// This method begins by casting each vector element `as f32` into a value in `-128.0..127.0`, then
+/// there are three optional operations that may be performed in order:
+/// 1. Rotate the vector. Requires that the dimensionality of the rotator and vector are the same.
+/// 2. L2 normalize the vector. This is recommended for angular distance.
+/// 3. Compute the residual of `vector` against `center`. Requires that the dimensionality of
+///    `vector` and `center` are the same.
+// XXX needs tests.
+pub fn prepare_vector_from_i8(
+    vector: impl AsRef<[i8]>,
+    rotator: Option<&Rotator>,
+    l2_normalize: bool,
+    center: Option<&[f32]>,
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; vector.as_ref().len()];
+    int8::decode_to_f32(vector.as_ref(), &mut out);
     prepare_vector_in_place(&mut out, rotator, l2_normalize, center);
     out
 }

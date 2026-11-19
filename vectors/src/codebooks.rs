@@ -20,6 +20,7 @@ const fn encode_thresholds<const N: usize>(decode: &[f32; N]) -> [f32; N] {
     encode
 }
 
+#[inline(always)]
 fn select_code<const N: usize>(encode: &[f32; N], v: f32) -> u8 {
     encode.iter().map(|&x| u8::from(x < v)).sum()
 }
@@ -48,10 +49,12 @@ macro_rules! declare_codebook {
         }
 
         impl Codebook for $name {
+            #[inline(always)]
             fn encode(&self, v: f32) -> u8 {
                 select_code(&self.encode, v)
             }
 
+            #[inline(always)]
             fn decode(&self, c: u8) -> f32 {
                 self.decode[c as usize]
             }
@@ -110,11 +113,13 @@ impl Codebook8 {
 }
 
 impl Codebook for Codebook8 {
+    #[inline(always)]
     fn encode(&self, v: f32) -> u8 {
         let block = select_code(&self.encode_block, v);
         block * 16 + select_code(&self.base.encode.as_chunks::<16>().0[block as usize], v)
     }
 
+    #[inline(always)]
     fn decode(&self, c: u8) -> f32 {
         self.base.decode(c)
     }

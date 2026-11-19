@@ -28,7 +28,7 @@ impl<const B: usize, C: Codebook> MSECoder<B, C> {
 impl<const B: usize, C: Codebook> F32VectorCoder for MSECoder<B, C> {
     fn encode_to(&self, vector: &[f32], out: &mut [u8]) {
         crate::assert_finite_vector(vector);
-        let norm = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let norm = float32::l2_norm(vector);
         assert!(norm.is_finite(), "vector magnitude is not finite");
         out[..4].copy_from_slice(&norm.to_le_bytes());
 

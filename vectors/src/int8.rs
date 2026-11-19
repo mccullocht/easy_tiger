@@ -81,3 +81,21 @@ pub fn decode_to_f32(vector: &[i8], out: &mut [f32]) {
         Kernel::Avx512 => unsafe { x86_64::avx512::decode_to_f32(vector, out) },
     }
 }
+
+/// Compute l2 distance squared between `a` and `b`.
+pub fn l2_distance_sq(a: &[i8], b: &[i8]) -> i32 {
+    assert_eq!(a.len(), b.len());
+    scalar::l2_distance_sq(a, b)
+}
+
+/// Compute inner product between `a` and `b`.
+pub fn inner_product(a: &[i8], b: &[i8]) -> i32 {
+    assert_eq!(a.len(), b.len());
+    scalar::inner_product(a, b)
+}
+
+/// Compute cosine similarity between `a` and `b`.
+pub fn cosine_similarity(a: &[i8], b: &[i8]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    scalar::cosine_similarity(a, b)
+}

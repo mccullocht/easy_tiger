@@ -10,3 +10,11 @@ pub fn decode_to_f32(vector: &[i8], out: &mut [f32]) {
         *o = *i as f32;
     }
 }
+
+#[inline(always)]
+pub fn inner_product(a: &[i8], b: &[i8]) -> i32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(&a, &b)| a as i32 * b as i32)
+        .sum::<i32>()
+}

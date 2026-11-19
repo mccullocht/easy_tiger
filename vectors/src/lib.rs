@@ -5,7 +5,7 @@ use std::{borrow::Cow, fmt::Debug, io, str::FromStr};
 mod codebooks;
 pub mod float16;
 pub mod float32;
-mod int8;
+pub mod int8;
 mod kernels;
 mod lvq;
 mod packing;
@@ -143,7 +143,6 @@ pub fn prepare_vector_from_f16(
 /// 2. L2 normalize the vector. This is recommended for angular distance.
 /// 3. Compute the residual of `vector` against `center`. Requires that the dimensionality of
 ///    `vector` and `center` are the same.
-// XXX needs tests.
 pub fn prepare_vector_from_i8(
     vector: impl AsRef<[i8]>,
     rotator: Option<&Rotator>,
@@ -151,7 +150,7 @@ pub fn prepare_vector_from_i8(
     center: Option<&[f32]>,
 ) -> Vec<f32> {
     let mut out = vec![0.0f32; vector.as_ref().len()];
-    int8::decode_to_f32(vector.as_ref(), &mut out);
+    int8::VectorCoder::default().convert_slice_to_f32(vector.as_ref(), &mut out);
     prepare_vector_in_place(&mut out, rotator, l2_normalize, center);
     out
 }
@@ -642,7 +641,7 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
 
 #[cfg(test)]
 mod test {
-    use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity, float32::l2_normalize};
+    use crate::{float32::l2_normalize, F32VectorCoder, F32VectorCoding, VectorSimilarity};
 
     struct TestVector {
         rvec: Vec<f32>,
@@ -733,9 +732,9 @@ mod test {
         assert_float_near!(f32_dist, query_dist, threshold, index);
     }
 
+    use rand::{rngs::SysRng, RngExt, SeedableRng, TryRng};
     use F32VectorCoding::{F16, TLVQ1, TLVQ2, TLVQ4, TLVQ8};
     use VectorSimilarity::{Dot, Euclidean};
-    use rand::{RngExt, SeedableRng, TryRng, rngs::SysRng};
 
     macro_rules! distance_test {
         ($name:ident, $sim:path, $coder:path, $epsilon:literal) => {
@@ -778,8 +777,8 @@ mod test {
 /// through every coder and every distance entry point.
 #[cfg(test)]
 mod degenerate_test {
-    use crate::{F32VectorCoding, VectorSimilarity, float32::l2_normalize};
-    use rand::{RngExt, SeedableRng, TryRng, rngs::SysRng};
+    use crate::{float32::l2_normalize, F32VectorCoding, VectorSimilarity};
+    use rand::{rngs::SysRng, RngExt, SeedableRng, TryRng};
 
     const CODINGS: [F32VectorCoding; 7] = [
         F32VectorCoding::F16,
@@ -930,9 +929,9 @@ mod degenerate_test {
 /// preparation/encode boundary rather than persisting silently corrupt codes.
 #[cfg(test)]
 mod nonfinite_input_test {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
-    use crate::{F32VectorCoding, VectorSimilarity, f16, prepare_vector, prepare_vector_from_f16};
+    use crate::{f16, prepare_vector, prepare_vector_from_f16, F32VectorCoding, VectorSimilarity};
 
     fn assert_panics<R>(label: &str, f: impl FnOnce() -> R) {
         assert!(

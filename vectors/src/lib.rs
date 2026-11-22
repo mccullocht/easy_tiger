@@ -660,7 +660,7 @@ impl<'a, D: VectorDistance> QueryVectorDistance for QuantizedQueryVectorDistance
 
 #[cfg(test)]
 mod test {
-    use crate::{float32::l2_normalize, F32VectorCoder, F32VectorCoding, VectorSimilarity};
+    use crate::{F32VectorCoder, F32VectorCoding, VectorSimilarity, float32::l2_normalize};
 
     struct TestVector {
         rvec: Vec<f32>,
@@ -751,9 +751,9 @@ mod test {
         assert_float_near!(f32_dist, query_dist, threshold, index);
     }
 
-    use rand::{rngs::SysRng, RngExt, SeedableRng, TryRng};
     use F32VectorCoding::{F16, TLVQ1, TLVQ2, TLVQ4, TLVQ8};
     use VectorSimilarity::{Dot, Euclidean};
+    use rand::{RngExt, SeedableRng, TryRng, rngs::SysRng};
 
     macro_rules! distance_test {
         ($name:ident, $sim:path, $coder:path, $epsilon:literal) => {
@@ -796,8 +796,8 @@ mod test {
 /// through every coder and every distance entry point.
 #[cfg(test)]
 mod degenerate_test {
-    use crate::{float32::l2_normalize, F32VectorCoding, VectorSimilarity};
-    use rand::{rngs::SysRng, RngExt, SeedableRng, TryRng};
+    use crate::{F32VectorCoding, VectorSimilarity, float32::l2_normalize};
+    use rand::{RngExt, SeedableRng, TryRng, rngs::SysRng};
 
     const CODINGS: [F32VectorCoding; 7] = [
         F32VectorCoding::F16,
@@ -948,9 +948,9 @@ mod degenerate_test {
 /// preparation/encode boundary rather than persisting silently corrupt codes.
 #[cfg(test)]
 mod nonfinite_input_test {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use crate::{f16, prepare_vector, prepare_vector_from_f16, F32VectorCoding, VectorSimilarity};
+    use crate::{F32VectorCoding, VectorSimilarity, f16, prepare_vector, prepare_vector_from_f16};
 
     fn assert_panics<R>(label: &str, f: impl FnOnce() -> R) {
         assert!(

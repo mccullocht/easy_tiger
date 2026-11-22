@@ -274,7 +274,7 @@ pub enum F32VectorCoding {
     ///
     /// Inputs should be randomly rotated before encoding (see [`prepare_vector`]).
     TurboQuantM8,
-    /// Raw `i8` vectors with an l2 norm header.
+    /// Raw `i8` vectors with a squared l2 norm header.
     ///
     /// This format exists to ingest vectors that are already `i8` quantized. Vectors must be
     /// encoded with [`int8::VectorCoder::encode`]; encoding `f32` vectors with [`Self::coder`] is

@@ -90,13 +90,12 @@ fn ref_distance(similarity: VectorSimilarity, a: &[i8], b: &[i8]) -> f64 {
 
 /// Absolute error tolerance when comparing a computed distance to [`ref_distance`].
 ///
-/// The stored l2 norm is an `f32`, so euclidean error scales with the squared norms.
-fn distance_tolerance(similarity: VectorSimilarity, a: &[i8], b: &[i8]) -> f64 {
+/// Euclidean distance is computed entirely from integers so it must be exact. Angular distance
+/// may differ in the last few bits depending on the order of floating point operations.
+fn distance_tolerance(similarity: VectorSimilarity) -> f64 {
     match similarity {
-        VectorSimilarity::Euclidean => {
-            1e-6 * (ref_inner_product(a, a) + ref_inner_product(b, b)) as f64 + 1e-9
-        }
-        VectorSimilarity::Dot => 1e-6,
+        VectorSimilarity::Euclidean => 0.0,
+        VectorSimilarity::Dot => 1e-12,
     }
 }
 
@@ -206,9 +205,8 @@ fn encode_layout() {
         let encoded = VectorCoder::default().encode(&v);
         assert_eq!(encoded.len(), len + VectorCoder::HEADER_LEN);
 
-        let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
-        let expected_norm = (ref_inner_product(&v, &v) as f64).sqrt() as f32;
-        assert_eq!(norm, expected_norm, "len={len}");
+        let norm_sq = u32::from_le_bytes(encoded[..4].try_into().unwrap());
+        assert_eq!(norm_sq as i64, ref_inner_product(&v, &v), "len={len}");
         assert_eq!(
             &encoded[4..],
             bytemuck::cast_slice::<i8, u8>(&v),
@@ -226,11 +224,11 @@ fn encode_extreme_norms() {
     // The squared norm of this vector exceeds 2^24 so it can't be exactly represented in f32.
     let v = vec![i8::MIN; LONG_LENGTH];
     let encoded = VectorCoder::default().encode(&v);
-    let norm = f32::from_le_bytes(encoded[..4].try_into().unwrap());
-    assert_eq!(norm, (128.0 * (LONG_LENGTH as f64).sqrt()) as f32);
+    let norm_sq = u32::from_le_bytes(encoded[..4].try_into().unwrap());
+    assert_eq!(norm_sq, 16384 * LONG_LENGTH as u32);
 
     let encoded = VectorCoder::default().encode(&[0i8; 16]);
-    assert_eq!(f32::from_le_bytes(encoded[..4].try_into().unwrap()), 0.0);
+    assert_eq!(u32::from_le_bytes(encoded[..4].try_into().unwrap()), 0);
 }
 
 #[test]
@@ -328,7 +326,7 @@ fn distance_matches_reference() {
 
             let expected = ref_distance(similarity, &a, &b);
             let actual = dist.distance(&ea, &eb);
-            let tolerance = distance_tolerance(similarity, &a, &b);
+            let tolerance = distance_tolerance(similarity);
             assert!(
                 (expected - actual).abs() <= tolerance,
                 "{similarity} i={i} dim={dim} expected={expected} actual={actual}"
@@ -354,17 +352,14 @@ fn distance_identical_and_opposite() {
         let eneg = VectorCoder::default().encode(&neg);
 
         let l2 = Distance::new(VectorSimilarity::Euclidean);
-        let tolerance = distance_tolerance(VectorSimilarity::Euclidean, &v, &v);
-        assert!(l2.distance(&ev, &ev) <= tolerance, "dim={dim}");
+        assert_eq!(l2.distance(&ev, &ev), 0.0, "dim={dim}");
         let expected = 4.0 * ref_inner_product(&v, &v) as f64;
-        assert!(
-            (l2.distance(&ev, &eneg) - expected).abs() <= tolerance,
-            "dim={dim}"
-        );
+        assert_eq!(l2.distance(&ev, &eneg), expected, "dim={dim}");
 
+        // The product of the squared norms is a perfect square so these are exact.
         let dot = Distance::new(VectorSimilarity::Dot);
-        assert!(dot.distance(&ev, &ev) <= 1e-6, "dim={dim}");
-        assert!(dot.distance(&ev, &eneg) >= 1.0 - 1e-6, "dim={dim}");
+        assert_eq!(dot.distance(&ev, &ev), 0.0, "dim={dim}");
+        assert_eq!(dot.distance(&ev, &eneg), 1.0, "dim={dim}");
     }
 }
 
@@ -375,14 +370,11 @@ fn distance_extremes() {
         let max = VectorCoder::default().encode(&vec![i8::MAX; dim]);
 
         let l2 = Distance::new(VectorSimilarity::Euclidean).distance(&min, &max);
-        let expected = 255.0f64.powi(2) * dim as f64;
-        assert!(
-            (l2 - expected).abs() <= 1e-6 * expected,
-            "dim={dim} expected={expected} actual={l2}"
-        );
+        assert_eq!(l2, 255.0f64.powi(2) * dim as f64, "dim={dim}");
 
+        // The product of the squared norms is a perfect square so this is exact.
         let dot = Distance::new(VectorSimilarity::Dot).distance(&min, &max);
-        assert!((dot - 1.0).abs() <= 1e-6, "dim={dim} actual={dot}");
+        assert_eq!(dot, 1.0, "dim={dim}");
     }
 }
 
@@ -397,9 +389,8 @@ fn distance_zero_vector() {
         let l2 = Distance::new(VectorSimilarity::Euclidean);
         assert_eq!(l2.distance(&zero, &zero), 0.0);
         let expected = ref_inner_product(&v, &v) as f64;
-        let tolerance = distance_tolerance(VectorSimilarity::Euclidean, &v, &v);
-        assert!((l2.distance(&zero, &ev) - expected).abs() <= tolerance);
-        assert!((l2.distance(&ev, &zero) - expected).abs() <= tolerance);
+        assert_eq!(l2.distance(&zero, &ev), expected);
+        assert_eq!(l2.distance(&ev, &zero), expected);
 
         // Cosine is undefined for a zero vector; it must sanitize to the worst score.
         let dot = Distance::new(VectorSimilarity::Dot);
@@ -526,7 +517,7 @@ fn coding_distances() {
 
             assert!(
                 (expected - ref_distance(similarity, &a, &b)).abs()
-                    <= distance_tolerance(similarity, &a, &b),
+                    <= distance_tolerance(similarity),
                 "{similarity}"
             );
         }

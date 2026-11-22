@@ -3,8 +3,9 @@
 //! `i8` vectors are not fully supported because transforms almost always need to be performed in
 //! floating point space. Instead this offers a subset of the functionality provided for other
 //! formats:
-//! * A format extension that stores the l2 norm with the vector. This is necessary to maximize the
-//!   efficiency of vector comparisons on most CPUs.
+//! * A format extension that stores the squared l2 norm with the vector. This is necessary to
+//!   maximize the efficiency of vector comparisons on most CPUs. Storing the squared norm as an
+//!   integer allows euclidean distance to be computed exactly.
 //! * Symmetric and asymmetric distance functions that operate on the `i8` format.
 //! * Efficient decode-to-float operations so that you can transform and re-quantize `i8` vectors.
 
@@ -84,11 +85,15 @@ impl Default for Kernel {
 ///
 /// While this does implement [`F32VectorCoder`] the `encode()` path is not fully implemented since
 /// the operation is not well defined, and the purpose of this format is to support `i8` ingestion.
+///
+/// Encoded vectors consist of a little-endian `u32` squared l2 norm followed by the raw vector.
+/// Inner products are accumulated in `i32` so vectors are limited to 131071 dimensions, the most
+/// that can be represented if every component is `i8::MIN`.
 #[derive(Debug, Copy, Clone, Default)]
 pub struct VectorCoder(Kernel);
 
 impl VectorCoder {
-    const HEADER_LEN: usize = std::mem::size_of::<f32>();
+    const HEADER_LEN: usize = std::mem::size_of::<u32>();
 
     /// Encode `vector` in the `i8` format.
     ///
@@ -103,12 +108,10 @@ impl VectorCoder {
     ///
     /// `out` must be exactly `VectorCoder::encoded_len(vector.len())` bytes long.
     pub fn encode_to(&self, vector: &[i8], out: &mut [u8]) {
-        // Cast ip to f64 to avoid rounding if the product is > 2^23
-        let ip = inner_product(self.0, vector, vector);
-        let l2_norm = (ip as f64).sqrt() as f32;
+        let l2_norm_sq = inner_product(self.0, vector, vector) as u32;
 
         let (header, vector_bytes) = out.split_at_mut(Self::HEADER_LEN);
-        header.copy_from_slice(&l2_norm.to_le_bytes());
+        header.copy_from_slice(&l2_norm_sq.to_le_bytes());
         vector_bytes.copy_from_slice(bytemuck::cast_slice(vector));
     }
 
@@ -167,27 +170,31 @@ fn inner_product(k: Kernel, a: &[i8], b: &[i8]) -> i32 {
     }
 }
 
+/// Split an encoded vector into its squared l2 norm and vector components.
 #[inline]
-fn decode_vector(encoded: &[u8]) -> (f32, &[i8]) {
+fn decode_vector(encoded: &[u8]) -> (u32, &[i8]) {
     assert!(encoded.len() >= VectorCoder::HEADER_LEN);
     let (header, vector) = encoded.split_at(VectorCoder::HEADER_LEN);
     (
-        f32::from_le_bytes(header.try_into().unwrap()),
+        u32::from_le_bytes(header.try_into().unwrap()),
         bytemuck::cast_slice(vector),
     )
 }
 
+/// Compute distance from the inner product and squared l2 norms of two vectors.
 #[inline]
-fn compute_distance(similarity: VectorSimilarity, ip: i32, norms: (f32, f32)) -> f64 {
+fn compute_distance(similarity: VectorSimilarity, ip: i32, norms_sq: (u32, u32)) -> f64 {
     match similarity {
+        // All inputs are integers so this is exact. The result can only be negative if a header is
+        // inconsistent with the vector.
         VectorSimilarity::Euclidean => {
-            ((norms.0 as f64).powi(2) + (norms.1 as f64).powi(2) - 2.0 * ip as f64).max(0.0)
+            (norms_sq.0 as i64 + norms_sq.1 as i64 - 2 * ip as i64).max(0) as f64
         }
         // This is strictly cosine similarity, we don't anticipate every i8 scalar quantizer
         // correctly normalizing the vectors before quantization. Cosine is undefined if either
         // vector is zero; sanitize the resulting NaN to the worst possible score.
         VectorSimilarity::Dot => sanitize_distance(
-            (ip as f64 / (norms.0 as f64 * norms.1 as f64))
+            (ip as f64 / (norms_sq.0 as f64 * norms_sq.1 as f64).sqrt())
                 .mul_add(-0.5, 0.5)
                 .clamp(0.0, 1.0),
             true,
@@ -222,7 +229,7 @@ pub(super) struct QueryDistance<'a> {
     k: Kernel,
     similarity: VectorSimilarity,
 
-    query_norm: f32,
+    query_norm_sq: u32,
     query_vector: Cow<'a, [u8]>,
 }
 
@@ -231,7 +238,7 @@ impl<'a> QueryDistance<'a> {
         Self {
             k: Kernel::default(),
             similarity,
-            query_norm: f32::from_le_bytes(query.as_chunks::<4>().0[0]),
+            query_norm_sq: u32::from_le_bytes(query.as_chunks::<4>().0[0]),
             query_vector: query,
         }
     }
@@ -247,7 +254,7 @@ impl QueryVectorDistance for QueryDistance<'_> {
         compute_distance(
             self.similarity,
             inner_product(self.k, self.query(), dv),
-            (self.query_norm, dnorm),
+            (self.query_norm_sq, dnorm),
         )
     }
 }

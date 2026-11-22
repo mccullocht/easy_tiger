@@ -2,7 +2,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use half::f16;
 use rand::{RngExt, SeedableRng};
 use vectors::rotate::{Kernel, Rotator};
-use vectors::{F32VectorCoding, VectorSimilarity, prepare_vector};
+use vectors::{F32VectorCoding, VectorSimilarity, int8, prepare_vector};
 
 const SEED: u64 = 0x455A_5469676572;
 const DIMENSIONS: usize = 2048;
@@ -19,6 +19,13 @@ fn generate_test_vectors(dim: usize) -> (Vec<f32>, Vec<f32>) {
         .random_iter::<f32>()
         .take(dim)
         .collect::<Vec<_>>();
+    (a, b)
+}
+
+fn generate_test_vectors_i8(dim: usize) -> (Vec<i8>, Vec<i8>) {
+    let mut rng = rand_xoshiro::Xoroshiro128PlusPlus::seed_from_u64(SEED);
+    let a = (&mut rng).random_iter::<i8>().take(dim).collect::<Vec<_>>();
+    let b = (&mut rng).random_iter::<i8>().take(dim).collect::<Vec<_>>();
     (a, b)
 }
 
@@ -265,11 +272,81 @@ fn turbo_quant_benchmarks(c: &mut Criterion) {
     }
 }
 
+fn int8_benchmarks(c: &mut Criterion) {
+    // i8 vectors are encoded from i8 input, and there is no asymmetric f32 query distance, so
+    // query benchmarks use an encoded i8 query. Both similarities are benchmarked since they use
+    // the stored norms differently.
+    let (a, b) = generate_test_vectors_i8(DIMENSIONS);
+    let coder = int8::VectorCoder::default();
+    let x = coder.encode(&a);
+    let y = coder.encode(&b);
+
+    let mut group = c.benchmark_group("i8/distance");
+    group.throughput(Throughput::ElementsAndBytes {
+        elements: 1,
+        bytes: y.len() as u64,
+    });
+    for sim in VectorSimilarity::all() {
+        let dist = F32VectorCoding::I8
+            .distance_symmetric(sim)
+            .expect("supports symmetric distance");
+        group.bench_function(format!("doc/{sim}"), |b| {
+            b.iter(|| std::hint::black_box(dist.distance(&x, &y)))
+        });
+
+        let query_dist = F32VectorCoding::I8
+            .query_distance_symmetric(sim, x.as_slice())
+            .expect("supports symmetric distance");
+        group.bench_function(format!("query/{sim}"), |b| {
+            b.iter(|| std::hint::black_box(query_dist.distance(&y)))
+        });
+    }
+    drop(group);
+
+    let mut group = c.benchmark_group("i8/bulk_distance");
+    group.throughput(Throughput::ElementsAndBytes {
+        elements: BULK_VECTORS as u64,
+        bytes: (y.len() * BULK_VECTORS) as u64,
+    });
+    let bulk_docs_storage = vec![y.clone(); BULK_VECTORS];
+    let bulk_docs = bulk_docs_storage
+        .iter()
+        .map(|x| x.as_slice())
+        .collect::<Vec<_>>();
+    let mut bulk_out = vec![0.0; BULK_VECTORS];
+    for sim in VectorSimilarity::all() {
+        let dist = F32VectorCoding::I8
+            .distance_symmetric(sim)
+            .expect("supports symmetric distance");
+        group.bench_function(format!("doc/{sim}"), |b| {
+            b.iter(|| {
+                std::hint::black_box({
+                    dist.bulk_distance(&x, &bulk_docs, &mut bulk_out);
+                    bulk_out[0]
+                })
+            })
+        });
+
+        let query_dist = F32VectorCoding::I8
+            .query_distance_symmetric(sim, x.as_slice())
+            .expect("supports symmetric distance");
+        group.bench_function(format!("query/{sim}"), |b| {
+            b.iter(|| {
+                std::hint::black_box({
+                    query_dist.bulk_distance(&bulk_docs, &mut bulk_out);
+                    bulk_out[0]
+                })
+            })
+        });
+    }
+}
+
 criterion_group!(
     benches,
     float32_benchmarks,
     float16_benchmarks,
     quantized_normalized_benchmarks,
     turbo_quant_benchmarks,
+    int8_benchmarks,
 );
 criterion_main!(benches);

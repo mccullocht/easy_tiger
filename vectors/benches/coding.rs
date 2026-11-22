@@ -1,7 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use rand::{RngExt, SeedableRng};
 use vectors::rotate::{Kernel, Rotator};
-use vectors::{F32VectorCoding, VectorSimilarity, prepare_vector};
+use vectors::{F32VectorCoding, VectorSimilarity, int8, prepare_vector};
 
 const SEED: u64 = 0x455A_5469676572;
 const DIMENSIONS: usize = 1024;
@@ -12,6 +12,11 @@ fn generate_test_vector(dim: usize) -> Vec<f32> {
         .by_ref()
         .take(dim)
         .collect::<Vec<_>>()
+}
+
+fn generate_test_vector_i8(dim: usize) -> Vec<i8> {
+    let rng = rand_xoshiro::Xoroshiro128PlusPlus::seed_from_u64(SEED);
+    rng.random_iter::<i8>().take(dim).collect::<Vec<_>>()
 }
 
 fn benchmark_coding(
@@ -90,6 +95,22 @@ fn turbo_quant_benchmarks(c: &mut Criterion) {
     }
 }
 
+fn int8_benchmarks(c: &mut Criterion) {
+    // i8 vectors can't be encoded from f32 so this uses the i8 encoder directly.
+    let vector = generate_test_vector_i8(DIMENSIONS);
+    let i8_coder = int8::VectorCoder::default();
+    let coder = F32VectorCoding::I8.coder();
+    let mut out = vec![0u8; coder.byte_len(vector.len())];
+    c.bench_function("i8/coding", |b| {
+        b.iter(|| i8_coder.encode_to(&vector, std::hint::black_box(&mut out)))
+    });
+
+    let mut decoded = vec![0f32; vector.len()];
+    c.bench_function("i8/decode", |b| {
+        b.iter(|| coder.decode_to(&out, std::hint::black_box(&mut decoded)))
+    });
+}
+
 fn rotator_benchmarks(c: &mut Criterion) {
     for kernel in Kernel::all() {
         for dim in [512usize, 768, 1024, 1536, 2048] {
@@ -109,6 +130,7 @@ criterion_group!(
     binary_benchmarks,
     lvq_benchmarks,
     turbo_quant_benchmarks,
+    int8_benchmarks,
     rotator_benchmarks,
 );
 criterion_main!(benches);

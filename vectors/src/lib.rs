@@ -274,6 +274,15 @@ pub enum F32VectorCoding {
     ///
     /// Inputs should be randomly rotated before encoding (see [`prepare_vector`]).
     TurboQuantM8,
+    /// Raw `i8` vectors with an l2 norm header.
+    ///
+    /// This format exists to ingest vectors that are already `i8` quantized. Vectors must be
+    /// encoded with [`int8::VectorCoder::encode`]; encoding `f32` vectors with [`Self::coder`] is
+    /// not supported and will panic, as will [`Self::query_distance_asymmetric`]. Use
+    /// [`Self::query_distance_symmetric`] with an encoded `i8` query instead.
+    ///
+    /// [`VectorSimilarity::Dot`] computes cosine distance, so vectors do not need to be normalized.
+    I8,
 }
 
 impl F32VectorCoding {
@@ -304,6 +313,7 @@ impl F32VectorCoding {
             Self::TurboQuantM8 => {
                 Box::new(turbo_quant::MSECoder::<8, _>::new(&codebooks::CODEBOOK8))
             }
+            Self::I8 => Box::new(int8::VectorCoder::default()),
         }
     }
 
@@ -330,6 +340,7 @@ impl F32VectorCoding {
             (Self::TLVQ8, _) => Box::new(lvq::TurboPrimaryDistance::<8>::new(similarity)),
             (Self::RaBitQ, _) => Box::new(rabitq::Distance::new(similarity)),
             (Self::QuIVer, _) => quiver::new_symmetric_distance(),
+            (Self::I8, _) => Box::new(int8::Distance::new(similarity)),
             (Self::TurboQuantM1, _)
             | (Self::TurboQuantM2, _)
             | (Self::TurboQuantM4, _)
@@ -345,7 +356,8 @@ impl F32VectorCoding {
     /// stored vectors were centered, the same centering) -- typically via [`prepare_vector`].
     ///
     /// *Panics* if `query` contains a non-finite component, or is empty for codecs that require a
-    /// non-empty query.
+    /// non-empty query. Also panics for [`F32VectorCoding::I8`], which does not support `f32`
+    /// queries.
     pub fn query_distance_asymmetric<'a>(
         &self,
         similarity: VectorSimilarity,
@@ -395,6 +407,10 @@ impl F32VectorCoding {
                 query,
                 &codebooks::CODEBOOK8,
             )),
+            (Self::I8, _) => panic!(
+                "asymmetric f32 queries are not supported for i8 vectors; \
+                 encode the query as i8 and use query_distance_symmetric()"
+            ),
         }
     }
 
@@ -443,6 +459,7 @@ impl F32VectorCoding {
             }
             (_, Self::RaBitQ) => quantized_qvd!(rabitq::Distance::new(similarity), query),
             (_, Self::QuIVer) => quiver::new_symmetric_query_distance(query.into()),
+            (_, Self::I8) => Box::new(int8::QueryDistance::new(similarity, query.into())),
             (_, Self::TurboQuantM1)
             | (_, Self::TurboQuantM2)
             | (_, Self::TurboQuantM4)
@@ -470,6 +487,7 @@ impl FromStr for F32VectorCoding {
             "tqm2" => Ok(Self::TurboQuantM2),
             "tqm4" => Ok(Self::TurboQuantM4),
             "tqm8" => Ok(Self::TurboQuantM8),
+            "i8" => Ok(Self::I8),
             _ => Err(input_err(format!("unknown vector coding {s}"))),
         }
     }
@@ -490,6 +508,7 @@ impl std::fmt::Display for F32VectorCoding {
             Self::TurboQuantM2 => write!(f, "tqm2"),
             Self::TurboQuantM4 => write!(f, "tqm4"),
             Self::TurboQuantM8 => write!(f, "tqm8"),
+            Self::I8 => write!(f, "i8"),
         }
     }
 }

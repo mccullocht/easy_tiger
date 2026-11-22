@@ -8,17 +8,19 @@
 //! * Symmetric and asymmetric distance functions that operate on the `i8` format.
 //! * Efficient decode-to-float operations so that you can transform and re-quantize `i8` vectors.
 
-#![allow(dead_code)] // XXX DO NOT MERGE
-
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 mod scalar;
+#[cfg(test)]
+mod test;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
 use std::borrow::Cow;
 
-use super::{F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity};
+use super::{
+    F32VectorCoder, QueryVectorDistance, VectorDistance, VectorSimilarity, sanitize_distance,
+};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Kernel {
@@ -179,13 +181,17 @@ fn decode_vector(encoded: &[u8]) -> (f32, &[i8]) {
 fn compute_distance(similarity: VectorSimilarity, ip: i32, norms: (f32, f32)) -> f64 {
     match similarity {
         VectorSimilarity::Euclidean => {
-            ((norms.0 as f64).powi(2) + (norms.1 as f64).powi(2) - ip as f64).max(0.0)
+            ((norms.0 as f64).powi(2) + (norms.1 as f64).powi(2) - 2.0 * ip as f64).max(0.0)
         }
         // This is strictly cosine similarity, we don't anticipate every i8 scalar quantizer
-        // correctly normalizing the vectors before quantization.
-        VectorSimilarity::Dot => (ip as f64 / (norms.0 as f64 * norms.1 as f64))
-            .mul_add(-0.5, 0.5)
-            .clamp(0.0, 1.0),
+        // correctly normalizing the vectors before quantization. Cosine is undefined if either
+        // vector is zero; sanitize the resulting NaN to the worst possible score.
+        VectorSimilarity::Dot => sanitize_distance(
+            (ip as f64 / (norms.0 as f64 * norms.1 as f64))
+                .mul_add(-0.5, 0.5)
+                .clamp(0.0, 1.0),
+            true,
+        ),
     }
 }
 
@@ -240,7 +246,7 @@ impl QueryVectorDistance for QueryDistance<'_> {
         let (dnorm, dv) = decode_vector(doc);
         compute_distance(
             self.similarity,
-            inner_product(self.k, &self.query(), dv),
+            inner_product(self.k, self.query(), dv),
             (self.query_norm, dnorm),
         )
     }

@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use half::{f16, slice::HalfFloatSliceExt};
 use indicatif::ProgressIterator;
 use rand::{Rng, RngExt, SeedableRng};
@@ -13,6 +13,12 @@ use rand_distr::{Distribution, StandardNormal};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::ui::progress_bar;
+
+/// Number of standard deviations of a unit-norm Gaussian component mapped to
+/// `i8::MAX` (127). Each component of a `dim`-dimensional unit Gaussian vector
+/// has standard deviation `1 / sqrt(dim)`, so `3.8`σ covers ~99.985% of
+/// components without clipping across common dimensionalities (512–4096).
+const I8_SIGMA: f32 = 3.8;
 
 /// Default maximum Euclidean distance of a generated vector from its cluster
 /// center, roughly matching the locality of real transformer embedding data.
@@ -32,9 +38,19 @@ const MAX_TARGET_RADIUS: f32 = 1.4;
 /// Rejection attempts before falling back to bisection of the noise scale.
 const MAX_REJECTION_ATTEMPTS: usize = 32;
 
+/// Element format for generated vectors.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Little-endian IEEE f16 values.
+    #[default]
+    F16,
+    /// Raw signed 8-bit integers scaled for unit-norm Gaussian components.
+    I8,
+}
+
 #[derive(Args)]
 pub struct GenerateArgs {
-    /// Output file to write generated vectors as little-endian f16 values.
+    /// Output file to write generated vectors in BigANN format (<count,dims> header followed by vector data).
     #[arg(short, long)]
     output: PathBuf,
     /// Number of dimensions per vector.
@@ -46,6 +62,9 @@ pub struct GenerateArgs {
     /// Random seed for reproducible generation.
     #[arg(short, long)]
     seed: u64,
+    /// Output vector element format.
+    #[arg(short, long, value_enum, default_value_t = OutputFormat::F16)]
+    format: OutputFormat,
     /// Number of cluster centers to maintain. When set, vectors are generated
     /// in clusters around randomly placed unit-norm centers instead of
     /// uniformly; exhausted centers are replaced with fresh ones.
@@ -73,7 +92,7 @@ pub fn generate(args: GenerateArgs) -> io::Result<()> {
     out.write_all(&(dims as u32).to_le_bytes())?;
 
     let mut v = vec![0.0f32; dims];
-    let mut v16 = vec![f16::ZERO; dims];
+    let mut writer = VectorWriter::new(args.format, dims);
     match args.centers {
         None => {
             for _ in (0..count).progress_with(progress_bar(count, "generate")) {
@@ -81,7 +100,7 @@ pub fn generate(args: GenerateArgs) -> io::Result<()> {
                     *x = StandardNormal.sample(&mut rng);
                 }
                 vectors::prepare_vector_in_place(&mut v, None, true, None);
-                write_vector(&mut out, &v, &mut v16)?;
+                writer.write(&mut out, &v)?;
             }
         }
         Some(centers) => {
@@ -109,11 +128,11 @@ pub fn generate(args: GenerateArgs) -> io::Result<()> {
             let mut noise = vec![0.0f32; dims];
             for _ in (0..count).progress_with(progress_bar(count, "generate")) {
                 pool.next(&mut rng, &mut noise, &mut v);
-                // The radius cap is enforced in f32 before encoding; f16 rounding
-                // (~2^-11 relative) can push a vector ~1e-3 past the radius on
-                // disk. Enforce the cap post-encode instead if the on-disk
+                // The radius cap is enforced in f32 before encoding; quantization
+                // rounding (f16 or i8) can push a vector slightly past the radius
+                // on disk. Enforce the cap post-encode instead if the on-disk
                 // guarantee must be exact.
-                write_vector(&mut out, &v, &mut v16)?;
+                writer.write(&mut out, &v)?;
             }
         }
     }
@@ -122,14 +141,55 @@ pub fn generate(args: GenerateArgs) -> io::Result<()> {
     Ok(())
 }
 
-/// Writes `v` to `out` as little-endian f16, converting through the `v16`
-/// scratch buffer.
-fn write_vector(out: &mut impl Write, v: &[f32], v16: &mut [f16]) -> io::Result<()> {
-    v16.convert_from_f32_slice(v);
-    for &x in v16.iter() {
-        out.write_all(&x.to_le_bytes())?;
+/// Scratch buffer and encoding parameters for writing generated f32 vectors in
+/// the selected [`OutputFormat`].
+enum VectorWriter {
+    F16 { buf: Vec<f16> },
+    I8 { scale: f32, buf: Vec<i8> },
+}
+
+impl VectorWriter {
+    fn new(format: OutputFormat, dims: usize) -> Self {
+        match format {
+            OutputFormat::F16 => Self::F16 {
+                buf: vec![f16::ZERO; dims],
+            },
+            OutputFormat::I8 => Self::I8 {
+                scale: i8_scale(dims),
+                buf: vec![0; dims],
+            },
+        }
     }
-    Ok(())
+
+    fn write(&mut self, out: &mut impl Write, v: &[f32]) -> io::Result<()> {
+        match self {
+            Self::F16 { buf } => {
+                buf.convert_from_f32_slice(v);
+                for &x in buf.iter() {
+                    out.write_all(&x.to_le_bytes())?;
+                }
+                Ok(())
+            }
+            Self::I8 { scale, buf } => {
+                quantize_i8(v, *scale, buf);
+                out.write_all(bytemuck::cast_slice(buf))
+            }
+        }
+    }
+}
+
+/// Scale factor mapping `±I8_SIGMA / sqrt(dims)` to `±127` before rounding to `i8`.
+fn i8_scale(dims: usize) -> f32 {
+    127.0 * (dims as f32).sqrt() / I8_SIGMA
+}
+
+/// Scales `v` by `scale`, rounds to the nearest integer, clamps to `[-127, 127]`,
+/// and writes the resulting `i8` components to `out`.
+fn quantize_i8(v: &[f32], scale: f32, out: &mut [i8]) {
+    debug_assert_eq!(v.len(), out.len());
+    for (o, &x) in out.iter_mut().zip(v) {
+        *o = (x * scale).round().clamp(-127.0, 127.0) as i8;
+    }
 }
 
 /// Default per-center use cap: ceil(4/3 · count / centers) so the expected
@@ -416,6 +476,7 @@ mod test {
                 dimensions: NonZero::new(16).unwrap(),
                 count: NonZero::new(64).unwrap(),
                 seed: 7,
+                format: OutputFormat::F16,
                 centers: None,
                 cluster_radius: DEFAULT_CLUSTER_RADIUS,
                 max_per_center: None,
@@ -428,6 +489,150 @@ mod test {
         assert_eq!(a.len(), 8 + 64 * 16 * 2);
         assert_eq!(&a[..4], &64u32.to_le_bytes());
         assert_eq!(&a[4..8], &16u32.to_le_bytes());
+    }
+
+    #[test]
+    fn quantize_i8_rounds_and_clamps() {
+        let scale = i8_scale(1024);
+        let sigma_step = 1.0 / (1024.0f32).sqrt();
+        let input = [
+            0.0,
+            I8_SIGMA * sigma_step,
+            -I8_SIGMA * sigma_step,
+            10.0 * sigma_step,
+            -10.0 * sigma_step,
+            0.5 / scale,
+            -0.5 / scale,
+        ];
+        let mut out = vec![0i8; input.len()];
+        quantize_i8(&input, scale, &mut out);
+        assert_eq!(out, [0, 127, -127, 127, -127, 1, -1]);
+    }
+
+    fn cosine_f16_i8(a: &[f16], b: &[i8]) -> f64 {
+        let mut dot = 0.0f64;
+        let mut na = 0.0f64;
+        let mut nb = 0.0f64;
+        for (&x, &y) in a.iter().zip(b) {
+            let xf = x.to_f64();
+            let yf = y as f64;
+            dot += xf * yf;
+            na += xf * xf;
+            nb += yf * yf;
+        }
+        dot / (na * nb).sqrt()
+    }
+
+    #[test]
+    fn i8_uniform_format_and_distribution() {
+        use easy_tiger::input::{DerefVectorStore, VectorStore};
+
+        let dir = std::env::temp_dir();
+        let f16_path = dir.join("et_generate_i8_uniform_ref.f16vecs");
+        let i8_path = dir.join("et_generate_i8_uniform_test.i8vecs");
+        let dims = 1024;
+        let count = 64;
+
+        generate(GenerateArgs {
+            output: f16_path.clone(),
+            dimensions: NonZero::new(dims).unwrap(),
+            count: NonZero::new(count).unwrap(),
+            seed: 42,
+            format: OutputFormat::F16,
+            centers: None,
+            cluster_radius: DEFAULT_CLUSTER_RADIUS,
+            max_per_center: None,
+        })
+        .unwrap();
+        generate(GenerateArgs {
+            output: i8_path.clone(),
+            dimensions: NonZero::new(dims).unwrap(),
+            count: NonZero::new(count).unwrap(),
+            seed: 42,
+            format: OutputFormat::I8,
+            centers: None,
+            cluster_radius: DEFAULT_CLUSTER_RADIUS,
+            max_per_center: None,
+        })
+        .unwrap();
+
+        let raw_i8 = std::fs::read(&i8_path).unwrap();
+        assert_eq!(raw_i8.len(), 8 + count * dims);
+        assert_eq!(&raw_i8[..4], &(count as u32).to_le_bytes());
+        assert_eq!(&raw_i8[4..8], &(dims as u32).to_le_bytes());
+
+        let f16_store: DerefVectorStore<f16, Vec<u8>> =
+            DerefVectorStore::new(std::fs::read(&f16_path).unwrap()).unwrap();
+        let i8_store: DerefVectorStore<i8, Vec<u8>> = DerefVectorStore::new(raw_i8).unwrap();
+        assert_eq!(i8_store.len(), count);
+        assert_eq!(i8_store.elem_stride(), dims);
+
+        let mut sum_sq = 0.0f64;
+        let mut clipped = 0usize;
+        for i in 0..count {
+            let cos = cosine_f16_i8(&f16_store[i], &i8_store[i]);
+            assert!(
+                cos > 0.999,
+                "vector {i} cosine similarity {cos} too low after i8 quantization"
+            );
+            for &c in &i8_store[i] {
+                assert_ne!(c, i8::MIN, "symmetric clamping should not emit i8::MIN");
+                if c.abs() == 127 {
+                    clipped += 1;
+                }
+                sum_sq += (c as f64) * (c as f64);
+            }
+        }
+
+        let total = (count * dims) as f64;
+        let rms = (sum_sq / total).sqrt();
+        let expected_std = 127.0 / I8_SIGMA as f64;
+        assert!(
+            (rms - expected_std).abs() / expected_std < 0.05,
+            "component RMS {rms} not within 5% of expected {expected_std}"
+        );
+        let clip_rate = clipped as f64 / total;
+        assert!(clip_rate < 0.002, "clip rate {clip_rate} unexpectedly high");
+    }
+
+    #[test]
+    fn i8_clustered_mode() {
+        use easy_tiger::input::{DerefVectorStore, VectorStore};
+
+        let dir = std::env::temp_dir();
+        let f16_path = dir.join("et_generate_i8_clustered_ref.f16vecs");
+        let i8_path = dir.join("et_generate_i8_clustered_test.i8vecs");
+        let dims = 512;
+        let count = 64;
+
+        for (path, format) in [(&f16_path, OutputFormat::F16), (&i8_path, OutputFormat::I8)] {
+            generate(GenerateArgs {
+                output: path.clone(),
+                dimensions: NonZero::new(dims).unwrap(),
+                count: NonZero::new(count).unwrap(),
+                seed: 99,
+                format,
+                centers: Some(NonZero::new(8).unwrap()),
+                cluster_radius: DEFAULT_CLUSTER_RADIUS,
+                max_per_center: None,
+            })
+            .unwrap();
+        }
+
+        let f16_store: DerefVectorStore<f16, Vec<u8>> =
+            DerefVectorStore::new(std::fs::read(&f16_path).unwrap()).unwrap();
+        let i8_store: DerefVectorStore<i8, Vec<u8>> =
+            DerefVectorStore::new(std::fs::read(&i8_path).unwrap()).unwrap();
+        assert_eq!(i8_store.len(), count);
+        assert_eq!(i8_store.elem_stride(), dims);
+
+        for i in 0..count {
+            let cos = cosine_f16_i8(&f16_store[i], &i8_store[i]);
+            assert!(
+                cos > 0.999,
+                "clustered vector {i} cosine similarity {cos} too low after i8 quantization"
+            );
+        }
     }
 
     #[test]
